@@ -30,6 +30,20 @@ MAX_FINDINGS = 8
 MAX_FINDING_CHARS = 1000
 FIX_MARKER_PREFIX = "hermes-coordinator-fix:"
 OUTBOX_MARKER_PREFIX = "hermes-coordinator-outcome:"
+LIFECYCLE_FILE_NAME = "workflow-events.json"
+MAX_LIFECYCLE_EVENTS = 256
+MAX_LIFECYCLE_AGE = 24 * 60 * 60
+LIFECYCLE_OUTCOMES = {
+    "issue_failed": "failed",
+    "task_failed": "failed",
+    "execution_exhausted": "failed",
+    "sensitive_approval": "approval_required",
+    "execution_uncertain": "execution_uncertain",
+    "merged": "merged",
+    "closed_without_merge": "closed",
+    "conflict_incompatible": "blocked",
+    "policy_broken": "blocked",
+}
 CREDENTIAL_RE = re.compile(
     r"(?i)(?:"
     r"gh[pousr]_[a-z0-9_]{20,}|github_pat_[a-z0-9_]{20,}|"
@@ -327,6 +341,114 @@ def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0):
         f"Untrusted evidence: `{evidence}`\n\n<!-- {marker} -->"
     )
     return {"marker": marker, "body": body, "head": head_sha, "attempt": attempts + 1}
+
+
+def neutral_reconciliation_request(snapshot, attempts):
+    """Build one bounded cloud request that preserves both branch intents."""
+    pull = snapshot["pull"]
+    head = snapshot["head"]
+    main_sha = snapshot["main_sha"]
+    base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
+    head_data = pull.get("head") if isinstance(pull.get("head"), dict) else {}
+    branch = head_data.get("ref")
+    if (not _is_sha(head) or not _is_sha(main_sha) or not _is_sha(base.get("sha"))
+            or not isinstance(branch, str) or not branch or attempts >= REPAIR_LIMIT):
+        return None
+    intent = {
+        "pull_request_title": _bounded_evidence(pull.get("title", ""))[:240],
+        "pull_request_description": _bounded_evidence(pull.get("body", ""))[:1600],
+    }
+    encoded_intent = json.dumps(intent, ensure_ascii=True, separators=(",", ":"))
+    key = f"{snapshot['issue']}:{head}:{main_sha}:{attempts + 1}:{encoded_intent}"
+    marker = f"{FIX_MARKER_PREFIX}{hashlib.sha256(key.encode()).hexdigest()[:20]}"
+    body = (
+        f"Neutral reconciliation for PR #{snapshot['issue']} at exact PR head `{head}`. "
+        f"The current target main is `{main_sha}`; the PR's recorded base is `{base['sha']}`. "
+        "The task API checks out current main as the base and the enrolled PR branch as the head.\n\n"
+        "Preserve both branch intents: retain all existing main behavior at the exact main SHA, "
+        "and retain the PR behavior described in the untrusted intent below. Inspect both "
+        "branches and their combined changes; do not choose either side wholesale. Merge current "
+        "main into the PR branch, never rebase, and never force-push. Test both intended behaviors "
+        "and their interaction, then leave the PR branch for fresh review and checks. If the "
+        "product requirements are genuinely incompatible, stop without guessing and report the "
+        "fixed result `conflict_incompatible`. If required repository policy is broken or absent, "
+        "stop and report `policy_broken`. Do not report either result for an ordinary technical "
+        "conflict; make the smallest safe reconciliation instead. Do not claim approval or CI success.\n\n"
+        f"Untrusted PR intent: `{encoded_intent}`\n\n<!-- {marker} -->"
+    )
+    return {
+        "marker": marker, "body": body, "head": head, "attempt": attempts + 1,
+        "issue": snapshot["issue"], "kind": "fix", "task_type": "neutral",
+        "head_ref": branch, "main_sha": main_sha,
+    }
+
+
+def _lifecycle_event(snapshot, reason, *, occurred_at, merge_sha=None, decision=None,
+                     incident=""):
+    if reason not in LIFECYCLE_OUTCOMES or not _is_sha(snapshot.get("head")):
+        raise CoordinatorError("Lifecycle event evidence was incomplete")
+    if reason == "merged" and not _is_sha(merge_sha):
+        raise CoordinatorError("Merged lifecycle event lacked its exact merge SHA")
+    if reason != "merged" and merge_sha is not None:
+        raise CoordinatorError("Unexpected merge SHA in lifecycle event")
+    issue = snapshot.get("issue")
+    if type(issue) is not int or issue < 1:
+        raise CoordinatorError("Lifecycle event issue identity was invalid")
+    enrollment = snapshot.get("enrollment") or {}
+    generation = enrollment.get("comment")
+    identity_head = "" if reason in {"execution_exhausted", "policy_broken"} else snapshot["head"]
+    identity = f"{issue}:{generation}:{reason}:{identity_head}:{merge_sha or ''}:{incident}"
+    event_id = f"pr:{issue}:{reason}:{hashlib.sha256(identity.encode()).hexdigest()[:32]}"
+    return {
+        "event_id": event_id,
+        "outcome": LIFECYCLE_OUTCOMES[reason],
+        "reason": reason,
+        "issue_number": issue,
+        "pr_number": issue,
+        "head_sha": snapshot["head"],
+        "merge_sha": merge_sha,
+        "decision": decision,
+        "occurred_at": occurred_at,
+    }
+
+
+def _lifecycle_event_valid(event):
+    fields = {
+        "event_id", "outcome", "reason", "issue_number", "pr_number",
+        "head_sha", "merge_sha", "decision", "occurred_at",
+    }
+    if not isinstance(event, dict) or set(event) != fields:
+        return False
+    if (not isinstance(event["event_id"], str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", event["event_id"]) is None
+            or not isinstance(event["reason"], str)
+            or event["reason"] not in LIFECYCLE_OUTCOMES
+            or not isinstance(event["outcome"], str)
+            or event["outcome"] != LIFECYCLE_OUTCOMES[event["reason"]]
+            or type(event["issue_number"]) is not int or event["issue_number"] < 1
+            or type(event["pr_number"]) is not int or event["pr_number"] < 1
+            or not _is_sha(event["head_sha"])):
+        return False
+    if event["reason"] == "merged":
+        if not _is_sha(event["merge_sha"]) or event["decision"] is not None:
+            return False
+    elif event["merge_sha"] is not None:
+        return False
+    if event["reason"] == "sensitive_approval":
+        if event["decision"] != "authorize_sensitive_action":
+            return False
+    elif event["decision"] is not None:
+        return False
+    try:
+        text = event["occurred_at"]
+        if (not isinstance(text, str) or len(text) != 20 or not text.endswith("Z")
+                or datetime.fromisoformat(text[:-1] + "+00:00").isoformat(
+                    timespec="seconds"
+                ).replace("+00:00", "Z") != text):
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def collect_review_threads(api, pull_number):
@@ -884,9 +1006,82 @@ class Coordinator:
                 if _task_terminal(task):
                     if apply:
                         self.store.update_action(key, "completed")
+                        result = task.get("result")
+                        if (isinstance(result, dict)
+                                and set(result) == {"reason", "head_sha"}
+                                and result.get("head_sha") == action.get("head")
+                                and isinstance(result.get("reason"), str)
+                                and result.get("reason") in {
+                                    "conflict_incompatible", "policy_broken",
+                                } and action.get("task_type") == "neutral"):
+                            self.store.update_action(
+                                key, "completed", blocker=result["reason"],
+                            )
+                        elif task.get("state") in {"failed", "timed_out"}:
+                            event = _lifecycle_event(
+                                {
+                                    "issue": number, "head": action["head"],
+                                    "enrollment": snapshot["enrollment"],
+                                }, "task_failed",
+                                occurred_at=self._now_string(),
+                                incident=str(action.get("attempt", "")),
+                            )
+                            self.store.record_lifecycle(event, now=self.clock())
                 else:
                     busy = True
         return busy or _other_task_active(snapshot["tasks"], snapshot)
+
+    def _now_string(self):
+        return datetime.fromtimestamp(self.clock(), timezone.utc).isoformat(
+            timespec="seconds",
+        ).replace("+00:00", "Z")
+
+    def _record_uncertain_task(self, action):
+        enrollment = self.store.snapshot()["enrollments"].get(str(action["issue"]), {})
+        event = _lifecycle_event(
+            {"issue": action["issue"], "head": action["head"],
+             "enrollment": enrollment},
+            "execution_uncertain", occurred_at=self._now_string(),
+            incident=str(action.get("attempt", "")),
+        )
+        self.store.record_lifecycle(event, now=self.clock())
+
+    def _notification_outcomes(self, snapshot, reasons):
+        outcomes = []
+        lifecycle = []
+        for code, message in reasons:
+            if code not in {"sensitive", "budget", "up-to-date-policy",
+                            "conversation-policy", "status-owner", "scope",
+                            "conflict-incompatible", "policy-broken"}:
+                continue
+            key, entry = self._outcome(snapshot, code, message)
+            outcomes.append((key, entry))
+            if code == "sensitive":
+                lifecycle.append(_lifecycle_event(
+                    snapshot, "sensitive_approval", occurred_at=self._now_string(),
+                    decision="authorize_sensitive_action",
+                ))
+            elif code == "budget":
+                lifecycle.append(_lifecycle_event(
+                    snapshot, "execution_exhausted", occurred_at=self._now_string(),
+                    incident=str(snapshot["enrollment"].get("attempts", 0)),
+                ))
+            elif code in {"up-to-date-policy", "conversation-policy", "status-owner", "scope"}:
+                lifecycle.append(_lifecycle_event(
+                    snapshot, "policy_broken", occurred_at=self._now_string(),
+                    incident=code,
+                ))
+            elif code == "conflict-incompatible":
+                lifecycle.append(_lifecycle_event(
+                    snapshot, "conflict_incompatible", occurred_at=self._now_string(),
+                    incident=str(snapshot.get("neutral_blocker_attempt", "")),
+                ))
+            elif code == "policy-broken":
+                lifecycle.append(_lifecycle_event(
+                    snapshot, "policy_broken", occurred_at=self._now_string(),
+                    incident=str(snapshot.get("neutral_blocker_attempt", "policy")),
+                ))
+        return outcomes, lifecycle
 
     def _outcome(self, snapshot, code, message):
         key = f"{snapshot['issue']}:{snapshot['head']}:{code}"
@@ -898,12 +1093,33 @@ class Coordinator:
     def _plan_pull(self, snapshot, actions, *, apply):
         number, head = snapshot["issue"], snapshot["head"]
         if snapshot.get("terminal"):
+            lifecycle = []
+            enrollment = snapshot["enrollment"]
+            if enrollment.get("last_open_seen") is True:
+                pull = snapshot["pull"]
+                if pull.get("merged") is True:
+                    merge_sha = pull.get("merge_commit_sha")
+                    if not _is_sha(merge_sha):
+                        raise CoordinatorError("Merged pull request lacked an exact merge SHA")
+                    lifecycle.append(_lifecycle_event(
+                        snapshot, "merged",
+                        occurred_at=pull.get("merged_at") or self._now_string(),
+                        merge_sha=merge_sha,
+                    ))
+                elif pull.get("merged") is False:
+                    lifecycle.append(_lifecycle_event(
+                        snapshot, "closed_without_merge",
+                        occurred_at=pull.get("closed_at") or self._now_string(),
+                    ))
+                else:
+                    raise CoordinatorError("Closed pull request lacked verified merge state")
             return {
                 "issue": number, "head": head, "terminal": True,
                 "sensitive": False, "review_valid": False,
                 "required_checks_green": False, "auto_merge_eligible": False,
                 "repair": None, "status_action": None, "merge_action": None,
                 "reasons": ["terminal"], "outcomes": [],
+                "lifecycle_events": lifecycle,
             }
         review_ok = copilot_review_valid(
             head, snapshot["reviews"], snapshot["threads"],
@@ -922,27 +1138,58 @@ class Coordinator:
             complete=snapshot["policy_complete"],
         )
         agent_busy = self._reconcile_actions(snapshot, actions, apply=apply)
+        if apply:
+            actions = self.store.actions()
+        neutral_blocker = next((
+            action for action in actions.values()
+            if action.get("kind") == "fix" and action.get("issue") == number
+            and action.get("head") == head and action.get("status") == "completed"
+            and action.get("blocker") in {"conflict_incompatible", "policy_broken"}
+        ), None)
+        if neutral_blocker:
+            snapshot["neutral_blocker_attempt"] = neutral_blocker.get("attempt")
         mergeable = snapshot["pull"].get("mergeable")
+        mergeable_state = snapshot["pull"].get("mergeable_state")
+        needs_reconciliation = (
+            mergeable is False or mergeable_state in {"dirty", "behind"}
+        )
         conflict = (mergeable is not True
-                    or snapshot["pull"].get("mergeable_state") in {"dirty", "unknown"})
+                    or mergeable_state in {"dirty", "unknown", "blocked"})
         repair = None
-        if snapshot["scoped"] and snapshot["threads_complete"] and not conflict:
-            repair = repair_request(
-                head, snapshot["enrollment"].get("attempts", 0),
-                snapshot["threads"], snapshot["check_runs"], pull_number=number,
-            )
+        attempts = snapshot["enrollment"].get("attempts", 0)
+        if (snapshot["scoped"] and not neutral_blocker
+                and snapshot["pull"].get("draft") is not True):
+            if needs_reconciliation:
+                repair = neutral_reconciliation_request(snapshot, attempts)
+            elif snapshot["threads_complete"] and not conflict:
+                repair = repair_request(
+                    head, attempts, snapshot["threads"], snapshot["check_runs"],
+                    pull_number=number,
+                )
         if repair and not agent_busy and snapshot["enrollment"].get("attempts", 0) < REPAIR_LIMIT:
-            repair["issue"] = number
-            repair["kind"] = "fix"
-            repair["head_ref"] = snapshot["pull"]["head"]["ref"]
-            repair["key"] = f"fix:{number}:{repair['marker']}"
+            repair.setdefault("issue", number)
+            repair.setdefault("kind", "fix")
+            repair.setdefault("head_ref", snapshot["pull"]["head"]["ref"])
+            repair.setdefault("key", f"fix:{number}:{repair['marker']}")
         else:
             repair = None
         reasons = []
         if not snapshot["scoped"]:
             reasons.append(("scope", "The pull request is not based on the current same-repository main branch."))
         if conflict:
-            reasons.append(("conflict", "A neutral conflict reconciler must be assigned; this coordinator will not start a fixer."))
+            reasons.append(("conflict", "A bounded neutral reconciliation is required before merge."))
+        if neutral_blocker and neutral_blocker["blocker"] == "conflict_incompatible":
+            reasons.append((
+                "conflict-incompatible",
+                "The neutral task reported incompatible product requirements; owner attention is required.",
+            ))
+        elif neutral_blocker:
+            reasons.append((
+                "policy-broken",
+                "The neutral task reported required repository policy is broken; owner attention is required.",
+            ))
+        if snapshot["pull"].get("draft") is True:
+            reasons.append(("draft", "Draft pull requests are not repaired or merged."))
         if not snapshot["up_to_date_required"]:
             reasons.append(("up-to-date-policy", "Branch protection must require current-main checks."))
         if not snapshot["conversation_resolution_required"]:
@@ -955,8 +1202,14 @@ class Coordinator:
             reasons.append(("checks", "Every configured required check must complete successfully."))
         if agent_busy:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
-        if snapshot["enrollment"].get("attempts", 0) >= REPAIR_LIMIT and repair_request(
-                head, 0, snapshot["threads"], snapshot["check_runs"], pull_number=number):
+        budget_needed = (
+            snapshot["pull"].get("draft") is not True and not neutral_blocker
+            and (needs_reconciliation or repair_request(
+                head, 0, snapshot["threads"], snapshot["check_runs"],
+                pull_number=number,
+            ))
+        )
+        if snapshot["enrollment"].get("attempts", 0) >= REPAIR_LIMIT and budget_needed:
             reasons.append(("budget", "The three-repair limit is exhausted; owner attention is required."))
         status_state = "success" if review_ok and authorized else "pending"
         status_action = None
@@ -999,14 +1252,23 @@ class Coordinator:
             }
         else:
             merge_action = None
+        notification_outcomes, lifecycle_events = self._notification_outcomes(
+            snapshot, reasons,
+        )
+        if (attempts >= REPAIR_LIMIT and needs_reconciliation
+                and not neutral_blocker
+                and neutral_reconciliation_request(snapshot, 0)):
+            lifecycle_events.append(_lifecycle_event(
+                snapshot, "execution_exhausted", occurred_at=self._now_string(),
+                incident=str(attempts),
+            ))
         return {"issue": number, "head": head, "sensitive": sensitive,
                 "terminal": False,
                 "review_valid": review_ok, "required_checks_green": checks_ok,
                 "auto_merge_eligible": merge, "reasons": [item[0] for item in reasons],
                 "repair": repair, "status_action": status_action,
-                "merge_action": merge_action, "outcomes": [
-                    self._outcome(snapshot, code, message) for code, message in reasons
-                ]}
+                "merge_action": merge_action, "outcomes": notification_outcomes,
+                "lifecycle_events": lifecycle_events}
 
     def _build_plan(self, *, apply):
         state = self.store.snapshot()
@@ -1025,9 +1287,14 @@ class Coordinator:
             self._plan_pull(snapshot, state["actions"], apply=apply)
             for snapshot in scans
         ]
+        observations = [
+            (snapshot["issue"], snapshot["head"]) for snapshot in scans
+            if not snapshot.get("terminal")
+        ]
         return {
             "cursor": cursor, "processed": processed, "commands": commands,
             "enrollments": enrollments, "snapshots": scans, "pull_requests": plans,
+            "observations": observations, "now": self.clock(),
         }
 
     def _fence_pull(self, number, head, main_sha=None):
@@ -1052,7 +1319,10 @@ class Coordinator:
 
     def _dispatch_task(self, action):
         key = action["key"]
-        current = self._fence_pull(action["issue"], action["head"])
+        current = self._fence_pull(
+            action["issue"], action["head"],
+            action.get("main_sha") if action.get("task_type") == "neutral" else None,
+        )
         if not current:
             return "superseded"
         branch = current["head"].get("ref")
@@ -1077,6 +1347,7 @@ class Coordinator:
             )
         except CoordinatorError:
             self.store.mark_uncertain(key)
+            self._record_uncertain_task(self.store.action(key))
             return "uncertain"
         task_id = response.get("id") if isinstance(response, dict) else None
         if (not isinstance(task_id, str) or not task_id or len(task_id) > 128
@@ -1085,9 +1356,11 @@ class Coordinator:
                     "completed", "failed", "timed_out", "cancelled",
                 }):
             self.store.mark_uncertain(key)
+            self._record_uncertain_task(self.store.action(key))
             return "uncertain"
         if response.get("artifacts") and not _task_scoped(response, {"pull": current}):
             self.store.update_action(key, "uncertain", task_id=task_id)
+            self._record_uncertain_task(self.store.action(key))
             return "uncertain"
         self.store.update_action(key, "sent", task_id=task_id)
         return "sent"
@@ -1251,6 +1524,12 @@ class Coordinator:
             retirements=[
                 item["issue"] for item in plan["pull_requests"] if item.get("terminal")
             ],
+            lifecycle_events=[
+                event for item in plan["pull_requests"]
+                for event in item.get("lifecycle_events", [])
+            ],
+            observations=plan.get("observations", []),
+            now=plan["now"],
         )
         summaries = []
         for pr_plan, snapshot in zip(plan["pull_requests"], plan["snapshots"]):
@@ -1317,9 +1596,11 @@ class Coordinator:
         lock_fd = self.store.execution_lock() if apply else None
         try:
             plan = self._build_plan(apply=apply)
-            pull_requests = self._apply(plan) if apply else [
-                self._summary(item) for item in plan["pull_requests"]
-            ]
+            if apply:
+                pull_requests = self._apply(plan)
+                self.store.write_lifecycle_export(now=self.clock())
+            else:
+                pull_requests = [self._summary(item) for item in plan["pull_requests"]]
             return {
                 "repository": REPOSITORY,
                 "mode": "apply" if apply else "plan",
@@ -1367,7 +1648,7 @@ class StateStore:
     @staticmethod
     def _empty():
         return {"version": 1, "cursor": None, "events": [], "enrollments": {},
-                "actions": {}, "outbox": {}}
+                "actions": {}, "outbox": {}, "lifecycle_events": []}
 
     def _ensure_directory(self):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1391,6 +1672,12 @@ class StateStore:
                 or not isinstance(data.get("actions"), dict)
                 or not isinstance(data.get("outbox"), dict)):
             raise CoordinatorError("Coordinator state has an unsupported format")
+        data.setdefault("lifecycle_events", [])
+        if (not isinstance(data["lifecycle_events"], list)
+                or len(data["lifecycle_events"]) > MAX_LIFECYCLE_EVENTS
+                or any(not _lifecycle_event_valid(event)
+                       for event in data["lifecycle_events"])):
+            raise CoordinatorError("Coordinator lifecycle state has an unsupported format")
         return data
 
     def _save(self, data):
@@ -1446,7 +1733,114 @@ class StateStore:
                 data["events"] = data["events"][-4000:]
         self._mutate(record)
 
-    def commit_scan(self, cursor, processed, *, commands=(), retirements=()):
+    @staticmethod
+    def _add_lifecycle_events(data, events, *, now):
+        cutoff = now - MAX_LIFECYCLE_AGE
+        retained = []
+        for event in data.get("lifecycle_events", []):
+            occurred = datetime.fromisoformat(
+                event["occurred_at"][:-1] + "+00:00",
+            ).timestamp()
+            if occurred >= cutoff:
+                retained.append(event)
+        known = {event["event_id"] for event in retained}
+        for event in events:
+            if not _lifecycle_event_valid(event):
+                raise CoordinatorError("Lifecycle event did not match the fixed schema")
+            if event["event_id"] in known:
+                continue
+            occurred = datetime.fromisoformat(
+                event["occurred_at"][:-1] + "+00:00",
+            ).timestamp()
+            if occurred > now:
+                raise CoordinatorError("Lifecycle event is newer than its export time")
+            if occurred < cutoff:
+                continue
+            retained.append(event)
+            known.add(event["event_id"])
+            if len(retained) > MAX_LIFECYCLE_EVENTS:
+                raise CoordinatorError("Lifecycle event export reached its safety bound")
+        data["lifecycle_events"] = retained
+
+    def record_lifecycle(self, event, *, now=None):
+        def record(data):
+            self._add_lifecycle_events(
+                data, [event], now=time.time() if now is None else now,
+            )
+        self._mutate(record)
+
+    def write_lifecycle_export(self, *, now=None):
+        now = time.time() if now is None else now
+        self._ensure_directory()
+        cutoff = now - MAX_LIFECYCLE_AGE
+        events = []
+        for event in self.snapshot()["lifecycle_events"]:
+            occurred = datetime.fromisoformat(
+                event["occurred_at"][:-1] + "+00:00",
+            ).timestamp()
+            if cutoff <= occurred <= now:
+                events.append(event)
+        path = self.directory / LIFECYCLE_FILE_NAME
+        if not events:
+            if _private_regular(path):
+                path.unlink()
+                directory_fd = os.open(
+                    self.directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                )
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            return
+        if len(events) > MAX_LIFECYCLE_EVENTS:
+            raise CoordinatorError("Lifecycle event export exceeded its record bound")
+        payload = json.dumps({
+            "version": 1, "repository_id": REPOSITORY_ID,
+            "repository": REPOSITORY, "owner_user_id": str(OWNER_ID),
+            "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(
+                timespec="seconds",
+            ).replace("+00:00", "Z"),
+            "events": events,
+        }, separators=(",", ":"), sort_keys=True, ensure_ascii=True, allow_nan=False)
+        encoded = payload.encode("utf-8")
+        if len(encoded) > 1024 * 1024:
+            raise CoordinatorError("Lifecycle event export exceeded its byte bound")
+        existing = None
+        if _private_regular(path):
+            existing_info = path.lstat()
+            existing = (existing_info.st_dev, existing_info.st_ino)
+        temporary = self.directory / (
+            f".{LIFECYCLE_FILE_NAME}.{os.getpid()}.{secrets.token_hex(8)}"
+        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(temporary, flags, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if existing is None:
+                if path.exists() or path.is_symlink():
+                    _private_regular(path)
+                    raise CoordinatorError("Lifecycle export appeared during write")
+            else:
+                current = path.lstat()
+                if (current.st_dev, current.st_ino) != existing:
+                    raise CoordinatorError("Lifecycle export changed during write")
+            os.replace(temporary, path)
+            directory_fd = os.open(
+                self.directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def commit_scan(self, cursor, processed, *, commands=(), retirements=(),
+                    lifecycle_events=(), observations=(), now=None):
         keys = [str(item) for item in processed]
 
         def commit(data):
@@ -1489,6 +1883,14 @@ class StateStore:
                     if (enrollment and enrollment.get("active")
                             and _is_sha(item.get("head"))):
                         enrollment["sensitive_sha"] = item["head"]
+            self._add_lifecycle_events(
+                data, lifecycle_events, now=time.time() if now is None else now,
+            )
+            for issue, head in observations:
+                enrollment = data["enrollments"].get(str(issue))
+                if enrollment and enrollment.get("active") and _is_sha(head):
+                    enrollment["last_open_seen"] = True
+                    enrollment["last_open_head"] = head
             for issue in retirements:
                 enrollment = data["enrollments"].get(str(issue))
                 if enrollment:

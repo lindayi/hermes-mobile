@@ -26,8 +26,10 @@ head; it does not carry forward to a later commit.
 
 The coordinator captures a precollection watermark, polls issue updates and their
 comments with overlapping reads, and atomically persists accepted commands, their
-IDs and the watermark. A closed or merged PR retires its enrollment; reopening
-requires a fresh owner enrollment command. API errors,
+IDs and the watermark. A terminal PR records any observed merged/closed lifecycle
+event in durable state before retiring its enrollment. A terminal PR already closed
+at the first observation is treated as historical baseline and is not exported;
+reopening requires a fresh owner enrollment command. API errors,
 rate limits, malformed pagination, and incomplete GraphQL review-thread pages
 fail closed; the cursor is advanced only after a complete read.
 
@@ -35,8 +37,20 @@ Only current unresolved review-thread comments and completed failed/timed-out
 `Source checks` workflow runs are eligible repair evidence. It sends at most
 eight findings, clips each finding to 1,000 characters, removes links, and never
 fetches check logs. The Copilot request labels all embedded evidence untrusted,
-and the text is never interpreted as shell input. A deterministic marker
-deduplicates a request. At most three requests are claimed per enrollment.
+and the text is never interpreted as shell input. Draft PRs and ordinary pending
+review/check/task activity do not dispatch repairs or create owner notices.
+
+Behind or genuinely conflicted enrolled PRs receive a neutral task through the same
+durable reservation, exact task-ID reconciliation, serialization lock, and three
+attempt budget as ordinary repair tasks. Its bounded prompt identifies both exact
+branch SHAs and the PR's sanitized title/description as untrusted intent; the task
+must preserve both sides, merge main into the PR branch (never rebase or force-push),
+and test the combined behavior. A current-main fence is rechecked before dispatch.
+The prompt directs genuinely incompatible requirements or broken required policy
+to a fixed typed result; these stop further repair for that exact head. Waiting or
+uncertain tasks retain the shared lock. Ordinary technical conflicts are repaired
+within the shared budget; exhaustion or ambiguous execution becomes a meaningful
+owner blocker rather than an unbounded retry.
 
 A durable action claim is written before POSTing a task through
 `/agents/repos/{owner}/{repo}/tasks` with the bounded prompt, `base_ref=main`
@@ -105,9 +119,34 @@ immediately before the merge request. A new head has no inherited
 the new head is evaluated. Ambiguous writes are reconciled from GitHub state and
 are never blindly repeated.
 
-The durable outbox posts deduplicated, fixed-text outcome/blocker comments on
-public PRs. It carries no logs, credentials, arbitrary issue text, or private
-runtime data. The owner mobile Inbox is not implemented by this adapter.
+The durable outbox posts only fixed-text actionable owner blockers; missing review
+approval, pending checks, draft state, and ordinary task activity are not notices.
+Public comments are deduplicated by the issue, current head, and blocker.
+
+Apply mode atomically writes a private `<state_dir>/workflow-events.json` snapshot
+for the owner-bound mobile consumer. It uses the versioned closed envelope, fixed
+reason/outcome mapping, canonical event fields, stable incident IDs, numeric issue
+and PR identities, exact lowercase SHAs, and UTC timestamps. It includes no raw
+GitHub text, check logs, commands, credentials, or private runtime data. The file
+is owner-only, regular, unaliased, atomically replaced, and bounded to 256 recent
+events no older than 24 hours, and 1 MiB; event timestamps cannot be later than the
+export timestamp. Plan mode never creates the file. Stable event IDs deduplicate
+polling replays and persistent policy/budget incidents; exact-head authorization
+and neutral-task outcomes remain bound to that head. Terminal enrollment retirement
+and event persistence share one state transaction.
+
+The fixed lifecycle mapping is `merged` → `merged` (exact merge SHA),
+`closed_without_merge` → `closed`, `conflict_incompatible` and `policy_broken` →
+`blocked`, `sensitive_approval` → `approval_required`, `execution_uncertain` →
+`execution_uncertain`, and `execution_exhausted`/`task_failed` → `failed`.
+Closed and blocked PR events carry the exact PR/head with null merge SHA and
+decision; incompatible requirements are never mislabeled as task failures.
+
+The producer implements the agreed `closed_without_merge`, `conflict_incompatible`,
+and `policy_broken` contract additions without editing the consumer/schema. It is
+not ready for activation until the actual completed consumer schema is exercised
+against producer output on the final integrated revision. The owner mobile Inbox
+adapter remains a separate component; this file alone does not claim delivery.
 
 ## External policy boundary
 
