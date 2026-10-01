@@ -1,0 +1,10 @@
+{
+  "run_agent.py": {
+    "installed_sha256": "a26e5264738f1c62347e63c1265e562d3cfae439dadc313db48572f3e9cc751b",
+    "staged_sha256": "fb58e81ac57c0f49370d72146d21250d1cfeaa0b964c9996e972954bbc343609"
+  },
+  "gateway/platforms/api_server.py": {
+    "installed_sha256": "2893fba247bbe1523eaaf0b90646238c3cfb4208a9a69f3f80fadbc7dd1ddbdd",
+    "staged_sha256": "187c92509b3769c04756f0dc800d3597ea891ea21262e8a32ceaf3972ac95300"
+  }
+}

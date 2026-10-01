@@ -1,0 +1,9 @@
+{
+  "name": "hermes-mobile-checks",
+  "private": true,
+  "description": "Pinned browser test dependencies; not an application build dependency",
+  "devDependencies": {
+    "jsdom": "29.1.1",
+    "playwright": "1.58.2"
+  }
+}

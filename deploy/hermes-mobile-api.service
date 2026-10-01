@@ -1,0 +1,20 @@
+[Unit]
+Description=Hermes Mobile isolated native API listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/lindayi/projects/hermes-mobile
+Environment=HERMES_MOBILE_CONFIG=/home/lindayi/.local/share/hermes-mobile-live/config.json
+Environment=HERMES_HOME=/home/lindayi/.hermes
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/local/lib/hermes-agent/venv/bin/python /home/lindayi/projects/hermes-mobile/backend/native_api_service.py
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

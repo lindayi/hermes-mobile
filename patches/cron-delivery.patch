@@ -1,0 +1,103 @@
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -2850,6 +2850,7 @@
+                 route_metadata = {
+                     "direct_messages_topic_id": str(thread_id),
+                     "job_id": job["id"],
++                    "run_id": job.get("execution_id"),
+                 }
+                 # Media metadata mirrors the text routing so attachments land in
+                 # the same DM topic instead of the General lane (#22773).
+@@ -2864,7 +2865,7 @@
+                 # anchor, so the metadata key bypasses that check and lets the
+                 # adapter route via a plain message_thread_id.
+                 route_thread_id = str(thread_id) if thread_id is not None else None
+-                route_metadata = {"job_id": job["id"]}
++                route_metadata = {"job_id": job["id"], "run_id": job.get("execution_id")}
+                 if route_thread_id:
+                     route_metadata["thread_id"] = route_thread_id
+                 media_metadata = {"thread_id": thread_id} if thread_id else None
+@@ -3123,7 +3124,7 @@
+                 delivery_errors.extend(target_errors)
+                 continue
+             # Standalone path: run the async send in a fresh event loop (safe from any thread)
+-            coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
++            coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files, metadata={"job_id": job["id"], "run_id": job.get("execution_id")})
+             try:
+                 result = asyncio.run(coro)
+             except RuntimeError as run_err:
+@@ -3152,7 +3153,7 @@
+                 try:
+                     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                     try:
+-                        future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
++                        future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files, metadata={"job_id": job["id"], "run_id": job.get("execution_id")}))
+                         result = future.result(timeout=30)
+                     finally:
+                         pool.shutdown(wait=False)
+@@ -6240,6 +6241,9 @@
+     execution_id = job.get("execution_id")
+     if not execution_id:
+         execution_id = create_execution(job["id"], source="direct")["id"]
++    # Carry the durable attempt identity on a run-local copy. Never persist it
++    # into the schedule or mutate the caller: the next real run needs a new ID.
++    job = {**job, "execution_id": execution_id}
+     delivery_attempted = False
+     delivery_error = None
+     try:
+--- a/tools/send_message_tool.py
++++ b/tools/send_message_tool.py
+@@ -836,6 +836,7 @@
+     thread_id=None,
+     media_files=None,
+     force_document=False,
++    metadata=None,
+ ):
+     """Send a message via a live gateway adapter, with a standalone fallback
+     for out-of-process callers (e.g. cron running separately from the gateway).
+@@ -863,7 +864,7 @@
+             adapter = None
+         if adapter is not None:
+             try:
+-                metadata = {}
++                metadata = dict(metadata or {})
+                 if thread_id:
+                     metadata["thread_id"] = thread_id
+                 if platform_name == "ntfy" and chat_id:
+@@ -888,6 +889,11 @@
+ 
+     if entry is not None and entry.standalone_sender_fn is not None:
+         try:
++            # Additive opt-in: legacy standalone senders need not accept metadata.
++            import inspect
++            params = inspect.signature(entry.standalone_sender_fn).parameters
++            metadata_kwargs = ({"metadata": metadata} if ("metadata" in params or
++                any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())) else {})
+             result = await entry.standalone_sender_fn(
+                 pconfig,
+                 chat_id,
+@@ -895,6 +901,7 @@
+                 thread_id=thread_id,
+                 media_files=media_files,
+                 force_document=force_document,
++                **metadata_kwargs,
+             )
+         except asyncio.CancelledError:
+             raise
+@@ -922,7 +929,7 @@
+     }
+ 
+ 
+-async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False, args=None):
++async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False, args=None, *, metadata=None):
+     """Route a message to the appropriate platform sender.
+ 
+     Long messages are automatically chunked to fit within platform limits
+@@ -1309,6 +1316,7 @@
+                 thread_id=thread_id,
+                 media_files=media_files,
+                 force_document=force_document,
++                metadata=metadata,
+             )
+ 
+         if isinstance(result, dict) and result.get("error"):

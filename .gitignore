@@ -1,0 +1,26 @@
+# Runtime secrets and account state never belong in source control.
+.env
+.env.*
+!.env.example
+config.json
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.pem
+*.key
+.venv/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+public/
+artifacts/
+test-results/
+playwright-report/
+.worktrees/
+state/
+backups/
+*.log

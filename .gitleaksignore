@@ -1,0 +1,17 @@
+# Reviewed false positives only: source SHA-256 fingerprints, historical agent-test IDs,
+# and deliberately fake credential/private-key redaction fixtures. No blanket path allowlist.
+# Review this file whenever corresponding fixture lines change.
+deploy/native_controls_release.py:generic-api-key:25
+deploy/native_controls_release.py:generic-api-key:37
+deploy/native_controls_release.py:generic-api-key:46
+backend/model_controls.py:generic-api-key:13
+backend/model_controls.py:generic-api-key:22
+backend/model_controls.py:generic-api-key:68
+tests/browser/tool-detail.test.mjs:curl-auth-user:85
+tests/browser/tool-detail.test.mjs:curl-auth-user:149
+tests/test_session_visibility.py:generic-api-key:32
+tests/test_session_visibility.py:generic-api-key:33
+tests/test_session_visibility.py:generic-api-key:145
+tests/test_session_visibility.py:generic-api-key:148
+tests/test_tool_detail_presentation.py:curl-auth-user:46
+tests/test_push_policy_previews.py:private-key:28

@@ -1,0 +1,18 @@
+[Unit]
+Description=Hermes FAMILY member %i scheduler (mobile delivery only)
+After=network-online.target hermes-mobile.service
+Wants=network-online.target
+ConditionPathExists=%h/.hermes/profiles/member_%i/.mobile-jobs/verified.json
+
+[Service]
+Type=simple
+WorkingDirectory=/home/lindayi/projects/hermes-mobile
+ExecStart=/usr/local/lib/hermes-agent/venv/bin/python -m backend.member_scheduler --config /home/lindayi/.local/share/hermes-mobile-live/config.json --member-id %i --profile member_%i
+UMask=0077
+Restart=no
+TimeoutStopSec=20
+KillMode=control-group
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
