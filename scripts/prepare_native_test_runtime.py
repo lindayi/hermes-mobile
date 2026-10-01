@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""Provision the pinned public Hermes runtime on a disposable GitHub-hosted runner."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from deploy.install_core import patch_targets, validate_baselines
+
+
+REPOSITORY = 'https://github.com/NousResearch/hermes-agent'
+REVISION = '8911e2e0edf750b104edbdc106d63d6cdac88524'
+RUNTIME_PATH = Path('/usr/local/lib/hermes-agent')
+PYTHON_VERSION = '3.11'
+UV_VERSION = '0.9.28'
+UV_SHA256 = '7b8460a2b624d8ab27cb293a2c9f2393f9efc4e36e0fb886a6c2360e23fb48be'
+OPTIONAL_EXTRAS = ('messaging',)
+SQLITE_REPOSITORY = 'https://github.com/sqlite/sqlite'
+SQLITE_REVISION = 'a5333afb9ad1aa473f8963b92caeaa955f47dc74'
+SQLITE_VERSION = '3.51.3'
+SQLITE_MINIMUM = (3, 51, 3)
+UPSTREAM_HASHES = {
+    'pyproject.toml': '1f928b1560b0669291b3f7d562aa78c99ac4f927375939ca97fd3c3e7494cb91',
+    'uv.lock': '8fd868b9da8b6bc2f4aa94a845e210eccdd5e31be7a0b404f0a8527ced0fddec',
+}
+TARGETS = {
+    'run_agent.py': {
+        'installed_sha256': 'a26e5264738f1c62347e63c1265e562d3cfae439dadc313db48572f3e9cc751b',
+        'staged_sha256': 'fb58e81ac57c0f49370d72146d21250d1cfeaa0b964c9996e972954bbc343609',
+    },
+    'gateway/platforms/api_server.py': {
+        'installed_sha256': '2893fba247bbe1523eaaf0b90646238c3cfb4208a9a69f3f80fadbc7dd1ddbdd',
+        'staged_sha256': '187c92509b3769c04756f0dc800d3597ea891ea21262e8a32ceaf3972ac95300',
+    },
+    'cron/scheduler.py': {
+        'installed_sha256': 'ac0d2f0edcfaf26ffa21aa4e7478b44bb78e6f43e3072697e2849f2b1b13b7e7',
+        'staged_sha256': '4c75d873de809f72e865b9aab2a9f6e1c1008859b60373f9d721d0847d21e9fe',
+    },
+    'tools/send_message_tool.py': {
+        'installed_sha256': '5c0f0898b5a16d5c63cd083281ac5c307541ed704c46acfcfbc368b5eea1dc21',
+        'staged_sha256': '56ed3549db505cb38c9e000cb56ca13017f386c9080c3e5467f34cf9ab12e31c',
+    },
+}
+PATCHES = (
+    {
+        'path': 'patches/native-compat.patch',
+        'sha256': '2add04e93a5ea74eeeb407dc9d5556bb38c1454b5c8bf307c3e8490e9b72dd32',
+        'targets': ('gateway/platforms/api_server.py', 'run_agent.py'),
+    },
+    {
+        'path': 'patches/cron-delivery.patch',
+        'sha256': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
+        'targets': ('cron/scheduler.py', 'tools/send_message_tool.py'),
+    },
+)
+EXISTING_LINKS = ('node_modules', 'package.json')
+
+
+def _expected_spec():
+    return {
+        'repository': REPOSITORY,
+        'revision': REVISION,
+        'runtime_path': str(RUNTIME_PATH),
+        'python_version': PYTHON_VERSION,
+        'uv_version': UV_VERSION,
+        'uv_sha256': UV_SHA256,
+        'extras': list(OPTIONAL_EXTRAS),
+        'sqlite': {
+            'repository': SQLITE_REPOSITORY,
+            'revision': SQLITE_REVISION,
+            'version': SQLITE_VERSION,
+        },
+        'upstream_sha256': UPSTREAM_HASHES,
+        'targets': TARGETS,
+        'patches': [
+            {'path': entry['path'], 'sha256': entry['sha256'], 'targets': list(entry['targets'])}
+            for entry in PATCHES
+        ],
+    }
+
+
+def load_runtime_spec(repository_root):
+    path = Path(repository_root) / '.github/native-runtime.json'
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('Missing or unsafe native runtime manifest')
+    try:
+        spec = json.loads(path.read_text(encoding='utf-8'))
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError('Invalid native runtime manifest') from error
+    if spec != _expected_spec():
+        raise ValueError('Native runtime manifest differs from the approved public pins')
+    return spec
+
+
+def validate_hosted_runner(environ):
+    expected = {
+        'CI': 'true',
+        'GITHUB_ACTIONS': 'true',
+        'GITHUB_REPOSITORY': 'lindayi/hermes-mobile',
+        'RUNNER_ENVIRONMENT': 'github-hosted',
+        'RUNNER_OS': 'Linux',
+        'RUNNER_ARCH': 'X64',
+        'ImageOS': 'ubuntu24',
+    }
+    if any(environ.get(name) != value for name, value in expected.items()):
+        raise RuntimeError('Native runtime provisioning is restricted to hosted Ubuntu Actions')
+    workspace = Path(environ.get('GITHUB_WORKSPACE', ''))
+    runner_temp = Path(environ.get('RUNNER_TEMP', ''))
+    if (workspace != Path('/home/runner/work/hermes-mobile/hermes-mobile')
+            or runner_temp != Path('/home/runner/work/_temp')):
+        raise RuntimeError('Unexpected GitHub-hosted workspace layout')
+    if platform.machine() != 'x86_64':
+        raise RuntimeError('Native runtime provisioning requires an x86_64 hosted runner')
+    return workspace, runner_temp
+
+
+def validate_action_preflight(environ, repository_root, *, runtime_target=RUNTIME_PATH):
+    workspace, _ = validate_hosted_runner(environ)
+    repository_root = Path(repository_root)
+    target = Path(runtime_target)
+    if (repository_root.is_symlink()
+            or repository_root.resolve() != repository_root
+            or repository_root != workspace
+            or not repository_root.is_dir()):
+        raise RuntimeError('Unexpected GitHub-hosted repository workspace')
+    spec = load_runtime_spec(repository_root)
+    validate_patch_inputs(repository_root, spec)
+    if target.exists() or target.is_symlink():
+        raise RuntimeError('Refusing existing native runtime')
+    if target.parent.resolve() != target.parent or not target.parent.is_dir():
+        raise RuntimeError('Unexpected native runtime parent directory')
+    return workspace
+
+
+def validate_sqlite_version(version):
+    try:
+        parsed = tuple(int(part) for part in version.split('.'))
+    except (AttributeError, ValueError) as error:
+        raise RuntimeError(f'Invalid SQLite version: {version!r}') from error
+    if len(parsed) != 3 or parsed < SQLITE_MINIMUM:
+        raise RuntimeError('Native test runtime requires SQLite 3.51.3 or newer')
+    return parsed
+
+
+def publish_sqlite_library(environ, runner_temp, library):
+    runner_temp = Path(runner_temp)
+    library = Path(library)
+    env_file = Path(environ.get('GITHUB_ENV', ''))
+    if (runner_temp.resolve() != runner_temp
+            or library.is_symlink()
+            or library.resolve() != library
+            or not library.is_relative_to(runner_temp)
+            or env_file.is_symlink()
+            or not env_file.is_file()
+            or env_file.resolve() != env_file
+            or not env_file.is_relative_to(runner_temp)
+            or env_file.stat().st_uid != os.getuid()
+            or env_file.stat().st_nlink != 1
+            or env_file.stat().st_mode & 0o022):
+        raise RuntimeError('SQLite library and Actions environment file must be runner-owned paths')
+    library_file = library / f'libsqlite3.so.{SQLITE_VERSION}'
+    soname = library / 'libsqlite3.so.0'
+    if (not library_file.is_file()
+            or library_file.is_symlink()
+            or not soname.is_symlink()
+            or soname.resolve() != library_file):
+        raise RuntimeError('Pinned SQLite shared library is missing or unsafe')
+    previous = environ.get('LD_LIBRARY_PATH', '')
+    if any(character in previous for character in ('\n', '\r', '\0')):
+        raise RuntimeError('Unsafe inherited library path')
+    value = str(library) + (os.pathsep + previous if previous else '')
+    with env_file.open('a', encoding='utf-8') as stream:
+        stream.write(f'LD_LIBRARY_PATH={value}\n')
+    return value
+
+
+def validate_patch_inputs(repository_root, spec):
+    root = Path(repository_root)
+    if spec != _expected_spec():
+        raise ValueError('Native runtime manifest differs from the approved public pins')
+    baseline_records = {}
+    for name in ('native-compat-baseline.json', 'cron-delivery-baseline.json'):
+        path = root / 'patches' / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('Missing or unsafe patch baseline')
+        baseline_records.update(json.loads(path.read_text(encoding='utf-8')))
+    if baseline_records != spec['targets']:
+        raise ValueError('Patch pre/postimage records do not match the approved hashes')
+    for entry in PATCHES:
+        patch = root / entry['path']
+        if patch.is_symlink() or not patch.is_file():
+            raise ValueError('Missing or unsafe public compatibility patch')
+        digest = hashlib.sha256(patch.read_bytes()).hexdigest()
+        if digest != entry['sha256']:
+            raise ValueError(f'Patch digest mismatch: {entry["path"]}')
+        actual_targets = patch_targets(patch.read_text(encoding='utf-8'))
+        if actual_targets != set(entry['targets']):
+            raise ValueError(f'Unexpected patch targets: {entry["path"]}')
+    return baseline_records
+
+
+def _hash(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _child_environment(work, target):
+    home = work / 'home'
+    cache = work / 'cache'
+    paths = {
+        'HOME': home,
+        'PIP_CACHE_DIR': cache / 'pip',
+        'UV_CACHE_DIR': cache / 'uv',
+        'XDG_CACHE_HOME': cache / 'xdg',
+        'XDG_CONFIG_HOME': work / 'config',
+        'XDG_DATA_HOME': work / 'data',
+        'TMPDIR': work / 'tmp',
+    }
+    for path in paths.values():
+        path.mkdir(mode=0o700, parents=True, exist_ok=False)
+    env = {
+        'PATH': os.environ.get('PATH', ''),
+        'LANG': 'C.UTF-8',
+        'LC_ALL': 'C.UTF-8',
+        'GIT_CONFIG_NOSYSTEM': '1',
+        'GIT_CONFIG_GLOBAL': os.devnull,
+        'GIT_TERMINAL_PROMPT': '0',
+        'PIP_DISABLE_PIP_VERSION_CHECK': '1',
+        'UV_NO_PROGRESS': '1',
+        'UV_NATIVE_TLS': 'true',
+        'UV_PROJECT_ENVIRONMENT': str(target / 'venv'),
+        'PLAYWRIGHT_SKIP_BROWSER_GC': '1',
+    }
+    env.update({name: str(path) for name, path in paths.items()})
+    return env
+
+
+def _write_uv_requirements(work, spec):
+    if spec != _expected_spec():
+        raise ValueError('Native runtime manifest differs from the approved public pins')
+    path = Path(work) / 'uv-requirements.txt'
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        stream.write(f'uv=={UV_VERSION} --hash=sha256:{UV_SHA256}\n')
+    return path
+
+
+def _run(command, *, env, cwd=None):
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        detail = (result.stdout or '')[-8000:]
+        raise RuntimeError(f'{Path(command[0]).name} failed ({result.returncode}):\n{detail}')
+    return result.stdout
+
+
+def _validate_target(target, workspace):
+    if target.is_symlink() or not target.is_dir() or target.resolve() != target:
+        raise RuntimeError('Expected a real prepared native-runtime directory')
+    if target.stat().st_uid != os.getuid():
+        raise RuntimeError('Native-runtime directory must belong to the hosted runner user')
+    names = set(os.listdir(target))
+    if names - set(EXISTING_LINKS):
+        raise RuntimeError('Refusing to overwrite an existing native runtime')
+    for name in names:
+        path = target / name
+        if not path.is_symlink() or os.readlink(path) != str(workspace / name):
+            raise RuntimeError(f'Unexpected pre-existing runtime entry: {name}')
+    return names
+
+
+def _remove_created_runtime(target, preserved):
+    for path in target.iterdir():
+        if path.name in preserved:
+            continue
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+        else:
+            raise RuntimeError(f'Unexpected runtime entry during rollback: {path.name}')
+
+
+def _validate_public_tree(source):
+    for directory, names, files in os.walk(source, followlinks=False):
+        for name in names + files:
+            path = Path(directory) / name
+            if path.is_symlink():
+                link = Path(os.readlink(path))
+                if link.is_absolute() or not (path.parent / link).resolve().is_relative_to(source):
+                    raise RuntimeError(f'Unsafe upstream symlink: {path.relative_to(source)}')
+
+
+def _ignore_upstream_metadata(directory, names, source):
+    if Path(directory) == source:
+        return [name for name in names if name in {'.git', 'node_modules', 'package.json'}]
+    return []
+
+
+def _clone_public_source(source, repository, revision, env):
+    git = shutil.which('git', path=env['PATH'])
+    if not git:
+        raise RuntimeError('Git is required on the hosted runner')
+    _run([git, 'init', str(source)], env=env)
+    _run([git, '-C', str(source), 'remote', 'add', 'origin', repository], env=env)
+    _run([git, '-C', str(source), 'fetch', '--depth=1', '--no-tags', 'origin', revision], env=env)
+    _run([git, '-C', str(source), 'checkout', '--detach', 'FETCH_HEAD'], env=env)
+    actual = _run([git, '-C', str(source), 'rev-parse', 'HEAD'], env=env).strip()
+    if actual != revision:
+        raise RuntimeError('Fetched public source did not match its approved commit')
+
+
+def _build_sqlite(source, prefix, env):
+    _clone_public_source(source, SQLITE_REPOSITORY, SQLITE_REVISION, env)
+    version_file = source / 'VERSION'
+    configure = source / 'configure'
+    if (version_file.is_symlink() or not version_file.is_file()
+            or version_file.read_text(encoding='utf-8').strip() != SQLITE_VERSION
+            or configure.is_symlink() or not configure.is_file() or not os.access(configure, os.X_OK)):
+        raise RuntimeError('Pinned SQLite source did not match its release metadata')
+    _run(
+        [str(configure), f'--prefix={prefix}', '--enable-shared', '--disable-static', '--fts5'],
+        cwd=source,
+        env=env,
+    )
+    make = shutil.which('make', path=env['PATH'])
+    if not make:
+        raise RuntimeError('GNU make is required on hosted Ubuntu')
+    _run([make, '-j2'], cwd=source, env=env)
+    _run([make, 'install'], cwd=source, env=env)
+    library = prefix / 'lib'
+    env['LD_LIBRARY_PATH'] = str(library)
+    version = _run(
+        [sys.executable, '-c', 'import sqlite3; print(sqlite3.sqlite_version)'],
+        env=env,
+    ).strip()
+    validate_sqlite_version(version)
+    return library, version
+
+
+def prepare_runtime(repository_root, environ):
+    workspace, runner_temp = validate_hosted_runner(environ)
+    root = Path(repository_root)
+    if root != workspace or root.resolve() != root or not root.is_dir():
+        raise RuntimeError('Provisioning must run from the canonical GitHub workspace')
+    spec = load_runtime_spec(root)
+    records = validate_patch_inputs(root, spec)
+    if sys.version_info[:2] != (3, 11):
+        raise RuntimeError('Native runtime setup requires the pinned Python 3.11 action')
+    target = Path(spec['runtime_path'])
+    preserved = _validate_target(target, workspace)
+    sqlite_prefix = runner_temp / f'hermes-native-sqlite-{SQLITE_VERSION}'
+    if sqlite_prefix.exists() or sqlite_prefix.is_symlink():
+        raise RuntimeError('Refusing to overwrite an existing private SQLite build')
+    work = Path(tempfile.mkdtemp(prefix='hermes-native-', dir=runner_temp))
+    os.chmod(work, 0o700)
+    stage = work / 'upstream'
+    stage.mkdir(mode=0o700)
+    try:
+        env = _child_environment(work, target)
+        _clone_public_source(stage, REPOSITORY, REVISION, env)
+        for name, expected in spec['upstream_sha256'].items():
+            if _hash(stage / name) != expected:
+                raise RuntimeError(f'Pinned upstream input hash mismatch: {name}')
+        validate_baselines(stage, records)
+        patch = shutil.which('patch', path=env['PATH'])
+        if not patch:
+            raise RuntimeError('The hosted Ubuntu patch utility is required')
+        for entry in PATCHES:
+            _run(
+                [patch, '--batch', '--fuzz=0', '-p1', '-i', str(root / entry['path'])],
+                cwd=stage,
+                env=env,
+            )
+        validate_baselines(stage, records, patched_only=True)
+        _validate_public_tree(stage)
+        sqlite_source = work / 'sqlite-source'
+        sqlite_source.mkdir(mode=0o700)
+        sqlite_library, sqlite_version = _build_sqlite(sqlite_source, sqlite_prefix, env)
+        python = str(Path(sys.executable).resolve())
+        uv_requirements = _write_uv_requirements(work, spec)
+        pip = [
+            python, '-m', 'pip', 'install', '--disable-pip-version-check', '--no-input',
+            '--no-deps', '--require-hashes', '--cache-dir', env['PIP_CACHE_DIR'],
+            '-r', str(uv_requirements),
+        ]
+        _run(pip, env=env)
+        uv = str(Path(sys.executable).parent / ('uv.exe' if os.name == 'nt' else 'uv'))
+        if not Path(uv).is_file():
+            raise RuntimeError('Pinned uv installer did not provide its executable')
+        sync = [
+            uv, 'sync', '--locked', '--no-dev', '--no-install-project',
+            '--python', python, '--project', str(stage),
+        ]
+        for extra in spec['extras']:
+            sync.extend(('--extra', extra))
+        _run(
+            sync,
+            cwd=stage,
+            env=env,
+        )
+        native_python = target / 'venv/bin/python'
+        if not native_python.is_file():
+            raise RuntimeError('Locked dependency sync did not create the expected venv/bin/python')
+        native_sqlite = _run(
+            [str(native_python), '-c', 'import sqlite3; print(sqlite3.sqlite_version)'],
+            env=env,
+        ).strip()
+        validate_sqlite_version(native_sqlite)
+        shutil.copytree(
+            stage,
+            target,
+            dirs_exist_ok=True,
+            symlinks=True,
+            ignore=lambda directory, names: _ignore_upstream_metadata(
+                directory, names, stage
+            ),
+        )
+        validate_baselines(target, records, patched_only=True)
+        publish_sqlite_library(environ, runner_temp, sqlite_library)
+        print(f'Installed public Hermes revision {REVISION}')
+        print(f'upstream pyproject.toml sha256={spec["upstream_sha256"]["pyproject.toml"]}')
+        print(f'upstream uv.lock sha256={spec["upstream_sha256"]["uv.lock"]}')
+        for entry in PATCHES:
+            print(f'{entry["path"]} sha256={entry["sha256"]}')
+        print(f'Verified SQLite {sqlite_version} and locked extras: {", ".join(spec["extras"])}.')
+        print('Verified all four installed and staged source hashes; no provider or model extras enabled.')
+    except BaseException as error:
+        try:
+            _remove_created_runtime(target, preserved)
+        except Exception as cleanup_error:
+            error.add_note(f'Runtime rollback failed: {cleanup_error}')
+        if sqlite_prefix.exists() and not sqlite_prefix.is_symlink():
+            try:
+                if (sqlite_prefix.parent != runner_temp
+                        or sqlite_prefix.stat().st_uid != os.getuid()):
+                    raise RuntimeError('Unsafe private SQLite build during rollback')
+                shutil.rmtree(sqlite_prefix)
+            except Exception as cleanup_error:
+                error.add_note(f'SQLite rollback failed: {cleanup_error}')
+        raise
+    finally:
+        shutil.rmtree(work)
+
+
+def main():
+    if sys.argv[1:] == ['--preflight']:
+        validate_action_preflight(os.environ, ROOT)
+        print('Native runtime preflight passed')
+        return 0
+    if sys.argv[1:]:
+        raise SystemExit('Runtime provisioning accepts no command-line inputs')
+    prepare_runtime(ROOT, os.environ)
+    return 0
+
+
+if __name__ == '__main__':
+    main()
