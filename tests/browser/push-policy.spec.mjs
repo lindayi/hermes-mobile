@@ -23,6 +23,7 @@ async function fixture(run){
     const p=path.slice('/hermes/app-api'.length),call={p,method:req.method,body:raw?JSON.parse(raw):null,csrf:req.headers['x-csrf-token']};calls.push(call);
     let data={items:[]},status=200;
     if(p==='/auth/me'){if(control.authHold)await control.authHold;data={user:{id:control.user,status:'ready'},csrf_token:control.csrf || 'fixture-csrf'};}
+    if(p==='/auth/logout' && control.logoutDelay)await new Promise(resolve=>setTimeout(resolve,control.logoutDelay));
     if(p==='/push/presence' && call.body.visible && control.presenceHold)await control.presenceHold;
     if(p==='/sessions')data={items:[{id:'session-one',title:'First conversation'},{id:'session-two',title:'Second conversation'}]};
     if(p==='/push/key')data={public_key:'AQID'};
@@ -155,7 +156,14 @@ for(const departure of ['route','owner','logout','destroy'])test(`notification s
  await settings(page);await checkMaster(page,false);await page.getByRole('switch').click();await page.getByText('Enabling notifications…',{exact:true}).waitFor();
  if(departure==='route')await page.getByRole('button',{name:'Chats',exact:true}).click();
  if(departure==='owner'){control.user='new-owner';await page.evaluate(()=>app.start());}
- if(departure==='logout')await page.getByRole('button',{name:'Sign out',exact:true}).click();
+ if(departure==='logout'){
+  // Keep logout pending long enough to expose releasing permission on click alone.
+  // The late permission below is meant to cross completed logout, not its request.
+  control.logoutDelay=1000;
+  await page.getByRole('button',{name:'Sign out',exact:true}).click();
+  await page.getByRole('button',{name:'Sign in with a passkey',exact:true}).waitFor();
+  await page.waitForFunction(()=>app.state.user===null);
+ }
  if(departure==='destroy')await page.evaluate(()=>app.destroy());
  await page.evaluate(()=>releasePermission());await page.waitForTimeout(100);
  assert.equal(calls.filter(c=>c.p==='/push/subscriptions' || c.p==='/push/preferences' && c.method==='PUT').length,0);

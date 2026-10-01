@@ -7,6 +7,76 @@ import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
 const dir=process.env.HERMES_FRONTEND_DIR?process.env.HERMES_FRONTEND_DIR.replace(/\/$/,'')+'/':fileURLToPath(new URL('../../frontend/',import.meta.url));
+// setViewportSize acknowledges emulation before the page necessarily receives resize.
+// The swipe controller intentionally closes actions on resize: settle that event
+// before revealing Delete, rather than racing it or retrying a hidden action.
+async function resizeBeforeReveal(page,viewport,timeout=5000){
+ const previous=page.viewportSize();
+ if(previous.width===viewport.width&&previous.height===viewport.height)return;
+ await page.evaluate(()=>{
+  const state={ready:false,frame:null,listener:null};
+  state.listener=()=>{state.frame=requestAnimationFrame(()=>{state.ready=true;state.frame=null;});};
+  window.__sessionDeleteResize=state;
+  window.addEventListener('resize',state.listener,{once:true});
+ });
+ try{
+  await page.setViewportSize(viewport);
+  await page.waitForFunction(()=>window.__sessionDeleteResize?.ready===true,null,{polling:20,timeout});
+ }finally{
+  await page.evaluate(()=>{
+   const state=window.__sessionDeleteResize;
+   if(state){window.removeEventListener('resize',state.listener);if(state.frame!==null)cancelAnimationFrame(state.frame);}
+   delete window.__sessionDeleteResize;
+  });
+ }
+}
+test('session resize readiness rejects a held frame on deadline and cleans up',{timeout:15000},async t=>{
+ const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+ let pending,watchdog;
+ try{
+  const page=await browser.newPage({viewport:{width:320,height:568}});
+  await page.goto('about:blank');
+  await page.evaluate(()=>{
+   const native={request:window.requestAnimationFrame,cancel:window.cancelAnimationFrame,add:window.addEventListener,remove:window.removeEventListener};
+   const held=new Map(),listeners=new Set();let next=0;
+   window.__heldResizeFrame={held,listeners,requested:0,cancelled:0,restore(){
+    for(const listener of listeners)native.remove.call(window,'resize',listener);
+    held.clear();listeners.clear();
+    window.requestAnimationFrame=native.request;window.cancelAnimationFrame=native.cancel;
+    window.addEventListener=native.add;window.removeEventListener=native.remove;
+    delete window.__heldResizeFrame;delete window.__sessionDeleteResize;
+   }};
+   window.requestAnimationFrame=callback=>{held.set(++next,callback);window.__heldResizeFrame.requested++;return next;};
+   window.cancelAnimationFrame=id=>{if(held.delete(id))window.__heldResizeFrame.cancelled++;};
+   window.addEventListener=function(type,listener,options){if(type==='resize')listeners.add(listener);return native.add.call(this,type,listener,options);};
+   window.removeEventListener=function(type,listener,options){if(type==='resize')listeners.delete(listener);return native.remove.call(this,type,listener,options);};
+  });
+  try{
+   // Even with rendering held, an unchanged viewport must return immediately.
+   await resizeBeforeReveal(page,{width:320,height:568},200);
+   assert.equal(await page.evaluate(()=>Object.hasOwn(window,'__sessionDeleteResize')),false);
+   const started=performance.now();
+   pending=resizeBeforeReveal(page,{width:390,height:568},200).then(()=>({status:'resolved'}),error=>({status:'rejected',name:error.name,message:error.message}));
+   const outcome=await Promise.race([pending,new Promise(resolve=>{watchdog=setTimeout(()=>resolve({status:'watchdog'}),2000);})]);
+   clearTimeout(watchdog);
+   const elapsed=performance.now()-started;
+   t.diagnostic(`held-frame outcome=${outcome.status}; elapsed=${Math.round(elapsed)}ms`);
+   assert.equal(await page.evaluate(()=>window.__heldResizeFrame.requested),1,'real resize reached the held rendering frame');
+   assert.equal(outcome.status,'rejected','helper must reject on its own deadline, not strand teardown until the test watchdog');
+   assert.equal(outcome.name,'TimeoutError');assert.match(outcome.message,/200ms/);
+   assert.equal(await page.evaluate(()=>Object.hasOwn(window,'__sessionDeleteResize')),false,'deadline removes helper state');
+   assert.deepEqual(await page.evaluate(()=>({frames:window.__heldResizeFrame.held.size,listeners:window.__heldResizeFrame.listeners.size,cancelled:window.__heldResizeFrame.cancelled})),{frames:0,listeners:0,cancelled:1});
+  }finally{clearTimeout(watchdog);await page.evaluate(()=>window.__heldResizeFrame.restore());}
+  // Restore native rendering, then prove a real resize can complete normally.
+  await resizeBeforeReveal(page,{width:400,height:568});
+  assert.equal(await page.evaluate(()=>innerWidth),400);
+  assert.equal(await page.evaluate(()=>Object.hasOwn(window,'__sessionDeleteResize')),false,'success removes helper state');
+ }finally{
+  clearTimeout(watchdog);await browser.close();
+  // Closing the page rejects even the old unbounded evaluate in the RED run.
+  if(pending)await pending;
+ }
+});
 test('session deletion controls and confirmation fit narrow light/dark screens',{timeout:45000},async()=>{
  const title='Saved conversation with a long title that must not push actions offscreen';let exists=true;const mutations=[];
  const server=createServer(async(req,res)=>{const url=new URL(req.url,'http://fixture'),p=url.pathname.replace('/hermes/app-api','');const json=obj=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(obj));};
@@ -20,10 +90,10 @@ test('session deletion controls and confirmation fit narrow light/dark screens',
  });await new Promise(r=>server.listen(0,'127.0.0.1',r));const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
  try{const page=await browser.newPage({viewport:{width:320,height:568},serviceWorkers:'block',reducedMotion:'reduce'});page.setDefaultTimeout(5000);const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);
   const remove=page.getByRole('button',{name:'Delete conversation: '+title,exact:true}),open=page.getByRole('button',{name:title,exact:true});await open.press('Shift+F10');await remove.waitFor();
-  for(const theme of ['light','dark'])for(const width of [320,390,1280]){await page.setViewportSize({width,height:568});await page.evaluate(value=>document.documentElement.dataset.theme=value,theme);await open.press('Shift+F10');await remove.waitFor();const rb=await remove.boundingBox(),ob=await open.boundingBox();assert.ok(rb.width>=44&&rb.height>=44);assert.ok(rb.x>=ob.x+ob.width,'separate adjacent delete hit target');assert.ok(rb.y>=ob.y&&rb.y+rb.height<=ob.y+ob.height,'delete is vertically within the row');assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  for(const theme of ['light','dark'])for(const width of [320,390,1280]){await resizeBeforeReveal(page,{width,height:568});await page.evaluate(value=>document.documentElement.dataset.theme=value,theme);await open.press('Shift+F10');await remove.waitFor();const rb=await remove.boundingBox(),ob=await open.boundingBox();assert.ok(rb.width>=44&&rb.height>=44);assert.ok(rb.x>=ob.x+ob.width,'separate adjacent delete hit target');assert.ok(rb.y>=ob.y&&rb.y+rb.height<=ob.y+ob.height,'delete is vertically within the row');assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
    await remove.click();const dialog=page.getByRole('dialog',{name:'Delete conversation?',exact:true});await dialog.waitFor();assert.equal(await dialog.getByRole('button',{name:'Cancel',exact:true}).evaluate(el=>el===document.activeElement),true);const deletion=dialog.getByRole('button',{name:'Delete conversation',exact:true});const box=await deletion.boundingBox();assert.ok(box.y>=0&&box.y+box.height<=568,'confirmation stays reachable');await page.keyboard.press('Escape');assert.equal(mutations.length,0);assert.equal(await remove.evaluate(el=>el===document.activeElement),true);
   }
-  await page.setViewportSize({width:390,height:740});await open.press('Shift+F10');await remove.waitFor();await remove.click();await mkdir(artifactURL(),{recursive:true});await page.screenshot({path:fileURLToPath(artifactURL('session-delete-confirmation.png'))});await page.getByRole('dialog').getByRole('button',{name:'Delete conversation',exact:true}).click();await page.getByText('Conversation deleted.',{exact:true}).waitFor();assert.deepEqual(mutations,[{confirm:true}]);assert.equal(await open.count(),0);assert.deepEqual(errors,[]);
+  await resizeBeforeReveal(page,{width:390,height:740});await open.press('Shift+F10');await remove.waitFor();await remove.click();await mkdir(artifactURL(),{recursive:true});await page.screenshot({path:fileURLToPath(artifactURL('session-delete-confirmation.png'))});await page.getByRole('dialog').getByRole('button',{name:'Delete conversation',exact:true}).click();await page.getByText('Conversation deleted.',{exact:true}).waitFor();assert.deepEqual(mutations,[{confirm:true}]);assert.equal(await open.count(),0);assert.deepEqual(errors,[]);
  }finally{await browser.close();server.closeAllConnections();await new Promise(r=>server.close(r));}
 });
 

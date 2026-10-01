@@ -201,7 +201,11 @@ async function cappedBody(card,body,page,label){
  assert.equal(await summary.evaluate(el=>{const r=el.getBoundingClientRect();return el.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));}),true,`${label}: fold bar hit target remains reachable`);
  await summary.tap();assert.equal(await card.evaluate(el=>el.open),false,`${label}: native touch collapses`);
  await summary.focus();await page.keyboard.press('Enter');assert.equal(await card.evaluate(el=>el.open),true,`${label}: keyboard reopens`);
- await page.keyboard.press('Space');assert.equal(await card.evaluate(el=>el.open),false,`${label}: keyboard collapses`);
+ await page.keyboard.press('Space');
+ // Observe the result of native keyboard activation, not just input dispatch.
+ // Keep the existing deadline and assertion: a lost key/focus must still fail.
+ await page.waitForFunction(el=>!el.open,await card.elementHandle());
+ assert.equal(await card.evaluate(el=>el.open),false,`${label}: keyboard collapses`);
 }
 
 test('generated disclosures cap full content at phone/tablet and short viewport sizes without changing Inbox toolbar',{timeout:90000},async()=>{

@@ -29,8 +29,8 @@ def main(argv=None, *, run=run_suite):
         if args.list:
             return 0
         python = Path(os.environ.get('HERMES_TEST_PYTHON') or sys.executable).absolute()
-        node = shutil.which('node')
-        if not python.is_file() or not os.access(python, os.X_OK) or not node:
+        node = shutil.which('node') or '/home/lindayi/.hermes/node/bin/node'
+        if not python.is_file() or not os.access(python, os.X_OK) or not os.access(node, os.X_OK):
             raise ValueError('Working Python and Node interpreters are required')
         run(SOURCE, python=str(python), node=node,
             suite='python' if args.suite=='host' else args.suite,

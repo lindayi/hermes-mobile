@@ -6,6 +6,7 @@
   "tests/test_member_scheduler.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
   "tests/test_model_selection_transport_contract.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
   "tests/test_native_compression_admission.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_native_controls_release.py": "Native process/socket attestation reads installed Hermes source fingerprints (including hermes_state.py).",
   "tests/test_native_controls_startup.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
   "tests/test_native_delete_rollout.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
   "tests/test_native_maintenance.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",

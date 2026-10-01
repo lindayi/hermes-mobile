@@ -29,6 +29,11 @@ runs:
         sudo ln -s "$(command -v node)" /home/lindayi/.hermes/node/bin/node
         printf 'HERMES_TEST_PYTHON=%s\n' "$(command -v python)" >> "$GITHUB_ENV"
     - if: ${{ inputs.browser == 'true' }}
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: ${{ runner.temp }}/pw-browsers
+        key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+    - if: ${{ inputs.browser == 'true' }}
       shell: bash
       run: |
         export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/pw-browsers"

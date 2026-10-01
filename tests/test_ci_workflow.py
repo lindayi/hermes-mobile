@@ -41,6 +41,9 @@ def test_hosted_gate_requires_every_suite_without_optional_failures():
         assert f'--shards {count}' in run
         assert 'build_frontend' in run if suite=='browser' else True
     assert any('scripts/ci_tests.py js' in step.get('run','') for step in jobs['js']['steps'])
+    # steering-retry.test.mjs launches a real browser despite its unit-test suffix.
+    setup = next(step for step in jobs['js']['steps'] if step.get('uses') == './.github/actions/test-environment')
+    assert setup['with']['browser'] == 'true'
 
 
 def test_hosted_setup_uses_pinned_dependencies_without_deploy_access():

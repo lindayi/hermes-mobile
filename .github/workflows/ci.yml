@@ -41,6 +41,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/test-environment
+        with:
+          browser: 'true'
       - run: python -B scripts/ci_tests.py js
   python:
     runs-on: ubuntu-24.04
