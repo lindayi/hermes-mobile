@@ -19,10 +19,14 @@ authenticated GitHub user and repository before acting.
 The durable owner-private state records the immutable issue number, comment ID,
 accepted title/body digest, and comment timestamp before dispatch. It sends only
 the public issue title/body as explicitly untrusted task context; it does not
-include local credentials, private sessions, or arbitrary thread comments.
+include local credentials, private sessions, or arbitrary thread comments. The
+issue content is JSON-escaped in the task prompt. Before accepting that snapshot,
+the worker verifies bounded GraphQL `Issue.lastEditedAt` and
+`Issue.userContentEdits` history plus timestamped REST `renamed` timeline events.
 Edits after authorization, incomplete pagination/evidence, closed issues, and
-stale commands fail closed. Reopening requires a newer owner command. A consumed
-or response-uncertain dispatch is never posted again automatically.
+stale commands fail closed. Reopening requires a newer owner command and verified
+terminal evidence for any earlier remote task; closed authorization does not clear
+an active or response-uncertain task fence.
 
 ## Use
 
@@ -66,8 +70,9 @@ and owner/creator identity, a completed task and successful bound session, and
 the task's unique GitHub branch/PR artifacts. It checks the PR's repository,
 main target, branch, open state, issue-closing reference, and exact current head
 before any handoff. If the task leaves the PR as a draft, a durable one-time
-readiness reservation is reconciled against that exact head; it is never blindly
-retried.
+readiness reservation invokes GitHub's `markPullRequestReadyForReview` GraphQL
+mutation for the verified PR node ID. Fresh task, artifact, PR, and head evidence
+is checked again before enrollment; uncertain mutations are never blindly retried.
 
 Only after that proof, the worker posts the exact `/hermes enroll` comment using
 the verified owner-authenticated API client. This is the existing coordinator's
@@ -78,8 +83,10 @@ and repository protections remain authoritative.
 
 Only fixed-text completion and blocker receipts are posted publicly. Routine
 polling is silent. Comment/task response uncertainty is reconciled from durable
-state and remote markers; the worker does not blindly repeat task dispatch,
-readiness updates, or comments.
+state and remote markers. Receipt marker lookups are bounded and an irreconcilable
+receipt is durably abandoned without reposting; optional receipts do not block
+task polling or unrelated dispatch. The worker does not blindly repeat task
+dispatch, readiness updates, or comments.
 
 ## Operations and verification boundary
 
