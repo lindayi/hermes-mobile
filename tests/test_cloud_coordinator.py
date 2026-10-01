@@ -1,5 +1,9 @@
 import json
 from pathlib import Path
+import shutil
+import subprocess
+import sys
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -38,6 +42,8 @@ BASE = "b" * 40
 def valid_pr(**changes):
     pr = {
         "number": 16,
+        "state": "open",
+        "merged": False,
         "draft": False,
         "mergeable": True,
         "mergeable_state": "clean",
@@ -327,7 +333,8 @@ class FakeApi:
                  active_agent=False, strict_protection=True,
                  conversation_resolution=True, source_failure_sha=HEAD,
                  head_sha=HEAD, reopen_after_first=False, review_status_present=True,
-                 active_after_first=False):
+                 active_after_first=False, workflow_runs=None, pull_state="open",
+                 merged=False, late_enrollment=False):
         self.author_id = author_id
         self.race = race
         self.fail = fail
@@ -347,6 +354,15 @@ class FakeApi:
         self.head_sha = head_sha
         self.reopen_after_first = reopen_after_first
         self.review_status_present = review_status_present
+        self.workflow_runs = workflow_runs
+        self.pull_state = pull_state
+        self.merged = merged
+        self.late_enrollment = late_enrollment
+        self.comment_reads = 0
+        self.late_comment = {
+            "id": 125, "user": {"id": OWNER}, "body": "/hermes enroll",
+            "updated_at": "2026-10-01T12:05:00Z",
+        }
         self.thread_reads = 0
         self.workflow_reads = 0
         self.workflow_routes = []
@@ -356,16 +372,19 @@ class FakeApi:
         self.graphql_writes = []
         self.pull = valid_pr() | {
             "node_id": "PR_node_16", "auto_merge": None,
+            "state": pull_state, "merged": merged,
             "head": {"sha": head_sha, "ref": "topic", "repo": {"id": 1399942965}},
         }
         self.issue = {"number": 16, "pull_request": {"url": "pull/16"} if issue_is_pull else None}
         self.comments = [{
             "id": 123, "user": {"id": author_id}, "body": "/hermes enroll",
+            "updated_at": "2026-10-01T11:00:00Z",
         }]
         if authorize:
             self.comments.append({
                 "id": 124, "user": {"id": OWNER},
                 "body": f"/hermes authorize-sensitive {authorize_sha}",
+                "updated_at": "2026-10-01T11:30:00Z",
             })
 
     def get(self, route):
@@ -403,7 +422,17 @@ class FakeApi:
         if route.startswith("repos/lindayi/hermes-mobile/issues/16/comments?per_page=100"):
             if self.fail:
                 raise ApiError("rate limited", status=429)
-            return self.comments
+            self.comment_reads += 1
+            values = list(self.comments)
+            if self.late_enrollment and self.comment_reads == 1:
+                self.comments.append(self.late_comment)
+                values = values
+            query = parse_qs(urlparse(route).query)
+            if query.get("since"):
+                since = query["since"][0]
+                values = [comment for comment in values
+                          if comment.get("updated_at", "") >= since]
+            return values
         if route.endswith("/pulls/16/files?per_page=100"):
             if self.sensitive:
                 return [{"filename": "backend/auth.py"}]
@@ -429,16 +458,22 @@ class FakeApi:
         if "/actions/runs?" in route:
             self.workflow_reads += 1
             self.workflow_routes.append(route)
+            if self.workflow_runs is not None:
+                return self.workflow_runs
             if self.source_failure:
                 return [{
                     "id": 567, "name": "Source checks", "head_sha": self.source_failure_sha,
+                    "workflow_id": 372155405, "run_number": 49, "run_attempt": 1,
+                    "head_branch": "topic",
                     "status": "completed", "conclusion": "failure",
                     "pull_requests": [{"number": 16}],
                 }]
             if self.active_agent or (self.active_after_first and self.workflow_reads > 1):
                 return [{
                     "id": 789, "name": "Running Copilot cloud agent",
-                    "head_sha": "c" * 40, "status": "in_progress",
+                    "workflow_id": 372426410, "head_sha": "c" * 40,
+                    "head_branch": "topic", "event": "dynamic",
+                    "actor": {"id": 198982749}, "status": "in_progress",
                 }]
             return []
         raise AssertionError(f"Unexpected API list: {route}")

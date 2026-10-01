@@ -22,11 +22,14 @@ REPOSITORY = "lindayi/hermes-mobile"
 REPOSITORY_ID = 1399942965
 OWNER_ID = 5164171
 COPILOT_REVIEWER_ID = 175728472
+COPILOT_AGENT_ID = 198982749
+SOURCE_WORKFLOW_ID = 372155405
 MAIN_BRANCH = "main"
 REPAIR_LIMIT = 3
 MAX_PAGES = 100
 MAX_FINDINGS = 8
 MAX_FINDING_CHARS = 1000
+NONTERMINAL_AGENT_STATES = {"queued", "in_progress", "requested", "waiting", "pending"}
 FIX_MARKER_PREFIX = "hermes-coordinator-fix:"
 OUTBOX_MARKER_PREFIX = "hermes-coordinator-outcome:"
 CREDENTIAL_RE = re.compile(
@@ -84,7 +87,8 @@ def enrollment_from_comment(issue, pull, comment):
             or not isinstance(comment.get("body"), str)
             or comment["body"].strip() != "/hermes enroll"
             or type(issue.get("number")) is not int
-            or pull.get("number") != issue["number"]):
+            or pull.get("number") != issue["number"]
+            or pull.get("state") != "open" or pull.get("merged") is not False):
         return None
     head, base = pull.get("head"), pull.get("base")
     if not isinstance(head, dict) or not isinstance(base, dict):
@@ -545,16 +549,77 @@ def _required_checks(api):
             conversation_resolution_required)
 
 
-def _workflow_runs(api, branch):
+def _workflow_runs(api, branch, pull_number):
     route = (f"repos/{REPOSITORY}/actions/runs?per_page=100"
              f"&branch={quote(branch, safe='')}")
     runs = _rest_list(api, route, collection="workflow_runs")
-    matches = []
+    matches, pull_bound = [], []
     for run in runs:
-        if not isinstance(run, dict):
+        if not isinstance(run, dict) or run.get("head_branch") != branch:
             continue
         matches.append(run)
-    return matches
+        if any(isinstance(pr, dict) and pr.get("number") == pull_number
+               for pr in run.get("pull_requests", [])):
+            pull_bound.append(run)
+    return matches, pull_bound
+
+
+def _latest_source_failure(runs, head_sha, branch, pull_number):
+    candidates = [
+        run for run in runs
+        if run.get("name") == "Source checks"
+        and run.get("workflow_id") == SOURCE_WORKFLOW_ID
+        and run.get("head_branch") == branch
+        and run.get("head_sha") == head_sha
+        and any(isinstance(pr, dict) and pr.get("number") == pull_number
+                for pr in run.get("pull_requests", []))
+        and type(run.get("run_number")) is int
+        and type(run.get("run_attempt")) is int
+    ]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda run: (
+        run["run_number"], run["run_attempt"], str(run.get("updated_at", "")),
+    ))
+    if (latest.get("status") != "completed"
+            or latest.get("conclusion") not in {"failure", "timed_out"}):
+        return None
+    return {
+        "id": latest.get("id"), "name": "Source checks", "head_sha": head_sha,
+        "status": latest["status"], "conclusion": latest["conclusion"],
+        "app": {"name": "GitHub Actions"},
+    }
+
+
+def _agent_run_is_active(run):
+    status = run.get("status")
+    return status != "completed"
+
+
+def _dispatch_run_candidates(runs, action, issue, branch):
+    created = action.get("created_at")
+    try:
+        after = datetime.fromtimestamp(created, timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return []
+    candidates = []
+    for run in runs:
+        actor = run.get("actor") if isinstance(run.get("actor"), dict) else {}
+        created_at = run.get("created_at")
+        try:
+            started = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if (run.get("head_branch") == branch
+                and run.get("event") == "dynamic"
+                and actor.get("id") == COPILOT_AGENT_ID
+                and "copilot cloud agent" in str(run.get("name", "")).casefold()
+                and run.get("head_sha") == action.get("head")
+                and started >= after
+                and any(isinstance(pr, dict) and pr.get("number") == issue
+                        for pr in run.get("pull_requests", []))):
+            candidates.append(run)
+    return candidates
 
 
 def _contains_marker(comments, marker):
@@ -675,6 +740,18 @@ class Coordinator:
             raise CoordinatorError("Pull request data was incomplete")
         if not _is_sha(head.get("sha")):
             raise CoordinatorError("Pull request head was not a commit SHA")
+        if pull.get("state") != "open" or pull.get("merged") is not False:
+            return {
+                "issue": number, "enrollment": enrollment, "pull": pull,
+                "head": head["sha"], "main_sha": main_sha, "scoped": False,
+                "terminal": True, "files": [], "files_complete": False,
+                "reviews": [], "threads": [], "threads_complete": False,
+                "required": [], "policy_complete": False,
+                "up_to_date_required": False,
+                "conversation_resolution_required": False,
+                "check_runs": [], "statuses": [], "comments": [], "workflows": [],
+                "status": None, "status_owned": False,
+            }
         scoped = (
             isinstance(head.get("repo"), dict)
             and head["repo"].get("id") == REPOSITORY_ID
@@ -703,17 +780,14 @@ class Coordinator:
             self.api, f"repos/{REPOSITORY}/commits/{sha}/statuses?per_page=100",
         )
         comments = _all_review_comments(self.api, number, None)
-        workflows = _workflow_runs(self.api, head.get("ref", ""))
-        source_failures = [{
-            "id": run.get("id"), "name": "Source checks", "head_sha": run.get("head_sha"),
-            "status": run.get("status"), "conclusion": run.get("conclusion"),
-            "app": {"name": "GitHub Actions"},
-        } for run in workflows
-            if run.get("name") == "Source checks"
-            and run.get("head_sha") == sha
-            and run.get("status") == "completed"
-            and run.get("conclusion") in {"failure", "timed_out"}]
-        check_runs.extend(source_failures)
+        workflows, pull_workflows = _workflow_runs(
+            self.api, head.get("ref", ""), number,
+        )
+        source_failure = _latest_source_failure(
+            workflows, sha, head.get("ref", ""), number,
+        )
+        if source_failure:
+            check_runs.append(source_failure)
         latest_status, status_is_owned = _status_owned(
             statuses, "cloud-review", OWNER_ID,
         )
@@ -727,6 +801,7 @@ class Coordinator:
             "conversation_resolution_required": conversation_resolution_required,
             "check_runs": check_runs, "statuses": statuses,
             "comments": comments, "workflows": workflows,
+            "pull_workflows": pull_workflows,
             "status": latest_status, "status_owned": status_is_owned,
         }
 
@@ -788,6 +863,14 @@ class Coordinator:
 
     def _plan_pull(self, snapshot, actions, *, apply):
         number, head = snapshot["issue"], snapshot["head"]
+        if snapshot.get("terminal"):
+            return {
+                "issue": number, "head": head, "terminal": True,
+                "sensitive": False, "review_valid": False,
+                "required_checks_green": False, "auto_merge_eligible": False,
+                "repair": None, "status_action": None, "merge_action": None,
+                "reasons": ["terminal"], "outcomes": [],
+            }
         review_ok = copilot_review_valid(
             head, snapshot["reviews"], snapshot["threads"],
             threads_complete=snapshot["threads_complete"],
@@ -874,6 +957,7 @@ class Coordinator:
         else:
             merge_action = None
         return {"issue": number, "head": head, "sensitive": sensitive,
+                "terminal": False,
                 "review_valid": review_ok, "required_checks_green": checks_ok,
                 "auto_merge_eligible": merge, "reasons": [item[0] for item in reasons],
                 "repair": repair, "status_action": status_action,
@@ -907,7 +991,9 @@ class Coordinator:
         pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
         base = pull.get("base") if isinstance(pull, dict) else None
         actual = pull.get("head") if isinstance(pull, dict) else None
-        if (not isinstance(base, dict) or not isinstance(actual, dict)
+        if (not isinstance(pull, dict) or pull.get("state") != "open"
+                or pull.get("merged") is not False
+                or not isinstance(base, dict) or not isinstance(actual, dict)
                 or actual.get("sha") != head or base.get("ref") != MAIN_BRANCH
                 or not isinstance(actual.get("repo"), dict)
                 or actual["repo"].get("id") != REPOSITORY_ID
@@ -1106,9 +1192,15 @@ class Coordinator:
     def _apply(self, plan):
         self.store.commit_scan(
             plan["cursor"], plan["processed"], commands=plan["commands"],
+            retirements=[
+                item["issue"] for item in plan["pull_requests"] if item.get("terminal")
+            ],
         )
         summaries = []
         for pr_plan, snapshot in zip(plan["pull_requests"], plan["snapshots"]):
+            if pr_plan.get("terminal"):
+                summaries.append(self._summary(pr_plan))
+                continue
             for key, entry in pr_plan["outcomes"]:
                 self.store.add_outbox(key, entry)
             comments = snapshot["comments"]
@@ -1190,6 +1282,7 @@ class Coordinator:
     def _summary(item):
         return {
             "issue": item["issue"], "head": item["head"],
+            "terminal": item.get("terminal", False),
             "sensitive": item["sensitive"], "review_valid": item["review_valid"],
             "required_checks_green": item["required_checks_green"],
             "auto_merge_eligible": item["auto_merge_eligible"],
