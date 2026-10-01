@@ -9,9 +9,11 @@ import yaml
 
 from scripts.prepare_native_test_runtime import (
     _child_environment,
+    _write_uv_requirements,
     load_runtime_spec,
     _remove_created_runtime,
     publish_sqlite_library,
+    validate_action_preflight,
     validate_hosted_runner,
     validate_patch_inputs,
     validate_sqlite_version,
@@ -36,6 +38,7 @@ def hosted_environment():
         'GITHUB_WORKSPACE': '/home/runner/work/hermes-mobile/hermes-mobile',
         'RUNNER_ENVIRONMENT': 'github-hosted',
         'RUNNER_OS': 'Linux',
+        'RUNNER_ARCH': 'X64',
         'RUNNER_TEMP': '/home/runner/work/_temp',
         'ImageOS': 'ubuntu24',
     }
@@ -48,6 +51,7 @@ def test_runner_guard_rejects_local_self_hosted_and_other_repositories():
         ('RUNNER_ENVIRONMENT', 'self-hosted'),
         ('GITHUB_REPOSITORY', 'other/project'),
         ('GITHUB_WORKSPACE', '/tmp/hermes-mobile'),
+        ('RUNNER_ARCH', 'ARM64'),
     ):
         changed = dict(environment, **{key: value})
         with pytest.raises(RuntimeError):
@@ -62,10 +66,38 @@ def test_runner_guard_accepts_only_canonical_hosted_layout():
 
 def test_action_validates_runner_before_privileged_runtime_creation():
     action = yaml.safe_load((ROOT / '.github/actions/native-test-environment/action.yml').read_text())
-    run = action['runs']['steps'][-1]['run']
-    validate = run.index('validate_hosted_runner(os.environ)')
-    install = run.index('sudo install -d')
-    assert validate < install
+    steps = action['runs']['steps']
+    assert steps[0]['shell'] == 'bash'
+    assert '--preflight' in steps[0]['run']
+    setup = next(i for i, step in enumerate(steps) if step.get('uses', '').startswith('actions/setup-python@'))
+    create = next(i for i, step in enumerate(steps) if 'sudo mkdir' in step.get('run', ''))
+    assert 0 < setup < create
+    assert '--preflight' in steps[create]['run'].split('sudo mkdir')[0]
+    assert steps[create]['run'].index('sudo mkdir') < steps[create]['run'].index('sudo chown')
+
+
+def test_action_preflight_rejects_existing_runtime_without_mutating_it(tmp_path):
+    target = tmp_path / 'native-runtime'
+    target.mkdir(mode=0o700)
+    content = target / 'keep'
+    content.write_text('do not touch')
+    before = (target.stat().st_mode, content.read_bytes())
+    with pytest.raises(RuntimeError, match='Refusing existing native runtime'):
+        validate_action_preflight(hosted_environment(), ROOT, runtime_target=target)
+    assert (target.stat().st_mode, content.read_bytes()) == before
+
+
+def test_action_preflight_rejects_symlinked_runtime_without_following_it(tmp_path):
+    target = tmp_path / 'native-runtime'
+    real = tmp_path / 'existing'
+    real.mkdir()
+    marker = real / 'marker'
+    marker.write_text('preserve')
+    target.symlink_to(real, target_is_directory=True)
+    with pytest.raises(RuntimeError, match='Refusing existing native runtime'):
+        validate_action_preflight(hosted_environment(), ROOT, runtime_target=target)
+    assert target.is_symlink()
+    assert marker.read_text() == 'preserve'
 
 
 def test_runtime_spec_pins_public_sources_and_exact_four_preimages():
@@ -73,6 +105,8 @@ def test_runtime_spec_pins_public_sources_and_exact_four_preimages():
     assert spec['repository'] == 'https://github.com/NousResearch/hermes-agent'
     assert spec['revision'] == UPSTREAM_REVISION
     assert spec['python_version'] == '3.11'
+    assert spec['uv_version'] == '0.9.28'
+    assert spec['uv_sha256'] == '7b8460a2b624d8ab27cb293a2c9f2393f9efc4e36e0fb886a6c2360e23fb48be'
     assert spec['extras'] == ['messaging']
     assert spec['sqlite'] == {
         'repository': 'https://github.com/sqlite/sqlite',
@@ -140,6 +174,15 @@ def test_installer_uses_private_workspace_and_runner_certificate_store(tmp_path)
     assert environment['UV_CACHE_DIR'].startswith(str(work))
     assert environment['UV_NATIVE_TLS'] == 'true'
     assert not {'GITHUB_TOKEN', 'GH_TOKEN'} & environment.keys()
+
+
+def test_uv_bootstrap_uses_private_hash_locked_requirement(tmp_path):
+    requirements = _write_uv_requirements(tmp_path, load_runtime_spec(ROOT))
+    assert requirements.read_text() == (
+        'uv==0.9.28 --hash=sha256:'
+        '7b8460a2b624d8ab27cb293a2c9f2393f9efc4e36e0fb886a6c2360e23fb48be\n'
+    )
+    assert requirements.stat().st_mode & 0o077 == 0
 
 
 def test_sqlite_version_gate_preserves_native_test_minimum():

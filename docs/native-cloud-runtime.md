@@ -6,15 +6,19 @@ This pilot reconstructs the public Hermes runtime on a disposable GitHub-hosted
 Ubuntu runner. It does not access production, install on an arbitrary host, copy a
 production checkout or virtualenv, upload private state, run operator scripts, or
 make real model calls. The `/usr/local/lib/hermes-agent` path is created only after
-the provisioner verifies the fixed GitHub-hosted repository, Ubuntu image, workspace
-and temporary-directory layout. `HOME` and XDG directories used for provisioning
-are private directories under `RUNNER_TEMP`; test execution uses the existing
-managed `deploy.test_workspace.run_suite` lifecycle.
+the non-mutating preflight verifies the fixed GitHub-hosted repository, Ubuntu
+image, x86_64 architecture, workspace and temporary-directory layout before
+`actions/setup-python` runs. It also rejects any existing or symlinked runtime
+target. The action repeats preflight before using `sudo mkdir`, which fails rather
+than changing an existing target's ownership or mode. `HOME` and XDG directories
+used for provisioning are private directories under `RUNNER_TEMP`; test execution
+uses the existing managed `deploy.test_workspace.run_suite` lifecycle.
 
 ## Acceptance
 
 1. Provisioning rejects local, self-hosted, non-Ubuntu, and non-canonical
-   repository/workspace execution before modifying the native runtime.
+   repository/workspace execution, or an existing/symlinked runtime target before
+   setup-python or any privileged mutation.
 2. Public upstream revision, lockfile bytes, patch bytes, patch targets, and all
    four installed/staged source hashes must match their reviewed pins.
 3. Native provisioning uses Python 3.11 and locked public dependencies; test homes,
@@ -44,6 +48,10 @@ Hermes source:
   same commit. Dependencies are synchronized with `--locked`; only the `messaging`
   extra is enabled because the selected native tests import `aiohttp`. No provider
   or model-generation extras are enabled.
+- The uv bootstrap wheel is hash-pinned to the PyPI SHA-256
+  `7b8460a2b624d8ab27cb293a2c9f2393f9efc4e36e0fb886a6c2360e23fb48be`
+  for `uv-0.9.28-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl`;
+  preflight requires the matching x86_64 hosted runner.
 
 The patch digests are verified before application; both pre- and postimage hashes
 are checked against the public upstream tree and the installed staging directory.
@@ -79,8 +87,22 @@ The new provisioner acceptance tests were exercised through `run_suite`:
   path; the added regression passed after correction.
 - SQLite/prerequisite RED: acceptance tests first failed because pinned SQLite
   checks and the runner environment-file publication were not implemented.
-- Final GREEN: `tests/test_native_test_environment.py` — **9 passed** in managed
+- Final GREEN: `tests/test_native_test_environment.py` — **13 passed** in managed
   isolation.
+- Action-order and refusal-before-mutation regressions cover a pre-existing directory
+  and symlink target, preserving their modes and contents. The native pilot's
+  previously recorded 16-file run remains **419 passed**; this guard-only follow-up
+  does not change native dependencies or test classifications.
+- Follow-up RED: running the new action-order regression against the preceding
+  committed action failed at the first step (`KeyError: 'shell'`), because
+  `setup-python` ran before a guarded shell preflight. Follow-up GREEN: the full
+  guard test module passed **13/13** under managed isolation.
+- The follow-up pip check first tried `--hash` as a bare install option; pip rejected
+  that syntax, so the provisioner now writes a fixed hash-locked requirements file
+  inside its private work directory. Pip then installed the pinned wheel with
+  `--require-hashes`, and its supported CLI reported `uv 0.9.28`. An initial module
+  version probe was unsupported (`uv` has no `__version__` attribute); the CLI
+  verified the version instead.
 
 Before the prerequisite fixes, the first complete native selection produced
 **385 passed, 34 failed**. The failures were environmental: `aiohttp` was absent

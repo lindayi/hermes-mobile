@@ -4,6 +4,7 @@
   "runtime_path": "/usr/local/lib/hermes-agent",
   "python_version": "3.11",
   "uv_version": "0.9.28",
+  "uv_sha256": "7b8460a2b624d8ab27cb293a2c9f2393f9efc4e36e0fb886a6c2360e23fb48be",
   "extras": [
     "messaging"
   ],

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,7 @@ REVISION = '8911e2e0edf750b104edbdc106d63d6cdac88524'
 RUNTIME_PATH = Path('/usr/local/lib/hermes-agent')
 PYTHON_VERSION = '3.11'
 UV_VERSION = '0.9.28'
+UV_SHA256 = '7b8460a2b624d8ab27cb293a2c9f2393f9efc4e36e0fb886a6c2360e23fb48be'
 OPTIONAL_EXTRAS = ('messaging',)
 SQLITE_REPOSITORY = 'https://github.com/sqlite/sqlite'
 SQLITE_REVISION = 'a5333afb9ad1aa473f8963b92caeaa955f47dc74'
@@ -69,6 +71,7 @@ def _expected_spec():
         'runtime_path': str(RUNTIME_PATH),
         'python_version': PYTHON_VERSION,
         'uv_version': UV_VERSION,
+        'uv_sha256': UV_SHA256,
         'extras': list(OPTIONAL_EXTRAS),
         'sqlite': {
             'repository': SQLITE_REPOSITORY,
@@ -104,6 +107,7 @@ def validate_hosted_runner(environ):
         'GITHUB_REPOSITORY': 'lindayi/hermes-mobile',
         'RUNNER_ENVIRONMENT': 'github-hosted',
         'RUNNER_OS': 'Linux',
+        'RUNNER_ARCH': 'X64',
         'ImageOS': 'ubuntu24',
     }
     if any(environ.get(name) != value for name, value in expected.items()):
@@ -113,7 +117,27 @@ def validate_hosted_runner(environ):
     if (workspace != Path('/home/runner/work/hermes-mobile/hermes-mobile')
             or runner_temp != Path('/home/runner/work/_temp')):
         raise RuntimeError('Unexpected GitHub-hosted workspace layout')
+    if platform.machine() != 'x86_64':
+        raise RuntimeError('Native runtime provisioning requires an x86_64 hosted runner')
     return workspace, runner_temp
+
+
+def validate_action_preflight(environ, repository_root, *, runtime_target=RUNTIME_PATH):
+    workspace, _ = validate_hosted_runner(environ)
+    repository_root = Path(repository_root)
+    target = Path(runtime_target)
+    if (repository_root.is_symlink()
+            or repository_root.resolve() != repository_root
+            or repository_root != workspace
+            or not repository_root.is_dir()):
+        raise RuntimeError('Unexpected GitHub-hosted repository workspace')
+    spec = load_runtime_spec(repository_root)
+    validate_patch_inputs(repository_root, spec)
+    if target.exists() or target.is_symlink():
+        raise RuntimeError('Refusing existing native runtime')
+    if target.parent.resolve() != target.parent or not target.parent.is_dir():
+        raise RuntimeError('Unexpected native runtime parent directory')
+    return workspace
 
 
 def validate_sqlite_version(version):
@@ -216,6 +240,16 @@ def _child_environment(work, target):
     }
     env.update({name: str(path) for name, path in paths.items()})
     return env
+
+
+def _write_uv_requirements(work, spec):
+    if spec != _expected_spec():
+        raise ValueError('Native runtime manifest differs from the approved public pins')
+    path = Path(work) / 'uv-requirements.txt'
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        stream.write(f'uv=={UV_VERSION} --hash=sha256:{UV_SHA256}\n')
+    return path
 
 
 def _run(command, *, env, cwd=None):
@@ -359,8 +393,12 @@ def prepare_runtime(repository_root, environ):
         sqlite_source.mkdir(mode=0o700)
         sqlite_library, sqlite_version = _build_sqlite(sqlite_source, sqlite_prefix, env)
         python = str(Path(sys.executable).resolve())
-        pip = [python, '-m', 'pip', 'install', '--disable-pip-version-check', '--no-input',
-               '--cache-dir', env['PIP_CACHE_DIR'], f'uv=={spec["uv_version"]}']
+        uv_requirements = _write_uv_requirements(work, spec)
+        pip = [
+            python, '-m', 'pip', 'install', '--disable-pip-version-check', '--no-input',
+            '--no-deps', '--require-hashes', '--cache-dir', env['PIP_CACHE_DIR'],
+            '-r', str(uv_requirements),
+        ]
         _run(pip, env=env)
         uv = str(Path(sys.executable).parent / ('uv.exe' if os.name == 'nt' else 'uv'))
         if not Path(uv).is_file():
@@ -421,9 +459,14 @@ def prepare_runtime(repository_root, environ):
 
 
 def main():
-    if len(sys.argv) != 1:
+    if sys.argv[1:] == ['--preflight']:
+        validate_action_preflight(os.environ, ROOT)
+        print('Native runtime preflight passed')
+        return 0
+    if sys.argv[1:]:
         raise SystemExit('Runtime provisioning accepts no command-line inputs')
     prepare_runtime(ROOT, os.environ)
+    return 0
 
 
 if __name__ == '__main__':
