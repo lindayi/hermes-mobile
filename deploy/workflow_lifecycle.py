@@ -63,7 +63,9 @@ def merge_events(existing, additions, *, now=None, limit=MAX_EVENTS):
         prior = known.get(event_id)
         if prior is not None:
             persistent_incident = (
-                prior.get("reason") in {"execution_exhausted", "policy_broken"}
+                prior.get("reason") in {
+                    "execution_exhausted", "execution_uncertain", "policy_broken",
+                }
                 and prior.get("reason") == event.get("reason")
                 and prior.get("outcome") == event.get("outcome")
                 and prior.get("issue_number") == event.get("issue_number")

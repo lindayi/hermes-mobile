@@ -44,6 +44,8 @@ BASE = "b" * 40
 def valid_pr(**changes):
     pr = {
         "number": 16,
+        "id": 160000016,
+        "node_id": "PR_node_16",
         "state": "open",
         "merged": False,
         "draft": False,
@@ -550,8 +552,11 @@ class FakeApi:
             if self.fail_fix:
                 raise ApiError("response lost", status=503)
             task_id = f"task-{self.fix_attempts}"
-            task = {"id": task_id, "state": "queued", "created_at": "2026-10-01T12:00:00Z",
-                    "creator": {"id": OWNER}, "repository": {"id": 1399942965},
+            task = {"id": task_id, "state": "queued",
+                    "created_at": "2026-10-01T12:00:00Z",
+                    "updated_at": "2026-10-01T12:00:00Z",
+                    "creator": {"id": OWNER}, "owner": {"id": OWNER},
+                    "repository": {"id": 1399942965},
                     "artifacts": [{"provider": "github", "type": "branch",
                                    "data": {"head_ref": "topic", "base_ref": "main"}}]}
             self.tasks[task_id] = task
@@ -560,6 +565,50 @@ class FakeApi:
         if body.get("context") == "cloud-review":
             response.update(state=body["state"], creator={"id": OWNER})
         return response
+
+    def complete_task(self, task_id, action, *, result="ready", head_sha=None):
+        task = self.tasks[task_id]
+        session_id = f"session-{task_id}"
+        created = "2026-10-01T12:00:00Z"
+        session_created = "2026-10-01T12:01:00Z"
+        comment_created = "2026-10-01T12:05:00Z"
+        completed = "2026-10-01T12:05:30Z"
+        task.update(
+            state="completed",
+            updated_at=completed,
+            artifacts=task["artifacts"] + [{
+                "provider": "github", "type": "pull",
+                "data": {"id": action["pull_id"], "global_id": action["pull_node_id"]},
+            }],
+            sessions=[{
+                "id": session_id, "task_id": task_id, "state": "completed",
+                "user": {"id": OWNER}, "owner": {"id": OWNER},
+                "repository": {"id": 1399942965},
+                "created_at": session_created, "completed_at": completed,
+                "prompt": action["body"], "head_ref": action["head_ref"],
+                "base_ref": "main",
+            }],
+        )
+        current_head = head_sha or self.head_sha
+        nonce = action["dispatch_nonce"]
+        body = (
+            "Hermes-Task-Receipt: v1\n"
+            f"nonce={nonce}\n"
+            f"task={task_id}\n"
+            f"session={session_id}\n"
+            "pr=16\n"
+            f"start_head={action['head']}\n"
+            f"head={current_head}\n"
+            f"base={BASE}\n"
+            f"result={result}"
+        )
+        self.comments.append({
+            "id": 9000 + self.fix_attempts,
+            "user": {"id": 198982749},
+            "body": body,
+            "created_at": comment_created,
+            "updated_at": comment_created,
+        })
 
     def graphql_write(self, query, variables):
         self.graphql_writes.append((query, variables))
@@ -957,6 +1006,8 @@ def test_cli_help_does_not_create_bytecode_in_fresh_checkout(tmp_path):
     (tmp_path / "deploy").mkdir()
     (tmp_path / "scripts").mkdir()
     shutil.copy2(root / "deploy/cloud_coordinator.py", tmp_path / "deploy/cloud_coordinator.py")
+    for module in ("workflow_lifecycle.py", "workflow_events.py", "task_receipts.py"):
+        shutil.copy2(root / "deploy" / module, tmp_path / "deploy" / module)
     shutil.copy2(root / "scripts/cloud_coordinator.py", tmp_path / "scripts/cloud_coordinator.py")
     env = dict(__import__("os").environ)
     env.pop("PYTHONDONTWRITEBYTECODE", None)
@@ -1123,16 +1174,14 @@ def test_fresh_draft_fence_prevents_task_reservation_and_post(tmp_path, task_typ
     assert not [body for route, body in api.writes if route.endswith("/tasks")]
 
 
-def test_explicit_incompatible_task_result_is_exported_and_stops_repair(tmp_path):
+def test_exact_copilot_receipt_reports_incompatible_neutral_result(tmp_path):
     api = FakeApi()
     api.pull.update(mergeable=False, mergeable_state="dirty")
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
     coordinator.run(apply=True)
-    api.tasks["task-1"].update(
-        state="completed",
-        result={"reason": "conflict_incompatible", "head_sha": HEAD},
-    )
+    action = next(item for item in store.actions().values() if item["kind"] == "fix")
+    api.complete_task("task-1", action, result="conflict_incompatible")
 
     result = coordinator.run(apply=True)
 
@@ -1282,33 +1331,38 @@ def test_reenrollment_preserves_unresolved_fixer_with_empty_task_list(
         result = restarted_cycle()
     # Empty list results are not proof that an earlier POST did not start a task.
     assert api.fix_attempts == 1
-    expected = fix | {"status": "sent" if claim_status == "sent" else "uncertain"}
-    assert retained == expected
-    assert store.action(fix["key"]) == expected
+    assert retained["status"] == ("sent" if claim_status == "sent" else "uncertain")
+    assert store.action(fix["key"])["status"] == retained["status"]
     assert enrollment["attempts"] == 1
     assert "agent" in result["pull_requests"][0]["reasons"]
     assert not api.graphql_writes
+    if claim_status != "sent":
+        assert retained["blocker"] == "execution_uncertain"
+        assert any(event["reason"] == "execution_uncertain"
+                   for event in store.snapshot()["lifecycle_events"])
 
     if claim_status == "sent":
         old_task = api.tasks[fix["task_id"]]
         old_task.update(id="unrelated-task", state="completed")
         restarted_cycle()
         assert api.fix_attempts == 1
-        assert store.action(fix["key"]) == expected
+        assert store.action(fix["key"])["status"] == "sent"
         old_task.update(id=fix["task_id"], sessions=[
             {"id": "session-1", "state": "waiting_for_user"},
         ])
         restarted_cycle()
         assert api.fix_attempts == 1
-        assert store.action(fix["key"]) == expected
+        assert store.action(fix["key"])["status"] == "sent"
         old_task["sessions"][0]["state"] = "completed"
         restarted_cycle()
-        assert store.action(fix["key"])["status"] == "completed"
-        assert api.fix_attempts == 2
-        new_fix = next(action for action in store.actions().values()
-                       if action.get("task_id") == "task-2")
-        assert new_fix["key"] != fix["key"]
-        assert new_fix["status"] == "sent"
+        assert store.action(fix["key"])["status"] == "sent"
+        assert api.fix_attempts == 1
+        restarted_cycle()
+        assert store.action(fix["key"])["status"] == "uncertain"
+        assert store.action(fix["key"])["blocker"] == "execution_uncertain"
+        assert any(event["reason"] == "execution_uncertain"
+                   for event in store.snapshot()["lifecycle_events"])
+        assert api.fix_attempts == 1
 
 
 def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
@@ -1323,7 +1377,10 @@ def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
         restarted_cycle()
         assert api.fix_attempts == attempt + 1
         if attempt < 2:
-            api.tasks[f"task-{attempt + 1}"]["state"] = "completed"
+            task_id = f"task-{attempt + 1}"
+            action = next(item for item in store.actions().values()
+                          if item.get("task_id") == task_id)
+            api.complete_task(task_id, action)
     old_fix = next(action for action in store.actions().values()
                    if action.get("task_id") == "task-3")
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
@@ -1336,9 +1393,7 @@ def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
     assert api.fix_attempts == 3
     assert store.snapshot()["enrollments"]["16"]["active"] is False
     assert store.action(old_fix["key"])["status"] == "sent"
-    api.tasks["task-3"].update(state="completed", sessions=[
-        {"id": "session-3", "state": "completed"},
-    ])
+    api.complete_task("task-3", old_fix)
     api.comments.append({"id": 126, "user": {"id": OWNER},
                          "body": "/hermes enroll", "updated_at": "2026-10-01T12:10:00Z"})
     restarted_cycle()
@@ -1368,11 +1423,9 @@ def test_task_api_identity_reconciles_across_head_changes(tmp_path):
     assert all("@copilot" not in body.get("body", "") for _, body in api.writes)
     api.head_sha = "c" * 40
     api.pull["head"]["sha"] = api.head_sha
-    api.tasks["task-1"]["state"] = "waiting_for_user"
+    api.complete_task("task-1", fix)
     coordinator.run(apply=True)
     assert api.fix_attempts == 1
-    api.tasks["task-1"]["state"] = "completed"
-    coordinator.run(apply=True)
     assert store.action(fix["key"])["status"] == "completed"
 
 
@@ -1389,7 +1442,7 @@ def test_unrelated_or_unverified_task_completion_cannot_release_fixer(tmp_path):
     assert api.fix_attempts == 1
 
 
-def test_task_sessions_must_all_be_terminal_before_another_dispatch(tmp_path):
+def test_task_sessions_and_receipt_must_be_verified_before_releasing_fixer(tmp_path):
     api = FakeApi(unresolved=True)
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store)
@@ -1402,7 +1455,15 @@ def test_task_sessions_must_all_be_terminal_before_another_dispatch(tmp_path):
     assert api.fix_attempts == 1
     api.tasks["task-1"]["sessions"][0]["state"] = "completed"
     coordinator.run(apply=True)
-    assert api.fix_attempts == 2
+    assert api.fix_attempts == 1
+    key = next(key for key, value in store.actions().items() if value["kind"] == "fix")
+    assert store.action(key)["status"] == "sent"
+    for _ in range(2):
+        coordinator.run(apply=True)
+    assert store.action(key)["status"] == "uncertain"
+    assert store.action(key)["blocker"] == "execution_uncertain"
+    assert any(event["reason"] == "execution_uncertain"
+               for event in store.snapshot()["lifecycle_events"])
 
 
 def test_other_branch_task_session_does_not_block_this_pr(tmp_path):
@@ -1440,7 +1501,10 @@ def test_task_dispatch_is_bounded_to_three_after_verified_completion(tmp_path):
     for attempt in range(3):
         coordinator.run(apply=True)
         assert api.fix_attempts == attempt + 1
-        api.tasks[f"task-{attempt + 1}"]["state"] = "completed"
+        task_id = f"task-{attempt + 1}"
+        action = next(item for item in store.actions().values()
+                      if item.get("task_id") == task_id)
+        api.complete_task(task_id, action)
     result = coordinator.run(apply=True)
     assert api.fix_attempts == 3
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
@@ -1512,19 +1576,20 @@ def test_malformed_ruleset_pull_request_rule_fails_policy_closed(tmp_path, rule)
     assert not any("/statuses/" in route for route, _ in api.writes)
 
 
-def test_behind_pull_is_reported_for_reconciliation_not_sent_to_fixer(tmp_path):
+def test_behind_pull_dispatches_only_a_neutral_reconciliation_task(tmp_path):
     api = FakeApi(source_failure=True, unresolved=True)
     api.pull = api.pull | {"mergeable": True, "mergeable_state": "behind"}
     store = StateStore(tmp_path / "state.json")
     result = Coordinator(api, store).run(apply=True)
     summary = result["pull_requests"][0]
     assert "behind" in summary["reasons"]
-    assert summary["repair_requested"] is False
-    assert api.fix_attempts == 0
-    assert not any(route.endswith("/tasks") for route, _ in api.writes)
-    assert not any(action.get("kind") == "fix" for action in store.actions().values())
+    assert summary["repair_requested"] is True
+    tasks = [body for route, body in api.writes if route.endswith("/tasks")]
+    assert len(tasks) == 1 and "Neutral reconciliation" in tasks[0]["prompt"]
+    assert api.fix_attempts == 1
+    assert next(action for action in store.actions().values()
+                if action["kind"] == "fix")["task_type"] == "neutral"
     assert not api.graphql_writes
-    assert any("neutral reconciler" in body.get("body", "") for _, body in api.writes)
 
 
 @pytest.mark.parametrize("payload", [
@@ -1615,7 +1680,7 @@ def test_terminal_records_compact_across_heads_without_duplicate_writes(tmp_path
     import deploy.cloud_coordinator as coordinator_module
     monkeypatch.setattr(coordinator_module, "TOMBSTONE_LIMIT", 8)
     api = RecordingApi()
-    api.pull["mergeable"] = False
+    api.sensitive = True
     path = tmp_path / "state.json"
 
     def restarted_cycle():
@@ -1631,7 +1696,8 @@ def test_terminal_records_compact_across_heads_without_duplicate_writes(tmp_path
         state = json.loads(path.read_text())
         assert {entry["head"] for entry in state["outbox"].values()} == {head}
         assert {action["head"] for action in state["actions"].values()} <= {head}
-    assert sizes[-1] <= sizes[15] + 512
+    assert sizes[-1] < coordinator_module.MAX_STATE_BYTES
+    assert len(StateStore(path).snapshot()["lifecycle_events"]) == len(heads)
     retired = json.loads(path.read_text())["retired"]["16"]
     assert len(retired["outbox"]) <= 8 and len(retired["actions"]) <= 8
     assert retired["status_generation"] >= 1
@@ -1678,7 +1744,9 @@ def test_closed_pull_retires_terminal_records_but_keeps_unresolved_claims(tmp_pa
     restarted_cycle()
     state = StateStore(path).snapshot()
     fix = next(action for action in state["actions"].values() if action["kind"] == "fix")
-    assert fix["status"] == "uncertain" and state["outbox"]
+    assert fix["status"] == "uncertain"
+    assert any(event["reason"] == "execution_uncertain"
+               for event in state["lifecycle_events"])
     api.pull["state"] = "closed"
     restarted_cycle()
     state = StateStore(path).snapshot()
@@ -1717,7 +1785,7 @@ def test_capacity_failure_blocks_cycle_before_remote_write_and_reports(tmp_path,
     from deploy.cloud_coordinator import main
 
     api = FakeApi()
-    api.pull["mergeable"] = False
+    api.sensitive = True
     path = tmp_path / "state.json"
     Coordinator(api, StateStore(path)).run(apply=True)
     monkeypatch.setattr(coordinator_module, "MAX_STATE_BYTES", path.stat().st_size + 64)

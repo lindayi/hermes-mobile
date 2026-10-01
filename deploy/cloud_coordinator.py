@@ -25,6 +25,7 @@ from deploy.workflow_lifecycle import (
     pull_event as build_pull_lifecycle_event,
     validate_event as validate_lifecycle_event,
 )
+from deploy.task_receipts import ReceiptError, receipt_instruction, validate_task_receipt
 
 
 REPOSITORY = "lindayi/hermes-mobile"
@@ -34,6 +35,9 @@ COPILOT_REVIEWER_ID = 175728472
 SOURCE_WORKFLOW_ID = 372155405
 MAIN_BRANCH = "main"
 REPAIR_LIMIT = 3
+MAX_RECEIPT_POLLS = 3
+MAX_HANDOFF_POLLS = 6
+COPILOT_REVIEWER_LOGIN = "copilot-pull-request-reviewer[bot]"
 MAX_PAGES = 100
 MAX_FINDINGS = 8
 MAX_FINDING_CHARS = 1000
@@ -982,47 +986,100 @@ class Coordinator:
                 continue
             if action.get("kind") != "fix":
                 continue
+            if (status == "completed"
+                    and action.get("handoff_state") in {
+                        "pending", "waiting_review", "ready_uncertain",
+                        "review_request_uncertain",
+                    }):
+                if apply:
+                    busy = self._advance_task_handoff(key, action, snapshot) or busy
+                else:
+                    busy = True
+                continue
             if status in {"sending", "uncertain"}:
-                if status == "sending" and apply:
-                    self.store.mark_uncertain(key)
+                if apply and (
+                    status == "sending" or not action.get("lifecycle_event_id")
+                ):
+                    event = self._record_uncertain_task(action)
+                    self.store.update_action_with_lifecycle(
+                        key, "uncertain", event, now=self.clock(),
+                        blocker="execution_uncertain",
+                    )
                 busy = True
                 continue
             if status == "sent":
                 task_id = action.get("task_id")
                 if not isinstance(task_id, str) or not task_id or len(task_id) > 128:
+                    if apply:
+                        self._record_receipt_wait(key, action)
                     busy = True
                     continue
-                task = self.api.get(
-                    f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}"
-                )
+                try:
+                    task = self.api.get(
+                        f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}"
+                    )
+                except CoordinatorError:
+                    if apply:
+                        self._record_receipt_wait(key, action)
+                    busy = True
+                    continue
                 if (not isinstance(task, dict) or task.get("id") != task_id
                         or not _task_scoped(task, snapshot)):
+                    if apply:
+                        self._record_receipt_wait(key, action)
                     busy = True
                     continue
                 if _task_terminal(task):
-                    if apply:
-                        self.store.update_action(key, "completed")
-                        result = task.get("result")
-                        if (isinstance(result, dict)
-                                and set(result) == {"reason", "head_sha"}
-                                and result.get("head_sha") == action.get("head")
-                                and isinstance(result.get("reason"), str)
-                                and result.get("reason") in {
-                                    "conflict_incompatible", "policy_broken",
-                                } and action.get("task_type") == "neutral"):
-                            self.store.update_action(
-                                key, "completed", blocker=result["reason"],
-                            )
-                        elif task.get("state") in {"failed", "timed_out"}:
+                    if task.get("state") in {"failed", "timed_out", "cancelled"}:
+                        if apply:
                             event = _lifecycle_event(
-                                {
-                                    "issue": number, "head": action["head"],
-                                    "enrollment": snapshot["enrollment"],
-                                }, "task_failed",
-                                occurred_at=self._now_string(),
+                                {"issue": number, "head": action["head"],
+                                 "enrollment": snapshot["enrollment"]},
+                                "task_failed", occurred_at=self._now_string(),
                                 incident=str(action.get("attempt", "")),
                             )
-                            self.store.record_lifecycle(event, now=self.clock())
+                            self.store.update_action_with_lifecycle(
+                                key, "completed", event, now=self.clock(),
+                                blocker="task_failed",
+                            )
+                    else:
+                        try:
+                            receipt = validate_task_receipt(
+                                task, action, snapshot["pull"], snapshot["comments"],
+                                now=datetime.fromtimestamp(self.clock(), timezone.utc),
+                            )
+                        except (ReceiptError, TypeError, ValueError):
+                            receipt = None
+                        if receipt:
+                            if apply:
+                                fields = {
+                                    "receipt_result": receipt["result"],
+                                    "receipt_head": snapshot["head"],
+                                    "receipt_base": snapshot["pull"]["base"]["sha"],
+                                }
+                                if receipt["result"] == "ready":
+                                    fields["handoff_state"] = "pending"
+                                    self.store.update_action_with_lifecycle(
+                                        key, "completed", None, now=self.clock(), **fields,
+                                    )
+                                    busy = self._advance_task_handoff(
+                                        key, self.store.action(key), snapshot,
+                                    ) or busy
+                                else:
+                                    event = _lifecycle_event(
+                                        {"issue": number, "head": action["head"],
+                                         "enrollment": snapshot["enrollment"]},
+                                        receipt["result"], occurred_at=self._now_string(),
+                                        incident=str(action.get("attempt", "")),
+                                    )
+                                    self.store.update_action_with_lifecycle(
+                                        key, "completed", event, now=self.clock(),
+                                        blocker=receipt["result"], **fields,
+                                    )
+                        elif apply:
+                            self._record_receipt_wait(key, action)
+                        if not receipt:
+                            busy = True
                 else:
                     busy = True
         return busy or _other_task_active(snapshot["tasks"], snapshot)
@@ -1034,13 +1091,24 @@ class Coordinator:
 
     def _record_uncertain_task(self, action):
         enrollment = self.store.snapshot()["enrollments"].get(str(action["issue"]), {})
-        event = _lifecycle_event(
+        return _lifecycle_event(
             {"issue": action["issue"], "head": action["head"],
              "enrollment": enrollment},
             "execution_uncertain", occurred_at=self._now_string(),
             incident=str(action.get("attempt", "")),
         )
-        self.store.record_lifecycle(event, now=self.clock())
+
+    def _record_receipt_wait(self, key, action):
+        waits = action.get("receipt_waits", 0) + 1
+        if waits >= MAX_RECEIPT_POLLS:
+            event = self._record_uncertain_task(action)
+            self.store.update_action_with_lifecycle(
+                key, "uncertain", event, now=self.clock(),
+                blocker="execution_uncertain", receipt_waits=waits,
+            )
+            return "uncertain"
+        self.store.update_action(key, "sent", receipt_waits=waits)
+        return "waiting"
 
     def _notification_outcomes(self, snapshot, reasons):
         outcomes = []
@@ -1163,6 +1231,9 @@ class Coordinator:
             repair.setdefault("kind", "fix")
             repair.setdefault("head_ref", snapshot["pull"]["head"]["ref"])
             repair.setdefault("key", f"fix:{number}:{repair['marker']}")
+            repair.setdefault("main_sha", snapshot["main_sha"])
+            repair.setdefault("pull_id", snapshot["pull"].get("id"))
+            repair.setdefault("pull_node_id", snapshot["pull"].get("node_id"))
         else:
             repair = None
         reasons = []
@@ -1317,13 +1388,17 @@ class Coordinator:
     def _dispatch_task(self, action):
         key = action["key"]
         current = self._fence_pull(
-            action["issue"], action["head"],
-            action.get("main_sha") if action.get("task_type") == "neutral" else None,
+            action["issue"], action["head"], action.get("main_sha"),
         )
         if not current:
             return "superseded"
         if current.get("draft") is not False:
             return "draft"
+        if (type(action.get("pull_id")) is not int
+                or current.get("number") != action["issue"]
+                or current.get("id") != action.get("pull_id")
+                or current.get("node_id") != action.get("pull_node_id")):
+            return "superseded"
         reconciliation = _reconciliation_reasons(current)
         neutral = action.get("task_type") == "neutral"
         if neutral and not reconciliation:
@@ -1345,29 +1420,48 @@ class Coordinator:
         if not claimed:
             existing = self.store.action(key)
             return existing.get("status") if existing else "not-claimed"
+        claimed_action = self.store.action(key)
         try:
             response = self.api.write(
                 f"agents/repos/{REPOSITORY}/tasks",
-                {"prompt": action["body"], "base_ref": MAIN_BRANCH, "head_ref": branch},
+                {"prompt": claimed_action["body"], "base_ref": MAIN_BRANCH, "head_ref": branch},
             )
         except CoordinatorError:
-            self.store.mark_uncertain(key)
-            self._record_uncertain_task(self.store.action(key))
+            event = self._record_uncertain_task(claimed_action)
+            self.store.update_action_with_lifecycle(
+                key, "uncertain", event, now=self.clock(),
+                blocker="execution_uncertain",
+            )
             return "uncertain"
         task_id = response.get("id") if isinstance(response, dict) else None
         if (not isinstance(task_id, str) or not task_id or len(task_id) > 128
                 or response.get("state") not in {
                     "queued", "in_progress", "waiting_for_user", "idle",
                     "completed", "failed", "timed_out", "cancelled",
-                }):
-            self.store.mark_uncertain(key)
-            self._record_uncertain_task(self.store.action(key))
+                } or not _valid_timestamp(response.get("created_at"))
+                or not isinstance(response.get("creator"), dict)
+                or response["creator"].get("id") != OWNER_ID
+                or not isinstance(response.get("repository"), dict)
+                or response["repository"].get("id") != REPOSITORY_ID):
+            event = self._record_uncertain_task(claimed_action)
+            self.store.update_action_with_lifecycle(
+                key, "uncertain", event, now=self.clock(),
+                blocker="execution_uncertain", task_id=task_id,
+            )
             return "uncertain"
         if response.get("artifacts") and not _task_scoped(response, {"pull": current}):
-            self.store.update_action(key, "uncertain", task_id=task_id)
-            self._record_uncertain_task(self.store.action(key))
+            event = self._record_uncertain_task(claimed_action)
+            self.store.update_action_with_lifecycle(
+                key, "uncertain", event, now=self.clock(),
+                blocker="execution_uncertain", task_id=task_id,
+                task_created_at=response["created_at"],
+            )
             return "uncertain"
-        self.store.update_action(key, "sent", task_id=task_id)
+        self.store.update_action(
+            key, "sent", task_id=task_id,
+            task_created_at=response["created_at"],
+            owner_id=OWNER_ID, repository_id=REPOSITORY_ID,
+        )
         return "sent"
 
     def _publish_status(self, action, snapshot, actor_id):
@@ -1684,8 +1778,11 @@ def _retirable_action(action, current_head, inactive):
     """Only positively terminal records may be retired; unresolved claims stay."""
     status = action.get("status")
     if action.get("kind") == "fix":
-        # A sent task may still be running; only verified completion is terminal.
-        return inactive and status == "completed"
+        if action.get("handoff_state") == "pending":
+            return False
+        return status == "completed" and (
+            inactive or action.get("head") != current_head
+        )
     if status not in {"sent", "superseded", "blocked", "completed"}:
         return False
     return inactive or action.get("head") != current_head
@@ -2011,6 +2108,11 @@ class StateStore:
                     return False
                 enrollment["attempts"] += 1
                 claimed["attempt"] = enrollment["attempts"]
+                nonce = secrets.token_urlsafe(32)
+                claimed["dispatch_nonce"] = nonce
+                claimed["body"] = (
+                    f"{claimed.get('body', '')}\n\n{receipt_instruction(nonce)}"
+                )
             data["actions"][key] = {**claimed, "status": "sending",
                                     "created_at": time.time()}
             return True
@@ -2028,6 +2130,21 @@ class StateStore:
             if action:
                 action["status"] = status
                 action.update(fields)
+        self._mutate(update)
+
+    def update_action_with_lifecycle(self, key, status, event, *, now=None, **fields):
+        def update(data):
+            action = data["actions"].get(key)
+            if not isinstance(action, dict):
+                raise CoordinatorError("Task claim disappeared before lifecycle commit")
+            if event is not None:
+                self._add_lifecycle_events(
+                    data, [event], now=time.time() if now is None else now,
+                )
+            action["status"] = status
+            action.update(fields)
+            if event is not None:
+                action["lifecycle_event_id"] = event["event_id"]
         self._mutate(update)
 
     def mark_uncertain(self, key):
