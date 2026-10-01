@@ -44,13 +44,16 @@ jobs:
           script: |
             const owner = 'lindayi', repo = 'hermes-mobile', OWNER_ID = 5164171, BOT_ID = 41898282;
             const HEX = /^[0-9a-f]{40}$/;
+            // Require primitive strings and full matches, never RegExp input coercion.
+            const exactString = (value, pattern) =>
+              typeof value === 'string' && pattern.exec(value)?.[0] === value;
             const ensure = (condition, message) => { if (!condition) throw new Error(message); };
             const sourceRunId = Number(process.env.SOURCE_RUN_ID);
             const approvalRunId = Number(process.env.APPROVAL_RUN_ID);
             const sha = process.env.SOURCE_SHA;
             ensure(Number.isSafeInteger(sourceRunId) && sourceRunId > 0 &&
                    Number.isSafeInteger(approvalRunId) && approvalRunId === context.runId &&
-                   HEX.test(sha), 'Invalid fixed intent inputs');
+                   exactString(sha, HEX), 'Invalid fixed intent inputs');
             ensure(process.env.GITHUB_RUN_ATTEMPT === '1', 'Production workflow reruns require a new source run');
             ensure(context.repo.owner === owner && context.repo.repo === repo &&
                    context.ref === 'refs/heads/main' && context.sha === sha, 'Default-main context mismatch');
@@ -83,7 +86,7 @@ jobs:
                 if (index >= MAX_HISTORY) return [null, 'deployment history exceeds inspection bound'];
                 if (!(deployment && Number.isSafeInteger(deployment.id) && deployment.id > 0 &&
                       by(deployment, BOT_ID, 'github-actions[bot]') && deployment.task === 'deploy:mobile' &&
-                      deployment.environment === 'production' && HEX.test(deployment.sha))) {
+                      deployment.environment === 'production' && exactString(deployment.sha, HEX))) {
                   return [null, 'untrusted deployment record'];
                 }
                 const {data: statuses} = await github.rest.repos.listDeploymentStatuses(
@@ -118,8 +121,8 @@ jobs:
               'production', 'push', 'recovery', 'release', 'restore', 'rollback', 'routine', 'runtime',
               'scheduler', 'secret', 'security', 'signing', 'token', 'webauthn', 'workflow'];
             const routinePath = path => {
-              if (typeof path !== 'string' || path.length > MAX_PATH || !CANONICAL.test(path)) return false;
-              if (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => pattern.test(path))) return true;
+              if (!exactString(path, CANONICAL) || path.length > MAX_PATH) return false;
+              if (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => exactString(path, pattern))) return true;
               const match = DOC.exec(path);
               return Boolean(match) && !DOC_SENSITIVE.some(word => match[1].includes(word));
             };
@@ -154,7 +157,7 @@ jobs:
               if (!Array.isArray(files) || files.length === 0 || files.length > MAX_FILES) return null;
               const treeFor = async commitSha => {
                const {data: commit} = await github.rest.git.getCommit({owner, repo, commit_sha: commitSha});
-               if (!commit || commit.sha !== commitSha || !commit.tree || !HEX.test(commit.tree.sha)) return null;
+               if (!commit || commit.sha !== commitSha || !commit.tree || !exactString(commit.tree.sha, HEX)) return null;
                const treeSha = commit.tree.sha;
                const {data: tree} = await github.rest.git.getTree({owner, repo, tree_sha: treeSha, recursive: '1'});
                if (!tree || tree.sha !== treeSha || tree.truncated !== false ||
@@ -165,7 +168,7 @@ jobs:
                for (const entry of tree.tree) {
                  if (!entry || typeof entry.path !== 'string' || !entry.path || entry.path.includes('\0') ||
                      seen.has(entry.path) || typeof entry.mode !== 'string' || typeof entry.type !== 'string' ||
-                     !Object.hasOwn(types, entry.mode) || types[entry.mode] !== entry.type || !HEX.test(entry.sha)) return null;
+                     !Object.hasOwn(types, entry.mode) || types[entry.mode] !== entry.type || !exactString(entry.sha, HEX)) return null;
                  seen.add(entry.path);
                  if (entry.mode !== '040000') entries.set(entry.path, entry);
                }
@@ -182,7 +185,8 @@ jobs:
               const described = new Set(), changes = [];
               const statusMap = {added: 'A', removed: 'D', modified: 'M', renamed: 'R'};
               for (const file of files) {
-               const status = file && typeof file === 'object' && Object.hasOwn(statusMap, file.status) ?
+               const status = file && typeof file === 'object' && typeof file.status === 'string' &&
+                 Object.hasOwn(statusMap, file.status) ?
                  statusMap[file.status] : null;
                const path = file && file.filename;
                const previous = file && Object.hasOwn(file, 'previous_filename') ? file.previous_filename : null;
@@ -245,19 +249,22 @@ jobs:
           script: |
             const owner = 'lindayi', repo = 'hermes-mobile', OWNER_ID = 5164171;
             const HEX = /^[0-9a-f]{40}$/;
+            // Require primitive strings and full matches, never RegExp input coercion.
+            const exactString = (value, pattern) =>
+              typeof value === 'string' && pattern.exec(value)?.[0] === value;
             const ensure = (condition, message) => { if (!condition) throw new Error(message); };
             const risk = process.env.RELEASE_RISK, baseSha = process.env.BASE_SHA;
             const job = {routine: 'promote-routine', sensitive: 'promote-sensitive'}[risk];
             ensure(job && process.env.GITHUB_JOB === job && process.env.CLASSIFIED_RISK === risk,
                    'Promotion job does not match the classified risk');
-            ensure(baseSha === '' || HEX.test(baseSha), 'Invalid deployed base');
+            ensure(baseSha === '' || exactString(baseSha, HEX), 'Invalid deployed base');
             ensure(risk === 'sensitive' || baseSha !== '', 'Routine promotion requires an authenticated deployed base');
             const sourceRunId = Number(process.env.SOURCE_RUN_ID);
             const approvalRunId = Number(process.env.APPROVAL_RUN_ID);
             const sha = process.env.SOURCE_SHA;
             ensure(Number.isSafeInteger(sourceRunId) && sourceRunId > 0 &&
                    Number.isSafeInteger(approvalRunId) && approvalRunId === context.runId &&
-                   HEX.test(sha), 'Invalid fixed intent inputs');
+                   exactString(sha, HEX), 'Invalid fixed intent inputs');
             ensure(process.env.GITHUB_RUN_ATTEMPT === '1', 'Approval reruns require a new intent');
             ensure(context.repo.owner === owner && context.repo.repo === repo &&
                    context.ref === 'refs/heads/main' && context.sha === sha, 'Default-main context mismatch');
@@ -289,8 +296,8 @@ jobs:
               'permission', 'policy', 'privacy', 'production', 'push', 'recovery', 'release', 'restore',
               'rollback', 'routine', 'runtime', 'scheduler', 'secret', 'security', 'signing', 'token',
               'webauthn', 'workflow'];
-            const routinePath = path => typeof path === 'string' && path.length <= MAX_PATH && CANONICAL.test(path) &&
-              (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => pattern.test(path)) ||
+            const routinePath = path => exactString(path, CANONICAL) && path.length <= MAX_PATH &&
+              (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => exactString(path, pattern)) ||
                (() => { const match = DOC.exec(path); return Boolean(match) &&
                  !DOC_SENSITIVE.some(word => match[1].includes(word)); })());
             const classifyChanges = changes => {
@@ -315,7 +322,7 @@ jobs:
               if (!Array.isArray(files) || files.length === 0 || files.length > MAX_FILES) return null;
               const treeFor = async commitSha => {
                 const {data: commit} = await github.rest.git.getCommit({owner, repo, commit_sha: commitSha});
-                if (!commit || commit.sha !== commitSha || !commit.tree || !HEX.test(commit.tree.sha)) return null;
+                if (!commit || commit.sha !== commitSha || !commit.tree || !exactString(commit.tree.sha, HEX)) return null;
                 const treeSha = commit.tree.sha;
                 const {data: tree} = await github.rest.git.getTree({owner, repo, tree_sha: treeSha, recursive: '1'});
                 if (!tree || tree.sha !== treeSha || tree.truncated !== false ||
@@ -326,7 +333,7 @@ jobs:
                 for (const entry of tree.tree) {
                   if (!entry || typeof entry.path !== 'string' || !entry.path || entry.path.includes('\0') ||
                       seen.has(entry.path) || typeof entry.mode !== 'string' || typeof entry.type !== 'string' ||
-                      !Object.hasOwn(types, entry.mode) || types[entry.mode] !== entry.type || !HEX.test(entry.sha)) return null;
+                      !Object.hasOwn(types, entry.mode) || types[entry.mode] !== entry.type || !exactString(entry.sha, HEX)) return null;
                   seen.add(entry.path);
                   if (entry.mode !== '040000') entries.set(entry.path, entry);
                 }
@@ -343,7 +350,8 @@ jobs:
               const described = new Set(), changes = [];
               const statusMap = {added: 'A', removed: 'D', modified: 'M', renamed: 'R'};
               for (const file of files) {
-                const status = file && typeof file === 'object' && Object.hasOwn(statusMap, file.status) ?
+                const status = file && typeof file === 'object' && typeof file.status === 'string' &&
+                 Object.hasOwn(statusMap, file.status) ?
                   statusMap[file.status] : null;
                 const path = file && file.filename;
                 const previous = file && Object.hasOwn(file, 'previous_filename') ? file.previous_filename : null;
@@ -420,19 +428,22 @@ jobs:
           script: |
             const owner = 'lindayi', repo = 'hermes-mobile', OWNER_ID = 5164171;
             const HEX = /^[0-9a-f]{40}$/;
+            // Require primitive strings and full matches, never RegExp input coercion.
+            const exactString = (value, pattern) =>
+              typeof value === 'string' && pattern.exec(value)?.[0] === value;
             const ensure = (condition, message) => { if (!condition) throw new Error(message); };
             const risk = process.env.RELEASE_RISK, baseSha = process.env.BASE_SHA;
             const job = {routine: 'promote-routine', sensitive: 'promote-sensitive'}[risk];
             ensure(job && process.env.GITHUB_JOB === job && process.env.CLASSIFIED_RISK === risk,
                    'Promotion job does not match the classified risk');
-            ensure(baseSha === '' || HEX.test(baseSha), 'Invalid deployed base');
+            ensure(baseSha === '' || exactString(baseSha, HEX), 'Invalid deployed base');
             ensure(risk === 'sensitive' || baseSha !== '', 'Routine promotion requires an authenticated deployed base');
             const sourceRunId = Number(process.env.SOURCE_RUN_ID);
             const approvalRunId = Number(process.env.APPROVAL_RUN_ID);
             const sha = process.env.SOURCE_SHA;
             ensure(Number.isSafeInteger(sourceRunId) && sourceRunId > 0 &&
                    Number.isSafeInteger(approvalRunId) && approvalRunId === context.runId &&
-                   HEX.test(sha), 'Invalid fixed intent inputs');
+                   exactString(sha, HEX), 'Invalid fixed intent inputs');
             ensure(process.env.GITHUB_RUN_ATTEMPT === '1', 'Approval reruns require a new intent');
             ensure(context.repo.owner === owner && context.repo.repo === repo &&
                    context.ref === 'refs/heads/main' && context.sha === sha, 'Default-main context mismatch');
@@ -464,8 +475,8 @@ jobs:
               'permission', 'policy', 'privacy', 'production', 'push', 'recovery', 'release', 'restore',
               'rollback', 'routine', 'runtime', 'scheduler', 'secret', 'security', 'signing', 'token',
               'webauthn', 'workflow'];
-            const routinePath = path => typeof path === 'string' && path.length <= MAX_PATH && CANONICAL.test(path) &&
-              (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => pattern.test(path)) ||
+            const routinePath = path => exactString(path, CANONICAL) && path.length <= MAX_PATH &&
+              (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => exactString(path, pattern)) ||
                (() => { const match = DOC.exec(path); return Boolean(match) &&
                  !DOC_SENSITIVE.some(word => match[1].includes(word)); })());
             const classifyChanges = changes => {
@@ -490,7 +501,7 @@ jobs:
               if (!Array.isArray(files) || files.length === 0 || files.length > MAX_FILES) return null;
               const treeFor = async commitSha => {
                 const {data: commit} = await github.rest.git.getCommit({owner, repo, commit_sha: commitSha});
-                if (!commit || commit.sha !== commitSha || !commit.tree || !HEX.test(commit.tree.sha)) return null;
+                if (!commit || commit.sha !== commitSha || !commit.tree || !exactString(commit.tree.sha, HEX)) return null;
                 const treeSha = commit.tree.sha;
                 const {data: tree} = await github.rest.git.getTree({owner, repo, tree_sha: treeSha, recursive: '1'});
                 if (!tree || tree.sha !== treeSha || tree.truncated !== false ||
@@ -501,7 +512,7 @@ jobs:
                 for (const entry of tree.tree) {
                   if (!entry || typeof entry.path !== 'string' || !entry.path || entry.path.includes('\0') ||
                       seen.has(entry.path) || typeof entry.mode !== 'string' || typeof entry.type !== 'string' ||
-                      !Object.hasOwn(types, entry.mode) || types[entry.mode] !== entry.type || !HEX.test(entry.sha)) return null;
+                      !Object.hasOwn(types, entry.mode) || types[entry.mode] !== entry.type || !exactString(entry.sha, HEX)) return null;
                   seen.add(entry.path);
                   if (entry.mode !== '040000') entries.set(entry.path, entry);
                 }
@@ -518,7 +529,8 @@ jobs:
               const described = new Set(), changes = [];
               const statusMap = {added: 'A', removed: 'D', modified: 'M', renamed: 'R'};
               for (const file of files) {
-                const status = file && typeof file === 'object' && Object.hasOwn(statusMap, file.status) ?
+                const status = file && typeof file === 'object' && typeof file.status === 'string' &&
+                 Object.hasOwn(statusMap, file.status) ?
                   statusMap[file.status] : null;
                 const path = file && file.filename;
                 const previous = file && Object.hasOwn(file, 'previous_filename') ? file.previous_filename : null;
