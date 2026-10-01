@@ -72,22 +72,34 @@ The managed CLI resolves Node from explicit `HERMES_TEST_NODE`, then PATH, then
 the legacy installed-server fallback; invalid explicit paths fail closed. Cloud
 setup exports the exact installed Python, Node and Chromium executables.
 
-## Final integration compatibility
+## Final integration and gate transition
 
 The authoritative [Git development contract](git-development-spec.md)
 (`docs/git-development-spec.md`) governs required gates; use the contract and
 runner capabilities on the revision being integrated, not a pending PR's promises.
-When the documented hosted partition is available via `scripts/ci_tests.py` and
-`.github/host-tests.json`, final integration requires complete matching hosted
-results plus all residual host tests on the same exact head SHA. Verify coverage,
-configuration and successful results against that revision's documented partition;
-file presence, dependency setup, selected tests, or a partial hosted pass alone
-are not full integration. Otherwise, conservatively use the existing managed `all`
-suite on a compatible isolated host (`python3 scripts/test.py all`, with Python
-selected through `HERMES_TEST_PYTHON` or the repository `.venv`). Never drop residual
-host/native coverage or automatically execute public PR code on a production-host
-self-hosted runner. Final integration is a merge gate, not a full local suite per
-edit; focused local RED/GREEN checks remain the development loop.
+
+Until the parent operator verifies the dependencies and exact-head replacement
+evidence and changes repository protection, the existing `source-ci`,
+`integration-tests`, and `agent-review` contexts remain required. In this
+pre-cutover policy, integration requires complete matching hosted results plus all
+residual host tests listed in `.github/host-tests.json` through
+`scripts/ci_tests.py host` on the same exact head SHA.
+Verify coverage, configuration and successful results against that revision's
+documented partition; file presence, dependency setup, selected tests, or a partial
+hosted pass alone are not full integration. If the documented partition is
+unavailable, conservatively use the existing managed `all` suite on a compatible
+isolated host (`python3 scripts/test.py all`, with Python selected through
+`HERMES_TEST_PYTHON` or the repository `.venv`).
+
+The target routine premerge policy is complete hosted `source-ci` (portable Python,
+JavaScript, generated-assets browser shards and the required native suite),
+`issue-link`, and exact-head `cloud-review`. This policy is conditional, not active
+from documentation or validator changes alone. After the owner activates it,
+installed/private compatibility remains required at guarded exact-main deployment;
+do not execute public PR code on a production-host self-hosted runner. See
+[`autonomy-policy.md`](autonomy-policy.md) for the read-only evidence contract and
+pre/post-cutover requirements. Final integration is a merge gate, not a full local
+suite per edit; focused local RED/GREEN checks remain the development loop.
 
 ## Cloud dependency setup
 
@@ -107,14 +119,24 @@ See [GitHub's setup workflow documentation](https://docs.github.com/en/copilot/h
 For behavior changes, record a real focused RED followed by GREEN and preserve
 existing assertions. Describe the baseline, linked issue, acceptance cases,
 scope, risks, exact commands/results, and any unrun checks in the pull request.
-`source-ci`, `integration-tests`, and `agent-review` must pass on the exact head SHA
-before GitHub merge. Require an independent formal COMMENT review for every PR,
-with actionable inline findings where needed. Publish `agent-review` only after
-verifying the independent review of that head; a COMMENT review alone is neither
-an approval nor a passing status, and does not claim a human approval or a separate
-GitHub identity. Publish `integration-tests` only after verifying complete final
-integration under the compatibility rules above; hosted `source-ci` remains a
-separate mandatory gate. New commits invalidate all old-head review/test evidence.
+Until cutover, `source-ci`, `integration-tests`, and `agent-review` must pass on the
+exact head SHA before GitHub merge. Require an independent formal COMMENT review
+for every PR, with actionable inline findings where needed. Publish `agent-review`
+only after verifying the independent review of that head; a COMMENT review alone
+is neither an approval nor a passing status, and does not claim a human approval
+or a separate GitHub identity. Publish `integration-tests` only after verifying
+complete final integration under the compatibility rules above; hosted `source-ci`
+remains a separate mandatory gate. New commits invalidate all old-head review/test
+evidence.
+
+After the parent operator has verified replacements on actual current heads and
+activated post-cutover protection, require `source-ci`, `issue-link`, and
+`cloud-review` on the exact head. Cloud review is valid only for the latest
+authenticated Copilot `APPROVED` review on that SHA with complete review/thread
+pagination and resolved threads; a `COMMENTED` review, overview text, or status
+alone is insufficient. Do not publish the retired `agent-review` or
+`integration-tests` contexts as substitutes. Sensitive changes still require
+explicit owner authorization for the exact SHA and targeted independent review.
 
 Use follow-up fix commits, reply in actual GitHub threads with the fix SHA and test
 evidence, and check findings before resolving them. Require resolved review threads

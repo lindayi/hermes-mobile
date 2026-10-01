@@ -26,11 +26,12 @@ def _unique_object(pairs):
 
 
 def _read_evidence(path):
-    path = Path(path)
-    info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_EVIDENCE:
-        raise ValueError('Evidence must be a bounded regular file')
-    raw = path.read_bytes()
+    flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    descriptor = os.open(Path(path), flags)
+    with os.fdopen(descriptor, 'rb') as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError('Evidence must be a regular file')
+        raw = source.read(MAX_EVIDENCE + 1)
     if len(raw) > MAX_EVIDENCE:
         raise ValueError('Evidence exceeds size limit')
     return json.loads(raw, object_pairs_hook=_unique_object)

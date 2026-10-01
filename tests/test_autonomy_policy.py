@@ -15,6 +15,7 @@ from deploy.autonomy_policy import (
     WORKFLOW_PATH,
     validate_transition,
 )
+from scripts.autonomy_policy import main as cli_main
 
 SHA = 'a' * 40
 ARTIFACT_HASH = 'b' * 64
@@ -86,8 +87,14 @@ WORKFLOW_ID = {WORKFLOW_ID}
 REF = {REF!r}
 EXPECTED_JOBS = frozenset({{{expected_jobs}}})
 def _run_record():
-    return {{'repository_id': REPOSITORY_ID, 'head_sha': sha}}
+    return {{'repository_id': REPOSITORY_ID, 'workflow_id': WORKFLOW_ID,
+            'path': WORKFLOW, 'event': 'push', 'head_branch': 'main',
+            'repository': REPOSITORY, 'head_sha': sha,
+            'status': 'completed', 'conclusion': 'success'}}
+def _listed():
+    return []
 def _check_jobs(jobs, run_id, run_attempt, sha):
+    _listed()
     if len(jobs) != len(EXPECTED_JOBS) or {{job.get('name') for job in jobs}} != EXPECTED_JOBS:
         raise ValueError()
     for job in jobs:
@@ -97,7 +104,9 @@ def _check_jobs(jobs, run_id, run_attempt, sha):
             raise ValueError()
 def _attestation():
     return ['--cert-identity', '--source-ref', '--source-digest', '--signer-digest',
-            '--deny-self-hosted-runners', 'runnerEnvironment', REPOSITORY_ID, WORKFLOW_ID]
+            '--deny-self-hosted-runners', 'runnerEnvironment', 'sourceRepositoryDigest',
+            'buildSignerDigest', 'runInvocationURI', REPOSITORY, REPOSITORY_ID,
+            WORKFLOW, WORKFLOW_ID, REF]
 def acquire_verified_bundle():
     _run_record()
     _check_jobs()
@@ -113,6 +122,24 @@ def _deploy(hosted_run_id, checks, paths, stage):
         checks(stage)
     else:
         run_host_checks(paths, stage)
+"""
+    ci_selection = """
+def select_tests(source, suite):
+    python = set()
+    host = load('.github/host-tests.json')
+    native = load('.github/native-tests.json')
+    if suite not in {'python', 'host', 'native', 'js', 'browser'}:
+        raise ValueError()
+    groups = {'python': python - host.keys(), 'host': set(host), 'native': set(native)}
+    return groups[suite]
+"""
+    ci_tests = """
+def main(args):
+    if args.suite not in ('python', 'host', 'native', 'js', 'browser'):
+        raise ValueError()
+    selected = select_tests(SOURCE, args.suite)
+    suite = 'python' if args.suite == 'host' else args.suite
+    return run_suite(SOURCE, suite=suite, extra_args=selected)
 """
     coordinator = f"""
 REPOSITORY = {REPOSITORY!r}
@@ -169,9 +196,14 @@ def _plan_pull(head, snapshot):
     return {
         WORKFLOW_PATH: _workflow(),
         '.github/native-tests.json': json.dumps({'tests/test_native.py': 'synthetic native test'}),
-        '.github/host-tests.json': json.dumps({'tests/test_host.py': 'synthetic installed compatibility test'}),
+        '.github/host-tests.json': json.dumps({
+            'tests/test_host.py': 'synthetic installed compatibility test',
+            'tests/test_native.py': 'synthetic installed native test',
+        }),
         'deploy/release_artifact.py': release_artifact,
         'deploy/self_deploy.py': self_deploy,
+        'deploy/ci_selection.py': ci_selection,
+        'scripts/ci_tests.py': ci_tests,
         'deploy/cloud_coordinator.py': coordinator,
     }
 
@@ -226,6 +258,7 @@ def _evidence():
         'source_ci': _source_ci(),
         'cloud_review': {
             'repository_id': REPOSITORY_ID, 'base_branch': 'main', 'base_sha': SHA,
+            'state': 'open', 'draft': False,
             'head_sha': review_head, 'reviews_complete': True, 'threads_complete': True,
             'reviews': [{
                 'user': {'id': COPILOT_REVIEWER_ID}, 'state': 'APPROVED',
@@ -236,6 +269,7 @@ def _evidence():
                 'context': 'cloud-review', 'state': 'success',
                 'head_sha': review_head, 'creator_id': OWNER_ID,
             },
+            'change': {'head_sha': review_head, 'files_complete': True, 'sensitive': False},
         },
     }
 
@@ -272,6 +306,12 @@ def test_missing_native_job_or_aggregate_dependency_blocks():
     )
     assert 'native-aggregate-dependency' in _blockers(evidence)
 
+    evidence = _evidence()
+    evidence['main']['files'][WORKFLOW_PATH] = evidence['main']['files'][WORKFLOW_PATH].replace(
+        "'browser', 'native'", "'browser'",
+    )
+    assert 'native-aggregate-contract' in _blockers(evidence)
+
 
 def test_missing_or_incomplete_release_provenance_blocks():
     evidence = _evidence()
@@ -285,6 +325,39 @@ def test_missing_or_incomplete_release_provenance_blocks():
     evidence = _evidence()
     evidence['source_ci']['artifact']['attestation']['source_sha'] = 'd' * 40
     assert 'release-attestation' in _blockers(evidence)
+
+    evidence = _evidence()
+    evidence['main']['files']['deploy/release_artifact.py'] = (
+        evidence['main']['files']['deploy/release_artifact.py']
+        .replace("'native', ", '', 1)
+    )
+    assert 'release-artifact-provenance' in _blockers(evidence)
+
+
+@pytest.mark.parametrize(('field', 'value'), [
+    ('status', 'failure'),
+    ('conclusion', 'skipped'),
+    ('head_sha', 'd' * 40),
+    ('run_attempt', 3),
+])
+def test_failed_skipped_or_stale_native_job_blocks(field, value):
+    evidence = _evidence()
+    native_job = next(job for job in evidence['source_ci']['jobs'] if job['name'] == 'native')
+    native_job[field] = value
+
+    assert 'source-ci-jobs' in _blockers(evidence)
+
+
+def test_missing_native_job_record_and_truncated_review_block():
+    evidence = _evidence()
+    evidence['source_ci']['jobs'] = [
+        job for job in evidence['source_ci']['jobs'] if job['name'] != 'native'
+    ]
+    assert 'source-ci-jobs' in _blockers(evidence)
+
+    evidence = _evidence()
+    evidence['cloud_review']['threads'][0]['comments_complete'] = False
+    assert 'cloud-review-threads' in _blockers(evidence)
 
 
 def test_missing_installed_host_gate_blocks():
@@ -362,11 +435,17 @@ def test_mismatched_current_head_and_sensitive_approval_block():
 
     evidence = _evidence()
     evidence['cloud_review']['change'] = {
+        'head_sha': evidence['cloud_review']['head_sha'],
+        'files_complete': True,
         'sensitive': True,
         'owner_authorization': {'actor_id': OWNER_ID, 'head_sha': SHA, 'state': 'approved'},
         'targeted_review': {'reviewer_id': 76, 'head_sha': 'd' * 40, 'state': 'COMMENTED'},
     }
     assert 'sensitive-review-authorization' in _blockers(evidence)
+
+    evidence = _evidence()
+    evidence['cloud_review'].pop('change')
+    assert 'change-scope-evidence' in _blockers(evidence)
 
 
 def test_missing_evidence_blocks_and_validator_does_not_mutate_input():
@@ -379,3 +458,26 @@ def test_missing_evidence_blocks_and_validator_does_not_mutate_input():
     assert report['phase'] == 'pre-cutover'
     assert report['blockers']
     assert evidence == before
+
+
+def test_cli_only_reads_evidence_and_returns_blocked_for_missing_fields(tmp_path, capsys):
+    path = tmp_path / 'evidence.json'
+    path.write_text('{}')
+
+    result = cli_main(['--phase', 'pre-cutover', str(path)])
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report['ready'] is False
+    assert path.read_text() == '{}'
+
+
+def test_cli_rejects_duplicate_evidence_keys(tmp_path, capsys):
+    path = tmp_path / 'evidence.json'
+    path.write_text('{"repository": {}, "repository": {}}')
+
+    result = cli_main(['--phase', 'pre-cutover', str(path)])
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert report == {'ready': False, 'phase': 'pre-cutover', 'blockers': ['invalid-evidence']}

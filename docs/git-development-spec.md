@@ -11,11 +11,20 @@ source import and subsequent changes use protected pull requests.
 ## Required observable outcomes
 
 1. Repository `lindayi/hermes-mobile` exists; remote source readback matches commits.
-2. Main requires `source-ci`, `integration-tests`, `agent-review`, an up-to-date
-   branch and resolved review conversations; protections apply to administrators.
-3. Zero separate human approvals are required. An independent agent records formal
-   COMMENT reviews on exact commits. A passing status does not claim a different
-   GitHub identity or a human approval.
+2. Until an owner-verified gate transition is activated, main requires
+   `source-ci`, `integration-tests`, `agent-review`, an up-to-date branch and
+   resolved review conversations; protections apply to administrators. The target
+   post-cutover routine premerge policy is `source-ci`, `issue-link`, and
+   exact-head `cloud-review`, with strict/up-to-date main and resolved
+   conversations. The target is not active merely because it is specified or validated.
+3. The current policy requires an independent formal COMMENT review on the exact
+   commit; a passing status does not claim a different GitHub identity or a human
+   approval. After the parent operator verifies replacement evidence on actual
+   current heads and performs the authorized protection change, `cloud-review`
+   requires an actual authenticated Copilot `APPROVED` review on the exact current
+   head, complete review/thread pagination, and resolved threads. A `COMMENTED`
+   review or overview text is not approval. Sensitive changes retain exact-SHA
+   owner authorization and targeted independent review.
 4. At least one real PR review is published; genuine findings receive follow-up
    commits and checked thread resolution. Do not invent findings for a demo.
 5. Task worktrees isolate edits. Conflict reconciliation preserves both compatible
@@ -39,12 +48,15 @@ naming are separate PRs after migration.
 
 ## Test environments
 
-Hosted GitHub Actions verifies syntax, secrets, all JavaScript/browser tests and
-the portable Python partition without credentials or production access. The
-explicit remaining native/private-operator partition runs through the managed
-local `scripts/ci_tests.py host` suite. Exact-head integration status requires BOTH
-partitions to pass. See hosted-ci-spec.md; `source-ci` is the fail-closed aggregate
-of every hosted shard. No production-host self-hosted Actions runner executes
-public PR code automatically. Main merges trigger CI, not deployment. Release
-staging retains its conservative full test gate until exact-source/asset CI
-evidence reuse is separately implemented and reviewed.
+Hosted GitHub Actions verifies syntax, secrets, JavaScript/browser tests and the
+portable Python partition without credentials or production access. Once the
+native CI dependency is present on main, `source-ci` also requires the complete
+public native suite and exact generated-artifact evidence. Before the owner-verified
+cutover, exact-head integration status requires both hosted `source-ci` and the
+entire residual host partition through managed `scripts/ci_tests.py host`. After
+cutover, installed/private compatibility remains required at guarded exact-main
+deployment, not by executing public PR code on a production host. See
+`hosted-ci-spec.md` and `autonomy-policy.md`. No production-host self-hosted
+Actions runner executes public PR code automatically. Main merges trigger CI, not
+deployment. Release staging retains its conservative full test gate until
+exact-source/asset CI evidence reuse is separately implemented and reviewed.

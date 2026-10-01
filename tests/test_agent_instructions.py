@@ -118,8 +118,8 @@ SYNCED_RULES = (
     'gates.',
     'Never use production credentials, real accounts, real model calls, native production '
     'homes or databases, private evidence uploads, or live enrollment as tests.',
-    'A review comment is not an approval or a passing review status; require independent '
-    'formal COMMENT review for every PR and verify evidence against the exact head SHA.',
+    'A review comment is not an approval or a passing review status; verify every review '
+    'and test result against the exact head SHA.',
     'Merging and deployment are separate; only guarded deployment from verified main is '
     'allowed, and coding agents never access production.',
 )
@@ -168,7 +168,7 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         for clause in (
             'docs/git-development-spec.md',
             '`source-ci`, `integration-tests`, and `agent-review` must pass',
-            'independent formal COMMENT review for every PR',
+            'independent formal COMMENT review',
             'Publish `agent-review` only after verifying the independent review',
             'Publish `integration-tests` only after verifying complete final integration',
             'exact head SHA',
@@ -181,12 +181,12 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
 
     workflow = ' '.join((ROOT / 'docs/development-workflow.md').read_text().split())
     for clause in (
-        'When the documented hosted partition is available',
-        '`scripts/ci_tests.py`',
+        'Until the parent operator verifies the dependencies and exact-head replacement evidence',
+        'scripts/ci_tests.py',
         '`.github/host-tests.json`',
         'complete matching hosted results plus all residual host tests',
         'same exact head SHA',
-        'Otherwise, conservatively use the existing managed `all` suite',
+        'If the documented partition is unavailable, conservatively use the existing managed `all` suite',
         'Final integration is a merge gate, not a full local suite per edit',
         'fresh Linux',
         'Playwright OS dependencies',
@@ -200,8 +200,9 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
     assert 'Full managed integration result, if required' not in template
     for clause in (
         'Mandatory final integration evidence',
-        '`source-ci`, `integration-tests`, and `agent-review`',
-        'independent formal COMMENT review',
+        'before cutover `source-ci`, `integration-tests`, and `agent-review`',
+        'after cutover `source-ci`, `issue-link`, and `cloud-review`',
+        'actual authenticated Copilot `APPROVED` review',
         'resolved review threads',
         'current with freshly fetched `origin/main`',
         'No owner/admin bypass',
@@ -225,15 +226,45 @@ def test_agent_instructions_use_the_available_hosted_partition_portably():
         '`.github/host-tests.json`; new files default to hosted execution',
         'Do not repeat hosted suites on the production server routinely',
         'The full managed `all` remains an opt-in diagnostic and the conservative '
-        'release-stage gate, not the ordinary premerge server task',
+        'release-stage gate',
         'the entire residual host-compatibility suite and the matching hosted '
         '`source-ci` aggregate must succeed on the same exact head SHA',
         'Record both results and the workflow URL',
         'Never use only a hosted subset or only local host tests to claim full coverage',
+        'The target routine premerge gate is the complete hosted `source-ci` aggregate',
+        'This target is not active because its documentation or validator exists',
+        'installed/private host-compatibility suite remains required at guarded exact-main deployment',
     ):
         assert clause in text, clause
     assert (ROOT / 'scripts/ci_tests.py').is_file()
     assert (ROOT / '.github/host-tests.json').is_file()
+
+
+def test_gate_transition_is_conditional_and_preserves_exact_head_review():
+    paths = (
+        'AGENTS.md',
+        '.github/copilot-instructions.md',
+        'docs/git-development-spec.md',
+        'docs/development-workflow.md',
+        'docs/autonomy-policy.md',
+        '.github/pull_request_template.md',
+    )
+    for path in paths:
+        text = ' '.join((ROOT / path).read_text().split())
+        assert 'post-cutover' in text or 'After activation' in text or 'after cutover' in text
+        assert 'source-ci' in text and 'issue-link' in text and 'cloud-review' in text
+        assert 'exact' in text and ('head' in text or 'SHA' in text)
+
+    policy = ' '.join((ROOT / 'docs/autonomy-policy.md').read_text().split())
+    for clause in (
+        'The CLI performs no network calls, writes, status publication, settings changes',
+        'does not authenticate the JSON file',
+        'A `COMMENTED` review, body text, empty overview, or a status without the authenticated review is not approval',
+        'private installed-runtime compatibility remains an exact-main guarded deployment gate',
+        'pre-cutover',
+        'post-cutover',
+    ):
+        assert clause in policy, clause
 
 
 def test_parallel_integration_preserves_reviewed_history_and_both_intents():

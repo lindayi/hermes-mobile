@@ -29,6 +29,8 @@ REQUIRED_FILES = (
     '.github/host-tests.json',
     'deploy/release_artifact.py',
     'deploy/self_deploy.py',
+    'deploy/ci_selection.py',
+    'scripts/ci_tests.py',
     'deploy/cloud_coordinator.py',
 )
 SHA_RE = re.compile(r'[0-9a-f]{40}\Z')
@@ -73,6 +75,15 @@ def _literal(node):
     return ast.literal_eval(node)
 
 
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('Duplicate manifest key')
+        result[key] = value
+    return result
+
+
 def _source_tree(files, name, blockers):
     text = files.get(name)
     if not isinstance(text, str):
@@ -109,8 +120,16 @@ def _workflow_contract(files, blockers):
     except ImportError:
         blockers.add('hosted-workflow-contract')
         return
+
+    class UniqueLoader(yaml.BaseLoader):
+        def construct_mapping(self, node, deep=False):
+            keys = [self.construct_object(key, deep=deep) for key, _ in node.value]
+            if len(keys) != len(set(keys)):
+                raise ValueError('Duplicate workflow key')
+            return super().construct_mapping(node, deep)
+
     try:
-        workflow = yaml.load(files[WORKFLOW_PATH], Loader=yaml.BaseLoader)
+        workflow = yaml.load(files[WORKFLOW_PATH], Loader=UniqueLoader)
     except (KeyError, TypeError, ValueError, yaml.YAMLError):
         blockers.add('hosted-workflow-contract')
         return
@@ -122,26 +141,41 @@ def _workflow_contract(files, blockers):
     if any(job.get('runs-on') != 'ubuntu-24.04' for job in jobs.values()):
         blockers.add('hosted-runner-contract')
 
-    native = jobs['native']
-    native_steps = native.get('steps', [])
-    if not isinstance(native_steps, list):
-        native_steps = []
-    commands = '\n'.join(step.get('run', '') for step in native_steps if isinstance(step, dict))
-    if (not any('--preflight' in step.get('run', '') for step in native_steps if isinstance(step, dict))
-            or 'scripts/ci_tests.py native' not in commands
+    def steps(job):
+        result = job.get('steps')
+        if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
+            blockers.add('hosted-workflow-contract')
+            return []
+        return result
+
+    def commands(items):
+        return '\n'.join(value for step in items
+                         if isinstance((value := step.get('run', '')), str))
+
+    native_steps = steps(jobs['native'])
+    native_commands = commands(native_steps)
+    if (not any('--preflight' in step.get('run', '') for step in native_steps
+                if isinstance(step.get('run', ''), str))
+            or 'scripts/ci_tests.py native' not in native_commands
             or any('self-hosted' in str(job.get('runs-on', '')) for job in jobs.values())):
         blockers.add('native-job-contract')
 
     gate = jobs['source-ci']
-    if gate.get('if') != '${{ always() }}' or set(gate.get('needs', [])) != HOSTED_JOBS:
+    needs = gate.get('needs')
+    if (gate.get('if') != '${{ always() }}' or not isinstance(needs, list)
+            or len(needs) != len(HOSTED_JOBS) or set(needs) != HOSTED_JOBS):
         blockers.add('native-aggregate-dependency')
         return
-    steps = gate.get('steps', [])
-    step = steps[0] if isinstance(steps, list) and steps else {}
-    if not isinstance(step, dict) or step.get('env', {}).get('RESULTS') != '${{ toJSON(needs) }}':
+    gate_steps = steps(gate)
+    step = gate_steps[0] if gate_steps else {}
+    if (not isinstance(step, dict) or not isinstance(step.get('env'), dict)
+            or step['env'].get('RESULTS') != '${{ toJSON(needs) }}'):
         blockers.add('native-aggregate-contract')
         return
     run = step.get('run', '')
+    if not isinstance(run, str):
+        blockers.add('native-aggregate-contract')
+        return
     match = re.search(r'python3\s+-\s+<<[\'"]?PY[\'"]?\s*\n(.*?)\n\s*PY\s*$', run, re.S)
     try:
         gate_tree = ast.parse(textwrap.dedent(match.group(1))) if match else None
@@ -150,21 +184,22 @@ def _workflow_contract(files, blockers):
     if not gate_tree or not _fail_closed_aggregate(gate_tree):
         blockers.add('native-aggregate-contract')
 
-    build_text = '\n'.join(item.get('run', '') for item in jobs['build'].get('steps', []) if isinstance(item, dict))
+    build_steps, browser_steps = steps(jobs['build']), steps(jobs['browser'])
+    attest_steps = steps(jobs['attest'])
+    build_text, browser_text = commands(build_steps), commands(browser_steps)
     build_uploads = [
-        item.get('with', {}).get('name')
-        for item in jobs['build'].get('steps', [])
+        (item.get('with') or {}).get('name')
+        for item in build_steps
         if isinstance(item, dict) and str(item.get('uses', '')).startswith('actions/upload-artifact@')
     ]
-    browser_text = '\n'.join(item.get('run', '') for item in jobs['browser'].get('steps', []) if isinstance(item, dict))
     browser_downloads = [
-        item.get('with', {}).get('name')
-        for item in jobs['browser'].get('steps', [])
+        (item.get('with') or {}).get('name')
+        for item in browser_steps
         if isinstance(item, dict) and str(item.get('uses', '')).startswith('actions/download-artifact@')
     ]
     attest = jobs['attest']
-    attest_text = '\n'.join(item.get('run', '') for item in attest.get('steps', []) if isinstance(item, dict))
-    attest_actions = [str(item.get('uses', '')) for item in attest.get('steps', []) if isinstance(item, dict)]
+    attest_text = commands(attest_steps)
+    attest_actions = [str(item.get('uses', '')) for item in attest_steps]
     if ('deploy.release_artifact build' not in build_text
             or 'release-${{ github.run_id }}-${{ github.run_attempt }}' not in build_uploads
             or 'release-${{ github.run_id }}-${{ github.run_attempt }}' not in browser_downloads
@@ -227,18 +262,21 @@ def _fail_closed_aggregate(tree):
 
 def _hosted_release_contract(files, blockers):
     try:
-        host = json.loads(files['.github/host-tests.json'])
-        native = json.loads(files['.github/native-tests.json'])
+        host = json.loads(files['.github/host-tests.json'], object_pairs_hook=_unique_object)
+        native = json.loads(files['.github/native-tests.json'], object_pairs_hook=_unique_object)
     except (KeyError, TypeError, ValueError):
         blockers.add('installed-host-gate')
         return
     if (not isinstance(host, dict) or not host or not isinstance(native, dict) or not native
+            or not set(native) <= set(host)
             or any(not isinstance(reason, str) or not reason.strip() for reason in (*host.values(), *native.values()))):
         blockers.add('installed-host-gate')
 
     deploy_tree = _source_tree(files, 'deploy/self_deploy.py', blockers)
     release_tree = _source_tree(files, 'deploy/release_artifact.py', blockers)
-    if deploy_tree is None or release_tree is None:
+    selection_tree = _source_tree(files, 'deploy/ci_selection.py', blockers)
+    cli_tree = _source_tree(files, 'scripts/ci_tests.py', blockers)
+    if any(tree is None for tree in (deploy_tree, release_tree, selection_tree, cli_tree)):
         return
     source_trees = _assignments(deploy_tree).get('SOURCE_TREES')
     try:
@@ -254,6 +292,17 @@ def _hosted_release_contract(files, blockers):
             or 'host' not in host_text or 'extra_args' not in host_names):
         blockers.add('installed-host-gate')
     if hosted_branch is None or not _host_run_branch(hosted_branch):
+        blockers.add('installed-host-gate')
+    select_tests = _function(selection_tree, 'select_tests')
+    select_text, select_names = _strings_and_names(select_tests) if select_tests else (set(), set())
+    ci_main = _function(cli_tree, 'main')
+    ci_text = _strings_and_names(ci_main)[0] if ci_main else set()
+    ci_calls = _call_strings(ci_main) if ci_main else set()
+    if (select_tests is None or not {'host', 'native', '.github/host-tests.json',
+                                     '.github/native-tests.json'} <= select_text
+            or not {'python', 'host', 'native'} <= select_names
+            or ci_main is None or not {'host', 'native'} <= ci_text
+            or not {'select_tests', 'run_suite'} <= ci_calls):
         blockers.add('installed-host-gate')
 
     assignments = _assignments(release_tree)
@@ -279,12 +328,18 @@ def _hosted_release_contract(files, blockers):
     check_text, check_names = _strings_and_names(check_jobs) if check_jobs else (set(), set())
     attest_text, attest_names = _strings_and_names(attestation) if attestation else (set(), set())
     acquire_calls = _call_strings(acquire) if acquire else set()
+    run_text, run_names = _strings_and_names(run_record) if run_record else (set(), set())
     if (expected_jobs != RUN_JOBS or not trusted
+            or not {'push', 'main', 'completed', 'success', 'workflow_id', 'head_sha'} <= run_text
+            or not {'REPOSITORY_ID', 'WORKFLOW_ID', 'REPOSITORY'} <= run_names
             or not {'run_id', 'run_attempt', 'head_sha', 'completed', 'success'} <= check_text
+            or not {'len', '_listed'} <= _call_strings(check_jobs)
+            or 'EXPECTED_JOBS' not in check_names
             or not {'_run_record', '_check_jobs', '_attestation'} <= acquire_calls
             or not {'--cert-identity', '--source-ref', '--source-digest', '--signer-digest',
-                    '--deny-self-hosted-runners', 'runnerEnvironment'} <= attest_text
-            or not {'REPOSITORY_ID', 'WORKFLOW_ID'} <= check_names | attest_names
+                    '--deny-self-hosted-runners', 'runnerEnvironment', 'sourceRepositoryDigest',
+                    'buildSignerDigest', 'runInvocationURI'} <= attest_text
+            or not {'REPOSITORY_ID', 'WORKFLOW_ID', 'REPOSITORY', 'REF', 'WORKFLOW'} <= attest_names
             or run_record is None or check_jobs is None or attestation is None or acquire is None):
         blockers.add('release-artifact-provenance')
 
@@ -532,6 +587,7 @@ def _check_review(evidence, main_sha, blockers):
     head = review.get('head_sha')
     if (review.get('repository_id') != REPOSITORY_ID or review.get('base_branch') != 'main'
             or review.get('base_sha') != main_sha or not _valid_sha(head)
+            or review.get('state') != 'open' or review.get('draft') is not False
             or review.get('reviews_complete') is not True
             or review.get('threads_complete') is not True):
         blockers.add('cloud-review-evidence')
@@ -559,21 +615,25 @@ def _check_review(evidence, main_sha, blockers):
         blockers.add('cloud-review-status')
 
     change = review.get('change')
-    if isinstance(change, dict) and change.get('sensitive') is True:
+    if (not isinstance(change, dict) or change.get('head_sha') != head
+            or change.get('files_complete') is not True
+            or type(change.get('sensitive')) is not bool):
+        blockers.add('change-scope-evidence')
+    elif change['sensitive']:
         authorization = change.get('owner_authorization')
         targeted = change.get('targeted_review')
         if (not isinstance(authorization, dict) or authorization.get('actor_id') != OWNER_ID
                 or authorization.get('head_sha') != head or authorization.get('state') != 'approved'
                 or not isinstance(targeted, dict) or type(targeted.get('reviewer_id')) is not int
                 or targeted.get('reviewer_id') == OWNER_ID or targeted.get('head_sha') != head
-                or targeted.get('state') not in {'COMMENTED', 'APPROVED'}):
+                or targeted.get('state') not in ('COMMENTED', 'APPROVED')):
             blockers.add('sensitive-review-authorization')
 
 
 def validate_transition(evidence, *, phase):
     """Validate injected read-only GitHub evidence and main-source contracts; perform no I/O."""
     blockers = set()
-    if phase not in REQUIRED_CHECKS:
+    if not isinstance(phase, str) or phase not in REQUIRED_CHECKS:
         return {'ready': False, 'phase': phase, 'blockers': ['invalid-phase']}
     if not isinstance(evidence, dict):
         return {'ready': False, 'phase': phase, 'blockers': ['invalid-evidence']}
@@ -589,9 +649,12 @@ def validate_transition(evidence, *, phase):
         sha, files = main['sha'], main['files']
         if any(not isinstance(value, str) for value in files.values()):
             blockers.add('main-source-invalid')
-    _static_contracts(files, blockers)
-    _check_protection(evidence, phase, blockers)
-    if sha:
-        _check_source_run(evidence, sha, blockers)
-        _check_review(evidence, sha, blockers)
+    try:
+        _static_contracts(files, blockers)
+        _check_protection(evidence, phase, blockers)
+        if sha:
+            _check_source_run(evidence, sha, blockers)
+            _check_review(evidence, sha, blockers)
+    except (AttributeError, IndexError, KeyError, RecursionError, TypeError, ValueError):
+        blockers.add('malformed-evidence')
     return {'ready': not blockers, 'phase': phase, 'blockers': sorted(blockers)}
