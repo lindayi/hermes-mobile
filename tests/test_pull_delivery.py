@@ -460,3 +460,371 @@ def test_worker_crash_reservation_and_state_symlinks_do_not_replay(tmp_path, mon
     with pytest.raises(ValueError, match='Symlink'):
         m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)
     assert victim.read_text() == 'must not touch'
+
+
+# ---- Version 2: routine/sensitive risk policy (issue #17) -------------------
+
+BASE = 'b' * 40
+RELEASE = 'e' * 32
+OID = '1' * 40
+ZERO = '0' * 40
+V2_JOBS = PREFIX + '/actions/runs/20/jobs?filter=latest&per_page=100'
+
+
+def raw(*entries):
+    """Synthetic `git diff --raw -z --no-abbrev` output for (status, path[, old, new])."""
+    text = ''
+    for status, path, *modes in entries:
+        old, new = modes or (('000000', '100644') if status == 'A' else
+                             ('100644', '000000') if status == 'D' else ('100644', '100644'))
+        text += f':{old} {new} {OID} {OID} {status}\0{path}\0'
+    return text
+
+
+def evidence_v2(path='routine', base=BASE):
+    request, api = evidence()
+    request['payload'] = {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': base}
+
+    def job(job_id, name, conclusion, started, completed):
+        return {'id': job_id, 'run_id': 20, 'run_attempt': 1, 'head_sha': SHA, 'head_branch': 'main',
+                'workflow_name': 'Production approval', 'name': name, 'status': 'completed',
+                'conclusion': conclusion, 'started_at': started, 'completed_at': completed}
+    routine = path == 'routine'
+    api[V2_JOBS] = {'total_count': 3, 'jobs': [
+        job(31, 'Classify release', 'success', '2026-10-01T11:27:00Z', '2026-10-01T11:28:00Z'),
+        job(32, 'Promote routine release', 'success' if routine else 'skipped',
+            '2026-10-01T11:29:00Z', '2026-10-01T11:31:00Z'),
+        job(33, 'Promote sensitive release', 'skipped' if routine else 'success',
+            '2026-10-01T11:29:00Z', '2026-10-01T11:31:00Z')]}
+    api[PREFIX + '/actions/runs/20/approvals'] = [] if routine else [
+        {'state': 'approved', 'user': {'id': 5164171, 'login': 'lindayi'},
+         'environments': [{'id': 41, 'name': 'production-sensitive'}], 'comment': 'ship'}]
+    return request, api
+
+
+def test_v2_routine_intent_needs_no_owner_review_and_carries_no_risk_flag():
+    m = module()
+    request, api = evidence_v2('routine')
+    intent = m.validate_intent(request, api.__getitem__, now=NOW)
+    assert (intent.version, intent.risk, intent.base_sha) == (2, 'routine', BASE)
+    assert intent.key == SHA + ':20'
+
+
+def test_v2_sensitive_intent_requires_owner_approval_for_sensitive_environment():
+    m = module()
+    request, api = evidence_v2('sensitive')
+    intent = m.validate_intent(request, api.__getitem__, now=NOW)
+    assert (intent.version, intent.risk, intent.base_sha) == (2, 'sensitive', BASE)
+    request, api = evidence_v2('sensitive', base=None)
+    assert m.validate_intent(request, api.__getitem__, now=NOW).base_sha is None
+
+
+def test_v1_owner_approved_intent_remains_legacy_owner_path():
+    m = module()
+    request, api = evidence()
+    intent = m.validate_intent(request, api.__getitem__, now=NOW)
+    assert (intent.version, intent.risk, intent.base_sha) == (1, None, None)
+
+
+@pytest.mark.parametrize('payload', [
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE, 'risk': 'routine'},
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE, 'safe': True},
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20},
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE.upper()},
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE[:39]},
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': ''},
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': 7},
+    {'version': 2, 'source_run_id': '10', 'approval_run_id': 20, 'base_sha': BASE},
+    {'version': 2.0, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE},
+    {'version': True, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE},
+    {'version': 3, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE},
+    {'version': 1, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE},
+])
+def test_v2_payload_schema_is_strict_and_cannot_assert_safety(payload):
+    m = module()
+    request, api = evidence_v2('routine')
+    request['payload'] = payload
+    with pytest.raises(m.Blocked):
+        m.validate_intent(request, api.__getitem__, now=NOW)
+
+
+def test_v2_routine_without_authenticated_base_is_blocked():
+    m = module()
+    request, api = evidence_v2('routine', base=None)
+    with pytest.raises(m.Blocked, match='base'):
+        m.validate_intent(request, api.__getitem__, now=NOW)
+
+
+def _jobs(api):
+    return api[V2_JOBS]['jobs']
+
+
+@pytest.mark.parametrize('tamper', [
+    'missing_job', 'extra_job', 'duplicate_name', 'renamed', 'both_success', 'both_skipped',
+    'classify_failed', 'classify_skipped', 'promote_failed', 'in_progress', 'attempt', 'run_id',
+    'head_sha', 'head_branch', 'workflow_name', 'total_count', 'created_before', 'created_after',
+    'skipped_classify_but_success_promote'])
+def test_v2_exact_job_set_and_runtime_binding(tamper):
+    m = module()
+    request, api = evidence_v2('routine')
+    jobs = _jobs(api)
+    if tamper == 'missing_job':
+        jobs.pop()
+        api[V2_JOBS]['total_count'] = 2
+    elif tamper == 'extra_job':
+        jobs.append({**jobs[0], 'id': 34, 'name': 'Approve production'})
+        api[V2_JOBS]['total_count'] = 4
+    elif tamper == 'duplicate_name':
+        jobs[2] = {**jobs[1], 'id': 33}
+    elif tamper == 'renamed':
+        jobs[1]['name'] = 'Promote routine'
+    elif tamper == 'both_success':
+        jobs[2]['conclusion'] = 'success'
+    elif tamper == 'both_skipped':
+        jobs[1]['conclusion'] = 'skipped'
+    elif tamper == 'classify_failed':
+        jobs[0]['conclusion'] = 'failure'
+    elif tamper == 'classify_skipped':
+        jobs[0]['conclusion'] = 'skipped'
+    elif tamper == 'promote_failed':
+        jobs[1]['conclusion'] = 'failure'
+    elif tamper == 'in_progress':
+        jobs[2]['status'] = 'in_progress'
+    elif tamper == 'attempt':
+        jobs[1]['run_attempt'] = 2
+    elif tamper == 'run_id':
+        jobs[0]['run_id'] = 21
+    elif tamper == 'head_sha':
+        jobs[2]['head_sha'] = BASE
+    elif tamper == 'head_branch':
+        jobs[1]['head_branch'] = 'topic'
+    elif tamper == 'workflow_name':
+        jobs[1]['workflow_name'] = 'Source checks'
+    elif tamper == 'total_count':
+        api[V2_JOBS]['total_count'] = 4
+    elif tamper == 'created_before':
+        request['created_at'] = '2026-10-01T11:28:30Z'
+    elif tamper == 'created_after':
+        jobs[1]['completed_at'] = '2026-10-01T11:29:30Z'
+    elif tamper == 'skipped_classify_but_success_promote':
+        jobs[0]['conclusion'] = 'skipped'
+        jobs[2]['conclusion'] = 'success'
+    with pytest.raises(m.Blocked):
+        m.validate_intent(request, api.__getitem__, now=NOW)
+
+
+@pytest.mark.parametrize('reviews', [
+    [],
+    [{'state': 'approved', 'user': {'id': 5164171, 'login': 'lindayi'}, 'environments': [{'name': 'production'}]}],
+    [{'state': 'approved', 'user': {'id': 1, 'login': 'lindayi'}, 'environments': [{'name': 'production-sensitive'}]}],
+    [{'state': 'approved', 'user': {'id': 5164171, 'login': 'other'}, 'environments': [{'name': 'production-sensitive'}]}],
+    [{'state': 'pending', 'user': {'id': 5164171, 'login': 'lindayi'}, 'environments': [{'name': 'production-sensitive'}]}],
+    [{'state': 'approved', 'user': {'id': 5164171, 'login': 'lindayi'}, 'environments': [{'name': 'production-sensitive'}]},
+     {'state': 'rejected', 'user': {'id': 5164171, 'login': 'lindayi'}, 'environments': [{'name': 'production-sensitive'}]}],
+    {'state': 'approved'},
+])
+def test_v2_sensitive_bypass_wrong_environment_or_rejection_is_not_approval(reviews):
+    m = module()
+    request, api = evidence_v2('sensitive')
+    api[PREFIX + '/actions/runs/20/approvals'] = reviews
+    with pytest.raises(m.Blocked):
+        m.validate_intent(request, api.__getitem__, now=NOW)
+
+
+def test_v2_any_rejection_blocks_routine_and_rerun_approval_is_not_replayed():
+    m = module()
+    request, api = evidence_v2('routine')
+    api[PREFIX + '/actions/runs/20/approvals'] = [
+        {'state': 'rejected', 'user': {'id': 5164171, 'login': 'lindayi'}, 'environments': [{'name': 'production'}]}]
+    with pytest.raises(m.Blocked):
+        m.validate_intent(request, api.__getitem__, now=NOW)
+    request, api = evidence_v2('sensitive')
+    api[PREFIX + '/actions/runs/20']['run_attempt'] = 2
+    with pytest.raises(m.Blocked):
+        m.validate_intent(request, api.__getitem__, now=NOW)
+
+
+def installed(controller, sha=BASE, *, status='succeeded', release=RELEASE, provenance=None, link=None):
+    import json
+    import os
+    releases = controller / 'releases'
+    (releases / RELEASE).mkdir(parents=True, exist_ok=True)
+    (releases / RELEASE / 'git-provenance.json').write_text(json.dumps(provenance or {'git_sha': sha}))
+    current = controller / 'current'
+    if current.is_symlink():
+        current.unlink()
+    os.symlink(link or releases / RELEASE, current)
+    record = {'status': status, 'release': release, 'git_sha': sha, 'hosted_run_id': 9}
+    (controller / 'status.json').write_text(json.dumps({k: v for k, v in record.items() if v is not None}))
+
+
+def test_installed_basis_binds_controller_success_current_release_and_provenance(tmp_path):
+    m = module()
+    controller = tmp_path / 'controller'
+    controller.mkdir()
+    assert m.installed_basis(controller) is None  # No controller status: bootstrap.
+    installed(controller)
+    assert m.installed_basis(controller) == BASE
+
+
+@pytest.mark.parametrize('variant', ['failed', 'rolled_back', 'running', 'rollback_failed', 'no_sha',
+                                     'short_sha', 'bad_release', 'other_release', 'provenance',
+                                     'outside_link', 'not_link', 'corrupt'])
+def test_installed_basis_unverifiable_is_bootstrap(tmp_path, variant):
+    m = module()
+    controller = tmp_path / 'controller'
+    controller.mkdir()
+    kwargs = {}
+    if variant in {'failed', 'rolled_back', 'running', 'rollback_failed'}:
+        kwargs['status'] = variant
+    elif variant == 'no_sha':
+        kwargs['sha'] = None
+    elif variant == 'short_sha':
+        kwargs['sha'] = BASE[:12]
+    elif variant == 'bad_release':
+        kwargs['release'] = '../x'
+    elif variant == 'other_release':
+        kwargs['release'] = 'f' * 32
+    elif variant == 'provenance':
+        kwargs['provenance'] = {'git_sha': SHA}
+    elif variant == 'outside_link':
+        other = tmp_path / RELEASE
+        other.mkdir()
+        (other / 'git-provenance.json').write_text('{"git_sha": "%s"}' % BASE)
+        kwargs['link'] = other
+    installed(controller, **kwargs)
+    if variant == 'not_link':
+        (controller / 'current').unlink()
+        (controller / 'current').mkdir()
+    if variant == 'corrupt':
+        (controller / 'status.json').write_text('{')
+    assert m.installed_basis(controller) is None
+
+
+def worker_v2(tmp_path, monkeypatch, path='routine', *, diff=None, base=BASE, local=BASE, ancestor=True):
+    from deploy import git_source
+    m, paths, request, api, effects, run, post = worker_fixture(tmp_path, monkeypatch)
+    request_v2, api_v2 = evidence_v2(path, base=base)
+    request.clear()
+    request.update(request_v2)
+    api.update(api_v2)
+    if local:
+        installed(paths.controller_state, local)
+    original = git_source._git
+
+    def git(source, *args):
+        if args[:1] in {('cat-file',), ('merge-base',), ('diff',)}:
+            effects.append(('git', args))
+            if args[0] == 'merge-base' and not ancestor:
+                raise RuntimeError('Git source verification failed')
+            if args[0] == 'diff':
+                return raw(('M', 'frontend/app.js')) if diff is None else diff
+            return ''
+        return original(source, *args)
+    monkeypatch.setattr(git_source, '_git', git)
+    return m, paths, request, api, effects, run, post
+
+
+def git_calls(effects):
+    return [e[1] for e in effects if e[0] == 'git']
+
+
+def test_v2_routine_recomputes_host_diff_from_git_objects_before_merge(tmp_path, monkeypatch):
+    m, paths, request, api, effects, run, post = worker_v2(tmp_path, monkeypatch)
+    result = m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)
+    assert result['status'] == 'deployed', result
+    calls = git_calls(effects)
+    diff = ('diff', '--raw', '-z', '--no-renames', '--no-abbrev', '--no-ext-diff', '--no-textconv', BASE, SHA)
+    assert ('merge-base', '--is-ancestor', BASE, SHA) in calls and diff in calls
+    fetch = calls.index(('fetch', '--no-tags', 'origin', 'refs/heads/main:refs/remotes/origin/main'))
+    merge = calls.index(('merge', '--ff-only', '--no-edit', SHA))
+    assert fetch < calls.index(diff) < merge
+    assert [e[2]['state'] for e in effects if e[0] == 'post'] == ['in_progress', 'success']
+    assert [e[1] for e in effects if e[0] == 'run'][0][-2:] == ['--hosted-run-id', '10']
+
+
+def test_v2_sensitive_owner_approved_bootstrap_without_any_base_deploys(tmp_path, monkeypatch):
+    m, paths, request, api, effects, run, post = worker_v2(tmp_path, monkeypatch, 'sensitive',
+                                                           base=None, local=None)
+    assert m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)['status'] == 'deployed'
+    assert not [c for c in git_calls(effects) if c[0] == 'diff']
+
+
+def test_v2_sensitive_owner_approved_sensitive_diff_deploys(tmp_path, monkeypatch):
+    m, paths, request, api, effects, run, post = worker_v2(tmp_path, monkeypatch, 'sensitive',
+                                                           diff=raw(('M', 'backend/app.py')))
+    assert m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)['status'] == 'deployed'
+
+
+@pytest.mark.parametrize('case,reason', [
+    ('host_sensitive_diff', 'disagree'),
+    ('rename_from_backend', 'disagree'),
+    ('symlink_mode', 'disagree'),
+    ('executable_mode', 'disagree'),
+    ('empty_diff', 'disagree'),
+    ('malformed_diff', 'Malformed'),
+    ('overlarge', 'disagree'),
+    ('base_mismatch', 'bases disagree'),
+    ('no_local_basis', 'disagree'),
+    ('not_descendant', 'Git'),
+    ('sensitive_but_host_routine', 'disagree'),
+    ('sensitive_cloud_bootstrap_local_not_ancestor', 'Git'),
+    ('sensitive_base_mismatch', 'bases disagree'),
+])
+def test_v2_disagreement_or_bad_evidence_blocks_before_merge_and_controller(tmp_path, monkeypatch, case, reason):
+    kwargs = {}
+    path = 'routine'
+    if case == 'host_sensitive_diff':
+        kwargs['diff'] = raw(('M', 'frontend/app.js'), ('M', 'deploy/self_deploy.py'))
+    elif case == 'rename_from_backend':
+        kwargs['diff'] = raw(('R087', 'backend/app.py', '100644', '100644')).replace(
+            '\0backend/app.py\0', '\0backend/app.py\0frontend/app.js\0')
+    elif case == 'symlink_mode':
+        kwargs['diff'] = raw(('A', 'frontend/x.js', '000000', '120000'))
+    elif case == 'executable_mode':
+        kwargs['diff'] = raw(('M', 'tests/test_x.py', '100644', '100755'))
+    elif case == 'empty_diff':
+        kwargs['diff'] = ''
+    elif case == 'malformed_diff':
+        kwargs['diff'] = 'frontend/app.js\0'
+    elif case == 'overlarge':
+        kwargs['diff'] = raw(*[('M', f'tests/test_{index}.py') for index in range(251)])
+    elif case == 'base_mismatch':
+        kwargs['local'] = 'c' * 40
+    elif case == 'no_local_basis':
+        kwargs['local'] = None
+    elif case == 'not_descendant':
+        kwargs['ancestor'] = False
+    elif case == 'sensitive_but_host_routine':
+        path = 'sensitive'
+    elif case == 'sensitive_cloud_bootstrap_local_not_ancestor':
+        path, kwargs['base'], kwargs['ancestor'] = 'sensitive', None, False
+    elif case == 'sensitive_base_mismatch':
+        path, kwargs['local'] = 'sensitive', 'c' * 40
+    m, paths, request, api, effects, run, post = worker_v2(tmp_path, monkeypatch, path, **kwargs)
+    result = m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)
+    assert result['status'] == 'blocked' and reason in result['reason'], result
+    assert not [e for e in effects if e[0] in {'run', 'post'}]
+    assert not [c for c in git_calls(effects) if c[0] in {'merge', 'reset', 'stash', 'checkout'}]
+    # Consumed: a later tick never retries the same intent.
+    effects.clear()
+    assert m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)['status'] == 'duplicate'
+    assert not effects
+
+
+@pytest.mark.parametrize('local,status', [('c' * 40, 'blocked'), (BASE, 'ready')])
+def test_v2_check_only_compares_bases_without_fetch_or_writes(tmp_path, monkeypatch, local, status):
+    m, paths, request, api, effects, run, post = worker_v2(tmp_path, monkeypatch, local=local)
+    result = m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW, check_only=True)
+    assert result['status'] == status, result
+    if status == 'blocked':
+        assert 'bases disagree' in result['reason']
+    assert not paths.state.exists()
+    assert not [e for e in effects if e[0] in {'post', 'run'} or e[1][0] in {'fetch', 'merge', 'diff'}]
+
+
+def test_v2_policy_module_is_loaded_before_any_source_sync():
+    """Never import incoming policy code: it is bound at worker import time."""
+    import sys
+    m = module()
+    assert m.release_policy is sys.modules['deploy.release_policy']
