@@ -12,5 +12,6 @@ runs:
       run: |
         test "$GITHUB_ACTIONS" = true
         test "$RUNNER_ENVIRONMENT" = github-hosted
+        python -c 'import os; from scripts.prepare_native_test_runtime import validate_hosted_runner; validate_hosted_runner(os.environ)'
         sudo install -d --mode=0755 --owner="$(id -u)" --group="$(id -g)" /usr/local/lib/hermes-agent
         python scripts/prepare_native_test_runtime.py

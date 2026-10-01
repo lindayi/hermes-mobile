@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.prepare_native_test_runtime import (
     _child_environment,
@@ -57,6 +58,14 @@ def test_runner_guard_accepts_only_canonical_hosted_layout():
     workspace, temporary = validate_hosted_runner(hosted_environment())
     assert workspace == Path('/home/runner/work/hermes-mobile/hermes-mobile')
     assert temporary == Path('/home/runner/work/_temp')
+
+
+def test_action_validates_runner_before_privileged_runtime_creation():
+    action = yaml.safe_load((ROOT / '.github/actions/native-test-environment/action.yml').read_text())
+    run = action['runs']['steps'][-1]['run']
+    validate = run.index('validate_hosted_runner(os.environ)')
+    install = run.index('sudo install -d')
+    assert validate < install
 
 
 def test_runtime_spec_pins_public_sources_and_exact_four_preimages():
