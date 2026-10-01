@@ -103,13 +103,10 @@ jobs:
             // Exact mirror of deploy/release_policy.py; parity is tested by executing this script.
             const MAX_FILES = 250, MAX_PATH = 200;
             const CANONICAL = /^[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)*$/;
-            const FRONTEND = /^frontend\/([a-z0-9][a-z0-9-]*)\.(?:css|html|js|mjs)$/;
-            const FRONTEND_ICON = /^frontend\/icons\/[a-z0-9][a-z0-9-]*\.(?:png|svg)$/;
-            const FRONTEND_SENSITIVE = new Set(['frontend/sw.js', 'frontend/api.mjs', 'frontend/webauthn.mjs',
-              'frontend/manifest.webmanifest']);
-            const FRONTEND_SENSITIVE_TOKENS = new Set(['api', 'auth', 'credential', 'credentials', 'crypto',
-              'login', 'logout', 'passkey', 'passkeys', 'password', 'passwords', 'push', 'secret', 'secrets',
-              'subscription', 'sw', 'token', 'tokens', 'webauthn', 'worker']);
+            // Exact audited presentation-only frontend files (SEC-1); never a basename pattern.
+            const FRONTEND_ROUTINE = new Set(['frontend/styles.css', 'frontend/viewport.mjs',
+              'frontend/session-swipe.mjs', 'frontend/disclosure-reachability.mjs',
+              'frontend/icons/apple-touch-icon.png', 'frontend/icons/icon-192.png', 'frontend/icons/icon-512.png']);
             const TESTS = [/^tests\/test_[a-z0-9_]+\.py$/, /^tests\/browser\/[a-z0-9][a-z0-9-]*\.(?:spec|test)\.mjs$/,
               /^tests\/browser\/[a-z0-9_]+_fixture\.py$/, /^tests\/fixtures\/[a-z0-9][a-z0-9-]*\.json$/];
             const DOC = /^docs\/([a-z0-9][a-z0-9-]*)\.md$/;
@@ -121,13 +118,8 @@ jobs:
               'scheduler', 'secret', 'security', 'signing', 'token', 'webauthn', 'workflow'];
             const routinePath = path => {
               if (typeof path !== 'string' || path.length > MAX_PATH || !CANONICAL.test(path)) return false;
-              let match = FRONTEND.exec(path);
-              if (match) {
-                return !FRONTEND_SENSITIVE.has(path) &&
-                  !match[1].split('-').some(token => FRONTEND_SENSITIVE_TOKENS.has(token));
-              }
-              if (FRONTEND_ICON.test(path) || TESTS.some(pattern => pattern.test(path))) return true;
-              match = DOC.exec(path);
+              if (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => pattern.test(path))) return true;
+              const match = DOC.exec(path);
               return Boolean(match) && !DOC_SENSITIVE.some(word => match[1].includes(word));
             };
             const STATUS = {added: 'A', removed: 'D', modified: 'M', renamed: 'R'};

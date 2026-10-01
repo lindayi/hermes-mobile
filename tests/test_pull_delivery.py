@@ -444,7 +444,7 @@ def cloud_api(files=None, history=None):
     for ident, _, _, statuses in history:
         api[PREFIX + f'/deployments/{ident}/statuses'] = [{'state': state, 'creator': who}
                                                           for state, who in statuses]
-    files = [{'filename': 'frontend/app.js', 'status': 'modified'}] if files is None else files
+    files = [{'filename': 'frontend/styles.css', 'status': 'modified'}] if files is None else files
     api[PREFIX + f'/compare/{BASE}...{SHA}'] = {'status': 'ahead', 'ahead_by': 2, 'behind_by': 0,
                                                'merge_base_commit': {'sha': BASE}, 'files': files}
     return api
@@ -523,10 +523,14 @@ def parity_cases():
     cases = [[('modified', path, None)] for path in tables.ROUTINE_PATHS + tables.SENSITIVE_PATHS]
     cases += [
         [], [('added', 'frontend/new.js', None), ('removed', 'docs/ux.md', None)],
-        [('renamed', 'frontend/app.js', 'backend/app.py')], [('renamed', 'frontend/b.js', 'frontend/a.js')],
-        [('renamed', 'frontend/b.js', None)], [('copied', 'frontend/b.js', 'frontend/a.js')],
-        [('changed', 'frontend/app.js', None)], [('unchanged', 'frontend/app.js', None)],
-        [('modified', 'frontend/app.js', 'frontend/app.js')],
+        [('removed', 'frontend/viewport.mjs', None), ('added', 'docs/ux.md', None)],
+        [('renamed', 'frontend/styles.css', 'backend/app.py')],
+        [('renamed', 'frontend/styles.css', 'frontend/ui.mjs')],
+        [('renamed', 'frontend/viewport.mjs', 'frontend/session-swipe.mjs')],
+        [('renamed', 'frontend/viewport.mjs', None)],
+        [('copied', 'frontend/viewport.mjs', 'frontend/session-swipe.mjs')],
+        [('changed', 'frontend/styles.css', None)], [('unchanged', 'frontend/styles.css', None)],
+        [('modified', 'frontend/styles.css', 'frontend/styles.css')],
         [('modified', f'tests/test_{index}.py', None) for index in range(250)],
         [('modified', f'tests/test_{index}.py', None) for index in range(251)],
     ]
@@ -928,7 +932,7 @@ def worker_v2(tmp_path, monkeypatch, path='routine', *, diff=None, base=BASE, lo
             if args[0] == 'merge-base' and not ancestor:
                 raise RuntimeError('Git source verification failed')
             if args[0] == 'diff':
-                return raw(('M', 'frontend/app.js')) if diff is None else diff
+                return raw(('M', 'frontend/styles.css')) if diff is None else diff
             return ''
         return original(source, *args)
     monkeypatch.setattr(git_source, '_git', git)
@@ -985,18 +989,18 @@ def test_v2_disagreement_or_bad_evidence_blocks_before_merge_and_controller(tmp_
     kwargs = {}
     path = 'routine'
     if case == 'host_sensitive_diff':
-        kwargs['diff'] = raw(('M', 'frontend/app.js'), ('M', 'deploy/self_deploy.py'))
+        kwargs['diff'] = raw(('M', 'frontend/styles.css'), ('M', 'deploy/self_deploy.py'))
     elif case == 'rename_from_backend':
         kwargs['diff'] = raw(('R087', 'backend/app.py', '100644', '100644')).replace(
-            '\0backend/app.py\0', '\0backend/app.py\0frontend/app.js\0')
+            '\0backend/app.py\0', '\0backend/app.py\0frontend/styles.css\0')
     elif case == 'symlink_mode':
-        kwargs['diff'] = raw(('A', 'frontend/x.js', '000000', '120000'))
+        kwargs['diff'] = raw(('A', 'frontend/viewport.mjs', '000000', '120000'))
     elif case == 'executable_mode':
         kwargs['diff'] = raw(('M', 'tests/test_x.py', '100644', '100755'))
     elif case == 'empty_diff':
         kwargs['diff'] = ''
     elif case == 'malformed_diff':
-        kwargs['diff'] = 'frontend/app.js\0'
+        kwargs['diff'] = 'frontend/styles.css\0'
     elif case == 'overlarge':
         kwargs['diff'] = raw(*[('M', f'tests/test_{index}.py') for index in range(251)])
     elif case == 'base_mismatch':
@@ -1038,3 +1042,69 @@ def test_v2_policy_module_is_loaded_before_any_source_sync():
     import sys
     m = module()
     assert m.release_policy is sys.modules['deploy.release_policy']
+
+
+def real_git_release(tmp_path, edit):
+    """Commit the actual frontend tree, apply `edit`, commit again; return (repo, base, sha)."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+    repo = tmp_path / 'source'
+    shutil.copytree(Path(__file__).resolve().parents[1] / 'frontend', repo / 'frontend')
+
+    def git(*args):
+        return subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@invalid',
+                               '-c', 'commit.gpgsign=false', *args],
+                              check=True, capture_output=True, text=True, timeout=60).stdout.strip()
+    git('init', '-q', '-b', 'main')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'base')
+    base = git('rev-parse', 'HEAD')
+    edit(repo / 'frontend')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'change')
+    return repo, base, git('rev-parse', 'HEAD')
+
+
+def replace_once(name, old, new):
+    def edit(frontend):
+        path = frontend / name
+        text = path.read_text()
+        assert text.count(old) == 1, (name, old)
+        path.write_text(text.replace(old, new))
+    return edit
+
+
+def add_file(name, text):
+    return lambda frontend: (frontend / name).write_text(text)
+
+
+SEC1_CASES = {
+    # SEC-1: passkey recovery enrollment lives in the ui.mjs authentication monolith.
+    'ui_auth_recovery': (replace_once('ui.mjs', "kind === 'register' || kind === 'recovery'",
+                                      "kind === 'register'"), 'sensitive'),
+    'app_bootstrap_sw': (replace_once('app.js', "{scope:'/hermes/'}", "{scope:'/'}"), 'sensitive'),
+    'index_auth_markup': (replace_once('index.html', 'secure passkey sign-in', 'sign-in'), 'sensitive'),
+    'markdown_links': (replace_once('markdown.mjs', 'const token=match[0];', 'const token=match[0];//'),
+                       'sensitive'),
+    'new_code_module': (add_file('profile-card.mjs', 'export const x = 1;\n'), 'sensitive'),
+    'new_stylesheet': (add_file('extra.css', 'body{}\n'), 'sensitive'),
+    'presentation_only': (lambda frontend: (frontend / 'styles.css').write_text(
+        (frontend / 'styles.css').read_text() + '\n/* spacing */\n'), 'routine'),
+}
+
+
+@pytest.mark.parametrize('case', sorted(SEC1_CASES))
+def test_sec1_real_git_diff_and_executed_cloud_classifier_agree_on_auth_modules(tmp_path, case):
+    """Host full Git diff and the actual workflow classifier both classify real frontend edits."""
+    from deploy import release_policy
+    m = module()
+    edit, expected = SEC1_CASES[case]
+    repo, base, sha = real_git_release(tmp_path, edit)
+    changes = m.release_changes(repo, base, sha)
+    assert changes and release_policy.classify(changes).risk == expected
+    statuses = {'A': 'added', 'D': 'removed', 'M': 'modified'}
+    files = [{'filename': change.path, 'status': statuses[change.status]} for change in changes]
+    output = run_script('classify', cloud_api(files))
+    assert 'error' not in output, output
+    assert output['outputs'] == {'risk': expected, 'base_sha': BASE}

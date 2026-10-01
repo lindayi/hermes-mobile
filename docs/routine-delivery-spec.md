@@ -28,7 +28,7 @@ tested by executing the actual workflow script against the same table.
 
 | Routine | Pattern |
 |---|---|
-| Frontend UI assets | `frontend/<name>.{css,html,js,mjs}`, `frontend/icons/<name>.{png,svg}` |
+| Presentation-only frontend files (exact audited list, not a pattern) | `frontend/styles.css`, `frontend/viewport.mjs`, `frontend/session-swipe.mjs`, `frontend/disclosure-reachability.mjs`, `frontend/icons/{apple-touch-icon,icon-192,icon-512}.png` |
 | Tests | `tests/test_<name>.py`, `tests/browser/<name>.{spec,test}.mjs`, `tests/browser/<name>_fixture.py`, `tests/fixtures/<name>.json` |
 | Non-operational docs | `docs/<name>.md` whose name has no operational/security keyword |
 
@@ -38,10 +38,18 @@ Always sensitive, with no broad fallback:
   `.github/` (including the host-test manifest), root files such as `AGENTS.md`,
   `README.md`, `package.json`, `package-lock.json`, `requirements.lock`, and any
   unknown or future top-level path.
-- Security-relevant frontend files: `frontend/sw.js`, `frontend/api.mjs`,
-  `frontend/webauthn.mjs`, `frontend/manifest.webmanifest`, and any frontend name
-  containing a token such as `auth`, `passkey`, `credential`, `token`, `secret`,
-  `login`, `password`, `crypto`, `worker`, `push`, `subscription`, `api` or `sw`.
+- Every other frontend file, including every **new** frontend file whatever its
+  name. In particular `frontend/ui.mjs` (passkey login, registration, recovery,
+  enrollment/recovery codes, session clearing, one-time secret display and
+  credential/device revocation), `frontend/app.js` (bootstrap and service-worker
+  registration), `frontend/index.html` (auth markup), `frontend/api.mjs`,
+  `frontend/webauthn.mjs`, `frontend/sw.js`, `frontend/manifest.webmanifest`,
+  `frontend/markdown.mjs` (link rendering), `frontend/tool-details.mjs` (secret
+  redaction), `frontend/model-controls.mjs` (API calls, per-user storage),
+  `frontend/background-placement.mjs` (cross-session placement) and SVG icons.
+  A file joins the routine list only by a reviewed change to both classifiers
+  (itself a sensitive change). `ui.mjs` stays sensitive until authentication and
+  account management are split into explicitly sensitive modules.
 - Test infrastructure outside the patterns above (probes, bridges, conftest,
   shared browser harness modules).
 - Docs whose name contains operational/security keywords (for example
@@ -165,8 +173,11 @@ Native, dependency and migration maintenance are never routine.
 
 ## Acceptance cases
 
-1. Routine frontend/test/doc-only diff from verified base → routine job, no
-   review, host recomputes routine, controller runs.
+1. Routine audited-presentation/test/doc-only diff from verified base → routine
+   job, no review, host recomputes routine, controller runs.
+1a. (SEC-1) A real Git diff changing passkey recovery handling in `frontend/ui.mjs`,
+   bootstrap in `app.js`, auth markup in `index.html`, link rendering, or adding
+   any new frontend file → sensitive on both host and cloud.
 2. Any backend/deploy/patch/lock/.github/script/instruction/unknown path, a
    rename from such a path, a symlink/executable mode, >250 files, an empty or
    truncated diff → sensitive.

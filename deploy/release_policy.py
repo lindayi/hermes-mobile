@@ -14,14 +14,15 @@ MAX_PATH = 200
 
 # Canonical relative POSIX path: ASCII, no empty/hidden/dot segments.
 CANONICAL = re.compile(r'[A-Za-z0-9_][A-Za-z0-9._-]*(?:/[A-Za-z0-9_][A-Za-z0-9._-]*)*')
-FRONTEND = re.compile(r'frontend/([a-z0-9][a-z0-9-]*)\.(?:css|html|js|mjs)')
-FRONTEND_ICON = re.compile(r'frontend/icons/[a-z0-9][a-z0-9-]*\.(?:png|svg)')
-FRONTEND_SENSITIVE = frozenset({'frontend/sw.js', 'frontend/api.mjs', 'frontend/webauthn.mjs',
-                                'frontend/manifest.webmanifest'})
-FRONTEND_SENSITIVE_TOKENS = frozenset({
-    'api', 'auth', 'credential', 'credentials', 'crypto', 'login', 'logout', 'passkey', 'passkeys',
-    'password', 'passwords', 'push', 'secret', 'secrets', 'subscription', 'sw', 'token', 'tokens',
-    'webauthn', 'worker'})
+# Exact audited presentation-only frontend files (SEC-1). Not a basename pattern:
+# ui.mjs (passkey login/recovery/account management), app.js (bootstrap and
+# service-worker registration), index.html (auth markup), api/webauthn/sw,
+# manifest, link rendering (markdown), secret redaction (tool-details), API calls
+# (model-controls), cross-session placement, SVG and every new file stay sensitive.
+FRONTEND_ROUTINE = frozenset({
+    'frontend/styles.css', 'frontend/viewport.mjs', 'frontend/session-swipe.mjs',
+    'frontend/disclosure-reachability.mjs', 'frontend/icons/apple-touch-icon.png',
+    'frontend/icons/icon-192.png', 'frontend/icons/icon-512.png'})
 TESTS = (re.compile(r'tests/test_[a-z0-9_]+\.py'),
          re.compile(r'tests/browser/[a-z0-9][a-z0-9-]*\.(?:spec|test)\.mjs'),
          re.compile(r'tests/browser/[a-z0-9_]+_fixture\.py'),
@@ -60,11 +61,7 @@ def path_is_routine(path):
     if not isinstance(path, str) or not path.isascii() or len(path) > MAX_PATH \
             or not CANONICAL.fullmatch(path):
         return False
-    match = FRONTEND.fullmatch(path)
-    if match:
-        tokens = set(match.group(1).split('-'))
-        return path not in FRONTEND_SENSITIVE and not tokens & FRONTEND_SENSITIVE_TOKENS
-    if FRONTEND_ICON.fullmatch(path) or any(pattern.fullmatch(path) for pattern in TESTS):
+    if path in FRONTEND_ROUTINE or any(pattern.fullmatch(path) for pattern in TESTS):
         return True
     match = DOC.fullmatch(path)
     return bool(match) and not any(word in match.group(1) for word in DOC_SENSITIVE)
