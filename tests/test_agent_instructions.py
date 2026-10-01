@@ -305,6 +305,20 @@ def test_pull_request_template_records_linked_scope_evidence_risks_and_review():
     assert 'exact head SHA' in template
 
 
+def test_pull_request_template_links_work_outside_repository_file_view():
+    from urllib.parse import urlsplit
+
+    template = (ROOT / '.github/pull_request_template.md').read_text()
+    links = re.findall(r'\]\(([^)]+)\)', template)
+    assert links
+    for link in links:
+        url = urlsplit(link)
+        assert url.scheme == 'https' and url.netloc == 'github.com'
+        prefix = '/lindayi/hermes-mobile/blob/main/'
+        assert url.path.startswith(prefix)
+        assert (ROOT / url.path.removeprefix(prefix)).is_file()
+
+
 def test_completed_pull_request_template_passes_issue_link_policy():
     from test_issue_link_policy import evaluate
 
