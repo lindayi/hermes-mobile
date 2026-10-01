@@ -10,9 +10,28 @@ concurrency:
   group: source-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
-  source-ci:
+  build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Build public assets exactly once
+        run: python -B -m deploy.release_artifact build --bundle "$RUNNER_TEMP/release.tar"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release.tar
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -23,26 +42,118 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
-          cache: npm
       - name: Python and JavaScript syntax
         run: |
           python -c 'from pathlib import Path; files=list(Path(".").rglob("*.py")); [compile(p.read_bytes(),str(p),"exec") for p in files]; print(f"Parsed {len(files)} Python files")'
           while IFS= read -r -d '' file; do node --check "$file"; done < <(find frontend tests/browser -type f \( -name '*.mjs' -o -name '*.js' \) -print0)
-      - name: Secret scan (pinned binary, exact reviewed false-positive exclusions)
+      - name: Secret scan
         run: |
           curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o "$RUNNER_TEMP/gitleaks.tar.gz"
           printf '%s  %s\n' 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb "$RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
           "$RUNNER_TEMP/gitleaks" dir . --redact --no-banner
-      - name: Install pinned test dependencies
+  js:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/test-environment
+        with:
+          browser: 'true'
+      - run: python -B scripts/ci_tests.py js
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/test-environment
+        with:
+          browser: 'true'
+      - run: python -B scripts/ci_tests.py --shard ${{ matrix.shard }} --shards 2 python
+      - name: Bounded synthetic failure logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: python-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: /tmp/hmt-*/r-*/run.log
+          retention-days: 3
+          if-no-files-found: ignore
+  browser:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/test-environment
+        with:
+          browser: 'true'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundle
+      - name: Consume exact generated bundle (no rebuild)
+        run: python -B -m deploy.release_artifact unpack --bundle "$RUNNER_TEMP/bundle/release.tar" --destination "$RUNNER_TEMP/consumed"
+      - run: python -B scripts/ci_tests.py --assets "$RUNNER_TEMP/consumed/public" --shard ${{ matrix.shard }} --shards 4 browser
+      - name: Bounded synthetic failure evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: browser-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: |
+            /tmp/hmt-*/r-*/run.log
+            /tmp/hmt-*/r-*/artifacts/*.png
+            /tmp/hmt-*/r-*/artifacts/*.jpg
+            /tmp/hmt-*/r-*/artifacts/*.webp
+            /tmp/hmt-*/r-*/artifacts/*.log
+          retention-days: 3
+          if-no-files-found: ignore
+  source-ci:
+    if: ${{ always() }}
+    needs: [build, checks, js, python, browser]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every hosted suite to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
         run: |
-          python -m pip install -r requirements.lock
-          npm ci --ignore-scripts --no-audit --no-fund
-      - name: Legacy test-path compatibility on disposable hosted runner only
-        run: |
-          sudo mkdir -p /usr/local/lib/hermes-agent /home/lindayi/.hermes/node/bin
-          sudo ln -s "$GITHUB_WORKSPACE/node_modules" /usr/local/lib/hermes-agent/node_modules
-          sudo ln -s "$GITHUB_WORKSPACE/package.json" /usr/local/lib/hermes-agent/package.json
-          sudo ln -s "$(command -v node)" /home/lindayi/.hermes/node/bin/node
-      - name: Managed JavaScript unit suite
-        run: HERMES_TEST_PYTHON="$(command -v python)" python scripts/test.py js
+          python3 - <<'PY'
+          import json, os, sys
+          results = json.loads(os.environ['RESULTS'])
+          failed = {name: value['result'] for name, value in results.items() if value['result'] != 'success'}
+          print(json.dumps(results, indent=2))
+          sys.exit(bool(failed) or set(results) != {'build','checks','js','python','browser'})
+          PY
+  attest:
+    # PRs and manual runs can test bundles but can never sign a production release.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'lindayi/hermes-mobile' }}
+    needs: source-ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bundle
+      - name: Attest only the fully tested main bundle
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-path: ${{ runner.temp }}/bundle/release.tar
