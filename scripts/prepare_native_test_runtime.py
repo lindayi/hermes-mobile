@@ -157,6 +157,7 @@ def _child_environment(work, target):
         'GIT_TERMINAL_PROMPT': '0',
         'PIP_DISABLE_PIP_VERSION_CHECK': '1',
         'UV_NO_PROGRESS': '1',
+        'UV_NATIVE_TLS': 'true',
         'UV_PROJECT_ENVIRONMENT': str(target / 'venv'),
         'PLAYWRIGHT_SKIP_BROWSER_GC': '1',
     }

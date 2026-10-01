@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts.prepare_native_test_runtime import (
+    _child_environment,
     load_runtime_spec,
     _remove_created_runtime,
     validate_hosted_runner,
@@ -111,3 +112,14 @@ def test_failed_setup_cleanup_removes_only_new_runtime_entries(tmp_path):
     _remove_created_runtime(target, {'package.json'})
     assert list(target.iterdir()) == [target / 'package.json']
     assert preserved.read_text() == 'private test harness'
+
+
+def test_installer_uses_private_workspace_and_runner_certificate_store(tmp_path):
+    work = tmp_path / 'work'
+    work.mkdir()
+    environment = _child_environment(work, tmp_path / 'runtime')
+    assert environment['HOME'] == str(work / 'home')
+    assert environment['PIP_CACHE_DIR'].startswith(str(work))
+    assert environment['UV_CACHE_DIR'].startswith(str(work))
+    assert environment['UV_NATIVE_TLS'] == 'true'
+    assert not {'GITHUB_TOKEN', 'GH_TOKEN'} & environment.keys()
