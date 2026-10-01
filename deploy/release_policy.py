@@ -121,7 +121,8 @@ def parse_git_raw(output):
             raise ValueError('Unexpected Git similarity score')
         count = 2 if status in {'R', 'C'} else 1
         paths = fields[index + 1:index + 1 + count]
-        if len(paths) != count or any(not path or path.startswith(':') for path in paths):
+        # In --raw -z, NUL framing and status determine path fields, not their prefix.
+        if len(paths) != count or any(not path for path in paths):
             raise ValueError('Malformed Git raw diff paths')
         previous, path = (paths[0], paths[1]) if count == 2 else (None, paths[0])
         changes.append(Change(status, path, previous, old_mode, new_mode))

@@ -165,6 +165,11 @@ def test_parse_git_raw_returns_exact_changes():
     f':100644 100644 {OID_A[:7]} {OID_B} M\0frontend/styles.css\0', f':100644 100644 {OID_A} {OID_B} RR\0a\0b\0',
     f':100644 100644 {OID_A} {OID_B} R100\0frontend/a.js\0',
     f':100644 100644 {OID_A} {OID_B} M\0frontend/styles.css',
+    # NUL framing still rejects empty paths and extra fields, not colon-prefixed names.
+    f':100644 100644 {OID_A} {OID_B} M\0\0',
+    f':100644 100644 {OID_A} {OID_B} R100\0\0b\0',
+    f':100644 100644 {OID_A} {OID_B} R100\0a\0\0',
+    f':100644 100644 {OID_A} {OID_B} M\0a\0:not-a-header\0',
 ])
 def test_parse_git_raw_rejects_malformed_output(output):
     m = module()

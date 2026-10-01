@@ -1286,6 +1286,89 @@ def real_git_mode_release(tmp_path, change):
     return repo, base, sha, tree_entries(base), tree_entries(sha)
 
 
+@pytest.mark.parametrize('old,new', [
+    (None, ':notes.md'), ('docs/ux.md', ':notes.md'), (':notes.md', 'docs/ux.md'),
+])
+@pytest.mark.parametrize('consumer', ['inventory', 'worker'])
+def test_real_git_colon_paths_remain_sensitive_and_owner_approved(tmp_path, monkeypatch, old, new, consumer):
+    import subprocess
+    from deploy import release_policy
+
+    repo = tmp_path / 'colon-repo'
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@invalid',
+                               '-c', 'commit.gpgsign=false', *args],
+                              check=True, capture_output=True, text=True, timeout=60).stdout
+
+    git('init', '-q', '-b', 'main')
+    if old:
+        (repo / old).parent.mkdir(parents=True, exist_ok=True)
+        (repo / old).write_text('notes\n')
+    git('add', '-A')  # Avoid treating the colon-prefixed filename as a Git pathspec.
+    git('commit', '-q', '--allow-empty', '-m', 'base')
+    base = git('rev-parse', 'HEAD').strip()
+    (repo / new).parent.mkdir(parents=True, exist_ok=True)
+    if old:
+        (repo / old).rename(repo / new)
+    else:
+        (repo / new).write_text('notes\n')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'change')
+    sha = git('rev-parse', 'HEAD').strip()
+
+    def entries(revision):
+        result = []
+        for record in git('ls-tree', '-r', '-z', revision).split('\0'):
+            if record:
+                header, path = record.split('\t', 1)
+                mode, kind, oid = header.split()
+                result.append({'path': path, 'mode': mode, 'type': kind, 'sha': oid})
+        return result
+
+    files = [{'filename': new, 'status': 'renamed' if old else 'added',
+              **({'previous_filename': old} if old else {})}]
+    api = promote_api('sensitive', base=base, sha=sha, files=files,
+                      base_entries=entries(base), head_entries=entries(sha))
+    cloud = run_script('classify', api, sha=sha)
+    assert 'error' not in cloud and not cloud['writes'], cloud
+    assert cloud['outputs'] == {'risk': 'sensitive', 'base_sha': base}
+    env = {'RELEASE_RISK': 'sensitive', 'CLASSIFIED_RISK': 'sensitive', 'BASE_SHA': base}
+    approved = run_script('promote-sensitive', api, sha=sha, env=env)
+    assert 'error' not in approved and len(approved['writes']) == 2, approved
+    assert approved['writes'][0]['payload']['base_sha'] == base
+    assert approved['writes'][1]['state'] == 'queued'
+    api[PREFIX + '/actions/runs/20/approvals'] = []
+    unapproved = run_script('promote-sensitive', api, sha=sha, env=env)
+    assert unapproved.get('error') and not unapproved['writes'], unapproved
+    routine = run_script('promote-routine', api, sha=sha, env={
+        **env, 'RELEASE_RISK': 'routine', 'CLASSIFIED_RISK': 'routine'})
+    assert routine.get('error') and not routine['writes'], routine
+
+    if consumer == 'inventory':
+        changes = module().release_changes(repo, base, sha)
+        assert {item.path for item in changes} == {path for path in (old, new) if path}
+        assert release_policy.classify(changes).risk == 'sensitive'
+        # With rename detection, NUL framing assigns two paths, including either colon side.
+        renamed = release_policy.parse_git_raw(git('diff', '--raw', '-z', '--no-abbrev', '-M', base, sha))
+        assert renamed == [release_policy.Change('R' if old else 'A', new, old,
+                                                 '100644' if old else '000000', '100644')]
+        assert release_policy.classify(renamed).risk == 'sensitive'
+    else:
+        # Exercise poll_once with real Git output; API, sync and controller remain synthetic.
+        diff = git('diff', '--raw', '-z', '--no-renames', '--no-abbrev', base, sha)
+        m, paths, request, api, effects, run, post = worker_v2(
+            tmp_path, monkeypatch, 'sensitive', diff=diff)
+        result = m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)
+        assert result['status'] == 'deployed', result
+        calls = git_calls(effects)
+        assert next(i for i, call in enumerate(calls) if call[0] == 'diff') < next(
+            i for i, call in enumerate(calls) if call[0] == 'merge')
+        assert len([e for e in effects if e[0] == 'run']) == 1
+        assert [e[2]['state'] for e in effects if e[0] == 'post'] == ['in_progress', 'success']
+
+
 def replace_once(name, old, new):
     def edit(frontend):
         path = frontend / name
