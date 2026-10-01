@@ -73,8 +73,10 @@ draft or conflict, all required checks including `cloud-review` are green, the
 review gate passes, no fixer may be running, and sensitive authorization is
 current. Both the PR head and the current `main` SHA are re-read before enabling
 auto-merge. The owner-managed branch rule must also require the PR branch to be
-up to date; the coordinator cannot alter branch protection or make a remote
-write conditional on a SHA. A new head has no inherited
+up to date (strict required checks) and require conversation resolution; the
+coordinator cannot alter branch protection or make a remote write conditional on
+a SHA. Current review, thread, check, and policy evidence is fetched again
+immediately before the merge request. A new head has no inherited
 `cloud-review` success, so required branch protection must keep it blocked until
 the new head is evaluated. Ambiguous writes are reconciled from GitHub state and
 are never blindly repeated.
@@ -90,8 +92,8 @@ permissions, deployment workflows, the deployment controller, or running
 services. Before unattended use, an owner must separately review the numeric
 Copilot reviewer identity and configure `cloud-review` as a required status while
 preserving existing required checks (including `integration-tests` when required),
-`agent-review`, and an up-to-date branch requirement. If this policy is absent or
-unreadable, auto-merge remains disabled.
+`agent-review`, strict up-to-date checks, and required conversation resolution.
+If this policy is absent or unreadable, auto-merge remains disabled.
 
 Native compatibility gating and routine deployment policy remain follow-ups under
 issue #5. This slice does not change the current global `AGENTS.md` review,

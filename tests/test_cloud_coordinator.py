@@ -19,6 +19,16 @@ from deploy.cloud_coordinator import (
 )
 
 
+def test_auto_merge_requires_strict_current_base_and_conversation_resolution(tmp_path):
+    for index, api in enumerate((
+        FakeApi(strict_protection=False),
+        FakeApi(conversation_resolution=False),
+    )):
+        result = Coordinator(api, StateStore(tmp_path / f"state-{index}.json")).run(apply=True)
+        assert not api.graphql_writes
+        assert not result["pull_requests"][0]["auto_merge_eligible"]
+
+
 OWNER = 5164171
 COPILOT_REVIEWER = 175728472
 HEAD = "a" * 40
@@ -162,6 +172,8 @@ def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
         sensitive_authorized=True,
         cloud_review_required=True,
         cloud_review_status_owned=True,
+        up_to_date_required=True,
+        conversation_resolution_required=True,
         agent_running=False,
     )
     assert eligible_for_auto_merge(pr, **args)
@@ -171,12 +183,17 @@ def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
         ("sensitive_authorized", False),
         ("cloud_review_required", False),
         ("cloud_review_status_owned", False),
+        ("up_to_date_required", False),
+        ("conversation_resolution_required", False),
         ("agent_running", True),
         ("checks_complete", False),
     ):
         assert not eligible_for_auto_merge(pr, **(args | {key: value}))
     assert not eligible_for_auto_merge(pr | {"draft": True}, **args)
     assert not eligible_for_auto_merge(pr | {"mergeable": None}, **args)
+    assert not eligible_for_auto_merge(
+        pr | {"mergeable_state": "behind"}, **args,
+    )
 
 
 def test_repair_request_is_bounded_deduplicable_and_uses_only_actionable_evidence():
@@ -307,7 +324,10 @@ class FakeApi:
                  sensitive=False, authorize=False, authorize_sha=HEAD, source_failure=False,
                  unresolved=False, fail_fix=False, uncertain_merge=False,
                  status_author_id=OWNER, advance_main=False, issue_is_pull=True,
-                 active_agent=False):
+                 active_agent=False, strict_protection=True,
+                 conversation_resolution=True, source_failure_sha=HEAD,
+                 head_sha=HEAD, reopen_after_first=False, review_status_present=True,
+                 active_after_first=False):
         self.author_id = author_id
         self.race = race
         self.fail = fail
@@ -320,11 +340,24 @@ class FakeApi:
         self.advance_main = advance_main
         self.main_reads = 0
         self.active_agent = active_agent
+        self.active_after_first = active_after_first
+        self.strict_protection = strict_protection
+        self.conversation_resolution = conversation_resolution
+        self.source_failure_sha = source_failure_sha
+        self.head_sha = head_sha
+        self.reopen_after_first = reopen_after_first
+        self.review_status_present = review_status_present
+        self.thread_reads = 0
+        self.workflow_reads = 0
+        self.workflow_routes = []
         self.pull_reads = 0
         self.writes = []
         self.fix_attempts = 0
         self.graphql_writes = []
-        self.pull = valid_pr() | {"node_id": "PR_node_16", "auto_merge": None}
+        self.pull = valid_pr() | {
+            "node_id": "PR_node_16", "auto_merge": None,
+            "head": {"sha": head_sha, "ref": "topic", "repo": {"id": 1399942965}},
+        }
         self.issue = {"number": 16, "pull_request": {"url": "pull/16"} if issue_is_pull else None}
         self.comments = [{
             "id": 123, "user": {"id": author_id}, "body": "/hermes enroll",
@@ -345,6 +378,10 @@ class FakeApi:
             if self.advance_main and self.main_reads > 1:
                 return {"sha": "d" * 40}
             return {"sha": BASE}
+        if route.endswith("/branches/main/protection"):
+            return {"required_conversation_resolution": {
+                "enabled": self.conversation_resolution,
+            }}
         if route == "repos/lindayi/hermes-mobile/pulls/16":
             self.pull_reads += 1
             if self.race and self.pull_reads >= 3:
@@ -352,7 +389,10 @@ class FakeApi:
                                              "repo": {"id": 1399942965}}}
             return self.pull
         if route.endswith("/branches/main/protection/required_status_checks"):
-            return {"contexts": ["integration-tests", "cloud-review"]}
+            return {
+                "contexts": ["integration-tests", "cloud-review"],
+                "strict": self.strict_protection,
+            }
         if route.endswith("/rules/branches/main"):
             return []
         raise AssertionError(f"Unexpected API read: {route}")
@@ -370,28 +410,32 @@ class FakeApi:
             return [{"filename": "frontend/app.js"}]
         if route.endswith("/pulls/16/reviews?per_page=100"):
             return [{
-                "state": "APPROVED", "commit_id": HEAD,
+                "state": "APPROVED", "commit_id": self.head_sha,
                 "submitted_at": "2026-10-01T12:00:00Z",
                 "user": {"id": COPILOT_REVIEWER},
             }]
-        if "/check-runs?" in route:
+        if f"/commits/{self.head_sha}/check-runs?" in route:
             return [{
                 "name": "integration-tests", "status": "completed",
                 "conclusion": "success",
             }]
-        if route.endswith("/commits/" + HEAD + "/statuses?per_page=100"):
+        if route.endswith("/commits/" + self.head_sha + "/statuses?per_page=100"):
+            if not self.review_status_present:
+                return []
             return [{
                 "context": "cloud-review", "state": "success",
                 "creator": {"id": self.status_author_id}, "created_at": "2026-10-01T12:01:00Z",
             }]
         if "/actions/runs?" in route:
+            self.workflow_reads += 1
+            self.workflow_routes.append(route)
             if self.source_failure:
                 return [{
-                    "id": 567, "name": "Source checks", "head_sha": HEAD,
+                    "id": 567, "name": "Source checks", "head_sha": self.source_failure_sha,
                     "status": "completed", "conclusion": "failure",
                     "pull_requests": [{"number": 16}],
                 }]
-            if self.active_agent:
+            if self.active_agent or (self.active_after_first and self.workflow_reads > 1):
                 return [{
                     "id": 789, "name": "Running Copilot cloud agent",
                     "head_sha": "c" * 40, "status": "in_progress",
@@ -400,6 +444,10 @@ class FakeApi:
         raise AssertionError(f"Unexpected API list: {route}")
 
     def graphql(self, query, variables):
+        self.thread_reads += 1
+        unresolved = self.unresolved or (
+            self.reopen_after_first and self.thread_reads > 1
+        )
         nodes = [{
             "id": "PRRT_kw1", "isResolved": False, "comments": {
                 "nodes": [{
@@ -407,7 +455,7 @@ class FakeApi:
                 }],
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
             },
-        }] if self.unresolved else []
+        }] if unresolved else []
         return {"data": {"repository": {"pullRequest": {"reviewThreads": {
             "nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None},
         }}}}}
@@ -447,6 +495,8 @@ def test_plan_is_read_only_and_apply_uses_protected_auto_merge(tmp_path):
     assert "enablePullRequestAutoMerge" in api.graphql_writes[0][0]
     assert not api.writes
     assert store.snapshot()["enrollments"]["16"]["comment"] == 123
+    assert any("&branch=topic" in route for route in api.workflow_routes)
+    assert all("head_branch=" not in route for route in api.workflow_routes)
 
 
 def test_head_race_fences_auto_merge_and_marks_action_superseded(tmp_path):
@@ -455,7 +505,7 @@ def test_head_race_fences_auto_merge_and_marks_action_superseded(tmp_path):
     Coordinator(api, store).run(apply=True)
     assert not api.graphql_writes
     actions = store.actions()
-    assert actions["auto-merge:16:" + HEAD]["status"] == "superseded"
+    assert actions[f"auto-merge:16:{HEAD}:{BASE}"]["status"] == "superseded"
 
 
 def test_main_advance_fences_auto_merge_even_when_head_is_unchanged(tmp_path):
@@ -463,7 +513,7 @@ def test_main_advance_fences_auto_merge_even_when_head_is_unchanged(tmp_path):
     store = StateStore(tmp_path / "state.json")
     Coordinator(api, store).run(apply=True)
     assert not api.graphql_writes
-    assert store.action("auto-merge:16:" + HEAD)["status"] == "superseded"
+    assert store.action(f"auto-merge:16:{HEAD}:{BASE}")["status"] == "superseded"
 
 
 def test_foreign_cloud_review_status_cannot_authorize_auto_merge(tmp_path):
@@ -524,6 +574,38 @@ def test_sensitive_change_needs_owner_authorization_for_the_exact_current_sha(tm
     assert allowed_store.snapshot()["enrollments"]["16"]["sensitive_sha"] == HEAD
 
 
+def test_owner_can_authorize_a_new_current_head_after_enrollment(tmp_path):
+    new_head = "c" * 40
+    api = FakeApi(
+        sensitive=True, authorize=True, authorize_sha=new_head, head_sha=new_head,
+    )
+    store = StateStore(tmp_path / "state.json")
+    store.enroll({"issue": 16, "comment": 122, "head": HEAD, "base": BASE})
+    store.record_event("123")
+    Coordinator(api, store).run(apply=True)
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["head"] == HEAD
+    assert enrollment["sensitive_sha"] == new_head
+
+
+def test_scan_cursor_and_owner_commands_commit_atomically(tmp_path):
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    enrollment = {"issue": 16, "comment": 123, "head": HEAD, "base": BASE}
+    authorization = {
+        "issue": 16, "comment": "124", "head": "c" * 40, "validated": True,
+    }
+    store.commit_scan(
+        "2026-10-01T12:00:00Z", ["123", "124"],
+        commands=[("authorize", authorization), ("enroll", enrollment)],
+    )
+    restarted = StateStore(path)
+    state = restarted.snapshot()
+    assert state["cursor"] == "2026-10-01T12:00:00Z"
+    assert set(state["events"]) == {"123", "124"}
+    assert state["enrollments"]["16"]["sensitive_sha"] == "c" * 40
+
+
 def test_stale_owner_sensitive_authorization_does_not_carry_to_current_head(tmp_path):
     api = FakeApi(sensitive=True, authorize=True, authorize_sha=BASE)
     store = StateStore(tmp_path / "state.json")
@@ -545,6 +627,27 @@ def test_failed_source_workflow_is_batched_without_accessing_run_logs(tmp_path):
     assert result["pull_requests"][0]["reasons"] == ["review"]
 
 
+def test_old_source_workflow_failure_is_not_attributed_to_current_head(tmp_path):
+    api = FakeApi(source_failure=True, source_failure_sha="c" * 40)
+    Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
+    assert not any("@copilot" in body.get("body", "") for _, body in api.writes)
+
+
+def test_review_and_threads_are_refetched_before_enabling_auto_merge(tmp_path):
+    api = FakeApi(reopen_after_first=True)
+    result = Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
+    assert api.thread_reads >= 2
+    assert not api.graphql_writes
+    assert "review" in result["pull_requests"][0]["reasons"]
+
+
+def test_cloud_review_success_status_is_not_published_from_stale_threads(tmp_path):
+    api = FakeApi(reopen_after_first=True, review_status_present=False)
+    Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
+    assert api.thread_reads >= 2
+    assert not any(route.endswith("/statuses/" + HEAD) for route, _ in api.writes)
+
+
 def test_conflicts_are_not_sent_to_a_fixer_for_neutral_reconciliation(tmp_path):
     api = FakeApi(source_failure=True, unresolved=True)
     api.pull = api.pull | {"mergeable": False, "mergeable_state": "dirty"}
@@ -559,6 +662,14 @@ def test_active_copilot_run_on_pr_branch_serializes_fixer_even_without_pr_metada
     result = Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
     assert not any("@copilot" in body.get("body", "") for _, body in api.writes)
     assert result["pull_requests"][0]["reasons"] == ["review", "agent"]
+
+
+def test_agent_starting_after_plan_is_rechecked_before_fix_dispatch(tmp_path):
+    api = FakeApi(unresolved=True, active_after_first=True)
+    result = Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
+    assert api.workflow_reads >= 2
+    assert not any("@copilot" in body.get("body", "") for _, body in api.writes)
+    assert result["pull_requests"][0]["repair_requested"] is False
 
 
 def test_response_uncertain_agent_dispatch_is_reconciled_never_retried(tmp_path):
@@ -581,11 +692,11 @@ def test_auto_merge_ambiguous_write_reconciles_from_github_state_without_retry(t
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store)
     coordinator.run(apply=True)
-    action = store.action("auto-merge:16:" + HEAD)
+    action = store.action(f"auto-merge:16:{HEAD}:{BASE}")
     assert action["status"] == "uncertain"
     coordinator.run(apply=True)
     assert len(api.graphql_writes) == 1
-    assert store.action("auto-merge:16:" + HEAD)["status"] == "sent"
+    assert store.action(f"auto-merge:16:{HEAD}:{BASE}")["status"] == "sent"
 
 
 def test_cli_apply_requires_explicit_once():

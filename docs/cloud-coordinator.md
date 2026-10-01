@@ -46,6 +46,7 @@ Separate owner/policy work still required:
 
 - Verify the configured Copilot reviewer identity and require `cloud-review` in
   repository branch protection/rules and require branches to be up to date.
+  Require resolved review conversations as a protected merge rule as well.
   This PR intentionally makes no settings or protection changes and preserves
   `agent-review` unchanged.
 - Install and enable the service/timer only after exact-head review and policy

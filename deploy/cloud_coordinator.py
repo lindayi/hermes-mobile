@@ -242,16 +242,20 @@ def required_checks_pass(required, check_runs, statuses, *, complete):
 
 def eligible_for_auto_merge(pull, *, current_main_sha, required_checks, check_runs,
                             statuses, checks_complete, review_valid, sensitive_authorized,
-                            cloud_review_required, cloud_review_status_owned, agent_running):
+                            cloud_review_required, cloud_review_status_owned,
+                            up_to_date_required, conversation_resolution_required,
+                            agent_running):
     """Pure eligibility gate; GitHub still enforces protected auto-merge."""
     if not isinstance(pull, dict):
         return False
     base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
     if (pull.get("draft") is not False or pull.get("mergeable") is not True
-            or pull.get("mergeable_state") in {"dirty", "unknown", "blocked"}
+            or pull.get("mergeable_state") in {"behind", "dirty", "unknown", "blocked"}
             or base.get("ref") != MAIN_BRANCH or base.get("sha") != current_main_sha
             or not _is_sha(current_main_sha) or not review_valid or not sensitive_authorized
-            or not cloud_review_required or not cloud_review_status_owned or agent_running):
+            or not cloud_review_required or not cloud_review_status_owned
+            or not up_to_date_required or not conversation_resolution_required
+            or agent_running):
         return False
     contexts = _required_contexts(required_checks)
     if "cloud-review" not in {entry["context"] for entry in contexts}:
@@ -476,7 +480,8 @@ def _rest_list(api, route, collection=None):
 def _all_review_comments(api, issue_number, cursor):
     route = f"repos/{REPOSITORY}/issues/{issue_number}/comments?per_page=100"
     if cursor:
-        route += "&" + urlencode({"since": cursor})
+        since = datetime.fromisoformat(cursor.replace("Z", "+00:00")) - timedelta(seconds=120)
+        route += "&" + urlencode({"since": since.isoformat().replace("+00:00", "Z")})
     return _rest_list(api, route)
 
 
@@ -486,11 +491,26 @@ def _review_thread_complete(threads_complete, threads):
 
 def _required_checks(api):
     required, available = [], False
+    up_to_date_required = False
+    conversation_resolution_required = False
+    protection_root_route = f"repos/{REPOSITORY}/branches/{MAIN_BRANCH}/protection"
+    try:
+        protection_root = api.get(protection_root_route)
+        if isinstance(protection_root, dict):
+            available = True
+            conversation = protection_root.get("required_conversation_resolution")
+            conversation_resolution_required = (
+                isinstance(conversation, dict) and conversation.get("enabled") is True
+            )
+    except ApiError as exc:
+        if exc.status != 404:
+            raise
     protection_route = f"repos/{REPOSITORY}/branches/{MAIN_BRANCH}/protection/required_status_checks"
     try:
         protection = api.get(protection_route)
         if isinstance(protection, dict):
             required.extend(protection.get("checks") or protection.get("contexts") or [])
+            up_to_date_required = protection.get("strict") is True
             available = True
     except ApiError as exc:
         if exc.status != 404:
@@ -502,10 +522,16 @@ def _required_checks(api):
             available = True
             for rule in rules:
                 if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
+                    if isinstance(rule, dict) and rule.get("type") == "conversation_resolution":
+                        conversation_resolution_required = True
                     continue
                 params = rule.get("parameters")
                 if isinstance(params, dict):
                     required.extend(params.get("required_status_checks") or [])
+                    up_to_date_required = (
+                        up_to_date_required
+                        or params.get("strict_required_status_checks_policy") is True
+                    )
     except ApiError as exc:
         if exc.status != 404:
             raise
@@ -515,12 +541,13 @@ def _required_checks(api):
         if normalized:
             item = normalized[0]
             unique[(item["context"], item["app_id"])] = item
-    return list(unique.values()), available
+    return (list(unique.values()), available, up_to_date_required,
+            conversation_resolution_required)
 
 
 def _workflow_runs(api, branch):
     route = (f"repos/{REPOSITORY}/actions/runs?per_page=100"
-             f"&head_branch={quote(branch, safe='')}")
+             f"&branch={quote(branch, safe='')}")
     runs = _rest_list(api, route, collection="workflow_runs")
     matches = []
     for run in runs:
@@ -637,6 +664,7 @@ class Coordinator:
                     and isinstance(base.get("repo"), dict)
                     and base["repo"].get("id") == REPOSITORY_ID):
                 enrollment["sensitive_sha"] = item["head"]
+                item["validated"] = True
         return issues, commands, processed, candidates
 
     def _snapshot_pull(self, number, enrollment, main_sha):
@@ -664,7 +692,8 @@ class Coordinator:
             self.api, f"repos/{REPOSITORY}/pulls/{number}/reviews?per_page=100",
         )
         threads, threads_complete = collect_review_threads(self.api, number)
-        required, policy_complete = _required_checks(self.api)
+        (required, policy_complete, up_to_date_required,
+         conversation_resolution_required) = _required_checks(self.api)
         check_runs = _rest_list(
             self.api,
             f"repos/{REPOSITORY}/commits/{sha}/check-runs?filter=latest&per_page=100",
@@ -676,11 +705,12 @@ class Coordinator:
         comments = _all_review_comments(self.api, number, None)
         workflows = _workflow_runs(self.api, head.get("ref", ""))
         source_failures = [{
-            "id": run.get("id"), "name": "Source checks", "head_sha": sha,
+            "id": run.get("id"), "name": "Source checks", "head_sha": run.get("head_sha"),
             "status": run.get("status"), "conclusion": run.get("conclusion"),
             "app": {"name": "GitHub Actions"},
         } for run in workflows
             if run.get("name") == "Source checks"
+            and run.get("head_sha") == sha
             and run.get("status") == "completed"
             and run.get("conclusion") in {"failure", "timed_out"}]
         check_runs.extend(source_failures)
@@ -693,6 +723,8 @@ class Coordinator:
             "files_complete": len(files) < 300, "reviews": reviews,
             "threads": threads, "threads_complete": threads_complete,
             "required": required, "policy_complete": policy_complete,
+            "up_to_date_required": up_to_date_required,
+            "conversation_resolution_required": conversation_resolution_required,
             "check_runs": check_runs, "statuses": statuses,
             "comments": comments, "workflows": workflows,
             "status": latest_status, "status_owned": status_is_owned,
@@ -793,6 +825,10 @@ class Coordinator:
             reasons.append(("scope", "The pull request is not based on the current same-repository main branch."))
         if conflict:
             reasons.append(("conflict", "A neutral conflict reconciler must be assigned; this coordinator will not start a fixer."))
+        if not snapshot["up_to_date_required"]:
+            reasons.append(("up-to-date-policy", "Branch protection must require current-main checks."))
+        if not snapshot["conversation_resolution_required"]:
+            reasons.append(("conversation-policy", "Branch protection must require resolved review conversations."))
         if sensitive and not authorized:
             reasons.append(("sensitive", "Owner exact-head authorization is required for sensitive changes."))
         if not review_ok:
@@ -825,12 +861,16 @@ class Coordinator:
                 snapshot["status_owned"] and snapshot["status"] is not None
                 and snapshot["status"].get("state") == "success"
             ),
+            up_to_date_required=snapshot["up_to_date_required"],
+            conversation_resolution_required=snapshot["conversation_resolution_required"],
             agent_running=agent_busy or repair is not None,
         )
         if merge and not snapshot["pull"].get("auto_merge"):
-            merge_action = {"kind": "auto-merge", "issue": number, "head": head,
-                            "main_sha": snapshot["main_sha"],
-                            "key": f"auto-merge:{number}:{head}"}
+            merge_action = {
+                "kind": "auto-merge", "issue": number, "head": head,
+                "main_sha": snapshot["main_sha"],
+                "key": f"auto-merge:{number}:{head}:{snapshot['main_sha']}",
+            }
         else:
             merge_action = None
         return {"issue": number, "head": head, "sensitive": sensitive,
@@ -883,11 +923,23 @@ class Coordinator:
 
     def _post_comment(self, action, *, route, body):
         key = action["key"]
+        try:
+            current = self._fence_pull(action["issue"], action["head"])
+        except CoordinatorError:
+            raise
+        if not current:
+            return "superseded"
+        if action.get("kind") == "fix":
+            head = current.get("head") if isinstance(current.get("head"), dict) else {}
+            workflows = _workflow_runs(self.api, head.get("ref", ""))
+            if any("copilot cloud agent" in str(run.get("name", "")).casefold()
+                   and run.get("status") in {"queued", "in_progress"} for run in workflows):
+                return "agent-running"
         claimed = self.store.claim_action(key, action)
         if not claimed:
             existing = self.store.action(key)
             return existing.get("status") if existing else "not-claimed"
-        if not self._fence_pull(action["issue"], action["head"]):
+        if not isinstance(current, dict):
             self.store.update_action(key, "superseded")
             return "superseded"
         try:
@@ -906,13 +958,49 @@ class Coordinator:
         if not self.store.claim_action(key, action):
             existing = self.store.action(key)
             return existing.get("status") if existing else "not-claimed"
-        if not self._fence_pull(action["issue"], action["head"]):
-            self.store.update_action(key, "superseded")
-            return "superseded"
-        if not any(item.get("context") == "cloud-review" for item in snapshot["required"]):
-            self.store.update_action(key, "superseded")
-            return "not-required"
-        existing, owned = _status_owned(snapshot["statuses"], "cloud-review", actor_id)
+        try:
+            fence_main = snapshot["main_sha"] if action["state"] == "success" else None
+            current_pull = self._fence_pull(
+                action["issue"], action["head"], fence_main,
+            )
+            if not current_pull:
+                self.store.update_action(key, "superseded")
+                return "superseded"
+            current_required, current_policy_complete, _, _ = _required_checks(self.api)
+            if (not current_policy_complete
+                    or not any(item.get("context") == "cloud-review"
+                               for item in current_required)):
+                self.store.update_action(key, "superseded")
+                return "not-required"
+            if action["state"] == "success":
+                reviews = _rest_list(
+                    self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
+                )
+                threads, threads_complete = collect_review_threads(self.api, action["issue"])
+                files = _rest_list(
+                    self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/files?per_page=100",
+                )
+                current_pull = self._fence_pull(
+                    action["issue"], action["head"], snapshot["main_sha"],
+                )
+                sensitive = classify_sensitive_paths(files, complete=len(files) < 300)
+                if (not isinstance(current_pull, dict)
+                        or not copilot_review_valid(
+                            action["head"], reviews, threads,
+                            threads_complete=threads_complete,
+                        )
+                        or (sensitive
+                            and snapshot["enrollment"].get("sensitive_sha") != action["head"])):
+                    self.store.update_action(key, "blocked")
+                    return "blocked"
+            current_statuses = _rest_list(
+                self.api,
+                f"repos/{REPOSITORY}/commits/{action['head']}/statuses?per_page=100",
+            )
+        except CoordinatorError:
+            self.store.update_action(key, "blocked")
+            raise
+        existing, owned = _status_owned(current_statuses, "cloud-review", actor_id)
         if existing and not owned:
             self.store.update_action(key, "superseded")
             return "foreign-status"
@@ -939,20 +1027,62 @@ class Coordinator:
         self.store.update_action(key, "sent")
         return "sent"
 
-    def _enable_auto_merge(self, action):
+    def _enable_auto_merge(self, action, snapshot):
         key = action["key"]
         if not self.store.claim_action(key, action):
             existing = self.store.action(key)
             return existing.get("status") if existing else "not-claimed"
-        pull = self._fence_pull(
-            action["issue"], action["head"], action.get("main_sha"),
-        )
+        try:
+            pull = self._fence_pull(
+                action["issue"], action["head"], action.get("main_sha"),
+            )
+        except CoordinatorError:
+            self.store.update_action(key, "blocked")
+            raise
         if pull is False:
             self.store.update_action(key, "superseded")
             return "superseded"
         if not isinstance(pull, dict) or not pull.get("node_id"):
-            self.store.update_action(key, "uncertain")
-            return "uncertain"
+            self.store.update_action(key, "blocked")
+            return "blocked"
+        try:
+            current = self._snapshot_pull(
+                action["issue"], snapshot["enrollment"], action["main_sha"],
+            )
+        except CoordinatorError:
+            self.store.update_action(key, "blocked")
+            raise
+        current_plan = self._plan_pull(
+            current, self.store.actions(), apply=False,
+        )
+        if (not current_plan["merge_action"]
+                or current_plan["merge_action"]["key"] != key):
+            self.store.update_action(key, "blocked")
+            status_action = current_plan["status_action"]
+            if status_action:
+                actor = self.api.get("user")
+                self._publish_status(status_action, current, actor.get("id"))
+            return current_plan
+        try:
+            pull = self._fence_pull(
+                action["issue"], action["head"], action.get("main_sha"),
+            )
+        except CoordinatorError:
+            self.store.update_action(key, "blocked")
+            raise
+        if pull is False:
+            self.store.update_action(key, "superseded")
+            current_plan["auto_merge_eligible"] = False
+            current_plan["merge_action"] = None
+            current_plan["reasons"] = list(dict.fromkeys(
+                current_plan["reasons"] + ["head-or-base-race"],
+            ))
+            return current_plan
+        if not isinstance(pull, dict) or not pull.get("node_id"):
+            self.store.update_action(key, "blocked")
+            current_plan["auto_merge_eligible"] = False
+            current_plan["merge_action"] = None
+            return current_plan
         query = """
         mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
           enablePullRequestAutoMerge(input: {
@@ -974,14 +1104,9 @@ class Coordinator:
         return "sent"
 
     def _apply(self, plan):
-        self.store.commit_scan(plan["cursor"], plan["processed"])
-        for action, item in plan["commands"]:
-            if action == "enroll":
-                self.store.enroll(item)
-            elif action == "authorize":
-                enrollment = plan["enrollments"].get(str(item["issue"]))
-                if enrollment and item["head"] == enrollment.get("head"):
-                    self.store.authorize_sensitive(item["issue"], item["head"])
+        self.store.commit_scan(
+            plan["cursor"], plan["processed"], commands=plan["commands"],
+        )
         summaries = []
         for pr_plan, snapshot in zip(plan["pull_requests"], plan["snapshots"]):
             for key, entry in pr_plan["outcomes"]:
@@ -997,10 +1122,10 @@ class Coordinator:
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") != "pending"):
                     continue
-                self.store.update_outbox(key, "sending")
                 if not self._fence_pull(entry["issue"], entry["head"]):
                     self.store.update_outbox(key, "superseded")
                     continue
+                self.store.update_outbox(key, "sending")
                 try:
                     response = self.api.write(
                         f"repos/{REPOSITORY}/issues/{entry['issue']}/comments",
@@ -1014,17 +1139,32 @@ class Coordinator:
                 )
             action = pr_plan["repair"]
             if action:
-                self._post_comment(
+                result = self._post_comment(
                     action, route=f"repos/{REPOSITORY}/issues/{action['issue']}/comments",
                     body=action["body"],
                 )
+                if result in {"agent-running", "superseded"}:
+                    pr_plan["repair"] = None
+                    if result == "agent-running":
+                        pr_plan["reasons"] = list(dict.fromkeys(
+                            pr_plan["reasons"] + ["agent"],
+                        ))
             status_action = pr_plan["status_action"]
             if status_action:
                 actor = self.api.get("user")
                 self._publish_status(status_action, snapshot, actor.get("id"))
             merge_action = pr_plan["merge_action"]
             if merge_action and not action:
-                self._enable_auto_merge(merge_action)
+                current_plan = self._enable_auto_merge(merge_action, snapshot)
+                if isinstance(current_plan, dict):
+                    pr_plan.update({
+                        "review_valid": current_plan["review_valid"],
+                        "required_checks_green": current_plan["required_checks_green"],
+                        "auto_merge_eligible": current_plan["auto_merge_eligible"],
+                        "reasons": current_plan["reasons"],
+                        "status_action": current_plan["status_action"],
+                        "merge_action": None,
+                    })
             summaries.append(self._summary(pr_plan))
         return summaries
 
@@ -1160,13 +1300,32 @@ class StateStore:
                 data["events"] = data["events"][-4000:]
         self._mutate(record)
 
-    def commit_scan(self, cursor, processed):
+    def commit_scan(self, cursor, processed, *, commands=()):
         keys = [str(item) for item in processed]
 
         def commit(data):
             seen = set(data["events"])
-            data["events"].extend(item for item in keys if item not in seen)
+            for item in keys:
+                if item not in seen:
+                    data["events"].append(item)
+                    seen.add(item)
             data["events"] = data["events"][-4000:]
+            for action, item in commands:
+                if action != "enroll":
+                    continue
+                key = str(item.get("issue"))
+                if (type(item.get("issue")) is int and _is_sha(item.get("head"))
+                        and _is_sha(item.get("base"))
+                        and key not in data["enrollments"]):
+                    data["enrollments"][key] = {
+                        **item, "attempts": 0, "sensitive_sha": None, "active": True,
+                    }
+            for action, item in commands:
+                if action == "authorize" and item.get("validated") is True:
+                    enrollment = data["enrollments"].get(str(item.get("issue")))
+                    if (enrollment and enrollment.get("active")
+                            and _is_sha(item.get("head"))):
+                        enrollment["sensitive_sha"] = item["head"]
             data["cursor"] = cursor
         self._mutate(commit)
 
@@ -1198,9 +1357,14 @@ class StateStore:
 
     def claim_action(self, key, action):
         def claim(data):
-            if key in data["actions"]:
-                return False
             claimed = dict(action)
+            existing = data["actions"].get(key)
+            if existing:
+                if (claimed.get("kind") in {"status", "auto-merge"}
+                        and existing.get("status") == "blocked"):
+                    del data["actions"][key]
+                else:
+                    return False
             if claimed.get("kind") == "fix":
                 enrollment = data["enrollments"].get(str(claimed.get("issue")))
                 if not enrollment or not enrollment.get("active"):
