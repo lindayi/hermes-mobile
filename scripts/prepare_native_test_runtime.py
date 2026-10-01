@@ -401,7 +401,7 @@ def prepare_runtime(repository_root, environ):
         for entry in PATCHES:
             print(f'{entry["path"]} sha256={entry["sha256"]}')
         print(f'Verified SQLite {sqlite_version} and locked extras: {", ".join(spec["extras"])}.')
-        print('Verified all four installed and staged source hashes; no model or media extras installed.')
+        print('Verified all four installed and staged source hashes; no provider or model extras enabled.')
     except BaseException as error:
         try:
             _remove_created_runtime(target, preserved)
