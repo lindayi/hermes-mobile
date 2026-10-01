@@ -1,16 +1,20 @@
 import copy
+import hashlib
 import json
 
 import pytest
 
 from deploy.autonomy_policy import (
-    COPILOT_AGENT_ID,
     COPILOT_REVIEWER_ID,
     OWNER_ID,
     REPOSITORY,
     REPOSITORY_ID,
     REF,
+    REQUIRED_FILES,
     RUN_JOBS,
+    SOURCE_BASELINES,
+    SOURCE_BLOCKERS,
+    SOURCE_FINGERPRINTS,
     WORKFLOW_ID,
     WORKFLOW_PATH,
     validate_transition,
@@ -21,230 +25,25 @@ SHA = 'a' * 40
 ARTIFACT_HASH = 'b' * 64
 IDENTITY = f'https://github.com/{REPOSITORY}/{WORKFLOW_PATH}@{REF}'
 
-
-def _workflow():
-    jobs = """  build:
-    runs-on: ubuntu-24.04
-    steps:
-      - run: python -B -m deploy.release_artifact build --bundle release.tar
-      - uses: actions/upload-artifact@0123456789012345678901234567890123456789
-        with:
-          name: release-${{ github.run_id }}-${{ github.run_attempt }}
-  checks:
-    runs-on: ubuntu-24.04
-    steps:
-      - run: python -c 'compile('
-      - run: node --check frontend/main.js
-      - run: 'gitleaks dir . && sha256sum -c'
-  js:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: ./.github/actions/test-environment
-        with:
-          browser: 'true'
-      - run: python -B scripts/ci_tests.py js
-  python:
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: 'false'
-      matrix:
-        shard: ['0', '1']
-    steps:
-      - run: python -B scripts/ci_tests.py --shards 2 python
-  browser:
-    runs-on: ubuntu-24.04
-    needs: build
-    strategy:
-      fail-fast: 'false'
-      matrix:
-        shard: ['0', '1', '2', '3']
-    steps:
-      - uses: actions/download-artifact@0123456789012345678901234567890123456789
-        with:
-          name: release-${{ github.run_id }}-${{ github.run_attempt }}
-      - run: python -B -m deploy.release_artifact unpack --bundle release.tar
-      - run: python -B scripts/ci_tests.py --assets generated --shards 4 browser
-"""
-    return f"""jobs:
-{jobs}
-  native:
-    runs-on: ubuntu-24.04
-    steps:
-      - run: python3 scripts/prepare_native_test_runtime.py --preflight
-      - uses: ./.github/actions/native-test-environment
-      - run: '"$HERMES_TEST_PYTHON" -B scripts/ci_tests.py native'
-  source-ci:
-    if: "${{{{ always() }}}}"
-    needs: [build, checks, js, python, browser, native]
-    runs-on: ubuntu-24.04
-    steps:
-      - env:
-          RESULTS: "${{{{ toJSON(needs) }}}}"
-        run: |
-          python3 - <<'PY'
-          import json, os, sys
-          results = json.loads(os.environ['RESULTS'])
-          failed = {{name: value['result'] for name, value in results.items() if value['result'] != 'success'}}
-          sys.exit(bool(failed) or set(results) != {{'build', 'checks', 'js', 'python', 'browser', 'native'}})
-          PY
-  attest:
-    needs: source-ci
-    runs-on: ubuntu-24.04
-    if: "${{{{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'lindayi/hermes-mobile' }}}}"
-    steps:
-      - uses: actions/attest-build-provenance@0123456789012345678901234567890123456789
-"""
+_MERGED_MAIN_SOURCE_FIXTURE = {
+    '.github/workflows/ci.yml': '39110e6f940fc59ef3aec9846f07616a86a2e07335d2aaed6c6cd0ab444ff195',
+    '.github/native-tests.json': 'b97ddb088e595197cf65d97b0b4af89f4f83f5c4ad25463c566df7099817209f',
+    '.github/host-tests.json': '8af5fc30188f81ba95d3d7c11ba6801f52795175c2cac7f634424f906947ce5a',
+    '.github/actions/native-test-environment/action.yml': 'b1e5af03a4aa397f585e541805b4a292d1b3529090d54932b8945b6743ecd993',
+    '.github/native-runtime.json': '705351eff7420cf3cbd3f91f3edc605feb304eba86f99e5a94902e89d3fb4d88',
+    'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
+    'deploy/self_deploy.py': 'c8b9febf5e73c22de2aebbbf6ecb63e08597f58ea7ff5eede979d4be51783550',
+    'deploy/ci_selection.py': '07493f74bc4b932e26342e0d27fee8c3c38601af8211e0a950920935173b2f16',
+    'scripts/ci_tests.py': '6ed905a90720fb17226472a0453fb762395424b8370df474fed4536827b398d6',
+    'scripts/prepare_native_test_runtime.py': '798195e6d9b284bae69cb6e27cf8dc7ad5ffc6dce62939b137fb6c6b370b58a8',
+}
+_PENDING_PR16_COORDINATOR_FIXTURE = {
+    'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
+}
 
 
 def _source_files():
-    expected_jobs = ', '.join(repr(name) for name in sorted(RUN_JOBS))
-    release_artifact = f"""
-REPOSITORY = {REPOSITORY!r}
-REPOSITORY_ID = {REPOSITORY_ID}
-WORKFLOW = {WORKFLOW_PATH!r}
-WORKFLOW_ID = {WORKFLOW_ID}
-REF = {REF!r}
-EXPECTED_JOBS = frozenset({{{expected_jobs}}})
-def _run_record():
-    return {{'repository_id': REPOSITORY_ID, 'workflow_id': WORKFLOW_ID,
-            'path': WORKFLOW, 'event': 'push', 'head_branch': 'main',
-            'repository': REPOSITORY, 'head_sha': sha,
-            'status': 'completed', 'conclusion': 'success'}}
-def _listed():
-    return []
-def _check_jobs(jobs, run_id, run_attempt, sha):
-    _listed()
-    if len(jobs) != len(EXPECTED_JOBS) or {{job.get('name') for job in jobs}} != EXPECTED_JOBS:
-        raise ValueError()
-    for job in jobs:
-        expected = {{'run_id': run_id, 'run_attempt': run_attempt, 'head_sha': sha,
-                    'status': 'completed', 'conclusion': 'success'}}
-        if any(job.get(key) != value for key, value in expected.items()):
-            raise ValueError()
-def _attestation():
-    return ['--cert-identity', '--source-ref', '--source-digest', '--signer-digest',
-            '--deny-self-hosted-runners', 'runnerEnvironment', 'sourceRepositoryDigest',
-            'buildSignerDigest', 'runInvocationURI', REPOSITORY, REPOSITORY_ID,
-            WORKFLOW, WORKFLOW_ID, REF]
-def acquire_verified_bundle():
-    _run_record()
-    _check_jobs()
-    _attestation()
-"""
-    self_deploy = """
-SOURCE_TREES = ('.github',)
-def run_host_checks(paths, stage):
-    selected = select_tests(stage, 'host')
-    return run_suite(stage, suite='python', extra_args=selected)
-def _deploy(hosted_run_id, checks, paths, stage):
-    if hosted_run_id is None:
-        checks(stage)
-    else:
-        run_host_checks(paths, stage)
-"""
-    ci_selection = """
-def select_tests(source, suite):
-    python = set()
-    host = load('.github/host-tests.json')
-    native = load('.github/native-tests.json')
-    if suite not in {'python', 'host', 'native', 'js', 'browser'}:
-        raise ValueError()
-    groups = {'python': python - host.keys(), 'host': set(host), 'native': set(native)}
-    return groups[suite]
-"""
-    ci_tests = """
-def main(args):
-    if args.suite not in ('python', 'host', 'native', 'js', 'browser'):
-        raise ValueError()
-    selected = select_tests(SOURCE, args.suite)
-    suite = 'python' if args.suite == 'host' else args.suite
-    return run_suite(SOURCE, suite=suite, extra_args=selected)
-"""
-    native_action = """runs:
-  using: composite
-  steps:
-    - run: python3 scripts/prepare_native_test_runtime.py --preflight
-    - run: sudo mkdir --mode=0755 -- /usr/local/lib/hermes-agent
-    - run: python scripts/prepare_native_test_runtime.py
-"""
-    native_runtime = """
-def validate_hosted_runner(environ):
-    return True
-def validate_action_preflight(environ, root):
-    return True
-def main():
-    if sys.argv[1:] == ['--preflight']:
-        validate_action_preflight(os.environ, ROOT)
-        validate_hosted_runner(os.environ)
-"""
-    coordinator = f"""
-REPOSITORY = {REPOSITORY!r}
-REPOSITORY_ID = {REPOSITORY_ID}
-OWNER_ID = {OWNER_ID}
-COPILOT_REVIEWER_ID = {COPILOT_REVIEWER_ID}
-COPILOT_AGENT_ID = {COPILOT_AGENT_ID}
-SOURCE_WORKFLOW_ID = {WORKFLOW_ID}
-MAIN_BRANCH = 'main'
-def _complete_resolved_threads(threads, complete=True):
-    return (complete is True and isinstance(threads, list)
-            and all(thread.get('isResolved') is True
-                    and thread.get('comments_complete', True) is True for thread in threads))
-def copilot_review_valid(head_sha, reviews, threads, *, threads_complete=True,
-                         reviews_complete=True):
-    if (not _is_sha(head_sha) or not reviews_complete or not isinstance(reviews, list)
-            or not _complete_resolved_threads(threads, complete=threads_complete)):
-        return False
-    authored = [
-        review for review in reviews
-        if isinstance(review, dict)
-        and isinstance(review.get('user'), dict)
-        and type(review['user'].get('id')) is int
-        and review['user']['id'] == COPILOT_REVIEWER_ID
-    ]
-    if not authored:
-        return False
-    latest = max(authored, key=lambda review: str(review.get('submitted_at') or ''))
-    return latest.get('state') == 'APPROVED' and latest.get('commit_id') == head_sha
-def classify_sensitive_paths(files, complete=True):
-    return complete
-class Coordinator:
-    def _identity(self, api):
-        repository = api.get(f'repos/{{REPOSITORY}}')
-        if repository.get('id') != REPOSITORY_ID:
-            return False
-        user = api.get('user')
-        return user.get('id') == OWNER_ID
-def _is_owner_sensitive_command(comment):
-    user = comment.get('user')
-    body = comment.get('body')
-    if user.get('id') != OWNER_ID:
-        return None
-    match = re.fullmatch(r'/hermes authorize-sensitive ([0-9a-f]{{40}})', body.strip())
-    return match.group(1) if match else None
-def _scan_enrollments(comment):
-    return _is_owner_sensitive_command(comment)
-def _plan_pull(head, snapshot):
-    review_ok = copilot_review_valid(head, snapshot['reviews'], snapshot['threads'])
-    sensitive = classify_sensitive_paths(snapshot['files'])
-    authorized = not sensitive or snapshot['enrollment'].get('sensitive_sha') == head
-    return review_ok and authorized
-"""
-    return {
-        WORKFLOW_PATH: _workflow(),
-        '.github/native-tests.json': json.dumps({'tests/test_native.py': 'synthetic native test'}),
-        '.github/native-runtime.json': json.dumps({'synthetic': True}),
-        '.github/host-tests.json': json.dumps({
-            'tests/test_host.py': 'synthetic installed compatibility test',
-            'tests/test_native.py': 'synthetic installed native test',
-        }),
-        'deploy/release_artifact.py': release_artifact,
-        'deploy/self_deploy.py': self_deploy,
-        'deploy/ci_selection.py': ci_selection,
-        'scripts/ci_tests.py': ci_tests,
-        '.github/actions/native-test-environment/action.yml': native_action,
-        'scripts/prepare_native_test_runtime.py': native_runtime,
-        'deploy/cloud_coordinator.py': coordinator,
-    }
+    return _MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR16_COORDINATOR_FIXTURE
 
 
 def _source_ci():
@@ -317,6 +116,26 @@ def _blockers(evidence, phase='pre-cutover'):
     return set(validate_transition(evidence, phase=phase)['blockers'])
 
 
+def _changed_source(evidence, path, source):
+    evidence['main']['files'][path] = hashlib.sha256(source.encode()).hexdigest()
+
+
+def test_reviewed_source_fixture_matches_complete_required_contract():
+    assert {
+        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
+        if path != 'deploy/cloud_coordinator.py'
+    } == _MERGED_MAIN_SOURCE_FIXTURE
+    assert {
+        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
+        if path == 'deploy/cloud_coordinator.py'
+    } == _PENDING_PR16_COORDINATOR_FIXTURE
+    assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
+    assert SOURCE_BASELINES == {
+        'main': '66a64245b6c9c632d5ca4087e3d1e4e4fa2a4e83',
+        'deploy/cloud_coordinator.py': '403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83',
+    }
+
+
 def test_complete_synthetic_evidence_satisfies_each_policy_phase():
     pre = validate_transition(_evidence(), phase='pre-cutover')
     assert pre == {'ready': True, 'phase': 'pre-cutover', 'blockers': []}
@@ -331,25 +150,29 @@ def test_complete_synthetic_evidence_satisfies_each_policy_phase():
     assert post == {'ready': True, 'phase': 'post-cutover', 'blockers': []}
 
 
+def test_missing_pending_pr16_source_cannot_satisfy_current_main_contract():
+    evidence = _evidence()
+    evidence['main']['files'].pop('deploy/cloud_coordinator.py')
+
+    report = validate_transition(evidence, phase='pre-cutover')
+
+    assert report['ready'] is False
+    assert report['blockers'] == ['main-source-missing']
+    assert SOURCE_BASELINES['deploy/cloud_coordinator.py'] != SOURCE_BASELINES['main']
+
+
 def test_missing_native_job_or_aggregate_dependency_blocks():
     evidence = _evidence()
-    evidence['main']['files'][WORKFLOW_PATH] = evidence['main']['files'][WORKFLOW_PATH].replace(
-        '  native:\n', '  omitted-native:\n', 1,
-    )
+    _changed_source(evidence, WORKFLOW_PATH, 'native job omitted')
     assert 'hosted-workflow-contract' in _blockers(evidence)
 
     evidence = _evidence()
-    evidence['main']['files'][WORKFLOW_PATH] = evidence['main']['files'][WORKFLOW_PATH].replace(
-        'needs: [build, checks, js, python, browser, native]',
-        'needs: [build, checks, js, python, browser]',
-    )
-    assert 'native-aggregate-dependency' in _blockers(evidence)
+    _changed_source(evidence, WORKFLOW_PATH, 'native aggregate dependency omitted')
+    assert 'hosted-workflow-contract' in _blockers(evidence)
 
     evidence = _evidence()
-    evidence['main']['files'][WORKFLOW_PATH] = evidence['main']['files'][WORKFLOW_PATH].replace(
-        "'browser', 'native'", "'browser'",
-    )
-    assert 'native-aggregate-contract' in _blockers(evidence)
+    _changed_source(evidence, WORKFLOW_PATH, 'native removed from aggregate result set')
+    assert 'hosted-workflow-contract' in _blockers(evidence)
 
 
 def test_missing_or_incomplete_release_provenance_blocks():
@@ -366,10 +189,7 @@ def test_missing_or_incomplete_release_provenance_blocks():
     assert 'release-attestation' in _blockers(evidence)
 
     evidence = _evidence()
-    evidence['main']['files']['deploy/release_artifact.py'] = (
-        evidence['main']['files']['deploy/release_artifact.py']
-        .replace("'native', ", '', 1)
-    )
+    _changed_source(evidence, 'deploy/release_artifact.py', 'native omitted from expected job set')
     assert 'release-artifact-provenance' in _blockers(evidence)
 
 
@@ -401,12 +221,80 @@ def test_missing_native_job_record_and_truncated_review_block():
 
 def test_missing_installed_host_gate_blocks():
     evidence = _evidence()
-    evidence['main']['files']['.github/host-tests.json'] = '{}'
+    _changed_source(evidence, '.github/host-tests.json', '{}')
     assert 'installed-host-gate' in _blockers(evidence)
 
     evidence = _evidence()
-    evidence['main']['files']['deploy/self_deploy.py'] = 'def _deploy(): pass'
+    _changed_source(evidence, 'deploy/self_deploy.py', 'def _deploy(): pass')
     assert 'installed-host-gate' in _blockers(evidence)
+
+
+def test_noop_host_gate_and_earlier_non_gate_branch_block():
+    evidence = _evidence()
+    _changed_source(
+        evidence, 'deploy/self_deploy.py',
+        'def run_host_checks(paths, stage):\n    return True',
+    )
+    assert 'installed-host-gate' in _blockers(evidence)
+
+    evidence = _evidence()
+    _changed_source(
+        evidence, 'deploy/self_deploy.py',
+        'def _deploy(hosted_run_id):\n'
+        '    if hosted_run_id is None:\n        return\n'
+        '    run_host_checks(paths, stage)',
+    )
+    assert 'installed-host-gate' in _blockers(evidence)
+
+
+def test_dead_review_guards_and_unreachable_aggregate_exit_block():
+    evidence = _evidence()
+    _changed_source(
+        evidence, 'deploy/cloud_coordinator.py',
+        'def copilot_review_valid(head_sha, reviews, threads):\n    return True',
+    )
+    assert 'coordinator-review-contract' in _blockers(evidence)
+
+    evidence = _evidence()
+    _changed_source(
+        evidence, WORKFLOW_PATH,
+        'sys.exit(0)\n' + "sys.exit(bool(failed) or set(results) != expected)",
+    )
+    assert 'hosted-workflow-contract' in _blockers(evidence)
+
+
+def test_skipped_mandatory_native_step_and_invalid_runtime_pin_block():
+    evidence = _evidence()
+    _changed_source(evidence, WORKFLOW_PATH, 'if: ${{ false }}\nrun: ci_tests.py native')
+    assert 'hosted-workflow-contract' in _blockers(evidence)
+
+    evidence = _evidence()
+    _changed_source(evidence, '.github/native-runtime.json', '{}')
+    assert 'native-job-contract' in _blockers(evidence)
+
+
+def test_uses_only_checkout_and_later_host_branch_are_pinned_to_merged_source():
+    evidence = _evidence()
+    _changed_source(evidence, WORKFLOW_PATH, 'uses: actions/checkout@pin')
+    assert 'hosted-workflow-contract' in _blockers(evidence)
+
+    evidence = _evidence()
+    _changed_source(evidence, 'deploy/self_deploy.py', 'run_host_checks before later release branch')
+    assert 'installed-host-gate' in _blockers(evidence)
+
+
+def test_removed_private_host_manifest_entry_blocks():
+    evidence = _evidence()
+    _changed_source(evidence, '.github/host-tests.json', '{"tests/test_native.py":"native"}')
+
+    assert 'installed-host-gate' in _blockers(evidence)
+
+
+def test_workflow_identity_uses_reviewed_release_source_fingerprint():
+    assert SOURCE_FINGERPRINTS['deploy/release_artifact.py'] == _MERGED_MAIN_SOURCE_FIXTURE[
+        'deploy/release_artifact.py'
+    ]
+    assert SOURCE_BLOCKERS['deploy/release_artifact.py'] == 'release-artifact-provenance'
 
 
 @pytest.mark.parametrize(('field', 'value', 'blocker'), [
@@ -450,20 +338,9 @@ def test_review_requires_authenticated_exact_head_approval_and_complete_threads(
     }
 
 
-def test_wrong_coordinator_identity_or_review_contract_blocks():
+def test_unreviewed_coordinator_source_changes_block():
     evidence = _evidence()
-    evidence['main']['files']['deploy/cloud_coordinator.py'] = (
-        evidence['main']['files']['deploy/cloud_coordinator.py']
-        .replace(f'COPILOT_REVIEWER_ID = {COPILOT_REVIEWER_ID}',
-                 'COPILOT_REVIEWER_ID = 42')
-    )
-    assert 'coordinator-review-contract' in _blockers(evidence)
-
-    evidence = _evidence()
-    evidence['main']['files']['deploy/cloud_coordinator.py'] = (
-        evidence['main']['files']['deploy/cloud_coordinator.py']
-        .replace("'APPROVED'", "'COMMENTED'")
-    )
+    _changed_source(evidence, 'deploy/cloud_coordinator.py', 'different coordinator implementation')
     assert 'coordinator-review-contract' in _blockers(evidence)
 
 

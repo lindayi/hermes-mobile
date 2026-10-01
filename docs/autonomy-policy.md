@@ -30,10 +30,25 @@ The operator must verify the source snapshot and API provenance, and verify rele
 attestation using the existing exact certificate identity and authenticated
 certificate extensions. A caller assertion or PR overview is not proof.
 
-The source snapshot includes the workflow, native and host manifests, release
-artifact verifier, deployment controller and coordinator implementation. Source
-contracts are parsed as YAML/Python syntax trees; candidate code is never imported
-or run. Readiness requires:
+`main.files` maps every required source path to its SHA-256 digest over the exact
+read-back bytes. The validator compares those values with a narrow reviewed
+fingerprint set; it does not parse, import, or execute evidence source. The
+fingerprints for the hosted workflow, native/runtime pin and action, complete
+native/host manifests, release verifier, test partition, runtime preflight, and
+deployment controller are from merged main `66a64245b6c9c632d5ca4087e3d1e4e4fa2a4e83`.
+The coordinator fingerprint is from reviewed but still-pending PR16 head
+`403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83`; that pin is not evidence that PR16 is
+merged or that current main contains the coordinator. A final PR16 assembly that
+changes the source requires a follow-up fingerprint update. Readiness remains false
+until required dependencies are merged and genuine current-head evidence is verified;
+the synthetic unit fixtures do not establish readiness.
+
+Any fingerprint-set update must be independently reviewed against the complete
+source and its intended control flow. The digest comparison is only a consistency
+check: it does not authenticate the evidence file, prove how hashes were collected,
+or turn operator-supplied booleans into cryptographic proof. The operator must
+independently verify authenticated API provenance and the exact current-main
+readback. Readiness requires:
 
 - A hosted `native` job on GitHub-hosted Ubuntu that runs the managed native test
   suite, is a direct dependency of the `always()` `source-ci` aggregate, and is
@@ -89,7 +104,7 @@ settings change. No coding task or validator performs that action.
 
 The JSON root contains `repository`, `main`, `protection`, `source_ci`, and
 `cloud_review` records. `main.files` maps the exact required source paths to their
-read-back text and is bound to `main.sha`, `main.ref` and the fixed repository ID.
+SHA-256 digests and is bound to `main.sha`, `main.ref` and the fixed repository ID.
 `source_ci.jobs` carries every unique GitHub job ID, name, run ID, attempt, head
 SHA, completion status and conclusion. The artifact record carries its run/attempt,
 repository IDs, expiration state, size and SHA-256. Its attestation record carries

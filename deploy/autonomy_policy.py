@@ -1,9 +1,6 @@
 """Read-only validation of the repository's conditional premerge gate transition."""
 
-import ast
-import json
 import re
-import textwrap
 
 REPOSITORY = 'lindayi/hermes-mobile'
 REPOSITORY_ID = 1399942965
@@ -36,498 +33,52 @@ REQUIRED_FILES = (
     'scripts/prepare_native_test_runtime.py',
     'deploy/cloud_coordinator.py',
 )
+SOURCE_FINGERPRINTS = {
+    '.github/workflows/ci.yml': '39110e6f940fc59ef3aec9846f07616a86a2e07335d2aaed6c6cd0ab444ff195',
+    '.github/native-tests.json': 'b97ddb088e595197cf65d97b0b4af89f4f83f5c4ad25463c566df7099817209f',
+    '.github/host-tests.json': '8af5fc30188f81ba95d3d7c11ba6801f52795175c2cac7f634424f906947ce5a',
+    '.github/actions/native-test-environment/action.yml': 'b1e5af03a4aa397f585e541805b4a292d1b3529090d54932b8945b6743ecd993',
+    '.github/native-runtime.json': '705351eff7420cf3cbd3f91f3edc605feb304eba86f99e5a94902e89d3fb4d88',
+    'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
+    'deploy/self_deploy.py': 'c8b9febf5e73c22de2aebbbf6ecb63e08597f58ea7ff5eede979d4be51783550',
+    'deploy/ci_selection.py': '07493f74bc4b932e26342e0d27fee8c3c38601af8211e0a950920935173b2f16',
+    'scripts/ci_tests.py': '6ed905a90720fb17226472a0453fb762395424b8370df474fed4536827b398d6',
+    'scripts/prepare_native_test_runtime.py': '798195e6d9b284bae69cb6e27cf8dc7ad5ffc6dce62939b137fb6c6b370b58a8',
+    'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
+}
+SOURCE_BLOCKERS = {
+    WORKFLOW_PATH: 'hosted-workflow-contract',
+    '.github/native-tests.json': 'installed-host-gate',
+    '.github/host-tests.json': 'installed-host-gate',
+    '.github/actions/native-test-environment/action.yml': 'native-job-contract',
+    '.github/native-runtime.json': 'native-job-contract',
+    'deploy/release_artifact.py': 'release-artifact-provenance',
+    'deploy/self_deploy.py': 'installed-host-gate',
+    'deploy/ci_selection.py': 'installed-host-gate',
+    'scripts/ci_tests.py': 'installed-host-gate',
+    'scripts/prepare_native_test_runtime.py': 'native-job-contract',
+    'deploy/cloud_coordinator.py': 'coordinator-review-contract',
+}
+SOURCE_BASELINES = {
+    'main': '66a64245b6c9c632d5ca4087e3d1e4e4fa2a4e83',
+    'deploy/cloud_coordinator.py': '403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83',
+}
 SHA_RE = re.compile(r'[0-9a-f]{40}\Z')
 HEX_RE = re.compile(r'[0-9a-f]{64}\Z')
 
 
-def _const(node, value):
-    return isinstance(node, ast.Constant) and node.value == value
-
-
-def _call_name(node):
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return None
-
-
-def _functions(tree):
-    return {node.name: node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-
-
-def _function(tree, name):
-    return _functions(tree).get(name)
-
-
-def _assignments(tree):
-    result = {}
-    for node in tree.body:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            value = node.value
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    result[target.id] = value
-    return result
-
-
-def _literal(node):
-    if isinstance(node, ast.Call) and _call_name(node.func) in {'set', 'frozenset'} and len(node.args) == 1:
-        return ast.literal_eval(node.args[0])
-    return ast.literal_eval(node)
-
-
-def _unique_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError('Duplicate manifest key')
-        result[key] = value
-    return result
-
-
-def _source_tree(files, name, blockers):
-    text = files.get(name)
-    if not isinstance(text, str):
-        blockers.add('main-source-missing')
-        return None
-    try:
-        return ast.parse(text, filename=name)
-    except (SyntaxError, ValueError):
-        blockers.add('main-source-invalid')
-        return None
-
-
-def _strings_and_names(node):
-    strings, names = set(), set()
-    for child in ast.walk(node):
-        if isinstance(child, ast.Constant) and isinstance(child.value, (str, int)):
-            strings.add(child.value)
-        elif isinstance(child, ast.Name):
-            names.add(child.id)
-    return strings, names
-
-
-def _call_strings(node):
-    result = set()
-    for child in ast.walk(node):
-        if isinstance(child, ast.Call):
-            result.add(_call_name(child.func))
-    return result
-
-
-def _workflow_contract(files, blockers):
-    try:
-        import yaml
-    except ImportError:
-        blockers.add('hosted-workflow-contract')
-        return
-
-    class UniqueLoader(yaml.BaseLoader):
-        def construct_mapping(self, node, deep=False):
-            keys = [self.construct_object(key, deep=deep) for key, _ in node.value]
-            if len(keys) != len(set(keys)):
-                raise ValueError('Duplicate workflow key')
-            return super().construct_mapping(node, deep)
-
-    try:
-        workflow = yaml.load(files[WORKFLOW_PATH], Loader=UniqueLoader)
-    except (KeyError, TypeError, ValueError, yaml.YAMLError):
-        blockers.add('hosted-workflow-contract')
-        return
-    jobs = workflow.get('jobs') if isinstance(workflow, dict) else None
-    if (not isinstance(jobs, dict) or set(jobs) != HOSTED_JOBS | {'source-ci', 'attest'}
-            or any(not isinstance(job, dict) for job in jobs.values())):
-        blockers.add('hosted-workflow-contract')
-        return
-    if any(job.get('runs-on') != 'ubuntu-24.04' for job in jobs.values()):
-        blockers.add('hosted-runner-contract')
-
-    def steps(job):
-        result = job.get('steps')
-        if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
-            blockers.add('hosted-workflow-contract')
-            return []
-        return result
-
-    def commands(items):
-        return '\n'.join(value for step in items
-                         if isinstance((value := step.get('run', '')), str))
-
-    job_steps = {name: steps(job) for name, job in jobs.items()}
-    if any(job.get('continue-on-error') or any(step.get('continue-on-error') for step in job_steps[name])
-           for name, job in jobs.items()):
-        blockers.add('hosted-runner-contract')
-
-    native_steps = job_steps['native']
-    native_commands = commands(native_steps)
-    preflight = next((index for index, step in enumerate(native_steps)
-                      if isinstance(step.get('run', ''), str) and '--preflight' in step['run']), None)
-    native_setup = next((index for index, step in enumerate(native_steps)
-                         if '.github/actions/native-test-environment' in str(step.get('uses', ''))), None)
-    try:
-        native_action = yaml.load(
-            files['.github/actions/native-test-environment/action.yml'], Loader=UniqueLoader,
-        )
-        action_steps = native_action['runs']['steps']
-        action_commands = commands(action_steps)
-        guard_position = action_commands.find('scripts/prepare_native_test_runtime.py --preflight')
-        effects_position = action_commands.find('sudo mkdir')
-        native_command = action_commands.find('python scripts/prepare_native_test_runtime.py')
-        action_valid = (
-            native_action['runs']['using'] == 'composite'
-            and guard_position >= 0 and effects_position > guard_position
-            and native_command > effects_position
-        )
-    except (KeyError, TypeError, ValueError, yaml.YAMLError):
-        action_valid = False
-    runtime_tree = _source_tree(files, 'scripts/prepare_native_test_runtime.py', blockers)
-    runtime_text, runtime_names = _strings_and_names(runtime_tree) if runtime_tree else (set(), set())
-    if (preflight is None or native_setup is None or preflight >= native_setup
-            or not action_valid or '--preflight' not in runtime_text
-            or not {'validate_action_preflight', 'validate_hosted_runner'} <= runtime_names
-            or 'scripts/ci_tests.py native' not in native_commands
-            or any('self-hosted' in str(job.get('runs-on', '')) for job in jobs.values())):
-        blockers.add('native-job-contract')
-
-    js_steps, python_steps, checks_steps = job_steps['js'], job_steps['python'], job_steps['checks']
-    js_text, python_text, checks_text = commands(js_steps), commands(python_steps), commands(checks_steps)
-    js_environment = any(
-        step.get('uses') == './.github/actions/test-environment'
-        and isinstance(step.get('with'), dict) and step['with'].get('browser') == 'true'
-        for step in js_steps
-    )
-    python_matrix = jobs['python'].get('strategy', {}).get('matrix', {}).get('shard')
-    browser_matrix = jobs['browser'].get('strategy', {}).get('matrix', {}).get('shard')
-    browser_steps = job_steps['browser']
-    if (not js_environment or 'scripts/ci_tests.py js' not in js_text
-            or 'scripts/ci_tests.py' not in python_text or '--shards 2 python' not in python_text
-            or python_matrix != ['0', '1']
-            or not all(value in checks_text for value in ('compile(', 'node --check', 'gitleaks', 'sha256sum -c'))
-            or jobs['browser'].get('needs') != 'build'
-            or browser_matrix != ['0', '1', '2', '3']
-            or jobs['browser'].get('strategy', {}).get('fail-fast') != 'false'
-            or '--shards 4 browser' not in commands(browser_steps)
-            or '--assets ' not in commands(browser_steps)):
-        blockers.add('hosted-suite-contract')
-
-    gate = jobs['source-ci']
-    needs = gate.get('needs')
-    if (gate.get('if') != '${{ always() }}' or not isinstance(needs, list)
-            or len(needs) != len(HOSTED_JOBS) or set(needs) != HOSTED_JOBS):
-        blockers.add('native-aggregate-dependency')
-        return
-    gate_steps = job_steps['source-ci']
-    step = gate_steps[0] if gate_steps else {}
-    if (not isinstance(step, dict) or not isinstance(step.get('env'), dict)
-            or step['env'].get('RESULTS') != '${{ toJSON(needs) }}'):
-        blockers.add('native-aggregate-contract')
-        return
-    run = step.get('run', '')
-    if not isinstance(run, str):
-        blockers.add('native-aggregate-contract')
-        return
-    match = re.search(r'python3\s+-\s+<<[\'"]?PY[\'"]?\s*\n(.*?)\n\s*PY\s*$', run, re.S)
-    try:
-        gate_tree = ast.parse(textwrap.dedent(match.group(1))) if match else None
-    except SyntaxError:
-        gate_tree = None
-    if not gate_tree or not _fail_closed_aggregate(gate_tree):
-        blockers.add('native-aggregate-contract')
-
-    build_steps, attest_steps = job_steps['build'], job_steps['attest']
-    build_text, browser_text = commands(build_steps), commands(browser_steps)
-    build_uploads = [
-        (item.get('with') or {}).get('name')
-        for item in build_steps
-        if isinstance(item, dict) and str(item.get('uses', '')).startswith('actions/upload-artifact@')
-    ]
-    browser_downloads = [
-        (item.get('with') or {}).get('name')
-        for item in browser_steps
-        if isinstance(item, dict) and str(item.get('uses', '')).startswith('actions/download-artifact@')
-    ]
-    attest = jobs['attest']
-    attest_text = commands(attest_steps)
-    attest_actions = [str(item.get('uses', '')) for item in attest_steps]
-    if ('deploy.release_artifact build' not in build_text
-            or 'release-${{ github.run_id }}-${{ github.run_attempt }}' not in build_uploads
-            or 'release-${{ github.run_id }}-${{ github.run_attempt }}' not in browser_downloads
-            or 'deploy.release_artifact unpack' not in browser_text
-            or attest.get('needs') != 'source-ci'
-            or attest.get('if') != "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'lindayi/hermes-mobile' }}"
-            or not any('attest-build-provenance@' in action for action in attest_actions)
-            or attest_text):
-        blockers.add('release-workflow-contract')
-
-
-def _fail_closed_aggregate(tree):
-    assignments = _assignments(tree)
-    failed = assignments.get('failed')
-    if not isinstance(failed, ast.DictComp):
-        return False
-    if (len(failed.generators) != 1
-            or not isinstance(failed.generators[0].target, ast.Tuple)
-            or [item.id for item in failed.generators[0].target.elts if isinstance(item, ast.Name)] != ['name', 'value']
-            or not isinstance(failed.generators[0].iter, ast.Call)
-            or _call_name(failed.generators[0].iter.func) != 'items'
-            or not isinstance(failed.generators[0].iter.func, ast.Attribute)
-            or not isinstance(failed.generators[0].iter.func.value, ast.Name)
-            or failed.generators[0].iter.func.value.id != 'results'
-            or not isinstance(failed.value, ast.Subscript)
-            or not isinstance(failed.value.value, ast.Name) or failed.value.value.id != 'value'
-            or not _const(failed.value.slice, 'result')
-            or not any(
-                isinstance(condition, ast.Compare) and condition.ops
-                and isinstance(condition.ops[0], ast.NotEq)
-                and condition.comparators and _const(condition.comparators[0], 'success')
-                and isinstance(condition.left, ast.Subscript)
-                and isinstance(condition.left.value, ast.Name) and condition.left.value.id == 'value'
-                and _const(condition.left.slice, 'result')
-                for condition in failed.generators[0].ifs
-            )):
-        return False
-    expected = None
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Call) and _call_name(node.func) == 'exit'
-                and isinstance(node.func, ast.Attribute) and node.func.attr == 'exit'
-                and node.args and isinstance(node.args[0], ast.BoolOp)
-                and isinstance(node.args[0].op, ast.Or)):
-            expression = node.args[0]
-            left, right = expression.values
-            if (isinstance(left, ast.Call) and _call_name(left.func) == 'bool'
-                    and left.args and isinstance(left.args[0], ast.Name)
-                    and left.args[0].id == 'failed'
-                    and isinstance(right, ast.Compare) and isinstance(right.ops[0], ast.NotEq)
-                    and isinstance(right.left, ast.Call) and _call_name(right.left.func) == 'set'
-                    and right.left.args and isinstance(right.left.args[0], ast.Name)
-                    and right.left.args[0].id == 'results'
-                    and isinstance(right.comparators[0], ast.Set)):
-                try:
-                    expected = set(ast.literal_eval(right.comparators[0]))
-                except (TypeError, ValueError):
-                    expected = None
-    return expected == HOSTED_JOBS and {'loads', 'exit'} <= _call_strings(tree)
-
-
-def _hosted_release_contract(files, blockers):
-    try:
-        host = json.loads(files['.github/host-tests.json'], object_pairs_hook=_unique_object)
-        native = json.loads(files['.github/native-tests.json'], object_pairs_hook=_unique_object)
-    except (KeyError, TypeError, ValueError):
-        blockers.add('installed-host-gate')
-        return
-    if (not isinstance(host, dict) or not host or not isinstance(native, dict) or not native
-            or not set(native) <= set(host)
-            or any(not isinstance(reason, str) or not reason.strip() for reason in (*host.values(), *native.values()))):
-        blockers.add('installed-host-gate')
-
-    deploy_tree = _source_tree(files, 'deploy/self_deploy.py', blockers)
-    release_tree = _source_tree(files, 'deploy/release_artifact.py', blockers)
-    selection_tree = _source_tree(files, 'deploy/ci_selection.py', blockers)
-    cli_tree = _source_tree(files, 'scripts/ci_tests.py', blockers)
-    if any(tree is None for tree in (deploy_tree, release_tree, selection_tree, cli_tree)):
-        return
-    source_trees = _assignments(deploy_tree).get('SOURCE_TREES')
-    try:
-        if '.github' not in ast.literal_eval(source_trees):
-            blockers.add('installed-host-gate')
-    except (TypeError, ValueError):
-        blockers.add('installed-host-gate')
-    run_host = _function(deploy_tree, 'run_host_checks')
-    hosted_branch = _function(deploy_tree, '_deploy')
-    host_calls = _call_strings(run_host) if run_host else set()
-    host_text, host_names = _strings_and_names(run_host) if run_host else (set(), set())
-    if not ({'select_tests', 'run_suite'} <= host_calls
-            or 'host' not in host_text or 'extra_args' not in host_names):
-        blockers.add('installed-host-gate')
-    if hosted_branch is None or not _host_run_branch(hosted_branch):
-        blockers.add('installed-host-gate')
-    select_tests = _function(selection_tree, 'select_tests')
-    select_text, select_names = _strings_and_names(select_tests) if select_tests else (set(), set())
-    ci_main = _function(cli_tree, 'main')
-    ci_text = _strings_and_names(ci_main)[0] if ci_main else set()
-    ci_calls = _call_strings(ci_main) if ci_main else set()
-    if (select_tests is None or not {'host', 'native', '.github/host-tests.json',
-                                     '.github/native-tests.json'} <= select_text
-            or not {'python', 'host', 'native'} <= select_names
-            or ci_main is None or not {'host', 'native'} <= ci_text
-            or not {'select_tests', 'run_suite'} <= ci_calls):
-        blockers.add('installed-host-gate')
-
-    assignments = _assignments(release_tree)
-    try:
-        expected_jobs = set(_literal(assignments['EXPECTED_JOBS']))
-    except (KeyError, TypeError, ValueError):
-        expected_jobs = set()
-    run_record = _function(release_tree, '_run_record')
-    check_jobs = _function(release_tree, '_check_jobs')
-    attestation = _function(release_tree, '_attestation')
-    acquire = _function(release_tree, 'acquire_verified_bundle')
-    run_constants = _assignments(release_tree)
-    try:
-        trusted = (
-            ast.literal_eval(run_constants['REPOSITORY']) == REPOSITORY
-            and ast.literal_eval(run_constants['REPOSITORY_ID']) == REPOSITORY_ID
-            and ast.literal_eval(run_constants['WORKFLOW_ID']) == WORKFLOW_ID
-            and ast.literal_eval(run_constants['WORKFLOW']) == WORKFLOW_PATH
-            and ast.literal_eval(run_constants['REF']) == REF
-        )
-    except (KeyError, TypeError, ValueError):
-        trusted = False
-    check_text, check_names = _strings_and_names(check_jobs) if check_jobs else (set(), set())
-    attest_text, attest_names = _strings_and_names(attestation) if attestation else (set(), set())
-    acquire_calls = _call_strings(acquire) if acquire else set()
-    run_text, run_names = _strings_and_names(run_record) if run_record else (set(), set())
-    if (expected_jobs != RUN_JOBS or not trusted
-            or not {'push', 'main', 'completed', 'success', 'workflow_id', 'head_sha'} <= run_text
-            or not {'REPOSITORY_ID', 'WORKFLOW_ID', 'REPOSITORY'} <= run_names
-            or not {'run_id', 'run_attempt', 'head_sha', 'completed', 'success'} <= check_text
-            or not {'len', '_listed'} <= _call_strings(check_jobs)
-            or 'EXPECTED_JOBS' not in check_names
-            or not {'_run_record', '_check_jobs', '_attestation'} <= acquire_calls
-            or not {'--cert-identity', '--source-ref', '--source-digest', '--signer-digest',
-                    '--deny-self-hosted-runners', 'runnerEnvironment', 'sourceRepositoryDigest',
-                    'buildSignerDigest', 'runInvocationURI'} <= attest_text
-            or not {'REPOSITORY_ID', 'WORKFLOW_ID', 'REPOSITORY', 'REF', 'WORKFLOW'} <= attest_names
-            or run_record is None or check_jobs is None or attestation is None or acquire is None):
-        blockers.add('release-artifact-provenance')
-
-
-def _host_run_branch(function):
-    for node in ast.walk(function):
-        if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
-            continue
-        test = node.test
-        if (isinstance(test.left, ast.Name) and test.left.id == 'hosted_run_id'
-                and any(_const(value, None) for value in test.comparators)):
-            body_calls = _call_strings(ast.Module(body=node.body, type_ignores=[]))
-            else_calls = _call_strings(ast.Module(body=node.orelse, type_ignores=[]))
-            return 'checks' in body_calls and 'run_host_checks' in else_calls
-    return False
-
-
-def _coordinator_contract(files, blockers):
-    tree = _source_tree(files, 'deploy/cloud_coordinator.py', blockers)
-    if tree is None:
-        return
-    constants = _assignments(tree)
-    expected = {
-        'REPOSITORY': REPOSITORY, 'REPOSITORY_ID': REPOSITORY_ID,
-        'OWNER_ID': OWNER_ID, 'COPILOT_REVIEWER_ID': COPILOT_REVIEWER_ID,
-        'COPILOT_AGENT_ID': COPILOT_AGENT_ID, 'SOURCE_WORKFLOW_ID': WORKFLOW_ID,
-        'MAIN_BRANCH': 'main',
-    }
-    try:
-        identities_match = all(ast.literal_eval(constants[name]) == value for name, value in expected.items())
-    except (KeyError, TypeError, ValueError):
-        identities_match = False
-    review = _function(tree, 'copilot_review_valid')
-    threads = _function(tree, '_complete_resolved_threads')
-    plan = _function(tree, '_plan_pull')
-    identity = _function(tree, '_identity')
-    sensitive_command = _function(tree, '_is_owner_sensitive_command')
-    scan = _function(tree, '_scan_enrollments')
-    review_contract = _valid_review_contract(review, threads)
-    identity_names = _strings_and_names(identity)[1] if identity else set()
-    sensitive_text, sensitive_names = _strings_and_names(sensitive_command) if sensitive_command else (set(), set())
-    plan_calls = _call_strings(plan) if plan else set()
-    scan_calls = _call_strings(scan) if scan else set()
-    if (not identities_match or review is None or threads is None or plan is None
-            or not review_contract or identity is None or sensitive_command is None or scan is None
-            or not {'REPOSITORY', 'REPOSITORY_ID', 'OWNER_ID'} <= identity_names
-            or 'OWNER_ID' not in sensitive_names
-            or not any(isinstance(value, str) and 'authorize-sensitive' in value and '[0-9a-f]{40}' in value
-                       for value in sensitive_text)
-            or '_is_owner_sensitive_command' not in scan_calls
-            or not {'copilot_review_valid', 'classify_sensitive_paths'} <= plan_calls
-            or 'sensitive_sha' not in _strings_and_names(plan)[0]):
-        blockers.add('coordinator-review-contract')
-
-
-def _path(node):
-    if isinstance(node, ast.Name):
-        return (node.id,)
-    if isinstance(node, ast.Subscript):
-        key = node.slice.value if isinstance(node.slice, ast.Index) else node.slice
-        if isinstance(key, ast.Constant) and isinstance(key.value, str):
-            return _path(node.value) + (key.value,)
-    return ()
-
-
-def _get_comparison(node, obj, key, expected):
-    if (not isinstance(node, ast.Compare) or len(node.ops) != 1
-            or not isinstance(node.ops[0], ast.Eq) or len(node.comparators) != 1
-            or not isinstance(node.left, ast.Call) or _call_name(node.left.func) != 'get'
-            or not isinstance(node.left.func, ast.Attribute)
-            or not isinstance(node.left.func.value, ast.Name)
-            or node.left.func.value.id != obj or not node.left.args
-            or not _const(node.left.args[0], key)):
-        return False
-    value = node.comparators[0]
-    if isinstance(expected, tuple) and expected[0] == 'name':
-        return isinstance(value, ast.Name) and value.id == expected[1]
-    return _const(value, expected)
-
-
-def _valid_review_contract(review, threads):
-    if review is None or threads is None:
-        return False
-    returns = [node.value for node in review.body if isinstance(node, ast.Return)]
-    if not returns or not isinstance(returns[-1], ast.BoolOp) or not isinstance(returns[-1].op, ast.And):
-        return False
-    final = returns[-1].values
-    if len(final) != 2 or not {
-        'APPROVED', 'head_sha',
-    } <= {item for node in final for item in _strings_and_names(node)[0] | _strings_and_names(node)[1]}:
-        return False
-    if not (_get_comparison(final[0], 'latest', 'state', 'APPROVED')
-            and _get_comparison(final[1], 'latest', 'commit_id', ('name', 'head_sha'))):
-        return False
-    assignments = {
-        target.id: node.value
-        for node in ast.walk(review)
-        if isinstance(node, ast.Assign) for target in node.targets if isinstance(target, ast.Name)
-    }
-    authored = assignments.get('authored')
-    if (not isinstance(authored, ast.ListComp) or len(authored.generators) != 1
-            or not isinstance(authored.generators[0].iter, ast.Name)
-            or authored.generators[0].iter.id != 'reviews'
-            or not any(isinstance(condition, ast.Compare) and len(condition.ops) == 1
-                       and isinstance(condition.ops[0], ast.Eq)
-                       and _path(condition.left) == ('review', 'user', 'id')
-                       and isinstance(condition.comparators[0], ast.Name)
-                       and condition.comparators[0].id == 'COPILOT_REVIEWER_ID'
-                       for condition in ast.walk(authored))):
-        return False
-    latest = assignments.get('latest')
-    if (not isinstance(latest, ast.Call) or _call_name(latest.func) != 'max'
-            or not latest.args or not isinstance(latest.args[0], ast.Name)
-            or latest.args[0].id != 'authored'
-            or not any(keyword.arg == 'key' and isinstance(keyword.value, ast.Lambda)
-                       and 'submitted_at' in _strings_and_names(keyword.value)[0]
-                       for keyword in latest.keywords)):
-        return False
-    names = _strings_and_names(review)[1]
-    if not {'reviews_complete', 'threads_complete', '_complete_resolved_threads'} <= names | _call_strings(review):
-        return False
-    thread_calls = _call_strings(threads)
-    thread_text = _strings_and_names(threads)[0]
-    if 'all' not in thread_calls or not {'isResolved', 'comments_complete'} <= thread_text:
-        return False
-    return True
-
-
 def _static_contracts(files, blockers):
-    for name in REQUIRED_FILES:
-        if not isinstance(files.get(name), str):
+    if set(files) != set(REQUIRED_FILES):
+        if set(REQUIRED_FILES) - set(files):
             blockers.add('main-source-missing')
-    if 'main-source-missing' in blockers:
-        return
-    _workflow_contract(files, blockers)
-    _hosted_release_contract(files, blockers)
-    _coordinator_contract(files, blockers)
+        if set(files) - set(REQUIRED_FILES):
+            blockers.add('main-source-invalid')
+    for name in REQUIRED_FILES:
+        digest = files.get(name)
+        if not isinstance(digest, str) or HEX_RE.fullmatch(digest) is None:
+            blockers.add('main-source-invalid' if name in files else 'main-source-missing')
+        elif digest != SOURCE_FINGERPRINTS[name]:
+            blockers.add(SOURCE_BLOCKERS[name])
 
 
 def _valid_sha(value):
@@ -698,8 +249,6 @@ def validate_transition(evidence, *, phase):
         sha, files = '', {}
     else:
         sha, files = main['sha'], main['files']
-        if any(not isinstance(value, str) for value in files.values()):
-            blockers.add('main-source-invalid')
     try:
         _static_contracts(files, blockers)
         _check_protection(evidence, phase, blockers)
