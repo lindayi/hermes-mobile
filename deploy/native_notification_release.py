@@ -61,6 +61,7 @@ class NativeNotificationCallbacks:
         self.initial_records = None
         self.initial_receipts = None
         self.handoff_records = None
+        self.handoff_receipts = None
         self.owner_id = None
         self.scope = None
         self.identities = None
@@ -327,15 +328,31 @@ class NativeNotificationCallbacks:
 
     @staticmethod
     def _receipt_fingerprints(snapshot):
-        return {key: _sha(_canonical(dict(receipt)))
-                for key, receipt in snapshot['receipts'].items()}
+        fields = ('event_id', 'scope', 'digest', 'user_id', 'origin', 'inbox_id',
+                  'event_json', 'lease_token', 'joined_inbox_id', 'delivery_id',
+                  'inbox_user_id', 'title', 'body', 'session_id')
+        result = {}
+        for key, receipt in snapshot['receipts'].items():
+            acknowledged = receipt['acknowledged']
+            if type(acknowledged) is not int or acknowledged not in (0, 1):
+                raise RuntimeError('Owned notification acknowledgement is unknown')
+            result[key] = dict(
+                binding=_sha(_canonical({field: receipt[field] for field in fields})),
+                acknowledged=acknowledged)
+        return result
 
     @staticmethod
     def _preserved_receipts(before, snapshot):
         after = snapshot['receipts']
-        if any(key not in after or _sha(_canonical(dict(after[key]))) != fingerprint
-               for key, fingerprint in before.items()):
-            raise RuntimeError('Owned notification receipt was not preserved')
+        for key, captured in before.items():
+            receipt = after.get(key)
+            if receipt is None:
+                raise RuntimeError('Owned notification receipt was not preserved')
+            current = NativeNotificationCallbacks._receipt_fingerprints(
+                dict(receipts={key: receipt}))[key]
+            if (current['binding'] != captured['binding']
+                    or current['acknowledged'] < captured['acknowledged']):
+                raise RuntimeError('Owned notification receipt was not preserved')
 
     def _require_delivered_receipts(self, snapshot):
         for event_id, record in snapshot['records'].items():
@@ -389,6 +406,7 @@ class NativeNotificationCallbacks:
                 or self.native._start_ticks(self.baseline['pid']) != self.baseline['start_ticks']):
             raise RuntimeError('Native notification process identity changed before handoff')
         snapshot = self._snapshot(expected_owner=self.owner_id, include_receipts=True)
+        self.handoff_receipts = self._receipt_fingerprints(snapshot)
         self._preserved(self.initial_records, snapshot['records'])
         self._preserved_receipts(self.initial_receipts, snapshot)
         self._require_delivered_receipts(snapshot)
@@ -459,6 +477,7 @@ class NativeNotificationCallbacks:
                     raise RuntimeError('Native notification database binding changed')
                 self._preserved(self.handoff_records, self._fingerprints(snapshot['records']), exact=True)
                 self._preserved_receipts(self.initial_receipts, snapshot)
+                self._preserved_receipts(self.handoff_receipts, snapshot)
                 ready = self._require_health(root=stage, require_idle=True, snapshot=snapshot)
             except _EvidenceChanged:
                 ready = False
@@ -494,6 +513,8 @@ class NativeNotificationCallbacks:
         expected = self.handoff_records if self.handoff_records is not None else self.initial_records
         self._preserved(expected, self._fingerprints(snapshot['records']), exact=True)
         self._preserved_receipts(self.initial_receipts, snapshot)
+        if self.handoff_receipts is not None:
+            self._preserved_receipts(self.handoff_receipts, snapshot)
         self._require_delivered_receipts(snapshot)
         self._require_health(baseline=self.baseline, require_idle=False, snapshot=snapshot)
         return True

@@ -211,6 +211,10 @@ def fixture(tmp_path):
     def run(cmd, **kw):
         events.append(('command', cmd))
     def rollback_verify(root, baseline):
+        assert (paths.state / 'current').resolve() == root
+        with journal.connect() as db:
+            assert [tuple(row) for row in db.execute(
+                'SELECT singleton, owner FROM deployment_gate')] == [(1, baseline['gate_owner'])]
         events.append(('rollback-preservation', root))
         return True
     args = dict(checks=lambda stage: events.append(('checks', stage)), verify=verify,

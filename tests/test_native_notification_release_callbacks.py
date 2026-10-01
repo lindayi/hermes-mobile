@@ -2,10 +2,10 @@
 import fcntl
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 import shutil
 import sqlite3
-from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -139,6 +139,17 @@ def create_owned_ack(app, outbox, event, scope):
     app.notifications.background_acknowledged(scope, item['event_id'], item['lease_token'])
     outbox.ack(event_id=item['event_id'], payload_sha256=item['payload_sha256'],
                lease_token=item['lease_token'], receipt_id=receipt_id)
+
+
+def create_unacked_owned_receipt(app, outbox, event, scope):
+    from backend.background_delivery import BackgroundDeliveryService
+    item = outbox.claim(1)[0]
+    receipt_id = app.notifications.store_background(
+        scope=scope, event_id=item['event_id'], digest=item['payload_sha256'],
+        user_id='owner', origin=BackgroundDeliveryService._origin(event),
+        session_id='chat', event=event, lease_token=item['lease_token'],
+        body=BackgroundDeliveryService._body(event))
+    return item, receipt_id
 
 
 def setup_controller_release(tmp_path, monkeypatch, *, delivered=True):
@@ -294,6 +305,19 @@ def test_controller_reopens_after_verified_candidate_rollback(tmp_path, monkeypa
         assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
 
 
+def test_controller_reopens_prepublication_after_positive_rollback_proof(
+        tmp_path, monkeypatch):
+    _, _, native, paths, callbacks, args, _, _ = setup_controller_release(tmp_path, monkeypatch)
+    native.idle = lambda *a, **kw: False
+
+    with pytest.raises(RuntimeError, match='Native idle wait timed out'):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'rolled_back'
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
+
+
 def test_controller_reopens_after_receipt_delay_with_preserved_pending_record(
         tmp_path, monkeypatch):
     _, _, _, paths, callbacks, args, _, _ = setup_controller_release(
@@ -301,6 +325,28 @@ def test_controller_reopens_after_receipt_delay_with_preserved_pending_record(
     callbacks.receipt_timeout = 0
 
     with pytest.raises(RuntimeError, match='receipt verification timed out'):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'rolled_back'
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
+
+
+def test_controller_allows_receipt_ack_progress_during_verified_rollback(tmp_path, monkeypatch):
+    app, outbox, _, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch, delivered=False)
+    scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+    item, receipt_id = create_unacked_owned_receipt(app, outbox, event, scope)
+
+    def acknowledge_then_fail(stage):
+        app.notifications.background_acknowledged(scope, item['event_id'], item['lease_token'])
+        outbox.ack(event_id=item['event_id'], payload_sha256=item['payload_sha256'],
+                   lease_token=item['lease_token'], receipt_id=receipt_id)
+        callbacks.probe(stage)
+        raise RuntimeError('ordinary candidate failure after receipt ACK')
+
+    args['probe'] = acknowledge_then_fail
+    with pytest.raises(RuntimeError, match='ordinary candidate failure after receipt ACK'):
         release.deploy(paths, idle_timeout=0, **args)
 
     assert json.loads((paths.state / 'status.json').read_text())['status'] == 'rolled_back'

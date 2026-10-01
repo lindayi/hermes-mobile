@@ -137,15 +137,15 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
            rollback_verify=None):
     """One lock and one candidate, with owner-gated verified rollback.
 
-    Notification candidates require two synchronous callbacks:
+    Notification candidates require synchronous callbacks:
     handoff(stage) proves durable retention in the existing private outbox after
     drain and before publication/restarts; it never mutates SDK source or registry.
     probe(stage) proves delivery receipts after activation.
     rollback_verify(old, baseline) proves captured notification evidence before
     either abort path reopens admission.
-    Both run under the same deployment lock and owned admission gate. Callbacks
-    must raise on incomplete work; explicit False is also a failure, and no
-    return value substitutes for positive checks.
+    All callbacks run under the same deployment lock and owned admission gate.
+    Handoff/probe must raise on incomplete work; explicit False is also a failure.
+    Rollback verification must return literal True to reopen admission.
     """
     from .git_source import preflight
     preflight(paths, service_run=run, extra_paths=(native_dropin,))

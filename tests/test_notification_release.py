@@ -124,6 +124,17 @@ def test_notification_publication_requires_explicit_handoff_before_checks(releas
         assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
 
 
+def test_notification_rollback_requires_explicit_preservation_verifier(release_transaction):
+    paths, old, journal, dropin, events, args = release_transaction
+    args.pop('rollback_verify')
+    with pytest.raises(RuntimeError, match='rollback preservation verification'):
+        release.deploy(paths, **args)
+    assert (paths.state / 'current').resolve() == old
+    assert not events
+    with journal.connect() as db:
+        assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
+
+
 def test_worker_cli_wires_guarded_notification_callbacks(release_transaction, monkeypatch):
     paths, _, _, _, _, _ = release_transaction
     from deploy import native_notification_release
