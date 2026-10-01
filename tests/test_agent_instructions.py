@@ -267,6 +267,35 @@ def test_gate_transition_is_conditional_and_preserves_exact_head_review():
         assert clause in policy, clause
 
 
+def test_additive_staging_policy_documents_bounded_maps_and_ordered_operator_gates():
+    policy = (ROOT / 'docs/autonomy-policy.md').read_text()
+    expected = {
+        'pre-cutover': ('source-ci', 'integration-tests', 'agent-review', 'issue-link'),
+        'staging': ('source-ci', 'integration-tests', 'agent-review', 'issue-link', 'cloud-review'),
+        'post-cutover': ('source-ci', 'issue-link', 'cloud-review'),
+    }
+    for phase, contexts in expected.items():
+        assert f'--phase {phase} /private/path/evidence.json' in policy
+        row = next(line for line in policy.splitlines() if line.startswith(f'| `{phase}` |'))
+        assert tuple(re.findall(r'`([^`]+)`', row.split('|')[2])) == contexts
+    text = ' '.join(policy.split())
+    for clause in (
+        'No arbitrary supersets or unknown contexts',
+        'app_id must be explicitly present as a JSON integer or null',
+        'source-ci may be unbound (null) or already bound to Actions app 15368',
+        'staging and post-cutover require source-ci bound to Actions app 15368',
+        'issue-link remains bound to Actions app 15368 in every phase',
+        'Only pre-cutover permits omission of cloud_review.status',
+        'An explicitly supplied null or malformed status blocks',
+        'creator ID 5164171',
+        'the genuinely merged coordinator',
+        'before retiring either legacy context',
+        'A pre-cutover pass is permission to consider additive staging, not to retire legacy gates',
+        'Do not synthesize a status to bridge this gap',
+    ):
+        assert clause in text, clause
+
+
 def test_parallel_integration_preserves_reviewed_history_and_both_intents():
     for path in ('AGENTS.md', 'docs/development-workflow.md'):
         text = ' '.join((ROOT / path).read_text().split())

@@ -17,7 +17,13 @@ RUN_JOBS = frozenset({
     'native', 'source-ci', 'attest',
 })
 REQUIRED_CHECKS = {
-    'pre-cutover': {'source-ci': 15368, 'integration-tests': None, 'agent-review': None},
+    'pre-cutover': {
+        'source-ci': None, 'integration-tests': None, 'agent-review': None, 'issue-link': 15368,
+    },
+    'staging': {
+        'source-ci': 15368, 'integration-tests': None, 'agent-review': None,
+        'issue-link': 15368, 'cloud-review': None,
+    },
     'post-cutover': {'source-ci': 15368, 'issue-link': 15368, 'cloud-review': None},
 }
 REQUIRED_FILES = (
@@ -106,7 +112,9 @@ def _check_protection(evidence, phase, blockers):
     actual = {}
     if isinstance(checks, list):
         for check in checks:
-            if not isinstance(check, dict) or not isinstance(check.get('context'), str):
+            if (not isinstance(check, dict) or not isinstance(check.get('context'), str)
+                    or 'app_id' not in check
+                    or (check['app_id'] is not None and type(check['app_id']) is not int)):
                 blockers.add('required-check-policy')
                 return
             context = check['context']
@@ -114,7 +122,10 @@ def _check_protection(evidence, phase, blockers):
                 blockers.add('required-check-policy')
                 return
             actual[context] = check.get('app_id')
-    if actual != expected:
+    # The only pre-cutover variant is an already Actions-bound source-ci.
+    if actual != expected and not (
+        phase == 'pre-cutover' and actual == expected | {'source-ci': 15368}
+    ):
         blockers.add('required-check-policy')
 
 
@@ -181,7 +192,7 @@ def _check_source_run(evidence, sha, blockers):
         blockers.add('release-attestation')
 
 
-def _check_review(evidence, main_sha, blockers):
+def _check_review(evidence, main_sha, phase, blockers):
     review = evidence.get('cloud_review')
     if not isinstance(review, dict):
         blockers.add('cloud-review-evidence')
@@ -211,7 +222,8 @@ def _check_review(evidence, main_sha, blockers):
            or thread.get('comments_complete') is not True for thread in threads):
         blockers.add('cloud-review-threads')
     status = review.get('status')
-    if (not isinstance(status, dict) or status.get('context') != 'cloud-review'
+    if (phase != 'pre-cutover' or 'status' in review) and (
+            not isinstance(status, dict) or status.get('context') != 'cloud-review'
             or status.get('state') != 'success' or status.get('head_sha') != head
             or status.get('creator_id') != OWNER_ID):
         blockers.add('cloud-review-status')
@@ -254,7 +266,7 @@ def validate_transition(evidence, *, phase):
         _check_protection(evidence, phase, blockers)
         if sha:
             _check_source_run(evidence, sha, blockers)
-            _check_review(evidence, sha, blockers)
+            _check_review(evidence, sha, phase, blockers)
     except (AttributeError, IndexError, KeyError, RecursionError, TypeError, ValueError):
         blockers.add('malformed-evidence')
     return {'ready': not blockers, 'phase': phase, 'blockers': sorted(blockers)}

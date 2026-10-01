@@ -39,7 +39,7 @@ def _read_evidence(path):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--phase', required=True, choices=('pre-cutover', 'post-cutover'))
+    parser.add_argument('--phase', required=True, choices=('pre-cutover', 'staging', 'post-cutover'))
     parser.add_argument('evidence', type=Path, help='read-only JSON snapshot collected from GitHub')
     args = parser.parse_args(argv)
     try:

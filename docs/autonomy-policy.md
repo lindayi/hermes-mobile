@@ -13,6 +13,7 @@ a readiness report:
 
 ```sh
 python3 scripts/autonomy_policy.py --phase pre-cutover /private/path/evidence.json
+python3 scripts/autonomy_policy.py --phase staging /private/path/evidence.json
 python3 scripts/autonomy_policy.py --phase post-cutover /private/path/evidence.json
 ```
 
@@ -82,23 +83,78 @@ independent review of that head. A later commit invalidates both.
 
 | Phase | Required main protection checks | Meaning |
 | --- | --- | --- |
-| `pre-cutover` | `source-ci`, `integration-tests`, `agent-review` | Existing manual policy. Exact-head `source-ci` and complete residual host coverage remain required; publish neither legacy status from this validator. |
-| `post-cutover` | `source-ci`, `issue-link`, `cloud-review` | Target routine policy, only after the owner has verified replacement evidence on actual current heads and changed required checks through the protected repository settings. |
+| `pre-cutover` | `source-ci`, `integration-tests`, `agent-review`, `issue-link` | Existing manual policy, with issue-link retained. Genuine complete exact-head APPROVED review is required, but its not-yet-published cloud-review status may be absent. |
+| `staging` | `source-ci`, `integration-tests`, `agent-review`, `issue-link`, `cloud-review` | Additive policy: bind source-ci to Actions and add cloud-review without retiring legacy gates. Require actual coordinator-published exact-head success and its genuine approved review. |
+| `post-cutover` | `source-ci`, `issue-link`, `cloud-review` | Target routine policy, only after the owner has verified staging replacement evidence on actual current heads and authorized retirement of the two legacy contexts. |
 
-Both phases require strict main protection and conversation resolution. In either
-phase, complete `source-ci` includes the public native suite. After cutover, private
+These are exact context maps, not minimum subsets. No arbitrary supersets or unknown
+contexts are accepted, and duplicate contexts block. Each check's app_id must be
+explicitly present as a JSON integer or null. In pre-cutover, source-ci may be
+unbound (null) or already bound to Actions app 15368; staging and post-cutover
+require source-ci bound to Actions app 15368. The issue-link remains bound to
+Actions app 15368 in every phase. The legacy integration-tests and agent-review
+bindings remain null in pre-cutover and staging; cloud-review's app binding is
+null in staging and post-cutover. Its separate status creator identity is checked
+below. No other app-binding variants are accepted.
+
+All three phases require strict main protection, administrator enforcement and
+conversation resolution. In every phase, complete `source-ci` includes the public
+native suite. After cutover, private
 installed-runtime compatibility remains an exact-main guarded deployment gate,
 not a premerge host task. The validator never publishes `integration-tests`,
 `agent-review`, `cloud-review`, or any other status and cannot perform the settings
 transition.
 
-The cutover is deliberately blocked if PR #19/PR20's native aggregate and release
-provenance, or PR #15/PR16's fixed-identity coordinator and exact-head review
-contract, are absent from current main. A PR branch or expected merge is not a
-dependency proof. Keep current required contexts until the parent operator has
-verified actual hosted results, release provenance, complete review evidence and
-the retained installed-host gate, then independently applies the reversible
-settings change. No coding task or validator performs that action.
+Only pre-cutover permits omission of cloud_review.status. An explicitly supplied
+null or malformed status blocks; if supplied, it must meet the same success,
+exact-head, context and creator checks as the later phases. Staging and post-cutover
+require an actual `cloud-review` success on the reviewed PR head, with creator ID
+5164171, published by the genuinely merged coordinator. The operator must verify
+that provenance independently; a supplied status record or fixed creator ID alone
+does not authenticate who ran which source. Review approval, complete pagination,
+resolved threads, source/run/artifact provenance, changed-file classification and
+sensitive owner authorization remain mandatory even when pre-cutover status is
+absent. A pre-cutover pass is permission to consider additive staging, not to retire
+legacy gates.
+
+The coordinator publishes cloud-review only when that context is required. Requiring
+its status before adding the context would deadlock. Do not synthesize a status to
+bridge this gap. The owner-controlled sequence is:
+
+1. Merge the independently reviewed dependencies through the existing protected
+   process. Pre-cutover remains blocked if PR #19/PR20's native aggregate/release
+   provenance or PR #15/PR16's fixed-identity coordinator and exact-head review
+   contract are absent from current main. A PR branch or expected merge is not a
+   dependency proof. Once the final merged core (and later PR33 changes) is known,
+   deliberately review and replace any changed fingerprint and provenance fixture;
+   never auto-pin candidate evidence or expand a whitelist.
+2. Collect authenticated current-main source, successful complete hosted results,
+   release provenance, retained installed-host gate and genuine complete exact-head
+   APPROVED review evidence, including sensitive authorization where required.
+   Run pre-cutover validation against the actual four-context readback. Keep existing
+   issue-link and both legacy gates; exact-head hosted plus full residual host
+   coverage and the independent formal COMMENT/legacy publication obligations in
+   the development workflow remain in force until final cutover.
+3. Only the owner may authorize and apply the reversible additive settings change:
+   tighten source-ci to Actions app 15368 and add cloud-review, retaining issue-link,
+   integration-tests, agent-review and all strict/admin/conversation protections.
+   This is staging, not final activation. Read back the exact five-context map.
+4. Under that staging policy, verify the genuinely merged coordinator publishes
+   cloud-review success from actual exact-head APPROVED review with complete resolved
+   threads and any required sensitive authorization. Recollect fresh evidence and
+   pass staging validation before retiring either legacy context. Missing status,
+   stale heads, fake approval, or mismatched source remain blockers, not reasons to
+   fabricate success or bypass protection.
+5. Only after that verification may the owner authorize the final reversible change
+   retiring integration-tests and agent-review. Retain exactly source-ci/app15368,
+   issue-link/app15368 and cloud-review/unbound plus all protections. Recollect actual
+   readback, main and PR-head evidence and pass post-cutover validation. New heads
+   invalidate old evidence; re-read current main and PR head to fence collection
+   races. A post-cutover snapshot does not prove the earlier staging verification;
+   the parent operator must retain and independently verify that record.
+
+No coding task or validator performs settings changes or service activation. Do not
+equate synthetic unit-test success with live readiness, a merge, or a deployment.
 
 ## Evidence fields
 
@@ -114,7 +170,8 @@ run invocation URI, trigger and runner environment.
 `cloud_review` identifies the current PR repository, base ref/SHA and head SHA,
 open/draft state, complete changed-file classification for its exact head,
 complete review/thread pagination, review authors/states/commit SHAs, resolved
-thread state, and the `cloud-review` status context, state, head and creator ID.
+thread state, and the `cloud-review` status context, state, head and creator ID
+(status may be omitted only in pre-cutover, as described above).
 For a sensitive change it also carries the exact-head owner authorization and
 targeted-review identities. Consult `deploy/autonomy_policy.py` for the executable
 field contract; missing fields block rather than defaulting to success.

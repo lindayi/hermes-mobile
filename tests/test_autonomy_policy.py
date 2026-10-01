@@ -88,9 +88,10 @@ def _evidence():
             'complete': True, 'strict': True, 'enforce_admins': True,
             'required_conversation_resolution': True,
             'required_checks': [
-                {'context': 'source-ci', 'app_id': 15368},
+                {'context': 'source-ci', 'app_id': None},
                 {'context': 'integration-tests', 'app_id': None},
                 {'context': 'agent-review', 'app_id': None},
+                {'context': 'issue-link', 'app_id': 15368},
             ],
         },
         'source_ci': _source_ci(),
@@ -110,6 +111,24 @@ def _evidence():
             'change': {'head_sha': review_head, 'files_complete': True, 'sensitive': False},
         },
     }
+
+
+PHASES = ('pre-cutover', 'staging', 'post-cutover')
+
+
+def _phase_evidence(phase):
+    evidence = _evidence()
+    if phase == 'pre-cutover':
+        evidence['cloud_review'].pop('status')
+    else:
+        evidence['protection']['required_checks'][0]['app_id'] = 15368
+        evidence['protection']['required_checks'].append({'context': 'cloud-review', 'app_id': None})
+        if phase == 'post-cutover':
+            evidence['protection']['required_checks'] = [
+                check for check in evidence['protection']['required_checks']
+                if check['context'] not in ('integration-tests', 'agent-review')
+            ]
+    return evidence
 
 
 def _blockers(evidence, phase='pre-cutover'):
@@ -148,6 +167,27 @@ def test_complete_synthetic_evidence_satisfies_each_policy_phase():
     ]
     post = validate_transition(post_evidence, phase='post-cutover')
     assert post == {'ready': True, 'phase': 'post-cutover', 'blockers': []}
+
+
+@pytest.mark.parametrize('source_app', [None, 15368])
+@pytest.mark.parametrize('published_status', [False, True])
+def test_pre_cutover_preserves_actual_four_checks_without_bootstrap_deadlock(source_app, published_status):
+    # Only protection mirrors the observed policy; all other records are synthetic.
+    evidence = _evidence()
+    evidence['protection']['required_checks'] = [
+        {'context': 'source-ci', 'app_id': source_app},
+        {'context': 'integration-tests', 'app_id': None},
+        {'context': 'agent-review', 'app_id': None},
+        {'context': 'issue-link', 'app_id': 15368},
+    ]
+    if not published_status:
+        evidence['cloud_review'].pop('status')
+    before = copy.deepcopy(evidence)
+
+    assert validate_transition(evidence, phase='pre-cutover') == {
+        'ready': True, 'phase': 'pre-cutover', 'blockers': [],
+    }
+    assert evidence == before
 
 
 def test_missing_pending_pr16_source_cannot_satisfy_current_main_contract():
@@ -364,6 +404,152 @@ def test_mismatched_current_head_and_sensitive_approval_block():
     assert 'change-scope-evidence' in _blockers(evidence)
 
 
+@pytest.mark.parametrize('phase', PHASES)
+def test_additive_staging_synthetic_positive_and_no_input_mutation(phase):
+    evidence = _phase_evidence(phase)
+    before = copy.deepcopy(evidence)
+    assert validate_transition(evidence, phase=phase) == {
+        'ready': True, 'phase': phase, 'blockers': [],
+    }
+    assert evidence == before
+
+
+@pytest.mark.parametrize('phase', PHASES)
+def test_additive_staging_requires_every_context_and_no_unknown_superset(phase):
+    evidence = _phase_evidence(phase)
+    checks = evidence['protection']['required_checks']
+    for removed in checks:
+        changed = copy.deepcopy(evidence)
+        changed['protection']['required_checks'].remove(removed)
+        assert _blockers(changed, phase) == {'required-check-policy'}, removed['context']
+    for added in ({'context': 'unknown', 'app_id': None}, checks[0]):
+        changed = copy.deepcopy(evidence)
+        changed['protection']['required_checks'].append(added)
+        assert _blockers(changed, phase) == {'required-check-policy'}
+
+
+@pytest.mark.parametrize('phase', PHASES)
+def test_additive_staging_requires_exact_app_bindings(phase):
+    evidence = _phase_evidence(phase)
+    for index, check in enumerate(evidence['protection']['required_checks']):
+        bad_apps = [175728472, '15368', 15368.0]
+        if phase != 'pre-cutover' or check['context'] != 'source-ci':
+            bad_apps.append(None if check['app_id'] is not None else 15368)
+        for app in bad_apps:
+            changed = copy.deepcopy(evidence)
+            changed['protection']['required_checks'][index]['app_id'] = app
+            assert _blockers(changed, phase) == {'required-check-policy'}, (check, app)
+        changed = copy.deepcopy(evidence)
+        changed['protection']['required_checks'][index].pop('app_id')
+        assert _blockers(changed, phase) == {'required-check-policy'}, check
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize(('path', 'value', 'blocker'), [
+    (('repository', 'id'), 1, 'repository-identity'),
+    (('protection', 'strict'), False, 'branch-protection'),
+    (('protection', 'enforce_admins'), False, 'branch-protection'),
+    (('protection', 'required_conversation_resolution'), False, 'branch-protection'),
+    (('protection', 'complete'), False, 'branch-protection'),
+    (('cloud_review', 'reviews'), [], 'cloud-review-approval'),
+    (('cloud_review', 'reviews', 0, 'state'), 'COMMENTED', 'cloud-review-approval'),
+    (('cloud_review', 'reviews', 0, 'state'), 'CHANGES_REQUESTED', 'cloud-review-approval'),
+    (('cloud_review', 'reviews', 0, 'state'), 'DISMISSED', 'cloud-review-approval'),
+    (('cloud_review', 'reviews', 0, 'user', 'id'), OWNER_ID, 'cloud-review-approval'),
+    (('cloud_review', 'reviews', 0, 'commit_id'), 'd' * 40, 'cloud-review-approval'),
+    (('cloud_review', 'reviews_complete'), False, 'cloud-review-evidence'),
+    (('cloud_review', 'threads_complete'), False, 'cloud-review-evidence'),
+    (('cloud_review', 'threads', 0, 'isResolved'), False, 'cloud-review-threads'),
+    (('cloud_review', 'threads', 0, 'comments_complete'), False, 'cloud-review-threads'),
+    (('cloud_review', 'base_sha'), 'd' * 40, 'cloud-review-evidence'),
+    (('cloud_review', 'change', 'head_sha'), 'd' * 40, 'change-scope-evidence'),
+    (('cloud_review', 'change', 'files_complete'), False, 'change-scope-evidence'),
+    (('cloud_review', 'change', 'sensitive'), True, 'sensitive-review-authorization'),
+    (('source_ci', 'head_sha'), 'd' * 40, 'source-ci-evidence'),
+    (('source_ci', 'workflow_id'), 1, 'source-ci-evidence'),
+    (('source_ci', 'jobs_complete'), False, 'source-ci-jobs'),
+    (('source_ci', 'jobs', 0, 'conclusion'), 'skipped', 'source-ci-jobs'),
+    (('source_ci', 'artifact'), None, 'release-artifact-evidence'),
+    (('source_ci', 'artifact', 'attestation', 'verified'), False, 'release-attestation'),
+    (('main', 'current'), False, 'current-main-snapshot'),
+    (('main', 'files', 'deploy/cloud_coordinator.py'), '0' * 64, 'coordinator-review-contract'),
+    (('main', 'files', WORKFLOW_PATH), '0' * 64, 'hosted-workflow-contract'),
+    (('main', 'files', 'deploy/self_deploy.py'), '0' * 64, 'installed-host-gate'),
+])
+def test_additive_staging_never_substitutes_status_for_review_or_source(phase, path, value, blocker):
+    evidence = _phase_evidence(phase)
+    node = evidence
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    assert blocker in _blockers(evidence, phase)
+
+
+@pytest.mark.parametrize('phase', PHASES)
+def test_additive_staging_missing_merged_coordinator_blocks(phase):
+    evidence = _phase_evidence(phase)
+    evidence['main']['files'].pop('deploy/cloud_coordinator.py')
+    assert _blockers(evidence, phase) == {'main-source-missing'}
+
+
+@pytest.mark.parametrize('phase', PHASES)
+def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(phase):
+    evidence = _phase_evidence(phase)
+    review = evidence['cloud_review']
+    review['reviews'].append(dict(review['reviews'][0], state='COMMENTED',
+                                  submitted_at='2026-10-01T22:00:00Z'))
+    assert _blockers(evidence, phase) == {'cloud-review-approval'}
+    review['reviews'].pop()
+    head = review['head_sha']
+    review['change'].update(
+        sensitive=True,
+        owner_authorization={'actor_id': OWNER_ID, 'head_sha': head, 'state': 'approved'},
+        targeted_review={'reviewer_id': 76, 'head_sha': head, 'state': 'COMMENTED'},
+    )
+    assert _blockers(evidence, phase) == set()
+    for record, field, value in (
+        ('owner_authorization', 'actor_id', 1),
+        ('owner_authorization', 'head_sha', 'd' * 40),
+        ('owner_authorization', 'state', 'pending'),
+        ('targeted_review', 'reviewer_id', OWNER_ID),
+        ('targeted_review', 'head_sha', 'd' * 40),
+        ('targeted_review', 'state', 'DISMISSED'),
+    ):
+        changed = copy.deepcopy(evidence)
+        changed['cloud_review']['change'][record][field] = value
+        assert _blockers(changed, phase) == {'sensitive-review-authorization'}
+
+
+@pytest.mark.parametrize('phase', PHASES)
+def test_additive_staging_status_omission_only_before_staging(phase):
+    evidence = _phase_evidence(phase)
+    evidence['cloud_review'].pop('status', None)
+    assert _blockers(evidence, phase) == (
+        set() if phase == 'pre-cutover' else {'cloud-review-status'}
+    )
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('status', [
+    None, {}, 'success',
+    {'context': 'agent-review', 'state': 'success', 'head_sha': 'c' * 40, 'creator_id': OWNER_ID},
+    {'context': 'cloud-review', 'state': 'pending', 'head_sha': 'c' * 40, 'creator_id': OWNER_ID},
+    {'context': 'cloud-review', 'state': 'success', 'head_sha': 'd' * 40, 'creator_id': OWNER_ID},
+    {'context': 'cloud-review', 'state': 'success', 'head_sha': 'c' * 40, 'creator_id': 15368},
+])
+def test_additive_staging_supplied_status_must_be_fixed_creator_exact_head_success(phase, status):
+    evidence = _phase_evidence(phase)
+    evidence['cloud_review']['status'] = status
+    assert _blockers(evidence, phase) == {'cloud-review-status'}
+
+
+def test_additive_staging_rejects_other_phase_maps():
+    for selected in PHASES:
+        for supplied in PHASES:
+            if selected != supplied:
+                assert 'required-check-policy' in _blockers(_phase_evidence(supplied), selected)
+
+
 def test_missing_evidence_blocks_and_validator_does_not_mutate_input():
     evidence = _evidence()
     before = copy.deepcopy(evidence)
@@ -374,6 +560,30 @@ def test_missing_evidence_blocks_and_validator_does_not_mutate_input():
     assert report['phase'] == 'pre-cutover'
     assert report['blockers']
     assert evidence == before
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('published_status', [False, True])
+def test_cli_phase_selection_is_read_only_and_never_bootstraps_status(tmp_path, capsys, phase, published_status):
+    evidence = _phase_evidence(phase)
+    if published_status:
+        evidence['cloud_review']['status'] = _evidence()['cloud_review']['status']
+    else:
+        evidence['cloud_review'].pop('status', None)
+    path = tmp_path / 'evidence.json'
+    raw = json.dumps(evidence)
+    path.write_text(raw)
+    expected_ready = phase == 'pre-cutover' or published_status
+
+    result = cli_main(['--phase', phase, str(path)])
+
+    assert result == (0 if expected_ready else 1)
+    assert json.loads(capsys.readouterr().out) == {
+        'ready': expected_ready, 'phase': phase,
+        'blockers': [] if expected_ready else ['cloud-review-status'],
+    }
+    assert path.read_text() == raw
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_cli_only_reads_evidence_and_returns_blocked_for_missing_fields(tmp_path, capsys):
