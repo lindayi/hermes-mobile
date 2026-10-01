@@ -42,6 +42,9 @@ Implemented in this slice:
   ambiguous-write fail-closed path. Public receipt/outcome comments never
   dispatch a second task.
 - Generation-bound status transitions and a deduplicated public outcome outbox.
+- A 4 MiB state cap checked before replacement (prior state preserved on
+  failure) and compaction of positively terminal records into bounded per-PR
+  tombstones; unresolved claims and current-head evidence are retained.
 - Current-head Copilot review and resolved-thread validation, fail-closed check
   collection, owned `cloud-review` status updates, and protected auto-merge
   eligibility.
@@ -63,7 +66,7 @@ Separate owner/policy work still required:
   This coordinator does not deploy, modify deployment/controller/artifact code,
   or replace the current global `AGENTS.md` requirements.
 
-Conflicts are not automatically resolved. They are reported for a separately
+Conflicts and `behind` pull requests are not automatically resolved. They are reported for a separately
 assigned neutral reconciler. A completed cloud-agent run is not a successful
 review or test result, and this coordinator does not modify `source-ci`,
 `integration-tests`, or `agent-review` status contexts.

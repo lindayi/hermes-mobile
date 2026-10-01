@@ -33,6 +33,9 @@ OUTBOX_MARKER_PREFIX = "hermes-coordinator-outcome:"
 LIFECYCLE_FILE_NAME = "workflow-events.json"
 MAX_LIFECYCLE_EVENTS = 256
 MAX_LIFECYCLE_AGE = 24 * 60 * 60
+MAX_STATE_BYTES = 4 * 1024 * 1024
+MAX_EVENTS = 4000
+TOMBSTONE_LIMIT = 512
 LIFECYCLE_OUTCOMES = {
     "issue_failed": "failed",
     "task_failed": "failed",
@@ -88,6 +91,16 @@ class ApiError(CoordinatorError):
 
 def _is_sha(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) is not None
+
+
+def _valid_timestamp(value):
+    if not isinstance(value, str) or not value or len(value) > 64:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
 
 
 def enrollment_from_comment(issue, pull, comment):
@@ -643,14 +656,22 @@ def _required_checks(api):
         if exc.status != 404:
             raise
     rules_route = f"repos/{REPOSITORY}/rules/branches/{MAIN_BRANCH}"
+    malformed = False
     try:
         rules = api.get(rules_route)
         if isinstance(rules, list):
             available = True
             for rule in rules:
-                if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
-                    if isinstance(rule, dict) and rule.get("type") == "conversation_resolution":
+                if isinstance(rule, dict) and rule.get("type") == "pull_request":
+                    params = rule.get("parameters")
+                    resolution = (params.get("required_review_thread_resolution")
+                                  if isinstance(params, dict) else None)
+                    if type(resolution) is not bool:
+                        malformed = True
+                    elif resolution:
                         conversation_resolution_required = True
+                    continue
+                if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
                     continue
                 params = rule.get("parameters")
                 if isinstance(params, dict):
@@ -662,6 +683,10 @@ def _required_checks(api):
     except ApiError as exc:
         if exc.status != 404:
             raise
+    if malformed:
+        # A malformed pull-request rule leaves the merge policy unproven.
+        available = False
+        conversation_resolution_required = False
     unique = {}
     for check in required:
         normalized = _required_contexts([check])
@@ -793,6 +818,17 @@ def _status_owned(statuses, context, actor_id):
     return latest, isinstance(creator, dict) and creator.get("id") == actor_id
 
 
+def _reconciliation_reasons(pull):
+    """Use the same neutral-reconciler boundary when planning and dispatching."""
+    reasons = []
+    if (pull.get("mergeable") is not True
+            or pull.get("mergeable_state") in {"dirty", "unknown"}):
+        reasons.append(("conflict", "A neutral conflict reconciler must be assigned; this coordinator will not start a fixer."))
+    if pull.get("mergeable_state") == "behind":
+        reasons.append(("behind", "The pull request is behind main; a neutral reconciler must update it, and this coordinator will not start a fixer."))
+    return reasons
+
+
 class Coordinator:
     """Poll, plan, and (only on explicit request) apply bounded public GitHub actions."""
 
@@ -828,7 +864,7 @@ class Coordinator:
                 if not isinstance(comment, dict) or comment.get("id") is None:
                     continue
                 key = str(comment["id"])
-                if key in state.get("events", []):
+                if _event_consumed(state, key):
                     continue
                 user = comment.get("user")
                 if not isinstance(user, dict) or user.get("id") != OWNER_ID:
@@ -1150,20 +1186,16 @@ class Coordinator:
         ), None)
         if neutral_blocker:
             snapshot["neutral_blocker_attempt"] = neutral_blocker.get("attempt")
-        mergeable = snapshot["pull"].get("mergeable")
-        mergeable_state = snapshot["pull"].get("mergeable_state")
-        needs_reconciliation = (
-            mergeable is False or mergeable_state in {"dirty", "behind"}
-        )
-        conflict = (mergeable is not True
-                    or mergeable_state in {"dirty", "unknown", "blocked"})
+        reconciliation = _reconciliation_reasons(snapshot["pull"])
+        needs_reconciliation = bool(reconciliation)
+        conflict = bool(reconciliation)
         repair = None
         attempts = snapshot["enrollment"].get("attempts", 0)
         if (snapshot["scoped"] and not neutral_blocker
                 and snapshot["pull"].get("draft") is not True):
             if needs_reconciliation:
                 repair = neutral_reconciliation_request(snapshot, attempts)
-            elif snapshot["threads_complete"] and not conflict:
+            elif snapshot["threads_complete"]:
                 repair = repair_request(
                     head, attempts, snapshot["threads"], snapshot["check_runs"],
                     pull_number=number,
@@ -1178,8 +1210,7 @@ class Coordinator:
         reasons = []
         if not snapshot["scoped"]:
             reasons.append(("scope", "The pull request is not based on the current same-repository main branch."))
-        if conflict:
-            reasons.append(("conflict", "A bounded neutral reconciliation is required before merge."))
+        reasons.extend(reconciliation)
         if neutral_blocker and neutral_blocker["blocker"] == "conflict_incompatible":
             reasons.append((
                 "conflict-incompatible",
@@ -1225,7 +1256,13 @@ class Coordinator:
                          and item.get("head") == head]
                 ambiguous = any(item.get("status") in {"sending", "uncertain"}
                                 for item in prior)
-                generation = max((item.get("generation", 0) for item in prior), default=0) + 1
+                # Retirement can compact any head of this PR before the claim.
+                # Reserve above all live generations as well as its tombstone.
+                generation = max(
+                    [item.get("generation", 0) for item in actions.values()
+                     if item.get("kind") == "status" and item.get("issue") == number]
+                    + [self.store.status_generation_floor(number)]
+                ) + 1
                 if not ambiguous:
                     status_action = {
                         "kind": "status", "issue": number, "head": head,
@@ -1244,7 +1281,7 @@ class Coordinator:
             ),
             up_to_date_required=snapshot["up_to_date_required"],
             conversation_resolution_required=snapshot["conversation_resolution_required"],
-            agent_running=agent_busy or repair is not None,
+            agent_running=agent_busy or repair is not None or bool(neutral_blocker),
         )
         if merge and not snapshot["pull"].get("auto_merge"):
             merge_action = {
@@ -1327,6 +1364,9 @@ class Coordinator:
         )
         if not current:
             return "superseded"
+        reconciliation = _reconciliation_reasons(current)
+        if reconciliation:
+            return reconciliation[0][0]
         branch = current["head"].get("ref")
         if not isinstance(branch, str) or not branch or branch != action["head_ref"]:
             return "superseded"
@@ -1371,7 +1411,9 @@ class Coordinator:
         key = action["key"]
         if not self.store.claim_action(key, action):
             existing = self.store.action(key)
-            return existing.get("status") if existing else "not-claimed"
+            if not existing:
+                raise CoordinatorError("Planned status generation could not be claimed")
+            return existing.get("status")
         try:
             fence_main = snapshot["main_sha"] if action["state"] == "success" else None
             current_pull = self._fence_pull(
@@ -1514,7 +1556,15 @@ class Coordinator:
         except CoordinatorError:
             self.store.mark_uncertain(key)
             return "uncertain"
-        if not isinstance(result, dict) or result.get("errors"):
+        data = result.get("data") if isinstance(result, dict) else None
+        mutation = data.get("enablePullRequestAutoMerge") if isinstance(data, dict) else None
+        proven = mutation.get("pullRequest") if isinstance(mutation, dict) else None
+        request = proven.get("autoMergeRequest") if isinstance(proven, dict) else None
+        if (not isinstance(result, dict) or result.get("errors")
+                or not isinstance(proven, dict) or proven.get("id") != pull["node_id"]
+                or not isinstance(request, dict)
+                or not _valid_timestamp(request.get("enabledAt"))):
+            # Unproven responses stay ambiguous and reconcile from GitHub state.
             self.store.mark_uncertain(key)
             return "uncertain"
         self.store.update_action(key, "sent")
@@ -1536,8 +1586,11 @@ class Coordinator:
         summaries = []
         for pr_plan, snapshot in zip(plan["pull_requests"], plan["snapshots"]):
             if pr_plan.get("terminal"):
+                self.store.retire(snapshot["issue"], snapshot["head"])
                 summaries.append(self._summary(pr_plan))
                 continue
+            # Compact first so retired records cannot block new evidence at capacity.
+            self.store.retire(snapshot["issue"], snapshot["head"])
             for key, entry in pr_plan["outcomes"]:
                 self.store.add_outbox(key, entry)
             comments = snapshot["comments"]
@@ -1554,6 +1607,11 @@ class Coordinator:
                 if not self._fence_pull(entry["issue"], entry["head"]):
                     self.store.update_outbox(key, "superseded")
                     continue
+                marker = entry.get("marker")
+                if isinstance(marker, str) and marker and _contains_marker(comments, marker):
+                    # The public comment already exists; never post it twice.
+                    self.store.update_outbox(key, "sent")
+                    continue
                 self.store.update_outbox(key, "sending")
                 try:
                     response = self.api.write(
@@ -1569,11 +1627,12 @@ class Coordinator:
             action = pr_plan["repair"]
             if action:
                 result = self._dispatch_task(action)
-                if result in {"agent-running", "superseded"}:
+                if result in {"agent-running", "superseded", "conflict", "behind"}:
                     pr_plan["repair"] = None
-                    if result == "agent-running":
+                    if result != "superseded":
+                        reason = "agent" if result == "agent-running" else result
                         pr_plan["reasons"] = list(dict.fromkeys(
-                            pr_plan["reasons"] + ["agent"],
+                            pr_plan["reasons"] + [reason],
                         ))
             status_action = pr_plan["status_action"]
             if status_action:
@@ -1591,6 +1650,7 @@ class Coordinator:
                         "status_action": current_plan["status_action"],
                         "merge_action": None,
                     })
+            self.store.retire(snapshot["issue"], snapshot["head"])
             summaries.append(self._summary(pr_plan))
         return summaries
 
@@ -1629,6 +1689,45 @@ class Coordinator:
         }
 
 
+def _event_consumed(data, key):
+    """Return whether an owner command ID is fenced by the list or its watermark."""
+    watermark = data.get("event_watermark", 0)
+    return key in data.get("events", []) or (
+        key.isdigit() and type(watermark) is int and int(key) <= watermark
+    )
+
+
+def _bound_events(data):
+    """Keep the newest command IDs and fold dropped numeric IDs into a watermark."""
+    excess = len(data["events"]) - MAX_EVENTS
+    if excess <= 0:
+        return
+    kept, watermark = [], data.get("event_watermark", 0)
+    for item in data["events"]:
+        if excess > 0 and item.isdigit():
+            watermark = max(watermark, int(item))
+            excess -= 1
+        else:
+            kept.append(item)
+    data["events"] = kept
+    data["event_watermark"] = watermark
+
+
+def _tombstone_digest(key):
+    return hashlib.sha256(str(key).encode("utf-8")).hexdigest()[:32]
+
+
+def _retirable_action(action, current_head, inactive):
+    """Only positively terminal records may be retired; unresolved claims stay."""
+    status = action.get("status")
+    if action.get("kind") == "fix":
+        # A sent task may still be running; only verified completion is terminal.
+        return inactive and status == "completed"
+    if status not in {"sent", "superseded", "blocked", "completed"}:
+        return False
+    return inactive or action.get("head") != current_head
+
+
 def _private_regular(path):
     try:
         info = path.lstat()
@@ -1649,8 +1748,9 @@ class StateStore:
 
     @staticmethod
     def _empty():
-        return {"version": 1, "cursor": None, "events": [], "enrollments": {},
-                "actions": {}, "outbox": {}, "lifecycle_events": []}
+        return {"version": 1, "cursor": None, "events": [], "event_watermark": 0,
+                "enrollments": {}, "actions": {}, "outbox": {}, "retired": {},
+                "lifecycle_events": []}
 
     def _ensure_directory(self):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1663,7 +1763,7 @@ class StateStore:
         if not _private_regular(self.path):
             return self._empty()
         try:
-            if self.path.stat().st_size > 4 * 1024 * 1024:
+            if self.path.stat().st_size > MAX_STATE_BYTES:
                 raise CoordinatorError("Coordinator state exceeded its safety bound")
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -1672,7 +1772,14 @@ class StateStore:
                 or not isinstance(data.get("events"), list)
                 or not isinstance(data.get("enrollments"), dict)
                 or not isinstance(data.get("actions"), dict)
-                or not isinstance(data.get("outbox"), dict)):
+                or not isinstance(data.get("outbox"), dict)
+                or type(data.setdefault("event_watermark", 0)) is not int
+                or not isinstance(data.setdefault("retired", {}), dict)
+                or not all(isinstance(item, dict)
+                           and type(item.get("status_generation")) is int
+                           and isinstance(item.get("actions"), list)
+                           and isinstance(item.get("outbox"), list)
+                           for item in data["retired"].values())):
             raise CoordinatorError("Coordinator state has an unsupported format")
         data.setdefault("lifecycle_events", [])
         if (not isinstance(data["lifecycle_events"], list)
@@ -1683,13 +1790,20 @@ class StateStore:
         return data
 
     def _save(self, data):
+        payload = json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        if len(payload) > MAX_STATE_BYTES:
+            # Checked before any replace so the prior valid state stays readable.
+            raise CoordinatorError(
+                f"Coordinator state would exceed its safety bound ({len(payload)} > "
+                f"{MAX_STATE_BYTES} bytes); the prior state was preserved"
+            )
         self._ensure_directory()
         temporary = self.directory / f".{self.path.name}.{os.getpid()}.{secrets.token_hex(8)}"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(temporary, flags, 0o600)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(data, stream, separators=(",", ":"), sort_keys=True)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
@@ -1724,15 +1838,15 @@ class StateStore:
         return self._load()
 
     def event_seen(self, event_id):
-        return str(event_id) in self._load()["events"]
+        return _event_consumed(self._load(), str(event_id))
 
     def record_event(self, event_id):
         key = str(event_id)
 
         def record(data):
-            if key not in data["events"]:
+            if not _event_consumed(data, key):
                 data["events"].append(key)
-                data["events"] = data["events"][-4000:]
+                _bound_events(data)
         self._mutate(record)
 
     @staticmethod
@@ -1848,10 +1962,10 @@ class StateStore:
         def commit(data):
             seen = set(data["events"])
             for item in keys:
-                if item not in seen:
+                if item not in seen and not _event_consumed(data, item):
                     data["events"].append(item)
                     seen.add(item)
-            data["events"] = data["events"][-4000:]
+            _bound_events(data)
             for action, item in commands:
                 if action != "enroll":
                     continue
@@ -1865,17 +1979,26 @@ class StateStore:
                                  and item["comment"] > data["enrollments"][key]["comment"]))):
                     attempts = 0
                     if key in data["enrollments"]:
-                        # Fresh authorization is not proof an earlier fixer stopped.
-                        data["actions"] = {
-                            k: v for k, v in data["actions"].items()
-                            if v.get("issue") != item["issue"]
-                            or (v.get("kind") == "fix"
-                                and v.get("status") in {"sending", "uncertain", "sent"})
-                        }
+                        # Authorization is not terminal proof for any write claim.
+                        for action_key, claim in list(data["actions"].items()):
+                            if (claim.get("issue") != item["issue"]
+                                    or not _retirable_action(claim, item["head"], inactive=True)):
+                                continue
+                            if claim.get("kind") == "status" and type(claim.get("generation")) is int:
+                                tombstone = data["retired"].setdefault(key, {
+                                    "status_generation": 0, "actions": [], "outbox": [],
+                                })
+                                tombstone["status_generation"] = max(
+                                    tombstone["status_generation"], claim["generation"],
+                                )
+                            del data["actions"][action_key]
                         if any(v.get("issue") == item["issue"] and v.get("kind") == "fix"
                                for v in data["actions"].values()):
                             # Do not reuse an attempt-derived key retained above.
                             attempts = data["enrollments"][key].get("attempts", 0)
+                        # Mirror the terminal action deletion above for retired keys.
+                        if key in data["retired"]:
+                            data["retired"][key]["actions"] = []
                     data["enrollments"][key] = {
                         **item, "attempts": attempts, "sensitive_sha": None, "active": True,
                     }
@@ -1930,6 +2053,13 @@ class StateStore:
         def claim(data):
             claimed = dict(action)
             existing = data["actions"].get(key)
+            tombstone = data["retired"].get(str(claimed.get("issue")), {})
+            if not existing and (
+                    _tombstone_digest(key) in tombstone.get("actions", ())
+                    or (claimed.get("kind") == "status"
+                        and type(claimed.get("generation")) is int
+                        and claimed["generation"] <= tombstone.get("status_generation", 0))):
+                return False
             if existing:
                 if (claimed.get("kind") in {"status", "auto-merge"}
                         and existing.get("status") == "blocked"):
@@ -1975,7 +2105,8 @@ class StateStore:
 
     def add_outbox(self, key, entry):
         def add(data):
-            if key in data["outbox"]:
+            tombstone = data["retired"].get(str(entry.get("issue")), {})
+            if key in data["outbox"] or _tombstone_digest(key) in tombstone.get("outbox", ()):
                 return False
             data["outbox"][key] = {**entry, "status": "pending"}
             return True
@@ -1986,6 +2117,57 @@ class StateStore:
             if key in data["outbox"]:
                 data["outbox"][key]["status"] = status
         self._mutate(update)
+
+    def status_generation_floor(self, issue):
+        tombstone = self._load()["retired"].get(str(issue), {})
+        return tombstone.get("status_generation", 0)
+
+    def retire(self, issue, current_head):
+        """Compact positively terminal records into bounded per-PR tombstones.
+
+        Unresolved claims, current-head records of an active enrollment, the
+        enrollment (command fence and attempt budget), and every non-terminal
+        fixer claim are retained.
+        """
+        issue_key = str(issue)
+
+        def compact(data):
+            enrollment = data["enrollments"].get(issue_key)
+            if not enrollment:
+                return
+            inactive = not enrollment.get("active")
+            tombstone = data["retired"].get(issue_key) or {
+                "status_generation": 0, "actions": [], "outbox": [],
+            }
+            changed = False
+            for key, action in list(data["actions"].items()):
+                if (action.get("issue") != issue
+                        or not _retirable_action(action, current_head, inactive)):
+                    continue
+                del data["actions"][key]
+                changed = True
+                if action.get("kind") == "status":
+                    if type(action.get("generation")) is int:
+                        tombstone["status_generation"] = max(
+                            tombstone["status_generation"], action["generation"],
+                        )
+                elif action.get("kind") != "fix" and action.get("status") != "blocked":
+                    tombstone["actions"].append(_tombstone_digest(key))
+            for key, entry in list(data["outbox"].items()):
+                if (entry.get("issue") != issue
+                        or entry.get("status") not in {"sent", "superseded"}
+                        or (not inactive and entry.get("head") == current_head)):
+                    continue
+                del data["outbox"][key]
+                changed = True
+                tombstone["outbox"].append(_tombstone_digest(key))
+            if changed:
+                # Beyond this window, GitHub's PR comment markers and auto-merge
+                # state remain the remote proof checked before any write.
+                tombstone["actions"] = tombstone["actions"][-TOMBSTONE_LIMIT:]
+                tombstone["outbox"] = tombstone["outbox"][-TOMBSTONE_LIMIT:]
+                data["retired"][issue_key] = tombstone
+        self._mutate(compact)
 
     def execution_lock(self):
         """Return a non-blocking process lock used around the full apply cycle."""

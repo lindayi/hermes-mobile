@@ -360,8 +360,9 @@ class FakeApi:
                  conversation_resolution=True, source_failure_sha=HEAD,
                  head_sha=HEAD, reopen_after_first=False, review_status_present=True,
                  active_after_first=False, workflow_runs=None, pull_state="open",
-                 merged=False, late_enrollment=False):
+                 merged=False, late_enrollment=False, rules=None):
         self.author_id = author_id
+        self.rules = rules if rules is not None else []
         self.race = race
         self.fail = fail
         self.sensitive = sensitive
@@ -448,7 +449,7 @@ class FakeApi:
                 "strict": self.strict_protection,
             }
         if route.endswith("/rules/branches/main"):
-            return []
+            return self.rules
         raise AssertionError(f"Unexpected API read: {route}")
 
     def get_all(self, route, *, collection=None):
@@ -1425,3 +1426,449 @@ def test_units_are_templates_only_and_apply_is_explicit():
     assert "ProtectSystem=strict" in service
     assert "[Install]" not in service
     assert "WantedBy=timers.target" in timer
+
+
+def test_ruleset_pull_request_thread_resolution_satisfies_conversation_policy(tmp_path):
+    api = FakeApi(conversation_resolution=False, rules=[
+        {"type": "pull_request", "parameters": {
+            "required_approving_review_count": 0,
+            "required_review_thread_resolution": True,
+        }},
+    ])
+    result = Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
+    assert "conversation-policy" not in result["pull_requests"][0]["reasons"]
+    assert len(api.graphql_writes) == 1
+
+    disabled = FakeApi(conversation_resolution=False, rules=[
+        {"type": "pull_request", "parameters": {"required_review_thread_resolution": False}},
+    ])
+    result = Coordinator(disabled, StateStore(tmp_path / "disabled.json")).run(apply=True)
+    assert "conversation-policy" in result["pull_requests"][0]["reasons"]
+    assert not disabled.graphql_writes
+
+
+@pytest.mark.parametrize("rule", [
+    {"type": "pull_request"},
+    {"type": "pull_request", "parameters": None},
+    {"type": "pull_request", "parameters": {}},
+    {"type": "pull_request", "parameters": {"required_review_thread_resolution": "true"}},
+])
+def test_malformed_ruleset_pull_request_rule_fails_policy_closed(tmp_path, rule):
+    api = FakeApi(rules=[rule])
+    result = Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
+    summary = result["pull_requests"][0]
+    assert not summary["auto_merge_eligible"]
+    assert not summary["required_checks_green"]
+    assert not api.graphql_writes
+    assert not any("/statuses/" in route for route, _ in api.writes)
+
+
+def test_behind_pull_is_reported_for_reconciliation_not_sent_to_fixer(tmp_path):
+    api = FakeApi(source_failure=True, unresolved=True)
+    api.pull = api.pull | {"mergeable": True, "mergeable_state": "behind"}
+    store = StateStore(tmp_path / "state.json")
+    result = Coordinator(api, store).run(apply=True)
+    summary = result["pull_requests"][0]
+    assert "behind" in summary["reasons"]
+    assert summary["repair_requested"] is False
+    assert api.fix_attempts == 0
+    assert not any(route.endswith("/tasks") for route, _ in api.writes)
+    assert not any(action.get("kind") == "fix" for action in store.actions().values())
+    assert not api.graphql_writes
+    assert any("neutral reconciler" in body.get("body", "") for _, body in api.writes)
+
+
+@pytest.mark.parametrize("payload", [
+    None,
+    {"data": None},
+    {"data": {"enablePullRequestAutoMerge": None}},
+    {"data": {"enablePullRequestAutoMerge": {"pullRequest": None}}},
+    {"data": {"enablePullRequestAutoMerge": {"pullRequest": {
+        "id": "PR_other", "autoMergeRequest": {"enabledAt": "2026-10-01T12:02:00Z"},
+    }}}},
+    {"data": {"enablePullRequestAutoMerge": {"pullRequest": {
+        "id": "PR_node_16", "autoMergeRequest": None,
+    }}}},
+    {"data": {"enablePullRequestAutoMerge": {"pullRequest": {
+        "id": "PR_node_16", "autoMergeRequest": {"enabledAt": ""},
+    }}}},
+    {"data": {"enablePullRequestAutoMerge": {"pullRequest": {
+        "id": "PR_node_16", "autoMergeRequest": {"enabledAt": "not-a-time"},
+    }}}},
+])
+def test_auto_merge_requires_exact_pull_and_enabled_request_proof(tmp_path, payload):
+    class Unproven(FakeApi):
+        def graphql_write(self, query, variables):
+            self.graphql_writes.append((query, variables))
+            return payload
+
+    api = Unproven()
+    path = tmp_path / "state.json"
+    key = f"auto-merge:16:{HEAD}:{BASE}"
+    Coordinator(api, StateStore(path)).run(apply=True)
+    assert StateStore(path).action(key)["status"] == "uncertain"
+    Coordinator(api, StateStore(path)).run(apply=True)
+    assert len(api.graphql_writes) == 1
+    assert StateStore(path).action(key)["status"] == "uncertain"
+    api.pull["auto_merge"] = {"enabledAt": "2026-10-01T12:02:00Z"}
+    Coordinator(api, StateStore(path)).run(apply=True)
+    assert len(api.graphql_writes) == 1
+    assert StateStore(path).action(key)["status"] == "sent"
+
+
+def test_consumed_command_fences_survive_event_compaction(tmp_path):
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    store.commit_scan("2026-10-01T12:00:00Z", ["123"] + [str(i) for i in range(1000, 5100)])
+    restarted = StateStore(path)
+    assert len(restarted.snapshot()["events"]) <= 4000
+    assert restarted.event_seen("123") and restarted.event_seen("5099")
+    api = FakeApi()
+    result = Coordinator(api, restarted).run(apply=True)
+    # The dropped enrollment command must not replay after compaction.
+    assert result["enrolled"] == 0
+    assert api.pull_reads == 0
+    assert not api.writes and not api.graphql_writes
+
+
+class RecordingApi(FakeApi):
+    """Fake GitHub that keeps posted comments and statuses as remote evidence."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.status_log = {}
+
+    def get_all(self, route, *, collection=None):
+        if "/statuses?per_page=100" in route:
+            sha = route.split("/commits/", 1)[1].split("/", 1)[0]
+            return list(self.status_log.get(sha, []))
+        return super().get_all(route, collection=collection)
+
+    def write(self, route, body):
+        response = super().write(route, body)
+        if route.endswith("/issues/16/comments"):
+            self.comments.append({"id": 10_000 + len(self.writes), "user": {"id": OWNER},
+                                  "body": body["body"], "updated_at": "2026-10-01T11:00:00Z"})
+        elif "/statuses/" in route:
+            self.status_log.setdefault(route.rsplit("/", 1)[-1], []).append({
+                "context": body["context"], "state": body["state"],
+                "creator": {"id": OWNER},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        return response
+
+    def move_head(self, sha):
+        self.head_sha = sha
+        self.pull["head"]["sha"] = sha
+
+
+def test_terminal_records_compact_across_heads_without_duplicate_writes(tmp_path, monkeypatch):
+    import deploy.cloud_coordinator as coordinator_module
+    monkeypatch.setattr(coordinator_module, "TOMBSTONE_LIMIT", 8)
+    api = RecordingApi()
+    api.pull["mergeable"] = False
+    path = tmp_path / "state.json"
+
+    def restarted_cycle():
+        return Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+
+    heads = [f"{index:040x}" for index in range(1, 41)]
+    sizes = []
+    for head in heads:
+        api.move_head(head)
+        restarted_cycle()
+        restarted_cycle()  # replay after restart
+        sizes.append(path.stat().st_size)
+        state = json.loads(path.read_text())
+        assert {entry["head"] for entry in state["outbox"].values()} == {head}
+        assert {action["head"] for action in state["actions"].values()} <= {head}
+    assert sizes[-1] <= sizes[15] + 512
+    retired = json.loads(path.read_text())["retired"]["16"]
+    assert len(retired["outbox"]) <= 8 and len(retired["actions"]) <= 8
+    assert retired["status_generation"] >= 1
+    # Returning heads within and beyond the tombstone window never duplicate writes.
+    for head in (heads[-2], heads[0], heads[-2], heads[0]):
+        api.move_head(head)
+        restarted_cycle()
+    comments = [body["body"] for route, body in api.writes if route.endswith("/comments")]
+    assert comments and len(comments) == len(set(comments))
+    for sha, statuses in api.status_log.items():
+        assert len(statuses) == 1, sha
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    assert StateStore(path).snapshot()["enrollments"]["16"]["active"] is True
+
+
+def test_sent_auto_merge_tombstone_prevents_rerequest_after_head_returns(tmp_path):
+    api = RecordingApi()
+    path = tmp_path / "state.json"
+
+    def restarted_cycle():
+        return Coordinator(api, StateStore(path)).run(apply=True)
+
+    restarted_cycle()  # publishes the owned cloud-review status
+    restarted_cycle()
+    assert len(api.graphql_writes) == 1
+    api.move_head("c" * 40)
+    api.pull["mergeable"] = False
+    restarted_cycle()
+    assert f"auto-merge:16:{HEAD}:{BASE}" not in StateStore(path).actions()
+    api.move_head(HEAD)
+    api.pull["mergeable"] = True
+    api.pull["auto_merge"] = None
+    restarted_cycle()
+    assert len(api.graphql_writes) == 1
+
+
+def test_closed_pull_retires_terminal_records_but_keeps_unresolved_claims(tmp_path):
+    api = RecordingApi(unresolved=True, fail_fix=True)
+    path = tmp_path / "state.json"
+
+    def restarted_cycle():
+        return Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+
+    restarted_cycle()
+    state = StateStore(path).snapshot()
+    fix = next(action for action in state["actions"].values() if action["kind"] == "fix")
+    assert fix["status"] == "uncertain" and state["outbox"]
+    api.pull["state"] = "closed"
+    restarted_cycle()
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["active"] is False
+    assert state["enrollments"]["16"]["attempts"] == 1
+    assert state["enrollments"]["16"]["comment"] == 123
+    assert list(state["actions"].values()) == [fix]
+    assert not state["outbox"]
+    posted = len(api.writes)
+    api.pull["state"] = "open"
+    restarted_cycle()
+    restarted_cycle()
+    assert len(api.writes) == posted
+    assert api.fix_attempts == 1
+
+
+def test_state_capacity_is_enforced_before_replace_and_preserves_prior_state(tmp_path):
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    assert store.add_outbox("16:small", {"issue": 16, "head": HEAD, "body": "small"})
+    prior = path.read_bytes()
+    with pytest.raises(CoordinatorError, match="safety bound.*preserved"):
+        store.add_outbox("16:huge", {"issue": 16, "head": HEAD,
+                                     "body": "x" * (4 * 1024 * 1024)})
+    assert path.read_bytes() == prior
+    assert StateStore(path).snapshot()["outbox"].keys() == {"16:small"}
+    assert sorted(item.name for item in tmp_path.iterdir()) == [
+        ".state.json.lock", "state.json",
+    ]
+
+
+def test_capacity_failure_blocks_cycle_before_remote_write_and_reports(tmp_path, monkeypatch,
+                                                                       capsys):
+    import deploy.cloud_coordinator as coordinator_module
+    from deploy.cloud_coordinator import main
+
+    api = FakeApi()
+    api.pull["mergeable"] = False
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path)).run(apply=True)
+    monkeypatch.setattr(coordinator_module, "MAX_STATE_BYTES", path.stat().st_size + 64)
+    writes = list(api.writes)
+    api.unresolved = True
+    assert main(["--once", "--apply", "--state", str(path)],
+                api_factory=lambda: api) == 1
+    error = capsys.readouterr().err
+    assert "Coordinator blocked:" in error and "safety bound" in error
+    assert "preserved" in error
+    assert api.writes == writes and api.fix_attempts == 0
+    state = StateStore(path).snapshot()
+    assert not any(action.get("kind") == "fix" for action in state["actions"].values())
+
+
+def test_atomic_replace_failure_preserves_prior_state(tmp_path, monkeypatch):
+    import deploy.cloud_coordinator as coordinator_module
+
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    prior = path.read_bytes()
+
+    def failed_replace(source, target):
+        raise OSError("disk failure")
+
+    monkeypatch.setattr(coordinator_module.os, "replace", failed_replace)
+    with pytest.raises(OSError):
+        store.claim_action("fix:16:x", {"kind": "fix", "issue": 16})
+    monkeypatch.undo()
+    assert path.read_bytes() == prior
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
+    assert sorted(item.name for item in tmp_path.iterdir()) == [
+        ".state.json.lock", "state.json",
+    ]
+
+
+def _managed_cycle(api, path):
+    # The approved managed runner must supply a disposable native/home environment.
+    import os
+    assert os.environ["HOME"].startswith("/tmp/hmt-")
+    assert os.environ["HERMES_HOME"].startswith("/tmp/hmt-")
+    return Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+
+
+def test_returning_head_revokes_success_in_first_cycle(tmp_path):
+    class RevocableReview(RecordingApi):
+        revoked = False
+
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if self.revoked and route.endswith('/pulls/16/reviews?per_page=100'):
+                return [dict(value, state='COMMENTED') for value in values]
+            return values
+    api = RevocableReview()
+    api.pull['mergeable'] = False  # No task or auto-merge writes obscure status behavior.
+    path = tmp_path / 'state.json'
+    _managed_cycle(api, path)  # H success generation 1
+    assert api.status_log[HEAD][-1]['state'] == 'success'
+    api.move_head('c' * 40)
+    _managed_cycle(api, path)
+    _managed_cycle(api, path)  # A repeat cycle must not obscure returning-head revocation.
+    assert api.status_log['c' * 40][-1]['state'] == 'success'
+    api.move_head(HEAD)
+    api.revoked = True  # Latest Copilot review is now COMMENTED, so H's success must be revoked.
+    _managed_cycle(api, path)
+    observed = api.status_log[HEAD][-1]['state']
+    _managed_cycle(api, path)
+    assert api.status_log[HEAD][-1]['state'] == 'pending', 'Must eventually revoke'
+    assert observed == 'pending', 'Compaction must not reject a just-planned revocation'
+
+
+def test_new_head_publishes_status_in_first_cycle(tmp_path):
+    api = RecordingApi()
+    api.pull["mergeable"] = False
+    path = tmp_path / "state.json"
+    _managed_cycle(api, path)
+    api.move_head("c" * 40)
+    _managed_cycle(api, path)
+    assert api.status_log.get("c" * 40), "New head must publish on its first cycle"
+    assert api.status_log["c" * 40][-1]["state"] == "success"
+
+
+def test_rejected_status_generation_fails_cycle_instead_of_reporting_transition(tmp_path):
+    class RejectedStatusStore(StateStore):
+        def claim_action(self, key, action):
+            if action["kind"] == "status":
+                return False
+            return super().claim_action(key, action)
+
+    api = FakeApi(review_status_present=False)
+    store = RejectedStatusStore(tmp_path / "state.json")
+    with pytest.raises(CoordinatorError, match="status.*claim"):
+        Coordinator(api, store).run(apply=True)
+    assert not any("/statuses/" in route for route, _ in api.writes)
+
+
+@pytest.mark.parametrize('kind', ['status', 'auto-merge'])
+def test_reenrollment_preserves_uncertain_nonfix_claim(tmp_path, kind):
+    class LostResponse(FakeApi):
+        def write(self, route, body):
+            response = super().write(route, body)
+            return None if '/statuses/' in route else response
+
+        def graphql_write(self, query, variables):
+            self.graphql_writes.append((query, variables))
+            return {'data': None}
+    api = LostResponse(review_status_present=(kind == 'auto-merge'))
+    path = tmp_path / 'state.json'
+    _managed_cycle(api, path)
+
+    def count():
+        return (len(api.graphql_writes) if kind == 'auto-merge'
+                else sum('/statuses/' in route for route, _ in api.writes))
+
+    assert count() == 1
+    assert any(a['kind'] == kind and a['status'] == 'uncertain'
+               for a in StateStore(path).actions().values())
+    api.pull['state'] = 'closed'
+    _managed_cycle(api, path)
+    assert any(a['kind'] == kind and a['status'] == 'uncertain'
+               for a in StateStore(path).actions().values())
+    api.pull['state'] = 'open'
+    api.comments.append({'id': 124, 'user': {'id': OWNER}, 'body': '/hermes enroll',
+                         'updated_at': '2026-10-01T12:10:00Z'})
+    _managed_cycle(api, path)
+    enrollment = StateStore(path).snapshot()['enrollments']['16']
+    assert enrollment['active'] is True and enrollment['comment'] == 124
+    _managed_cycle(api, path)
+    assert count() == 1, 'Fresh enrollment is not proof an ambiguous write did not happen'
+
+
+def test_reenrollment_preserves_every_unresolved_claim_and_attempt_budget(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+
+    def seed(data):
+        data["enrollments"]["16"].update(active=False, attempts=3)
+        for kind in ("fix", "status", "auto-merge"):
+            for status in ("pending", "sending", "uncertain") + (("sent",) if kind == "fix" else ()):
+                data["actions"][f"{kind}:{status}"] = {
+                    "kind": kind, "status": status, "issue": 16, "head": HEAD, "generation": 1,
+                }
+        for status in ("pending", "sending", "uncertain"):
+            data["outbox"][status] = {"status": status, "issue": 16, "head": HEAD}
+
+    store._mutate(seed)
+    before = store.snapshot()
+    store.commit_scan(None, [124], commands=[("enroll", {
+        "issue": 16, "comment": 124, "head": "c" * 40, "base": BASE,
+    })])
+    after = StateStore(store.path).snapshot()
+    assert after["enrollments"]["16"]["active"] is True
+    assert after["enrollments"]["16"]["comment"] == 124
+    assert after["enrollments"]["16"]["attempts"] == 3
+    assert after["actions"] == before["actions"]
+    assert after["outbox"] == before["outbox"]
+
+
+@pytest.mark.parametrize("status", ["sent", "superseded", "blocked", "completed"])
+def test_reenrollment_keeps_generation_boundary_when_resetting_terminal_status(tmp_path, status):
+    store = StateStore(tmp_path / "state.json")
+    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    action = {"kind": "status", "issue": 16, "head": HEAD, "generation": 7}
+    assert store.claim_action("old-status", action)
+    store.update_action("old-status", status)
+    # A restart may happen between retiring enrollment and record compaction.
+    store.commit_scan(None, [], retirements=[16])
+    store.commit_scan(None, [124], commands=[("enroll", {
+        "issue": 16, "comment": 124, "head": HEAD, "base": BASE,
+    })])
+    assert store.action("old-status") is None
+    assert store.status_generation_floor(16) == 7
+    assert not store.claim_action("stale-status", action)
+    assert store.claim_action("new-status", action | {"generation": 8})
+
+
+@pytest.mark.parametrize("mergeable, mergeable_state, reason", [
+    (True, "behind", "behind"),
+    (True, "dirty", "conflict"),
+    (True, "unknown", "conflict"),
+    (False, "clean", "conflict"),
+    (None, "clean", "conflict"),
+])
+def test_dispatch_rechecks_reconciliation_after_planning(tmp_path, mergeable, mergeable_state, reason):
+    class BecomesUnmergeable(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/pulls/16") and self.pull_reads > 2:
+                return value | {"mergeable": mergeable, "mergeable_state": mergeable_state}
+            return value
+
+    api = BecomesUnmergeable(unresolved=True)
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert api.pull_reads > 2
+    assert api.fix_attempts == 0, "Final fresh pull must not receive an ordinary fixer"
+    summary = result["pull_requests"][0]
+    assert not summary["repair_requested"]
+    assert reason in summary["reasons"]
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())

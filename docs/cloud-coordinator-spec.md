@@ -68,8 +68,8 @@ idle and unknown task states do not release the fixer lock. Completion only
 releases the fixer lock; it is not review or CI success.
 Unidentifiable nonterminal repository tasks conservatively block new dispatch
 until GitHub exposes enough branch, session, or PR evidence to scope them.
-Conflicted or unmergeable pull requests are not sent to a fixer; a neutral
-reconciler must be assigned separately.
+Conflicted, unmergeable, or `behind` pull requests are not sent to a fixer;
+they are reported as needing a separately assigned neutral reconciler.
 
 ## Review, checks, and merge
 
@@ -112,41 +112,51 @@ review gate passes, no fixer may be running, and sensitive authorization is
 current. Both the PR head and the current `main` SHA are re-read before enabling
 auto-merge; the mutation supplies `expectedHeadOid` as the server-side head
 fence. The owner-managed branch rule must also require the PR branch to be
-up to date (strict required checks) and require conversation resolution; the
+up to date (strict required checks) and require conversation resolution, either
+through classic protection or a ruleset `pull_request` rule's
+`parameters.required_review_thread_resolution`; a malformed `pull_request` rule
+leaves the policy unproven and blocks status publication and auto-merge. The
 coordinator cannot alter branch protection. Current review, thread, check, and policy evidence is fetched again
 immediately before the merge request. A new head has no inherited
 `cloud-review` success, so required branch protection must keep it blocked until
 the new head is evaluated. Ambiguous writes are reconciled from GitHub state and
-are never blindly repeated.
+are never blindly repeated. An auto-merge request is recorded as sent only when
+the mutation returns the exact pull-request node ID and a valid, nonempty
+`autoMergeRequest.enabledAt`; any other response remains uncertain until
+GitHub's pull-request state proves auto-merge was enabled.
 
-The durable outbox posts only fixed-text actionable owner blockers; missing review
-approval, pending checks, draft state, and ordinary task activity are not notices.
-Public comments are deduplicated by the issue, current head, and blocker.
+The durable outbox posts deduplicated, fixed-text outcome/blocker comments on
+public PRs. It carries no logs, credentials, arbitrary issue text, or private
+runtime data. The owner mobile Inbox is not implemented by this adapter.
+Before posting, an existing marker in the fully read PR comments is treated as
+proof the outcome was already published.
 
 Apply mode atomically writes a private `<state_dir>/workflow-events.json` snapshot
-for the owner-bound mobile consumer. It uses the versioned closed envelope, fixed
-reason/outcome mapping, canonical event fields, stable incident IDs, numeric issue
-and PR identities, exact lowercase SHAs, and UTC timestamps. It includes no raw
-GitHub text, check logs, commands, credentials, or private runtime data. The file
-is owner-only, regular, unaliased, atomically replaced, and bounded to 256 recent
-events no older than 24 hours, and 1 MiB; event timestamps cannot be later than the
-export timestamp. Plan mode never creates the file. Stable event IDs deduplicate
-polling replays and persistent policy/budget incidents; exact-head authorization
-and neutral-task outcomes remain bound to that head. Terminal enrollment retirement
-and event persistence share one state transaction.
+using the closed, versioned schema and fixed lifecycle reason/outcome mapping.
+It includes only sanitized identifiers, exact lowercase SHAs, and UTC times.
+Raw GitHub text, check logs, commands, credentials, and private runtime data are
+excluded. Export persistence is bounded to 256 events and 1 MiB; plan mode never
+writes it. Stable event IDs preserve polling replay identity, and terminal
+enrollment retirement is committed with event persistence.
 
-The fixed lifecycle mapping is `merged` → `merged` (exact merge SHA),
-`closed_without_merge` → `closed`, `conflict_incompatible` and `policy_broken` →
-`blocked`, `sensitive_approval` → `approval_required`, `execution_uncertain` →
-`execution_uncertain`, and `execution_exhausted`/`task_failed` → `failed`.
-Closed and blocked PR events carry the exact PR/head with null merge SHA and
-decision; incompatible requirements are never mislabeled as task failures.
+The owner mobile Inbox consumer is a separate adapter and must validate this
+producer's exact event schema and bind the export to the actual ready application
+owner. A GitHub account ID is not an application owner ID. Exported merged
+outcomes do not imply deployment.
 
-The producer implements the agreed `closed_without_merge`, `conflict_incompatible`,
-and `policy_broken` contract additions without editing the consumer/schema. It is
-not ready for activation until the actual completed consumer schema is exercised
-against producer output on the final integrated revision. The owner mobile Inbox
-adapter remains a separate component; this file alone does not claim delivery.
+## Bounded state
+
+The serialized state is limited to 4 MiB. The cap is checked before the
+temporary file replaces the state; a write that would exceed it fails the cycle
+with a clear error and leaves the prior valid state unchanged. Only records with
+positive terminal proof are compacted: verified-completed fixer tasks and
+sent/superseded/blocked status, auto-merge and outbox records of a PR observed
+closed or merged, plus those records on non-current heads of an open PR. They
+are replaced by a per-PR tombstone (a status-generation watermark and bounded
+lists of retired auto-merge and outbox key digests). Pending, sending, uncertain
+and sent fixer claims, every record on the current head, enrollments with their
+command fence and attempt budget, and consumed command IDs are never dropped;
+the oldest command IDs fold into a numeric watermark that still fences replays.
 
 ## External policy boundary
 
