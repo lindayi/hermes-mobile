@@ -1425,3 +1425,171 @@ def test_atomic_replace_failure_preserves_prior_state(tmp_path, monkeypatch):
     assert sorted(item.name for item in tmp_path.iterdir()) == [
         ".state.json.lock", "state.json",
     ]
+
+
+def _managed_cycle(api, path):
+    # The approved managed runner must supply a disposable native/home environment.
+    import os
+    assert os.environ["HOME"].startswith("/tmp/hmt-")
+    assert os.environ["HERMES_HOME"].startswith("/tmp/hmt-")
+    return Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+
+
+def test_returning_head_revokes_success_in_first_cycle(tmp_path):
+    class RevocableReview(RecordingApi):
+        revoked = False
+
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if self.revoked and route.endswith('/pulls/16/reviews?per_page=100'):
+                return [dict(value, state='COMMENTED') for value in values]
+            return values
+    api = RevocableReview()
+    api.pull['mergeable'] = False  # No task or auto-merge writes obscure status behavior.
+    path = tmp_path / 'state.json'
+    _managed_cycle(api, path)  # H success generation 1
+    assert api.status_log[HEAD][-1]['state'] == 'success'
+    api.move_head('c' * 40)
+    _managed_cycle(api, path)
+    _managed_cycle(api, path)  # A repeat cycle must not obscure returning-head revocation.
+    assert api.status_log['c' * 40][-1]['state'] == 'success'
+    api.move_head(HEAD)
+    api.revoked = True  # Latest Copilot review is now COMMENTED, so H's success must be revoked.
+    _managed_cycle(api, path)
+    observed = api.status_log[HEAD][-1]['state']
+    _managed_cycle(api, path)
+    assert api.status_log[HEAD][-1]['state'] == 'pending', 'Must eventually revoke'
+    assert observed == 'pending', 'Compaction must not reject a just-planned revocation'
+
+
+def test_new_head_publishes_status_in_first_cycle(tmp_path):
+    api = RecordingApi()
+    api.pull["mergeable"] = False
+    path = tmp_path / "state.json"
+    _managed_cycle(api, path)
+    api.move_head("c" * 40)
+    _managed_cycle(api, path)
+    assert api.status_log.get("c" * 40), "New head must publish on its first cycle"
+    assert api.status_log["c" * 40][-1]["state"] == "success"
+
+
+def test_rejected_status_generation_fails_cycle_instead_of_reporting_transition(tmp_path):
+    class RejectedStatusStore(StateStore):
+        def claim_action(self, key, action):
+            if action["kind"] == "status":
+                return False
+            return super().claim_action(key, action)
+
+    api = FakeApi(review_status_present=False)
+    store = RejectedStatusStore(tmp_path / "state.json")
+    with pytest.raises(CoordinatorError, match="status.*claim"):
+        Coordinator(api, store).run(apply=True)
+    assert not any("/statuses/" in route for route, _ in api.writes)
+
+
+@pytest.mark.parametrize('kind', ['status', 'auto-merge'])
+def test_reenrollment_preserves_uncertain_nonfix_claim(tmp_path, kind):
+    class LostResponse(FakeApi):
+        def write(self, route, body):
+            response = super().write(route, body)
+            return None if '/statuses/' in route else response
+
+        def graphql_write(self, query, variables):
+            self.graphql_writes.append((query, variables))
+            return {'data': None}
+    api = LostResponse(review_status_present=(kind == 'auto-merge'))
+    path = tmp_path / 'state.json'
+    _managed_cycle(api, path)
+
+    def count():
+        return (len(api.graphql_writes) if kind == 'auto-merge'
+                else sum('/statuses/' in route for route, _ in api.writes))
+
+    assert count() == 1
+    assert any(a['kind'] == kind and a['status'] == 'uncertain'
+               for a in StateStore(path).actions().values())
+    api.pull['state'] = 'closed'
+    _managed_cycle(api, path)
+    assert any(a['kind'] == kind and a['status'] == 'uncertain'
+               for a in StateStore(path).actions().values())
+    api.pull['state'] = 'open'
+    api.comments.append({'id': 124, 'user': {'id': OWNER}, 'body': '/hermes enroll',
+                         'updated_at': '2026-10-01T12:10:00Z'})
+    _managed_cycle(api, path)
+    enrollment = StateStore(path).snapshot()['enrollments']['16']
+    assert enrollment['active'] is True and enrollment['comment'] == 124
+    _managed_cycle(api, path)
+    assert count() == 1, 'Fresh enrollment is not proof an ambiguous write did not happen'
+
+
+def test_reenrollment_preserves_every_unresolved_claim_and_attempt_budget(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+
+    def seed(data):
+        data["enrollments"]["16"].update(active=False, attempts=3)
+        for kind in ("fix", "status", "auto-merge"):
+            for status in ("pending", "sending", "uncertain") + (("sent",) if kind == "fix" else ()):
+                data["actions"][f"{kind}:{status}"] = {
+                    "kind": kind, "status": status, "issue": 16, "head": HEAD, "generation": 1,
+                }
+        for status in ("pending", "sending", "uncertain"):
+            data["outbox"][status] = {"status": status, "issue": 16, "head": HEAD}
+
+    store._mutate(seed)
+    before = store.snapshot()
+    store.commit_scan(None, [124], commands=[("enroll", {
+        "issue": 16, "comment": 124, "head": "c" * 40, "base": BASE,
+    })])
+    after = StateStore(store.path).snapshot()
+    assert after["enrollments"]["16"]["active"] is True
+    assert after["enrollments"]["16"]["comment"] == 124
+    assert after["enrollments"]["16"]["attempts"] == 3
+    assert after["actions"] == before["actions"]
+    assert after["outbox"] == before["outbox"]
+
+
+@pytest.mark.parametrize("status", ["sent", "superseded", "blocked", "completed"])
+def test_reenrollment_keeps_generation_boundary_when_resetting_terminal_status(tmp_path, status):
+    store = StateStore(tmp_path / "state.json")
+    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    action = {"kind": "status", "issue": 16, "head": HEAD, "generation": 7}
+    assert store.claim_action("old-status", action)
+    store.update_action("old-status", status)
+    # A restart may happen between retiring enrollment and record compaction.
+    store.commit_scan(None, [], retirements=[16])
+    store.commit_scan(None, [124], commands=[("enroll", {
+        "issue": 16, "comment": 124, "head": HEAD, "base": BASE,
+    })])
+    assert store.action("old-status") is None
+    assert store.status_generation_floor(16) == 7
+    assert not store.claim_action("stale-status", action)
+    assert store.claim_action("new-status", action | {"generation": 8})
+
+
+@pytest.mark.parametrize("mergeable, mergeable_state, reason", [
+    (True, "behind", "behind"),
+    (True, "dirty", "conflict"),
+    (True, "unknown", "conflict"),
+    (False, "clean", "conflict"),
+    (None, "clean", "conflict"),
+])
+def test_dispatch_rechecks_reconciliation_after_planning(tmp_path, mergeable, mergeable_state, reason):
+    class BecomesUnmergeable(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/pulls/16") and self.pull_reads > 2:
+                return value | {"mergeable": mergeable, "mergeable_state": mergeable_state}
+            return value
+
+    api = BecomesUnmergeable(unresolved=True)
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert api.pull_reads > 2
+    assert api.fix_attempts == 0, "Final fresh pull must not receive an ordinary fixer"
+    summary = result["pull_requests"][0]
+    assert not summary["repair_requested"]
+    assert reason in summary["reasons"]
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())

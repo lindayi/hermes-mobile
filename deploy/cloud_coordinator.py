@@ -696,6 +696,17 @@ def _status_owned(statuses, context, actor_id):
     return latest, isinstance(creator, dict) and creator.get("id") == actor_id
 
 
+def _reconciliation_reasons(pull):
+    """Use the same neutral-reconciler boundary when planning and dispatching."""
+    reasons = []
+    if (pull.get("mergeable") is not True
+            or pull.get("mergeable_state") in {"dirty", "unknown"}):
+        reasons.append(("conflict", "A neutral conflict reconciler must be assigned; this coordinator will not start a fixer."))
+    if pull.get("mergeable_state") == "behind":
+        reasons.append(("behind", "The pull request is behind main; a neutral reconciler must update it, and this coordinator will not start a fixer."))
+    return reasons
+
+
 class Coordinator:
     """Poll, plan, and (only on explicit request) apply bounded public GitHub actions."""
 
@@ -947,12 +958,9 @@ class Coordinator:
             complete=snapshot["policy_complete"],
         )
         agent_busy = self._reconcile_actions(snapshot, actions, apply=apply)
-        mergeable = snapshot["pull"].get("mergeable")
-        conflict = (mergeable is not True
-                    or snapshot["pull"].get("mergeable_state") in {"dirty", "unknown"})
-        behind = snapshot["pull"].get("mergeable_state") == "behind"
+        reconciliation = _reconciliation_reasons(snapshot["pull"])
         repair = None
-        if snapshot["scoped"] and snapshot["threads_complete"] and not conflict and not behind:
+        if snapshot["scoped"] and snapshot["threads_complete"] and not reconciliation:
             repair = repair_request(
                 head, snapshot["enrollment"].get("attempts", 0),
                 snapshot["threads"], snapshot["check_runs"], pull_number=number,
@@ -967,10 +975,7 @@ class Coordinator:
         reasons = []
         if not snapshot["scoped"]:
             reasons.append(("scope", "The pull request is not based on the current same-repository main branch."))
-        if conflict:
-            reasons.append(("conflict", "A neutral conflict reconciler must be assigned; this coordinator will not start a fixer."))
-        if behind:
-            reasons.append(("behind", "The pull request is behind main; a neutral reconciler must update it, and this coordinator will not start a fixer."))
+        reasons.extend(reconciliation)
         if not snapshot["up_to_date_required"]:
             reasons.append(("up-to-date-policy", "Branch protection must require current-main checks."))
         if not snapshot["conversation_resolution_required"]:
@@ -998,8 +1003,11 @@ class Coordinator:
                          and item.get("head") == head]
                 ambiguous = any(item.get("status") in {"sending", "uncertain"}
                                 for item in prior)
+                # Retirement can compact any head of this PR before the claim.
+                # Reserve above all live generations as well as its tombstone.
                 generation = max(
-                    [item.get("generation", 0) for item in prior]
+                    [item.get("generation", 0) for item in actions.values()
+                     if item.get("kind") == "status" and item.get("issue") == number]
                     + [self.store.status_generation_floor(number)]
                 ) + 1
                 if not ambiguous:
@@ -1086,6 +1094,9 @@ class Coordinator:
         current = self._fence_pull(action["issue"], action["head"])
         if not current:
             return "superseded"
+        reconciliation = _reconciliation_reasons(current)
+        if reconciliation:
+            return reconciliation[0][0]
         branch = current["head"].get("ref")
         if not isinstance(branch, str) or not branch or branch != action["head_ref"]:
             return "superseded"
@@ -1127,7 +1138,9 @@ class Coordinator:
         key = action["key"]
         if not self.store.claim_action(key, action):
             existing = self.store.action(key)
-            return existing.get("status") if existing else "not-claimed"
+            if not existing:
+                raise CoordinatorError("Planned status generation could not be claimed")
+            return existing.get("status")
         try:
             fence_main = snapshot["main_sha"] if action["state"] == "success" else None
             current_pull = self._fence_pull(
@@ -1335,11 +1348,12 @@ class Coordinator:
             action = pr_plan["repair"]
             if action:
                 result = self._dispatch_task(action)
-                if result in {"agent-running", "superseded"}:
+                if result in {"agent-running", "superseded", "conflict", "behind"}:
                     pr_plan["repair"] = None
-                    if result == "agent-running":
+                    if result != "superseded":
+                        reason = "agent" if result == "agent-running" else result
                         pr_plan["reasons"] = list(dict.fromkeys(
-                            pr_plan["reasons"] + ["agent"],
+                            pr_plan["reasons"] + [reason],
                         ))
             status_action = pr_plan["status_action"]
             if status_action:
@@ -1570,13 +1584,19 @@ class StateStore:
                                  and item["comment"] > data["enrollments"][key]["comment"]))):
                     attempts = 0
                     if key in data["enrollments"]:
-                        # Fresh authorization is not proof an earlier fixer stopped.
-                        data["actions"] = {
-                            k: v for k, v in data["actions"].items()
-                            if v.get("issue") != item["issue"]
-                            or (v.get("kind") == "fix"
-                                and v.get("status") in {"sending", "uncertain", "sent"})
-                        }
+                        # Authorization is not terminal proof for any write claim.
+                        for action_key, claim in list(data["actions"].items()):
+                            if (claim.get("issue") != item["issue"]
+                                    or not _retirable_action(claim, item["head"], inactive=True)):
+                                continue
+                            if claim.get("kind") == "status" and type(claim.get("generation")) is int:
+                                tombstone = data["retired"].setdefault(key, {
+                                    "status_generation": 0, "actions": [], "outbox": [],
+                                })
+                                tombstone["status_generation"] = max(
+                                    tombstone["status_generation"], claim["generation"],
+                                )
+                            del data["actions"][action_key]
                         if any(v.get("issue") == item["issue"] and v.get("kind") == "fix"
                                for v in data["actions"].values()):
                             # Do not reuse an attempt-derived key retained above.
