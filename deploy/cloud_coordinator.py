@@ -1364,8 +1364,13 @@ class Coordinator:
         )
         if not current:
             return "superseded"
+        if current.get("draft") is not False:
+            return "draft"
         reconciliation = _reconciliation_reasons(current)
-        if reconciliation:
+        neutral = action.get("task_type") == "neutral"
+        if neutral and not reconciliation:
+            return "superseded"
+        if not neutral and reconciliation:
             return reconciliation[0][0]
         branch = current["head"].get("ref")
         if not isinstance(branch, str) or not branch or branch != action["head_ref"]:

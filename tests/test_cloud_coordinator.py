@@ -1103,6 +1103,26 @@ def test_main_advancement_before_neutral_dispatch_cancels_reservation(tmp_path):
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
 
 
+@pytest.mark.parametrize("task_type", ["repair", "neutral"])
+def test_fresh_draft_fence_prevents_task_reservation_and_post(tmp_path, task_type):
+    api = FakeApi()
+    api.pull["draft"] = True
+    store = StateStore(tmp_path / "state.json")
+    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    action = {
+        "issue": 16, "head": HEAD, "head_ref": "topic", "kind": "fix",
+        "task_type": "neutral" if task_type == "neutral" else "repair",
+        "main_sha": BASE, "key": "fix:16:draft-fence", "body": "bounded prompt",
+    }
+
+    result = Coordinator(api, store, clock=lambda: 1790856540)._dispatch_task(action)
+
+    assert result == "draft"
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
+    assert store.actions() == {}
+    assert not [body for route, body in api.writes if route.endswith("/tasks")]
+
+
 def test_explicit_incompatible_task_result_is_exported_and_stops_repair(tmp_path):
     api = FakeApi()
     api.pull.update(mergeable=False, mergeable_state="dirty")
