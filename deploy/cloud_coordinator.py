@@ -780,6 +780,11 @@ def _status_owned(statuses, context, actor_id):
     return latest, isinstance(creator, dict) and creator.get("id") == actor_id
 
 
+def _github_identity(value, expected):
+    return (isinstance(value, dict) and type(value.get("id")) is int
+            and value["id"] == expected)
+
+
 def _reconciliation_reasons(pull):
     """Use the same neutral-reconciler boundary when planning and dispatching."""
     reasons = []
@@ -996,6 +1001,9 @@ class Coordinator:
                 else:
                     busy = True
                 continue
+            if status == "completed" and action.get("handoff_state") == "failed":
+                busy = True
+                continue
             if status in {"sending", "uncertain"}:
                 if apply and (
                     status == "sending" or not action.get("lifecycle_event_id")
@@ -1109,6 +1117,212 @@ class Coordinator:
             return "uncertain"
         self.store.update_action(key, "sent", receipt_waits=waits)
         return "waiting"
+
+    def _handoff_wait(self, key, action, snapshot):
+        waits = action.get("handoff_waits", 0) + 1
+        if waits >= MAX_HANDOFF_POLLS:
+            incident = f"review:{action.get('attempt', '')}:{action.get('receipt_head', '')}"
+            event = _lifecycle_event(
+                {"issue": action["issue"], "head": action["receipt_head"],
+                 "enrollment": snapshot["enrollment"]},
+                "execution_exhausted", occurred_at=self._now_string(),
+                incident=incident,
+            )
+            self.store.update_action_with_lifecycle(
+                key, "completed", event, now=self.clock(),
+                blocker="review_handoff_exhausted", handoff_state="failed",
+                handoff_waits=waits,
+            )
+            return True
+        self.store.update_action(
+            key, "completed", handoff_state=action.get("handoff_state", "waiting_review"),
+            handoff_waits=waits,
+        )
+        return True
+
+    def _advance_task_handoff(self, key, action, snapshot):
+        head = action.get("receipt_head")
+        base = action.get("receipt_base")
+        current = self._fence_pull(action.get("issue"), head, base)
+        if (not isinstance(current, dict)
+                or current.get("number") != action.get("issue")
+                or current.get("id") != action.get("pull_id")
+                or current.get("node_id") != action.get("pull_node_id")):
+            return self._handoff_wait(key, action, snapshot)
+
+        ready_state = action.get("ready_state")
+        if current.get("draft") is True:
+            if ready_state in {"sending", "ready_uncertain"}:
+                self.store.update_action(
+                    key, "completed", ready_state="ready_uncertain",
+                    handoff_state="ready_uncertain",
+                )
+                return self._handoff_wait(
+                    key, action | {"handoff_state": "ready_uncertain"}, snapshot,
+                )
+            self.store.update_action(
+                key, "completed", ready_state="sending", handoff_state="pending",
+            )
+            mutation_id = hashlib.sha256(f"{key}:ready".encode()).hexdigest()[:32]
+            query = """
+            mutation($pullRequestId: ID!, $clientMutationId: String!) {
+              markPullRequestReadyForReview(input: {
+                pullRequestId: $pullRequestId, clientMutationId: $clientMutationId
+              }) {
+                clientMutationId
+                pullRequest { id isDraft headRefOid }
+              }
+            }
+            """
+            try:
+                result = self.api.graphql_write(query, {
+                    "pullRequestId": action["pull_node_id"],
+                    "clientMutationId": mutation_id,
+                })
+            except CoordinatorError:
+                self.store.update_action(
+                    key, "completed", ready_state="ready_uncertain",
+                    handoff_state="ready_uncertain",
+                )
+                return self._handoff_wait(
+                    key, action | {"handoff_state": "ready_uncertain"}, snapshot,
+                )
+            data = result.get("data", {}).get("markPullRequestReadyForReview", {}) \
+                if isinstance(result, dict) else {}
+            ready_pull = data.get("pullRequest") if isinstance(data, dict) else None
+            if (not isinstance(ready_pull, dict)
+                    or data.get("clientMutationId") != mutation_id
+                    or ready_pull.get("id") != action["pull_node_id"]
+                    or ready_pull.get("isDraft") is not False
+                    or ready_pull.get("headRefOid") != head):
+                self.store.update_action(
+                    key, "completed", ready_state="ready_uncertain",
+                    handoff_state="ready_uncertain",
+                )
+                return self._handoff_wait(
+                    key, action | {"handoff_state": "ready_uncertain"}, snapshot,
+                )
+            self.store.update_action(key, "completed", ready_state="done")
+        elif current.get("draft") is False:
+            self.store.update_action(key, "completed", ready_state="done")
+        else:
+            return self._handoff_wait(key, action, snapshot)
+
+        review_ok = copilot_review_valid(
+            head, snapshot["reviews"], snapshot["threads"],
+            threads_complete=snapshot["threads_complete"],
+        )
+        if review_ok:
+            self.store.update_action(
+                key, "completed", handoff_state="done", handoff_waits=0,
+            )
+            return False
+
+        route = f"repos/{REPOSITORY}/pulls/{action['issue']}/requested_reviewers"
+        try:
+            requested = self.api.get(route)
+            reviews = _rest_list(
+                self.api,
+                f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
+            )
+        except CoordinatorError:
+            return self._handoff_wait(key, action, snapshot)
+        if not isinstance(requested, dict) or not isinstance(requested.get("users"), list):
+            return self._handoff_wait(key, action, snapshot)
+        has_request = any(
+            _github_identity(item, COPILOT_REVIEWER_ID) for item in requested["users"]
+        )
+        has_submitted_review = any(
+            isinstance(review, dict)
+            and review.get("commit_id") == head
+            and review.get("state") in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+            and _github_identity(review.get("user"), COPILOT_REVIEWER_ID)
+            for review in reviews
+        )
+        if has_submitted_review:
+            if action.get("receipt_head") != action.get("head"):
+                self.store.update_action(
+                    key, "completed", handoff_state="waiting_review",
+                    review_request_state="observed",
+                )
+                return self._handoff_wait(
+                    key, action | {"handoff_state": "waiting_review"}, snapshot,
+                )
+            self.store.update_action(
+                key, "completed", handoff_state="done",
+                review_request_state="observed",
+            )
+            return False
+        has_pending_review = any(
+            isinstance(review, dict)
+            and review.get("commit_id") == head
+            and review.get("state") == "PENDING"
+            and _github_identity(review.get("user"), COPILOT_REVIEWER_ID)
+            for review in reviews
+        )
+        if has_request or has_pending_review:
+            self.store.update_action(
+                key, "completed", handoff_state="waiting_review",
+                review_request_state="sent" if has_request else "observed",
+            )
+            return self._handoff_wait(
+                key, action | {"handoff_state": "waiting_review"}, snapshot,
+            )
+
+        request_state = action.get("review_request_state")
+        if request_state in {"sending", "uncertain", "sent"}:
+            self.store.update_action(
+                key, "completed", handoff_state="review_request_uncertain",
+                review_request_state="uncertain",
+            )
+            return self._handoff_wait(
+                key, action | {"handoff_state": "review_request_uncertain"}, snapshot,
+            )
+
+        # Re-fence immediately before the notification-producing reviewer request.
+        current = self._fence_pull(action["issue"], head, base)
+        if (not isinstance(current, dict) or current.get("id") != action["pull_id"]
+                or current.get("node_id") != action["pull_node_id"]):
+            return self._handoff_wait(key, action, snapshot)
+        self.store.update_action(
+            key, "completed", handoff_state="pending",
+            review_request_state="sending",
+        )
+        try:
+            response = self.api.write(route, {
+                "reviewers": [COPILOT_REVIEWER_LOGIN],
+            })
+        except CoordinatorError:
+            self.store.update_action(
+                key, "completed", handoff_state="review_request_uncertain",
+                review_request_state="uncertain",
+            )
+            return self._handoff_wait(
+                key, action | {"handoff_state": "review_request_uncertain"}, snapshot,
+            )
+        response_reviewers = response.get("requested_reviewers") \
+            if isinstance(response, dict) else None
+        if (not isinstance(response, dict)
+                or response.get("number") != action["issue"]
+                or response.get("id") != action["pull_id"]
+                or response.get("node_id") != action["pull_node_id"]
+                or not isinstance(response_reviewers, list)
+                or not any(_github_identity(item, COPILOT_REVIEWER_ID)
+                           for item in response_reviewers)):
+            self.store.update_action(
+                key, "completed", handoff_state="review_request_uncertain",
+                review_request_state="uncertain",
+            )
+            return self._handoff_wait(
+                key, action | {"handoff_state": "review_request_uncertain"}, snapshot,
+            )
+        self.store.update_action(
+            key, "completed", handoff_state="waiting_review",
+            review_request_state="sent",
+        )
+        return self._handoff_wait(
+            key, action | {"handoff_state": "waiting_review"}, snapshot,
+        )
 
     def _notification_outcomes(self, snapshot, reasons):
         outcomes = []
@@ -1778,7 +1992,7 @@ def _retirable_action(action, current_head, inactive):
     """Only positively terminal records may be retired; unresolved claims stay."""
     status = action.get("status")
     if action.get("kind") == "fix":
-        if action.get("handoff_state") == "pending":
+        if action.get("handoff_state") not in {None, "done", "failed"}:
             return False
         return status == "completed" and (
             inactive or action.get("head") != current_head

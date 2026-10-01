@@ -14,6 +14,7 @@ from deploy.cloud_coordinator import (
     Coordinator,
     CoordinatorError,
     GhApi,
+    MAX_HANDOFF_POLLS,
     StateStore,
     classify_sensitive_paths,
     collect_review_threads,
@@ -403,6 +404,8 @@ class FakeApi:
         self.writes = []
         self.fix_attempts = 0
         self.tasks = {}
+        self.requested_reviewers = []
+        self.review_state = "APPROVED"
         self.graphql_writes = []
         self.pull = valid_pr() | {
             "node_id": "PR_node_16", "auto_merge": None,
@@ -445,6 +448,8 @@ class FakeApi:
                 return self.pull | {"head": {"sha": "c" * 40, "ref": "topic",
                                              "repo": {"id": 1399942965}}}
             return self.pull
+        if route == "repos/lindayi/hermes-mobile/pulls/16/requested_reviewers":
+            return {"users": list(self.requested_reviewers), "teams": []}
         if route.endswith("/branches/main/protection/required_status_checks"):
             return {
                 "contexts": ["integration-tests", "cloud-review"],
@@ -484,7 +489,7 @@ class FakeApi:
             return [{"filename": "frontend/styles.css"}]
         if route.endswith("/pulls/16/reviews?per_page=100"):
             return [{
-                "state": "APPROVED", "commit_id": self.head_sha,
+                "state": self.review_state, "commit_id": self.head_sha,
                 "submitted_at": "2026-10-01T12:00:00Z",
                 "user": {"id": COPILOT_REVIEWER},
             }]
@@ -547,6 +552,9 @@ class FakeApi:
 
     def write(self, route, body):
         self.writes.append((route, body))
+        if route == "repos/lindayi/hermes-mobile/pulls/16/requested_reviewers":
+            self.requested_reviewers = [{"id": COPILOT_REVIEWER}]
+            return self.pull | {"requested_reviewers": self.requested_reviewers}
         if route == "agents/repos/lindayi/hermes-mobile/tasks":
             self.fix_attempts += 1
             if self.fail_fix:
@@ -612,6 +620,14 @@ class FakeApi:
 
     def graphql_write(self, query, variables):
         self.graphql_writes.append((query, variables))
+        if "markPullRequestReadyForReview" in query:
+            self.pull["draft"] = False
+            return {"data": {"markPullRequestReadyForReview": {
+                "clientMutationId": variables["clientMutationId"],
+                "pullRequest": {
+                    "id": "PR_node_16", "isDraft": False, "headRefOid": self.head_sha,
+                },
+            }}}
         self.pull["auto_merge"] = {"enabledAt": "2026-10-01T12:02:00Z"}
         if self.uncertain_merge:
             raise ApiError("response lost", status=503)
@@ -1427,6 +1443,35 @@ def test_task_api_identity_reconciles_across_head_changes(tmp_path):
     coordinator.run(apply=True)
     assert api.fix_attempts == 1
     assert store.action(fix["key"])["status"] == "completed"
+
+
+def test_task_handoff_requests_ready_review_once_and_fails_closed_after_wait(tmp_path):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task("task-1", fix)
+    api.pull["draft"] = True
+    api.review_state = "PENDING"
+
+    coordinator.run(apply=True)
+    action = store.action(fix["key"])
+    assert action["ready_state"] == "done"
+    assert action["handoff_state"] == "waiting_review"
+    assert any("markPullRequestReadyForReview" in query
+               for query, _ in api.graphql_writes)
+    assert not any(route.endswith("/requested_reviewers")
+                   for route, _ in api.writes)
+
+    for _ in range(MAX_HANDOFF_POLLS - 1):
+        coordinator.run(apply=True)
+    action = store.action(fix["key"])
+    assert action["handoff_state"] == "failed"
+    assert action["blocker"] == "review_handoff_exhausted"
+    events = store.snapshot()["lifecycle_events"]
+    assert [event["reason"] for event in events] == ["execution_exhausted"]
+    assert api.fix_attempts == 1
 
 
 def test_unrelated_or_unverified_task_completion_cannot_release_fixer(tmp_path):
