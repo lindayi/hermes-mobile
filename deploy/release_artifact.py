@@ -232,7 +232,9 @@ def _attestation(bundle, sha, run_id, attempt, *, run):
     identity = 'https://github.com/' + signer + '@' + REF
     results = _json(_command([
         'gh', 'attestation', 'verify', str(bundle), '--hostname', 'github.com',
-        '--repo', REPOSITORY, '--signer-repo', REPOSITORY, '--signer-workflow', signer,
+        # Exact certificate identity pins both signer repository and workflow.
+        # gh forbids combining it with signer-repo or signer-workflow selectors.
+        '--repo', REPOSITORY,
         '--cert-identity', identity, '--cert-oidc-issuer', 'https://token.actions.githubusercontent.com',
         '--source-ref', REF, '--source-digest', sha, '--signer-digest', sha,
         '--deny-self-hosted-runners', '--predicate-type', 'https://slsa.dev/provenance/v1',
