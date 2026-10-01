@@ -1,9 +1,9 @@
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -13,6 +13,7 @@ from deploy.issue_starter import (
     Coordinator,
     CoordinatorError,
     StateStore,
+    main,
 )
 
 
@@ -212,6 +213,24 @@ def test_read_only_plan_uses_exact_owner_command_and_creates_no_state(tmp_path):
     assert api.patches == []
 
 
+def test_cli_default_plan_creates_no_state_directory_or_lock(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+    result = main([], api_factory=FakeApi)
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["planned"] == 1
+    assert not (tmp_path / "state").exists()
+    assert not list(tmp_path.rglob("*.lock"))
+
+
+def test_cli_requires_once_for_apply(capsys):
+    with pytest.raises(SystemExit) as error:
+        main(["--apply"], api_factory=FakeApi)
+
+    assert error.value.code == 2
+
+
 @pytest.mark.parametrize(
     "comment, issue_value, timeline, expected",
     [
@@ -274,6 +293,113 @@ def test_response_uncertainty_consumes_reservation_without_reposting(tmp_path):
     assert saved["phase"] == "unknown"
 
 
+def test_repeated_exact_task_read_failures_are_bounded_and_escalated(tmp_path):
+    class MissingTaskApi(FakeApi):
+        task_reads = 0
+
+        def get(self, route):
+            if route.startswith(f"agents/repos/{REPOSITORY}/tasks/"):
+                self.task_reads += 1
+                from deploy.issue_starter import ApiError
+                raise ApiError("synthetic failure")
+            return super().get(route)
+
+    api = MissingTaskApi()
+    store = StateStore(tmp_path / "private" / "issue-starter.json")
+    start_task(tmp_path, api)
+    results = [Coordinator(api, store).run(apply=True) for _ in range(6)]
+
+    assert api.task_reads == 3
+    assert results[4]["pending"] == 0
+    assert json.loads(store.path.read_text())["commands"][f"{ISSUE_NUMBER}:{COMMAND_ID}"]["phase"] == "unknown"
+    assert len([item for item in api.posts if item[0].endswith("/tasks")]) == 1
+
+
+def test_unknown_task_response_is_consumed_without_reposting(tmp_path):
+    class UnknownResponseApi(FakeApi):
+        def post(self, route, body):
+            if route.endswith("/tasks"):
+                self.posts.append((route, body))
+                return {"state": "queued"}
+            return super().post(route, body)
+
+    api = UnknownResponseApi()
+    store = StateStore(tmp_path / "private" / "issue-starter.json")
+    first = Coordinator(api, store).run(apply=True)
+    second = Coordinator(api, store).run(apply=True)
+
+    assert first["blocked"] == 1
+    assert second["dispatched"] == 0
+    assert len([item for item in api.posts if item[0].endswith("/tasks")]) == 1
+    assert json.loads(store.path.read_text())["commands"][f"{ISSUE_NUMBER}:{COMMAND_ID}"]["phase"] == "unknown"
+
+
+def test_reserved_dispatch_resumes_after_crash_before_send(tmp_path):
+    api = FakeApi()
+    store = StateStore(tmp_path / "private" / "issue-starter.json")
+    store.reserve({
+        "issue": ISSUE_NUMBER,
+        "command_id": COMMAND_ID,
+        "accepted_title_body_sha256": hashlib.sha256(
+            ("Example\0Please implement the public feature.").encode()
+        ).hexdigest(),
+        "accepted_at": CREATED,
+        "phase": "reserved",
+        "base_sha": "b" * 40,
+        "task_id": None,
+    })
+
+    result = Coordinator(api, store).run(apply=True)
+
+    assert result["dispatched"] == 1
+    assert len([item for item in api.posts if item[0].endswith("/tasks")]) == 1
+
+
+def test_crash_after_task_send_keeps_dispatch_consumed(tmp_path):
+    class CrashAfterSendStore(StateStore):
+        def update(self, key, changes):
+            if changes.get("phase") == "task_created":
+                raise RuntimeError("simulated crash after remote response")
+            return super().update(key, changes)
+
+    api = FakeApi()
+    path = tmp_path / "private" / "issue-starter.json"
+    with pytest.raises(RuntimeError):
+        Coordinator(api, CrashAfterSendStore(path)).run(apply=True)
+
+    result = Coordinator(api, StateStore(path)).run(apply=True)
+
+    assert result["dispatched"] == 0
+    assert len([item for item in api.posts if item[0].endswith("/tasks")]) == 1
+    assert json.loads(path.read_text())["commands"][f"{ISSUE_NUMBER}:{COMMAND_ID}"]["phase"] == "unknown"
+
+
+def test_replayed_owner_command_never_creates_a_second_task(tmp_path):
+    api = FakeApi()
+    start_task(tmp_path, api)
+
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert result["dispatched"] == 0
+    assert len([item for item in api.posts if item[0].endswith("/tasks")]) == 1
+
+
+def test_issue_edit_after_reservation_blocks_dispatch(tmp_path):
+    api = FakeApi()
+    original_get = api.get
+
+    def edit_before_fresh_check(route):
+        if route == f"repos/{REPOSITORY}/issues/{ISSUE_NUMBER}":
+            api.current_issue = issue(body="Changed after the command.")
+        return original_get(route)
+
+    api.get = edit_before_fresh_check
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert result["dispatched"] == 0
+    assert not any(item[0].endswith("/tasks") for item in api.posts)
+
+
 @pytest.mark.parametrize("state", ["queued", "in_progress", "waiting_for_user", "idle"])
 def test_nonterminal_or_unknown_task_state_never_hands_off(tmp_path, state):
     api = FakeApi()
@@ -304,6 +430,54 @@ def test_completed_bound_task_marks_its_draft_pr_ready_and_enrolls_once(tmp_path
     ]
     assert enrollment == ["/hermes enroll"]
     assert api.pulls[0]["draft"] is False
+
+
+def test_uncertain_enrollment_comment_reconciles_without_duplicate_comment(tmp_path):
+    class LostEnrollmentResponseApi(FakeApi):
+        lost = False
+
+        def post(self, route, body):
+            response = super().post(route, body)
+            if route.endswith("/issues/41/comments") and body["body"] == "/hermes enroll" and not self.lost:
+                self.lost = True
+                raise TimeoutError("response lost")
+            return response
+
+    api = LostEnrollmentResponseApi(pulls=[pull_request()])
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+
+    first = make_coordinator(tmp_path, api).run(apply=True)
+    make_coordinator(tmp_path, api).run(apply=True)
+    final = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert first["blocked"] == 1
+    assert final["handed_off"] == 1
+    assert len([
+        item for item in api.posts
+        if item[0].endswith("/issues/41/comments") and item[1]["body"] == "/hermes enroll"
+    ]) == 1
+
+
+def test_uncertain_readiness_never_repeats_patch_when_pr_remains_draft(tmp_path):
+    class LostReadinessApi(FakeApi):
+        def patch(self, route, body):
+            self.patches.append((route, body))
+            raise TimeoutError("response lost before state change")
+
+    api = LostReadinessApi(pulls=[pull_request()])
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+
+    first = make_coordinator(tmp_path, api).run(apply=True)
+    second = make_coordinator(tmp_path, api).run(apply=True)
+    third = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert first["blocked"] == 1
+    assert second["blocked"] == 0
+    assert third["handed_off"] == 0
+    assert len(api.patches) == 1
+    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
 
 
 @pytest.mark.parametrize(
@@ -361,6 +535,26 @@ def test_task_completion_requires_successful_matching_session(tmp_path):
 
     assert result["handed_off"] == 0
     assert api.patches == []
+
+
+def test_changed_task_pull_binding_after_reservation_blocks_handoff(tmp_path):
+    api = FakeApi(pulls=[pull_request()])
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    original_get = api.get
+
+    def change_task_artifact(route):
+        if route.startswith(f"agents/repos/{REPOSITORY}/tasks/"):
+            value = completed_task(pull_id=9900, node_id="PR_other")
+            return value
+        return original_get(route)
+
+    api.get = change_task_artifact
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert result["handed_off"] == 0
+    assert api.patches == []
+    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
 
 
 def test_reopened_issue_requires_a_new_owner_command(tmp_path):

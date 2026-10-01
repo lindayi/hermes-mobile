@@ -28,17 +28,25 @@ MAX_PAGES = 20
 MAX_ITEMS_PER_PAGE = 100
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_COMMANDS = 1000
+MAX_READ_FAILURES = 3
+MAX_API_READS_PER_CYCLE = 512
+MAX_API_WRITES_PER_CYCLE = 4
 MAX_ISSUE_CHARS = 40_000
 MAX_TEXT_CHARS = 60_000
-MAX_TASK_ID_CHARS = 128
 MAX_SHA_RE = re.compile(r"[0-9a-f]{40}")
+TASK_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
 ACTIVE_STATES = {
     "queued", "in_progress", "idle", "waiting_for_user", "requested", "pending",
 }
 FAILED_STATES = {"failed", "timed_out", "cancelled"}
-TERMINAL_PHASES = {"failed", "handed_off"}
+TERMINAL_PHASES = {"failed", "handed_off", "stale_authorization", "handoff_failed"}
 IMMUTABLE_FIELDS = {
     "issue", "command_id", "accepted_title_body_sha256", "accepted_at",
+}
+PHASES = {
+    "reserved", "dispatch_started", "unknown", "task_created", "failed",
+    "stale_authorization", "handoff_reserved", "handoff_ready",
+    "handoff_comment_started", "handoff_uncertain", "handoff_failed", "handed_off",
 }
 
 
@@ -75,6 +83,39 @@ def _issue_digest(title, body):
 
 def _command_key(issue_number, comment_id):
     return f"{issue_number}:{comment_id}"
+
+
+def _valid_state_record(key, item):
+    if (not isinstance(key, str) or not isinstance(item, dict)
+            or type(item.get("issue")) is not int or item["issue"] <= 0
+            or type(item.get("command_id")) is not int or item["command_id"] <= 0
+            or key != _command_key(item["issue"], item["command_id"])
+            or not isinstance(item.get("accepted_title_body_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", item["accepted_title_body_sha256"]) is None
+            or _parse_time(item.get("accepted_at")) is None
+            or item.get("phase") not in PHASES
+            or (item.get("task_id") is not None
+                and (not isinstance(item.get("task_id"), str)
+                     or not TASK_ID_RE.fullmatch(item["task_id"])))):
+        return False
+    for name in ("preflight_read_failures", "poll_read_failures",
+                 "handoff_read_failures", "receipt_lookup_failures"):
+        value = item.get(name, 0)
+        if type(value) is not int or value < 0 or value > MAX_READ_FAILURES:
+            return False
+    receipt = item.get("receipt")
+    if receipt is not None:
+        if (not isinstance(receipt, dict)
+                or receipt.get("kind") not in {"blocked", "completed", "started"}
+                or receipt.get("state") not in {
+                    "reserved", "sending", "uncertain", "sent", "abandoned",
+                }
+                or receipt.get("marker") != (
+                    f"<!-- hermes-issue-starter:{receipt.get('kind')}:"
+                    f"{item['issue']}:{item['command_id']} -->"
+                )):
+            return False
+    return True
 
 
 def _all_pages(api, route, *, collection=None):
@@ -245,7 +286,7 @@ class StateStore:
                 or len(data["commands"]) > MAX_COMMANDS):
             raise CoordinatorError("Issue-starter state has an unsupported format")
         for key, item in data["commands"].items():
-            if not isinstance(key, str) or not isinstance(item, dict):
+            if not _valid_state_record(key, item):
                 raise CoordinatorError("Issue-starter state has invalid command records")
         return data
 
@@ -298,6 +339,8 @@ class StateStore:
         if not isinstance(entry, dict):
             raise CoordinatorError("Invalid issue-starter reservation")
         key = _command_key(entry.get("issue"), entry.get("command_id"))
+        if not _valid_state_record(key, entry):
+            raise CoordinatorError("Invalid issue-starter reservation")
 
         def reserve_command(data):
             if key in data["commands"]:
@@ -379,11 +422,40 @@ class GhApi:
         return self._call(["--method", "PATCH", route, "--input", "-"], input_text=payload)
 
 
+class _BoundedApi:
+    def __init__(self, api):
+        self.api = api
+        self.reads = 0
+        self.writes = 0
+
+    def reset(self):
+        self.reads = 0
+        self.writes = 0
+
+    def get(self, route):
+        self.reads += 1
+        if self.reads > MAX_API_READS_PER_CYCLE:
+            raise CoordinatorError("Issue-starter API read budget reached")
+        return self.api.get(route)
+
+    def post(self, route, body):
+        self.writes += 1
+        if self.writes > MAX_API_WRITES_PER_CYCLE:
+            raise CoordinatorError("Issue-starter API write budget reached")
+        return self.api.post(route, body)
+
+    def patch(self, route, body):
+        self.writes += 1
+        if self.writes > MAX_API_WRITES_PER_CYCLE:
+            raise CoordinatorError("Issue-starter API write budget reached")
+        return self.api.patch(route, body)
+
+
 class Coordinator:
     """Plan read-only by default; apply one durable task or handoff per run."""
 
     def __init__(self, api, store, *, clock=lambda: datetime.now(timezone.utc)):
-        self.api = api
+        self.api = _BoundedApi(api)
         self.store = store
         self.clock = clock
 
@@ -436,7 +508,11 @@ class Coordinator:
         timeline = _all_pages(
             self.api, f"repos/{REPOSITORY}/issues/{number}/timeline",
         )
-        if _edited_after_authorization(timeline, record.get("accepted_at")):
+        accepted_at = record.get("accepted_at")
+        reopen_at = _latest_reopen(timeline)
+        accepted = _parse_time(accepted_at)
+        if (_edited_after_authorization(timeline, accepted_at)
+                or (reopen_at is not None and accepted is not None and reopen_at > accepted)):
             raise CoordinatorError("Issue was edited after owner authorization")
         return value
 
@@ -456,6 +532,15 @@ class Coordinator:
         if digest is None:
             return []
         comments = _all_pages(self.api, f"repos/{REPOSITORY}/issues/{number}/comments")
+        authorized_comments = [
+            comment for comment in comments if isinstance(comment, dict)
+            and comment.get("body") == COMMAND
+            and isinstance(comment.get("user"), dict)
+            and type(comment["user"].get("id")) is int
+            and comment["user"]["id"] == OWNER_ID
+        ]
+        if not authorized_comments:
+            return []
         timeline = _all_pages(self.api, f"repos/{REPOSITORY}/issues/{number}/timeline")
         if _edited_after_authorization(timeline, value.get("updated_at")):
             return []
@@ -470,7 +555,7 @@ class Coordinator:
             if accepted is None or reopen_at is None or reopen_at <= accepted:
                 return []
         commands = []
-        for comment in comments:
+        for comment in authorized_comments:
             if not isinstance(comment, dict):
                 continue
             comment_id = comment.get("id")
@@ -514,6 +599,7 @@ class Coordinator:
         )
 
     def run(self, *, apply=False):
+        self.api.reset()
         self._identity()
         self._main_sha()
         state = self.store.snapshot()
@@ -531,7 +617,8 @@ class Coordinator:
             self._main_sha()
             state = self.store.snapshot()
             candidates = self._collect(state)
-            for key, record in self._stored_work(state):
+            work = self._stored_work(state)
+            for key, record in work:
                 if record.get("receipt", {}).get("state") in {"reserved", "sending", "uncertain"}:
                     return self._publish_receipt(key, record)
                 phase = record.get("phase")
@@ -544,9 +631,6 @@ class Coordinator:
                             "handed_off": 0, "blocked": 1}
                 if phase == "reserved":
                     return self._send_reserved(key, record)
-                if phase in {"task_created", "handoff_reserved", "handoff_ready",
-                              "handoff_comment_started", "handoff_uncertain"}:
-                    return self._advance(key, record)
             if candidates:
                 candidate = candidates[0]
                 candidate["base_sha"] = self._main_sha()
@@ -555,6 +639,16 @@ class Coordinator:
                             "handed_off": 0, "blocked": 0}
                 key = _command_key(candidate["issue"], candidate["command_id"])
                 return self._send_reserved(key, candidate)
+            for key, record in work:
+                phase = record.get("phase")
+                if phase in {"task_created", "handoff_reserved", "handoff_ready",
+                              "handoff_comment_started", "handoff_uncertain"}:
+                    try:
+                        return self._advance(key, record)
+                    except ApiError:
+                        return self._read_failure(
+                            key, record, handoff=phase != "task_created",
+                        )
             return {"planned": 0, "pending": 0, "dispatched": 0,
                     "handed_off": 0, "blocked": 0}
         finally:
@@ -574,9 +668,18 @@ class Coordinator:
             return {"planned": 0, "pending": 0, "dispatched": 0, "handed_off": 0, "blocked": 0}
         issue_number = record["issue"]
         marker = receipt.get("marker")
-        comments = _all_pages(
-            self.api, f"repos/{REPOSITORY}/issues/{issue_number}/comments",
-        )
+        try:
+            comments = _all_pages(
+                self.api, f"repos/{REPOSITORY}/issues/{issue_number}/comments",
+            )
+        except ApiError:
+            attempts = receipt.get("lookup_failures", 0) + 1
+            state = "abandoned" if attempts >= MAX_READ_FAILURES else receipt.get("state")
+            self.store.update(key, {
+                "receipt": {**receipt, "state": state, "lookup_failures": attempts},
+            })
+            return {"planned": 0, "pending": 0, "dispatched": 0,
+                    "handed_off": 0, "blocked": 1}
         found = next(
             (item for item in comments if isinstance(item, dict)
              and isinstance(item.get("body"), str) and marker in item["body"]
@@ -609,6 +712,33 @@ class Coordinator:
         self.store.update(key, {"receipt": {**receipt, "state": "sent"}})
         return {"planned": 0, "pending": 0, "dispatched": 0, "handed_off": 0, "blocked": 0}
 
+    def _read_failure(self, key, record, *, handoff=False):
+        field = "handoff_read_failures" if handoff else "poll_read_failures"
+        failures = record.get(field, 0) + 1
+        changes = {
+            field: failures,
+            "blocker": "github_read_unavailable",
+            "receipt": self._receipt("blocked", record),
+        }
+        if failures >= MAX_READ_FAILURES:
+            changes["phase"] = "handoff_failed" if handoff else "unknown"
+        self.store.update(key, changes)
+        return {"planned": 0, "pending": int(failures < MAX_READ_FAILURES),
+                "dispatched": 0, "handed_off": 0, "blocked": 1}
+
+    def _preflight_failure(self, key, record):
+        failures = record.get("preflight_read_failures", 0) + 1
+        changes = {
+            "preflight_read_failures": failures,
+            "blocker": "issue_or_main_read_unavailable",
+            "receipt": self._receipt("blocked", record),
+        }
+        if failures >= MAX_READ_FAILURES:
+            changes["phase"] = "stale_authorization"
+        self.store.update(key, changes)
+        return {"planned": 0, "pending": int(failures < MAX_READ_FAILURES),
+                "dispatched": 0, "handed_off": 0, "blocked": 1}
+
     @staticmethod
     def _receipt_text(record, receipt):
         issue_number = record["issue"]
@@ -629,16 +759,25 @@ class Coordinator:
             "Owner action is required; no uncertain task was automatically retried."
         )
 
-    def _fresh_reserved_issue(self, record):
-        self._fresh_issue(record)
-
     def _send_reserved(self, key, record):
         try:
             issue_value = self._fresh_issue(record)
-            main_sha = self._main_sha()
-        except Exception:
+        except ApiError:
+            return self._preflight_failure(key, record)
+        except CoordinatorError:
+            self.store.update(key, {
+                "phase": "stale_authorization",
+                "blocker": "issue_authorization_no_longer_valid",
+                "receipt": self._receipt("blocked", record),
+            })
+            updated = self.store.snapshot()["commands"][key]
+            self._publish_receipt(key, updated)
             return {"planned": 0, "pending": 0, "dispatched": 0,
                     "handed_off": 0, "blocked": 1}
+        try:
+            main_sha = self._main_sha()
+        except CoordinatorError:
+            return self._preflight_failure(key, record)
         self.store.update(key, {
             "base_sha": main_sha,
             "phase": "dispatch_started",
@@ -659,8 +798,7 @@ class Coordinator:
             return {"planned": 0, "pending": 0, "dispatched": 0,
                     "handed_off": 0, "blocked": 1}
         task_id = response.get("id") if isinstance(response, dict) else None
-        if (not isinstance(task_id, str) or not task_id or len(task_id) > MAX_TASK_ID_CHARS
-                or any(ord(char) < 0x21 for char in task_id)):
+        if not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id):
             self.store.update(key, {
                 "phase": "unknown",
                 "blocker": "task_response_unverifiable",
@@ -673,9 +811,7 @@ class Coordinator:
                 "handed_off": 0, "blocked": 0}
 
     def _task(self, task_id):
-        if (not isinstance(task_id, str) or not task_id
-                or len(task_id) > MAX_TASK_ID_CHARS
-                or any(ord(char) < 0x21 for char in task_id)):
+        if not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id):
             raise CoordinatorError("Stored agent task identity is invalid")
         task = self.api.get(f"{TASKS_ROUTE}/{task_id}")
         if (not isinstance(task, dict) or task.get("id") != task_id
@@ -749,6 +885,7 @@ class Coordinator:
         number = pull.get("number")
         if (type(number) is not int or number <= 0
                 or pull.get("state") != "open" or pull.get("merged") is not False
+                or type(pull.get("draft")) is not bool
                 or not isinstance(head, dict) or head.get("ref") != branch
                 or not _is_sha(head.get("sha"))
                 or not isinstance(head_repo, dict) or head_repo.get("id") != REPOSITORY_ID
@@ -775,9 +912,33 @@ class Coordinator:
     def _advance(self, key, record):
         try:
             self._fresh_issue(record)
+        except ApiError:
+            return self._read_failure(
+                key, record, handoff=record.get("phase") != "task_created",
+            )
+        except CoordinatorError:
+            self.store.update(key, {
+                "phase": "stale_authorization",
+                "blocker": "issue_authorization_no_longer_valid",
+                "receipt": self._receipt("blocked", record),
+            })
+            updated = self.store.snapshot()["commands"][key]
+            self._publish_receipt(key, updated)
+            return {"planned": 0, "pending": 0, "dispatched": 0,
+                    "handed_off": 0, "blocked": 1}
+        try:
             task = self._task(record.get("task_id"))
-        except Exception:
-            return {"planned": 0, "pending": 1, "dispatched": 0,
+        except ApiError:
+            return self._read_failure(
+                key, record, handoff=record.get("phase") != "task_created",
+            )
+        except CoordinatorError:
+            self.store.update(key, {
+                "phase": "handoff_failed" if record.get("phase") != "task_created" else "unknown",
+                "blocker": "task_identity_unverified",
+                "receipt": self._receipt("blocked", record),
+            })
+            return {"planned": 0, "pending": 0, "dispatched": 0,
                     "handed_off": 0, "blocked": 1}
         phase = record.get("phase")
         state = task.get("state")
@@ -796,7 +957,12 @@ class Coordinator:
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
             if state != "completed":
-                return {"planned": 0, "pending": 1, "dispatched": 0,
+                self.store.update(key, {
+                    "phase": "unknown",
+                    "blocker": "task_state_unrecognized",
+                    "receipt": self._receipt("blocked", record),
+                })
+                return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
             artifacts = task.get("artifacts")
             branches = [
@@ -864,6 +1030,7 @@ class Coordinator:
         base = pull.get("base") if isinstance(pull, dict) else None
         if (not isinstance(pull, dict) or pull.get("number") != record["pull_number"]
                 or pull.get("state") != "open" or pull.get("merged") is not False
+                or type(pull.get("draft")) is not bool
                 or not isinstance(head, dict) or head.get("sha") != record["head_sha"]
                 or head.get("ref") != record["branch"] or not _is_sha(head.get("sha"))
                 or not isinstance(head.get("repo"), dict)
@@ -877,10 +1044,22 @@ class Coordinator:
 
     def _advance_handoff(self, key, record, task):
         try:
+            if (task.get("state") != "completed"
+                    or not self._successful_sessions(
+                        task, record["task_id"], record["branch"],
+                    )):
+                raise CoordinatorError("Completed task identity changed")
+            linked_pull = self._find_task_pull(task, record["issue"])
+            if (linked_pull is None
+                    or linked_pull.get("number") != record["pull_number"]
+                    or linked_pull.get("head", {}).get("sha") != record["head_sha"]):
+                raise CoordinatorError("Completed task pull binding changed")
             pull = self._current_pull(record)
+        except ApiError:
+            return self._read_failure(key, record, handoff=True)
         except Exception:
             self.store.update(key, {
-                "phase": "handoff_uncertain",
+                "phase": "handoff_failed",
                 "blocker": "pull_head_or_identity_changed",
                 "receipt": self._receipt("blocked", record),
             })
@@ -898,6 +1077,8 @@ class Coordinator:
                     f"repos/{REPOSITORY}/pulls/{record['pull_number']}",
                     {"draft": False},
                 )
+            except ApiError:
+                return self._read_failure(key, record, handoff=True)
             except Exception:
                 self.store.update(key, {
                     "phase": "handoff_uncertain",
@@ -910,6 +1091,8 @@ class Coordinator:
             try:
                 if self._current_pull(record).get("draft") is not False:
                     raise CoordinatorError("Draft readiness change was not verified")
+            except ApiError:
+                return self._read_failure(key, record, handoff=True)
             except Exception:
                 self.store.update(key, {
                     "phase": "handoff_uncertain",
@@ -922,14 +1105,19 @@ class Coordinator:
             self.store.update(key, {"ready_state": "done"})
             record = self.store.snapshot()["commands"][key]
         elif ready_state in {"started", "uncertain"}:
+            if pull.get("draft") is True:
+                self.store.update(key, {
+                    "phase": "handoff_failed",
+                    "ready_state": "uncertain",
+                    "blocker": "ready_for_review_uncertain",
+                    "receipt": self._receipt("blocked", record),
+                })
+                return {"planned": 0, "pending": 0, "dispatched": 0,
+                        "handed_off": 0, "blocked": 1}
             self.store.update(key, {
-                "phase": "handoff_uncertain",
-                "ready_state": "uncertain",
-                "blocker": "ready_for_review_uncertain",
-                "receipt": self._receipt("blocked", record),
+                "ready_state": "done",
             })
-            return {"planned": 0, "pending": 0, "dispatched": 0,
-                    "handed_off": 0, "blocked": 1}
+            record = self.store.snapshot()["commands"][key]
         elif ready_state != "done":
             return {"planned": 0, "pending": 0, "dispatched": 0,
                     "handed_off": 0, "blocked": 1}
@@ -937,7 +1125,7 @@ class Coordinator:
             pull = self._current_pull(record)
         except Exception:
             self.store.update(key, {
-                "phase": "handoff_uncertain",
+                "phase": "handoff_failed",
                 "blocker": "pull_head_or_identity_changed",
                 "receipt": self._receipt("blocked", record),
             })
@@ -1022,7 +1210,7 @@ class Coordinator:
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 1, "blocked": 0}
             self.store.update(key, {
-                "phase": "handoff_uncertain",
+                "phase": "handoff_failed",
                 "enrollment_state": "uncertain",
                 "blocker": "owner_enrollment_comment_uncertain",
                 "receipt": self._receipt("blocked", record),
@@ -1043,7 +1231,7 @@ def main(argv=None, *, api_factory=GhApi, store_factory=StateStore):
     if args.apply and not args.once:
         parser.error("--apply requires explicit --once")
     state_path = args.state or (
-        Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+        Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
         / "hermes-mobile-issue-starter" / "state.json"
     )
     try:
