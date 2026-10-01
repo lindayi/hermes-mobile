@@ -19,7 +19,10 @@ export function backgroundPlacement(messages, item, history) {
     .flatMap(node=>node.matches?.('details.tool-activity') ? [...node.querySelector('.tool-rows').children] : [node]);
   const turns=native.filter(node=>node.dataset.turnStart==='true');
   const originSession=item.origin_session_id || item.session_id;
-  let target=typeof item.origin_run_id==='string' && item.origin_run_id && native.find(node=>node.dataset.historyRun===item.origin_run_id && node.dataset.historySession===originSession);
+  const runTargets=typeof item.origin_run_id==='string' && item.origin_run_id ? native.filter(node=>node.dataset.historyRun===item.origin_run_id && node.dataset.historySession===originSession) : [];
+  // A user/reminder can share recorded ownership with the live container.
+  // Its segment boundaries live inside that container, not after the user row.
+  let target=runTargets.find(node=>node.matches?.('.live-message')) || runTargets[0];
   if (!target && item.origin_message_id!=null && typeof item.origin_session_id==='string') {
     target=turns.find(node=>node.dataset.historyId===String(item.origin_message_id) && node.dataset.historySession===item.origin_session_id);
   }

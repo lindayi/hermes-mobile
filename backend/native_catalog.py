@@ -10,6 +10,7 @@ import sqlite3
 from backend.tool_presentation import tool_summary
 from backend.context_compression_presentation import compression_ids
 from backend.runtime_notice_presentation import runtime_notice_ids
+from backend.task_reminder_presentation import reminder_projections, matches_user
 
 
 # Expansion, not target-page limits: keep ordinary multi-hundred tool turns whole.
@@ -169,7 +170,7 @@ def _first_turn_row(rows, processes=()):
                  and not (row['role'] == 'user' and _non_turn_user(row['content']))), None)
 
 
-def _completed_turn(rows, run, tool_events=(), processes=()):
+def _completed_turn(rows, run, tool_events=(), processes=(), reminders=()):
     """Match one anchored turn and prove recorded tools, never equal text later.
 
     Anonymous callbacks cannot be attributed by globally matching tool names.
@@ -184,7 +185,7 @@ def _completed_turn(rows, run, tool_events=(), processes=()):
             return False
         expected.add(call_id)
     first = _first_turn_row(rows, processes)
-    if first is None or first['role'] != 'user' or first['content'] != run['input']:
+    if not matches_user(first, run, reminders):
         return False
     last, results = first, set()
     for row in rows:
@@ -321,7 +322,7 @@ def _native_rewrites(connection, session_id, columns):
     return {row['old_id']: row['new_id'] for row in pairs}
 
 
-def _rewritten_turn_ids(connection, session_id, anchor, run, rewrites, processes=()):
+def _rewritten_turn_ids(connection, session_id, anchor, run, rewrites, processes=(), reminders=()):
     """Prove admission in the oldest usable anchor generation, then trace IDs.
 
     Each generation ends at its first ordinary user or reinserted older row.
@@ -341,7 +342,7 @@ def _rewritten_turn_ids(connection, session_id, anchor, run, rewrites, processes
     admitted = None
     for boundary in anchors:
         first = _first_turn_row(iter(connection.execute(query, (session_id, boundary))), processes)
-        if first is not None and first['role'] == 'user' and first['content'] == run['input']:
+        if matches_user(first, run, reminders):
             admitted = first['id']
             break
     if admitted is None:
@@ -491,12 +492,13 @@ class NativeCatalog:
             compressions.update(new for old, new in rewrites.items() if old in compressions)
             notices.update(new for old, new in rewrites.items() if old in notices)
             processes = compressions | notices
+            reminders = reminder_projections(c, session_id, columns, snapshot, compressions, processes, rewrites)
             process_keep = (' OR id IN (' + ','.join(str(value) for value in sorted(processes)) + ')'
                                 if processes else '')
             visibility=' AND (active=1 OR compacted=1)' if {'active','compacted'}<=columns else (' AND active=1' if 'active' in columns else '')
             if rewrites:
                 visibility += ' AND id NOT IN (' + ','.join(str(int(value)) for value in rewrites) + ')'
-            rewritten_turn = _rewritten_turn_ids(c, session_id, anchor, run, rewrites, processes)
+            rewritten_turn = _rewritten_turn_ids(c, session_id, anchor, run, rewrites, processes, reminders)
             anchor = _relocated_anchor(anchor, rewrites)
             # Recover prior accepted input/output only within its admission ID
             # interval. Equal text in other turns is never evidence of persistence.
@@ -516,13 +518,13 @@ class NativeCatalog:
                              + visibility + ' ORDER BY id')
                     args = (session_id, boundary, end['message_id'])
                     first = _first_turn_row(iter(c.execute(query, args)), processes)
-                    matched = bool(first and first['role'] == 'user' and first['content'] == old['input'])
-                    complete = matched and isinstance(old['output'], str) and _completed_turn(iter(c.execute(query, args)), old, processes=processes)
+                    matched = matches_user(first, old, reminders)
+                    complete = matched and isinstance(old['output'], str) and _completed_turn(iter(c.execute(query, args)), old, processes=processes, reminders=reminders)
                 if entry.get('replay_events'):
                     # Prove ownership in the original/archived generation before
                     # following copies. A relocated interval can cross an external
                     # turn whose user boundary was not reinserted by compaction.
-                    rewritten_prior = _rewritten_turn_ids(c, session_id, entry['anchor'], old, rewrites, processes)
+                    rewritten_prior = _rewritten_turn_ids(c, session_id, entry['anchor'], old, rewrites, processes, reminders)
                     if rewritten_prior is not None:
                         owned, _ = rewritten_prior
                         visibility += ' AND id NOT IN (' + ','.join(str(value) for value in sorted(owned)) + ')'
@@ -540,7 +542,8 @@ class NativeCatalog:
                         continue
                     position = end['message_id'] if role == 'assistant' and matched and end else boundary
                     item = {'id': 'journal:' + old['id'] + ':' + role, 'role': role,
-                            'content': content, 'tool_calls': None, 'timestamp': old['created_at'],
+                            'content': content, 'tool_calls': None,
+                            'timestamp': old['created_at'] if role == 'user' else old.get('updated_at'),
                             'run_id': old['id'], 'run_status': old['status'], 'source': 'journal',
                             'reconciliation': 'unverified', 'run_error': old['error']}
                     synthetic.append((position, index, item))
@@ -551,7 +554,7 @@ class NativeCatalog:
                     call_field = ',tool_call_id' if 'tool_call_id' in columns else ''
                     tail = c.execute('SELECT id,role,content,tool_calls' + call_field + ' FROM messages WHERE session_id=? AND id>?'
                                      + visibility + ' ORDER BY id', (session_id, anchor['message_id']))
-                    if not has_guidance and not has_public_text and _completed_turn(iter(tail), run, snapshot.get('tool_events', ()), processes):
+                    if not has_guidance and not has_public_text and _completed_turn(iter(tail), run, snapshot.get('tool_events', ()), processes, reminders):
                         overlay = None
                 if overlay and rewritten_turn is not None:
                     owned, conservative = rewritten_turn
@@ -566,8 +569,7 @@ class NativeCatalog:
                     tail = c.execute('SELECT id,role,content FROM messages WHERE session_id=? AND id>?'
                                      + visibility + ' ORDER BY id', (session_id, anchor['message_id']))
                     first = _first_turn_row(iter(tail), processes)
-                    matched = (first is not None and first['role'] == 'user'
-                               and first['content'] == run['input']
+                    matched = (matches_user(first, run, reminders)
                                and anchor['canonical_session_id'] == session_id)
                     if matched:
                         next_user = next((row['id'] for row in tail if _ordinary_user(row, processes)), None)
@@ -626,6 +628,8 @@ class NativeCatalog:
             items = []
             for row in rows:
                 item = dict(row)
+                if item['id'] in reminders:
+                    item.update({key: value for key, value in reminders[item['id']].items() if key != 'run_id'})
                 compression = item['id'] in compressions
                 sidecar = item.pop('codex_message_items', None)
                 if item['role'] == 'assistant' and sidecar:
@@ -658,6 +662,11 @@ class NativeCatalog:
         raw_count = len(items)
         expanded = []
         for item in items:
+            if item.get('source') == 'journal' and item.get('role') == 'user' and item.get('kind') != 'guidance':
+                children = [child for projection in reminders.values() if projection['run_id'] == item.get('run_id')
+                            for child in projection['runtime_reminders']]
+                if children:
+                    item['runtime_reminders'] = children
             expanded.extend(item.pop('_guidance_before', []))
             expanded.append(item)
         page = {'items': expanded, 'total': total, 'offset': offset}
@@ -670,9 +679,14 @@ class NativeCatalog:
                 'reason': boundary_reason, 'max_rows': TURN_PAGE_MAX_ROWS,
                 'max_extra_bytes': TURN_PAGE_MAX_EXTRA_BYTES,
             })
+        if overlay:
+            children = [child for projection in reminders.values() if projection['run_id'] == overlay['id']
+                        for child in projection['runtime_reminders']]
+            if children:
+                overlay = dict(overlay, runtime_reminders=children)
         if snapshot is not None:
             mode = 'overlay' if overlay else ('legacy-unanchored' if run and not anchor else 'history')
-            page.update(run=overlay, last_run=run, snapshot={'mode': mode, 'anchored': anchor is not None})
+            page.update(run=overlay, last_run=overlay or run, snapshot={'mode': mode, 'anchored': anchor is not None})
             if conservative or synthetic:
                 page['snapshot']['reconciliation'] = 'conservative-union'
         return page

@@ -199,13 +199,27 @@ async function cappedBody(card,body,page,label){
  const summary=card.locator(':scope > summary');
  await summary.scrollIntoViewIfNeeded();
  assert.equal(await summary.evaluate(el=>{const r=el.getBoundingClientRect();return el.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));}),true,`${label}: fold bar hit target remains reachable`);
- await summary.tap();assert.equal(await card.evaluate(el=>el.open),false,`${label}: native touch collapses`);
- await summary.focus();await page.keyboard.press('Enter');assert.equal(await card.evaluate(el=>el.open),true,`${label}: keyboard reopens`);
- await page.keyboard.press('Space');
- // Observe the result of native keyboard activation, not just input dispatch.
- // Keep the existing deadline and assertion: a lost key/focus must still fail.
- await page.waitForFunction(el=>!el.open,await card.elementHandle());
- assert.equal(await card.evaluate(el=>el.open),false,`${label}: keyboard collapses`);
+ const evidence=await card.elementHandle();
+ await evidence.evaluate(card=>{
+  const doc=card.ownerDocument,events=[],describe=el=>({tag:el?.tagName,className:String(el?.className || ''),text:el?.textContent?.slice(0,80)});
+  const record=event=>{events.push({type:event.type,key:event.key,trusted:event.isTrusted,target:describe(event.target),active:describe(doc.activeElement),open:card.open,connected:card.isConnected});if(events.length>32)events.shift();};
+  const types=['keydown','keyup','click','focusin','focusout','toggle'];
+  for(const type of types)doc.addEventListener(type,record,true);
+  card.foldEvidence=()=>({events,active:describe(doc.activeElement),open:card.open,connected:card.isConnected});
+  card.stopFoldEvidence=()=>{for(const type of types)doc.removeEventListener(type,record,true);delete card.foldEvidence;delete card.stopFoldEvidence;};
+ });
+ try{
+  await summary.tap();assert.equal(await card.evaluate(el=>el.open),false,`${label}: native touch collapses`);
+  await summary.focus();await page.keyboard.press('Enter');assert.equal(await card.evaluate(el=>el.open),true,`${label}: keyboard reopens`);
+  await page.keyboard.press('Space');
+  // Observe the result of native keyboard activation, not just input dispatch.
+  // Keep the existing deadline and assertion: a lost key/focus must still fail.
+  await page.waitForFunction(el=>!el.open,await card.elementHandle());
+  assert.equal(await card.evaluate(el=>el.open),false,`${label}: keyboard collapses`);
+ }catch(error){
+  console.error('DISCLOSURE-KEYBOARD',label,JSON.stringify(await evidence.evaluate(el=>el.foldEvidence())));
+  throw error;
+ }finally{await evidence.evaluate(el=>el.stopFoldEvidence());await evidence.dispose();}
 }
 
 test('generated disclosures cap full content at phone/tablet and short viewport sizes without changing Inbox toolbar',{timeout:90000},async()=>{
@@ -286,16 +300,54 @@ test('nested generated tool list retains real keyboard and touch scrolling indep
   await open(progress,page);await open(card,page);
   await progress.evaluate(el=>{el.scrollTop=el.scrollHeight;});
   await rows.evaluate(el=>{el.scrollTop=0;});
-  await rows.scrollIntoViewIfNeeded();await rows.focus();await page.keyboard.press('End');
-  await page.waitForFunction(()=>{const el=document.querySelector('.activity-summary .tool-rows');return el.scrollTop>100;});
+  await rows.scrollIntoViewIfNeeded();await rows.focus();
+  await rows.evaluate(el=>{
+   window.nestedKeyboardEnded=false;
+   const ended=event=>{
+    if(event.target!==el || el.scrollHeight-el.clientHeight-el.scrollTop>=2)return;
+    window.nestedKeyboardEnded=true;el.removeEventListener('scrollend',ended);
+   };
+   el.addEventListener('scrollend',ended);
+  });
+  await page.keyboard.press('End');
+  // A >100px sample is mid-animation: resetting there lets later keyboard
+  // frames overwrite zero and falsely satisfy the subsequent touch assertion.
+  await page.waitForFunction(()=>window.nestedKeyboardEnded);
+  assert.ok(await rows.evaluate(el=>el.scrollTop)>100,'End really scrolls the nested list');
   await rows.evaluate(el=>{el.scrollTop=0;});await settle(page);
   const parentBefore=await progress.evaluate(el=>el.scrollTop);
   const box=await rows.boundingBox(),messagesBox=await page.locator('.messages').boundingBox(),outer=await progress.boundingBox();
-  const y=Math.min(box.y+box.height,messagesBox.y+messagesBox.height,outer.y+outer.height)-12;
+  const x=box.x+box.width/2,y=Math.min(box.y+box.height,messagesBox.y+messagesBox.height,outer.y+outer.height)-12;
   assert.ok(y>Math.max(box.y,messagesBox.y,outer.y)+25,'nested content has a real touch surface');
+  const before=await rows.evaluate((el,{x,y})=>{
+   window.nestedTouch={start:null,cancelled:false,ended:false};
+   el.addEventListener('touchstart',event=>{
+    window.nestedTouch.start={trusted:event.isTrusted,inside:el.contains(event.target),scroll:el.scrollTop};
+   },{once:true,passive:true});
+   el.addEventListener('pointercancel',event=>{window.nestedTouch.cancelled=event.isTrusted;},{once:true});
+   el.addEventListener('scrollend',event=>{
+    const start=window.nestedTouch.start;
+    if(event.target===el && start && el.scrollTop>start.scroll)window.nestedTouch.ended=true;
+   });
+   return {scroll:el.scrollTop,hit:el.contains(document.elementFromPoint(x,y))};
+  },{x,y});
+  assert.equal(before.scroll,0,'keyboard scrolling has completed before the touch baseline');
+  assert.equal(before.hit,true,'gesture starts on the nested list, not an overlapping sticky bar');
   const cdp=await context.newCDPSession(page);
-  await cdp.send('Input.synthesizeScrollGesture',{x:box.x+box.width/2,y,yDistance:-100,xDistance:0,gestureSourceType:'touch',preventFling:true,speed:400});
-  await page.waitForFunction(()=>document.querySelector('.activity-summary .tool-rows').scrollTop>20);
+  // The synthetic-scroll touch driver emitted pointer motion without native
+  // scrolling even on a bare overflow:auto control. Dispatch real touch input
+  // instead, and prove the browser takes over the pan (trusted pointercancel).
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y}]});
+  for(const dy of [20,40,60,80,100]){
+   await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x,y:y-dy}]});
+   await settle(page);
+  }
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+  await page.waitForFunction(()=>document.querySelector('.activity-summary .tool-rows').scrollTop>20 && window.nestedTouch.ended);
+  const touch=await page.evaluate(()=>window.nestedTouch);
+  assert.deepEqual(touch.start,{trusted:true,inside:true,scroll:0},'trusted touch starts at the verified reset position');
+  assert.equal(touch.cancelled,true,'native browser scrolling takes over the pointer');
+  assert.ok(await rows.evaluate(el=>el.scrollTop)-before.scroll>20,'touch itself advances the nested list');
   assert.ok(Math.abs(await progress.evaluate(el=>el.scrollTop)-parentBefore)<2,'touch scroll remains within nested content');
   await rows.evaluate(el=>{el.scrollTop=el.scrollHeight;});
   assert.match(await rows.locator('.tool-preview').last().textContent(),/fixture-31/,'last tool is retained');

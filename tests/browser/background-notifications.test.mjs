@@ -4,7 +4,7 @@ import {createRequire} from 'node:module';
 import {readFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {renderMarkdown} from '../../frontend/markdown.mjs';
-import {mountApp} from '../../frontend/ui.mjs';
+import {mountApp,formatMessageTime} from '../../frontend/ui.mjs';
 import {assertPresenceBody} from './push-fixture-contract.mjs';
 // Unit API boundary has no HTTP headers: validate the actual body, never invent CSRF.
 const withoutUnitPresence=calls=>calls.filter(call=>{
@@ -242,12 +242,12 @@ test('long trusted live chunks flush without argument spread and retain original
  // Exercise the exact private production helper without replaying 150000 SSE
  // callbacks; full real-browser streaming/selection is covered in the spec.
  const source=readFileSync(new URL('../../frontend/ui.mjs',import.meta.url),'utf8');
- const start=source.indexOf('  function publicActivity(text,chunks) {'),end=source.indexOf('  function guidanceLabel(',start);
+ const start=source.indexOf('  function publicActivity(text,chunks,time) {'),end=source.indexOf('  function guidanceLabel(',start);
  const helperStart=source.indexOf('  const h = ('),helperEnd=source.indexOf('  const button = ',helperStart);
  assert.ok(start>=0 && end>start && helperStart>=0 && helperEnd>helperStart);
  const dom=new JSDOM('<div></div>'),win=dom.window,doc=win.document;
  try{
-  const publicActivity=new Function('doc','win','renderMarkdown',source.slice(helperStart,helperEnd)+"const disclosure=()=>h('span');"+source.slice(start,end)+';return publicActivity;')(doc,win,renderMarkdown);
+  const publicActivity=new Function('doc','win','renderMarkdown','formatMessageTime',source.slice(helperStart,helperEnd)+"const disclosure=()=>h('span');"+source.slice(start,end)+';return publicActivity;')(doc,win,renderMarkdown,formatMessageTime);
   const text='x'.repeat(150000),chunks=Array.from({length:150000},(_,i)=>({text:'x',observed_at:i,node:doc.createTextNode('x')}));
   const card=publicActivity(text,chunks);doc.body.append(card);
   const body=card.querySelector('.markdown');assert.equal(body.textContent,text);assert.equal(body.childNodes.length,150000);assert.equal(body.firstChild,chunks[0].node);assert.equal(body.lastChild,chunks.at(-1).node);assert.equal(chunks[0].node.isConnected,true);

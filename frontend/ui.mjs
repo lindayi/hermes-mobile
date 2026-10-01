@@ -6,6 +6,33 @@ import {createSessionSwipe} from './session-swipe.mjs';
 import {observeDisclosureReachability} from './disclosure-reachability.mjs';
 import {markHistoryNode,backgroundPlacement} from './background-placement.mjs';
 
+// Presentation only: these dates never participate in transcript ordering.
+export function formatMessageTime(value, {locale, timeZone} = {}) {
+  let date,fraction='';
+  if(typeof value==='number') {
+    // Numeric transport is Unix seconds, never browser milliseconds.
+    if(!Number.isFinite(value) || value<0 || value>=253402300800)return null;
+    // Fail closed on exponent-form precision instead of dropping or embedding it.
+    const decimal=/^\d+(?:\.(\d+))?$/.exec(String(value));
+    if(!decimal)return null;
+    date=new Date(Math.floor(value)*1000);
+    fraction=decimal[1] || '';
+  } else if(typeof value==='string' && value.length<=64) {
+    const match=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+    if(!match)return null;
+    const [,year,month,day,hour,minute,second,decimals,zone]=match;
+    const local=new Date(`${year}-${month}-${day}T00:00:00Z`);
+    if(!Number.isFinite(local.getTime()) || local.toISOString().slice(0,10)!==`${year}-${month}-${day}` || Number(hour)>23 || Number(minute)>59 || Number(second)>59 || (zone!=='Z' && (Number(zone.slice(1,3))>23 || Number(zone.slice(4))>59)))return null;
+    date=new Date(value);fraction=decimals || '';
+  } else return null;
+  if(!Number.isFinite(date.getTime()) || date.getTime()<0 || date.getUTCFullYear()>9999)return null;
+  const options={timeZone,year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'};
+  // Keep recorded fractional precision; Date is only used for calendar/timezone conversion.
+  const datetime=date.toISOString().replace(/\.\d{3}Z$/,`.${fraction.padEnd(3,'0')}Z`);
+  return {datetime,text:new Intl.DateTimeFormat(locale,options).format(date),
+    title:new Intl.DateTimeFormat(locale,{...options,second:'2-digit',timeZoneName:'long'}).format(date)};
+}
+
 export async function mountApp(doc, api, win = doc.defaultView) {
   const root = doc.getElementById('app');
   const state = {user:null,view:'chats',session:null,query:'',searchOpen:false,offset:0,kind:'chats'};
@@ -33,6 +60,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     }
     for (const child of children.flat(Infinity)) if (child != null) el.append(child.nodeType ? child : doc.createTextNode(String(child)));
     return el;
+  };
+  const messageTime=(value,label='')=>{
+    const formatted=formatMessageTime(value);if(!formatted)return null;
+    const prefix=label ? `${label} ` : '';
+    return h('time',{class:'message-time',datetime:formatted.datetime,title:prefix+formatted.title,'aria-label':prefix+formatted.title},prefix+formatted.text);
   };
   const button = (text, action, cls = 'secondary', attrs = {}) => h('button', {type:'button',class:cls,onclick:action,...attrs}, text);
   const field = (label,name,type = 'text',value = '') => h('label', {class:'field'},h('span',{},label),h('input',{name,type,value,required:true,autocomplete:type === 'password' ? 'off' : 'name'}));
@@ -767,12 +799,23 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     stopDisclosureReachability=observeDisclosureReachability(messages,current);
     const resultIds=new Set();
     let reflowBackground=()=>({changed:false,tail:false});
+    const reminderIds=new Set();
+    function renderReminders(owner) {
+      if(!Array.isArray(owner.runtime_reminders))return [];
+      const nodes=[];
+      for(const item of owner.runtime_reminders){
+        if(!item || item.role!=='tool' || item.kind!=='context_compression' || typeof item.id!=='string' || !item.id || typeof item.content!=='string' || !item.content.trim() || reminderIds.has(item.id))continue;
+        reminderIds.add(item.id);
+        nodes.push(markHistoryNode(renderMessage(item),{...item,run_id:owner.run_id || (owner.role===undefined?owner.id:undefined),session_id:session.id},session.id));
+      }
+      return nodes;
+    }
     function renderPage(items=[]) {
       for(const item of items)if(item.role==='tool' && item.tool_call_id)resultIds.add(item.tool_call_id);
       const rendered=[];
       for(const item of items) {
         if(item.role==='assistant' && Array.isArray(item.public_commentary))for(const entry of item.public_commentary){
-          if(typeof entry?.content==='string' && entry.content.trim())rendered.push(markHistoryNode(publicActivity(entry.content),{...entry,role:'assistant',run_id:item.run_id,session_id:item.session_id || session.id},session.id));
+          if(typeof entry?.content==='string' && entry.content.trim())rendered.push(markHistoryNode(publicActivity(entry.content,undefined,Object.hasOwn(entry,'timestamp')?entry.timestamp:entry.observed_at),{...entry,role:'assistant',run_id:item.run_id,session_id:item.session_id || session.id},session.id));
         }
         const node=renderMessage(item.role==='assistant' ? {...item,tool_calls:(item.tool_calls || []).filter(call=>!call.id || !resultIds.has(call.id))} : item);
         if(node.nodeType===11 && !node.childNodes.length)continue;
@@ -784,6 +827,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           previous.querySelector('.tool-rows').append(...node.querySelector('.tool-rows').children);
           refreshToolActivity(previous);
         } else rendered.push(node);
+        if(item.role==='user')rendered.push(...renderReminders(item));
       }
       return rendered;
     }
@@ -848,7 +892,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const runId=attempt.run_id || steeringRun;
       let bubble=[...messages.querySelectorAll('[data-guidance-key]')].find(node=>node.dataset.guidanceRun===runId && (node.dataset.guidanceKey===attempt.idempotency_key || attempt.id && node.dataset.guidanceId===attempt.id));
       if(!bubble && (attempt.status==='accepted_unconfirmed' || previouslyAccepted) && placeGuidance && attempt.idempotency_key && attempt.input){
-        bubble=renderMessage({role:'user',kind:'guidance',content:attempt.input,run_id:runId,idempotency_key:attempt.idempotency_key,steering_id:attempt.id,steering_status:attempt.status});placeGuidance(bubble);
+        bubble=renderMessage({role:'user',kind:'guidance',content:attempt.input,run_id:runId,idempotency_key:attempt.idempotency_key,steering_id:attempt.id,steering_status:attempt.status,timestamp:attempt.created_at});placeGuidance(bubble);
         if(!ordered)provisionalGuidance.add(bubble);
       }
       // POST/controls placement is provisional until the first ordered SSE/replay event.
@@ -938,7 +982,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         syncModelLock();
       }
       if(version!==routeVersion)return;
-      messages.querySelector('.empty')?.remove();messages.append(renderMessage({role:'user',content:input}));
+      messages.querySelector('.empty')?.remove();messages.append(renderMessage({role:'user',content:input,timestamp:run.created_at,run_id:run.id,session_id:session.id}),...renderReminders(run));
       messages.scrollTop=messages.scrollHeight;
       await trackRun({...run,session_id:session.id},messages,composerAction);
     }
@@ -1095,7 +1139,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         backgroundItems=next;
         for(const [id,item] of next){
           if(backgroundCards.has(id))continue;
-          const card=h('details',{class:'card background-result','data-background-id':id,'aria-label':'Background result'},h('summary',{},disclosure(),h('strong',{class:'background-label'},'Background result'),item.title.trim()==='Background result'?null:h('span',{class:'background-title'},item.title)),renderMarkdown(doc,item.body),h('p',{class:'caption background-placement',hidden:true}),h('p',{class:'caption'},'No follow-up was run automatically.'));
+          const card=h('details',{class:'card background-result','data-background-id':id,'aria-label':'Background result'},h('summary',{},disclosure(),h('strong',{class:'background-label'},'Background result'),item.title.trim()==='Background result'?null:h('span',{class:'background-title'},item.title),messageTime(Object.hasOwn(item,'event_at')?item.event_at:item.created_at)),renderMarkdown(doc,item.body),h('p',{class:'caption background-placement',hidden:true}),h('p',{class:'caption'},'No follow-up was run automatically.'));
           messages.querySelector('.empty')?.remove();backgroundCards.set(id,card);changed=true;
         }
         const placement=reflowBackground();changed ||= placement.changed;
@@ -1125,7 +1169,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     if(Object.hasOwn(result,'run')) {
       if(result.run) {
         messages.querySelector('.empty')?.remove();
-        messages.append(renderMessage({role:'user',content:result.run.input}));
+        messages.append(renderMessage({role:'user',content:result.run.input,timestamp:result.run.created_at,run_id:result.run.id,session_id:session.id}),...renderReminders(result.run));
         messages.scrollTop=messages.scrollHeight;
         await trackRun(result.run,messages,composerAction,result.tool_replay);
       } else if(result.last_run?.status==='unknown') {
@@ -1155,7 +1199,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const commentaryIds=new Set();
     const publicText=data=>![data.channel,data.phase].some(value=>['analysis','reasoning'].includes(value)) && !['analysis','reasoning','reasoning_content'].some(key=>Object.hasOwn(data,key)) && typeof (data.text ?? data.delta)==='string' ? (data.text ?? data.delta) : '';
     let deltaChunks=[];
-    const retainPublic=(text,time,chunks)=>{if(!text.trim())return;output.before(markHistoryNode(publicActivity(text,chunks),{timestamp:time,run_id:run.id,session_id:sessionId},sessionId));splitTools=true;};
+    const retainPublic=(text,time,chunks)=>{if(!text.trim())return;output.before(markHistoryNode(publicActivity(text,chunks,time),{timestamp:time,run_id:run.id,session_id:sessionId},sessionId));splitTools=true;};
     const flushPublic=()=>{if(output.textContent.trim()){retainPublic(output.textContent,output.dataset.historyTime===undefined?undefined:Number(output.dataset.historyTime),deltaChunks);output.textContent='';deltaChunks=[];delete output.dataset.historyTime;}};
     const pendingTools=[];
     let currentStatus=run.status || 'submitted',stopPending=false;
@@ -1172,7 +1216,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         stopPending=false;composerAction.set(currentStatus,stop);throw error;
       }
     };
-    const article=h('article',{class:'message assistant-message live-message','data-history-run':run.id,'data-history-session':run.session_id},h('div',{class:'message-author'},'Hermes'),h('div',{class:'live-activity-heading'},h('strong',{},'Activity'),status),tools,output);
+    const article=h('article',{class:'message assistant-message live-message','data-history-run':run.id,'data-history-session':run.session_id},h('div',{class:'message-author'},'Hermes',messageTime(run.created_at,'Started')),h('div',{class:'live-activity-heading'},h('strong',{},'Activity'),status),tools,output);
     article.backgroundPlaced=()=>{tools=[...article.children].filter(node=>node.matches('.tool-activity')).at(-1) || tools;splitTools=output.previousElementSibling!==tools;};
     article.prepareBackground=(time,fresh)=>{
       const crossing=Number.isFinite(time) && deltaChunks.some(chunk=>Number.isFinite(chunk.observed_at) && chunk.observed_at<=time) && deltaChunks.some(chunk=>Number.isFinite(chunk.observed_at) && chunk.observed_at>time);
@@ -1230,6 +1274,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     seeding=false;
     if(seeded)for(const card of article.querySelectorAll('.tool-activity'))refreshToolActivity(card);
     const apply=current=>{
+      const terminal=finalStates.has(current.status);
+      if(terminal){
+        const author=article.querySelector(':scope > .message-author'),prior=author.querySelector('time');
+        const recorded=messageTime(current.updated_at);
+        // A sparse terminal update must never relabel the start as a sent time.
+        if(recorded){prior?.remove();author.append(recorded);}
+        else if(!finalStates.has(currentStatus) || prior?.textContent.startsWith('Started '))prior?.remove();
+      }
       currentStatus=current.status || currentStatus;
       composerAction.set(stopPending && !finalStates.has(currentStatus)?'stopping':currentStatus,stop);
       const atBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;
@@ -1435,12 +1487,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(!count)return null;
       const prefix=parts.splice(0,count),text=prefix.map(chunk=>chunk.text).join('');
       if(!text.trim())return null;
-      const progress=markHistoryNode(publicActivity(text,prefix),{...identity,observed_at:prefix[0].observed_at},identity.session_id);
+      const progress=markHistoryNode(publicActivity(text,prefix,prefix[0].observed_at),{...identity,observed_at:prefix[0].observed_at},identity.session_id);
       carrier.before(progress);return progress;
     };
   }
-  function publicActivity(text,chunks) {
-    const card=h('details',{class:'activity-summary',open:true},h('summary',{},disclosure(),h('span',{class:'activity-title'},'Progress'),h('span',{class:'activity-preview'},text.replace(/\s+/g,' ').slice(0,120))),renderMarkdown(doc,text));
+  function publicActivity(text,chunks,time) {
+    const card=h('details',{class:'activity-summary',open:true},h('summary',{},disclosure(),h('span',{class:'activity-title'},'Progress'),h('span',{class:'activity-preview'},text.replace(/\s+/g,' ').slice(0,120)),messageTime(time)),renderMarkdown(doc,text));
     // Delta runs stay compact, retaining receipt-level boundaries for a later
     // background arrival. Only known boundaries split disclosures, never tokens.
     const trusted=Array.isArray(chunks) && chunks.length && chunks.every(chunk=>chunk?.node instanceof win.Text);
@@ -1459,7 +1511,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         // Missing/nonmonotonic receipts cannot prove a split. Keep native order.
         if(!Number.isFinite(time) || parts.some((chunk,i)=>!Number.isFinite(chunk.observed_at) || i && chunk.observed_at<parts[i-1].observed_at))return null;
         const index=parts.findIndex(chunk=>chunk.observed_at>time);if(index<=0)return null;
-        const laterParts=parts.splice(index),later=publicActivity(laterParts.map(chunk=>chunk.text).join(''),laterParts);
+        const laterParts=parts.splice(index),later=publicActivity(laterParts.map(chunk=>chunk.text).join(''),laterParts,laterParts[0].observed_at);
         Object.assign(later.dataset,card.dataset);later.dataset.historyTime=String(laterParts[0].observed_at);later.open=card.open;
         refresh();card.after(later);return later;
       };
@@ -1470,21 +1522,21 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   function renderMessage(message) {
     if(!['user','assistant','tool'].includes(message.role) || ['analysis','reasoning'].includes(message.channel))return doc.createDocumentFragment();
     if(message.role==='tool') {
-      const processName=message.kind==='context_compression' ? 'Context compression' : message.kind==='runtime_notice' && message.name==='Tool limit reached' && message.status==='completed' ? 'Tool limit reached' : null;
+      const processName=message.kind==='context_compression' ? (message.name==='Runtime reminders'?'Runtime reminders':'Context compression') : message.kind==='runtime_notice' && message.name==='Tool limit reached' && message.status==='completed' ? 'Tool limit reached' : null;
       if(processName && typeof message.content==='string') {
-        return h('details',{class:`${message.kind==='context_compression' ? 'context-compression' : 'runtime-notice'} process-history`,'data-status':message.status},h('summary',{},disclosure(),h('strong',{},processName),h('span',{class:'caption'},'Completed')),renderMarkdown(doc,message.content));
+        return h('details',{class:`${message.kind==='context_compression' ? 'context-compression' : 'runtime-notice'} process-history`,'data-status':message.status},h('summary',{},disclosure(),h('strong',{},processName),h('span',{class:'caption'},'Completed'),messageTime(message.timestamp)),renderMarkdown(doc,message.content));
       }
       if(message.kind==='delegation' && typeof message.content==='string' && message.content.trim()) {
-        return h('details',{class:'delegation-result'},h('summary',{},disclosure(),toolPreview({...message,name:'Subagent result'})),renderMarkdown(doc,message.content));
+        return h('details',{class:'delegation-result'},h('summary',{},disclosure(),toolPreview({...message,name:'Subagent result'}),messageTime(message.timestamp)),renderMarkdown(doc,message.content));
       }
       return toolActivity([message]);
     }
     const text=typeof message.content==='string' ? message.content : message.content == null ? '' : JSON.stringify(message.content);
     const tools=(message.tool_calls || []).map(tool=>({...tool,name:tool.function?.name || tool.name}));
     if(!text.trim())return tools.length ? toolActivity(tools) : doc.createDocumentFragment();
-    if(message.role==='assistant' && message.channel==='commentary'){const progress=publicActivity(text,message.timed_chunks);if(tools.length)progress.append(toolActivity(tools));return progress;}
+    if(message.role==='assistant' && message.channel==='commentary'){const progress=publicActivity(text,message.timed_chunks,Object.hasOwn(message,'timestamp')?message.timestamp:message.observed_at);if(tools.length)progress.append(toolActivity(tools));return progress;}
     const copy=message.role==='assistant' ? button(icon('copy'),e=>action(e.currentTarget,async()=>{if(!win.navigator.clipboard)throw new Error('Copy is unavailable in this browser. Select the text to copy it.');await win.navigator.clipboard.writeText(text);inform('Copied to clipboard.');}),'quiet message-copy',{'aria-label':'Copy message',title:'Copy message'}) : null;
-    const node=h('article',{class:`message ${message.role === 'user' ? 'user-message' : 'assistant-message'}`},h('div',{class:'message-author'},message.role === 'user' ? 'You' : 'Hermes',copy),
+    const node=h('article',{class:`message ${message.role === 'user' ? 'user-message' : 'assistant-message'}`},h('div',{class:'message-author'},message.role === 'user' ? 'You' : 'Hermes',messageTime(message.timestamp),copy),
       renderMarkdown(doc,text),tools.length ? toolActivity(tools) : null);
     if(message.role==='user' && message.kind==='guidance' && message.run_id && message.idempotency_key){
       node.dataset.guidanceRun=message.run_id;node.dataset.guidanceKey=message.idempotency_key;
