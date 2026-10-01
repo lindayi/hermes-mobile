@@ -9,10 +9,36 @@ must stay aligned; private owner memories are not a source to upload.
 Create/search an issue before implementing an approved requirement. Each delivery
 PR targets `main` and contains an actionable closing reference (`Closes #N`).
 Split partial work into bounded child issues; reference the parent epic without
-closing it early. The `Issue-first policy` workflow validates real open issues,
-not PR numbers or links hidden in examples/comments. It has read-only permissions
-and evaluates metadata without executing repository source. Enable required
-`issue-link` only after the workflow is on main and an actual PR run succeeds.
+closing it early. The `Issue-first policy` workflow validates real open same-repo
+issues, not PR numbers or links hidden in inline, fenced or indented code examples,
+comments or quoted lines. Use a plain prose `Closes #N` or
+`Closes lindayi/hermes-mobile#N` reference; this is a conservative metadata policy,
+not a general Markdown renderer.
+
+The workflow runs with `pull_request_target` from the trusted base/default branch,
+never the PR's workflow definition. It does not fetch or execute PR source, load
+artifacts, interpolate PR text into JavaScript, or reference deployment secrets.
+The SHA-pinned `github-script` validator has only `issues: read`. Default workflow
+permissions are empty. Separate metadata-only publisher jobs receive only
+`statuses: write` (and `pull-requests: read` for the final freshness check); that
+narrow write permission is necessary to report an enforceable PR-head result.
+
+The publishers set commit-status context `issue-link` on the event's exact PR head
+SHA, first `pending`, then `success` only for successful validation and an unchanged
+current open PR (head, body and base). Failure, cancellation or skipped validation
+cannot produce success. Once pending is written, a publication/API failure leaves
+it blocking rather than reusing an earlier success. Runs serialize per PR instead
+of cancelling an in-flight publisher. Actions job names are deliberately different
+from `issue-link`: a `pull_request_target` job check is associated with the trusted
+base/default SHA, not evidence for the PR head.
+
+Enable required `issue-link` only after the workflow is on main and actual PR runs
+prove both passing and failing statuses on their exact heads, including a body edit
+and a fork PR. Bind the required status to GitHub Actions, not any status producer.
+This context does not distinguish different workflows using that same app; retain
+independent `agent-review` and protection for workflow/policy changes. Metadata
+changes and status updates are asynchronous, not an atomic merge-time transaction;
+an unscheduled run or a failed initial pending write needs operator attention.
 Merge closes the implementation issue; it does not assert production deployment.
 
 Substantial work can use `gh agent-task create --repo lindayi/hermes-mobile
