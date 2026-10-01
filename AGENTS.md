@@ -3,6 +3,9 @@
 This is the canonical Hermes Mobile source: https://github.com/lindayi/hermes-mobile.
 The local integration checkout is `/home/lindayi/projects/hermes-mobile-git`.
 Older `hermes-mobile-*` source copies are migration inputs, not deployment sources.
+Port unfinished legacy work by applying its diff against its own verified baseline
+to a new task worktree; never overlay the entire older copy onto current main.
+Preserve those inputs until their work is merged or explicitly discarded.
 
 ## Before editing
 

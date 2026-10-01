@@ -140,7 +140,8 @@ def check_protected_release(paths, stage, previous):
 
 def deploy(paths, **kwargs):
     from deploy.git_source import preflight
-    git_sha = preflight(paths)
+    git_sha = preflight(paths, service_run=(None if kwargs.get('frontend_only')
+                                           else kwargs.get('run', subprocess.run)))
     from deploy.assets import checked_path
     for path in (paths.state, paths.source, paths.webroot, paths.database, paths.dropin,
                  *(paths.state / name for name in ('releases', 'backups', 'deploy.lock', 'status.json'))):
@@ -414,6 +415,10 @@ def stage_release(source, destination, *, git_sha=None):
             shutil.copy2(original, destination / name)
     if git_sha is not None:
         verify_stage(source, destination, git_sha)
+        # One small record follows this release's lifecycle, including native
+        # callers that only receive a Path. Attempt status may then advance
+        # without losing the still-active/rolled-back release's source binding.
+        atomic_write(destination / 'git-provenance.json', json.dumps({'git_sha': git_sha}))
     return destination
 
 
@@ -512,7 +517,7 @@ def main(argv=None, *, paths=None, run=subprocess.run):
         return 0
     if not (args.frontend_only or args.bootstrap or args.worker):
         from deploy.git_source import preflight
-        preflight(paths)
+        preflight(paths, service_run=run)
         unit = 'hermes-mobile-deploy-' + uuid.uuid4().hex
         run(['systemd-run', '--user', '--collect', '--unit=' + unit, '--on-active=5s',
              '--property=NoNewPrivileges=yes', '--property=UMask=0077',

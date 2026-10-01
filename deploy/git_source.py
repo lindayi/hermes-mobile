@@ -8,10 +8,18 @@ REMOTE = 'https://github.com/lindayi/hermes-mobile.git'
 
 
 def _git(source, *args):
+    # Repository identity must come from -C, not a caller's Git process state.
+    local_env = {'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
+                 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+                 'GIT_NAMESPACE', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE',
+                 'GIT_CONFIG', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS'}
+    env = {key: value for key, value in os.environ.items()
+           if key not in local_env and not key.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'))}
+    env['GIT_TERMINAL_PROMPT'] = '0'
     try:
         return subprocess.run(
-            ['git', '-C', str(source), *args], check=True, capture_output=True,
-            text=True, timeout=60, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'},
+            ['git', '--no-replace-objects', '-C', str(source), *args], check=True, capture_output=True,
+            text=True, timeout=60, env=env,
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError('Git source verification failed') from exc
@@ -46,22 +54,25 @@ def _check_checkout(source):
 
 
 
-def preflight(paths):
-    """Guard production roots; keep wholly redirected non-Git fixtures offline."""
+def preflight(paths, *, service_run=None, extra_paths=()):
+    """Exempt redirected fixtures only when no real service runner is enabled."""
     from deploy.self_deploy import Paths
+    from deploy.native_controls_release import NATIVE_DROPIN
     defaults = Paths()
     protected = (CANONICAL_SOURCE, Path('/home/lindayi/projects/hermes-mobile'),
                  defaults.state, defaults.webroot, defaults.database.parent,
-                 defaults.dropin.parent)
+                 defaults.dropin.parent, NATIVE_DROPIN.parent)
     production = any(
         path.resolve().is_relative_to(root.resolve()) or root.resolve().is_relative_to(path.resolve())
-        for path in (paths.source, paths.state, paths.webroot, paths.database, paths.dropin)
+        for path in (paths.source, paths.state, paths.webroot, paths.database, paths.dropin, *extra_paths)
         for root in protected
     )
     if production and paths.source != CANONICAL_SOURCE:
         raise RuntimeError('Git source must use the canonical production checkout')
     if production or (paths.source / '.git').exists():
         return validate_source(paths.source)
+    if service_run is subprocess.run:
+        raise RuntimeError('Git source provenance required for real service commands')
     return None
 
 

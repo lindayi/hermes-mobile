@@ -126,6 +126,8 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
     Both run under the same deployment lock and owned admission gate. A
     callback must raise on incomplete work; its return value is not evidence.
     """
+    from .git_source import preflight
+    preflight(paths, service_run=run, extra_paths=(native_dropin,))
     from .assets import checked_path, publish_assets, restore_assets, _assets
     from .frontend_release import build_frontend
     from backend.runs import RunJournal, RunConflict

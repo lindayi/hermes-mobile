@@ -1,5 +1,18 @@
 # Unprivileged mobile releases
 
+## Git-controlled source prerequisite
+
+Routine releases use the canonical `/home/lindayi/projects/hermes-mobile-git`
+checkout only, after GitHub PR review, follow-up commits, required checks and merge
+to main. Fetch and fast-forward that checkout to origin/main; never copy an older
+candidate over it. The controller rejects dirty, stale, wrong-remote or unmerged
+source before publication. Read the repository AGENTS.md for parallel tasks and
+cleanup. Its local ignored `.venv` points to the existing installed test/runtime
+environment; dependencies and private state are not committed or copied into Git.
+
+The one-time setup below describes the original installation and is NOT part of
+ordinary updates or the Git migration. Do not rerun it on the enrolled live app.
+
 `deploy.self_deploy` publishes **only the mobile frontend and bridge**. It never
 restarts the native API (`hermes-mobile-api.service`), WhatsApp, or member
 schedulers. It never copies, restores, or rolls back user databases or private
@@ -27,7 +40,7 @@ no concurrent clients may submit during this initial migration. If bootstrap was
 refused after the ownership grant, finish the conversation and run, as `lindayi`:
 
 ```sh
-cd /home/lindayi/projects/hermes-mobile && .venv/bin/python -m deploy.self_deploy --bootstrap
+cd /home/lindayi/projects/hermes-mobile-git && .venv/bin/python -m deploy.self_deploy --bootstrap
 ```
 
 This is an **unprivileged** command. The controller refuses execution as root.
@@ -40,7 +53,7 @@ remains at `/home/lindayi/.local/share/hermes-mobile-live/runs.sqlite`.
 After initial bootstrap, an agent can request a complete tested release with:
 
 ```sh
-cd /home/lindayi/projects/hermes-mobile && .venv/bin/python -m deploy.self_deploy
+cd /home/lindayi/projects/hermes-mobile-git && .venv/bin/python -m deploy.self_deploy
 ```
 
 This **schedules**, rather than performs, a bridge restart. It creates a separate
@@ -59,7 +72,7 @@ manually. Do not replace this command with `systemctl restart` in a conversation
 ### Frontend-only: direct replacement, no restart
 
 ```sh
-cd /home/lindayi/projects/hermes-mobile && .venv/bin/python -m deploy.self_deploy --frontend-only
+cd /home/lindayi/projects/hermes-mobile-git && .venv/bin/python -m deploy.self_deploy --frontend-only
 ```
 
 This runs immediately after local staged test gates. It publishes frontend files,
@@ -71,7 +84,7 @@ release command above.
 ### Status and logs
 
 ```sh
-cd /home/lindayi/projects/hermes-mobile && .venv/bin/python -m deploy.self_deploy --status
+cd /home/lindayi/projects/hermes-mobile-git && .venv/bin/python -m deploy.self_deploy --status
 journalctl --user -u hermes-mobile-deploy-UNIT_ID.service
 ```
 
