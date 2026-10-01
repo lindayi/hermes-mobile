@@ -274,13 +274,55 @@ a._run_statuses = {}
 a._run_streams = {}
 a._active_run_agents = {}
 a._stopping_run_ids = set()
+a._run_approval_sessions = {'r': 'r'}
+a._active_run_tasks = {}
 loop = asyncio.new_event_loop()
 q = a._run_streams['r'] = asyncio.Queue()
 cb = a._make_run_event_callback('r', loop)
 a._set_run_status('r', 'queued')
 a._set_run_status('r', 'running')
 scenario = sys.argv[1]
-if scenario.startswith('race:'):
+if scenario.startswith('approval_timeout:'):
+    import json
+    from types import SimpleNamespace
+    from contextlib import nullcontext
+    from tools import approval
+    # Only the approval timer/hooks are fixtures. Execute the installed timeout,
+    # registry, tool callback and native GET; never construct a model agent.
+    approval._get_approval_timeout = lambda: 0
+    approval.human_wait_window = lambda key: nullcontext()
+    approval._fire_approval_hook = lambda *args, **kwargs: None
+    approval.is_interrupted = lambda: False
+    a._check_auth = lambda request: None
+    async def read_body(request):
+        return request.body, None
+    a._read_json_body = read_body
+    calls = []
+    agent = SimpleNamespace(steer=lambda text: calls.append(text) or True)
+    a._active_run_agents['r'] = agent
+    a._controls['r']['agent'] = agent
+    a._active_run_tasks['r'] = loop.create_future()
+    def notify(data):
+        a._set_run_status('r', 'waiting_for_approval', last_event='approval.request')
+    outcome = approval._await_gateway_decision('r', notify, {'request_id': 'expired'})
+    assert outcome['resolved'] is False and outcome['choice'] is None
+    assert approval.list_gateway_approvals('r') == []
+    cb('tool.completed', tool_name='synthetic')
+    assert a._run_statuses['r']['status'] == 'waiting_for_approval'
+    request = SimpleNamespace(match_info={'run_id': 'r'},
+        body={'input': 'guidance', 'idempotency_key': 'synthetic-key'})
+    async def check():
+        if scenario.endswith(':get'):
+            result = json.loads((await a._handle_get_run(request)).text)
+            assert result['status'] == 'running', result
+            assert result['pending_approvals'] == []
+        response = await a._handle_steer_run(request)
+        assert response.status == 200, response.text
+        assert json.loads(response.text)['status'] == 'accepted_unconfirmed'
+        await a._handle_steer_run(request)
+        assert calls == ['guidance'], calls
+    loop.run_until_complete(check())
+elif scenario.startswith('race:'):
     ending = scenario.split(':')[1]
     attempted = threading.Event()
     lock = threading.RLock()
@@ -356,7 +398,8 @@ loop.close()
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('scenario', ['race:completed', 'race:stopping', 'monotonic', 'ordinary'])
+@pytest.mark.parametrize('scenario', ['race:completed', 'race:stopping', 'monotonic', 'ordinary',
+                                      'approval_timeout:get', 'approval_timeout:steer'])
 def test_installed_native_lifecycle_is_monotonic(tmp_path, scenario):
     _installed_native_probe(tmp_path, scenario)
 

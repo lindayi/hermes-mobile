@@ -33,6 +33,16 @@ NATIVE_DEPENDENCIES = {
 TERMINAL = {'completed', 'failed', 'cancelled'}
 APPROVED_CONTROL_HASHES = {
     'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
+    'backend/native_run_controls.py': '71969151c1885b7e1e66e35f72aaa049b712eadd0dc8b7ffdd0478bacfe03c3f',
+    'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/native_maintenance.py': 'e083b0941b2b849559cd685d946ed10fb14a87128cf8ea2d125f77cb38ce434b',
+    'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
+    'backend/native_notifications.py': '0159fbdd02705469853f51be7bb32479ea9e2fa0d6fdbc6789253d3b3c1c85fe',
+}
+
+# Exact immediate pre-timeout-fix source set, retained for drain/rollback.
+TIMEOUT_BASELINE_CONTROL_HASHES = {
+    'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
     'backend/native_run_controls.py': '5107e54ed631fe2579efe2fb50c6a8ba1e9e3616c4fcd1d0e8ead2f7f29445d9',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': 'e083b0941b2b849559cd685d946ed10fb14a87128cf8ea2d125f77cb38ce434b',
@@ -50,7 +60,9 @@ PREVIOUS_CONTROL_HASHES = {
 
 def attested_controls(root):
     """Runtime/rollback approval accepts only one complete known source set."""
-    from backend.model_controls import _CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES, _control_source_hashes
+    from backend.model_controls import (
+        _CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES, _TIMEOUT_BASELINE_CONTROL_HASHES,
+        _control_source_hashes)
     actual = _control_source_hashes(root)
     if (set(APPROVED_CONTROL_HASHES) != {
                 'backend/native_controls_service.py', 'backend/native_run_controls.py',
@@ -61,7 +73,10 @@ def attested_controls(root):
                 'backend/native_api_service.py', 'backend/native_maintenance.py'}
             or _CONTROL_HASHES != APPROVED_CONTROL_HASHES
             or _PREVIOUS_CONTROL_HASHES != PREVIOUS_CONTROL_HASHES
-            or actual not in (APPROVED_CONTROL_HASHES, PREVIOUS_CONTROL_HASHES)):
+            or set(TIMEOUT_BASELINE_CONTROL_HASHES) != set(APPROVED_CONTROL_HASHES)
+            or _TIMEOUT_BASELINE_CONTROL_HASHES != TIMEOUT_BASELINE_CONTROL_HASHES
+            or actual not in (APPROVED_CONTROL_HASHES, TIMEOUT_BASELINE_CONTROL_HASHES,
+                              PREVIOUS_CONTROL_HASHES)):
         raise RuntimeError('Native controls do not match approved source version')
     return actual
 
@@ -70,7 +85,8 @@ def approved_controls(root):
     try:
         tree = ast.parse((root / 'backend/model_controls.py').read_bytes())
         for name, expected in (('_CONTROL_HASHES', APPROVED_CONTROL_HASHES),
-                               ('_PREVIOUS_CONTROL_HASHES', PREVIOUS_CONTROL_HASHES)):
+                               ('_PREVIOUS_CONTROL_HASHES', PREVIOUS_CONTROL_HASHES),
+                               ('_TIMEOUT_BASELINE_CONTROL_HASHES', TIMEOUT_BASELINE_CONTROL_HASHES)):
             constants = [ast.literal_eval(node.value) for node in tree.body
                          if isinstance(node, ast.Assign) and any(
                              isinstance(t, ast.Name) and t.id == name for t in node.targets)]
