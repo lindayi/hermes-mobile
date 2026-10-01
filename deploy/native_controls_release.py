@@ -119,12 +119,13 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
            bootstrap_dedicated_native=False, probe=None, handoff=None):
     """One lock and one candidate, with owner-gated verified rollback.
 
-    Notification candidates require two synchronous operator callbacks:
-    handoff(stage) durably copies all approved backlog to the private outbox
-    after drain, before publication/restarts; it must never mutate SDK source
-    or its registry. probe(stage) proves delivery receipts after activation.
-    Both run under the same deployment lock and owned admission gate. A
-    callback must raise on incomplete work; its return value is not evidence.
+    Notification candidates require two synchronous callbacks:
+    handoff(stage) proves durable retention in the existing private outbox after
+    drain and before publication/restarts; it never mutates SDK source or registry.
+    probe(stage) proves delivery receipts after activation.
+    Both run under the same deployment lock and owned admission gate. Callbacks
+    must raise on incomplete work; explicit False is also a failure, and no
+    return value substitutes for positive checks.
     """
     from .git_source import preflight
     preflight(paths, service_run=run, extra_paths=(native_dropin,))
@@ -214,6 +215,11 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
         backup = paths.state / 'backups' / release_id
         switched = False
         try:
+            prepare_handoff = getattr(handoff, 'capture', None)
+            if prepare_handoff is not None:
+                if not callable(prepare_handoff):
+                    raise RuntimeError('Invalid native notification handoff preparation')
+                prepare_handoff(baseline)
             bridge.wait_idle(journal, timeout=idle_timeout, sleep=sleep)
             with closing(journal.connect()) as db:
                 required_ids = tuple(dict.fromkeys(
@@ -225,7 +231,8 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
                     raise RuntimeError('Native idle wait timed out')
                 sleep(1)
             if handoff is not None:
-                handoff(stage)
+                if handoff(stage) is False:
+                    raise RuntimeError('Native notification handoff did not verify')
             if bridge.fingerprints(stage, names) != frozen:
                 raise RuntimeError('Staged source changed after checks')
             if handoff is not None and not native.idle(journal, baseline, required_ids=required_ids):
@@ -247,7 +254,8 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
                 # Notification candidates require this operator-supplied proof:
                 # drain the old backlog to real web receipts before reopening
                 # deletion/admission. Native readiness proves retention only.
-                probe(stage)
+                if probe(stage) is False:
+                    raise RuntimeError('Native notification receipt verification did not pass')
             if bridge.fingerprints(stage, names) != frozen:
                 raise RuntimeError('Staged source changed during activation')
         except Exception as error:
@@ -641,9 +649,13 @@ def main(argv=None, *, paths=None, run=subprocess.run):
     from .native_readiness import load_legacy_notice_approval
     approval = load_legacy_notice_approval(args.legacy_restart_approval) if args.legacy_restart_approval else None
     native = NativeProbe(paths.source, run=run, legacy_notice_approval=approval)
+    from backend.native_api_service import OWNER_HOME
+    from .native_notification_release import NativeNotificationCallbacks
+    notifications = NativeNotificationCallbacks(paths, native, home=OWNER_HOME)
     deploy(paths, checks=lambda stage: bridge.run_checks(paths, stage, run=run),
            verify=lambda stage, backend, **kw: bridge.verify_release(paths, stage, backend, run=run, **kw),
-           native=native, run=run, bootstrap_dedicated_native=args.bootstrap_dedicated_native)
+           native=native, run=run, bootstrap_dedicated_native=args.bootstrap_dedicated_native,
+           handoff=notifications, probe=notifications.probe)
     return 0
 
 

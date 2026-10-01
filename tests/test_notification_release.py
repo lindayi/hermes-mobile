@@ -1,5 +1,6 @@
 """Offline source-attested notification rollout; no live service/state access."""
 import copy
+import json
 
 import pytest
 
@@ -119,6 +120,75 @@ def test_notification_publication_requires_explicit_handoff_before_checks(releas
     assert not events  # No checks, capture, public verification or service command.
     assert not dropin.exists()
     assert (paths.webroot / 'index.html').read_bytes() == (old / 'public/index.html').read_bytes()
+    with journal.connect() as db:
+        assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
+
+
+def test_worker_cli_wires_guarded_notification_callbacks(release_transaction, monkeypatch):
+    paths, _, _, _, _, _ = release_transaction
+    from deploy import native_notification_release
+    monkeypatch.setattr(release.os, 'geteuid', lambda: 1000)
+    monkeypatch.setenv('INVOCATION_ID', 'synthetic-invocation')
+    monkeypatch.setattr(release, 'NativeProbe', lambda *a, **kw: object())
+    def callbacks(stage):
+        return None
+    callbacks.probe = lambda stage: None
+    monkeypatch.setattr(native_notification_release, 'NativeNotificationCallbacks',
+                        lambda *a, **kw: callbacks)
+    captured = {}
+
+    def deploy(_paths, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(release, 'deploy', deploy)
+    assert release.main(['--worker'], paths=paths) == 0
+    assert callable(captured.get('handoff'))
+    assert callable(captured.get('probe'))
+
+
+def test_notification_baseline_capture_runs_under_owned_gate_before_drain(release_transaction):
+    import fcntl
+    paths, old, journal, dropin, events, args = release_transaction
+
+    class Handoff:
+        def capture(self, baseline):
+            assert baseline['gate_owner']
+            with (paths.state / 'deploy.lock').open('a') as lock:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with journal.connect() as db:
+                assert [tuple(row) for row in db.execute(
+                    'SELECT singleton,owner FROM deployment_gate')] == [(1, baseline['gate_owner'])]
+            events.append(('notification-capture', old))
+
+        def __call__(self, stage):
+            events.append(('handoff', stage))
+
+    native = args['native']
+    original_idle = native.idle
+
+    def idle(*a, **kw):
+        events.append(('idle', old))
+        return original_idle(*a, **kw)
+
+    native.idle = idle
+    args.update(handoff=Handoff(), probe=lambda stage: None)
+    release.deploy(paths, **args)
+    assert events.index(('notification-capture', old)) < events.index(('idle', old))
+    handoff_index = next(i for i, event in enumerate(events) if event[0] == 'handoff')
+    assert events.index(('idle', old)) < handoff_index
+
+
+@pytest.mark.parametrize('callback', ['handoff', 'probe'])
+def test_false_notification_callback_result_aborts_release(release_transaction, callback):
+    paths, old, journal, _, _, args = release_transaction
+    args[callback] = lambda stage: False
+    error = ('handoff did not verify' if callback == 'handoff'
+             else 'receipt verification did not pass')
+    with pytest.raises(RuntimeError, match=error):
+        release.deploy(paths, **args)
+    assert (paths.state / 'current').resolve() == old
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'rolled_back'
     with journal.connect() as db:
         assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
 

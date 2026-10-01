@@ -2,6 +2,9 @@
 
 Process-local owner listener ONLY, launched by new `backend/native_controls_service.py`; the existing `backend/native_api_service.py` remains byte-identical to the deployed baseline, so legacy rollback/member listeners remain unchanged and do not advertise these capabilities. The new entrypoint rejects member configs before native imports. Root-owned installed Hermes files are not modified. Activation/restart is parent-coordinated.
 
+Guarded native notification upgrade preservation and receipt checks are specified
+in [native-notification-release.md](native-notification-release.md).
+
 `GET /v1/capabilities` adds top-level `mobile_run_controls: {version:1, steering:true, live_commentary:true}` and `mobile_run_controls_v1: true` (no identity inference or fallback to owner).
 
 `POST /v1/runs/{native_run_id}/steer` accepts exactly `{input: string, idempotency_key: string}`. Input nonblank, at most 32768 characters; key nonblank, at most 128 characters. The bridge resolves native run IDs from owned persisted runs; never trust a browser-supplied native ID.
