@@ -10,9 +10,9 @@ tests/test_session_visibility.py:generic-api-key:148
 tests/test_tool_detail_presentation.py:curl-auth-user:46
 tests/test_push_policy_previews.py:private-key:28
 deploy/native_controls_release.py:generic-api-key:25
-deploy/native_controls_release.py:generic-api-key:37
-deploy/native_controls_release.py:generic-api-key:47
-deploy/native_controls_release.py:generic-api-key:56
+deploy/native_controls_release.py:generic-api-key:38
+deploy/native_controls_release.py:generic-api-key:48
+deploy/native_controls_release.py:generic-api-key:57
 backend/model_controls.py:generic-api-key:13
 backend/model_controls.py:generic-api-key:23
 backend/model_controls.py:generic-api-key:32

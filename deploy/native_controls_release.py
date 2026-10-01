@@ -28,6 +28,7 @@ NATIVE_DEPENDENCIES = {
     Path('/usr/local/lib/hermes-agent/tools/process_registry.py'): '5eace294ba298a08ff2a5e0503a75720f5eb2bf9c3117e2588746f207ab915a9',
     Path('/usr/local/lib/hermes-agent/tools/async_delegation.py'): 'eadedad768e3b327bfa9755daf8b0ee00f330ce3f787336986d8b50dad5f9391',
     Path('/usr/local/lib/hermes-agent/tools/daemon_pool.py'): '148a18c801a28f4fb5a96eb20399052245599413a349d7df2fd0b4643ae910dc',
+    Path('/usr/local/lib/hermes-agent/tools/approval.py'): '266ce183b1adced097b29df7b2c4a15bde0f86c9a24f6d887339675f4011b903',
     Path('/usr/local/lib/hermes-agent/tools/delegate_tool.py'): '9559ddd8d407cf8d321b8751c714a9f221dd8bd7f09cd016274c5b830940f385',
 }
 TERMINAL = {'completed', 'failed', 'cancelled'}
