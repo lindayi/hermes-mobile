@@ -1,6 +1,7 @@
 ## Linked issue and related work
 
-- Closes #:
+<!-- Replace NUMBER with the actual issue number. -->
+- Closes #NUMBER
 - Related issues/PRs/specification:
 
 ## Scope and baseline

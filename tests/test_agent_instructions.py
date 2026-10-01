@@ -300,7 +300,20 @@ def test_pull_request_template_records_linked_scope_evidence_risks_and_review():
     ):
         assert heading in template
     assert 'Closes #' in template
+    assert '- Closes #NUMBER' in template.splitlines()
+    assert 'Replace NUMBER with the actual issue number.' in template
     assert 'exact head SHA' in template
+
+
+def test_completed_pull_request_template_passes_issue_link_policy():
+    from test_issue_link_policy import evaluate
+
+    template = (ROOT / '.github/pull_request_template.md').read_text()
+    result = evaluate(template.replace('#NUMBER', '#7'))
+    assert result['errors'] == []
+    assert result['requests'] == [
+        {'owner': 'lindayi', 'repo': 'hermes-mobile', 'issue_number': 7}]
+    assert result['statuses'] == []
 
 
 def test_copilot_setup_is_pinned_minimal_and_never_runs_tests():
