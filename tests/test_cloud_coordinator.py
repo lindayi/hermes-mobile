@@ -1144,6 +1144,35 @@ def test_explicit_incompatible_task_result_is_exported_and_stops_repair(tmp_path
     assert event["merge_sha"] is None and event["decision"] is None
 
 
+def test_lifecycle_producer_rejects_ids_outside_shared_schema_bounds():
+    from deploy.cloud_coordinator import _lifecycle_event_valid
+    from deploy.workflow_events import validate_export
+
+    event = {
+        "event_id": "pr:16:merged:oversized",
+        "outcome": "merged",
+        "reason": "merged",
+        "issue_number": 2**31,
+        "pr_number": 2**31,
+        "head_sha": HEAD,
+        "merge_sha": "e" * 40,
+        "decision": None,
+        "occurred_at": "2026-10-01T12:00:00Z",
+    }
+    export = {
+        "version": 1,
+        "repository_id": 1399942965,
+        "repository": "lindayi/hermes-mobile",
+        "owner_user_id": str(OWNER),
+        "generated_at": "2026-10-01T12:01:00Z",
+        "events": [event],
+    }
+
+    assert not _lifecycle_event_valid(event)
+    with pytest.raises(ValueError, match="Invalid lifecycle issue"):
+        validate_export(export, now=datetime.fromisoformat("2026-10-01T12:01:00+00:00"))
+
+
 def test_draft_and_pending_activity_do_not_create_noise_or_repairs(tmp_path):
     api = FakeApi(unresolved=True, source_failure=True)
     api.pull["draft"] = True

@@ -17,6 +17,15 @@ import sys
 import time
 from urllib.parse import quote, unquote, urlencode
 
+from deploy.workflow_lifecycle import (
+    MAX_EVENTS as MAX_LIFECYCLE_EVENTS,
+    REASON_OUTCOMES as LIFECYCLE_OUTCOMES,
+    build_export as build_lifecycle_export,
+    merge_events as merge_lifecycle_events,
+    pull_event as build_pull_lifecycle_event,
+    validate_event as validate_lifecycle_event,
+)
+
 
 REPOSITORY = "lindayi/hermes-mobile"
 REPOSITORY_ID = 1399942965
@@ -31,8 +40,6 @@ MAX_FINDING_CHARS = 1000
 FIX_MARKER_PREFIX = "hermes-coordinator-fix:"
 OUTBOX_MARKER_PREFIX = "hermes-coordinator-outcome:"
 LIFECYCLE_FILE_NAME = "workflow-events.json"
-MAX_LIFECYCLE_EVENTS = 256
-MAX_LIFECYCLE_AGE = 24 * 60 * 60
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_EVENTS = 4000
 TOMBSTONE_LIMIT = 512
@@ -398,68 +405,19 @@ def neutral_reconciliation_request(snapshot, attempts):
 
 def _lifecycle_event(snapshot, reason, *, occurred_at, merge_sha=None, decision=None,
                      incident=""):
-    if reason not in LIFECYCLE_OUTCOMES or not _is_sha(snapshot.get("head")):
-        raise CoordinatorError("Lifecycle event evidence was incomplete")
-    if reason == "merged" and not _is_sha(merge_sha):
-        raise CoordinatorError("Merged lifecycle event lacked its exact merge SHA")
-    if reason != "merged" and merge_sha is not None:
-        raise CoordinatorError("Unexpected merge SHA in lifecycle event")
-    issue = snapshot.get("issue")
-    if type(issue) is not int or issue < 1:
-        raise CoordinatorError("Lifecycle event issue identity was invalid")
-    enrollment = snapshot.get("enrollment") or {}
-    generation = enrollment.get("comment")
-    identity_head = "" if reason in {"execution_exhausted", "policy_broken"} else snapshot["head"]
-    identity = f"{issue}:{generation}:{reason}:{identity_head}:{merge_sha or ''}:{incident}"
-    event_id = f"pr:{issue}:{reason}:{hashlib.sha256(identity.encode()).hexdigest()[:32]}"
-    return {
-        "event_id": event_id,
-        "outcome": LIFECYCLE_OUTCOMES[reason],
-        "reason": reason,
-        "issue_number": issue,
-        "pr_number": issue,
-        "head_sha": snapshot["head"],
-        "merge_sha": merge_sha,
-        "decision": decision,
-        "occurred_at": occurred_at,
-    }
+    try:
+        return build_pull_lifecycle_event(
+            snapshot, reason, occurred_at=occurred_at, merge_sha=merge_sha,
+            decision=decision, incident=incident,
+        )
+    except (TypeError, ValueError) as error:
+        raise CoordinatorError("Lifecycle event evidence was incomplete") from error
 
 
 def _lifecycle_event_valid(event):
-    fields = {
-        "event_id", "outcome", "reason", "issue_number", "pr_number",
-        "head_sha", "merge_sha", "decision", "occurred_at",
-    }
-    if not isinstance(event, dict) or set(event) != fields:
-        return False
-    if (not isinstance(event["event_id"], str)
-            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", event["event_id"]) is None
-            or not isinstance(event["reason"], str)
-            or event["reason"] not in LIFECYCLE_OUTCOMES
-            or not isinstance(event["outcome"], str)
-            or event["outcome"] != LIFECYCLE_OUTCOMES[event["reason"]]
-            or type(event["issue_number"]) is not int or event["issue_number"] < 1
-            or type(event["pr_number"]) is not int or event["pr_number"] < 1
-            or not _is_sha(event["head_sha"])):
-        return False
-    if event["reason"] == "merged":
-        if not _is_sha(event["merge_sha"]) or event["decision"] is not None:
-            return False
-    elif event["merge_sha"] is not None:
-        return False
-    if event["reason"] == "sensitive_approval":
-        if event["decision"] != "authorize_sensitive_action":
-            return False
-    elif event["decision"] is not None:
-        return False
     try:
-        text = event["occurred_at"]
-        if (not isinstance(text, str) or len(text) != 20 or not text.endswith("Z")
-                or datetime.fromisoformat(text[:-1] + "+00:00").isoformat(
-                    timespec="seconds"
-                ).replace("+00:00", "Z") != text):
-            return False
-    except (TypeError, ValueError):
+        validate_lifecycle_event(event)
+    except (TypeError, ValueError, KeyError):
         return False
     return True
 
@@ -1856,32 +1814,13 @@ class StateStore:
 
     @staticmethod
     def _add_lifecycle_events(data, events, *, now):
-        cutoff = now - MAX_LIFECYCLE_AGE
-        retained = []
-        for event in data.get("lifecycle_events", []):
-            occurred = datetime.fromisoformat(
-                event["occurred_at"][:-1] + "+00:00",
-            ).timestamp()
-            if occurred >= cutoff:
-                retained.append(event)
-        known = {event["event_id"] for event in retained}
-        for event in events:
-            if not _lifecycle_event_valid(event):
-                raise CoordinatorError("Lifecycle event did not match the fixed schema")
-            if event["event_id"] in known:
-                continue
-            occurred = datetime.fromisoformat(
-                event["occurred_at"][:-1] + "+00:00",
-            ).timestamp()
-            if occurred > now:
-                raise CoordinatorError("Lifecycle event is newer than its export time")
-            if occurred < cutoff:
-                continue
-            retained.append(event)
-            known.add(event["event_id"])
-            if len(retained) > MAX_LIFECYCLE_EVENTS:
-                raise CoordinatorError("Lifecycle event export reached its safety bound")
-        data["lifecycle_events"] = retained
+        try:
+            data["lifecycle_events"] = merge_lifecycle_events(
+                data.get("lifecycle_events", []), events, now=now,
+                limit=MAX_LIFECYCLE_EVENTS,
+            )
+        except (TypeError, ValueError) as error:
+            raise CoordinatorError("Lifecycle event was invalid or capacity was reached") from error
 
     def record_lifecycle(self, event, *, now=None):
         def record(data):
@@ -1893,14 +1832,7 @@ class StateStore:
     def write_lifecycle_export(self, *, now=None):
         now = time.time() if now is None else now
         self._ensure_directory()
-        cutoff = now - MAX_LIFECYCLE_AGE
-        events = []
-        for event in self.snapshot()["lifecycle_events"]:
-            occurred = datetime.fromisoformat(
-                event["occurred_at"][:-1] + "+00:00",
-            ).timestamp()
-            if cutoff <= occurred <= now:
-                events.append(event)
+        events = self.snapshot()["lifecycle_events"]
         path = self.directory / LIFECYCLE_FILE_NAME
         if not events:
             if _private_regular(path):
@@ -1915,14 +1847,14 @@ class StateStore:
             return
         if len(events) > MAX_LIFECYCLE_EVENTS:
             raise CoordinatorError("Lifecycle event export exceeded its record bound")
-        payload = json.dumps({
-            "version": 1, "repository_id": REPOSITORY_ID,
-            "repository": REPOSITORY, "owner_user_id": str(OWNER_ID),
-            "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(
-                timespec="seconds",
-            ).replace("+00:00", "Z"),
-            "events": events,
-        }, separators=(",", ":"), sort_keys=True, ensure_ascii=True, allow_nan=False)
+        try:
+            payload = json.dumps(
+                build_lifecycle_export(events, str(OWNER_ID), now=now),
+                separators=(",", ":"), sort_keys=True, ensure_ascii=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as error:
+            raise CoordinatorError("Lifecycle export did not match the shared schema") from error
         encoded = payload.encode("utf-8")
         if len(encoded) > 1024 * 1024:
             raise CoordinatorError("Lifecycle event export exceeded its byte bound")
