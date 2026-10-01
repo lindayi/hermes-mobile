@@ -42,7 +42,7 @@ def test_agent_instructions_are_portable_and_copilot_rules_stay_synced():
     assert 'scripts/ci_tests.py' in workflow
     assert '.github/host-tests.json' in workflow
     assert 'copilot-setup-steps.yml' in workflow
-    assert 'repository settings' in workflow
+    assert 'repository setting' in workflow
 
 
 def test_product_preferences_remain_explicit_in_canonical_instructions():
@@ -93,28 +93,39 @@ def test_copilot_setup_is_pinned_minimal_and_never_runs_tests():
     path = ROOT / '.github/workflows/copilot-setup-steps.yml'
     workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
 
-    assert workflow['on']['workflow_dispatch'] is None
+    assert workflow['on']['workflow_dispatch'] == ''
     assert 'push' in workflow['on'] and 'pull_request' in workflow['on']
+    setup_path = '.github/workflows/copilot-setup-steps.yml'
+    assert workflow['on']['push']['paths'] == [setup_path]
+    assert workflow['on']['pull_request']['paths'] == [setup_path]
     assert list(workflow['jobs']) == ['copilot-setup-steps']
     job = workflow['jobs']['copilot-setup-steps']
     assert job['permissions'] == {'contents': 'read'}
     assert job['runs-on'] == 'ubuntu-24.04'
 
     actions = []
+    checkout = None
     for step in job['steps']:
         action = step.get('uses')
         if action:
             assert re.fullmatch(r'[^@]+@[0-9a-f]{40}', action)
             actions.append(action)
+            if action.startswith('actions/checkout@'):
+                checkout = step
+    assert checkout['with']['persist-credentials'] == 'false'
     assert any(action.startswith('actions/setup-python@') for action in actions)
     assert any(action.startswith('actions/setup-node@') for action in actions)
+    assert job['steps'][1]['with']['python-version'] == '3.12'
+    assert job['steps'][2]['with']['node-version'] == '22'
+    assert job['steps'][2]['with']['cache-dependency-path'] == 'package-lock.json'
 
     commands = '\n'.join(step.get('run', '') for step in job['steps'])
+    assert 'python -m venv .venv' in commands
     assert 'requirements.lock' in commands
     assert 'npm ci' in commands
-    assert 'package-lock.json' in commands
     assert 'PLAYWRIGHT_BROWSERS_PATH' in commands
     assert 'RUNNER_TEMP' in commands
     assert 'PLAYWRIGHT_SKIP_BROWSER_GC=1' in commands
+    assert 'playwright install --with-deps chromium' in commands
     assert 'scripts/test.py' not in commands
     assert 'pytest' not in commands
