@@ -609,8 +609,12 @@ def test_playwright_chromium_detached_interruption_smoke(tmp_path):
         "args:['--no-sandbox','--disable-dev-shm-usage']});\n"
         f"fs.writeFileSync({str(ready)!r},JSON.stringify([server.process().pid,process.env.HOME]));\n"
         "await new Promise(resolve=>setTimeout(resolve,60000));\n")
-    # Chromium's Unix sockets require a short private TMPDIR, unlike tmp_path.
-    with tempfile.TemporaryDirectory(prefix='hmt-smoke-') as short:
+    # Do not inherit the outer managed TMPDIR: another workspace level makes
+    # Chromium 145's SingletonSocket exceed Linux's 107-byte pathname limit.
+    # TemporaryDirectory still creates a private 0700 directory and cleans it up.
+    with tempfile.TemporaryDirectory(prefix='hmt-smoke-', dir='/tmp') as short:
+        assert Path(short).parent == Path('/tmp'), 'browser scratch must not inherit the outer managed TMPDIR'
+        assert Path(short).stat().st_mode & 0o777 == 0o700
         root = Path(short) / 'managed'
         runner = subprocess.Popen([sys.executable, '-c',
             f'import sys; sys.path.insert(0,{str(SOURCE)!r}); from deploy.test_workspace import run_suite; '

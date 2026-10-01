@@ -23,10 +23,11 @@ async function fixture(run){
     const p=path.slice('/hermes/app-api'.length),call={p,method:req.method,body:raw?JSON.parse(raw):null,csrf:req.headers['x-csrf-token']};calls.push(call);
     let data={items:[]},status=200;
     if(p==='/auth/me'){if(control.authHold)await control.authHold;data={user:{id:control.user,status:'ready'},csrf_token:control.csrf || 'fixture-csrf'};}
+    if(p==='/auth/logout' && control.logoutDelay)await new Promise(resolve=>setTimeout(resolve,control.logoutDelay));
     if(p==='/push/presence' && call.body.visible && control.presenceHold)await control.presenceHold;
     if(p==='/sessions')data={items:[{id:'session-one',title:'First conversation'},{id:'session-two',title:'Second conversation'}]};
     if(p==='/push/key')data={public_key:'AQID'};
-    if(p.endsWith('/messages'))data={items:[],total:0};
+    if(p.endsWith('/messages')){if(control.messagesDelay)await new Promise(resolve=>setTimeout(resolve,control.messagesDelay));data={items:[],total:0};}
     if(p==='/push/preferences'){
      if(control.hold)await control.hold;
      if(req.method==='GET' && control.getError || req.method==='PUT' && control.putError){status=503;data={detail:'Synthetic unavailable'};}
@@ -155,7 +156,14 @@ for(const departure of ['route','owner','logout','destroy'])test(`notification s
  await settings(page);await checkMaster(page,false);await page.getByRole('switch').click();await page.getByText('Enabling notifications…',{exact:true}).waitFor();
  if(departure==='route')await page.getByRole('button',{name:'Chats',exact:true}).click();
  if(departure==='owner'){control.user='new-owner';await page.evaluate(()=>app.start());}
- if(departure==='logout')await page.getByRole('button',{name:'Sign out',exact:true}).click();
+ if(departure==='logout'){
+  // Keep logout pending long enough to expose releasing permission on click alone.
+  // The late permission below is meant to cross completed logout, not its request.
+  control.logoutDelay=1000;
+  await page.getByRole('button',{name:'Sign out',exact:true}).click();
+  await page.getByRole('button',{name:'Sign in with a passkey',exact:true}).waitFor();
+  await page.waitForFunction(()=>app.state.user===null);
+ }
  if(departure==='destroy')await page.evaluate(()=>app.destroy());
  await page.evaluate(()=>releasePermission());await page.waitForTimeout(100);
  assert.equal(calls.filter(c=>c.p==='/push/subscriptions' || c.p==='/push/preferences' && c.method==='PUT').length,0);
@@ -321,15 +329,17 @@ test('pending presence cannot renew during account revalidation or after a new o
  await page.waitForFunction(()=>app.state.user?.id==='fixture-new-owner');
  await page.evaluate(()=>dispatchEvent(new Event('focus')));await page.clock.fastForward(60000);await page.waitForTimeout(80);assert.equal(presence().length,count,'late responses cannot restore the previous account lease');
 }));
-test('two tab presence IDs are independent and pagehide logout never renew a lease',{timeout:30000},()=>fixture(async({page,context,mount,calls})=>{
- await page.getByRole('button',{name:/First conversation/}).click();await page.waitForTimeout(60);
+test('two tab presence IDs are independent and pagehide logout never renew a lease',{timeout:30000},()=>fixture(async({page,context,mount,calls,control})=>{
+ control.messagesDelay=1200; // Keep the old click-plus-60ms race reproducible.
+ // A click dispatch does not await the owned conversation read or its presence POST.
+ await presenceResponse(page,{session_id:'session-one',visible:true},()=>page.getByRole('button',{name:/First conversation/}).click());
  const presence=()=>calls.filter(c=>c.p==='/push/presence');const first=presence().find(c=>c.body.visible)?.body.client_id;assert.ok(first);
  const second=await context.newPage();await mount(second);await second.bringToFront();
- await second.getByRole('button',{name:/Second conversation/}).click();await second.waitForTimeout(60);
+ await presenceResponse(second,{session_id:'session-two',visible:true},()=>second.getByRole('button',{name:/Second conversation/}).click());
  const secondId=presence().find(c=>c.body.session_id==='session-two' && c.body.visible)?.body.client_id;assert.ok(secondId);assert.notEqual(first,secondId);
- await second.evaluate(()=>dispatchEvent(new Event('pagehide')));await second.waitForTimeout(60);
+ await presenceResponse(second,{client_id:secondId,visible:false},()=>second.evaluate(()=>dispatchEvent(new Event('pagehide'))));
  assert.equal(presence().at(-1).body.client_id,secondId);assert.equal(presence().at(-1).body.visible,false);
- await second.evaluate(()=>dispatchEvent(new Event('pageshow')));await second.waitForTimeout(60);assert.equal(presence().at(-1).body.visible,true);
+ await presenceResponse(second,{client_id:secondId,visible:true},()=>second.evaluate(()=>dispatchEvent(new Event('pageshow'))));assert.equal(presence().at(-1).body.visible,true);
  await settings(second);await check(second,'Approvals',true);await second.getByRole('button',{name:'Sign out',exact:true}).click();await second.getByRole('button',{name:'Sign in with a passkey',exact:true}).waitFor();
  const count=presence().filter(c=>c.body.client_id===secondId).length;
  await second.evaluate(()=>{dispatchEvent(new Event('focus'));document.dispatchEvent(new Event('visibilitychange'));});await second.waitForTimeout(60);
@@ -350,7 +360,8 @@ test('presence reload preserves tab high-water sequence while copied tabs and de
  assert.notEqual(presence().at(-1).body.client_id,first.client_id,'same account with a new authenticated device must not reuse the previous device scope');
  assert.equal(await page.evaluate(()=>Object.keys(localStorage).some(k=>k.includes('push-presence'))),false);
 }));
-test('hung presence is bounded to one abortable request and ten second teardown',{timeout:30000},()=>fixture(async({page,ui})=>{
+test('hung presence is bounded to one abortable request and ten second teardown',{timeout:30000},()=>fixture(async({page,ui,control})=>{
+ control.messagesDelay=1200; // Lease timing starts after conversation readiness, not click dispatch.
  await page.clock.install();
  await page.evaluate(()=>{
   const original=window.fetch;window.presenceTransport={active:0,max:0,requests:[],aborted:0};
@@ -362,6 +373,8 @@ test('hung presence is bounded to one abortable request and ten second teardown'
  });
  await page.evaluate(async ui=>{app.destroy();const {mountApp}=await import('./'+ui);const {createAPI}=await import('./api.'+ui.split('.')[1]+'.mjs');window.app=await mountApp(document,createAPI(),window);},ui);
  await page.getByRole('button',{name:/First conversation/}).click();
+ // Wait for the intercepted transport to start before measuring its unchanged deadline.
+ await page.waitForFunction(()=>presenceTransport.active===1);
  assert.equal(await page.evaluate(()=>presenceTransport.active),1);
  await page.clock.fastForward(10000);await page.waitForTimeout(40);
  assert.equal(await page.evaluate(()=>presenceTransport.active),0,'hung heartbeat is aborted at 10 seconds');
@@ -370,7 +383,9 @@ test('hung presence is bounded to one abortable request and ten second teardown'
  assert.equal(await page.evaluate(()=>presenceTransport.max),1,'superseded request is aborted before new visibility state dispatch');
  await settings(page);await check(page,'Approvals',true);await page.clock.fastForward(10000);assert.equal(await page.evaluate(()=>presenceTransport.active),0);
  await page.getByRole('button',{name:'Chats',exact:true}).click();await page.getByRole('button',{name:/First conversation/}).click();
- await page.evaluate(()=>dispatchEvent(new Event('focus')));await page.evaluate(()=>app.destroy());
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));
+ await page.waitForFunction(()=>presenceTransport.active===1 && presenceTransport.requests.at(-1)?.visible===true);
+ await page.evaluate(()=>app.destroy());
  assert.equal(await page.evaluate(()=>presenceTransport.requests.at(-1).visible),false);
  await page.clock.fastForward(10000);assert.equal(await page.evaluate(()=>presenceTransport.active),0);
  const count=await page.evaluate(()=>presenceTransport.requests.length);await page.clock.fastForward(60000);await page.evaluate(()=>dispatchEvent(new Event('focus')));assert.equal(await page.evaluate(()=>presenceTransport.requests.length),count);
@@ -387,6 +402,14 @@ test('effective notification status requires browser permission and subscription
  await page.getByText('Notifications enabled.',{exact:true}).waitFor();await checkMaster(page,true);
  assert.ok(calls.some(c=>c.p==='/push/subscriptions' && c.method==='POST'));
 }));
+async function presenceResponse(page,expected,action){
+ const response=page.waitForResponse(response=>{
+  const request=response.request();
+  if(!response.url().endsWith('/push/presence') || request.method()!=='POST')return false;
+  const body=request.postDataJSON();return Object.entries(expected).every(([key,value])=>body[key]===value);
+ },{timeout:2500});
+ await Promise.all([response,action()]);
+}
 async function device(page){
  await page.evaluate(()=>{
   if(window.fixturePush)return;
