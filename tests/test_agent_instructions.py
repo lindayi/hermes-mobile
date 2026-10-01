@@ -78,20 +78,31 @@ def test_fresh_setup_exports_repository_node_path(tmp_path, route):
     assert result.returncode == 0, result.stderr
 
 
-def test_steering_retry_fixture_honors_browser_override_without_launching():
-    source = (ROOT / 'tests/browser/steering-retry-lifecycle.spec.mjs').read_text()
-    expression = re.search(r'executablePath:(.*?),headless:', source).group(1)
+def test_all_managed_browser_fixtures_honor_browser_override_without_launching():
+    files = sorted(set((ROOT / 'tests/browser').glob('*.spec.mjs')) |
+                   set((ROOT / 'tests/browser').glob('*.test.mjs')))
+    expressions = [(path.name, expression) for path in files
+                   for expression in re.findall(r'executablePath\s*:\s*([^,}]+)', path.read_text())]
+    assert expressions, 'Managed browser executable selections must be covered'
+    assert any(name == 'steering-retry-lifecycle.spec.mjs' for name, _ in expressions)
+    assert any(name == 'steering-controls.spec.mjs' for name, _ in expressions)
+    script = 'process.stdout.write(JSON.stringify([' + ','.join(
+        '{name:' + repr(name) + ', value:(' + expression + ')}'
+        for name, expression in expressions
+    ) + ']));'
     for browser in ('/private cache/chromium', '', None):
         env = dict(os.environ)
         env.pop('HERMES_BROWSER', None)
         if browser is not None:
             env['HERMES_BROWSER'] = browser
         result = subprocess.run(
-            [_node(), '-e', f'process.stdout.write({expression})'],
+            [_node(), '-e', script],
             env=env, capture_output=True, text=True, timeout=15,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stdout == (browser or '/usr/bin/google-chrome')
+        import json
+        for selection in json.loads(result.stdout):
+            assert selection['value'] == (browser or '/usr/bin/google-chrome'), selection['name']
 
 
 SYNCED_RULES = (
