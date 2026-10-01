@@ -14,9 +14,11 @@ def test_release_stage_retains_ci_contract_files(tmp_path):
     (source / '.github/workflows').mkdir(parents=True)
     (source / '.github/workflows/ci.yml').write_text('fixture workflow')
     (source / '.github/host-tests.json').write_text('{}')
+    (source / '.github/native-tests.json').write_text('{}')
     stage = stage_release(source, tmp_path / 'stage')
     assert (stage / '.github/workflows/ci.yml').read_text() == 'fixture workflow'
     assert (stage / '.github/host-tests.json').read_text() == '{}'
+    assert (stage / '.github/native-tests.json').read_text() == '{}'
 
 
 def test_hosted_gate_requires_every_suite_without_optional_failures():
@@ -85,17 +87,19 @@ def test_native_job_is_confined_to_public_disposable_hosted_runtime():
     job = workflow['jobs']['native']
     assert job['runs-on'] == 'ubuntu-24.04'
     assert job['timeout-minutes'] == '30'
-    checkout = next(step for step in job['steps'] if step.get('uses', '').startswith('actions/checkout@'))
+    steps = job['steps']
+    checkout = steps[0]
+    assert checkout['uses'].startswith('actions/checkout@')
     assert checkout['with']['persist-credentials'] == 'false'
-    assert './.github/actions/native-test-environment' in {
-        step.get('uses') for step in job['steps']
-    }
-    assert any('scripts/ci_tests.py native' in step.get('run', '') for step in job['steps'])
-    setup = next(
-        step for step in job['steps']
-        if step.get('uses') == './.github/actions/test-environment'
-    )
-    assert setup['with']['browser'] == 'false'
+    assert 'prepare_native_test_runtime.py --preflight' in steps[1]['run']
+    assert steps[2]['uses'].startswith('actions/setup-python@')
+    assert steps[2]['with']['python-version'] == '3.12'
+    assert steps[3]['uses'].startswith('actions/setup-node@')
+    assert steps[3]['with']['node-version'] == '22'
+    assert 'pip install -r requirements.lock' in steps[4]['run']
+    assert 'HERMES_TEST_PYTHON=' in steps[4]['run']
+    assert steps[5]['uses'] == './.github/actions/native-test-environment'
+    assert '"$HERMES_TEST_PYTHON" -B scripts/ci_tests.py native' in steps[6]['run']
     workflow_text = (ROOT / '.github/workflows/ci.yml').read_text()
     assert 'self-hosted' not in workflow_text
     assert 'secrets.' not in workflow_text

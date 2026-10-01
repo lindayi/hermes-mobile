@@ -322,7 +322,7 @@ def test_workflow_builds_once_browser_consumes_and_main_only_attests():
     root = Path(__file__).resolve().parents[1]
     workflow = yaml.load((root / '.github/workflows/ci.yml').read_text(), Loader=yaml.BaseLoader)
     jobs = workflow['jobs']
-    assert set(jobs['source-ci']['needs']) == {'build', 'checks', 'js', 'python', 'browser'}
+    assert set(jobs['source-ci']['needs']) == {'build', 'checks', 'js', 'python', 'browser', 'native'}
     assert jobs['browser']['needs'] == 'build'
     browser = '\n'.join(s.get('run', '') for s in jobs['browser']['steps'])
     assert 'build_frontend' not in browser and 'release_artifact unpack' in browser

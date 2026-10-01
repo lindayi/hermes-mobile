@@ -22,28 +22,37 @@ Current staging intentionally includes `.github`, covered separately by
 ## Acceptance
 
 1. PR and main workflows run syntax/secret checks, JavaScript tests, generated
-   frontend browser tests and the portable Python suite on hosted runners.
-2. Python tests requiring the installed patched Hermes runtime or private operator
-   files remain an explicitly documented local compatibility suite. Classification
-   covers every collected test file exactly once; new files default to hosted,
-   not silently omitted. Missing/stale host entries, invalid paths and invalid
-   shards fail before execution. No test outcome is converted to a skip/pass.
-3. Hosted jobs install pinned dependencies without production secrets. Cache only
+   frontend browser tests, portable Python tests and the proven native-runtime
+   subset on disposable hosted runners.
+2. Every collected Python test belongs to exactly one installed-runtime partition:
+   portable hosted tests or the complete host compatibility suite. A separate,
+   reason-bearing native manifest selects only the proven portable subset of host
+   tests for an additional hosted run; it does not remove any test from the host
+   release suite. New test files default to portable hosted coverage. Missing or
+   stale entries, duplicate keys, symlinks, invalid subsets and empty shards fail
+   before execution. No test outcome is converted to a skip/pass.
+3. Hosted jobs install pinned dependencies without production secrets. The native
+   job uses the guarded public runtime provisioner only on GitHub-hosted Ubuntu,
+   with native Python 3.11 separate from project test Python 3.12. Cache only
    package downloads, not private state. Browser workers are serial per shard;
    independent hosted shards provide parallelism instead of competing on this host.
 4. Every shard uses the existing managed test workspace lifecycle, isolated HOME,
    short temp paths, process cleanup and bounded failure evidence. Browser tests
    exercise generated assets built from the checked-out revision. No raw runner
    bypass, blind retries, increased gesture thresholds or assertion removal.
-5. A required hosted aggregate fails on failed/cancelled/skipped constituent jobs.
-   Server compatibility and independent agent review remain separate exact-head
-   gates. Existing required gates are not weakened during migration.
+5. The required `source-ci` aggregate fails on failed, cancelled, skipped or missing
+   `native` or any other constituent job. Release evidence pins the exact required
+   job set for the exact successful main workflow attempt. Server compatibility and
+   independent agent review remain separate exact-head gates. Existing required
+   gates are not weakened during migration.
 6. Failures expose useful bounded synthetic logs/screenshots with short retention;
    never upload native homes, databases, credentials or host operator files.
-7. Small local RED/GREEN tests verify partitioning, shard union/disjointness,
-   validation, concurrency and workflow gate contracts. Real GitHub Actions runs
-   prove installation and all hosted suites; local validation runs only the
-   residual host suite plus focused regressions, not another broad full suite.
+7. Small managed RED/GREEN tests verify partitioning, shard union/disjointness,
+   validation, concurrency, native failure blocking and workflow gate contracts.
+   Real GitHub Actions runs prove native provisioning and hosted suites. The native
+   reconstruction proves public-source reproducibility, not installed production
+   compatibility; local validation still runs the complete residual host suite
+   plus focused regressions, not another broad full suite.
 8. Formal independent review, follow-up commits and exact-head gates precede
    protected merge. Reconcile intervening main changes without dropping parallel
    work, then remove only this task's merged branch/worktree and scratch.
@@ -56,3 +65,6 @@ release provenance, drain/gating, live checks and rollback protections remain.
 Any reuse of hosted evidence by the release path must bind successful trusted
 workflow results to the exact source and generated asset bytes; absent verified
 evidence must fail closed or use the existing full validation, never skip it.
+The hosted native job does not replace the installed/private host suite or its
+required `integration-tests` gate. A successful hosted aggregate alone is not
+evidence that installed production files, private operators or live services work.
