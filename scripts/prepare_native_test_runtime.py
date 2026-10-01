@@ -9,10 +9,12 @@ import subprocess
 import sys
 import tempfile
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 from deploy.install_core import patch_targets, validate_baselines
 
 
-ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = 'https://github.com/NousResearch/hermes-agent'
 REVISION = '8911e2e0edf750b104edbdc106d63d6cdac88524'
 RUNTIME_PATH = Path('/usr/local/lib/hermes-agent')

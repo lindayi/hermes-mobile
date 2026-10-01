@@ -1,5 +1,7 @@
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -84,3 +86,14 @@ def test_patch_digest_mismatch_is_rejected(tmp_path):
     patch.write_bytes(patch.read_bytes() + b'\n')
     with pytest.raises(ValueError, match='digest'):
         validate_patch_inputs(tmp_path, spec)
+
+
+def test_entrypoint_rejects_arbitrary_command_line_inputs():
+    result = subprocess.run(
+        [sys.executable, str(ROOT / 'scripts/prepare_native_test_runtime.py'), 'unexpected'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert 'accepts no command-line inputs' in result.stderr
