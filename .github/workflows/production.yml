@@ -4,16 +4,16 @@ on:
     workflows: [Source checks]
     types: [completed]
     branches: [main]
-permissions:
-  contents: read
-  actions: read
-  deployments: write
+permissions: {}
 concurrency:
   group: production-approval-${{ github.event.workflow_run.id }}
   cancel-in-progress: false
+# Risk policy: docs/routine-delivery-spec.md. No repository source, downloaded
+# artifact execution, shell, secrets or production credentials in any job. The host
+# worker independently re-verifies every claim below before deploying.
 jobs:
-  approve-production:
-    name: Approve production
+  classify:
+    name: Classify release
     if: >-
       github.repository == 'lindayi/hermes-mobile' &&
       github.repository_id == '1399942965' &&
@@ -23,33 +23,191 @@ jobs:
       github.event.workflow_run.repository.id == 1399942965 &&
       github.event.workflow_run.head_repository.id == 1399942965 &&
       github.event.workflow_run.conclusion == 'success'
-    environment: production
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      risk: ${{ steps.classify.outputs.risk }}
+      base_sha: ${{ steps.classify.outputs.base_sha }}
     steps:
-      # No checkout, downloaded artifact execution, shell, or production credentials.
-      - name: Create exact approved deployment intent
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+      - name: Classify the full diff since the last deployed revision
+        id: classify
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
           SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
           APPROVAL_RUN_ID: ${{ github.run_id }}
         with:
           script: |
-            const owner = 'lindayi', repo = 'hermes-mobile';
+            const owner = 'lindayi', repo = 'hermes-mobile', OWNER_ID = 5164171, BOT_ID = 41898282;
+            const HEX = /^[0-9a-f]{40}$/;
             const ensure = (condition, message) => { if (!condition) throw new Error(message); };
             const sourceRunId = Number(process.env.SOURCE_RUN_ID);
             const approvalRunId = Number(process.env.APPROVAL_RUN_ID);
             const sha = process.env.SOURCE_SHA;
             ensure(Number.isSafeInteger(sourceRunId) && sourceRunId > 0 &&
                    Number.isSafeInteger(approvalRunId) && approvalRunId === context.runId &&
-                   /^[0-9a-f]{40}$/.test(sha), 'Invalid fixed intent inputs');
-            ensure(process.env.GITHUB_RUN_ATTEMPT === '1', 'Approval reruns require new owner approval intent');
+                   HEX.test(sha), 'Invalid fixed intent inputs');
+            ensure(process.env.GITHUB_RUN_ATTEMPT === '1', 'Production workflow reruns require a new source run');
             ensure(context.repo.owner === owner && context.repo.repo === repo &&
                    context.ref === 'refs/heads/main' && context.sha === sha, 'Default-main context mismatch');
             const {data: repository} = await github.rest.repos.get({owner, repo});
             const sameRepo = r => r && r.id === 1399942965 && r.full_name === 'lindayi/hermes-mobile';
-            ensure(sameRepo(repository) && repository.owner.id === 5164171 &&
+            ensure(sameRepo(repository) && repository.owner.id === OWNER_ID &&
+                   repository.default_branch === 'main', 'Repository identity mismatch');
+            const {data: source} = await github.rest.actions.getWorkflowRun({owner, repo, run_id: sourceRunId});
+            ensure(source.id === sourceRunId && source.workflow_id === 372155405 &&
+                   source.path === '.github/workflows/ci.yml' && source.event === 'push' &&
+                   source.head_branch === 'main' && source.head_sha === sha &&
+                   source.status === 'completed' && source.conclusion === 'success' &&
+                   sameRepo(source.repository) && sameRepo(source.head_repository), 'Source run is not release eligible');
+            const {data: ref} = await github.rest.git.getRef({owner, repo, ref: 'heads/main'});
+            ensure(ref.ref === 'refs/heads/main' && ref.object.type === 'commit' && ref.object.sha === sha,
+                   'Approved source has been superseded');
+
+            // Deployed base: newest bot-created intent whose newest status is a success
+            // reported by the owner identity (the host worker). Anything newer that the
+            // host touched without success, or any unverifiable record, means unknown.
+            const MAX_HISTORY = 30;
+            const by = (record, id, login) => record && record.creator &&
+              record.creator.id === id && record.creator.login === login;
+            const deployedBase = async () => {
+              const {data: deployments} = await github.rest.repos.listDeployments(
+                {owner, repo, task: 'deploy:mobile', environment: 'production', per_page: 100});
+              ensure(Array.isArray(deployments), 'Invalid deployment history');
+              const ordered = [...deployments].sort((a, b) => (b && b.id) - (a && a.id));
+              for (const [index, deployment] of ordered.entries()) {
+                if (index >= MAX_HISTORY) return [null, 'deployment history exceeds inspection bound'];
+                if (!(deployment && Number.isSafeInteger(deployment.id) && deployment.id > 0 &&
+                      by(deployment, BOT_ID, 'github-actions[bot]') && deployment.task === 'deploy:mobile' &&
+                      deployment.environment === 'production' && HEX.test(deployment.sha))) {
+                  return [null, 'untrusted deployment record'];
+                }
+                const {data: statuses} = await github.rest.repos.listDeploymentStatuses(
+                  {owner, repo, deployment_id: deployment.id, per_page: 100});
+                if (!Array.isArray(statuses) || statuses.length === 0 || statuses.length >= 100) {
+                  return [null, `deployment ${deployment.id} statuses are unverifiable`];
+                }
+                if (statuses.every(s => s && s.state === 'queued' && by(s, BOT_ID, 'github-actions[bot]'))) continue;
+                if (statuses[0] && statuses[0].state === 'success' && by(statuses[0], OWNER_ID, 'lindayi')) {
+                  return [deployment.sha, `owner-reported success of deployment ${deployment.id}`];
+                }
+                return [null, `deployment ${deployment.id} has no owner-reported success`];
+              }
+              return [null, 'no authenticated successful deployment (bootstrap)'];
+            };
+
+            // Exact mirror of deploy/release_policy.py; parity is tested by executing this script.
+            const MAX_FILES = 250, MAX_PATH = 200;
+            const CANONICAL = /^[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)*$/;
+            const FRONTEND = /^frontend\/([a-z0-9][a-z0-9-]*)\.(?:css|html|js|mjs)$/;
+            const FRONTEND_ICON = /^frontend\/icons\/[a-z0-9][a-z0-9-]*\.(?:png|svg)$/;
+            const FRONTEND_SENSITIVE = new Set(['frontend/sw.js', 'frontend/api.mjs', 'frontend/webauthn.mjs',
+              'frontend/manifest.webmanifest']);
+            const FRONTEND_SENSITIVE_TOKENS = new Set(['api', 'auth', 'credential', 'credentials', 'crypto',
+              'login', 'logout', 'passkey', 'passkeys', 'password', 'passwords', 'push', 'secret', 'secrets',
+              'subscription', 'sw', 'token', 'tokens', 'webauthn', 'worker']);
+            const TESTS = [/^tests\/test_[a-z0-9_]+\.py$/, /^tests\/browser\/[a-z0-9][a-z0-9-]*\.(?:spec|test)\.mjs$/,
+              /^tests\/browser\/[a-z0-9_]+_fixture\.py$/, /^tests\/fixtures\/[a-z0-9][a-z0-9-]*\.json$/];
+            const DOC = /^docs\/([a-z0-9][a-z0-9-]*)\.md$/;
+            const DOC_SENSITIVE = ['account', 'admin', 'agent', 'artifact', 'attestation', 'auth', 'backup',
+              'bootstrap', 'ci', 'credential', 'cron', 'delivery', 'deploy', 'development', 'family', 'git',
+              'hosted', 'hygiene', 'implementation', 'install', 'instruction', 'invite', 'job', 'member',
+              'migration', 'native', 'notification', 'operator', 'passkey', 'permission', 'policy', 'privacy',
+              'production', 'push', 'recovery', 'release', 'restore', 'rollback', 'routine', 'runtime',
+              'scheduler', 'secret', 'security', 'signing', 'token', 'webauthn', 'workflow'];
+            const routinePath = path => {
+              if (typeof path !== 'string' || path.length > MAX_PATH || !CANONICAL.test(path)) return false;
+              let match = FRONTEND.exec(path);
+              if (match) {
+                return !FRONTEND_SENSITIVE.has(path) &&
+                  !match[1].split('-').some(token => FRONTEND_SENSITIVE_TOKENS.has(token));
+              }
+              if (FRONTEND_ICON.test(path) || TESTS.some(pattern => pattern.test(path))) return true;
+              match = DOC.exec(path);
+              return Boolean(match) && !DOC_SENSITIVE.some(word => match[1].includes(word));
+            };
+            const STATUS = {added: 'A', removed: 'D', modified: 'M', renamed: 'R'};
+            const classify = files => {
+              if (!Array.isArray(files)) return ['sensitive', ['malformed diff inventory']];
+              if (files.length === 0) return ['sensitive', ['empty diff from deployed base']];
+              if (files.length > MAX_FILES) return ['sensitive', [`overlarge diff: more than ${MAX_FILES} files`]];
+              const reasons = [];
+              for (const file of files) {
+                const status = file && typeof file === 'object' && Object.hasOwn(STATUS, file.status) ?
+                  STATUS[file.status] : null;
+                const previous = file && Object.hasOwn(file, 'previous_filename') ? file.previous_filename : null;
+                if (!status) reasons.push(`unsupported change status: ${file && file.filename}`);
+                else if (status === 'R' && previous === null) reasons.push(`rename without from path: ${file.filename}`);
+                else if (status !== 'R' && previous !== null) reasons.push(`unexpected from path: ${file.filename}`);
+                else if (!routinePath(file.filename)) reasons.push(`sensitive path: ${file.filename}`);
+                else if (status === 'R' && !routinePath(previous)) reasons.push(`sensitive path: ${previous}`);
+              }
+              return reasons.length ? ['sensitive', reasons] : ['routine', []];
+            };
+
+            const [base, basis] = await deployedBase();
+            let risk = 'sensitive', reasons = [basis];
+            if (base) {
+              const {data: comparison} = await github.rest.repos.compareCommitsWithBasehead(
+                {owner, repo, basehead: `${base}...${sha}`});
+              ensure(comparison && ['ahead', 'identical'].includes(comparison.status) &&
+                     comparison.behind_by === 0 && comparison.merge_base_commit &&
+                     comparison.merge_base_commit.sha === base, 'Source does not descend from the deployed base');
+              [risk, reasons] = classify(comparison.files);
+            }
+            core.info(`Deployed base ${base || 'unknown'} (${basis}); risk ${risk}: ${reasons.join('; ') || 'all routine'}`);
+            core.setOutput('risk', risk);
+            core.setOutput('base_sha', base || '');
+
+  promote-routine:
+    name: Promote routine release
+    needs: classify
+    if: needs.classify.outputs.risk == 'routine'
+    # Unprotected after operator cutover; until then the existing reviewer rule only adds a gate.
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+      deployments: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Create exact routine deployment intent
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          APPROVAL_RUN_ID: ${{ github.run_id }}
+          CLASSIFIED_RISK: ${{ needs.classify.outputs.risk }}
+          BASE_SHA: ${{ needs.classify.outputs.base_sha }}
+          RELEASE_RISK: routine
+        with:
+          script: |
+            const owner = 'lindayi', repo = 'hermes-mobile', OWNER_ID = 5164171;
+            const HEX = /^[0-9a-f]{40}$/;
+            const ensure = (condition, message) => { if (!condition) throw new Error(message); };
+            const risk = process.env.RELEASE_RISK, baseSha = process.env.BASE_SHA;
+            const job = {routine: 'promote-routine', sensitive: 'promote-sensitive'}[risk];
+            ensure(job && process.env.GITHUB_JOB === job && process.env.CLASSIFIED_RISK === risk,
+                   'Promotion job does not match the classified risk');
+            ensure(baseSha === '' || HEX.test(baseSha), 'Invalid deployed base');
+            ensure(risk === 'sensitive' || baseSha !== '', 'Routine promotion requires an authenticated deployed base');
+            const sourceRunId = Number(process.env.SOURCE_RUN_ID);
+            const approvalRunId = Number(process.env.APPROVAL_RUN_ID);
+            const sha = process.env.SOURCE_SHA;
+            ensure(Number.isSafeInteger(sourceRunId) && sourceRunId > 0 &&
+                   Number.isSafeInteger(approvalRunId) && approvalRunId === context.runId &&
+                   HEX.test(sha), 'Invalid fixed intent inputs');
+            ensure(process.env.GITHUB_RUN_ATTEMPT === '1', 'Approval reruns require a new intent');
+            ensure(context.repo.owner === owner && context.repo.repo === repo &&
+                   context.ref === 'refs/heads/main' && context.sha === sha, 'Default-main context mismatch');
+            const {data: repository} = await github.rest.repos.get({owner, repo});
+            const sameRepo = r => r && r.id === 1399942965 && r.full_name === 'lindayi/hermes-mobile';
+            ensure(sameRepo(repository) && repository.owner.id === OWNER_ID &&
                    repository.default_branch === 'main', 'Repository identity mismatch');
             const {data: source} = await github.rest.actions.getWorkflowRun({owner, repo, run_id: sourceRunId});
             ensure(source.id === sourceRunId && source.workflow_id === 372155405 &&
@@ -64,17 +222,95 @@ jobs:
             // A successful environment job alone is NOT approval (admins can bypass).
             const {data: reviews} = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals',
                                                         {owner, repo, run_id: approvalRunId});
-            ensure(Array.isArray(reviews), 'Missing owner review history');
-            const production = reviews.filter(r => Array.isArray(r.environments) &&
-                                                   r.environments.some(e => e.name === 'production'));
-            ensure(!production.some(r => r.state === 'rejected') &&
-                   production.some(r => r.state === 'approved' && r.user.id === 5164171 && r.user.login === 'lindayi'),
+            ensure(Array.isArray(reviews), 'Missing review history');
+            ensure(!reviews.some(r => r && r.state === 'rejected'), 'Production review rejected');
+            ensure(risk === 'routine' || reviews.some(r => r && r.state === 'approved' && r.user &&
+                     r.user.id === OWNER_ID && r.user.login === 'lindayi' && Array.isArray(r.environments) &&
+                     r.environments.some(e => e && e.name === 'production-sensitive')),
                    'Actual owner approval required; environment bypass is not authorization');
             const {data: deployment} = await github.rest.repos.createDeployment({
               owner, repo, ref: sha, task: 'deploy:mobile', environment: 'production',
               auto_merge: false, required_contexts: [], transient_environment: false, production_environment: true,
-              description: 'Owner-approved exact main release',
-              payload: {version: 1, source_run_id: sourceRunId, approval_run_id: approvalRunId}
+              description: risk === 'routine' ? 'Routine exact main release' : 'Owner-approved sensitive exact main release',
+              payload: {version: 2, source_run_id: sourceRunId, approval_run_id: approvalRunId, base_sha: baseSha || null}
+            });
+            ensure(Number.isSafeInteger(deployment.id), 'Deployment creation did not return an ID');
+            await github.rest.repos.createDeploymentStatus({
+              owner, repo, deployment_id: deployment.id, state: 'queued', auto_inactive: false,
+              description: 'Waiting for guarded outbound host worker',
+              log_url: `https://github.com/${owner}/${repo}/actions/runs/${approvalRunId}`
+            });
+
+  promote-sensitive:
+    name: Promote sensitive release
+    needs: classify
+    if: needs.classify.outputs.risk == 'sensitive'
+    # Required reviewer: lindayi (5164171). The script also requires that review.
+    environment: production-sensitive
+    permissions:
+      contents: read
+      actions: read
+      deployments: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Create exact owner-approved sensitive deployment intent
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          APPROVAL_RUN_ID: ${{ github.run_id }}
+          CLASSIFIED_RISK: ${{ needs.classify.outputs.risk }}
+          BASE_SHA: ${{ needs.classify.outputs.base_sha }}
+          RELEASE_RISK: sensitive
+        with:
+          script: |
+            const owner = 'lindayi', repo = 'hermes-mobile', OWNER_ID = 5164171;
+            const HEX = /^[0-9a-f]{40}$/;
+            const ensure = (condition, message) => { if (!condition) throw new Error(message); };
+            const risk = process.env.RELEASE_RISK, baseSha = process.env.BASE_SHA;
+            const job = {routine: 'promote-routine', sensitive: 'promote-sensitive'}[risk];
+            ensure(job && process.env.GITHUB_JOB === job && process.env.CLASSIFIED_RISK === risk,
+                   'Promotion job does not match the classified risk');
+            ensure(baseSha === '' || HEX.test(baseSha), 'Invalid deployed base');
+            ensure(risk === 'sensitive' || baseSha !== '', 'Routine promotion requires an authenticated deployed base');
+            const sourceRunId = Number(process.env.SOURCE_RUN_ID);
+            const approvalRunId = Number(process.env.APPROVAL_RUN_ID);
+            const sha = process.env.SOURCE_SHA;
+            ensure(Number.isSafeInteger(sourceRunId) && sourceRunId > 0 &&
+                   Number.isSafeInteger(approvalRunId) && approvalRunId === context.runId &&
+                   HEX.test(sha), 'Invalid fixed intent inputs');
+            ensure(process.env.GITHUB_RUN_ATTEMPT === '1', 'Approval reruns require a new intent');
+            ensure(context.repo.owner === owner && context.repo.repo === repo &&
+                   context.ref === 'refs/heads/main' && context.sha === sha, 'Default-main context mismatch');
+            const {data: repository} = await github.rest.repos.get({owner, repo});
+            const sameRepo = r => r && r.id === 1399942965 && r.full_name === 'lindayi/hermes-mobile';
+            ensure(sameRepo(repository) && repository.owner.id === OWNER_ID &&
+                   repository.default_branch === 'main', 'Repository identity mismatch');
+            const {data: source} = await github.rest.actions.getWorkflowRun({owner, repo, run_id: sourceRunId});
+            ensure(source.id === sourceRunId && source.workflow_id === 372155405 &&
+                   source.path === '.github/workflows/ci.yml' && source.event === 'push' &&
+                   source.head_branch === 'main' && source.head_sha === sha &&
+                   source.status === 'completed' && source.conclusion === 'success' &&
+                   sameRepo(source.repository) && sameRepo(source.head_repository), 'Source run is not release eligible');
+            const {data: ref} = await github.rest.git.getRef({owner, repo, ref: 'heads/main'});
+            ensure(ref.ref === 'refs/heads/main' && ref.object.type === 'commit' && ref.object.sha === sha,
+                   'Approved source has been superseded');
+            // The REST review-history schema is an array of {state,user,environments,comment}.
+            // A successful environment job alone is NOT approval (admins can bypass).
+            const {data: reviews} = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals',
+                                                        {owner, repo, run_id: approvalRunId});
+            ensure(Array.isArray(reviews), 'Missing review history');
+            ensure(!reviews.some(r => r && r.state === 'rejected'), 'Production review rejected');
+            ensure(risk === 'routine' || reviews.some(r => r && r.state === 'approved' && r.user &&
+                     r.user.id === OWNER_ID && r.user.login === 'lindayi' && Array.isArray(r.environments) &&
+                     r.environments.some(e => e && e.name === 'production-sensitive')),
+                   'Actual owner approval required; environment bypass is not authorization');
+            const {data: deployment} = await github.rest.repos.createDeployment({
+              owner, repo, ref: sha, task: 'deploy:mobile', environment: 'production',
+              auto_merge: false, required_contexts: [], transient_environment: false, production_environment: true,
+              description: risk === 'routine' ? 'Routine exact main release' : 'Owner-approved sensitive exact main release',
+              payload: {version: 2, source_run_id: sourceRunId, approval_run_id: approvalRunId, base_sha: baseSha || null}
             });
             ensure(Number.isSafeInteger(deployment.id), 'Deployment creation did not return an ID');
             await github.rest.repos.createDeploymentStatus({

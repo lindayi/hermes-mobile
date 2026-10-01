@@ -1,6 +1,7 @@
 """Synthetic outbound API/subprocess/SQLite tests; never touch live services."""
 import copy
 import importlib.util
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -10,6 +11,11 @@ NOW = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
 REPO = {'id': 1399942965, 'full_name': 'lindayi/hermes-mobile',
         'owner': {'id': 5164171, 'login': 'lindayi'}, 'default_branch': 'main'}
 PREFIX = '/repos/lindayi/hermes-mobile'
+BASE = 'b' * 40
+RELEASE = 'e' * 32
+OID = '1' * 40
+ZERO = '0' * 40
+V2_JOBS = PREFIX + '/actions/runs/20/jobs?filter=latest&per_page=100'
 
 
 def module():
@@ -328,19 +334,47 @@ def production_workflow():
     return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
 
 
+GITHUB_SCRIPT = 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'  # v9.0.0
+JOB_NAMES = {'classify': 'Classify release', 'promote-routine': 'Promote routine release',
+             'promote-sensitive': 'Promote sensitive release'}
+
+
 def test_workflow_and_units_have_no_untrusted_checkout_or_production_runner():
     from pathlib import Path
     workflow = production_workflow()
     assert workflow['on'] == {'workflow_run': {'workflows': ['Source checks'], 'types': ['completed'], 'branches': ['main']}}
-    assert workflow['permissions'] == {'contents': 'read', 'actions': 'read', 'deployments': 'write'}
-    job = workflow['jobs']['approve-production']
-    assert job['environment'] == 'production'
-    assert job['name'] == 'Approve production'
-    assert job['runs-on'] == 'ubuntu-24.04'
-    assert len(job['steps']) == 1
-    assert job['steps'][0]['uses'] == 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
-    assert 'github.event.workflow_run.event' in job['if']
-    assert 'github.event.workflow_run.conclusion' in job['if']
+    assert workflow['permissions'] == {}
+    assert {key: job['name'] for key, job in workflow['jobs'].items()} == JOB_NAMES
+    read = {'contents': 'read', 'actions': 'read', 'deployments': 'read'}
+    write = {'contents': 'read', 'actions': 'read', 'deployments': 'write'}
+    classify = workflow['jobs']['classify']
+    assert classify['permissions'] == read and 'environment' not in classify and 'needs' not in classify
+    for condition in ("github.repository == 'lindayi/hermes-mobile'", "github.repository_id == '1399942965'",
+                      "github.ref == 'refs/heads/main'", "github.event.workflow_run.event == 'push'",
+                      "github.event.workflow_run.head_branch == 'main'",
+                      'github.event.workflow_run.repository.id == 1399942965',
+                      'github.event.workflow_run.head_repository.id == 1399942965',
+                      "github.event.workflow_run.conclusion == 'success'"):
+        assert condition in classify['if']
+    environments = {'promote-routine': 'production', 'promote-sensitive': 'production-sensitive'}
+    for key, environment in environments.items():
+        job = workflow['jobs'][key]
+        risk = key.split('-')[1]
+        assert job['environment'] == environment
+        assert job['needs'] == 'classify'
+        assert job['if'] == f"needs.classify.outputs.risk == '{risk}'"
+        assert job['permissions'] == write
+        assert job['steps'][0]['env']['RELEASE_RISK'] == risk
+    scripts = [workflow['jobs'][key]['steps'][0]['with']['script'] for key in environments]
+    assert scripts[0] == scripts[1]  # One reviewed promotion script; job ID selects the path.
+    for job in workflow['jobs'].values():
+        assert job['runs-on'] == 'ubuntu-24.04'
+        assert len(job['steps']) == 1
+        assert job['steps'][0]['uses'] == GITHUB_SCRIPT
+        assert '${{' not in job['steps'][0]['with']['script']  # No expression-to-JavaScript injection.
+    text = (Path(__file__).resolve().parents[1] / '.github/workflows/production.yml').read_text()
+    assert 'checkout' not in text and 'secrets.' not in text
+    assert not re.search(r'^\s*(?:-\s*)?run:', text, re.M)  # No shell steps.
     root = Path(__file__).resolve().parents[1]
     service = root / 'deploy/hermes-mobile-delivery.service'
     timer = root / 'deploy/hermes-mobile-delivery.timer'
@@ -353,54 +387,235 @@ def test_workflow_and_units_have_no_untrusted_checkout_or_production_runner():
     assert 'OnUnitInactiveSec=' in timer.read_text()
 
 
-@pytest.mark.parametrize('fault', [None, 'pr', 'fork', 'old_main', 'no_owner', 'rerun'])
-def test_approval_script_executes_only_fixed_validated_intent(tmp_path, fault):
+HARNESS = r'''
+const INPUT = __INPUT__;
+const P = '/repos/lindayi/hermes-mobile';
+const reads = [], writes = [], outputs = {};
+const read = async (path, params) => {
+  if (params.owner !== 'lindayi' || params.repo !== 'hermes-mobile') throw new Error('foreign repository');
+  reads.push({path, params});
+  if (!(path in INPUT.api)) { const error = new Error('Not Found: ' + path); error.status = 404; throw error; }
+  return {data: JSON.parse(JSON.stringify(INPUT.api[path]))};
+};
+const core = {setFailed: msg => {throw new Error(msg)}, info: () => {}, notice: () => {},
+  setOutput: (name, value) => { outputs[name] = String(value); }};
+const context = {repo: {owner: 'lindayi', repo: 'hermes-mobile'}, runId: 20,
+  ref: 'refs/heads/main', sha: INPUT.sha};
+const github = {rest: {
+  repos: {get: p => read(`/repos/${p.owner}/${p.repo}`, p),
+    listDeployments: p => read(`${P}/deployments`, p),
+    listDeploymentStatuses: p => read(`${P}/deployments/${p.deployment_id}/statuses`, p),
+    compareCommitsWithBasehead: p => read(`${P}/compare/${p.basehead}`, p),
+    createDeployment: async data => { writes.push(data); return {data: {id: 50}}; },
+    createDeploymentStatus: async data => { writes.push(data); return {data: {}}; }},
+  git: {getRef: p => read(`${P}/git/ref/${p.ref}`, p)},
+  actions: {getWorkflowRun: p => read(`${P}/actions/runs/${p.run_id}`, p)}},
+  request: (route, p) => read(route.split(' ')[1].replace(/\{(\w+)\}/g, (_, key) => p[key]), p)};
+(async () => { try { await (async () => { __SCRIPT__ })(); console.log(JSON.stringify({reads, writes, outputs})); }
+catch (e) { console.log(JSON.stringify({reads, writes, outputs, error: String(e)})); }})();
+'''
+
+
+def run_script(job, api, *, env=None, main=SHA):
     import json
     import os
     import subprocess
-    workflow = production_workflow()
-    script = workflow['jobs']['approve-production']['steps'][0]['with']['script']
-    assert '${{' not in script  # No expression-to-JavaScript injection.
-    request, api = evidence()
+    script = production_workflow()['jobs'][job]['steps'][0]['with']['script']
+    api = {**api, PREFIX + '/git/ref/heads/main': {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': main}}}
+    harness = HARNESS.replace('__INPUT__', json.dumps({'api': api, 'sha': SHA})).replace('__SCRIPT__', script)
+    environment = {**os.environ, 'SOURCE_RUN_ID': '10', 'APPROVAL_RUN_ID': '20', 'SOURCE_SHA': SHA,
+                   'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_JOB': job, **(env or {})}
+    result = subprocess.run(['/home/lindayi/.hermes/node/bin/node', '-e', harness],
+                            env=environment, check=True, text=True, capture_output=True, timeout=60)
+    return json.loads(result.stdout)
+
+
+BOT = {'id': 41898282, 'login': 'github-actions[bot]', 'type': 'Bot'}
+OWNER = {'id': 5164171, 'login': 'lindayi', 'type': 'User'}
+
+
+def cloud_api(files=None, history=None):
+    """Synthetic API: deployment 7 for BASE succeeded (owner-reported) unless overridden."""
+    _, api = evidence()
+    history = [(7, BASE, BOT, [('success', OWNER), ('in_progress', OWNER), ('queued', BOT)])] \
+        if history is None else history
+    api[PREFIX + '/deployments'] = [{'id': ident, 'sha': sha, 'task': 'deploy:mobile', 'environment': 'production',
+                                     'creator': creator} for ident, sha, creator, _ in history]
+    for ident, _, _, statuses in history:
+        api[PREFIX + f'/deployments/{ident}/statuses'] = [{'state': state, 'creator': who}
+                                                          for state, who in statuses]
+    files = [{'filename': 'frontend/app.js', 'status': 'modified'}] if files is None else files
+    api[PREFIX + f'/compare/{BASE}...{SHA}'] = {'status': 'ahead', 'ahead_by': 2, 'behind_by': 0,
+                                               'merge_base_commit': {'sha': BASE}, 'files': files}
+    return api
+
+
+def test_classify_routine_from_owner_reported_deployed_base_is_read_only():
+    output = run_script('classify', cloud_api())
+    assert 'error' not in output, output
+    assert output['outputs'] == {'risk': 'routine', 'base_sha': BASE}
+    assert not output['writes']
+    listing = [r for r in output['reads'] if r['path'] == PREFIX + '/deployments'][0]['params']
+    assert (listing['task'], listing['environment']) == ('deploy:mobile', 'production')
+
+
+@pytest.mark.parametrize('history,base', [
+    ([], ''),  # Bootstrap: no authenticated deployment history.
+    ([(7, BASE, BOT, [('success', {'id': 9, 'login': 'mallory'}), ('queued', BOT)])], ''),
+    ([(7, BASE, BOT, [('success', BOT), ('queued', BOT)])], ''),
+    ([(7, BASE, OWNER, [('success', OWNER)])], ''),  # Not a bot-created intent.
+    ([(8, 'c' * 40, BOT, [('failure', OWNER), ('in_progress', OWNER), ('queued', BOT)]),
+      (7, BASE, BOT, [('success', OWNER), ('queued', BOT)])], ''),
+    ([(8, 'c' * 40, BOT, [('in_progress', OWNER), ('queued', BOT)]),
+      (7, BASE, BOT, [('success', OWNER), ('queued', BOT)])], ''),
+    ([(8, 'c' * 40, BOT, [('queued', BOT)]), (7, BASE, BOT, [('success', OWNER), ('queued', BOT)])], BASE),
+    ([(8, 'c' * 40, BOT, []), (7, BASE, BOT, [('success', OWNER)])], ''),
+])
+def test_classify_trusts_only_authentic_owner_reported_success(history, base):
+    output = run_script('classify', cloud_api(history=history))
+    assert 'error' not in output, output
+    assert output['outputs'] == {'risk': 'routine' if base else 'sensitive', 'base_sha': base}
+
+
+def test_classify_history_inspection_is_bounded():
+    history = [(200 - index, 'c' * 40, BOT, [('queued', BOT)]) for index in range(30)] + \
+        [(7, BASE, BOT, [('success', OWNER)])]
+    output = run_script('classify', cloud_api(history=history))
+    assert output['outputs'] == {'risk': 'sensitive', 'base_sha': ''}
+
+
+@pytest.mark.parametrize('compare', [
+    {'status': 'diverged', 'behind_by': 1}, {'status': 'behind', 'behind_by': 2},
+    {'merge_base_commit': {'sha': 'c' * 40}}, {'status': 'ahead', 'behind_by': None}])
+def test_classify_refuses_source_not_descending_from_base(compare):
+    api = cloud_api()
+    api[PREFIX + f'/compare/{BASE}...{SHA}'].update(compare)
+    output = run_script('classify', api)
+    assert output.get('error') and not output['outputs'] and not output['writes']
+
+
+@pytest.mark.parametrize('fault', ['pr', 'fork', 'old_main', 'rerun', 'source_failed', 'other_workflow'])
+def test_classify_requires_trusted_current_push_source(fault):
+    api = cloud_api()
     source = api[PREFIX + '/actions/runs/10']
+    env, main = {}, SHA
     if fault == 'pr':
         source['event'] = 'pull_request'
-    if fault == 'fork':
+    elif fault == 'fork':
         source['head_repository']['id'] = 123
-    main_sha = 'b' * 40 if fault == 'old_main' else SHA
-    reviews = [] if fault == 'no_owner' else api[PREFIX + '/actions/runs/20/approvals']
-    harness = '''
-const source = INPUT.source;
-const calls = [];
-const core = {setFailed: msg => {throw new Error(msg)}, info: () => {}};
-const context = {repo:{owner:'lindayi',repo:'hermes-mobile'}, runId:20,
-  ref:'refs/heads/main', sha:INPUT.sha, payload:{workflow_run:source}};
-const github = {rest:{
-  repos:{get:async()=>({data:INPUT.repo}),
-    createDeployment:async data=>{calls.push(data); return {data:{id:50}}},
-    createDeploymentStatus:async data=>{calls.push(data); return {data:{}}}},
-  git:{getRef:async()=>({data:{ref:'refs/heads/main',object:{type:'commit',sha:INPUT.main}}})},
-  actions:{getWorkflowRun:async()=>({data:source})}},
-  request:async()=>({data:INPUT.reviews})};
-(async()=>{try { await (async()=>{ SCRIPT })(); console.log(JSON.stringify({calls})); }
-catch (e) { console.log(JSON.stringify({calls,error:String(e)})); }})();
-'''.replace('INPUT', json.dumps({'source': source, 'sha': SHA, 'repo': REPO, 'main': main_sha,
-                               'reviews': reviews})).replace('SCRIPT', script)
-    # Syntax above uses object literals in property access; bracket for parser clarity.
-    env = {**os.environ, 'SOURCE_RUN_ID': '10', 'APPROVAL_RUN_ID': '20', 'SOURCE_SHA': SHA,
-           'GITHUB_RUN_ATTEMPT': '2' if fault == 'rerun' else '1'}
-    result = subprocess.run(['/home/lindayi/.hermes/node/bin/node', '-e', harness],
-                            env=env, check=True, text=True, capture_output=True)
-    output = json.loads(result.stdout)
-    if fault:
-        assert output.get('error') and not output['calls']
-    else:
-        assert 'error' not in output
-        deployment, status = output['calls']
-        assert deployment['ref'] == SHA and deployment['task'] == 'deploy:mobile'
-        assert deployment['auto_merge'] is False and deployment['required_contexts'] == []
-        assert deployment['payload'] == {'version': 1, 'source_run_id': 10, 'approval_run_id': 20}
-        assert status['state'] == 'queued' and status['deployment_id'] == 50
+    elif fault == 'old_main':
+        main = 'c' * 40
+    elif fault == 'rerun':
+        env['GITHUB_RUN_ATTEMPT'] = '2'
+    elif fault == 'source_failed':
+        source['conclusion'] = 'failure'
+    elif fault == 'other_workflow':
+        source['workflow_id'] = 9
+    output = run_script('classify', api, env=env, main=main)
+    assert output.get('error') and not output['outputs']
+
+
+def parity_cases():
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location('release_policy_cases', Path(__file__).with_name('test_release_policy.py'))
+    tables = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tables)
+    cases = [[('modified', path, None)] for path in tables.ROUTINE_PATHS + tables.SENSITIVE_PATHS]
+    cases += [
+        [], [('added', 'frontend/new.js', None), ('removed', 'docs/ux.md', None)],
+        [('renamed', 'frontend/app.js', 'backend/app.py')], [('renamed', 'frontend/b.js', 'frontend/a.js')],
+        [('renamed', 'frontend/b.js', None)], [('copied', 'frontend/b.js', 'frontend/a.js')],
+        [('changed', 'frontend/app.js', None)], [('unchanged', 'frontend/app.js', None)],
+        [('modified', 'frontend/app.js', 'frontend/app.js')],
+        [('modified', f'tests/test_{index}.py', None) for index in range(250)],
+        [('modified', f'tests/test_{index}.py', None) for index in range(251)],
+    ]
+    return cases
+
+
+def test_cloud_classifier_matches_host_policy_exactly():
+    """Execute the actual workflow classifier for every case; compare with deploy.release_policy."""
+    from deploy import release_policy
+    letters = {'added': 'A', 'removed': 'D', 'modified': 'M', 'renamed': 'R'}
+    mismatches = []
+    for case in parity_cases():
+        files = [{'filename': path, 'status': status, **({'previous_filename': old} if old else {})}
+                 for status, path, old in case]
+        changes = [release_policy.Change(letters.get(status, status), path, old) for status, path, old in case]
+        expected = release_policy.classify(changes).risk
+        output = run_script('classify', cloud_api(files=files))
+        if output['outputs'].get('risk') != expected:
+            mismatches.append((case[:2], expected, output))
+    assert not mismatches
+
+
+def promote_api(path='routine', reviews=None):
+    _, api = evidence_v2(path)
+    if reviews is not None:
+        api[PREFIX + '/actions/runs/20/approvals'] = reviews
+    return api
+
+
+def test_promote_routine_creates_strict_v2_intent_without_owner_review():
+    output = run_script('promote-routine', promote_api('routine'),
+                        env={'RELEASE_RISK': 'routine', 'CLASSIFIED_RISK': 'routine', 'BASE_SHA': BASE})
+    assert 'error' not in output, output
+    deployment, status = output['writes']
+    assert deployment['ref'] == SHA and deployment['task'] == 'deploy:mobile'
+    assert deployment['environment'] == 'production' and deployment['production_environment'] is True
+    assert deployment['transient_environment'] is False
+    assert deployment['auto_merge'] is False and deployment['required_contexts'] == []
+    assert deployment['payload'] == {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE}
+    assert status['state'] == 'queued' and status['deployment_id'] == 50
+    assert status['log_url'] == 'https://github.com/lindayi/hermes-mobile/actions/runs/20'
+
+
+@pytest.mark.parametrize('base,expected', [(BASE, BASE), ('', None)])
+def test_promote_sensitive_requires_actual_owner_approval(base, expected):
+    output = run_script('promote-sensitive', promote_api('sensitive'),
+                        env={'RELEASE_RISK': 'sensitive', 'CLASSIFIED_RISK': 'sensitive', 'BASE_SHA': base})
+    assert 'error' not in output, output
+    assert output['writes'][0]['payload'] == {'version': 2, 'source_run_id': 10, 'approval_run_id': 20,
+                                              'base_sha': expected}
+
+
+@pytest.mark.parametrize('job,fault', [
+    ('promote-sensitive', 'no_review'), ('promote-sensitive', 'wrong_environment'),
+    ('promote-sensitive', 'other_user'), ('promote-sensitive', 'rejected'),
+    ('promote-routine', 'rejected'), ('promote-routine', 'no_base'), ('promote-routine', 'bad_base'),
+    ('promote-routine', 'risk_mismatch'), ('promote-routine', 'job_mismatch'),
+    ('promote-routine', 'pr'), ('promote-routine', 'fork'), ('promote-routine', 'old_main'),
+    ('promote-routine', 'rerun'), ('promote-sensitive', 'rerun'), ('promote-sensitive', 'old_main'),
+])
+def test_promote_rejects_bypass_replay_superseded_or_mismatched_intent(job, fault):
+    risk = job.split('-')[1]
+    approval = {'state': 'approved', 'user': {'id': 5164171, 'login': 'lindayi'},
+                'environments': [{'name': 'production-sensitive'}]}
+    reviews = {'no_review': [], 'wrong_environment': [{**approval, 'environments': [{'name': 'production'}]}],
+               'other_user': [{**approval, 'user': {'id': 1, 'login': 'lindayi'}}],
+               'rejected': [approval, {**approval, 'state': 'rejected'}]}.get(fault)
+    api = promote_api(risk, reviews)
+    env = {'RELEASE_RISK': risk, 'CLASSIFIED_RISK': risk, 'BASE_SHA': BASE}
+    main = SHA
+    source = api[PREFIX + '/actions/runs/10']
+    if fault == 'no_base':
+        env['BASE_SHA'] = ''
+    elif fault == 'bad_base':
+        env['BASE_SHA'] = 'BASE'
+    elif fault == 'risk_mismatch':
+        env['CLASSIFIED_RISK'] = 'sensitive'
+    elif fault == 'job_mismatch':
+        env['GITHUB_JOB'] = 'promote-sensitive'
+    elif fault == 'pr':
+        source['event'] = 'pull_request'
+    elif fault == 'fork':
+        source['head_repository']['id'] = 123
+    elif fault == 'old_main':
+        main = 'c' * 40
+    elif fault == 'rerun':
+        env['GITHUB_RUN_ATTEMPT'] = '2'
+    output = run_script(job, api, env=env, main=main)
+    assert output.get('error') and not output['writes'], output
 
 
 def test_latest_request_only_and_durable_high_watermark(tmp_path, monkeypatch):
@@ -464,11 +679,6 @@ def test_worker_crash_reservation_and_state_symlinks_do_not_replay(tmp_path, mon
 
 # ---- Version 2: routine/sensitive risk policy (issue #17) -------------------
 
-BASE = 'b' * 40
-RELEASE = 'e' * 32
-OID = '1' * 40
-ZERO = '0' * 40
-V2_JOBS = PREFIX + '/actions/runs/20/jobs?filter=latest&per_page=100'
 
 
 def raw(*entries):

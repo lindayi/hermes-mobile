@@ -12,37 +12,65 @@ the existing guarded controller remains the only publisher/restart authority.
    **372155405**, `.github/workflows/ci.yml`). PRs, forks, dispatch runs, and failed
    source runs are ineligible. The artifact verifier separately checks the actual
    job set, latest attempt, artifact bytes and restricted GitHub attestation.
-2. `.github/workflows/production.yml` runs from the trusted default branch, with
-   **no checkout**. Its single `Approve production` job uses the `production`
-   environment. Configure that environment for main only and required reviewer
-   `lindayi` (user ID **5164171**). The only permissions are contents/actions read
-   and deployments write. The github-script action is commit-pinned.
-3. After actual approval, the job rechecks source provenance and current main,
-   then creates a deployment with exact SHA `ref`, task `deploy:mobile`, environment
-   `production`, `auto_merge: false`, and `required_contexts: []`. The last setting
-   is not a tests bypass: authenticated source CI plus artifact verification are
-   the tests gate. It posts **queued**, never success.
+2. `.github/workflows/production.yml` (`Production approval`) runs from the
+   trusted default branch, with **no repository source** and no shell step. Its
+   three jobs are `Classify release` (contents/actions/deployments read, no
+   environment) followed by exactly one of `Promote routine release` (environment
+   `production`) or `Promote sensitive release` (environment
+   `production-sensitive`, required reviewer `lindayi`, user ID **5164171**). Only
+   the promote jobs have deployments write. The github-script action is
+   commit-pinned. The risk policy is specified in
+   [routine-delivery-spec.md](routine-delivery-spec.md).
+3. The classifier rechecks source provenance and current main, derives the
+   **last deployed base** only from bot-created `deploy:mobile` deployments whose
+   newest status is a `success` reported by the owner identity (the host worker),
+   requires the source to descend from it, and classifies the **entire** diff since
+   that base with an exact mirror of `deploy/release_policy.py`. Missing base,
+   unverifiable history, more than 250 files or any non-allowlisted path is
+   `sensitive`. The promote job rechecks everything, then creates a deployment with
+   exact SHA `ref`, task `deploy:mobile`, environment `production`,
+   `auto_merge: false`, and `required_contexts: []`. The last setting is not a
+   tests bypass: authenticated source CI plus artifact verification are the tests
+   gate. It posts **queued**, never success.
 
    ```json
-   {"version": 1, "source_run_id": 123, "approval_run_id": 456}
+   {"version": 2, "source_run_id": 123, "approval_run_id": 456, "base_sha": "<40 hex or null>"}
    ```
 
-   These are integer IDs only; extra payload keys, booleans, stringified JSON,
-   paths and commands are rejected. There are no executable request fields.
-4. Both producer and host require **actual owner approval history**, not merely
-   a bot creator or a successful protected job. The host binds the deployment to
-   a successful first-attempt `workflow_run` run at the trusted production workflow
-   path/ID, main/default ref, exact same SHA, one successful named job, and a
-   creation timestamp inside that job's execution interval. The endpoint is
-   [`GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals`](https://docs.github.com/en/rest/actions/workflow-runs#get-the-review-history-for-a-workflow-run).
-   Its documented response is an array of `{state, user, environments, comment}`;
-   `state` is `approved`, `rejected`, or `pending`, `user.id` identifies the reviewer,
-   and `environments` contains objects with `name` and `id`. This schema was also
-   checked against GitHub's official
+   Run IDs are integers and `base_sha` is a 40-hex SHA or `null`; extra payload
+   keys, booleans, stringified JSON, paths, commands and any risk field are
+   rejected. **Nothing in the payload can assert that a release is safe.** Legacy
+   `version: 1` intents (`source_run_id`, `approval_run_id` only) remain valid and
+   always require owner approval history as before.
+4. The host binds the deployment to a successful first-attempt `workflow_run` run
+   at the trusted production workflow path/ID, main/default ref and exact same SHA.
+   For version 2 it requires the **exact job set**: `Classify release` succeeded,
+   exactly one promote job succeeded and the other was skipped, every job is on the
+   same run/attempt/SHA, and the deployment was created inside the successful
+   promote job's interval. Job names alone are never sufficient: the host then
+   independently recomputes risk (below) and requires it to match the promote job.
+   A **sensitive** release (and every version 1 intent) requires actual owner
+   approval history from
+   [`GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals`](https://docs.github.com/en/rest/actions/workflow-runs#get-the-review-history-for-a-workflow-run)
+   for the matching environment (`production-sensitive` for v2, `production` for
+   v1). Its documented response is an array of `{state, user, environments,
+   comment}`; `state` is `approved`, `rejected`, or `pending`, `user.id` identifies
+   the reviewer, and `environments` contains objects with `name` and `id`. This
+   schema was also checked against GitHub's official
    [OpenAPI description](https://github.com/github/rest-api-description/blob/main/descriptions/api.github.com/api.github.com.json).
    **There is no review run-attempt field.** Approval workflow reruns are therefore
-   rejected rather than attributing old approval to a new attempt. Any production
-   rejection blocks the request even if another history entry says approved.
+   rejected rather than attributing old approval to a new attempt. Any rejection
+   in the run blocks the request even if another history entry says approved,
+   including a routine one.
+5. **Host recomputation.** Before merging, the host derives its own deployed base
+   from the *installed* controller state: `status.json` `succeeded` with a 40-hex
+   `git_sha`, `current` resolving to that release, and the release's
+   `git-provenance.json` equal to `{"git_sha": ...}`. It verifies both SHAs exist
+   as fetched Git objects, that the source descends from the base, and classifies
+   `git diff --raw -z --no-renames` from trusted Git objects (no merged or
+   unmerged code is executed or imported). Both bases present and different, or a
+   host/cloud risk disagreement, **blocks**. A missing base on either side is
+   bootstrap and must be the owner-approved sensitive path.
 
 GitHub's public environment API may leave `can_admins_bypass: true`; disabling it
 is optional additional UI hardening. An admin-bypassed job with no positive owner
@@ -57,7 +85,7 @@ policy supplied by a request.
   **only the highest deployment ID**, never fall back to an older candidate.
   Persist a high-water mark; disappearance or out-of-order delivery fails closed.
 - Require queued status, exact current main, age no more than 24 hours, successful
-  source and approval runs, and the complete owner-review evidence above. A job
+  source and approval runs, and the complete job/review evidence above. A job
   still finishing is deferred; missing/rejected/expired evidence is blocked.
 - Open the live `runs.sqlite` through a SQLite URI with **`mode=ro`** before source
   synchronization or checks. Do not instantiate `RunJournal` here. Missing or
@@ -66,7 +94,8 @@ policy supplied by a request.
 - Hold a private nonblocking worker lock; take the existing protected controller
   `deploy.lock` while synchronizing. Require canonical clean main, approved HTTPS
   origin and no hidden/ignored deployable changes. Fetch main and **fast-forward
-  only** to the approved SHA. Never stash, reset, switch branches or discard files.
+  only** to the approved SHA, after the version 2 risk recomputation above passes.
+  Never stash, reset, switch branches or discard files.
 - Release the preliminary controller lock (the controller takes it itself),
   recheck remote main and idle status, then durably reserve the attempt **before**
   posting in-progress or starting the controller. The fixed subprocess argv is:
@@ -116,7 +145,7 @@ is preliminary evidence, not a deployment guarantee. JSON states include:
 
 | State | Meaning |
 |---|---|
-| `queued` | No intent yet; inspect GitHub's environment UI for pending owner approval |
+| `queued` | No intent yet; inspect GitHub's environment UI for pending owner approval of a sensitive release |
 | `approval` | An intent exists, but its trusted approval workflow has not completed |
 | `deferred` | Busy/unknown run journal or held worker/controller lock; later tick may retry |
 | `blocked` | Invalid, stale, missing evidence, source issue or operator boundary; inspect reason |
@@ -181,11 +210,19 @@ follow the established guarded controller recovery procedure. Disable the timer
 first when investigating, but let any current activation finish.
 
 After correcting a blocked/failed condition, obtain a **new** successful Source
-checks completion and a **new production workflow run with fresh owner approval**.
+checks completion and a **new production workflow run** (with fresh owner approval
+when it classifies as sensitive).
 Rerunning Source checks on still-current main can produce such a new workflow run;
 rerunning the old approval workflow itself is deliberately unsupported. Do not
 edit the ledger, repost an old approval ID or set success manually to force replay.
 No automatic GitHub status-repair queue or persistent daemon is implemented.
+
+A host/cloud base disagreement typically means a newer deployment succeeded after
+the classifier ran (for example consecutive merges). Rerun Source checks on the
+still-current main to classify again from the newly deployed base. Operator
+bootstrap (no installed Git provenance or no owner-reported success yet) is always
+the sensitive owner-approved path; see
+[routine-delivery-spec.md](routine-delivery-spec.md#operator-bootstrap-and-recovery).
 
 ## Synthetic verification
 
@@ -194,11 +231,12 @@ or uses production artifacts. The focused managed test command is:
 
 ```sh
 HERMES_TEST_PYTHON=/home/lindayi/projects/hermes-mobile/.venv/bin/python \
-  python3 scripts/test.py python -- tests/test_pull_delivery.py
+  python3 scripts/test.py python -- tests/test_pull_delivery.py tests/test_release_policy.py
 ```
 
 Tests use temporary SQLite files, fake GitHub API and controller subprocesses,
 nonblocking temporary-file locks, and execute the actual workflow JavaScript in
-Node against a synthetic API. Hosted job/attestation and controller protections
+Node against a synthetic API, including exact parity of the cloud classifier with
+`deploy/release_policy.py`. Hosted job/attestation and controller protections
 have their own explicit test partitions. Live end-to-end activation remains a
 post-merge, owner-approved operation and can safely defer while chats are active.
