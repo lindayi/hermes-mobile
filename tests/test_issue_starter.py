@@ -130,30 +130,39 @@ class FakeApi:
         if route == "user":
             return {"id": OWNER_ID}
         if route == f"repos/{REPOSITORY}":
-            return {"id": REPOSITORY_ID, "full_name": REPOSITORY}
+            return {
+                "id": REPOSITORY_ID,
+                "full_name": REPOSITORY,
+                "default_branch": "main",
+                "owner": {"id": OWNER_ID},
+            }
         if route == f"repos/{REPOSITORY}/commits/main":
             return {"sha": "b" * 40}
         if route.startswith(f"repos/{REPOSITORY}/issues?"):
             return [self.current_issue] if self.current_issue["state"] == "open" else []
         if route.startswith(f"repos/{REPOSITORY}/issues/{ISSUE_NUMBER}/comments?"):
             return self.comments
+        if route.startswith(f"repos/{REPOSITORY}/issues/41/comments?"):
+            return self.comments
         if route.startswith(f"repos/{REPOSITORY}/issues/{ISSUE_NUMBER}/timeline?"):
             return self.timeline
         if route == f"repos/{REPOSITORY}/issues/{ISSUE_NUMBER}":
             return self.current_issue
-        if route.startswith(f"repos/{REPOSITORY}/agents/tasks/"):
+        if route.startswith(f"agents/repos/{REPOSITORY}/tasks/"):
             return self.task_detail
         if route.startswith(f"repos/{REPOSITORY}/pulls?"):
             return self.pulls
+        if route == f"repos/{REPOSITORY}/pulls/41":
+            return self.pulls[0]
         raise AssertionError(f"Unexpected GET {route}")
 
     def post(self, route, body):
         self.posts.append((route, body))
-        if route == f"repos/{REPOSITORY}/agents/tasks":
+        if route == f"agents/repos/{REPOSITORY}/tasks":
             return self.task_response
-        if route.endswith(f"/pulls/41/comments"):
+        if route.endswith(f"/issues/41/comments"):
             comment = {
-                "id": 8001,
+                "id": 9101,
                 "body": body["body"],
                 "created_at": "2026-10-01T21:00:00Z",
                 "user": {"id": OWNER_ID},
@@ -162,7 +171,7 @@ class FakeApi:
             return comment
         if route.endswith(f"/issues/{ISSUE_NUMBER}/comments"):
             comment = {
-                "id": 8002,
+                "id": 9102,
                 "body": body["body"],
                 "created_at": "2026-10-01T21:00:00Z",
                 "user": {"id": OWNER_ID},
@@ -175,7 +184,7 @@ class FakeApi:
         self.patches.append((route, body))
         for pull in self.pulls:
             if route.endswith(f"/pulls/{pull['number']}"):
-                pull["draft"] = body["draft"] is False
+                pull["draft"] = body["draft"]
                 return pull
         raise AssertionError(f"Unexpected PATCH {route}")
 
@@ -187,7 +196,7 @@ def make_coordinator(tmp_path, api):
 def start_task(tmp_path, api):
     result = make_coordinator(tmp_path, api).run(apply=True)
     assert result["dispatched"] == 1
-    assert len([item for item in api.posts if item[0].endswith("/agents/tasks")]) == 1
+    assert len([item for item in api.posts if item[0].endswith("/tasks")]) == 1
     return result
 
 
@@ -227,8 +236,8 @@ def test_untrusted_stale_or_unverifiable_issue_evidence_never_dispatches(
 def test_dispatch_is_reserved_and_uses_bounded_issue_only_prompt(tmp_path):
     api = FakeApi()
     start_task(tmp_path, api)
-    route, request = next(item for item in api.posts if item[0].endswith("/agents/tasks"))
-    assert route == f"repos/{REPOSITORY}/agents/tasks"
+    route, request = next(item for item in api.posts if item[0].endswith("/tasks"))
+    assert route == f"agents/repos/{REPOSITORY}/tasks"
     assert request["create_pull_request"] is True
     assert request["base_ref"] == "main"
     assert "AGENTS.md" in request["prompt"]
@@ -240,7 +249,7 @@ def test_dispatch_is_reserved_and_uses_bounded_issue_only_prompt(tmp_path):
     saved = state["commands"][f"{ISSUE_NUMBER}:{COMMAND_ID}"]
     assert saved["issue"] == ISSUE_NUMBER
     assert saved["command_id"] == COMMAND_ID
-    assert saved["accepted_issue_sha256"]
+    assert saved["accepted_title_body_sha256"]
     assert saved["accepted_at"] == CREATED
     assert saved["task_id"] == "task-1"
 
@@ -248,7 +257,7 @@ def test_dispatch_is_reserved_and_uses_bounded_issue_only_prompt(tmp_path):
 def test_response_uncertainty_consumes_reservation_without_reposting(tmp_path):
     class UncertainApi(FakeApi):
         def post(self, route, body):
-            if route.endswith("/agents/tasks"):
+            if route.endswith("/tasks"):
                 self.posts.append((route, body))
                 raise TimeoutError("response lost")
             return super().post(route, body)
@@ -260,7 +269,7 @@ def test_response_uncertainty_consumes_reservation_without_reposting(tmp_path):
 
     assert first["blocked"] == 1
     assert second["dispatched"] == 0
-    assert len([item for item in api.posts if item[0].endswith("/agents/tasks")]) == 1
+    assert len([item for item in api.posts     if item[0].endswith("/tasks")]) == 1
     saved = json.loads(store.path.read_text())["commands"][f"{ISSUE_NUMBER}:{COMMAND_ID}"]
     assert saved["phase"] == "unknown"
 
@@ -291,7 +300,7 @@ def test_completed_bound_task_marks_its_draft_pr_ready_and_enrolls_once(tmp_path
     assert api.patches == [(f"repos/{REPOSITORY}/pulls/41", {"draft": False})]
     enrollment = [
         body["body"] for route, body in api.posts
-        if route.endswith("/pulls/41/comments")
+        if route.endswith("/issues/41/comments")
     ]
     assert enrollment == ["/hermes enroll"]
     assert api.pulls[0]["draft"] is False
@@ -326,7 +335,14 @@ def test_task_head_race_blocks_readiness_and_enrollment(tmp_path):
     api = FakeApi(pulls=[pull])
     start_task(tmp_path, api)
     api.task_detail = completed_task()
-    api.pulls[0]["head"]["sha"] = "c" * 40
+    original_get = api.get
+
+    def change_head_after_reservation(route):
+        if route == f"repos/{REPOSITORY}/pulls/41":
+            api.pulls[0]["head"]["sha"] = "c" * 40
+        return original_get(route)
+
+    api.get = change_head_after_reservation
 
     result = make_coordinator(tmp_path, api).run(apply=True)
 
@@ -361,21 +377,23 @@ def test_reopened_issue_requires_a_new_owner_command(tmp_path):
     ]
     api.task_detail = task(state="failed")
 
+    make_coordinator(tmp_path, api).run(apply=True)
     result = make_coordinator(tmp_path, api).run(apply=True)
 
     assert result["dispatched"] == 1
-    assert len([item for item in api.posts if item[0].endswith("/agents/tasks")]) == 2
+    assert len([item for item in api.posts if item[0].endswith("/tasks")]) == 2
 
 
 def test_authenticated_identity_must_be_fixed_owner_and_repository(tmp_path):
     api = FakeApi()
 
     def wrong_identity(route):
-        value = api.get(route)
+        value = original_get(route)
         if route == "user":
             return {"id": 12}
         return value
 
+    original_get = api.get
     api.get = wrong_identity
     with pytest.raises(CoordinatorError):
         make_coordinator(tmp_path, api).run(apply=True)
@@ -389,7 +407,8 @@ def test_private_state_rejects_symlinked_directory_and_readonly_snapshot_is_clea
     link.symlink_to(real, target_is_directory=True)
     store = StateStore(link / "state.json")
 
-    assert store.snapshot()["version"] == 1
+    with pytest.raises(CoordinatorError):
+        store.snapshot()
     assert not list(tmp_path.rglob("*.lock"))
     with pytest.raises(CoordinatorError):
         store.reserve({"issue": ISSUE_NUMBER, "command_id": COMMAND_ID})
