@@ -30,9 +30,12 @@ source import and subsequent changes use protected pull requests.
 ## Migration baseline
 
 The baseline is a separately verified deployed release, not the older project
-working directory. Runtime application source initially remains byte-identical;
-only workflow/deployment controls are changed in this PR. Pre-existing issues such
-as placeholder naming are separate PRs after migration.
+working directory. Runtime application source remains byte-identical except for
+the push-contact default, which uses the public HTTPS URI https://lindayi.me
+instead of personal email. Publication privacy changes also replace one test's
+human-session fixture with synthetic data and sanitize specifications. This PR
+also changes workflow/deployment controls. Pre-existing issues such as placeholder
+naming are separate PRs after migration.
 
 ## Test environments
 
