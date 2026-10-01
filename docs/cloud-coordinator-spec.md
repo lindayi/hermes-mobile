@@ -54,8 +54,8 @@ idle and unknown task states do not release the fixer lock. Completion only
 releases the fixer lock; it is not review or CI success.
 Unidentifiable nonterminal repository tasks conservatively block new dispatch
 until GitHub exposes enough branch, session, or PR evidence to scope them.
-Conflicted or unmergeable pull requests are not sent to a fixer; a neutral
-reconciler must be assigned separately.
+Conflicted, unmergeable, or `behind` pull requests are not sent to a fixer;
+they are reported as needing a separately assigned neutral reconciler.
 
 ## Review, checks, and merge
 
@@ -98,16 +98,38 @@ review gate passes, no fixer may be running, and sensitive authorization is
 current. Both the PR head and the current `main` SHA are re-read before enabling
 auto-merge; the mutation supplies `expectedHeadOid` as the server-side head
 fence. The owner-managed branch rule must also require the PR branch to be
-up to date (strict required checks) and require conversation resolution; the
+up to date (strict required checks) and require conversation resolution, either
+through classic protection or a ruleset `pull_request` rule's
+`parameters.required_review_thread_resolution`; a malformed `pull_request` rule
+leaves the policy unproven and blocks status publication and auto-merge. The
 coordinator cannot alter branch protection. Current review, thread, check, and policy evidence is fetched again
 immediately before the merge request. A new head has no inherited
 `cloud-review` success, so required branch protection must keep it blocked until
 the new head is evaluated. Ambiguous writes are reconciled from GitHub state and
-are never blindly repeated.
+are never blindly repeated. An auto-merge request is recorded as sent only when
+the mutation returns the exact pull-request node ID and a valid, nonempty
+`autoMergeRequest.enabledAt`; any other response remains uncertain until
+GitHub's pull-request state proves auto-merge was enabled.
 
 The durable outbox posts deduplicated, fixed-text outcome/blocker comments on
 public PRs. It carries no logs, credentials, arbitrary issue text, or private
 runtime data. The owner mobile Inbox is not implemented by this adapter.
+Before posting, an existing marker in the fully read PR comments is treated as
+proof the outcome was already published.
+
+## Bounded state
+
+The serialized state is limited to 4 MiB. The cap is checked before the
+temporary file replaces the state; a write that would exceed it fails the cycle
+with a clear error and leaves the prior valid state unchanged. Only records with
+positive terminal proof are compacted: verified-completed fixer tasks and
+sent/superseded/blocked status, auto-merge and outbox records of a PR observed
+closed or merged, plus those records on non-current heads of an open PR. They
+are replaced by a per-PR tombstone (a status-generation watermark and bounded
+lists of retired auto-merge and outbox key digests). Pending, sending, uncertain
+and sent fixer claims, every record on the current head, enrollments with their
+command fence and attempt budget, and consumed command IDs are never dropped;
+the oldest command IDs fold into a numeric watermark that still fences replays.
 
 ## External policy boundary
 
