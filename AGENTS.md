@@ -1,71 +1,163 @@
-# Required development workflow
+# Contributor workflow
 
-This is the canonical Hermes Mobile source: https://github.com/lindayi/hermes-mobile.
-The local integration checkout is `/home/lindayi/projects/hermes-mobile-git`.
-Older `hermes-mobile-*` source copies are migration inputs, not deployment sources.
-Port unfinished legacy work by applying its diff against its own verified baseline
-to a new task worktree; never overlay the entire older copy onto current main.
-Preserve those inputs until their work is merged or explicitly discarded.
+This is the authoritative, portable guide for Hermes Mobile development. Keep it
+under 20,000 characters; detailed contracts belong in `docs/`. Read this file and
+the relevant product specification before editing. The required review and final
+integration gates are governed by [docs/git-development-spec.md](docs/git-development-spec.md),
+with portable execution details in [docs/development-workflow.md](docs/development-workflow.md).
+See [README.md](README.md) for the canonical source and local integration checkout.
 
-## Before editing
+## Plan and isolate work
 
-Read this file and the relevant specification. Fetch origin. Use a dedicated branch
-and worktree per task under `../hermes-mobile-worktrees/<task>` from `origin/main`.
-Never switch/reset another session's checkout or edit immutable deployed releases.
-Check open PRs for overlapping work; preserve their intended behaviors.
-Record acceptance cases first; demonstrate RED then GREEN for behavior changes.
+Start from an approved actionable issue. Search existing issues and pull requests
+for duplicates and overlapping work, then record the baseline, scope, and observable
+acceptance cases before implementation. Work on a task-specific branch/worktree
+based on freshly fetched `origin/main`; do not switch, reset, or edit another task's
+checkout. If another change overlaps, preserve its intended behavior and coordinate
+before expanding scope.
 
-## Verification and pull requests
+Start from an approved issue; search for duplicates and overlapping PRs, then record scope and acceptance cases before implementation.
 
-Use `HERMES_TEST_PYTHON=/home/lindayi/projects/hermes-mobile/.venv/bin/python
-python3 scripts/test.py python|js|browser -- <explicit test files>` for focused tests;
-final PR coverage combines required hosted `source-ci` (all portable Python, JS
-and generated-assets browser shards) with `python3 scripts/ci_tests.py host` using
-the same HERMES_TEST_PYTHON. Run only focused regressions locally during iteration.
-Do not repeat hosted suites on the production server routinely. The explicit host
-manifest is `.github/host-tests.json`; new files default to hosted execution.
-No isolation/cleanup bypass. The full managed `all` remains an opt-in diagnostic
-and the conservative release-stage gate, not the ordinary premerge server task. Never run
-live probes, account enrollment, real model calls, or operator scripts as tests.
+For behavior changes, preserve existing assertions and demonstrate a real RED test followed by GREEN.
 
-Commit and push task branches; open GitHub PRs. Do not push changes directly to main.
-Each PR records scope, baseline, acceptance tests and exact observed verification.
-An independent reviewer agent reviews the exact head SHA, posting a formal GitHub
-COMMENT review with actionable inline comments. The same GitHub account cannot
-approve its own PR; do not fabricate a human approval. Report the verified outcome
-as the `agent-review` commit status only after review. Report `integration-tests`
-on the exact tested head only after both the entire local host-compatibility
-suite and the matching hosted `source-ci` aggregate succeed. Record both results
-and the workflow URL. Never use only a hosted subset or only local host tests to
-claim full coverage. New commits invalidate all old-head evidence.
+Use the managed test runner with explicit test paths for focused local checks; choose Python through HERMES_TEST_PYTHON or the repository .venv, never a fixed owner-specific path.
 
-Address findings with follow-up commits, not silent amendments. Reply to each
-review thread with the fix commit and test evidence; resolve it only after checking
-that the finding is addressed. Preserve the discussion and dissent where relevant.
-All required checks must pass, all review threads be resolved, and the branch be
-current with main before merging through GitHub. No owner/admin bypass.
+Final PR coverage combines required hosted `source-ci` (all portable Python, JS
+and generated-assets browser shards) with the entire residual host-compatibility
+suite, using the same selected Python:
 
-## Parallel integration
+```sh
+HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
+  python3 scripts/ci_tests.py host
+```
 
-Merge and deploy one revision at a time. Merge updated origin/main into a PR branch
-rather than force-pushing reviewed history. For conflicts, gather both PR intents,
-base and both diffs; use a neutral reviewer/reconciler, combine compatible behavior,
-regenerate derived files and add tests for both sides and their interaction. Record
-resolution decisions in GitHub. Rerun tests and review on the resulting head.
-Do not resolve wholesale with ours/theirs. Ask the owner only for genuinely
-incompatible product requirements; technical conflicts are the agent's job.
+Run only focused regressions locally during iteration. Do not repeat hosted suites
+on the production server routinely. The explicit host manifest is
+`.github/host-tests.json`; new files default to hosted execution. The full managed
+`all` remains an opt-in diagnostic and the conservative release-stage gate, not
+the ordinary premerge server task.
 
-## Deployment and cleanup
+## Develop and test
 
-Only the canonical clean checkout of freshly fetched origin/main may deploy.
-Use the guarded main deployment entrypoint; retain existing drain, lock, native
-fingerprint and rollback protections. Never restart active sessions or use legacy
-candidate operators to bypass Git provenance. Record the deployed commit.
+For behavior changes, write a focused regression that fails for the intended reason,
+then make the smallest complete change and show it pass. Keep existing assertions;
+do not weaken or remove unrelated tests. Review the final diff for scope and data
+handling.
 
-After a PR is merged, verify the remote merge and preserve any uncommitted work,
-then remove that task's worktree and merged local/remote branch. Clean disposable
-build/test artifacts with the managed cleanup path. Never delete another active
-session's files or unknown/unmerged work. Git history replaces source snapshots;
-retain only bounded operational rollback releases still referenced by running
-services, and runtime data/backups required for recovery. Do not sweep old release
-roots while any service still references them.
+Use the managed runner for local checks and provide explicit test paths for focused
+work:
+
+```sh
+HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
+  python3 scripts/test.py python -- tests/test_agent_instructions.py
+HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
+  python3 scripts/test.py js -- tests/browser/example.test.mjs
+HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
+  python3 scripts/test.py browser -- tests/browser/example.spec.mjs
+```
+
+Replace the example paths with existing tests relevant to the change. The selected
+Python must have the locked test dependencies; the current source runner also uses
+the Hermes-compatible Node executable provided by its environment. Use the
+installed Playwright cache. Do not bypass runner isolation or its cleanup, and do
+not run a local full suite merely because hosted CI runs one.
+
+Use cloud execution by default for substantial coding, testing, and review; local work remains supported for small fixes and offline work under the same pull-request gates.
+
+Never use production credentials, real accounts, real model calls, native production homes or databases, private evidence uploads, or live enrollment as tests.
+
+When cloud setup is available, it uses an ephemeral environment and repository
+lockfiles. The setup workflow prepares dependencies only; it does not run the full
+suite. Browser installation and browser tests use a private
+`PLAYWRIGHT_BROWSERS_PATH` and set `PLAYWRIGHT_SKIP_BROWSER_GC=1`.
+
+No production credentials, real accounts, real model calls, native production
+homes or databases, private evidence uploads, or live enrollment may be used as
+tests. Use only public synthetic diagnostics. Never run live probes or operator
+scripts as tests.
+
+## Pull requests and review
+
+Every change links its issue and specification, describes the baseline and scope,
+records acceptance cases, and reports exact observed test/CI evidence. Use the
+repository issue and pull-request templates. State clearly when a check was not
+run; do not imply an unobserved pass.
+
+A review comment is not an approval or a passing review status; require independent formal COMMENT review for every PR and verify evidence against the exact head SHA.
+
+Request Copilot review for pull requests when it is available, and request a fresh
+review after follow-up commits. Automatic review/re-review is controlled by GitHub
+repository settings, not by these instruction files; do not claim this repository
+has that setting enabled unless verified. A Copilot suggestion is feedback, not an
+instruction: judge it against the code and tests. Authentication, deployment,
+migration, and semantic merge-conflict changes require targeted independent review.
+
+Required checks and protections are authoritative. Do not fabricate reviews,
+approvals, check results, or identities. Review and test evidence applies only to
+the exact head SHA; any new commit invalidates it. Address findings with follow-up
+commits and reply to their actual GitHub threads. Never self-approve, bypass
+protections, or write directly to `main`.
+
+`source-ci`, `integration-tests`, and `agent-review` must pass on the exact head SHA.
+Publish `agent-review` only after verifying the independent review of that head.
+Publish `integration-tests` only after verifying complete final integration under
+the linked development workflow: the entire residual host-compatibility suite and
+the matching hosted `source-ci` aggregate must succeed on the same exact head SHA.
+Record both results and the workflow URL. Never use only a hosted subset or only
+local host tests to claim full coverage. Focused checks or dependency setup alone
+are not final integration. Require resolved review threads and a branch current with freshly
+fetched `origin/main` before GitHub merge. No owner/admin bypass.
+
+Merge and deploy one revision at a time. Merge updated `origin/main` into the PR branch;
+never rebase or force-push reviewed history. Gather both PR intents, the common base,
+and both diffs for a neutral reviewer/reconciler. Preserve compatible behavior,
+regenerate derived files from their sources, and test both intended behaviors and
+their interaction; never resolve conflicts by wholesale choosing one side.
+Record resolution decisions on GitHub and obtain independent review and final
+integration evidence for the updated head. Escalate to the owner only for genuinely
+incompatible product requirements, not routine technical conflicts.
+
+## Privacy, merge, and deployment
+
+Never commit credentials, private account/session content, production data, native
+homes/databases, private operational evidence, or generated artifacts. Keep test
+state synthetic and isolated. Preserve user/member isolation, shared-session
+ownership, messaging, scheduling, and Docker-free deployment.
+
+Merging and deployment are separate; only guarded deployment from verified main is allowed, and coding agents never access production.
+
+Only the canonical, clean, freshly verified `origin/main` may be deployed through
+the guarded deployment path. Preserve its drain, lock, native fingerprint, and
+rollback protections. Never restart active sessions or use candidate operators to
+bypass Git provenance. Record the deployed commit.
+
+Never edit immutable deployed releases. Older source copies are migration inputs,
+not deployment sources. Port unfinished legacy work as a diff against its own verified
+baseline into a new task worktree; never overlay an older source tree onto current main.
+Preserve migration inputs until their work is merged or explicitly discarded.
+
+Before cleanup, verify the remote merge and preserve any uncommitted work in a
+recoverable location. Remove only that task's clean worktree and merged branch,
+including its remote branch if still present, and disposable managed artifacts.
+Preserve unknown/unmerged work, other active sessions' files, installed dependencies,
+runtime recovery data and rollback releases still in use. Never sweep release roots
+while any service references them.
+
+## Product language and UX
+
+Use **Sessions** and **New chat**, not “conversation”; do not add redundant summary
+text. Keep Search, Filter, and New in-place. Swipe reveals Delete; tests must not
+click hidden nodes. Use the native model picker. Put Stop at the right of Activity
+and Expand at the top-right. Support parallel sessions.
+
+Notifications have one master switch; show options only when enabled and save
+category/privacy changes explicitly. Keep Compression, Jobs, and Inbox folded by
+default. Inbox is read-on-open; put its actions at the title-right. Disclosures
+must be short and scrollable, with fold controls reachable. Background results
+retain their originating-turn chronology. Show rich tool previews in Activity rows
+and fold bars. Use local times for user, assistant, and system messages.
+
+Inbox/push is for meaningful outcomes, approvals, blockers, scheduled results,
+and serious alerts—not routine child, tool, or process noise. Previews must be
+informative and privacy-aware. Preserve owner/shared-session identity and member
+isolation, along with existing messaging and scheduling. Be explicit about public shared-origin limitations; never disguise them.

@@ -3,6 +3,7 @@
 import argparse
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -28,13 +29,17 @@ def main(argv=None, *, run=run_suite):
     python = Path(os.environ.get('HERMES_TEST_PYTHON') or source / '.venv/bin/python').absolute()
     if not python.is_file() or not os.access(python, os.X_OK):
         parser.error('Python interpreter missing; set HERMES_TEST_PYTHON to a working test interpreter')
-    if not os.access(NODE, os.X_OK):
-        parser.error(f'Fixed Node interpreter missing: {NODE}')
+    node = os.environ.get('HERMES_TEST_NODE')
+    if node is None:
+        node = shutil.which('node') or NODE
+    node = Path(node).absolute()
+    if not node.is_file() or not os.access(node, os.X_OK):
+        parser.error('Node interpreter missing or not executable; set HERMES_TEST_NODE to a working test interpreter')
     extra = args.extra_args
     if extra[:1] == ['--']:
         extra = extra[1:]
     try:
-        run(source, python=str(python), node=NODE, suite=args.suite,
+        run(source, python=str(python), node=str(node), suite=args.suite,
             assets=args.assets, root=args.root, extra_args=extra)
     except subprocess.CalledProcessError as error:
         return error.returncode if error.returncode > 0 else 128 - error.returncode

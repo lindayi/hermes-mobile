@@ -27,7 +27,7 @@ test('real HTTP/SSE narrow light and dark composer has compact separate Stop; ap
   try{const b=await readFile(process.env.HERMES_FRONTEND_DIR?join(process.env.HERMES_FRONTEND_DIR,rel):new URL('../../frontend/'+rel,import.meta.url));res.writeHead(200,{'Content-Type':({html:'text/html',css:'text/css',js:'text/javascript',mjs:'text/javascript'})[rel.split('.').pop()]||'application/octet-stream'});res.end(b);}catch{res.writeHead(404).end();}
  });
  await new Promise(r=>server.listen(0,'127.0.0.1',r));
- const browser=await chromium.launch({executablePath:'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+ const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER || '/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
  try{const page=await browser.newPage({viewport:{width:320,height:740},serviceWorkers:'block'});page.setDefaultTimeout(4000);const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);await page.getByRole('button',{name:'Fixture',exact:true}).click();
   const steer=page.getByRole('button',{name:'Steer current run',exact:true}),stop=page.getByRole('button',{name:'Stop run',exact:true});await steer.waitFor();
   for(const size of [{width:320,height:740},{width:390,height:844},{width:390,height:450},{width:320,height:450}])for(const theme of ['light','dark']){
