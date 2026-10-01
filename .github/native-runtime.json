@@ -3,7 +3,7 @@
   "revision": "8911e2e0edf750b104edbdc106d63d6cdac88524",
   "runtime_path": "/usr/local/lib/hermes-agent",
   "python_version": "3.11",
-  "uv_version": "0.8.22",
+  "uv_version": "0.9.28",
   "upstream_sha256": {
     "pyproject.toml": "1f928b1560b0669291b3f7d562aa78c99ac4f927375939ca97fd3c3e7494cb91",
     "uv.lock": "8fd868b9da8b6bc2f4aa94a845e210eccdd5e31be7a0b404f0a8527ced0fddec"

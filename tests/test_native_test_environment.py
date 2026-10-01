@@ -8,6 +8,7 @@ import pytest
 
 from scripts.prepare_native_test_runtime import (
     load_runtime_spec,
+    _remove_created_runtime,
     validate_hosted_runner,
     validate_patch_inputs,
 )
@@ -97,3 +98,16 @@ def test_entrypoint_rejects_arbitrary_command_line_inputs():
     )
     assert result.returncode != 0
     assert 'accepts no command-line inputs' in result.stderr
+
+
+def test_failed_setup_cleanup_removes_only_new_runtime_entries(tmp_path):
+    target = tmp_path / 'runtime'
+    target.mkdir()
+    preserved = tmp_path / 'package.json'
+    preserved.write_text('private test harness')
+    (target / 'package.json').symlink_to(preserved)
+    (target / 'venv').mkdir()
+    (target / 'partial-source').write_text('public upstream data')
+    _remove_created_runtime(target, {'package.json'})
+    assert list(target.iterdir()) == [target / 'package.json']
+    assert preserved.read_text() == 'private test harness'

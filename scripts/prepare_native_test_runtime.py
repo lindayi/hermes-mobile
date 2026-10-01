@@ -19,7 +19,7 @@ REPOSITORY = 'https://github.com/NousResearch/hermes-agent'
 REVISION = '8911e2e0edf750b104edbdc106d63d6cdac88524'
 RUNTIME_PATH = Path('/usr/local/lib/hermes-agent')
 PYTHON_VERSION = '3.11'
-UV_VERSION = '0.8.22'
+UV_VERSION = '0.9.28'
 UPSTREAM_HASHES = {
     'pyproject.toml': '1f928b1560b0669291b3f7d562aa78c99ac4f927375939ca97fd3c3e7494cb91',
     'uv.lock': '8fd868b9da8b6bc2f4aa94a845e210eccdd5e31be7a0b404f0a8527ced0fddec',
@@ -193,6 +193,19 @@ def _validate_target(target, workspace):
         path = target / name
         if not path.is_symlink() or os.readlink(path) != str(workspace / name):
             raise RuntimeError(f'Unexpected pre-existing runtime entry: {name}')
+    return names
+
+
+def _remove_created_runtime(target, preserved):
+    for path in target.iterdir():
+        if path.name in preserved:
+            continue
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+        else:
+            raise RuntimeError(f'Unexpected runtime entry during rollback: {path.name}')
 
 
 def _validate_public_tree(source):
@@ -234,7 +247,7 @@ def prepare_runtime(repository_root, environ):
     if sys.version_info[:2] != (3, 11):
         raise RuntimeError('Native runtime setup requires the pinned Python 3.11 action')
     target = Path(spec['runtime_path'])
-    _validate_target(target, workspace)
+    preserved = _validate_target(target, workspace)
     work = Path(tempfile.mkdtemp(prefix='hermes-native-', dir=runner_temp))
     os.chmod(work, 0o700)
     stage = work / 'upstream'
@@ -289,6 +302,12 @@ def prepare_runtime(repository_root, environ):
         for entry in PATCHES:
             print(f'{entry["path"]} sha256={entry["sha256"]}')
         print('Verified all four installed and staged source hashes; no optional extras installed.')
+    except BaseException as error:
+        try:
+            _remove_created_runtime(target, preserved)
+        except Exception as cleanup_error:
+            error.add_note(f'Runtime rollback failed: {cleanup_error}')
+        raise
     finally:
         shutil.rmtree(work)
 
