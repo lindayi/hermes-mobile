@@ -32,6 +32,7 @@ For a fresh local checkout, use Python 3.12, Node 22, and the committed locks:
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.lock
 npm ci --ignore-scripts --no-audit --no-fund
+export NODE_PATH="$PWD/node_modules"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/hermes-mobile-playwright}"
 mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
 chmod 700 "$PLAYWRIGHT_BROWSERS_PATH"
@@ -40,6 +41,13 @@ export PLAYWRIGHT_SKIP_BROWSER_GC=1
 export HERMES_TEST_NODE="$(command -v node)"
 export HERMES_BROWSER="$(node -e 'process.stdout.write(require("playwright").chromium.executablePath())')"
 ```
+
+Run the setup above from the repository root and keep these exports in the shell
+used for managed checks. `NODE_PATH` lets legacy CommonJS
+`createRequire('/usr/local/lib/hermes-agent/package.json')` imports find the locked
+repository dependencies even when that anchor does not exist. Do not create,
+install into, or change ownership of `/usr/local/lib/hermes-agent` for tests.
+Cloud setup persists the same repository-local `NODE_PATH` through `GITHUB_ENV`.
 
 On fresh Linux, downloading Chromium does not install its shared-library/system
 prerequisites. Playwright OS dependencies must already be provisioned by the

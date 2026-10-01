@@ -35,6 +35,10 @@ jobs:
           .venv/bin/python -m pip install --disable-pip-version-check -r requirements.lock
       - name: Install locked Node dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Expose repository Node dependencies to legacy test imports
+        shell: bash
+        run: |
+          printf 'NODE_PATH=%s/node_modules\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
       - name: Install Chromium in private runner cache
         shell: bash
         run: |
