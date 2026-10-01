@@ -23,11 +23,14 @@ EXPECTED_TARGETS = {
 
 def hosted_environment():
     return {
+        'CI': 'true',
         'GITHUB_ACTIONS': 'true',
         'GITHUB_REPOSITORY': 'lindayi/hermes-mobile',
         'GITHUB_WORKSPACE': '/home/runner/work/hermes-mobile/hermes-mobile',
         'RUNNER_ENVIRONMENT': 'github-hosted',
+        'RUNNER_OS': 'Linux',
         'RUNNER_TEMP': '/home/runner/work/_temp',
+        'ImageOS': 'ubuntu24',
     }
 
 
