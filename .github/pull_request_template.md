@@ -22,7 +22,7 @@
 - Focused managed commands and results:
 - Hosted CI check names/results:
 - Mandatory final integration evidence on the exact head SHA (complete matching hosted + residual host coverage when the documented partition is available; otherwise existing managed `all`):
-- Governing gate/partition contract: [Git development spec](../docs/git-development-spec.md) and [final integration compatibility](../docs/development-workflow.md#final-integration-compatibility):
+- Governing gate/partition contract: [Git development spec](https://github.com/lindayi/hermes-mobile/blob/main/docs/git-development-spec.md) and [final integration compatibility](https://github.com/lindayi/hermes-mobile/blob/main/docs/development-workflow.md#final-integration-compatibility):
 - Security/publication checks:
 - Checks or device-only/operational gates not exercised:
 
