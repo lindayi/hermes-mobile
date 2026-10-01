@@ -62,10 +62,17 @@ list does not pass. If the authenticated reviewer identity differs, the check
 fails closed and requires policy review rather than inferring approval.
 
 Path classification includes both sides of renames and treats malformed,
-unknown, or incomplete file inventories as sensitive. Backend/authentication,
-migrations, deployment and script paths, CI configuration, dependency manifests,
-security/deployment-policy documentation, and unknown roots require the separate
-owner exact-SHA authorization.
+unknown, empty, oversized, or incomplete file inventories as sensitive. Only the
+seven explicitly audited presentation files (`frontend/styles.css`,
+`frontend/viewport.mjs`, `frontend/session-swipe.mjs`,
+`frontend/disclosure-reachability.mjs`, and three named PNG icons), bounded
+portable test patterns, and non-operational top-level documentation are routine.
+Authentication-bearing `frontend/ui.mjs`, bootstrap `frontend/app.js`,
+`frontend/index.html`, `frontend/api.mjs`, and every unknown or new frontend
+module require an owner exact-SHA decision. Operational, native, security and
+deployment-policy docs are sensitive too. This PR classification concerns merge
+authorization; the separate release policy still classifies the complete diff
+from the deployed base before deployment.
 
 The coordinator publishes only its own `cloud-review` commit status, and only
 when that context is already required by branch protection/rules. Its success

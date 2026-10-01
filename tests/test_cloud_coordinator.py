@@ -104,7 +104,31 @@ def test_sensitive_paths_include_operational_files_and_renames(paths):
 def test_sensitive_classification_fails_closed_on_incomplete_or_unsafe_paths():
     assert classify_sensitive_paths([], complete=False)
     assert classify_sensitive_paths([{"filename": "../frontend/app.js"}])
-    assert classify_sensitive_paths([{"filename": "frontend/app.js"}]) is False
+    assert classify_sensitive_paths([{"filename": "frontend/app.js"}]) is True
+
+
+@pytest.mark.parametrize("path", [
+    "frontend/ui.mjs", "frontend/api.mjs", "frontend/index.html",
+    "frontend/bootstrap.mjs", "frontend/new-panel.mjs",
+    "frontend/icons/unknown.png", "docs/operations.md",
+    "docs/operational-guide.md", "docs/native-controls.md",
+    "docs/security.md", "docs/agent-workflow.md",
+])
+def test_auth_unknown_and_operational_paths_require_owner_decision(path):
+    assert classify_sensitive_paths([{"filename": path}])
+    assert classify_sensitive_paths([
+        {"filename": "frontend/styles.css", "previous_filename": path},
+    ])
+
+
+@pytest.mark.parametrize("path", [
+    "frontend/styles.css", "frontend/viewport.mjs", "frontend/session-swipe.mjs",
+    "frontend/disclosure-reachability.mjs", "frontend/icons/apple-touch-icon.png",
+    "frontend/icons/icon-192.png", "frontend/icons/icon-512.png",
+    "tests/test_cloud_coordinator.py", "docs/feature-overview.md",
+])
+def test_only_audited_presentation_tests_and_non_operational_docs_are_routine(path):
+    assert not classify_sensitive_paths([{"filename": path}])
 
 
 def test_review_requires_authenticated_copilot_approval_on_current_head():
@@ -450,7 +474,7 @@ class FakeApi:
         if route.endswith("/pulls/16/files?per_page=100"):
             if self.sensitive:
                 return [{"filename": "backend/auth.py"}]
-            return [{"filename": "frontend/app.js"}]
+            return [{"filename": "frontend/styles.css"}]
         if route.endswith("/pulls/16/reviews?per_page=100"):
             return [{
                 "state": "APPROVED", "commit_id": self.head_sha,

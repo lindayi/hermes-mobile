@@ -103,23 +103,24 @@ def enrollment_from_comment(issue, pull, comment):
 
 def classify_sensitive_paths(changes, *, complete=True):
     """Treat unknown, operational, and malformed path changes as sensitive."""
-    if not complete or not isinstance(changes, list) or len(changes) >= 300:
+    if not complete or not isinstance(changes, list) or not changes or len(changes) > 250:
         return True
-    routine_roots = ("frontend", "tests", "docs")
-    sensitive_prefixes = (
-        ".github", "backend", "deploy", "scripts", "patches", "hermes-plugin",
-        "migrations", "migration",
+    presentation = {
+        "frontend/styles.css", "frontend/viewport.mjs",
+        "frontend/session-swipe.mjs", "frontend/disclosure-reachability.mjs",
+        "frontend/icons/apple-touch-icon.png", "frontend/icons/icon-192.png",
+        "frontend/icons/icon-512.png",
+    }
+    operational_docs = (
+        "account", "admin", "agent", "artifact", "attestation", "auth", "backup",
+        "bootstrap", "ci", "credential", "cron", "delivery", "deploy", "development",
+        "family", "git", "hosted", "hygiene", "implementation", "install",
+        "instruction", "invite", "job", "member", "migration", "native",
+        "notification", "operational", "operations", "operator", "passkey",
+        "permission", "policy", "privacy", "production", "push", "recovery",
+        "release", "restore", "rollback", "routine", "runtime", "scheduler",
+        "secret", "security", "signing", "token", "webauthn", "workflow",
     )
-    sensitive_docs = {
-        "docs/auth-endpoints.md", "docs/github-policy.md", "docs/hosted-ci-spec.md",
-        "docs/self-deploy.md", "docs/self-deploy-spec.md", "docs/pull-delivery.md",
-        "docs/verified-release-artifacts.md", "docs/cloud-coordinator.md",
-        "docs/cloud-coordinator-spec.md", "docs/implementation-contract.md",
-    }
-    sensitive_files = {
-        "agents.md", "requirements.lock", "package.json", "package-lock.json",
-        "pyproject.toml", "setup.cfg", "tox.ini",
-    }
     for change in changes:
         if not isinstance(change, dict):
             return True
@@ -127,25 +128,27 @@ def classify_sensitive_paths(changes, *, complete=True):
             raw = change.get(key)
             if raw is None and key == "previous_filename":
                 continue
-            if not isinstance(raw, str) or not raw or len(raw) > 1024:
+            if not isinstance(raw, str) or not raw or len(raw) > 200:
                 return True
-            decoded = unquote(raw).replace("\\", "/")
+            decoded = unquote(raw)
+            if decoded != raw or not raw.isascii() or not re.fullmatch(
+                r"[a-z0-9_][a-z0-9._-]*(?:/[a-z0-9_][a-z0-9._-]*)*", raw
+            ):
+                return True
             path = PurePosixPath(decoded)
             if (path.is_absolute() or any(part in {"", ".", ".."} for part in decoded.split("/"))
                     or path.as_posix() != decoded):
                 return True
-            normalized = decoded.casefold()
-            parts = normalized.split("/")
-            sensitive_name = any(
-                token in part for part in parts
-                for token in ("auth", "credential", "secret", "password", "migration",
-                              "security", "deploy", "policy", "provenance", "artifact",
-                              "instruction")
+            doc = re.fullmatch(r"docs/([a-z0-9][a-z0-9-]*)\.md", decoded)
+            routine = (
+                decoded in presentation
+                or re.fullmatch(r"tests/test_[a-z0-9_]+\.py", decoded)
+                or re.fullmatch(r"tests/browser/[a-z0-9][a-z0-9-]*\.(?:spec|test)\.mjs", decoded)
+                or re.fullmatch(r"tests/browser/[a-z0-9_]+_fixture\.py", decoded)
+                or re.fullmatch(r"tests/fixtures/[a-z0-9][a-z0-9-]*\.json", decoded)
+                or (doc and not any(word in doc.group(1) for word in operational_docs))
             )
-            if (normalized in sensitive_files or normalized in sensitive_docs or sensitive_name
-                    or any(parts[0] == prefix for prefix in sensitive_prefixes)):
-                return True
-            if parts[0] not in routine_roots:
+            if not routine:
                 return True
     return False
 
