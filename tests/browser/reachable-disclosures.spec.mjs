@@ -199,9 +199,31 @@ async function cappedBody(card,body,page,label){
  const summary=card.locator(':scope > summary');
  await summary.scrollIntoViewIfNeeded();
  assert.equal(await summary.evaluate(el=>{const r=el.getBoundingClientRect();return el.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));}),true,`${label}: fold bar hit target remains reachable`);
- await summary.tap();assert.equal(await card.evaluate(el=>el.open),false,`${label}: native touch collapses`);
- await summary.focus();await page.keyboard.press('Enter');assert.equal(await card.evaluate(el=>el.open),true,`${label}: keyboard reopens`);
- await page.keyboard.press('Space');assert.equal(await card.evaluate(el=>el.open),false,`${label}: keyboard collapses`);
+ const evidence=await card.elementHandle();
+ await evidence.evaluate(card=>{
+  const doc=card.ownerDocument,events=[],describe=el=>({tag:el?.tagName,className:String(el?.className || ''),text:el?.textContent?.slice(0,80)});
+  const record=event=>{events.push({type:event.type,key:event.key,trusted:event.isTrusted,target:describe(event.target),active:describe(doc.activeElement),open:card.open,connected:card.isConnected});if(events.length>32)events.shift();};
+  const types=['keydown','keyup','click','focusin','focusout','toggle'];
+  for(const type of types)doc.addEventListener(type,record,true);
+  card.foldEvidence=()=>({events,active:describe(doc.activeElement),open:card.open,connected:card.isConnected});
+  card.stopFoldEvidence=()=>{for(const type of types)doc.removeEventListener(type,record,true);delete card.foldEvidence;delete card.stopFoldEvidence;};
+ });
+ try{
+  await summary.tap();assert.equal(await card.evaluate(el=>el.open),false,`${label}: native touch collapses`);
+  // Finish the touch-to-keyboard handoff before Enter clears :active itself.
+  // Blink's delayed touch release can otherwise clear Space's active flag
+  // between keydown/up, suppressing its native click even with focus retained.
+  await page.waitForFunction(el=>!el.querySelector(':scope > summary').matches(':active'),evidence);
+  await summary.focus();await page.keyboard.press('Enter');assert.equal(await card.evaluate(el=>el.open),true,`${label}: keyboard reopens`);
+  await page.keyboard.press('Space');
+  // Observe the result of native keyboard activation, not just input dispatch.
+  // Keep the existing deadline and assertion: a lost key/focus must still fail.
+  await page.waitForFunction(el=>!el.open,await card.elementHandle());
+  assert.equal(await card.evaluate(el=>el.open),false,`${label}: keyboard collapses`);
+ }catch(error){
+  console.error('DISCLOSURE-KEYBOARD',label,JSON.stringify(await evidence.evaluate(el=>el.foldEvidence())));
+  throw error;
+ }finally{await evidence.evaluate(el=>el.stopFoldEvidence());await evidence.dispose();}
 }
 
 test('generated disclosures cap full content at phone/tablet and short viewport sizes without changing Inbox toolbar',{timeout:90000},async()=>{

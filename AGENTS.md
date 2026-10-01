@@ -22,6 +22,21 @@ For behavior changes, preserve existing assertions and demonstrate a real RED te
 
 Use the managed test runner with explicit test paths for focused local checks; choose Python through HERMES_TEST_PYTHON or the repository .venv, never a fixed owner-specific path.
 
+Final PR coverage combines required hosted `source-ci` (all portable Python, JS
+and generated-assets browser shards) with the entire residual host-compatibility
+suite, using the same selected Python:
+
+```sh
+HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
+  python3 scripts/ci_tests.py host
+```
+
+Run only focused regressions locally during iteration. Do not repeat hosted suites
+on the production server routinely. The explicit host manifest is
+`.github/host-tests.json`; new files default to hosted execution. The full managed
+`all` remains an opt-in diagnostic and the conservative release-stage gate, not
+the ordinary premerge server task.
+
 ## Develop and test
 
 For behavior changes, write a focused regression that fails for the intended reason,
@@ -86,10 +101,11 @@ protections, or write directly to `main`.
 `source-ci`, `integration-tests`, and `agent-review` must pass on the exact head SHA.
 Publish `agent-review` only after verifying the independent review of that head.
 Publish `integration-tests` only after verifying complete final integration under
-the linked development workflow: complete matching hosted results plus all residual
-host tests on that head when the documented partition is available, otherwise the
-existing managed `all` suite. Focused checks or dependency setup alone are not final
-integration. Require resolved review threads and a branch current with freshly
+the linked development workflow: the entire residual host-compatibility suite and
+the matching hosted `source-ci` aggregate must succeed on the same exact head SHA.
+Record both results and the workflow URL. Never use only a hosted subset or only
+local host tests to claim full coverage. Focused checks or dependency setup alone
+are not final integration. Require resolved review threads and a branch current with freshly
 fetched `origin/main` before GitHub merge. No owner/admin bypass.
 
 Merge and deploy one revision at a time. Merge updated `origin/main` into the PR branch;

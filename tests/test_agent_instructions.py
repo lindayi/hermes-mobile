@@ -110,6 +110,33 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         assert clause in template, clause
 
 
+def test_agent_instructions_use_the_available_hosted_partition_portably():
+    agents = (ROOT / 'AGENTS.md').read_text()
+    text = ' '.join(agents.split())
+    assert 'when the documented partition is available, otherwise' not in text
+    assert '/home/lindayi/' not in agents
+    assert not re.search(r'^(<<<<<<<|=======|>>>>>>>)', agents, re.MULTILINE)
+    assert agents.count('python3 scripts/ci_tests.py host') == 1
+    assert (
+        'HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" '
+        '\\ python3 scripts/ci_tests.py host'
+    ) in text
+    for clause in (
+        'all portable Python, JS and generated-assets browser shards',
+        '`.github/host-tests.json`; new files default to hosted execution',
+        'Do not repeat hosted suites on the production server routinely',
+        'The full managed `all` remains an opt-in diagnostic and the conservative '
+        'release-stage gate, not the ordinary premerge server task',
+        'the entire residual host-compatibility suite and the matching hosted '
+        '`source-ci` aggregate must succeed on the same exact head SHA',
+        'Record both results and the workflow URL',
+        'Never use only a hosted subset or only local host tests to claim full coverage',
+    ):
+        assert clause in text, clause
+    assert (ROOT / 'scripts/ci_tests.py').is_file()
+    assert (ROOT / '.github/host-tests.json').is_file()
+
+
 def test_parallel_integration_preserves_reviewed_history_and_both_intents():
     for path in ('AGENTS.md', 'docs/development-workflow.md'):
         text = ' '.join((ROOT / path).read_text().split())

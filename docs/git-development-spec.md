@@ -39,9 +39,12 @@ naming are separate PRs after migration.
 
 ## Test environments
 
-Hosted GitHub Actions verifies source syntax and managed JavaScript unit tests
-without credentials or production access. Full Python/browser/native integration
-uses the isolated managed suite on the existing compatible host and publishes an
-exact-SHA result. No production-host self-hosted Actions runner executes public PR
-code automatically. Source compatibility currently includes host-specific paths;
-portability is not falsely claimed by the bootstrap.
+Hosted GitHub Actions verifies syntax, secrets, all JavaScript/browser tests and
+the portable Python partition without credentials or production access. The
+explicit remaining native/private-operator partition runs through the managed
+local `scripts/ci_tests.py host` suite. Exact-head integration status requires BOTH
+partitions to pass. See hosted-ci-spec.md; `source-ci` is the fail-closed aggregate
+of every hosted shard. No production-host self-hosted Actions runner executes
+public PR code automatically. Main merges trigger CI, not deployment. Release
+staging retains its conservative full test gate until exact-source/asset CI
+evidence reuse is separately implemented and reviewed.
