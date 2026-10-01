@@ -128,9 +128,11 @@ def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
     pr = valid_pr()
     args = dict(
         current_main_sha=BASE,
-        required_checks=[{"context": "integration-tests"}],
+        required_checks=[{"context": "integration-tests"}, {"context": "cloud-review"}],
         check_runs=[{
             "name": "integration-tests", "status": "completed", "conclusion": "success",
+        }, {
+            "name": "cloud-review", "status": "completed", "conclusion": "success",
         }],
         statuses=[],
         checks_complete=True,
@@ -178,12 +180,15 @@ def test_state_survives_restart_and_does_not_replay_or_retry_ambiguous_writes(tm
     path = tmp_path / "state.json"
     first = StateStore(path)
     first.record_event("999")
-    first.claim_action("fix:16:" + HEAD, {"kind": "fix", "status": "sending"})
+    first.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    first.claim_action("fix:16:" + HEAD, {"kind": "fix", "status": "sending", "issue": 16})
     first.mark_uncertain("fix:16:" + HEAD)
     second = StateStore(path)
     assert second.event_seen("999")
     assert second.action("fix:16:" + HEAD)["status"] == "uncertain"
-    assert not second.claim_action("fix:16:" + HEAD, {"kind": "fix", "status": "sending"})
+    assert not second.claim_action(
+        "fix:16:" + HEAD, {"kind": "fix", "status": "sending", "issue": 16},
+    )
     second.reconcile_action("fix:16:" + HEAD, found=True)
     assert second.action("fix:16:" + HEAD)["status"] == "sent"
     assert json.loads(path.read_text())["version"] == 1
