@@ -82,8 +82,11 @@ All members are checked before any destination files are written.
   metadata, downloads by numeric artifact ID and checks GitHub's transport
   SHA-256 when supplied.
 - Invokes the real installed `gh attestation verify` with explicit repository,
-  signer repository/workflow, certificate identity/issuer, main source ref,
+  exact certificate identity (binding signer repository/workflow) and issuer, main source ref,
   exact source/signer SHA, SLSA v1 predicate and denial of self-hosted runners.
+  Certificate identity is the sole signer-identity selector: GitHub CLI rejects
+  combining it with `--signer-repo` or `--signer-workflow`. These redundant flags
+  are not a stronger policy; the authenticated certificate fields below remain required.
 - Checks the verifier's authenticated **certificate extensions**, not the
   workflow-controlled statement predicate, for the exact repository identity,
   push/main/SHA/signer and
