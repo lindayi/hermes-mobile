@@ -32,20 +32,38 @@ def _workflow():
           name: release-${{ github.run_id }}-${{ github.run_attempt }}
   checks:
     runs-on: ubuntu-24.04
-    steps: []
+    steps:
+      - run: python -c 'compile('
+      - run: node --check frontend/main.js
+      - run: 'gitleaks dir . && sha256sum -c'
   js:
     runs-on: ubuntu-24.04
-    steps: []
+    steps:
+      - uses: ./.github/actions/test-environment
+        with:
+          browser: 'true'
+      - run: python -B scripts/ci_tests.py js
   python:
     runs-on: ubuntu-24.04
-    steps: []
+    strategy:
+      fail-fast: 'false'
+      matrix:
+        shard: ['0', '1']
+    steps:
+      - run: python -B scripts/ci_tests.py --shards 2 python
   browser:
     runs-on: ubuntu-24.04
+    needs: build
+    strategy:
+      fail-fast: 'false'
+      matrix:
+        shard: ['0', '1', '2', '3']
     steps:
       - uses: actions/download-artifact@0123456789012345678901234567890123456789
         with:
           name: release-${{ github.run_id }}-${{ github.run_attempt }}
       - run: python -B -m deploy.release_artifact unpack --bundle release.tar
+      - run: python -B scripts/ci_tests.py --assets generated --shards 4 browser
 """
     return f"""jobs:
 {jobs}
@@ -53,6 +71,7 @@ def _workflow():
     runs-on: ubuntu-24.04
     steps:
       - run: python3 scripts/prepare_native_test_runtime.py --preflight
+      - uses: ./.github/actions/native-test-environment
       - run: '"$HERMES_TEST_PYTHON" -B scripts/ci_tests.py native'
   source-ci:
     if: "${{{{ always() }}}}"
@@ -141,6 +160,23 @@ def main(args):
     suite = 'python' if args.suite == 'host' else args.suite
     return run_suite(SOURCE, suite=suite, extra_args=selected)
 """
+    native_action = """runs:
+  using: composite
+  steps:
+    - run: python3 scripts/prepare_native_test_runtime.py --preflight
+    - run: sudo mkdir --mode=0755 -- /usr/local/lib/hermes-agent
+    - run: python scripts/prepare_native_test_runtime.py
+"""
+    native_runtime = """
+def validate_hosted_runner(environ):
+    return True
+def validate_action_preflight(environ, root):
+    return True
+def main():
+    if sys.argv[1:] == ['--preflight']:
+        validate_action_preflight(os.environ, ROOT)
+        validate_hosted_runner(os.environ)
+"""
     coordinator = f"""
 REPOSITORY = {REPOSITORY!r}
 REPOSITORY_ID = {REPOSITORY_ID}
@@ -196,6 +232,7 @@ def _plan_pull(head, snapshot):
     return {
         WORKFLOW_PATH: _workflow(),
         '.github/native-tests.json': json.dumps({'tests/test_native.py': 'synthetic native test'}),
+        '.github/native-runtime.json': json.dumps({'synthetic': True}),
         '.github/host-tests.json': json.dumps({
             'tests/test_host.py': 'synthetic installed compatibility test',
             'tests/test_native.py': 'synthetic installed native test',
@@ -204,6 +241,8 @@ def _plan_pull(head, snapshot):
         'deploy/self_deploy.py': self_deploy,
         'deploy/ci_selection.py': ci_selection,
         'scripts/ci_tests.py': ci_tests,
+        '.github/actions/native-test-environment/action.yml': native_action,
+        'scripts/prepare_native_test_runtime.py': native_runtime,
         'deploy/cloud_coordinator.py': coordinator,
     }
 

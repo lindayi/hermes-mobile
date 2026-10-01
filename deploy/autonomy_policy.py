@@ -27,10 +27,13 @@ REQUIRED_FILES = (
     WORKFLOW_PATH,
     '.github/native-tests.json',
     '.github/host-tests.json',
+    '.github/actions/native-test-environment/action.yml',
+    '.github/native-runtime.json',
     'deploy/release_artifact.py',
     'deploy/self_deploy.py',
     'deploy/ci_selection.py',
     'scripts/ci_tests.py',
+    'scripts/prepare_native_test_runtime.py',
     'deploy/cloud_coordinator.py',
 )
 SHA_RE = re.compile(r'[0-9a-f]{40}\Z')
@@ -152,13 +155,62 @@ def _workflow_contract(files, blockers):
         return '\n'.join(value for step in items
                          if isinstance((value := step.get('run', '')), str))
 
-    native_steps = steps(jobs['native'])
+    job_steps = {name: steps(job) for name, job in jobs.items()}
+    if any(job.get('continue-on-error') or any(step.get('continue-on-error') for step in job_steps[name])
+           for name, job in jobs.items()):
+        blockers.add('hosted-runner-contract')
+
+    native_steps = job_steps['native']
     native_commands = commands(native_steps)
-    if (not any('--preflight' in step.get('run', '') for step in native_steps
-                if isinstance(step.get('run', ''), str))
+    preflight = next((index for index, step in enumerate(native_steps)
+                      if isinstance(step.get('run', ''), str) and '--preflight' in step['run']), None)
+    native_setup = next((index for index, step in enumerate(native_steps)
+                         if '.github/actions/native-test-environment' in str(step.get('uses', ''))), None)
+    try:
+        native_action = yaml.load(
+            files['.github/actions/native-test-environment/action.yml'], Loader=UniqueLoader,
+        )
+        action_steps = native_action['runs']['steps']
+        action_commands = commands(action_steps)
+        guard_position = action_commands.find('scripts/prepare_native_test_runtime.py --preflight')
+        effects_position = action_commands.find('sudo mkdir')
+        native_command = action_commands.find('python scripts/prepare_native_test_runtime.py')
+        action_valid = (
+            native_action['runs']['using'] == 'composite'
+            and guard_position >= 0 and effects_position > guard_position
+            and native_command > effects_position
+        )
+    except (KeyError, TypeError, ValueError, yaml.YAMLError):
+        action_valid = False
+    runtime_tree = _source_tree(files, 'scripts/prepare_native_test_runtime.py', blockers)
+    runtime_text, runtime_names = _strings_and_names(runtime_tree) if runtime_tree else (set(), set())
+    if (preflight is None or native_setup is None or preflight >= native_setup
+            or not action_valid or '--preflight' not in runtime_text
+            or not {'validate_action_preflight', 'validate_hosted_runner'} <= runtime_names
             or 'scripts/ci_tests.py native' not in native_commands
             or any('self-hosted' in str(job.get('runs-on', '')) for job in jobs.values())):
         blockers.add('native-job-contract')
+
+    js_steps, python_steps, checks_steps = job_steps['js'], job_steps['python'], job_steps['checks']
+    js_text, python_text, checks_text = commands(js_steps), commands(python_steps), commands(checks_steps)
+    js_environment = any(
+        step.get('uses') == './.github/actions/test-environment'
+        and isinstance(step.get('with'), dict) and step['with'].get('browser') == 'true'
+        for step in js_steps
+    )
+    python_matrix = jobs['python'].get('strategy', {}).get('matrix', {}).get('shard')
+    browser_matrix = jobs['browser'].get('strategy', {}).get('matrix', {}).get('shard')
+    browser_steps = job_steps['browser']
+    if (not js_environment or 'scripts/ci_tests.py js' not in js_text
+            or 'scripts/ci_tests.py' not in python_text or '--shards 2 python' not in python_text
+            or python_matrix != ['0', '1']
+            or not all(value in checks_text for value in ('compile(', 'node --check', 'gitleaks', 'sha256sum -c'))
+            or jobs['browser'].get('needs') != 'build'
+            or browser_matrix != ['0', '1', '2', '3']
+            or jobs['browser'].get('strategy', {}).get('fail-fast') != 'false'
+            or '--shards 4 browser' not in commands(browser_steps)
+            or '--assets ' not in commands(browser_steps)):
+        blockers.add('hosted-suite-contract')
 
     gate = jobs['source-ci']
     needs = gate.get('needs')
@@ -166,7 +218,7 @@ def _workflow_contract(files, blockers):
             or len(needs) != len(HOSTED_JOBS) or set(needs) != HOSTED_JOBS):
         blockers.add('native-aggregate-dependency')
         return
-    gate_steps = steps(gate)
+    gate_steps = job_steps['source-ci']
     step = gate_steps[0] if gate_steps else {}
     if (not isinstance(step, dict) or not isinstance(step.get('env'), dict)
             or step['env'].get('RESULTS') != '${{ toJSON(needs) }}'):
@@ -184,8 +236,7 @@ def _workflow_contract(files, blockers):
     if not gate_tree or not _fail_closed_aggregate(gate_tree):
         blockers.add('native-aggregate-contract')
 
-    build_steps, browser_steps = steps(jobs['build']), steps(jobs['browser'])
-    attest_steps = steps(jobs['attest'])
+    build_steps, attest_steps = job_steps['build'], job_steps['attest']
     build_text, browser_text = commands(build_steps), commands(browser_steps)
     build_uploads = [
         (item.get('with') or {}).get('name')
