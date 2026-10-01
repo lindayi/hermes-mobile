@@ -40,7 +40,7 @@ dependency versions are also pinned in `package-lock.json` for hosted checks.
 HERMES_TEST_PYTHON=/home/lindayi/projects/hermes-mobile/.venv/bin/python \
   python3 scripts/test.py python -- tests/test_public_source.py
 HERMES_TEST_PYTHON=/home/lindayi/projects/hermes-mobile/.venv/bin/python \
-  python3 scripts/test.py all
+  python3 scripts/ci_tests.py host
 ```
 
 Use the managed runner, including for focused tests. It isolates HOME, native
@@ -49,11 +49,17 @@ failure evidence. Do not run account enrollment, real model probes or live opera
 scripts as routine tests. Physical Safari/Home Screen push and biometric behavior
 remain distinct from emulated browser verification.
 
-Hosted `source-ci` runs syntax checks, a pinned secret scanner and managed JS unit
-tests on a disposable GitHub runner. Full Python/browser/native integration runs
-on the compatible host with isolated state and is reported on the exact tested PR
-SHA as `integration-tests`. No public-PR code automatically runs on the production
-host via a self-hosted Actions runner.
+Hosted `source-ci` now aggregates syntax/secret checks, the complete JS suite,
+two portable-Python shards and four generated-assets browser shards. Each browser
+shard runs serially on its own disposable runner; lockfile-keyed dependency caches
+avoid repeated downloads. All jobs must succeed, including after cancellations.
+Only files explicitly listed with reasons in `.github/host-tests.json` run in the
+local compatibility suite; all new files default to hosted coverage. The local
+`integration-tests` status requires that residual suite AND the matching hosted
+aggregate, recorded on the exact PR head. No public-PR code automatically runs on
+the production host via a self-hosted Actions runner. See
+[hosted CI acceptance](docs/hosted-ci-spec.md). `scripts/test.py all` remains
+available for explicit full-host diagnostics and conservative release validation.
 
 ## Deployment
 
@@ -68,7 +74,12 @@ protected native fingerprints and rollback checks. Main provenance is recorded
 with staged releases. Never deploy old copied candidate directories or restart an
 active session. The installed dependency venv remains separate from tracked code.
 
-The migration itself does not restart the production services. Private operational
+Merging main triggers CI, **not automatic deployment**. Releases are explicitly
+initiated through the guarded controller. Its full staged test gate remains
+unchanged: this PR offloads repeated premerge work, not release validation. Reusing
+CI at deployment requires separately reviewed exact-source/asset evidence; a green
+PR check alone is not permission to skip staged checks. No service restarts are
+part of CI changes. Private operational
 configuration, account/session data and historical incident evidence are omitted
 from Git. Product specifications remain under `docs/`; legacy specs describe their
 original feature scope, while [the Git workflow](docs/git-development-spec.md) and

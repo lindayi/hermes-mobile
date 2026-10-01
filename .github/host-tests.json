@@ -1,0 +1,22 @@
+{
+  "tests/test_cron_delivery_preflight.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_delivery_adapter.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_delivery_native.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_member_jobs.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_member_scheduler.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_model_selection_transport_contract.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_native_compression_admission.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_native_controls_release.py": "Native process/socket attestation reads installed Hermes source fingerprints (including hermes_state.py).",
+  "tests/test_native_controls_startup.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_native_delete_rollout.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_native_maintenance.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_native_notifications.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_native_parallel_lease_contract.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_native_run_controls.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_native_session_deletion.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_native_session_deletion_review.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_notice_recovery_operation.py": "Requires a private host operator or retained baseline file; synthetic isolated fixtures only.",
+  "tests/test_notification_release_operator.py": "Requires a private host operator or retained baseline file; synthetic isolated fixtures only.",
+  "tests/test_push_policy_rollback.py": "Requires a private host operator or retained baseline file; synthetic isolated fixtures only.",
+  "tests/test_session_release_callers.py": "Requires a private host operator or retained baseline file; synthetic isolated fixtures only."
+}
