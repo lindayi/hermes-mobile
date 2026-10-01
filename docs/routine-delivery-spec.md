@@ -56,7 +56,8 @@ Always sensitive, with no broad fallback:
   `deploy`, `delivery`, `release`, `artifact`, `auth`, `security`, `policy`,
   `git`, `ci`, `workflow`, `migration`, `backup`, `native`, `runtime`,
   `operator`, `install`, `development`, `hygiene`, `agent`, `routine`,
-  `implementation`, `family`, `job`, `notification`; the full list is in
+  `implementation`, `family`, `job`, `notification`, `operations`,
+  `operational`; the full list is in
   `release_policy.DOC_SENSITIVE`), docs in subdirectories, and instruction files.
   The substring match is intentionally over-broad.
 - Non-canonical paths (absolute, `.`/`..` or hidden segments, backslashes,

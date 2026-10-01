@@ -50,6 +50,7 @@ SENSITIVE_PATHS = [
     'tests/browser/artifacts.mjs', 'tests/browser/generated-assets.mjs', 'tests/fixtures/data.sqlite',
     'docs/pull-delivery.md', 'docs/routine-delivery-spec.md', 'docs/self-deploy.md',
     'docs/verified-release-artifacts.md', 'docs/github-policy.md', 'docs/auth-endpoints.md',
+    'docs/operations.md', 'docs/operational.md',
     'docs/backup.md', 'docs/migration-publication.md', 'docs/hosted-ci-spec.md',
     'docs/git-development-spec.md', 'docs/test-hygiene.md', 'docs/development-workflow.md',
     'docs/native-run-controls-contract.md', 'docs/notification-policy.md', 'docs/security.md',
@@ -175,10 +176,21 @@ def test_current_docs_and_frontend_classification_is_conservative():
     """Spot-check the live tree: security/operational docs are never routine."""
     from pathlib import Path
     m = module()
-    root = Path(__file__).resolve().parents[1]
-    docs = {path.name for path in (root / 'docs').glob('*.md') if m.path_is_routine(f'docs/{path.name}')}
+    docs_root = Path(__file__).resolve().parents[1] / 'docs'
+    docs = {path.name for path in docs_root.glob('*.md') if m.path_is_routine(f'docs/{path.name}')}
     for name in ('pull-delivery.md', 'routine-delivery-spec.md', 'self-deploy-spec.md', 'github-policy.md',
                  'guarded-delivery-spec.md', 'verified-release-artifacts.md', 'auth-endpoints.md',
                  'implementation-contract.md', 'family-jobs.md', 'family-runtime.md', 'test-hygiene.md'):
         assert name not in docs
     assert 'ux.md' in docs
+    for path in docs_root.rglob('*.md'):
+        relative = path.relative_to(docs_root.parent).as_posix()
+        if path.parent != docs_root:
+            assert not m.path_is_routine(relative)
+        if any(word in path.stem for word in m.DOC_SENSITIVE):
+            assert not m.path_is_routine(relative)
+        else:
+            assert m.path_is_routine(relative)
+    assert m.path_is_routine('docs/development-workflow.md') is False
+    assert m.path_is_routine('docs/operations.md') is False
+    assert m.path_is_routine('docs/operational.md') is False

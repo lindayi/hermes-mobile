@@ -419,15 +419,43 @@ catch (e) { console.log(JSON.stringify({reads, writes, outputs, error: String(e)
 def run_script(job, api, *, env=None, main=SHA):
     import json
     import os
+    import shutil
     import subprocess
     script = production_workflow()['jobs'][job]['steps'][0]['with']['script']
     api = {**api, PREFIX + '/git/ref/heads/main': {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': main}}}
     harness = HARNESS.replace('__INPUT__', json.dumps({'api': api, 'sha': SHA})).replace('__SCRIPT__', script)
     environment = {**os.environ, 'SOURCE_RUN_ID': '10', 'APPROVAL_RUN_ID': '20', 'SOURCE_SHA': SHA,
                    'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_JOB': job, **(env or {})}
-    result = subprocess.run(['/home/lindayi/.hermes/node/bin/node', '-e', harness],
+    node = os.environ.get('HERMES_TEST_NODE')
+    if node is None:
+        node = shutil.which('node')
+    if not node:
+        raise RuntimeError('Managed test runner must provide Node through HERMES_TEST_NODE or PATH')
+    result = subprocess.run([node, '-e', harness],
                             env=environment, check=True, text=True, capture_output=True, timeout=60)
     return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize('explicit', [True, False])
+def test_run_script_uses_managed_node_selection(monkeypatch, explicit):
+    import shutil
+    import subprocess
+    from types import SimpleNamespace
+    selected = '/managed/node'
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(stdout='{}')
+
+    if explicit:
+        monkeypatch.setenv('HERMES_TEST_NODE', selected)
+    else:
+        monkeypatch.delenv('HERMES_TEST_NODE', raising=False)
+        monkeypatch.setattr(shutil, 'which', lambda name: selected if name == 'node' else None)
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    assert run_script('classify', cloud_api()) == {}
+    assert calls[0][0][0] == selected
 
 
 BOT = {'id': 41898282, 'login': 'github-actions[bot]', 'type': 'Bot'}
@@ -521,6 +549,9 @@ def parity_cases():
     tables = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(tables)
     cases = [[('modified', path, None)] for path in tables.ROUTINE_PATHS + tables.SENSITIVE_PATHS]
+    docs_root = Path(__file__).resolve().parents[1] / 'docs'
+    cases += [[('modified', path.relative_to(docs_root.parent).as_posix(), None)]
+              for path in sorted(docs_root.rglob('*.md'))]
     cases += [
         [], [('added', 'frontend/new.js', None), ('removed', 'docs/ux.md', None)],
         [('removed', 'frontend/viewport.mjs', None), ('added', 'docs/ux.md', None)],

@@ -113,7 +113,8 @@ jobs:
             const DOC_SENSITIVE = ['account', 'admin', 'agent', 'artifact', 'attestation', 'auth', 'backup',
               'bootstrap', 'ci', 'credential', 'cron', 'delivery', 'deploy', 'development', 'family', 'git',
               'hosted', 'hygiene', 'implementation', 'install', 'instruction', 'invite', 'job', 'member',
-              'migration', 'native', 'notification', 'operator', 'passkey', 'permission', 'policy', 'privacy',
+              'migration', 'native', 'notification', 'operational', 'operations', 'operator', 'passkey',
+              'permission', 'policy', 'privacy',
               'production', 'push', 'recovery', 'release', 'restore', 'rollback', 'routine', 'runtime',
               'scheduler', 'secret', 'security', 'signing', 'token', 'webauthn', 'workflow'];
             const routinePath = path => {

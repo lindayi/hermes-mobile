@@ -32,7 +32,8 @@ DOC = re.compile(r'docs/([a-z0-9][a-z0-9-]*)\.md')
 DOC_SENSITIVE = ('account', 'admin', 'agent', 'artifact', 'attestation', 'auth', 'backup', 'bootstrap',
                  'ci', 'credential', 'cron', 'delivery', 'deploy', 'development', 'family', 'git',
                  'hosted', 'hygiene', 'implementation', 'install', 'instruction', 'invite', 'job',
-                 'member', 'migration', 'native', 'notification', 'operator', 'passkey', 'permission',
+                 'member', 'migration', 'native', 'notification', 'operational', 'operations', 'operator',
+                 'passkey', 'permission',
                  'policy', 'privacy', 'production', 'push', 'recovery', 'release', 'restore', 'rollback',
                  'routine', 'runtime', 'scheduler', 'secret', 'security', 'signing', 'token',
                  'webauthn', 'workflow')
