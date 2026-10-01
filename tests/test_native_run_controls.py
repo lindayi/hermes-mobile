@@ -3,7 +3,7 @@ import importlib.util
 import json
 import sys
 import threading
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from aiohttp import web
@@ -14,6 +14,7 @@ class Base:
         self._run_statuses = {}
         self._active_run_agents = {}
         self._run_streams = {}
+        self._run_approval_sessions = {}
         self._stopping_run_ids = set()
     async def _handle_capabilities(self, request):
         return web.json_response({'features': {'runs': True}})
@@ -35,6 +36,29 @@ class Base:
         return self.agent_factory(**kwargs)
 
 
+@pytest.fixture
+def registry(monkeypatch):
+    module = ModuleType('tools.approval')
+    module._lock = threading.Lock()  # Native is NOT reentrant.
+    module._gateway_queues = {}
+    def listing(key):
+        with module._lock:
+            return [dict(entry.data) for entry in module._gateway_queues.get(key, [])]
+    module.list_gateway_approvals = listing
+    package = ModuleType('tools')
+    package.approval = module
+    monkeypatch.setitem(sys.modules, 'tools', package)
+    monkeypatch.setitem(sys.modules, 'tools.approval', module)
+    return module
+
+
+def bind_run(a):
+    # Native binds the run-specific approval identity before creating callbacks.
+    a._run_streams['r'] = asyncio.Queue()
+    a._run_approval_sessions['r'] = 'r'
+    return a._make_run_event_callback('r', asyncio.get_running_loop())
+
+
 def adapter():
     assert importlib.util.find_spec('backend.native_run_controls'), 'Dedicated adapter missing'
     from backend.native_run_controls import run_controls_adapter
@@ -54,10 +78,11 @@ def request(text='note', key='k', during_body=None):
     return SimpleNamespace(match_info={'run_id': 'r'}, body={'input': text, 'idempotency_key': key}, during_body=during_body)
 
 
-def test_steer_dedup_exact_input_and_post_body_status_gate():
+def test_steer_dedup_exact_input_and_post_body_status_gate(registry):
     async def check():
         a = adapter()
         calls = []
+        bind_run(a)
         a._active_run_agents['r'] = SimpleNamespace(steer=lambda text: calls.append(text) or True)
         a._set_run_status('r', 'running')
         first = await a._handle_steer_run(request())
@@ -71,6 +96,7 @@ def test_steer_dedup_exact_input_and_post_body_status_gate():
             # Each case is a fresh run, not an illegal terminal-to-running reset.
             a._run_statuses.pop('r', None)
             a._controls.pop('r', None)
+            bind_run(a)
             a._set_run_status('r', 'running')
             result = await a._handle_steer_run(request(key=status, during_body=lambda: a._set_run_status('r', status)))
             assert result.status == 409
@@ -109,17 +135,16 @@ def native_agent():
 
 
 def attach(a, agent):
-    a._run_streams['r'] = asyncio.Queue()
+    callback = bind_run(a)
     a._set_run_status('r', 'running')
     a.agent_factory = lambda **kwargs: agent
-    callback = a._make_run_event_callback('r', asyncio.get_running_loop())
     result = a._create_agent(tool_progress_callback=callback, stream_delta_callback=lambda text: None)
     a._active_run_agents['r'] = result
     return result
 
 
 @pytest.mark.parametrize('ending', ['completed', 'failed', 'cancelled', 'exception'])
-def test_worker_close_retains_final_drain_gap_and_stop_pending(ending):
+def test_worker_close_retains_final_drain_gap_and_stop_pending(ending, registry):
     async def check():
         a = adapter()
         agent = native_agent()
@@ -214,7 +239,7 @@ def test_launcher_installs_controls_only_on_owner(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize('event', ['run.completed', 'run.failed', 'run.cancelled'])
-def test_terminal_transport_retains_guidance_before_status_publication(event):
+def test_terminal_transport_retains_guidance_before_status_publication(event, registry):
     async def check():
         a = adapter()
         agent = native_agent()
@@ -240,10 +265,11 @@ def test_pending_merge_is_not_duplicated_on_terminal_republication():
     assert a._snapshot('r')['pending_steer'] == 'first\nlate'
 
 
-def test_receipts_expire_with_native_status_and_attempt_count_is_bounded():
+def test_receipts_expire_with_native_status_and_attempt_count_is_bounded(registry):
     async def check():
         a = adapter()
         a._set_run_status('r', 'running')
+        bind_run(a)
         a._active_run_agents['r'] = SimpleNamespace(steer=lambda text: True)
         for i in range(256):
             assert (await a._handle_steer_run(request(key=str(i)))).status == 200
@@ -409,7 +435,7 @@ def test_installed_native_stale_owners_are_discarded(tmp_path, scenario):
     _installed_native_probe(tmp_path, scenario)
 
 
-def test_nonclearing_interrupt_path_keeps_native_pending_slot():
+def test_nonclearing_interrupt_path_keeps_native_pending_slot(registry):
     async def check():
         a = adapter()
         agent = native_agent()

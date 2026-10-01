@@ -1,15 +1,14 @@
 """Synthetic native lifecycle and bridge recovery; no model, service or live state."""
 import asyncio
 import json
-import sys
 import threading
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
 
 from backend.native_run_controls import run_controls_adapter
-from test_native_run_controls import Base
+from test_native_run_controls import Base, registry
 
 
 class NativeBase(Base):
@@ -23,22 +22,6 @@ class NativeBase(Base):
         if error is not None:
             return error
         return web.json_response(self._run_statuses[request.match_info['run_id']])
-
-
-@pytest.fixture
-def registry(monkeypatch):
-    module = ModuleType('tools.approval')
-    module._lock = threading.Lock()  # Native is NOT reentrant.
-    module._gateway_queues = {}
-    def listing(key):
-        with module._lock:
-            return [dict(entry.data) for entry in module._gateway_queues.get(key, [])]
-    module.list_gateway_approvals = listing
-    package = ModuleType('tools')
-    package.approval = module
-    monkeypatch.setitem(sys.modules, 'tools', package)
-    monkeypatch.setitem(sys.modules, 'tools.approval', module)
-    return module
 
 
 def live_run(registry, run_id='r'):
@@ -115,6 +98,45 @@ async def test_new_approval_between_recovery_and_notify_blocks_steering(registry
     response = await a._handle_steer_run(req())
     assert response.status == 409
     assert not calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('binding', [None, 'foreign'])
+@pytest.mark.parametrize('evidence', ['empty', 'pending', 'unavailable'])
+async def test_running_without_matching_callback_binding_rejects_new_steer(registry, binding, evidence):
+    a, calls = live_run(registry)
+    expire(registry)
+    a._set_run_status('r', 'running')
+    a._controls['r']['approval_session'] = binding
+    if evidence == 'pending':
+        with registry._lock:
+            registry._gateway_queues['r'] = [SimpleNamespace(data={'request_id': 'new'})]
+    elif evidence == 'unavailable':
+        def unavailable(key):
+            raise RuntimeError('unavailable')
+        registry.list_gateway_approvals = unavailable
+    response = await a._handle_steer_run(req())
+    assert response.status == 409
+    assert json.loads(response.text)['status'] == 'not_delivered'
+    assert json.loads(response.text)['accepted'] is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_existing_receipt_replays_without_binding_or_registry(registry):
+    a, calls = live_run(registry)
+    expire(registry)
+    first = await a._handle_steer_run(req())
+    assert first.status == 200
+    receipt = json.loads(first.text)
+    a._controls['r'].pop('approval_session')
+    a._run_approval_sessions.pop('r')
+    del registry._gateway_queues
+    replay = await a._handle_steer_run(req())
+    assert replay.status == 200
+    assert json.loads(replay.text) == receipt
+    assert (await a._handle_steer_run(req(key='new'))).status == 409
+    assert calls == ['keep working']
 
 
 @pytest.mark.asyncio

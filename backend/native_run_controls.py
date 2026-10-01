@@ -187,7 +187,9 @@ def run_controls_adapter(base):
                     return web.json_response({'error': {'code': 'steer_capacity'}}, status=429)
                 agent = self._active_run_agents.get(run_id)
                 eligible = (self._run_statuses[run_id].get('status') == 'running'
-                            and (pending == [] or state.get('approval_session') is None)
+                            and pending == []
+                            and state.get('approval_session') == run_id
+                            == getattr(self, '_run_approval_sessions', {}).get(run_id)
                             and run_id not in self._stopping_run_ids and not state['closed']
                             and callable(getattr(agent, 'steer', None)))
                 receipt = {'object': 'hermes.run.steer', 'run_id': run_id,

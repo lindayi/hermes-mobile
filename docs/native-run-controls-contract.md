@@ -34,6 +34,9 @@ adapter lock; ordering here is controls then registry. Never recursively invoke
 
 Unsupported, unavailable, malformed or changed evidence leaves the wait unresolved.
 An approval inserted before its waiting notification also blocks new steering.
+Every new admission requires an authoritative empty registry snapshot and the
+callback-bound approval identity matching the current run/session; a missing
+binding is never a fallback authorization, even if status is already `running`.
 Existing idempotent receipts remain readable and no timeout approves an action,
 resubmits a prompt, or changes turn identity. Existing bridge reconciliation then
 retires only the bound run's obsolete pending approvals and restores guidance;
