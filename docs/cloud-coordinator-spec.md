@@ -24,8 +24,10 @@ head; it does not carry forward to a later commit.
 
 ## Collection and bounded repair
 
-The coordinator polls issue updates and their comment IDs. It persists a private
-cursor and a bounded set of processed IDs so a restart replays safely. API errors,
+The coordinator captures a precollection watermark, polls issue updates and their
+comments with overlapping reads, and atomically persists accepted commands, their
+IDs and the watermark. A closed or merged PR retires its enrollment; reopening
+requires a fresh owner enrollment command. API errors,
 rate limits, malformed pagination, and incomplete GraphQL review-thread pages
 fail closed; the cursor is advanced only after a complete read.
 
@@ -36,11 +38,17 @@ fetches check logs. The Copilot request labels all embedded evidence untrusted,
 and the text is never interpreted as shell input. A deterministic marker
 deduplicates a request. At most three requests are claimed per enrollment.
 
-A durable action claim is written before posting a request. A restart reconciles
-the marker against pull-request comments; if a write may have succeeded but
-cannot be confirmed, it remains uncertain and is never resent automatically.
-Another fixer is not started until the prior cloud-agent workflow is observed
-complete. Completion only releases the fixer lock; it is not review or CI success.
+A durable action claim is written before POSTing a task through
+`/agents/repos/{owner}/{repo}/tasks` with the bounded prompt, `base_ref=main`
+and the enrolled PR's current same-repository `head_ref`. The returned task ID
+is persisted and GET by ID reconciles its state and branch/PR evidence across
+head changes. An ambiguous POST (including a crash before ID persistence) is
+never resent automatically; it blocks further dispatch for that PR. No second
+`@copilot` dispatch comment is posted. Queued, in-progress, waiting-for-user,
+idle and unknown task states do not release the fixer lock. Completion only
+releases the fixer lock; it is not review or CI success.
+Unidentifiable nonterminal repository tasks conservatively block new dispatch
+until GitHub exposes enough branch, session, or PR evidence to scope them.
 Conflicted or unmergeable pull requests are not sent to a fixer; a neutral
 reconciler must be assigned separately.
 
@@ -63,7 +71,11 @@ The coordinator publishes only its own `cloud-review` commit status, and only
 when that context is already required by branch protection/rules. Its success
 means current Copilot approval, resolved threads, and any required sensitive
 authorization were verified; it does **not** mean tests passed. It never writes
-`integration-tests`, `source-ci`, or `agent-review` statuses. All configured
+`integration-tests`, `source-ci`, or `agent-review` statuses. A status transition
+has a durable generation bound to the PR and head SHA; an ambiguous write is
+reconciled against a newer owned status on that same SHA, not assumed successful
+from a previous matching state. A later change in review evidence may revoke
+and restore success on the same SHA. All configured
 required checks must independently report success; skipped, cancelled, missing,
 pending, failed, or incomplete checks are not green.
 
@@ -72,10 +84,10 @@ operation only when the same-repository main base is current, the PR is not a
 draft or conflict, all required checks including `cloud-review` are green, the
 review gate passes, no fixer may be running, and sensitive authorization is
 current. Both the PR head and the current `main` SHA are re-read before enabling
-auto-merge. The owner-managed branch rule must also require the PR branch to be
+auto-merge; the mutation supplies `expectedHeadOid` as the server-side head
+fence. The owner-managed branch rule must also require the PR branch to be
 up to date (strict required checks) and require conversation resolution; the
-coordinator cannot alter branch protection or make a remote write conditional on
-a SHA. Current review, thread, check, and policy evidence is fetched again
+coordinator cannot alter branch protection. Current review, thread, check, and policy evidence is fetched again
 immediately before the merge request. A new head has no inherited
 `cloud-review` success, so required branch protection must keep it blocked until
 the new head is evaluated. Ambiguous writes are reconciled from GitHub state and

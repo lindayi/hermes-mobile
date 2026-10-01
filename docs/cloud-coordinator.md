@@ -34,8 +34,14 @@ deployment behavior is changed here.
 Implemented in this slice:
 
 - Explicit owner-ID enrollment and exact-current-head sensitive authorization.
-- Durable replay-safe polling, per-PR fixer serialization, three-attempt budget,
-  ambiguous-write reconciliation, and a deduplicated public outcome outbox.
+- Precollection watermark and overlapping reads, atomic owner-command/cursor
+  persistence, and retirement on close/merge (reopening needs a new owner
+  enrollment).
+- Reserved task-API dispatch with `base_ref=main`, current `head_ref`, durable
+  task ID reconciliation, per-PR serialization, three-attempt budget, and an
+  ambiguous-write fail-closed path. Public receipt/outcome comments never
+  dispatch a second task.
+- Generation-bound status transitions and a deduplicated public outcome outbox.
 - Current-head Copilot review and resolved-thread validation, fail-closed check
   collection, owned `cloud-review` status updates, and protected auto-merge
   eligibility.
