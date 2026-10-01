@@ -612,6 +612,8 @@ def main(argv=None, *, paths=None, run=subprocess.run):
     if os.geteuid() == 0:
         raise RuntimeError('Run as application owner, never root')
     if args.schedule:
+        from .git_source import preflight
+        preflight(paths, service_run=run)
         from .assets import checked_path
         checked_path(paths.state)
         paths.state.mkdir(parents=True, exist_ok=True, mode=0o700)

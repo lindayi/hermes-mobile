@@ -175,3 +175,29 @@ def test_legacy_native_stage_call_persists_provenance(repository, monkeypatch, t
     records = [p for p in stage.glob('*.json') if sha.encode() in p.read_bytes()]
     assert records, 'stage_release must not discard the SHA when its caller only receives a Path'
     assert json.loads(records[0].read_text())['git_sha'] == sha
+
+
+@pytest.mark.parametrize('explicit', [False, True])
+def test_native_schedule_non_git_default_commands_rejected_before_side_effects(tmp_path, monkeypatch, explicit):
+    from deploy import native_controls_release as native_release
+    _, paths = deploy_fixture(tmp_path)
+    monkeypatch.setattr(native_release.os, 'geteuid', lambda: 1000)
+    before = {str(p.relative_to(tmp_path)): p.read_bytes()
+              for p in tmp_path.rglob('*') if p.is_file()}
+    commands = []
+
+    def forbidden_popen(command, *args, **kwargs):
+        commands.append(command)
+        raise AssertionError('native scheduler default subprocess.run reached a real command')
+
+    # Preserve the actual run identity; never launch services even on the RED path.
+    monkeypatch.setattr(subprocess, 'Popen', forbidden_popen)
+    kwargs = {'run': subprocess.run} if explicit else {}
+    with pytest.raises(RuntimeError, match='Git source'):
+        native_release.main(['--schedule'], paths=paths, **kwargs)
+    assert commands == []
+    assert not paths.state.exists()
+    assert not paths.dropin.exists()
+    assert not paths.database.exists()
+    assert {str(p.relative_to(tmp_path)): p.read_bytes()
+            for p in tmp_path.rglob('*') if p.is_file()} == before
