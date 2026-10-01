@@ -14,6 +14,45 @@ Live public interim callback emits `message.commentary` with `{event,run_id,time
 
 No model/provider selection changes, no manually injected conversation messages, no native history/cache/role rewrites, no claim of exactly-once delivery.
 
+## Approval timeout recovery (issue #22)
+
+Baseline: `4767372f205b0809d980f47945ecd3ac318107f6`. Native timeout removes
+its approval entry but does not restore `waiting_for_approval`; subsequent tool
+callbacks preserve that status. Empty pending evidence alone does not prove that
+execution can resume.
+
+Both authenticated GET and new steering admission now reconcile under the adapter
+lifecycle lock. Recovery requires the same status/control objects, exact native
+run/approval-session identity, the callback-bound queue and created agent, an
+unchanged active task with `done() is False`, and no closed/stopping/terminal fence.
+The public pending snapshot is validated against the native registry while its
+lock is held. Keep that lock through status publication, GET serialization or
+steering admission: a concurrent new approval cannot slip through an empty read.
+Native registry insertion/removal releases its lock before notification takes the
+adapter lock; ordering here is controls then registry. Never recursively invoke
+`list_gateway_approvals` under the installed non-reentrant registry lock.
+
+Unsupported, unavailable, malformed or changed evidence leaves the wait unresolved.
+An approval inserted before its waiting notification also blocks new steering.
+Every new admission requires an authoritative empty registry snapshot and the
+callback-bound approval identity matching the current run/session; a missing
+binding is never a fallback authorization, even if status is already `running`.
+Existing idempotent receipts remain readable and no timeout approves an action,
+resubmits a prompt, or changes turn identity. Existing bridge reconciliation then
+retires only the bound run's obsolete pending approvals and restores guidance;
+uncertain approval decisions and stop intent retain their existing fences.
+
+Verification uses synthetic state, real temporary bridge journals/routes, and a
+fresh isolated native subprocess exercising the installed approval timeout,
+registry, tool callback and GET. No real model or service is invoked. Source pins
+match the revised adapter; the complete immediate baseline and older rollback set
+remain separately attestable, never accepted as arbitrary per-file mixtures.
+
+Activation is **not** bridge-only: after exact-head review and final integration,
+the guarded main-only native rollout must drain active work before replacing the
+listener. An already-running old listener does not hot-load this fix. No rollout,
+restart, live database repair, dummy approval or active-turn probe was performed.
+
 ## Implementation and evidence
 
 - Maximum 256 distinct attempt keys per run; new attempts beyond capacity return 429 `steer_capacity` without invocation. Existing keys remain readable/idempotent. Control records are swept with native status expiry.

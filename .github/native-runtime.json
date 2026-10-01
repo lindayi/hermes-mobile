@@ -1,0 +1,56 @@
+{
+  "repository": "https://github.com/NousResearch/hermes-agent",
+  "revision": "8911e2e0edf750b104edbdc106d63d6cdac88524",
+  "runtime_path": "/usr/local/lib/hermes-agent",
+  "python_version": "3.11",
+  "uv_version": "0.9.28",
+  "uv_sha256": "7b8460a2b624d8ab27cb293a2c9f2393f9efc4e36e0fb886a6c2360e23fb48be",
+  "extras": [
+    "messaging"
+  ],
+  "sqlite": {
+    "repository": "https://github.com/sqlite/sqlite",
+    "revision": "a5333afb9ad1aa473f8963b92caeaa955f47dc74",
+    "version": "3.51.3"
+  },
+  "upstream_sha256": {
+    "pyproject.toml": "1f928b1560b0669291b3f7d562aa78c99ac4f927375939ca97fd3c3e7494cb91",
+    "uv.lock": "8fd868b9da8b6bc2f4aa94a845e210eccdd5e31be7a0b404f0a8527ced0fddec"
+  },
+  "targets": {
+    "run_agent.py": {
+      "installed_sha256": "a26e5264738f1c62347e63c1265e562d3cfae439dadc313db48572f3e9cc751b",
+      "staged_sha256": "fb58e81ac57c0f49370d72146d21250d1cfeaa0b964c9996e972954bbc343609"
+    },
+    "gateway/platforms/api_server.py": {
+      "installed_sha256": "2893fba247bbe1523eaaf0b90646238c3cfb4208a9a69f3f80fadbc7dd1ddbdd",
+      "staged_sha256": "187c92509b3769c04756f0dc800d3597ea891ea21262e8a32ceaf3972ac95300"
+    },
+    "cron/scheduler.py": {
+      "installed_sha256": "ac0d2f0edcfaf26ffa21aa4e7478b44bb78e6f43e3072697e2849f2b1b13b7e7",
+      "staged_sha256": "4c75d873de809f72e865b9aab2a9f6e1c1008859b60373f9d721d0847d21e9fe"
+    },
+    "tools/send_message_tool.py": {
+      "installed_sha256": "5c0f0898b5a16d5c63cd083281ac5c307541ed704c46acfcfbc368b5eea1dc21",
+      "staged_sha256": "56ed3549db505cb38c9e000cb56ca13017f386c9080c3e5467f34cf9ab12e31c"
+    }
+  },
+  "patches": [
+    {
+      "path": "patches/native-compat.patch",
+      "sha256": "2add04e93a5ea74eeeb407dc9d5556bb38c1454b5c8bf307c3e8490e9b72dd32",
+      "targets": [
+        "gateway/platforms/api_server.py",
+        "run_agent.py"
+      ]
+    },
+    {
+      "path": "patches/cron-delivery.patch",
+      "sha256": "444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff",
+      "targets": [
+        "cron/scheduler.py",
+        "tools/send_message_tool.py"
+      ]
+    }
+  ]
+}

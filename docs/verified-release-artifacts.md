@@ -22,8 +22,10 @@ full every time; host evidence is not cached or uploaded.
    own checkout with `deploy.release_artifact unpack`, and passes its `public`
    directory to the managed CI runner. Browser jobs never rebuild those assets.
 3. The fail-closed `source-ci` aggregate requires `build`, syntax/secret checks,
-   JavaScript, both Python shards and all four browser shards. Failure,
-   cancellation and skipping cannot satisfy it.
+   JavaScript, both Python shards, all four browser shards and the disposable
+   hosted `native` job. Failure, cancellation and skipping cannot satisfy it.
+   The native job covers the explicit public-runtime subset; the complete
+   installed/private host partition still runs separately at deployment.
 4. Only successful `push`/`refs/heads/main` runs in `lindayi/hermes-mobile` reach
    `attest`, which depends on `source-ci`. Only that job has `id-token: write` and
    `attestations: write`. It downloads and attests the exact tar, without checking
@@ -76,7 +78,7 @@ All members are checked before any destination files are written.
   completed success and the latest run attempt.
 - Requires the exact complete set of successful attempt-specific jobs:
   `build`, `checks`, `js`, `python (0)`, `python (1)`, `browser (0..3)`,
-  `source-ci`, and `attest`. Job IDs must be unique; missing, duplicate, extra,
+  `native`, `source-ci`, and `attest`. Job IDs must be unique; missing, duplicate, extra,
   skipped or previous-attempt jobs fail closed.
 - Selects one unexpired exact-run/attempt artifact, validates its repository/SHA
   metadata, downloads by numeric artifact ID and checks GitHub's transport
