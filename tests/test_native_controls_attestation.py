@@ -28,3 +28,43 @@ def test_new_native_controls_attestation_pins_all_executable_local_sources(tmp_p
     (root/'backend/native_run_controls.py').unlink()
     outside=tmp_path/'outside';outside.write_text('compat');(root/'backend/native_run_controls.py').symlink_to(outside)
     assert not controls._control_sources_match(root)
+
+
+def test_timeout_recovery_sources_have_exact_matching_release_pins():
+    from deploy import native_controls_release as release
+    root = Path(__file__).resolve().parents[1]
+    assert controls._CONTROL_HASHES == release.APPROVED_CONTROL_HASHES
+    for name, digest in controls._CONTROL_HASHES.items():
+        assert hashlib.sha256((root/name).read_bytes()).hexdigest() == digest, name
+    assert release.approved_controls(root) == controls._CONTROL_HASHES
+
+
+def test_timeout_baseline_remains_exactly_attested_for_drain_and_rollback(tmp_path, monkeypatch):
+    from deploy import native_controls_release as release
+    import pytest
+    baseline = getattr(controls, '_TIMEOUT_BASELINE_CONTROL_HASHES', None)
+    assert baseline is not None, 'The immediate pre-fix listener must remain attestable'
+    assert baseline == release.TIMEOUT_BASELINE_CONTROL_HASHES
+    assert baseline == {**controls._CONTROL_HASHES, 'backend/native_run_controls.py':
+        '5107e54ed631fe2579efe2fb50c6a8ba1e9e3616c4fcd1d0e8ead2f7f29445d9'}
+    # Synthetic source sets exercise attestation without production release reads.
+    maps = []
+    for version in ('current', 'baseline'):
+        root = tmp_path/version
+        hashes = {}
+        for name in baseline:
+            path = root/name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(version+name)
+            hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        maps.append(hashes)
+    monkeypatch.setattr(controls, '_CONTROL_HASHES', maps[0])
+    monkeypatch.setattr(release, 'APPROVED_CONTROL_HASHES', maps[0])
+    monkeypatch.setattr(controls, '_TIMEOUT_BASELINE_CONTROL_HASHES', maps[1])
+    monkeypatch.setattr(release, 'TIMEOUT_BASELINE_CONTROL_HASHES', maps[1])
+    assert release.attested_controls(tmp_path/'baseline') == maps[1]
+    assert release.attested_controls(tmp_path/'current') == maps[0]
+    name = 'backend/native_run_controls.py'
+    (tmp_path/'baseline'/name).write_bytes((tmp_path/'current'/name).read_bytes())
+    with pytest.raises(RuntimeError, match='approved'):
+        release.attested_controls(tmp_path/'baseline')
