@@ -101,7 +101,7 @@ jobs:
             };
 
             // Exact mirror of deploy/release_policy.py; parity is tested by executing this script.
-            const MAX_FILES = 250, MAX_PATH = 200;
+            const MAX_FILES = 250, MAX_PATH = 200, MAX_TREE_ENTRIES = 100000;
             const CANONICAL = /^[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)*$/;
             // Exact audited presentation-only frontend files (SEC-1); never a basename pattern.
             const FRONTEND_ROUTINE = new Set(['frontend/styles.css', 'frontend/viewport.mjs',
@@ -123,34 +123,96 @@ jobs:
               const match = DOC.exec(path);
               return Boolean(match) && !DOC_SENSITIVE.some(word => match[1].includes(word));
             };
-            const STATUS = {added: 'A', removed: 'D', modified: 'M', renamed: 'R'};
+            const STATUS = new Set(['A', 'D', 'M', 'R']);
             const classify = files => {
               if (!Array.isArray(files)) return ['sensitive', ['malformed diff inventory']];
               if (files.length === 0) return ['sensitive', ['empty diff from deployed base']];
               if (files.length > MAX_FILES) return ['sensitive', [`overlarge diff: more than ${MAX_FILES} files`]];
               const reasons = [];
               for (const file of files) {
-                const status = file && typeof file === 'object' && Object.hasOwn(STATUS, file.status) ?
-                  STATUS[file.status] : null;
-                const previous = file && Object.hasOwn(file, 'previous_filename') ? file.previous_filename : null;
-                if (!status) reasons.push(`unsupported change status: ${file && file.filename}`);
-                else if (status === 'R' && previous === null) reasons.push(`rename without from path: ${file.filename}`);
-                else if (status !== 'R' && previous !== null) reasons.push(`unexpected from path: ${file.filename}`);
-                else if (!routinePath(file.filename)) reasons.push(`sensitive path: ${file.filename}`);
-                else if (status === 'R' && !routinePath(previous)) reasons.push(`sensitive path: ${previous}`);
+                const previous = file && file.previous_path !== undefined ? file.previous_path : null;
+                if (!file || typeof file !== 'object' || !STATUS.has(file.status))
+                  reasons.push(`unsupported change status: ${file && file.path}`);
+                else if (file.status === 'R' && previous === null) reasons.push(`rename without from path: ${file.path}`);
+                else if (file.status !== 'R' && previous !== null) reasons.push(`unexpected from path: ${file.path}`);
+                else if (!['000000', '100644'].includes(file.old_mode) ||
+                         !['000000', '100644'].includes(file.new_mode))
+                  reasons.push(`unsupported file mode: ${file.path}`);
+                else if (!routinePath(file.path)) reasons.push(`sensitive path: ${file.path}`);
+                else if (file.status === 'R' && !routinePath(previous)) reasons.push(`sensitive path: ${previous}`);
               }
               return reasons.length ? ['sensitive', reasons] : ['routine', []];
+            };
+
+            const modeAwareDiff = async (base, head) => {
+              const {data: comparison} = await github.rest.repos.compareCommitsWithBasehead(
+               {owner, repo, basehead: `${base}...${head}`, per_page: 100});
+              ensure(comparison && ['ahead', 'identical'].includes(comparison.status) &&
+                     comparison.behind_by === 0 && comparison.merge_base_commit &&
+                     comparison.merge_base_commit.sha === base, 'Source does not descend from the deployed base');
+              const files = comparison.files;
+              if (!Array.isArray(files) || files.length === 0 || files.length > MAX_FILES) return null;
+              const treeFor = async commitSha => {
+               const {data: commit} = await github.rest.git.getCommit({owner, repo, commit_sha: commitSha});
+               if (!commit || commit.sha !== commitSha || !commit.tree || !HEX.test(commit.tree.sha)) return null;
+               const treeSha = commit.tree.sha;
+               const {data: tree} = await github.rest.git.getTree({owner, repo, tree_sha: treeSha, recursive: '1'});
+               if (!tree || tree.sha !== treeSha || tree.truncated !== false ||
+                   !Array.isArray(tree.tree) || tree.tree.length > MAX_TREE_ENTRIES) return null;
+               const types = {'040000': 'tree', '100644': 'blob', '100755': 'blob',
+                 '120000': 'blob', '160000': 'commit'};
+               const entries = new Map(), seen = new Set();
+               for (const entry of tree.tree) {
+                 if (!entry || typeof entry.path !== 'string' || !entry.path || entry.path.includes('\0') ||
+                     seen.has(entry.path) || types[entry.mode] !== entry.type || !HEX.test(entry.sha)) return null;
+                 seen.add(entry.path);
+                 if (entry.mode !== '040000') entries.set(entry.path, entry);
+               }
+               return entries;
+              };
+              const [oldTree, newTree] = await Promise.all([treeFor(base), treeFor(head)]);
+              if (!oldTree || !newTree) return null;
+              const changedPaths = new Set([...oldTree.keys(), ...newTree.keys()]);
+              for (const path of [...changedPaths]) {
+               const oldEntry = oldTree.get(path), newEntry = newTree.get(path);
+               if (oldEntry && newEntry && oldEntry.mode === newEntry.mode &&
+                   oldEntry.type === newEntry.type && oldEntry.sha === newEntry.sha) changedPaths.delete(path);
+              }
+              const described = new Set(), changes = [];
+              const statusMap = {added: 'A', removed: 'D', modified: 'M', renamed: 'R'};
+              for (const file of files) {
+               const status = file && typeof file === 'object' && Object.hasOwn(statusMap, file.status) ?
+                 statusMap[file.status] : null;
+               const path = file && file.filename;
+               const previous = file && Object.hasOwn(file, 'previous_filename') ? file.previous_filename : null;
+               if (!status || typeof path !== 'string' ||
+                   (status === 'R' ? typeof previous !== 'string' : previous !== null)) return null;
+               const oldPath = status === 'R' ? previous : path;
+               const oldEntry = oldTree.get(oldPath), newEntry = newTree.get(path);
+               const touched = status === 'R' ? [previous, path] : [path];
+               if (touched.some(item => described.has(item))) return null;
+               for (const item of touched) described.add(item);
+               if (status === 'A' && (oldTree.has(path) || !newEntry)) return null;
+               if (status === 'D' && (!oldEntry || newTree.has(path))) return null;
+               if (status === 'M' && (!oldEntry || !newEntry ||
+                   (oldEntry.mode === newEntry.mode && oldEntry.type === newEntry.type && oldEntry.sha === newEntry.sha)))
+                 return null;
+               if (status === 'R' && (!oldEntry || newTree.has(previous) || oldTree.has(path) || !newEntry))
+                 return null;
+               changes.push({status, path, previous_path: previous,
+                 old_mode: oldEntry ? oldEntry.mode : '000000', new_mode: newEntry ? newEntry.mode : '000000'});
+              }
+              if (changedPaths.size > MAX_FILES || described.size !== changedPaths.size ||
+                 [...changedPaths].some(path => !described.has(path))) return null;
+              return changes;
             };
 
             const [base, basis] = await deployedBase();
             let risk = 'sensitive', reasons = [basis];
             if (base) {
-              const {data: comparison} = await github.rest.repos.compareCommitsWithBasehead(
-                {owner, repo, basehead: `${base}...${sha}`});
-              ensure(comparison && ['ahead', 'identical'].includes(comparison.status) &&
-                     comparison.behind_by === 0 && comparison.merge_base_commit &&
-                     comparison.merge_base_commit.sha === base, 'Source does not descend from the deployed base');
-              [risk, reasons] = classify(comparison.files);
+              const changes = await modeAwareDiff(base, sha);
+              [risk, reasons] = changes ? classify(changes) :
+               ['sensitive', ['incomplete or inconsistent Git-tree diff metadata']];
             }
             core.info(`Deployed base ${base || 'unknown'} (${basis}); risk ${risk}: ${reasons.join('; ') || 'all routine'}`);
             core.setOutput('risk', risk);
@@ -211,6 +273,102 @@ jobs:
             const {data: ref} = await github.rest.git.getRef({owner, repo, ref: 'heads/main'});
             ensure(ref.ref === 'refs/heads/main' && ref.object.type === 'commit' && ref.object.sha === sha,
                    'Approved source has been superseded');
+            const MAX_FILES = 250, MAX_PATH = 200, MAX_TREE_ENTRIES = 100000;
+            const CANONICAL = /^[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)*$/;
+            const FRONTEND_ROUTINE = new Set(['frontend/styles.css', 'frontend/viewport.mjs',
+              'frontend/session-swipe.mjs', 'frontend/disclosure-reachability.mjs',
+              'frontend/icons/apple-touch-icon.png', 'frontend/icons/icon-192.png', 'frontend/icons/icon-512.png']);
+            const TESTS = [/^tests\/test_[a-z0-9_]+\.py$/, /^tests\/browser\/[a-z0-9][a-z0-9-]*\.(?:spec|test)\.mjs$/,
+              /^tests\/browser\/[a-z0-9_]+_fixture\.py$/, /^tests\/fixtures\/[a-z0-9][a-z0-9-]*\.json$/];
+            const DOC = /^docs\/([a-z0-9][a-z0-9-]*)\.md$/;
+            const DOC_SENSITIVE = ['account', 'admin', 'agent', 'artifact', 'attestation', 'auth', 'backup',
+              'bootstrap', 'ci', 'credential', 'cron', 'delivery', 'deploy', 'development', 'family', 'git',
+              'hosted', 'hygiene', 'implementation', 'install', 'instruction', 'invite', 'job', 'member',
+              'migration', 'native', 'notification', 'operational', 'operations', 'operator', 'passkey',
+              'permission', 'policy', 'privacy', 'production', 'push', 'recovery', 'release', 'restore',
+              'rollback', 'routine', 'runtime', 'scheduler', 'secret', 'security', 'signing', 'token',
+              'webauthn', 'workflow'];
+            const routinePath = path => typeof path === 'string' && path.length <= MAX_PATH && CANONICAL.test(path) &&
+              (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => pattern.test(path)) ||
+               (() => { const match = DOC.exec(path); return Boolean(match) &&
+                 !DOC_SENSITIVE.some(word => match[1].includes(word)); })());
+            const classifyChanges = changes => {
+              if (!Array.isArray(changes) || changes.length === 0 || changes.length > MAX_FILES) return 'sensitive';
+              for (const file of changes) {
+                const previous = file && file.previous_path !== undefined ? file.previous_path : null;
+                if (!file || !['A', 'D', 'M', 'R'].includes(file.status) ||
+                    (file.status === 'R' ? previous === null : previous !== null) ||
+                    !['000000', '100644'].includes(file.old_mode) ||
+                    !['000000', '100644'].includes(file.new_mode) || !routinePath(file.path) ||
+                    (file.status === 'R' && !routinePath(previous))) return 'sensitive';
+              }
+              return 'routine';
+            };
+            const modeAwareDiff = async (base, head) => {
+              const {data: comparison} = await github.rest.repos.compareCommitsWithBasehead(
+                {owner, repo, basehead: `${base}...${head}`, per_page: 100});
+              ensure(comparison && ['ahead', 'identical'].includes(comparison.status) &&
+                     comparison.behind_by === 0 && comparison.merge_base_commit &&
+                     comparison.merge_base_commit.sha === base, 'Source does not descend from the deployed base');
+              const files = comparison.files;
+              if (!Array.isArray(files) || files.length === 0 || files.length > MAX_FILES) return null;
+              const treeFor = async commitSha => {
+                const {data: commit} = await github.rest.git.getCommit({owner, repo, commit_sha: commitSha});
+                if (!commit || commit.sha !== commitSha || !commit.tree || !HEX.test(commit.tree.sha)) return null;
+                const treeSha = commit.tree.sha;
+                const {data: tree} = await github.rest.git.getTree({owner, repo, tree_sha: treeSha, recursive: '1'});
+                if (!tree || tree.sha !== treeSha || tree.truncated !== false ||
+                    !Array.isArray(tree.tree) || tree.tree.length > MAX_TREE_ENTRIES) return null;
+                const types = {'040000': 'tree', '100644': 'blob', '100755': 'blob',
+                  '120000': 'blob', '160000': 'commit'};
+                const entries = new Map(), seen = new Set();
+                for (const entry of tree.tree) {
+                  if (!entry || typeof entry.path !== 'string' || !entry.path || entry.path.includes('\0') ||
+                      seen.has(entry.path) || types[entry.mode] !== entry.type || !HEX.test(entry.sha)) return null;
+                  seen.add(entry.path);
+                  if (entry.mode !== '040000') entries.set(entry.path, entry);
+                }
+                return entries;
+              };
+              const [oldTree, newTree] = await Promise.all([treeFor(base), treeFor(head)]);
+              if (!oldTree || !newTree) return null;
+              const changedPaths = new Set([...oldTree.keys(), ...newTree.keys()]);
+              for (const path of [...changedPaths]) {
+                const oldEntry = oldTree.get(path), newEntry = newTree.get(path);
+                if (oldEntry && newEntry && oldEntry.mode === newEntry.mode &&
+                    oldEntry.type === newEntry.type && oldEntry.sha === newEntry.sha) changedPaths.delete(path);
+              }
+              const described = new Set(), changes = [];
+              const statusMap = {added: 'A', removed: 'D', modified: 'M', renamed: 'R'};
+              for (const file of files) {
+                const status = file && typeof file === 'object' && Object.hasOwn(statusMap, file.status) ?
+                  statusMap[file.status] : null;
+                const path = file && file.filename;
+                const previous = file && Object.hasOwn(file, 'previous_filename') ? file.previous_filename : null;
+                if (!status || typeof path !== 'string' ||
+                    (status === 'R' ? typeof previous !== 'string' : previous !== null)) return null;
+                const oldPath = status === 'R' ? previous : path;
+                const oldEntry = oldTree.get(oldPath), newEntry = newTree.get(path);
+                const touched = status === 'R' ? [previous, path] : [path];
+                if (touched.some(item => described.has(item))) return null;
+                for (const item of touched) described.add(item);
+                if (status === 'A' && (oldTree.has(path) || !newEntry)) return null;
+                if (status === 'D' && (!oldEntry || newTree.has(path))) return null;
+                if (status === 'M' && (!oldEntry || !newEntry ||
+                    (oldEntry.mode === newEntry.mode && oldEntry.type === newEntry.type && oldEntry.sha === newEntry.sha)))
+                  return null;
+                if (status === 'R' && (!oldEntry || newTree.has(previous) || oldTree.has(path) || !newEntry))
+                  return null;
+                changes.push({status, path, previous_path: previous,
+                  old_mode: oldEntry ? oldEntry.mode : '000000', new_mode: newEntry ? newEntry.mode : '000000'});
+              }
+              if (changedPaths.size > MAX_FILES || described.size !== changedPaths.size ||
+                  [...changedPaths].some(path => !described.has(path))) return null;
+              return changes;
+            };
+            const recomputedRisk = baseSha ?
+              classifyChanges(await modeAwareDiff(baseSha, sha)) : 'sensitive';
+            ensure(recomputedRisk === risk, 'Promotion risk disagrees with complete Git-tree diff evidence');
             // The REST review-history schema is an array of {state,user,environments,comment}.
             // A successful environment job alone is NOT approval (admins can bypass).
             const {data: reviews} = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals',
@@ -289,6 +447,102 @@ jobs:
             const {data: ref} = await github.rest.git.getRef({owner, repo, ref: 'heads/main'});
             ensure(ref.ref === 'refs/heads/main' && ref.object.type === 'commit' && ref.object.sha === sha,
                    'Approved source has been superseded');
+            const MAX_FILES = 250, MAX_PATH = 200, MAX_TREE_ENTRIES = 100000;
+            const CANONICAL = /^[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)*$/;
+            const FRONTEND_ROUTINE = new Set(['frontend/styles.css', 'frontend/viewport.mjs',
+              'frontend/session-swipe.mjs', 'frontend/disclosure-reachability.mjs',
+              'frontend/icons/apple-touch-icon.png', 'frontend/icons/icon-192.png', 'frontend/icons/icon-512.png']);
+            const TESTS = [/^tests\/test_[a-z0-9_]+\.py$/, /^tests\/browser\/[a-z0-9][a-z0-9-]*\.(?:spec|test)\.mjs$/,
+              /^tests\/browser\/[a-z0-9_]+_fixture\.py$/, /^tests\/fixtures\/[a-z0-9][a-z0-9-]*\.json$/];
+            const DOC = /^docs\/([a-z0-9][a-z0-9-]*)\.md$/;
+            const DOC_SENSITIVE = ['account', 'admin', 'agent', 'artifact', 'attestation', 'auth', 'backup',
+              'bootstrap', 'ci', 'credential', 'cron', 'delivery', 'deploy', 'development', 'family', 'git',
+              'hosted', 'hygiene', 'implementation', 'install', 'instruction', 'invite', 'job', 'member',
+              'migration', 'native', 'notification', 'operational', 'operations', 'operator', 'passkey',
+              'permission', 'policy', 'privacy', 'production', 'push', 'recovery', 'release', 'restore',
+              'rollback', 'routine', 'runtime', 'scheduler', 'secret', 'security', 'signing', 'token',
+              'webauthn', 'workflow'];
+            const routinePath = path => typeof path === 'string' && path.length <= MAX_PATH && CANONICAL.test(path) &&
+              (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => pattern.test(path)) ||
+               (() => { const match = DOC.exec(path); return Boolean(match) &&
+                 !DOC_SENSITIVE.some(word => match[1].includes(word)); })());
+            const classifyChanges = changes => {
+              if (!Array.isArray(changes) || changes.length === 0 || changes.length > MAX_FILES) return 'sensitive';
+              for (const file of changes) {
+                const previous = file && file.previous_path !== undefined ? file.previous_path : null;
+                if (!file || !['A', 'D', 'M', 'R'].includes(file.status) ||
+                    (file.status === 'R' ? previous === null : previous !== null) ||
+                    !['000000', '100644'].includes(file.old_mode) ||
+                    !['000000', '100644'].includes(file.new_mode) || !routinePath(file.path) ||
+                    (file.status === 'R' && !routinePath(previous))) return 'sensitive';
+              }
+              return 'routine';
+            };
+            const modeAwareDiff = async (base, head) => {
+              const {data: comparison} = await github.rest.repos.compareCommitsWithBasehead(
+                {owner, repo, basehead: `${base}...${head}`, per_page: 100});
+              ensure(comparison && ['ahead', 'identical'].includes(comparison.status) &&
+                     comparison.behind_by === 0 && comparison.merge_base_commit &&
+                     comparison.merge_base_commit.sha === base, 'Source does not descend from the deployed base');
+              const files = comparison.files;
+              if (!Array.isArray(files) || files.length === 0 || files.length > MAX_FILES) return null;
+              const treeFor = async commitSha => {
+                const {data: commit} = await github.rest.git.getCommit({owner, repo, commit_sha: commitSha});
+                if (!commit || commit.sha !== commitSha || !commit.tree || !HEX.test(commit.tree.sha)) return null;
+                const treeSha = commit.tree.sha;
+                const {data: tree} = await github.rest.git.getTree({owner, repo, tree_sha: treeSha, recursive: '1'});
+                if (!tree || tree.sha !== treeSha || tree.truncated !== false ||
+                    !Array.isArray(tree.tree) || tree.tree.length > MAX_TREE_ENTRIES) return null;
+                const types = {'040000': 'tree', '100644': 'blob', '100755': 'blob',
+                  '120000': 'blob', '160000': 'commit'};
+                const entries = new Map(), seen = new Set();
+                for (const entry of tree.tree) {
+                  if (!entry || typeof entry.path !== 'string' || !entry.path || entry.path.includes('\0') ||
+                      seen.has(entry.path) || types[entry.mode] !== entry.type || !HEX.test(entry.sha)) return null;
+                  seen.add(entry.path);
+                  if (entry.mode !== '040000') entries.set(entry.path, entry);
+                }
+                return entries;
+              };
+              const [oldTree, newTree] = await Promise.all([treeFor(base), treeFor(head)]);
+              if (!oldTree || !newTree) return null;
+              const changedPaths = new Set([...oldTree.keys(), ...newTree.keys()]);
+              for (const path of [...changedPaths]) {
+                const oldEntry = oldTree.get(path), newEntry = newTree.get(path);
+                if (oldEntry && newEntry && oldEntry.mode === newEntry.mode &&
+                    oldEntry.type === newEntry.type && oldEntry.sha === newEntry.sha) changedPaths.delete(path);
+              }
+              const described = new Set(), changes = [];
+              const statusMap = {added: 'A', removed: 'D', modified: 'M', renamed: 'R'};
+              for (const file of files) {
+                const status = file && typeof file === 'object' && Object.hasOwn(statusMap, file.status) ?
+                  statusMap[file.status] : null;
+                const path = file && file.filename;
+                const previous = file && Object.hasOwn(file, 'previous_filename') ? file.previous_filename : null;
+                if (!status || typeof path !== 'string' ||
+                    (status === 'R' ? typeof previous !== 'string' : previous !== null)) return null;
+                const oldPath = status === 'R' ? previous : path;
+                const oldEntry = oldTree.get(oldPath), newEntry = newTree.get(path);
+                const touched = status === 'R' ? [previous, path] : [path];
+                if (touched.some(item => described.has(item))) return null;
+                for (const item of touched) described.add(item);
+                if (status === 'A' && (oldTree.has(path) || !newEntry)) return null;
+                if (status === 'D' && (!oldEntry || newTree.has(path))) return null;
+                if (status === 'M' && (!oldEntry || !newEntry ||
+                    (oldEntry.mode === newEntry.mode && oldEntry.type === newEntry.type && oldEntry.sha === newEntry.sha)))
+                  return null;
+                if (status === 'R' && (!oldEntry || newTree.has(previous) || oldTree.has(path) || !newEntry))
+                  return null;
+                changes.push({status, path, previous_path: previous,
+                  old_mode: oldEntry ? oldEntry.mode : '000000', new_mode: newEntry ? newEntry.mode : '000000'});
+              }
+              if (changedPaths.size > MAX_FILES || described.size !== changedPaths.size ||
+                  [...changedPaths].some(path => !described.has(path))) return null;
+              return changes;
+            };
+            const recomputedRisk = baseSha ?
+              classifyChanges(await modeAwareDiff(baseSha, sha)) : 'sensitive';
+            ensure(recomputedRisk === risk, 'Promotion risk disagrees with complete Git-tree diff evidence');
             // The REST review-history schema is an array of {state,user,environments,comment}.
             // A successful environment job alone is NOT approval (admins can bypass).
             const {data: reviews} = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals',

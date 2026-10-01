@@ -15,6 +15,8 @@ BASE = 'b' * 40
 RELEASE = 'e' * 32
 OID = '1' * 40
 ZERO = '0' * 40
+TREE_BASE = 'c' * 40
+TREE_HEAD = 'd' * 40
 V2_JOBS = PREFIX + '/actions/runs/20/jobs?filter=latest&per_page=100'
 
 
@@ -408,7 +410,9 @@ const github = {rest: {
     compareCommitsWithBasehead: p => read(`${P}/compare/${p.basehead}`, p),
     createDeployment: async data => { writes.push(data); return {data: {id: 50}}; },
     createDeploymentStatus: async data => { writes.push(data); return {data: {}}; }},
-  git: {getRef: p => read(`${P}/git/ref/${p.ref}`, p)},
+  git: {getRef: p => read(`${P}/git/ref/${p.ref}`, p),
+    getCommit: p => read(`${P}/git/commits/${p.commit_sha}`, p),
+    getTree: p => read(`${P}/git/trees/${p.tree_sha}?recursive=${p.recursive}`, p)},
   actions: {getWorkflowRun: p => read(`${P}/actions/runs/${p.run_id}`, p)}},
   request: (route, p) => read(route.split(' ')[1].replace(/\{(\w+)\}/g, (_, key) => p[key]), p)};
 (async () => { try { await (async () => { __SCRIPT__ })(); console.log(JSON.stringify({reads, writes, outputs})); }
@@ -416,15 +420,16 @@ catch (e) { console.log(JSON.stringify({reads, writes, outputs, error: String(e)
 '''
 
 
-def run_script(job, api, *, env=None, main=SHA):
+def run_script(job, api, *, env=None, main=None, sha=SHA):
     import json
     import os
     import shutil
     import subprocess
     script = production_workflow()['jobs'][job]['steps'][0]['with']['script']
+    main = sha if main is None else main
     api = {**api, PREFIX + '/git/ref/heads/main': {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': main}}}
-    harness = HARNESS.replace('__INPUT__', json.dumps({'api': api, 'sha': SHA})).replace('__SCRIPT__', script)
-    environment = {**os.environ, 'SOURCE_RUN_ID': '10', 'APPROVAL_RUN_ID': '20', 'SOURCE_SHA': SHA,
+    harness = HARNESS.replace('__INPUT__', json.dumps({'api': api, 'sha': sha})).replace('__SCRIPT__', script)
+    environment = {**os.environ, 'SOURCE_RUN_ID': '10', 'APPROVAL_RUN_ID': '20', 'SOURCE_SHA': sha,
                    'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_JOB': job, **(env or {})}
     node = os.environ.get('HERMES_TEST_NODE')
     if node is None:
@@ -462,19 +467,40 @@ BOT = {'id': 41898282, 'login': 'github-actions[bot]', 'type': 'Bot'}
 OWNER = {'id': 5164171, 'login': 'lindayi', 'type': 'User'}
 
 
-def cloud_api(files=None, history=None):
+def add_cloud_tree_api(api, files, *, base=BASE, sha=SHA, base_entries=None, head_entries=None):
+    """Add authenticated-style commit/tree responses bound to exact Git commits."""
+    if base_entries is None or head_entries is None:
+        base_entries, head_entries = [], []
+        for index, file in enumerate(files):
+            status, path = file.get('status'), file.get('filename')
+            old_path = file.get('previous_filename', path)
+            if status in {'removed', 'modified', 'renamed'}:
+                base_entries.append({'path': old_path, 'mode': '100644', 'type': 'blob',
+                                     'sha': f'{index + 1:040x}'})
+            if status in {'added', 'modified', 'renamed'}:
+                head_entries.append({'path': path, 'mode': '100644', 'type': 'blob',
+                                     'sha': f'{index + 2:040x}'})
+    for commit, tree, entries in ((base, TREE_BASE, base_entries), (sha, TREE_HEAD, head_entries)):
+        api[PREFIX + f'/git/commits/{commit}'] = {'sha': commit, 'tree': {'sha': tree}}
+        api[PREFIX + f'/git/trees/{tree}?recursive=1'] = {
+            'sha': tree, 'truncated': False, 'tree': entries}
+
+
+def cloud_api(files=None, history=None, *, base=BASE, sha=SHA):
     """Synthetic API: deployment 7 for BASE succeeded (owner-reported) unless overridden."""
     _, api = evidence()
-    history = [(7, BASE, BOT, [('success', OWNER), ('in_progress', OWNER), ('queued', BOT)])] \
+    history = [(7, base, BOT, [('success', OWNER), ('in_progress', OWNER), ('queued', BOT)])] \
         if history is None else history
-    api[PREFIX + '/deployments'] = [{'id': ident, 'sha': sha, 'task': 'deploy:mobile', 'environment': 'production',
-                                     'creator': creator} for ident, sha, creator, _ in history]
+    api[PREFIX + '/deployments'] = [{'id': ident, 'sha': deployed_sha, 'task': 'deploy:mobile', 'environment': 'production',
+                                     'creator': creator} for ident, deployed_sha, creator, _ in history]
     for ident, _, _, statuses in history:
         api[PREFIX + f'/deployments/{ident}/statuses'] = [{'state': state, 'creator': who}
                                                           for state, who in statuses]
     files = [{'filename': 'frontend/styles.css', 'status': 'modified'}] if files is None else files
-    api[PREFIX + f'/compare/{BASE}...{SHA}'] = {'status': 'ahead', 'ahead_by': 2, 'behind_by': 0,
-                                               'merge_base_commit': {'sha': BASE}, 'files': files}
+    api[PREFIX + f'/compare/{base}...{sha}'] = {'status': 'ahead', 'ahead_by': 2, 'behind_by': 0,
+                                                'merge_base_commit': {'sha': base}, 'files': files}
+    api[PREFIX + '/actions/runs/10']['head_sha'] = sha
+    add_cloud_tree_api(api, files, base=base, sha=sha)
     return api
 
 
@@ -584,10 +610,63 @@ def test_cloud_classifier_matches_host_policy_exactly():
     assert not mismatches
 
 
-def promote_api(path='routine', reviews=None):
-    _, api = evidence_v2(path)
-    if reviews is not None:
-        api[PREFIX + '/actions/runs/20/approvals'] = reviews
+@pytest.mark.parametrize('fault', [
+    'missing_file', 'duplicate_file', 'missing_tree_path', 'duplicate_tree_path', 'unexpected_tree_path',
+    'partial_file_inventory', 'unexpected_compare_path', 'missing_mode', 'unsupported_mode',
+    'unsupported_status', 'truncated_tree', 'missing_truncated', 'wrong_commit', 'wrong_tree',
+])
+def test_cloud_classifier_routes_incomplete_or_unexpected_git_metadata_sensitive(fault):
+    files = [{'filename': path, 'status': 'modified'}
+             for path in ('frontend/styles.css', 'docs/ux.md')] if fault == 'partial_file_inventory' else None
+    api = cloud_api(files)
+    comparison = api[PREFIX + f'/compare/{BASE}...{SHA}']
+    tree_key = PREFIX + f'/git/trees/{TREE_HEAD}?recursive=1'
+    tree = api[tree_key]
+    if fault == 'missing_file':
+        comparison['files'] = []
+    elif fault == 'duplicate_file':
+        comparison['files'].append(copy.deepcopy(comparison['files'][0]))
+    elif fault == 'missing_tree_path':
+        tree['tree'].clear()
+    elif fault == 'duplicate_tree_path':
+        tree['tree'].append(copy.deepcopy(tree['tree'][0]))
+    elif fault == 'unexpected_tree_path':
+        tree['tree'].append({'path': 'tests/test_unreported.py', 'mode': '100644', 'type': 'blob', 'sha': OID})
+    elif fault == 'partial_file_inventory':
+        comparison['files'].pop()
+    elif fault == 'unexpected_compare_path':
+        comparison['files'].append({'filename': 'tests/test_unreported.py', 'status': 'modified'})
+    elif fault == 'missing_mode':
+        tree['tree'][0].pop('mode')
+    elif fault == 'unsupported_mode':
+        tree['tree'][0]['mode'] = '100777'
+    elif fault == 'unsupported_status':
+        comparison['files'][0]['status'] = 'copied'
+    elif fault == 'truncated_tree':
+        tree['truncated'] = True
+    elif fault == 'missing_truncated':
+        tree.pop('truncated')
+    elif fault == 'wrong_commit':
+        api[PREFIX + f'/git/commits/{SHA}']['sha'] = BASE
+    elif fault == 'wrong_tree':
+        tree['sha'] = BASE
+    output = run_script('classify', api)
+    assert 'error' not in output, output
+    assert output['outputs'] == {'risk': 'sensitive', 'base_sha': BASE}
+
+
+def promote_api(path='routine', reviews=None, *, base=BASE, sha=SHA, files=None,
+                base_entries=None, head_entries=None):
+    request, api = evidence_v2(path, base=base)
+    approvals = api[PREFIX + '/actions/runs/20/approvals']
+    comparison_base = base or BASE
+    files = files or ([{'filename': 'frontend/styles.css', 'status': 'modified'}] if path == 'routine' else [
+        {'filename': 'backend/app.py', 'status': 'modified'}])
+    api.update(cloud_api(files, base=comparison_base, sha=sha))
+    add_cloud_tree_api(api, files, base=comparison_base, sha=sha,
+                       base_entries=base_entries, head_entries=head_entries)
+    api[PREFIX + '/actions/runs/10']['head_sha'] = sha
+    api[PREFIX + '/actions/runs/20/approvals'] = approvals if reviews is None else reviews
     return api
 
 
@@ -603,6 +682,32 @@ def test_promote_routine_creates_strict_v2_intent_without_owner_review():
     assert deployment['payload'] == {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE}
     assert status['state'] == 'queued' and status['deployment_id'] == 50
     assert status['log_url'] == 'https://github.com/lindayi/hermes-mobile/actions/runs/20'
+
+
+@pytest.mark.parametrize('change', ['regular_to_executable', 'executable_to_regular',
+                                    'add_symlink', 'regular_to_symlink'])
+def test_both_promotion_paths_recompute_real_git_modes_before_intent(tmp_path, change):
+    from deploy import release_policy
+
+    m = module()
+    repo, base, sha, base_entries, head_entries = real_git_mode_release(tmp_path, change)
+    changes = m.release_changes(repo, base, sha)
+    assert changes and release_policy.classify(changes).risk == 'sensitive'
+    statuses = {'A': 'added', 'D': 'removed', 'M': 'modified', 'T': 'modified'}
+    files = [{'filename': item.path, 'status': statuses[item.status]} for item in changes]
+    api = promote_api('sensitive', base=base, sha=sha, files=files,
+                      base_entries=base_entries, head_entries=head_entries)
+    sensitive = run_script('promote-sensitive', api, sha=sha,
+                           env={'RELEASE_RISK': 'sensitive', 'CLASSIFIED_RISK': 'sensitive', 'BASE_SHA': base})
+    assert 'error' not in sensitive, sensitive
+    assert sensitive['writes'][0]['payload']['base_sha'] == base
+    calls = [call['path'] for call in sensitive['reads']]
+    assert f'{PREFIX}/git/commits/{base}' in calls and f'{PREFIX}/git/commits/{sha}' in calls
+    assert f'{PREFIX}/git/trees/{TREE_BASE}?recursive=1' in calls
+    assert f'{PREFIX}/git/trees/{TREE_HEAD}?recursive=1' in calls
+    routine = run_script('promote-routine', api, sha=sha,
+                         env={'RELEASE_RISK': 'routine', 'CLASSIFIED_RISK': 'routine', 'BASE_SHA': base})
+    assert routine.get('error') and not routine['writes']
 
 
 @pytest.mark.parametrize('base,expected', [(BASE, BASE), ('', None)])
@@ -1097,6 +1202,57 @@ def real_git_release(tmp_path, edit):
     return repo, base, git('rev-parse', 'HEAD')
 
 
+def real_git_mode_release(tmp_path, change):
+    """Commit a real allowed-path mode/type change and return its exact tree entries."""
+    import subprocess
+
+    repo = tmp_path / 'mode-repo'
+    test_dir = repo / 'tests'
+    test_dir.mkdir(parents=True)
+    mode_path = test_dir / 'test_mode.py'
+    mode_path.write_text('assert True\n')
+    mode_path.chmod(0o755 if change == 'executable_to_regular' else 0o644)
+    type_path = test_dir / 'test_type.py'
+    if change == 'regular_to_symlink':
+        type_path.write_text('assert True\n')
+
+    def git(*args):
+        return subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@invalid',
+                               '-c', 'commit.gpgsign=false', *args],
+                              check=True, capture_output=True, text=True, timeout=60).stdout.strip()
+
+    git('init', '-q', '-b', 'main')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'base')
+    base = git('rev-parse', 'HEAD')
+
+    if change == 'regular_to_executable':
+        mode_path.chmod(0o755)
+    elif change == 'executable_to_regular':
+        mode_path.chmod(0o644)
+    elif change == 'add_symlink':
+        (test_dir / 'test_link.py').symlink_to('test_mode.py')
+    elif change == 'regular_to_symlink':
+        type_path.unlink()
+        type_path.symlink_to('test_mode.py')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'change')
+    sha = git('rev-parse', 'HEAD')
+
+    def tree_entries(revision):
+        raw = subprocess.run(['git', '-C', str(repo), 'ls-tree', '-r', '-t', '-z', '--full-tree', revision],
+                             check=True, capture_output=True, timeout=60).stdout
+        entries = []
+        for record in raw.split(b'\0'):
+            if record:
+                header, path = record.split(b'\t', 1)
+                mode, kind, oid = header.decode('ascii').split()
+                entries.append({'path': path.decode('utf-8'), 'mode': mode, 'type': kind, 'sha': oid})
+        return entries
+
+    return repo, base, sha, tree_entries(base), tree_entries(sha)
+
+
 def replace_once(name, old, new):
     def edit(frontend):
         path = frontend / name
@@ -1123,6 +1279,26 @@ SEC1_CASES = {
     'presentation_only': (lambda frontend: (frontend / 'styles.css').write_text(
         (frontend / 'styles.css').read_text() + '\n/* spacing */\n'), 'routine'),
 }
+
+
+@pytest.mark.parametrize('change', ['regular_to_executable', 'executable_to_regular',
+                                    'add_symlink', 'regular_to_symlink'])
+def test_cloud_and_host_classify_real_git_mode_changes_as_sensitive(tmp_path, change):
+    """The executed producer must use exact commit-tree modes just like the host."""
+    from deploy import release_policy
+
+    m = module()
+    repo, base, sha, base_entries, head_entries = real_git_mode_release(tmp_path, change)
+    changes = m.release_changes(repo, base, sha)
+    assert changes and release_policy.classify(changes).risk == 'sensitive'
+    statuses = {'A': 'added', 'D': 'removed', 'M': 'modified', 'T': 'modified'}
+    files = [{'filename': item.path, 'status': statuses[item.status]} for item in changes]
+    api = cloud_api(files, base=base, sha=sha)
+    add_cloud_tree_api(api, files, base=base, sha=sha,
+                       base_entries=base_entries, head_entries=head_entries)
+    output = run_script('classify', api, sha=sha)
+    assert 'error' not in output, output
+    assert output['outputs'] == {'risk': 'sensitive', 'base_sha': base}
 
 
 @pytest.mark.parametrize('case', sorted(SEC1_CASES))

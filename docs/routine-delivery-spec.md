@@ -99,6 +99,22 @@ unrelated identities are never trusted.
 and before the controller runs, using the policy module already imported from
 the deployed checkout. No unmerged or incoming code is imported or executed.
 
+The cloud also reads each exact base/head commit and its recursive Git tree from
+the fixed repository's authenticated Git API. The returned commit SHA and tree
+SHA must match the requested objects; both trees must explicitly be complete
+(`truncated: false`), contain at most 100,000 entries, and have unique,
+well-formed path/mode/type/object records. The compare inventory must be
+non-empty and at most 250 entries. Its statuses and old/new paths must describe
+the exact set of changed paths in those trees, with no missing, duplicate or
+unexpected entries. Any unverifiable or inconsistent inventory is sensitive,
+never a path-only routine fallback. The classifier and each promotion job
+independently repeat this same comparison/tree validation against the exact
+base/head commits before selecting or creating an intent. The cloud maps the
+tree modes into the host policy: only regular `100644` files (and `000000` add
+or delete sides) can be routine; executable `100755`, symlink `120000`,
+gitlink `160000`, type changes and unknown modes are sensitive. API requests
+are read-only; producer jobs do not checkout or execute incoming source.
+
 ## Cloud workflow
 
 `Production approval` still triggers only on a completed, successful `push` to
@@ -179,6 +195,9 @@ Native, dependency and migration maintenance are never routine.
 1a. (SEC-1) A real Git diff changing passkey recovery handling in `frontend/ui.mjs`,
    bootstrap in `app.js`, auth markup in `index.html`, link rendering, or adding
    any new frontend file → sensitive on both host and cloud.
+1b. Real Git chmod changes in either direction on an allowlisted test, plus
+    symlink additions and regular-file-to-symlink changes, → sensitive on both
+    host and cloud; the promotion job recomputes the same mode-aware result.
 2. Any backend/deploy/patch/lock/.github/script/instruction/unknown path, a
    rename from such a path, a symlink/executable mode, >250 files, an empty or
    truncated diff → sensitive.
