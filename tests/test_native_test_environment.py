@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import scripts.prepare_native_test_runtime as native_runtime
 from scripts.prepare_native_test_runtime import (
     _child_environment,
     _write_uv_requirements,
@@ -58,7 +59,8 @@ def test_runner_guard_rejects_local_self_hosted_and_other_repositories():
             validate_hosted_runner(changed)
 
 
-def test_runner_guard_accepts_only_canonical_hosted_layout():
+def test_runner_guard_accepts_only_canonical_hosted_layout(monkeypatch):
+    monkeypatch.setattr(native_runtime.platform, 'machine', lambda: 'x86_64')
     workspace, temporary = validate_hosted_runner(hosted_environment())
     assert workspace == Path('/home/runner/work/hermes-mobile/hermes-mobile')
     assert temporary == Path('/home/runner/work/_temp')
@@ -76,24 +78,26 @@ def test_action_validates_runner_before_privileged_runtime_creation():
     assert steps[create]['run'].index('sudo mkdir') < steps[create]['run'].index('sudo chown')
 
 
-def test_action_preflight_rejects_existing_runtime_without_mutating_it(tmp_path):
+def test_action_preflight_rejects_existing_runtime_without_mutating_it(tmp_path, monkeypatch):
     target = tmp_path / 'native-runtime'
     target.mkdir(mode=0o700)
     content = target / 'keep'
     content.write_text('do not touch')
     before = (target.stat().st_mode, content.read_bytes())
+    monkeypatch.setattr(native_runtime, 'validate_hosted_runner', lambda environ: (ROOT, tmp_path))
     with pytest.raises(RuntimeError, match='Refusing existing native runtime'):
         validate_action_preflight(hosted_environment(), ROOT, runtime_target=target)
     assert (target.stat().st_mode, content.read_bytes()) == before
 
 
-def test_action_preflight_rejects_symlinked_runtime_without_following_it(tmp_path):
+def test_action_preflight_rejects_symlinked_runtime_without_following_it(tmp_path, monkeypatch):
     target = tmp_path / 'native-runtime'
     real = tmp_path / 'existing'
     real.mkdir()
     marker = real / 'marker'
     marker.write_text('preserve')
     target.symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr(native_runtime, 'validate_hosted_runner', lambda environ: (ROOT, tmp_path))
     with pytest.raises(RuntimeError, match='Refusing existing native runtime'):
         validate_action_preflight(hosted_environment(), ROOT, runtime_target=target)
     assert target.is_symlink()

@@ -93,10 +93,23 @@ The new provisioner acceptance tests were exercised through `run_suite`:
   and symlink target, preserving their modes and contents. The native pilot's
   previously recorded 16-file run remains **419 passed**; this guard-only follow-up
   does not change native dependencies or test classifications.
+- The 16-file native **419 passed, 1 warning** run is specifically bound to source
+  commit `cc43015c57fdfd97ae3e6224f4e573a0902d343b`, original task shell 63/64.
+  It is not evidence that the later guard head or this test-portability follow-up
+  reran the native selection successfully. The test-project `requirements.lock`
+  used for that managed run has SHA-256
+  `1e912f6160c68f3ebb56a51da95af013875d0b4690434fe52fcd3f6b115de095`.
 - Follow-up RED: running the new action-order regression against the preceding
   committed action failed at the first step (`KeyError: 'shell'`), because
   `setup-python` ran before a guarded shell preflight. Follow-up GREEN: the full
   guard test module passed **13/13** under managed isolation.
+- Local-layout RED: the focused managed module in a second source copy under
+  `RUNNER_TEMP` failed exactly the two target-refusal tests because the real
+  canonical workspace check ran first. The tests now mock only that hosted-layout
+  seam with the fixture checkout and private temp directory; the strict production
+  guard and dedicated hosted-label/layout rejection test remain unchanged. The
+  managed module then passed in both that noncanonical copy and the canonical hosted
+  checkout.
 - The follow-up pip check first tried `--hash` as a bare install option; pip rejected
   that syntax, so the provisioner now writes a fixed hash-locked requirements file
   inside its private work directory. Pip then installed the pinned wheel with
