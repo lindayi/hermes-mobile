@@ -14,9 +14,11 @@ def test_release_stage_retains_ci_contract_files(tmp_path):
     (source / '.github/workflows').mkdir(parents=True)
     (source / '.github/workflows/ci.yml').write_text('fixture workflow')
     (source / '.github/host-tests.json').write_text('{}')
+    (source / '.github/native-tests.json').write_text('{}')
     stage = stage_release(source, tmp_path / 'stage')
     assert (stage / '.github/workflows/ci.yml').read_text() == 'fixture workflow'
     assert (stage / '.github/host-tests.json').read_text() == '{}'
+    assert (stage / '.github/native-tests.json').read_text() == '{}'
 
 
 def test_hosted_gate_requires_every_suite_without_optional_failures():
@@ -24,12 +26,12 @@ def test_hosted_gate_requires_every_suite_without_optional_failures():
     assert set(workflow['on']) == {'pull_request', 'push', 'workflow_dispatch'}
     assert workflow['permissions'] == {'contents':'read'}
     jobs = workflow['jobs']
-    assert set(jobs['source-ci']['needs']) == {'build','checks','js','python','browser'}
+    assert set(jobs['source-ci']['needs']) == {'build','checks','js','python','browser','native'}
     assert jobs['source-ci']['if'] == '${{ always() }}'
     gate = jobs['source-ci']['steps'][0]
     assert gate['env']['RESULTS'] == '${{ toJSON(needs) }}'
     assert "!= 'success'" in gate['run']
-    for name in ('build','checks','js','python','browser','source-ci','attest'):
+    for name in ('build','checks','js','python','browser','native','source-ci','attest'):
         assert jobs[name]['runs-on'] == 'ubuntu-24.04'
         assert 'continue-on-error' not in jobs[name]
         for step in jobs[name]['steps']:
@@ -58,13 +60,16 @@ def test_hosted_gate_requires_every_suite_without_optional_failures():
     assert setup['with']['browser'] == 'true'
 
 
-@pytest.mark.parametrize('job', ['build', 'checks', 'js', 'python', 'browser'])
+@pytest.mark.parametrize('job', ['build', 'checks', 'js', 'python', 'browser', 'native'])
 @pytest.mark.parametrize('result', ['success', 'failure', 'cancelled', 'skipped', 'missing', 'unexpected'])
 def test_hosted_gate_executes_fail_closed_for_complete_job_set(monkeypatch, job, result):
     workflow = yaml.load((ROOT / '.github/workflows/ci.yml').read_text(), Loader=yaml.BaseLoader)
     gate = workflow['jobs']['source-ci']['steps'][0]['run']
     code = gate.split("python3 - <<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
-    results = {name: {'result': 'success'} for name in ('build', 'checks', 'js', 'python', 'browser')}
+    results = {
+        name: {'result': 'success'}
+        for name in ('build', 'checks', 'js', 'python', 'browser', 'native')
+    }
     if result == 'missing':
         del results[job]
     elif result == 'unexpected':
@@ -75,6 +80,29 @@ def test_hosted_gate_executes_fail_closed_for_complete_job_set(monkeypatch, job,
     with pytest.raises(SystemExit) as exit_info:
         exec(compile(code, 'source-ci-gate', 'exec'), {})
     assert bool(exit_info.value.code) == (result != 'success')
+
+
+def test_native_job_is_confined_to_public_disposable_hosted_runtime():
+    workflow = yaml.load((ROOT / '.github/workflows/ci.yml').read_text(), Loader=yaml.BaseLoader)
+    job = workflow['jobs']['native']
+    assert job['runs-on'] == 'ubuntu-24.04'
+    assert job['timeout-minutes'] == '30'
+    steps = job['steps']
+    checkout = steps[0]
+    assert checkout['uses'].startswith('actions/checkout@')
+    assert checkout['with']['persist-credentials'] == 'false'
+    assert 'prepare_native_test_runtime.py --preflight' in steps[1]['run']
+    assert steps[2]['uses'].startswith('actions/setup-python@')
+    assert steps[2]['with']['python-version'] == '3.12'
+    assert steps[3]['uses'].startswith('actions/setup-node@')
+    assert steps[3]['with']['node-version'] == '22'
+    assert 'pip install -r requirements.lock' in steps[4]['run']
+    assert 'HERMES_TEST_PYTHON=' in steps[4]['run']
+    assert steps[5]['uses'] == './.github/actions/native-test-environment'
+    assert '"$HERMES_TEST_PYTHON" -B scripts/ci_tests.py native' in steps[6]['run']
+    workflow_text = (ROOT / '.github/workflows/ci.yml').read_text()
+    assert 'self-hosted' not in workflow_text
+    assert 'secrets.' not in workflow_text
 
 
 def test_build_once_bundle_is_attested_only_after_trusted_main_gate():

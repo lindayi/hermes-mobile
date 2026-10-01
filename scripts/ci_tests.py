@@ -21,7 +21,7 @@ def main(argv=None, *, run=run_suite):
     parser.add_argument('--shard', type=int, default=0)
     parser.add_argument('--shards', type=int, default=1)
     parser.add_argument('--list', action='store_true', help='print exact selected files without running')
-    parser.add_argument('suite', choices=('python','host','js','browser'))
+    parser.add_argument('suite', choices=('python','host','native','js','browser'))
     args = parser.parse_args(argv)
     try:
         selected = select_tests(SOURCE, args.suite, shard=args.shard, shards=args.shards)
@@ -33,7 +33,7 @@ def main(argv=None, *, run=run_suite):
         if not python.is_file() or not os.access(python, os.X_OK) or not os.access(node, os.X_OK):
             raise ValueError('Working Python and Node interpreters are required')
         run(SOURCE, python=str(python), node=node,
-            suite='python' if args.suite=='host' else args.suite,
+            suite='python' if args.suite in {'host', 'native'} else args.suite,
             assets=args.assets, extra_args=selected, node_concurrency=1)
     except subprocess.CalledProcessError as error:
         return error.returncode if error.returncode > 0 else 128 - error.returncode
