@@ -43,3 +43,7 @@ jobs:
           printf 'PLAYWRIGHT_BROWSERS_PATH=%s\nPLAYWRIGHT_SKIP_BROWSER_GC=1\n' \
             "$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
           ./node_modules/.bin/playwright install --with-deps chromium
+          HERMES_BROWSER="$(node -e 'process.stdout.write(require("playwright").chromium.executablePath())')"
+          test -x "$HERMES_BROWSER"
+          printf 'HERMES_TEST_PYTHON=%s/.venv/bin/python\nHERMES_TEST_NODE=%s\nHERMES_BROWSER=%s\n' \
+            "$GITHUB_WORKSPACE" "$(command -v node)" "$HERMES_BROWSER" >> "$GITHUB_ENV"

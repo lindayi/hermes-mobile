@@ -2,7 +2,10 @@
 
 This is the authoritative, portable guide for Hermes Mobile development. Keep it
 under 20,000 characters; detailed contracts belong in `docs/`. Read this file and
-the relevant product specification before editing.
+the relevant product specification before editing. The required review and final
+integration gates are governed by [docs/git-development-spec.md](docs/git-development-spec.md),
+with portable execution details in [docs/development-workflow.md](docs/development-workflow.md).
+See [README.md](README.md) for the canonical source and local integration checkout.
 
 ## Plan and isolate work
 
@@ -30,11 +33,11 @@ Use the managed runner for local checks and provide explicit test paths for focu
 work:
 
 ```sh
-HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$(command -v python3)}" \
+HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
   python3 scripts/test.py python -- tests/test_agent_instructions.py
-HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$(command -v python3)}" \
+HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
   python3 scripts/test.py js -- tests/browser/example.test.mjs
-HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$(command -v python3)}" \
+HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
   python3 scripts/test.py browser -- tests/browser/example.spec.mjs
 ```
 
@@ -65,7 +68,7 @@ records acceptance cases, and reports exact observed test/CI evidence. Use the
 repository issue and pull-request templates. State clearly when a check was not
 run; do not imply an unobserved pass.
 
-A review comment is not an approval or a passing review status; require independent review where specified and verify evidence against the exact head SHA.
+A review comment is not an approval or a passing review status; require independent formal COMMENT review for every PR and verify evidence against the exact head SHA.
 
 Request Copilot review for pull requests when it is available, and request a fresh
 review after follow-up commits. Automatic review/re-review is controlled by GitHub
@@ -80,9 +83,23 @@ the exact head SHA; any new commit invalidates it. Address findings with follow-
 commits and reply to their actual GitHub threads. Never self-approve, bypass
 protections, or write directly to `main`.
 
-Reconcile changes from both branches when updating from `main`; do not resolve
-conflicts by wholesale choosing one side. Test both intended behaviors and their
-interaction, then review the updated head.
+`source-ci`, `integration-tests`, and `agent-review` must pass on the exact head SHA.
+Publish `agent-review` only after verifying the independent review of that head.
+Publish `integration-tests` only after verifying complete final integration under
+the linked development workflow: complete matching hosted results plus all residual
+host tests on that head when the documented partition is available, otherwise the
+existing managed `all` suite. Focused checks or dependency setup alone are not final
+integration. Require resolved review threads and a branch current with freshly
+fetched `origin/main` before GitHub merge. No owner/admin bypass.
+
+Merge and deploy one revision at a time. Merge updated `origin/main` into the PR branch;
+never rebase or force-push reviewed history. Gather both PR intents, the common base,
+and both diffs for a neutral reviewer/reconciler. Preserve compatible behavior,
+regenerate derived files from their sources, and test both intended behaviors and
+their interaction; never resolve conflicts by wholesale choosing one side.
+Record resolution decisions on GitHub and obtain independent review and final
+integration evidence for the updated head. Escalate to the owner only for genuinely
+incompatible product requirements, not routine technical conflicts.
 
 ## Privacy, merge, and deployment
 
@@ -96,9 +113,19 @@ Merging and deployment are separate; only guarded deployment from verified main 
 Only the canonical, clean, freshly verified `origin/main` may be deployed through
 the guarded deployment path. Preserve its drain, lock, native fingerprint, and
 rollback protections. Never restart active sessions or use candidate operators to
-bypass Git provenance. Record the deployed commit. After merge, remove only that
-task's merged worktree/branch and disposable managed artifacts; preserve unrelated
-work and runtime data or rollback releases still in use.
+bypass Git provenance. Record the deployed commit.
+
+Never edit immutable deployed releases. Older source copies are migration inputs,
+not deployment sources. Port unfinished legacy work as a diff against its own verified
+baseline into a new task worktree; never overlay an older source tree onto current main.
+Preserve migration inputs until their work is merged or explicitly discarded.
+
+Before cleanup, verify the remote merge and preserve any uncommitted work in a
+recoverable location. Remove only that task's clean worktree and merged branch,
+including its remote branch if still present, and disposable managed artifacts.
+Preserve unknown/unmerged work, other active sessions' files, installed dependencies,
+runtime recovery data and rollback releases still in use. Never sweep release roots
+while any service references them.
 
 ## Product language and UX
 

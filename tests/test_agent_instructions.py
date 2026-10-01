@@ -20,7 +20,7 @@ SYNCED_RULES = (
     'Never use production credentials, real accounts, real model calls, native production '
     'homes or databases, private evidence uploads, or live enrollment as tests.',
     'A review comment is not an approval or a passing review status; require independent '
-    'review where specified and verify evidence against the exact head SHA.',
+    'formal COMMENT review for every PR and verify evidence against the exact head SHA.',
     'Merging and deployment are separate; only guarded deployment from verified main is '
     'allowed, and coding agents never access production.',
 )
@@ -60,6 +60,94 @@ def test_product_preferences_remain_explicit_in_canonical_instructions():
         'meaningful outcomes',
     ):
         assert preference in agents
+
+
+def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
+    # Normalize wrapping, but keep the mandatory policy clauses under regression.
+    for path in ('AGENTS.md', 'docs/development-workflow.md'):
+        text = ' '.join((ROOT / path).read_text().split())
+        for clause in (
+            'docs/git-development-spec.md',
+            '`source-ci`, `integration-tests`, and `agent-review` must pass',
+            'independent formal COMMENT review for every PR',
+            'Publish `agent-review` only after verifying the independent review',
+            'Publish `integration-tests` only after verifying complete final integration',
+            'exact head SHA',
+            'resolved review threads',
+            'current with freshly fetched `origin/main`',
+            'No owner/admin bypass',
+        ):
+            assert clause in text, (path, clause)
+        assert 'review where specified' not in text
+
+    workflow = ' '.join((ROOT / 'docs/development-workflow.md').read_text().split())
+    for clause in (
+        'When the documented hosted partition is available',
+        '`scripts/ci_tests.py`',
+        '`.github/host-tests.json`',
+        'complete matching hosted results plus all residual host tests',
+        'same exact head SHA',
+        'Otherwise, conservatively use the existing managed `all` suite',
+        'Final integration is a merge gate, not a full local suite per edit',
+        'fresh Linux',
+        'Playwright OS dependencies',
+        'playwright install-deps chromium',
+    ):
+        assert clause in workflow, clause
+    assert 'Open PR #4' not in workflow
+    assert 'neither exists on this baseline' not in workflow
+
+    template = ' '.join((ROOT / '.github/pull_request_template.md').read_text().split())
+    assert 'Full managed integration result, if required' not in template
+    for clause in (
+        'Mandatory final integration evidence',
+        '`source-ci`, `integration-tests`, and `agent-review`',
+        'independent formal COMMENT review',
+        'resolved review threads',
+        'current with freshly fetched `origin/main`',
+        'No owner/admin bypass',
+    ):
+        assert clause in template, clause
+
+
+def test_parallel_integration_preserves_reviewed_history_and_both_intents():
+    for path in ('AGENTS.md', 'docs/development-workflow.md'):
+        text = ' '.join((ROOT / path).read_text().split())
+        for clause in (
+            'Merge and deploy one revision at a time',
+            'Merge updated `origin/main` into the PR branch',
+            'never rebase or force-push reviewed history',
+            'both PR intents, the common base, and both diffs',
+            'neutral reviewer/reconciler',
+            'regenerate derived files',
+            'both intended behaviors and their interaction',
+            'Record resolution decisions on GitHub',
+            'only for genuinely incompatible product requirements',
+        ):
+            assert clause in text, (path, clause)
+
+
+def test_legacy_inputs_and_uncommitted_work_survive_cleanup():
+    for path, readme in (
+        ('AGENTS.md', '[README.md](README.md)'),
+        ('docs/development-workflow.md', '[README.md](../README.md)'),
+    ):
+        text = ' '.join((ROOT / path).read_text().split())
+        for clause in (
+            readme,
+            'canonical source and local integration checkout',
+            'Never edit immutable deployed releases',
+            'diff against its own verified baseline',
+            'never overlay an older source tree onto current main',
+            'Preserve migration inputs until their work is merged or explicitly discarded',
+            'verify the remote merge and preserve any uncommitted work',
+            "only that task's clean worktree and merged branch",
+        ):
+            assert clause in text, (path, clause)
+        assert '/home/lindayi/' not in text
+
+    template = ' '.join((ROOT / '.github/pull_request_template.md').read_text().split())
+    assert 'verified remote merge and preservation of any uncommitted work' in template
 
 
 def test_issue_form_captures_behavior_acceptance_scope_and_privacy_risks():
@@ -129,3 +217,5 @@ def test_copilot_setup_is_pinned_minimal_and_never_runs_tests():
     assert 'playwright install --with-deps chromium' in commands
     assert 'scripts/test.py' not in commands
     assert 'pytest' not in commands
+    for name in ('HERMES_TEST_PYTHON', 'HERMES_TEST_NODE', 'HERMES_BROWSER'):
+        assert name in commands, 'Cloud setup must expose the exact installed executables'

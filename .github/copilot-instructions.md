@@ -1,6 +1,6 @@
 # Hermes Mobile Copilot instructions
 
-`[AGENTS.md](../AGENTS.md)` is the portable source of truth. Read it and the
+[AGENTS.md](../AGENTS.md) is the portable source of truth. Read it and the
 relevant specification before editing; keep these critical rules synchronized:
 
 Start from an approved issue; search for duplicates and overlapping PRs, then record scope and acceptance cases before implementation.
@@ -13,7 +13,7 @@ Use cloud execution by default for substantial coding, testing, and review; loca
 
 Never use production credentials, real accounts, real model calls, native production homes or databases, private evidence uploads, or live enrollment as tests.
 
-A review comment is not an approval or a passing review status; require independent review where specified and verify evidence against the exact head SHA.
+A review comment is not an approval or a passing review status; require independent formal COMMENT review for every PR and verify evidence against the exact head SHA.
 
 Merging and deployment are separate; only guarded deployment from verified main is allowed, and coding agents never access production.
 
