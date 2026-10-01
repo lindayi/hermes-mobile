@@ -59,7 +59,8 @@ def _event(value, generated_at):
     if not isinstance(value, dict) or set(value) != _EVENT_KEYS:
         raise ValueError('Invalid lifecycle event fields')
     if (not isinstance(value['event_id'], str) or not _EVENT_ID.fullmatch(value['event_id'])
-            or value['reason'] not in _REASONS
+            or not isinstance(value['reason'], str) or value['reason'] not in _REASONS
+            or not isinstance(value['outcome'], str)
             or value['outcome'] != _REASONS[value['reason']]):
         raise ValueError('Invalid lifecycle event identity or outcome')
     for key in ('issue_number', 'pr_number'):
@@ -76,7 +77,7 @@ def _event(value, generated_at):
         raise ValueError('Pull request event requires its exact head SHA')
     decision = value['decision']
     if value['outcome'] == 'approval_required':
-        if (value['pr_number'] is None or decision not in _DECISIONS
+        if (value['pr_number'] is None or not isinstance(decision, str) or decision not in _DECISIONS
                 or value['merge_sha'] is not None):
             raise ValueError('Approval event requires a supported decision and exact PR head')
     elif decision is not None:
@@ -86,6 +87,8 @@ def _event(value, generated_at):
             raise ValueError('Merged lifecycle event requires exact PR and merge SHAs')
     elif value['merge_sha'] is not None:
         raise ValueError('Merge SHA is only valid for merged or deployed events')
+    if value['reason'] in ('issue_failed', 'execution_exhausted') and value['issue_number'] is None:
+        raise ValueError('Issue lifecycle event requires its issue number')
     occurred_at = _timestamp(value['occurred_at'])
     if occurred_at > generated_at:
         raise ValueError('Lifecycle event is newer than its export')
