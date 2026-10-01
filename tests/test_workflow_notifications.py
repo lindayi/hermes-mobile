@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+from pathlib import Path
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
@@ -56,6 +57,26 @@ def test_valid_sanitized_outcomes_and_canonical_digest():
     assert validate_export(payload, now=NOW) == payload
     assert canonical_json({'b': 1, 'a': 2}) == '{"a":2,"b":1}'
     assert event_digest(merged) == hashlib.sha256(canonical_json(merged).encode()).hexdigest()
+
+
+def test_issue30_terminal_outcomes_have_closed_exact_schema():
+    closed = event(
+        'closed', 'closed_without_merge', issue_number=31, pr_number=32,
+        head_sha='a' * 40)
+    conflict = event(
+        'blocked', 'conflict_incompatible', event_id='pr:32:conflict:1',
+        issue_number=31, pr_number=32,
+        head_sha='a' * 40)
+    policy = event(
+        'blocked', 'policy_broken', event_id='pr:32:policy:1',
+        issue_number=31, pr_number=32,
+        head_sha='a' * 40)
+
+    assert validate_export(export(closed, conflict, policy), now=NOW)['events'] == [
+        closed, conflict, policy]
+    for item in (closed, conflict, policy):
+        assert item['merge_sha'] is None
+        assert item['decision'] is None
 
 
 @pytest.mark.parametrize('change', [
@@ -124,6 +145,28 @@ def test_export_rejects_stale_or_future_timestamps_and_duplicate_event_ids():
     for invalid in (stale, duplicated, future):
         with pytest.raises(ValueError):
             validate_export(invalid, now=NOW)
+
+
+def test_fresh_export_can_retain_old_unacknowledged_incident():
+    old = event(occurred_at='2026-09-01T20:58:00Z')
+    snapshot = export(old)
+
+    assert validate_export(snapshot, now=NOW)['events'] == [old]
+
+
+@pytest.mark.parametrize('change', [
+    {'pr_number': None},
+    {'head_sha': None},
+    {'merge_sha': 'b' * 40},
+    {'decision': 'resolve_review'},
+])
+def test_closed_and_blocked_events_require_exact_nonmerged_pr_identity(change):
+    for outcome, reason in (('closed', 'closed_without_merge'),
+                            ('blocked', 'conflict_incompatible')):
+        item = event(outcome, reason, pr_number=32, head_sha='a' * 40)
+        item.update(change)
+        with pytest.raises(ValueError):
+            validate_export(export(item), now=NOW)
 
 
 def test_digest_changes_when_event_payload_changes():
@@ -199,13 +242,58 @@ def test_default_plan_is_read_only_and_missing_export_stays_unavailable(tmp_path
     assert not (state_dir / 'workflow-notifications.sqlite').exists()
 
 
+@pytest.mark.parametrize('database', ['auth', 'notifications'])
+def test_plan_rejects_wal_database_without_creating_sidecars(tmp_path, database):
+    from deploy.workflow_notifications import process
+
+    paths, state_dir, auth, inbox, _, _ = adapter_fixture(tmp_path)
+    target = auth if database == 'auth' else inbox
+    with sqlite3.connect(target) as db:
+        assert db.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
+    sidecars = (Path(str(target) + '-wal'), Path(str(target) + '-shm'))
+    assert not any(path.exists() for path in sidecars)
+    before = {path.name for path in state_dir.iterdir()}
+
+    with pytest.raises(ValueError):
+        process(paths, now=NOW)
+
+    assert {path.name for path in state_dir.iterdir()} == before
+    assert not any(path.exists() for path in sidecars)
+
+
+@pytest.mark.parametrize(('suffix', 'kind'), [
+    ('-wal', 'private'),
+    ('-shm', 'public'),
+    ('-journal', 'symlink'),
+])
+def test_plan_rejects_sqlite_sidecar_states_without_following_them(tmp_path, suffix, kind):
+    from deploy.workflow_notifications import process
+
+    paths, state_dir, auth, _, _, _ = adapter_fixture(tmp_path)
+    sidecar = Path(str(auth) + suffix)
+    target = state_dir.parent / 'sidecar-target'
+    target.write_text('synthetic')
+    if kind == 'symlink':
+        sidecar.symlink_to(target)
+    else:
+        sidecar.write_text('synthetic sidecar')
+        sidecar.chmod(0o600 if kind == 'private' else 0o644)
+    before = {path.name for path in state_dir.iterdir()}
+
+    with pytest.raises(ValueError):
+        process(paths, now=NOW)
+
+    assert {path.name for path in state_dir.iterdir()} == before
+    assert target.read_text() == 'synthetic'
+
+
 def test_cli_defaults_to_read_only_plan(tmp_path, capsys):
     from deploy.workflow_notifications import main
 
     paths, state_dir, auth, inbox, event_path, _ = adapter_fixture(tmp_path)
     before = {path: path.read_bytes() for path in (auth, inbox, event_path, paths.config)}
 
-    assert main([], paths=paths) == 0
+    assert main([], paths=paths, now=NOW) == 0
     assert json.loads(capsys.readouterr().out) == {'events': 1, 'status': 'plan', 'writes': False}
     assert {path: path.read_bytes() for path in before} == before
     assert not (state_dir / 'workflow-notifications.sqlite').exists()
@@ -274,6 +362,33 @@ def test_meaningful_outcomes_keep_failures_approvals_merge_and_deployment_distin
     assert head in notices['Owner decision required for PR #32']
     assert 'separate from deployment' in notices['PR #32 merged']
     assert all('deployed' not in title.lower() for title in notices)
+
+
+def test_issue30_terminal_notices_are_safe_and_operational(tmp_path):
+    from deploy.workflow_notifications import process
+
+    head = 'a' * 40
+    events = [
+        event('closed', 'closed_without_merge', event_id='pr:32:closed:1',
+              pr_number=32, head_sha=head),
+        event('blocked', 'conflict_incompatible', event_id='pr:32:conflict:1',
+              pr_number=32, head_sha=head),
+        event('blocked', 'policy_broken', event_id='pr:32:policy:1',
+              pr_number=32, head_sha=head),
+    ]
+    paths, _, _, inbox, _, _ = adapter_fixture(tmp_path, export(*events))
+
+    process(paths, apply=True, now=NOW)
+
+    with sqlite3.connect(inbox) as db:
+        notices = dict(db.execute('SELECT title,body FROM inbox'))
+        assert db.execute('SELECT DISTINCT category FROM notification_policy').fetchall() == [
+            ('operational',)]
+    assert notices == {
+        'PR #32 closed without merging': 'PR #32 closed without merging. Review its current status.',
+        'Incompatible conflict for PR #32': 'PR #32 needs owner review because the conflict is incompatible.',
+        'Workflow policy needs review for PR #32': 'PR #32 needs owner review because workflow policy is unavailable.',
+    }
 
 
 def test_existing_push_opt_out_suppresses_outbox_and_private_preview_is_generic(tmp_path):
@@ -443,14 +558,15 @@ def test_replay_after_crash_before_ack_and_concurrent_replay_are_idempotent(tmp_
         assert db.execute('SELECT status FROM events').fetchone() == ('acked',)
 
 
-def _write_deployed_proof(paths, merge_sha, *, status='succeeded'):
+def _write_deployed_proof(paths, merge_sha, *, status='succeeded', duplicate_last=False):
     delivery_file = paths.delivery_state
     delivery_file.parent.mkdir(mode=0o700)
     delivery = {
         'status': 'deployed', 'reason': '', 'sha': merge_sha,
         'approval_run_id': 123, 'source_run_id': 456, 'deployment_id': 789,
     }
-    delivery_state = {'version': 1, 'latest_id': 789, 'last': delivery,
+    last = {'status': 'duplicate', 'reason': 'Consumed intent: deployed'} if duplicate_last else delivery
+    delivery_state = {'version': 1, 'latest_id': 789, 'last': last,
                       'records': {f'{merge_sha}:123': delivery}}
     delivery_file.write_text(json.dumps(delivery_state))
     delivery_file.chmod(0o600)
@@ -469,6 +585,85 @@ def _write_deployed_proof(paths, merge_sha, *, status='succeeded'):
     status_file.chmod(0o600)
     for path in (delivery_file, status_file):
         os.utime(path, (NOW.timestamp(), NOW.timestamp()))
+
+
+def test_deployed_event_uses_durable_terminal_after_duplicate_poll(tmp_path):
+    from deploy.workflow_notifications import process
+
+    deployed = event('deployed', 'controller_verified', pr_number=32,
+                     head_sha='a' * 40, merge_sha='b' * 40)
+    paths, _, _, inbox, _, _ = adapter_fixture(tmp_path, export(deployed))
+    _write_deployed_proof(paths, 'b' * 40, duplicate_last=True)
+
+    assert process(paths, apply=True, now=NOW)['inbox_items'] == 1
+    with sqlite3.connect(inbox) as db:
+        assert 'verified deployed' in db.execute('SELECT title FROM inbox').fetchone()[0].lower()
+
+
+def test_deployed_event_rejects_terminal_record_behind_latest_intent(tmp_path):
+    from deploy.workflow_notifications import process
+
+    deployed = event('deployed', 'controller_verified', pr_number=32,
+                     head_sha='a' * 40, merge_sha='b' * 40)
+    paths, state_dir, _, inbox, _, _ = adapter_fixture(tmp_path, export(deployed))
+    _write_deployed_proof(paths, 'b' * 40, duplicate_last=True)
+    ledger = json.loads(paths.delivery_state.read_text())
+    ledger['latest_id'] = 790
+    paths.delivery_state.write_text(json.dumps(ledger))
+    paths.delivery_state.chmod(0o600)
+    os.utime(paths.delivery_state, (NOW.timestamp(), NOW.timestamp()))
+
+    with pytest.raises(ValueError):
+        process(paths, apply=True, now=NOW)
+    assert inbox.exists()
+    assert not (state_dir / 'workflow-notifications.sqlite').exists()
+
+
+def test_acked_deployment_replay_skips_obsolete_proof_without_blocking_new_events(tmp_path):
+    from deploy.workflow_notifications import process
+
+    deployed = event('deployed', 'controller_verified', event_id='pr:32:deployed:1',
+                     pr_number=32, head_sha='a' * 40, merge_sha='b' * 40)
+    paths, _, _, inbox, event_path, _ = adapter_fixture(tmp_path, export(deployed))
+    _write_deployed_proof(paths, 'b' * 40)
+    process(paths, apply=True, now=NOW)
+
+    newer = event(event_id='issue:31:after-deployment:1')
+    event_path.write_text(json.dumps(export(deployed, newer)))
+    event_path.chmod(0o600)
+    os.utime(event_path, (NOW.timestamp(), NOW.timestamp()))
+    status_path = paths.controller_state / 'status.json'
+    status_path.write_text(json.dumps({
+        'status': 'succeeded', 'release': 'c' * 32, 'git_sha': 'd' * 40}))
+    status_path.chmod(0o600)
+    os.utime(status_path, (NOW.timestamp(), NOW.timestamp()))
+
+    assert process(paths, apply=True, now=NOW)['inbox_items'] == 1
+    with sqlite3.connect(inbox) as db:
+        assert db.execute('SELECT count(*) FROM inbox').fetchone() == (2,)
+        assert {row[0] for row in db.execute('SELECT title FROM inbox')} == {
+            'PR #32 verified deployed', 'Workflow task failed for issue #31'}
+
+
+def test_old_unacknowledged_event_catches_up_and_replay_stays_deduplicated(tmp_path):
+    from datetime import timedelta
+    from deploy.workflow_notifications import process
+
+    old = event(event_id='issue:31:outage-catchup:1',
+                occurred_at='2026-09-28T20:58:00Z')
+    paths, _, _, inbox, event_path, _ = adapter_fixture(tmp_path, export(old))
+    process(paths, apply=True, now=NOW)
+
+    later = NOW + timedelta(days=2)
+    regenerated = export(old)
+    regenerated['generated_at'] = later.strftime('%Y-%m-%dT%H:%M:%SZ')
+    event_path.write_text(json.dumps(regenerated))
+    event_path.chmod(0o600)
+    os.utime(event_path, (later.timestamp(), later.timestamp()))
+    assert process(paths, apply=True, now=later)['inbox_items'] == 0
+
+    with sqlite3.connect(inbox) as db:
+        assert db.execute('SELECT count(*) FROM inbox').fetchone() == (1,)
 
 
 def test_merged_is_not_deployed_and_deployed_requires_fresh_exact_controller_ledger(tmp_path):

@@ -24,6 +24,9 @@ _REASONS = {
     'execution_uncertain': 'execution_uncertain',
     'merged': 'merged',
     'controller_verified': 'deployed',
+    'closed_without_merge': 'closed',
+    'conflict_incompatible': 'blocked',
+    'policy_broken': 'blocked',
 }
 _DECISIONS = {'approve_production', 'resolve_review', 'authorize_sensitive_action'}
 _EVENT_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z')
@@ -82,6 +85,10 @@ def _event(value, generated_at):
             raise ValueError('Approval event requires a supported decision and exact PR head')
     elif decision is not None:
         raise ValueError('Decision is only valid for approval events')
+    if value['outcome'] in ('closed', 'blocked'):
+        if (value['pr_number'] is None or value['head_sha'] is None
+                or value['merge_sha'] is not None):
+            raise ValueError('Closed or blocked PR event requires its exact head and no merge')
     if value['outcome'] in ('merged', 'deployed'):
         if value['pr_number'] is None or value['merge_sha'] is None:
             raise ValueError('Merged lifecycle event requires exact PR and merge SHAs')
@@ -123,7 +130,6 @@ def validate_export(value, *, now=None):
         if item['event_id'] in seen:
             raise ValueError('Duplicate lifecycle event identity')
         seen.add(item['event_id'])
-        event_age = (now - occurred_at).total_seconds()
-        if event_age > MAX_EVENT_AGE or event_age < -MAX_CLOCK_SKEW:
-            raise ValueError('Lifecycle event is stale or future-dated')
+        if (occurred_at - now).total_seconds() > MAX_CLOCK_SKEW:
+            raise ValueError('Lifecycle event is future-dated')
     return value

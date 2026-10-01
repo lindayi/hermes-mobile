@@ -139,12 +139,36 @@ def _fresh(info, now):
         raise Blocked('Private evidence is stale or future-dated')
 
 
+def _assert_readonly_database(path):
+    path = Path(path)
+    before = _owned_private_path(path)
+    for suffix in ('-wal', '-shm', '-journal'):
+        if os.path.lexists(f'{path}{suffix}'):
+            raise Blocked('SQLite sidecars are unsupported in read-only mode')
+    flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            header = stream.read(100)
+    except OSError as error:
+        raise Blocked('Existing private database cannot be inspected safely') from error
+    if (not stat.S_ISREG(info.st_mode) or info.st_dev != before.st_dev
+            or info.st_ino != before.st_ino or info.st_nlink != 1
+            or info.st_uid != os.geteuid() or info.st_mode & 0o077
+            or len(header) != 100 or header[:16] != b'SQLite format 3\x00'
+            or header[18:20] != b'\x01\x01'):
+        raise Blocked('Only rollback-journal SQLite databases are supported read-only')
+
+
 def _open_readonly(path):
     _owned_private_path(path)
+    _assert_readonly_database(path)
     try:
         db = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=2)
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA query_only=ON')
+        _assert_readonly_database(path)
         return db
     except (sqlite3.Error, ValueError) as error:
         raise Blocked('Existing private database is unavailable') from error
@@ -253,16 +277,25 @@ def _deployed_evidence(event, paths, now):
             or not isinstance(ledger['records'], dict) or len(ledger['records']) > 10000
             or not isinstance(ledger['last'], dict)):
         raise Blocked('Trusted deployment ledger is incomplete')
-    last = ledger['last']
     required = {'status', 'reason', 'sha', 'approval_run_id', 'source_run_id', 'deployment_id'}
-    if (set(last) != required or last['status'] != 'deployed'
-            or not isinstance(last['sha'], str) or last['sha'] != event['merge_sha']
-            or any(type(last[name]) is not int or last[name] <= 0
+    records = ledger['records']
+    terminal = [record for record in records.values()
+                if isinstance(record, dict) and record.get('status') == 'deployed'
+                and record.get('sha') == event['merge_sha']
+                and type(record.get('deployment_id')) is int
+                and record['deployment_id'] == ledger['latest_id']]
+    if (len(terminal) != 1 or set(terminal[0]) != required
+            or not isinstance(terminal[0]['sha'], str)
+            or any(type(terminal[0][name]) is not int or terminal[0][name] <= 0
                    for name in ('approval_run_id', 'source_run_id', 'deployment_id'))
-            or last['deployment_id'] != ledger['latest_id']
-            or not isinstance(last['reason'], str) or len(last['reason']) > 1000
-            or ledger['records'].get(f"{last['sha']}:{last['approval_run_id']}") != last):
+            or not isinstance(terminal[0]['reason'], str) or len(terminal[0]['reason']) > 1000
+            or records.get(f"{event['merge_sha']}:{terminal[0]['approval_run_id']}") != terminal[0]
+            or terminal[0]['deployment_id'] != ledger['latest_id']):
         raise Blocked('Trusted deployment ledger does not bind this exact SHA')
+    last = ledger['last']
+    duplicate = {'status': 'duplicate', 'reason': 'Consumed intent: deployed'}
+    if last != terminal[0] and last != duplicate:
+        raise Blocked('Latest delivery intent is inconsistent with the deployed record')
 
     controller_root = paths.controller_state
     _owned_private_path(controller_root, directory=True)
@@ -296,6 +329,27 @@ def _deployed_evidence(event, paths, now):
         raise Blocked('Current release provenance differs from the exact merge SHA')
     if ledger_info.st_mtime + 5 < status_info.st_mtime:
         raise Blocked('Deployment ledger predates controller success')
+
+
+def _acked_event_ids(state_path, payload, owner):
+    if not (state_path.exists() or state_path.is_symlink()):
+        return set()
+    acked = set()
+    with closing(_open_readonly(state_path)) as db:
+        for item in payload['events']:
+            row = db.execute('SELECT * FROM events WHERE event_id=?',
+                             (item['event_id'],)).fetchone()
+            if row is None:
+                continue
+            if (row['digest'] != event_digest(item) or row['recipient_id'] != owner
+                    or row['status'] not in ('pending', 'acked')
+                    or (row['status'] == 'pending' and row['inbox_id'] is not None)
+                    or (row['status'] == 'acked'
+                        and (not isinstance(row['inbox_id'], str) or not row['inbox_id']))):
+                raise Blocked('Existing lifecycle adapter state conflicts with this event')
+            if row['status'] == 'acked':
+                acked.add(item['event_id'])
+    return acked
 
 
 def _load(paths, now):
@@ -332,14 +386,15 @@ def _load(paths, now):
         raise Blocked('Lifecycle export is invalid, stale, or incomplete') from error
     if payload['owner_user_id'] != owner:
         raise Blocked('Lifecycle export is not bound to the current owner')
-    for item in payload['events']:
-        if item['outcome'] == 'deployed':
-            _deployed_evidence(item, paths, now)
     state_path = state_dir / ADAPTER_STATE_NAME
     if state_path.exists() or state_path.is_symlink():
         _owned_private_path(state_path, max_bytes=MAX_STATE_BYTES)
         _validate_adapter_state(state_path)
         _check_binding(state_path, owner)
+    acked = _acked_event_ids(state_path, payload, owner)
+    for item in payload['events']:
+        if item['outcome'] == 'deployed' and item['event_id'] not in acked:
+            _deployed_evidence(item, paths, now)
     return state_dir, owner, auth_path, inbox_path, payload, state_path
 
 
@@ -451,6 +506,15 @@ def _message(event):
         title = f'PR #{pr} verified deployed'
         body = (f'PR #{pr} deployed at merge SHA {event["merge_sha"]}; current controller '
                 'provenance matches. Phone delivery is not confirmed.')
+    elif event['reason'] == 'closed_without_merge':
+        title = f'PR #{pr} closed without merging'
+        body = f'PR #{pr} closed without merging. Review its current status.'
+    elif event['reason'] == 'conflict_incompatible':
+        title = f'Incompatible conflict for PR #{pr}'
+        body = f'PR #{pr} needs owner review because the conflict is incompatible.'
+    elif event['reason'] == 'policy_broken':
+        title = f'Workflow policy needs review for PR #{pr}'
+        body = f'PR #{pr} needs owner review because workflow policy is unavailable.'
     elif event['reason'] == 'issue_failed':
         title = f'Issue #{issue} needs attention'
         body = f'Issue #{issue} ended unsuccessfully. Review its current workflow status.'
@@ -562,7 +626,7 @@ def process(paths=None, *, apply=False, now=None):
     return _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, now)
 
 
-def main(argv=None, *, paths=None):
+def main(argv=None, *, paths=None, now=None):
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -571,7 +635,7 @@ def main(argv=None, *, paths=None):
     modes.add_argument('--apply', action='store_true', help='Record eligible events in the existing owner Inbox')
     args = parser.parse_args(argv)
     try:
-        result = process(paths, apply=args.apply)
+        result = process(paths, apply=args.apply, now=now)
     except Exception:
         result = {'status': 'blocked', 'reason': 'evidence_unavailable'}
     print(json.dumps(result, sort_keys=True))
