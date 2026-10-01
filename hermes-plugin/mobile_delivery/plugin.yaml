@@ -1,0 +1,6 @@
+name: mobile-delivery
+label: Mobile inbox
+kind: platform
+version: 1.0.0
+description: Outbound-only authenticated cron delivery to the private Hermes mobile bridge.
+author: local

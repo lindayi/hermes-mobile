@@ -1,0 +1,16 @@
+# Reachable disclosures, chronological background results, richer tool previews
+
+## Requested behavior
+
+1. Expandable content panels use a shorter viewport-relative height, initially aiming for a body cap of min(240px, 32dvh). Long content scrolls inside the panel, while its fold bar stays reachable. Cover tool activity, commentary, delegation/background/process reports, compression, Inbox and job disclosures, and session diagnostics. Preserve full content, keyboard/touch access, nested scrolling, disclosure state, reader position, and the existing viewport/keyboard layout. No clipping-as-deletion or global styling of unrelated dialogs/menus.
+2. A background result remains attached to its originating turn but appears at its chronological receipt/event location within that turn. Later tool calls and public progress must appear after it, not continually before an end-of-turn results footer. Preserve exact IDs/provenance, honest approximate placement for legacy gaps, deferred placement for unloaded turns, deduplication, pagination, reload and route/account fences.
+3. Every tool row and collapsed tool-card preview identifies the tool by name and presents useful safe context comparable to the gateway: action/target/query/path, safe command, bounded parallel child descriptions, plus recorded duration/outcome where available. Expanded line items and collapsed preview use one consistent presentation contract. Preserve full normalized secret screening before clipping, safe rendering, missing/unknown status, and never expose reasoning, arbitrary arguments, arbitrary scripts, credentials or result dumps.
+4. Inspect installed gateway producer and official documentation to explain why WhatsApp previews differ. Do not change WhatsApp verbosity/configuration or restart gateway/native API as part of this request.
+
+## Final-answer lifecycle compatibility
+
+Chronological placement does not turn an unfinished streamed answer into permanent Progress. A definitive terminal output replaces the uncommitted streaming tail, even when its wording differs. Earlier public text committed at tool, commentary, or background boundaries remains in its proper position. Active replay must not lose streamed text because the running snapshot has an empty output field, and missing terminal output must not be treated as a newly supplied final answer. Exercise navigation, HTTP/SSE reconnect, cleared local storage, persisted history, and background placement alongside this contract.
+
+## Evidence and release gates
+
+Use actual served frontend baseline (last successful frontend-only release 9bbb221fa27a4a43a3fa667b6be6cf8a, verified against webroot), not older backend current assets. No live data mutations or fabricated model outputs. Observe RED then GREEN per slice. Offline generated-asset browser coverage at phone/tablet widths, short viewport and nested long contents; DOM/server coverage for live/persisted ordering, names, safe previews and secret-bearing adversarial inputs. Review combined changes; run one frozen full integrated release gate. Keep physical iOS validation separate. Release only affected services via supported controller and verify public assets, health and unchanged gateway/native service identities.

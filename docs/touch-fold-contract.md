@@ -1,0 +1,8 @@
+# Follow-up mobile acceptance
+
+Baseline: deployed fa28623e909546ef901ba05050e47014. Scope: presentation and reliable session activation only; no native configuration, model probes, scheduling changes or notification-policy mutations.
+
+- Scheduled job cards are collapsed by default with accessible name/status/schedule summaries. Each independently expands/collapses; expanded controls retain existing confirmation and ownership rules. Refresh must not accidentally execute a job.
+- Inbox title and toolbar share a single vertically centered row, with the title on the left and actions flush right. Toolbar order is Refresh, Mark all read, Clear read. Title and controls fit together at 320, 375, 390, 768 and 1024px without overlap, clipped labels, title wrapping or page horizontal overflow; accessible labels, keyboard order and at least 44px touch targets remain.
+- Session opening: user reports both Safari and Home Screen no-reaction taps, with double taps more reliable. A resting closed row must not expose hidden action content or start a presentation/settle animation merely because it was tapped. Verify the native click → history request boundary, text and whitespace hit areas, incidental movement, touch capture, successive taps, scroll/regrab, keyboard and mouse. Preserve deliberate swipe reveal and never delete via gesture. No speculative click synthesis to mask native scrolling. Linux WebKit does not certify iOS-family content-change/two-phase-click policies.
+- Observed failing regression followed by passing fix, focused adjacent tests, independent review, full frozen release gate and public asset/health verification required before claiming deployment. Physical iPad/Safari acceptance remains user verification, not certified by Chromium fixtures.
