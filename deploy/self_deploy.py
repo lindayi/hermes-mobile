@@ -387,7 +387,7 @@ def _deploy(paths, *, frontend_only=False, bootstrap=False, checks, verify, run=
     return stage
 
 # Explicit source trees: never copy the project's config, state or interpreter.
-SOURCE_TREES = ('backend', 'frontend', 'tests', 'deploy', 'patches', 'hermes-plugin', 'scripts', 'spikes', 'docs')
+SOURCE_TREES = ('backend', 'frontend', 'tests', 'deploy', 'patches', 'hermes-plugin', 'scripts', 'spikes', 'docs', '.github')
 SOURCE_FILES = ('requirements.lock', 'README.md')
 SKIP = {'__pycache__', '.pytest_cache', 'artifacts', '.venv', 'node_modules', '.git',
         '.env', 'config.json', 'state', 'auth.sqlite', 'runs.sqlite'}

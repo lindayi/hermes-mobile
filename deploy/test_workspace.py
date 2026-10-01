@@ -286,7 +286,7 @@ def _validate_args(suite, args, source):
 
 
 def run_suite(source, *, python, node, suite='all', assets=None,
-              run=subprocess.run, root=None, extra_args=()):
+              run=subprocess.run, root=None, extra_args=(), node_concurrency=2):
     """Run tests with isolated paths and bounded diagnostics.
 
     Real execution is main-thread/Linux only and owns the initial process group
@@ -294,6 +294,8 @@ def run_suite(source, *, python, node, suite='all', assets=None,
     The injected run callback is a synchronous test seam: it must honor check=True
     and finish its children before returning; lifecycle/capture are then its duty.
     """
+    if type(node_concurrency) is not int or not 1 <= node_concurrency <= 4:
+        raise ValueError('node_concurrency must be an integer from 1 to 4')
     source = Path(source).absolute()
     extra_args, selected = _validate_args(suite, tuple(extra_args), source)
     root = _root(root)
@@ -304,7 +306,8 @@ def run_suite(source, *, python, node, suite='all', assets=None,
                 workspace = Path(tempfile.mkdtemp(prefix='r-', dir=root))
                 lock = locks.enter_context(_lock(workspace / '.lock', create=True))
                 _write_json(workspace / '.run.json', dict(ROOT_MARKER, state='running', created=time.time()))
-            return _suite_in_workspace(source, python, node, suite, assets, run, extra_args, workspace, lock, selected)
+            return _suite_in_workspace(source, python, node, suite, assets, run, extra_args, workspace, lock, selected,
+                                       node_concurrency=node_concurrency)
     finally:
         primary = sys.exc_info()[1]
         try:
@@ -556,7 +559,8 @@ def _execute(command, *, workspace, lock, **kwargs):
             raise SystemExit(128 + pending[0])
 
 
-def _suite_in_workspace(source, python, node, suite, assets, run, extra_args, workspace, lock, selected=()):
+def _suite_in_workspace(source, python, node, suite, assets, run, extra_args, workspace, lock, selected=(),
+                        *, node_concurrency=2):
     if run is subprocess.run:
         def run(command, **kwargs):
             return _execute(command, workspace=workspace, lock=lock, **kwargs)
@@ -591,7 +595,7 @@ def _suite_in_workspace(source, python, node, suite, assets, run, extra_args, wo
                            for p in (source / 'tests/browser').glob(pattern))
             if not tests:
                 raise RuntimeError(f'Frontend {suite} suite missing from source')
-            run([str(node), '--test', '--test-concurrency=2', *extra_args, *tests], cwd=source, env=env, check=True, umask=0o077)
+            run([str(node), '--test', f'--test-concurrency={node_concurrency}', *extra_args, *tests], cwd=source, env=env, check=True, umask=0o077)
     except BaseException as error:
         try:
             if not _workspace_active(workspace, _run_marker(workspace)):

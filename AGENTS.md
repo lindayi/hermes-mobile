@@ -19,8 +19,13 @@ Record acceptance cases first; demonstrate RED then GREEN for behavior changes.
 
 Use `HERMES_TEST_PYTHON=/home/lindayi/projects/hermes-mobile/.venv/bin/python
 python3 scripts/test.py python|js|browser -- <explicit test files>` for focused tests;
-use the managed `all` suite for final integration. Do not bypass its isolation or
-cleanup. Browser checks use the installed Playwright dependency cache. Never run
+final PR coverage combines required hosted `source-ci` (all portable Python, JS
+and generated-assets browser shards) with `python3 scripts/ci_tests.py host` using
+the same HERMES_TEST_PYTHON. Run only focused regressions locally during iteration.
+Do not repeat hosted suites on the production server routinely. The explicit host
+manifest is `.github/host-tests.json`; new files default to hosted execution.
+No isolation/cleanup bypass. The full managed `all` remains an opt-in diagnostic
+and the conservative release-stage gate, not the ordinary premerge server task. Never run
 live probes, account enrollment, real model calls, or operator scripts as tests.
 
 Commit and push task branches; open GitHub PRs. Do not push changes directly to main.
@@ -28,9 +33,11 @@ Each PR records scope, baseline, acceptance tests and exact observed verificatio
 An independent reviewer agent reviews the exact head SHA, posting a formal GitHub
 COMMENT review with actionable inline comments. The same GitHub account cannot
 approve its own PR; do not fabricate a human approval. Report the verified outcome
-as the `agent-review` commit status only after review. Full managed integration
-results are reported as `integration-tests` on the exact tested head SHA. Hosted
-`source-ci` is separately required. New commits invalidate all old-head evidence.
+as the `agent-review` commit status only after review. Report `integration-tests`
+on the exact tested head only after both the entire local host-compatibility
+suite and the matching hosted `source-ci` aggregate succeed. Record both results
+and the workflow URL. Never use only a hosted subset or only local host tests to
+claim full coverage. New commits invalidate all old-head evidence.
 
 Address findings with follow-up commits, not silent amendments. Reply to each
 review thread with the fix commit and test evidence; resolve it only after checking
