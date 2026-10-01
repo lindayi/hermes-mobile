@@ -43,7 +43,12 @@ A durable action claim is written before POSTing a task through
 and the enrolled PR's current same-repository `head_ref`. The returned task ID
 is persisted and GET by ID reconciles its state and branch/PR evidence across
 head changes. An ambiguous POST (including a crash before ID persistence) is
-never resent automatically; it blocks further dispatch for that PR. No second
+never resent automatically; it blocks further dispatch for that PR. Unresolved
+fixer claims survive PR closure, reopening, and fresh owner enrollment, even when
+the repository task list is empty. Their attempt counter is retained as well so
+attempt-derived request keys cannot collide; re-enrollment resets that counter
+only when no unresolved fixer claim remains. A fresh enrollment is authorization,
+not evidence that an earlier task stopped. No second
 `@copilot` dispatch comment is posted. Queued, in-progress, waiting-for-user,
 idle and unknown task states do not release the fixer lock. Completion only
 releases the fixer lock; it is not review or CI success.

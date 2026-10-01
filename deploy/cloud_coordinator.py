@@ -1467,13 +1467,21 @@ class StateStore:
                                  and isinstance(item.get("comment"), int)
                                  and isinstance(data["enrollments"][key].get("comment"), int)
                                  and item["comment"] > data["enrollments"][key]["comment"]))):
+                    attempts = 0
                     if key in data["enrollments"]:
+                        # Fresh authorization is not proof an earlier fixer stopped.
                         data["actions"] = {
                             k: v for k, v in data["actions"].items()
                             if v.get("issue") != item["issue"]
+                            or (v.get("kind") == "fix"
+                                and v.get("status") in {"sending", "uncertain", "sent"})
                         }
+                        if any(v.get("issue") == item["issue"] and v.get("kind") == "fix"
+                               for v in data["actions"].values()):
+                            # Do not reuse an attempt-derived key retained above.
+                            attempts = data["enrollments"][key].get("attempts", 0)
                     data["enrollments"][key] = {
-                        **item, "attempts": 0, "sensitive_sha": None, "active": True,
+                        **item, "attempts": attempts, "sensitive_sha": None, "active": True,
                     }
             for action, item in commands:
                 if action == "authorize" and item.get("validated") is True:

@@ -902,6 +902,130 @@ def test_response_uncertain_agent_dispatch_is_reconciled_never_retried(tmp_path)
             if action.get("kind") == "fix"][0]["status"] == "uncertain"
 
 
+@pytest.mark.parametrize("claim_status", ["sending", "uncertain", "sent"])
+def test_reenrollment_preserves_unresolved_fixer_with_empty_task_list(
+        tmp_path, monkeypatch, claim_status):
+    class EmptyTaskList(FakeApi):
+        def get_all(self, route, *, collection=None):
+            if route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
+                return []
+            return super().get_all(route, collection=collection)
+
+    api = EmptyTaskList(unresolved=True, fail_fix=claim_status == "uncertain")
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856540)
+    if claim_status == "sending":
+        # POST succeeds remotely, but the process dies before persisting its ID.
+        def crash_before_task_id(key, status, **fields):
+            assert status == "sent" and fields["task_id"] == "task-1"
+            raise SystemExit("crash before task ID persistence")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "update_action", crash_before_task_id)
+            with pytest.raises(SystemExit, match="crash before task ID persistence"):
+                coordinator.run(apply=True)
+    else:
+        coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    assert fix["status"] == claim_status
+    assert api.fix_attempts == 1
+    assert ("task_id" in fix) == (claim_status == "sent")
+
+    def restarted_cycle():
+        return Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+
+    api.pull["state"] = "closed"
+    restarted_cycle()
+    assert store.snapshot()["enrollments"]["16"]["active"] is False
+    assert store.action(fix["key"]) == fix
+    api.pull["state"] = "open"
+    restarted_cycle()
+    assert store.snapshot()["enrollments"]["16"]["active"] is False
+    assert store.action(fix["key"]) == fix
+    api.comments.append({"id": 126, "user": {"id": OWNER},
+                         "body": "/hermes enroll", "updated_at": "2026-10-01T12:10:00Z"})
+    restarted_cycle()
+    retained = store.action(fix["key"])
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["active"] is True and enrollment["comment"] == 126
+    for _ in range(2):
+        result = restarted_cycle()
+    # Empty list results are not proof that an earlier POST did not start a task.
+    assert api.fix_attempts == 1
+    expected = fix | {"status": "sent" if claim_status == "sent" else "uncertain"}
+    assert retained == expected
+    assert store.action(fix["key"]) == expected
+    assert enrollment["attempts"] == 1
+    assert "agent" in result["pull_requests"][0]["reasons"]
+    assert not api.graphql_writes
+
+    if claim_status == "sent":
+        old_task = api.tasks[fix["task_id"]]
+        old_task.update(id="unrelated-task", state="completed")
+        restarted_cycle()
+        assert api.fix_attempts == 1
+        assert store.action(fix["key"]) == expected
+        old_task.update(id=fix["task_id"], sessions=[
+            {"id": "session-1", "state": "waiting_for_user"},
+        ])
+        restarted_cycle()
+        assert api.fix_attempts == 1
+        assert store.action(fix["key"]) == expected
+        old_task["sessions"][0]["state"] = "completed"
+        restarted_cycle()
+        assert store.action(fix["key"])["status"] == "completed"
+        assert api.fix_attempts == 2
+        new_fix = next(action for action in store.actions().values()
+                       if action.get("task_id") == "task-2")
+        assert new_fix["key"] != fix["key"]
+        assert new_fix["status"] == "sent"
+
+
+def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
+    api = FakeApi(unresolved=True)
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+
+    def restarted_cycle():
+        return Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+
+    for attempt in range(3):
+        restarted_cycle()
+        assert api.fix_attempts == attempt + 1
+        if attempt < 2:
+            api.tasks[f"task-{attempt + 1}"]["state"] = "completed"
+    old_fix = next(action for action in store.actions().values()
+                   if action.get("task_id") == "task-3")
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
+    assert store.authorize_sensitive(16, HEAD)
+    api.pull["state"] = "closed"
+    restarted_cycle()
+    assert store.snapshot()["enrollments"]["16"]["active"] is False
+    api.pull["state"] = "open"
+    restarted_cycle()
+    assert api.fix_attempts == 3
+    assert store.snapshot()["enrollments"]["16"]["active"] is False
+    assert store.action(old_fix["key"])["status"] == "sent"
+    api.tasks["task-3"].update(state="completed", sessions=[
+        {"id": "session-3", "state": "completed"},
+    ])
+    api.comments.append({"id": 126, "user": {"id": OWNER},
+                         "body": "/hermes enroll", "updated_at": "2026-10-01T12:10:00Z"})
+    restarted_cycle()
+    assert api.fix_attempts == 4
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["comment"] == 126 and enrollment["active"] is True
+    assert enrollment["attempts"] == 1
+    assert enrollment["sensitive_sha"] is None
+    assert store.action(old_fix["key"]) is None
+    fixes = [action for action in store.actions().values() if action["kind"] == "fix"]
+    assert len(fixes) == 1
+    assert fixes[0]["task_id"] == "task-4" and fixes[0]["attempt"] == 1
+    restarted_cycle()
+    assert api.fix_attempts == 4
+
+
 def test_task_api_identity_reconciles_across_head_changes(tmp_path):
     api = FakeApi(unresolved=True)
     store = StateStore(tmp_path / "state.json")
