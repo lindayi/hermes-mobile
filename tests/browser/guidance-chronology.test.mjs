@@ -9,7 +9,7 @@ const button=(doc,label)=>doc.querySelector(`[aria-label="${label}"]`);
 async function setup(source){
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/',pretendToBeVisual:true});
  const win=dom.window,doc=win.document,streams=[];
- let attempt={id:'a',run_id:'r',idempotency_key:'k',input:'GUIDANCE',status:'accepted_unconfirmed',updated_at:1};
+ let attempt={id:'a',run_id:'r',idempotency_key:'k',input:'GUIDANCE',status:'accepted_unconfirmed',created_at:1762061400,updated_at:1};
  class Events{
   constructor(){this.listeners={};streams.push(this);}
   addEventListener(name,fn){this.listeners[name]=fn;}
@@ -43,6 +43,7 @@ for(const source of ['POST','controls'])for(const event of ['steering','steer'])
   const h=await setup(source);
   try{
    const bubble=h.doc.querySelector('[data-guidance-key]');assert.ok(bubble,'acceptance is shown before delayed SSE');
+   assert.equal(bubble.querySelector('time')?.dateTime,'2025-11-02T05:30:00.000Z','guidance shows journal creation, not status-update time');
    const e=h.events;
    e.emit('tool',{name:'BEFORE',tool_call_id:'before',status:'running'},'1');
    e.emit(event,h.attempt,'2');
