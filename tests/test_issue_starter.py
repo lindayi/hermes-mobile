@@ -750,11 +750,59 @@ def test_task_completion_requires_successful_matching_session(tmp_path):
     assert api.patches == []
 
 
-def test_task_pull_without_global_node_id_is_not_handed_off(tmp_path):
+def test_task_pull_without_optional_global_id_resolves_and_binds_detail_node(tmp_path):
+    # Official GitHub-resource artifact schema requires data.id, not global_id.
     api = FakeApi(pulls=[pull_request()])
     start_task(tmp_path, api)
     api.task_detail = completed_task()
     del api.task_detail["artifacts"][1]["data"]["global_id"]
+
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert result["handed_off"] == 1
+    saved = make_coordinator(tmp_path, api).store.snapshot()["commands"]["28:9001"]
+    assert saved["pull_node_id"] == "PR_kwDO123"
+    assert api.pull_detail_reads > 0
+    readiness = [call for call in api.graphql_calls
+                 if "markPullRequestReadyForReview" in call["query"]]
+    assert len(readiness) == 1
+    assert readiness[0]["variables"]["pullRequestId"] == "PR_kwDO123"
+    assert [body["body"] for route, body in api.posts
+            if route.endswith("/issues/41/comments")] == ["/hermes enroll"]
+
+
+@pytest.mark.parametrize("invalid", ["global_mismatch", "global_null", "id_missing",
+                                     "id_mismatch", "duplicate_id", "list_detail_node_mismatch",
+                                     "detail_id_mismatch", "node_missing"])
+def test_task_pull_artifact_binding_failures_never_handoff(tmp_path, invalid):
+    class DetailApi(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route == f"repos/{REPOSITORY}/pulls/41":
+                if invalid == "list_detail_node_mismatch":
+                    return {**value, "node_id": "PR_other"}
+                if invalid == "detail_id_mismatch":
+                    return {**value, "id": 4404}
+            return value
+
+    api = DetailApi(pulls=[pull_request()])
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    data = api.task_detail["artifacts"][1]["data"]
+    if invalid == "global_mismatch":
+        data["global_id"] = "PR_other"
+    elif invalid == "global_null":
+        data["global_id"] = None
+    elif invalid == "id_missing":
+        del data["id"]
+    elif invalid == "id_mismatch":
+        data["id"] = 4404
+    elif invalid == "duplicate_id":
+        api.pulls.append({**pull_request(node_id="PR_other"), "number": 42})
+    else:
+        del data["global_id"]
+        if invalid == "node_missing":
+            del api.pulls[0]["node_id"]
 
     result = make_coordinator(tmp_path, api).run(apply=True)
 
@@ -880,6 +928,189 @@ def test_missing_uncertain_receipt_is_bounded_and_does_not_starve_task_poll(tmp_
     assert saved["receipt"]["state"] == "abandoned"
     assert saved["receipt"]["lookup_failures"] == 3
     assert not any(route.endswith(f"/issues/{ISSUE_NUMBER}/comments") for route, _ in api.posts)
+
+
+@pytest.mark.parametrize("phase", ["stale_authorization", "handoff_failed", "failed", "handed_off"])
+@pytest.mark.parametrize("remote_state", ["in_progress", "waiting_for_user", "unrecognized", "failed", "completed"])
+def test_every_terminal_local_phase_requires_fresh_remote_occupancy(tmp_path, phase, remote_state):
+    api = FakeApi()
+    start_task(tmp_path, api)
+    store = make_coordinator(tmp_path, api).store
+    store.update("28:9001", {"phase": phase})
+    api.timeline = [
+        {"event": "closed", "created_at": "2026-10-01T20:30:00Z"},
+        {"event": "reopened", "created_at": "2026-10-01T20:40:00Z"},
+    ]
+    api.comments.append(issue_comment(comment_id=9002, created_at="2026-10-01T21:00:00Z"))
+    api.task_detail = task(state=remote_state)
+    reads_before = api.task_detail_reads
+
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    expected = int(remote_state in {"failed", "completed"})
+    assert result["dispatched"] == expected
+    assert api.task_detail_reads > reads_before
+    assert len([route for route, _ in api.posts if route.endswith("/tasks")]) == 1 + expected
+
+
+@pytest.mark.parametrize("proof", ["active", "wrong_identity", "unavailable"])
+@pytest.mark.parametrize("resume_reserved", [False, True])
+def test_all_older_tasks_reconcile_even_before_reserved_dispatch(tmp_path, proof, resume_reserved):
+    from deploy.issue_starter import ApiError
+
+    class OlderTaskApi(FakeApi):
+        def get(self, route):
+            if route.endswith("/tasks/task-1"):
+                if proof == "unavailable":
+                    raise ApiError("synthetic old task unavailable")
+                return task(state="in_progress" if proof == "active" else "failed",
+                            creator_id=7 if proof == "wrong_identity" else OWNER_ID)
+            if route.endswith("/tasks/task-2"):
+                return task("task-2", state="failed")
+            return super().get(route)
+
+    api = OlderTaskApi()
+    start_task(tmp_path, api)
+    store = make_coordinator(tmp_path, api).store
+    store.update("28:9001", {"phase": "handed_off"})
+    prior = store.snapshot()["commands"]["28:9001"]
+    store.reserve({**prior, "command_id": 9002, "accepted_at": "2026-10-01T21:00:00Z",
+                   "phase": "failed", "task_id": "task-2"})
+    api.timeline = [
+        {"event": "closed", "created_at": "2026-10-01T21:30:00Z"},
+        {"event": "reopened", "created_at": "2026-10-01T21:40:00Z"},
+    ]
+    api.comments.append(issue_comment(comment_id=9003, created_at="2026-10-01T22:00:00Z"))
+    if resume_reserved:
+        store.reserve({**prior, "command_id": 9003, "accepted_at": "2026-10-01T22:00:00Z",
+                       "phase": "reserved", "task_id": None})
+
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert result["dispatched"] == 0
+    assert len([route for route, _ in api.posts if route.endswith("/tasks")]) == 1
+
+
+@pytest.mark.parametrize("kind", ["pagination_bound", "incomplete"])
+@pytest.mark.parametrize("receipt_state", ["reserved", "sending", "uncertain"])
+def test_optional_receipt_incomplete_lookup_cannot_starve_unrelated_work(
+    tmp_path, kind, receipt_state,
+):
+    class TwoIssuesApi(FakeApi):
+        next_issue = None
+
+        def get(self, route):
+            if self.next_issue is not None:
+                if route.startswith(f"repos/{REPOSITORY}/issues?"):
+                    return [self.next_issue]
+                if route.startswith(f"repos/{REPOSITORY}/issues/29/comments?"):
+                    return [issue_comment(comment_id=9201, created_at="2026-10-01T21:00:00Z")]
+                if route.startswith(f"repos/{REPOSITORY}/issues/29/timeline?"):
+                    return []
+                if route == f"repos/{REPOSITORY}/issues/29":
+                    return self.next_issue
+                if route.startswith(f"repos/{REPOSITORY}/issues/28/comments?"):
+                    if kind == "incomplete":
+                        return {"incomplete": True}
+                    page = int(route.rsplit("page=", 1)[1])
+                    return [issue_comment(comment_id=10000 + page * 100 + i,
+                                          body="ordinary comment") for i in range(100)]
+            return super().get(route)
+
+    api = TwoIssuesApi()
+    start_task(tmp_path, api)
+    store = make_coordinator(tmp_path, api).store
+    store.update("28:9001", {
+        "phase": "failed",
+        "receipt": {"kind": "blocked", "state": receipt_state,
+                    "marker": "<!-- hermes-issue-starter:blocked:28:9001 -->",
+                    "lookup_failures": 0},
+    })
+    api.current_issue = issue(state="closed")
+    api.next_issue = {**issue(), "number": 29}
+
+    first = make_coordinator(tmp_path, api).run(apply=True)
+    assert first["dispatched"] == 1
+    for count in range(1, 4):
+        receipt = store.snapshot()["commands"]["28:9001"]["receipt"]
+        assert receipt["lookup_failures"] == count
+        assert receipt["state"] == ("abandoned" if count == 3 else receipt_state)
+        reads_before = api.task_detail_reads
+        result = make_coordinator(tmp_path, api).run(apply=True)
+        assert result["pending"] == 1
+        assert api.task_detail_reads > reads_before
+    assert store.snapshot()["commands"]["28:9001"]["receipt"]["lookup_failures"] == 3
+    assert not any(route.endswith("/issues/28/comments") for route, _ in api.posts)
+
+
+@pytest.mark.parametrize("path", ["mutation", "already_ready", "restart"])
+def test_final_fresh_draft_read_blocks_enrollment_without_readiness_retry(tmp_path, path):
+    class Crash(BaseException):
+        pass
+
+    class CrashAfterReadyStore(StateStore):
+        def update(self, key, changes):
+            result = super().update(key, changes)
+            if changes == {"ready_state": "done"}:
+                raise Crash()
+            return result
+
+    class RedraftedApi(FakeApi):
+        redraft_at = None
+
+        def post(self, route, body):
+            result = super().post(route, body)
+            if (path == "mutation" and route == "graphql"
+                    and "markPullRequestReadyForReview" in body.get("query", "")):
+                self.redraft_at = self.pull_detail_reads + 3
+            return result
+
+        def get(self, route):
+            if (route == f"repos/{REPOSITORY}/pulls/41"
+                    and self.pull_detail_reads + 1 == self.redraft_at):
+                self.pulls[0]["draft"] = True
+            return super().get(route)
+
+    api = RedraftedApi(pulls=[pull_request(draft=path != "already_ready")])
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    if path == "already_ready":
+        api.redraft_at = 4
+    elif path == "restart":
+        store = CrashAfterReadyStore(tmp_path / "private" / "issue-starter.json")
+        with pytest.raises(Crash):
+            Coordinator(api, store).run(apply=True)
+        assert store.snapshot()["commands"]["28:9001"]["ready_state"] == "done"
+        api.redraft_at = api.pull_detail_reads + 3
+
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert api.pulls[0]["draft"] is True
+    assert result["handed_off"] == 0
+    assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == 0
+    assert len([call for call in api.graphql_calls
+                if "markPullRequestReadyForReview" in call["query"]]) == int(path != "already_ready")
+    assert not any(route.endswith("/issues/41/comments") and body["body"] == "/hermes enroll"
+                   for route, body in api.posts)
+
+
+@pytest.mark.parametrize("stage", ["collection", "preflight"])
+@pytest.mark.parametrize("present", [False, True])
+def test_nullable_last_edited_at_must_be_explicit_evidence(tmp_path, stage, present):
+    class EvidenceApi(FakeApi):
+        def get(self, route):
+            if stage == "preflight" and route == f"repos/{REPOSITORY}/issues/28" and not present:
+                self.edit_evidence.pop("lastEditedAt", None)
+            return super().get(route)
+
+    api = EvidenceApi()
+    if stage == "collection" and not present:
+        del api.edit_evidence["lastEditedAt"]
+
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert result["dispatched"] == int(present)
+    assert len([route for route, _ in api.posts if route.endswith("/tasks")]) == int(present)
 
 
 def test_authenticated_identity_must_be_fixed_owner_and_repository(tmp_path):

@@ -582,7 +582,8 @@ class Coordinator:
             )
             nodes = connection.get("nodes") if isinstance(connection, dict) else None
             page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
-            if (not isinstance(issue, dict) or not isinstance(nodes, list)
+            if (not isinstance(issue, dict) or "lastEditedAt" not in issue
+                    or not isinstance(nodes, list)
                     or len(nodes) > MAX_ITEMS_PER_PAGE
                     or not isinstance(page_info, dict)
                     or type(page_info.get("hasNextPage")) is not bool):
@@ -642,8 +643,8 @@ class Coordinator:
                 if phase in {"dispatch_started", "unknown"}:
                     return False
                 continue
-            if phase not in {"stale_authorization", "dispatch_started", "unknown"}:
-                continue
+            # Local authorization/handoff phases never prove remote occupancy.
+            # Task state derives from the latest session and may have resumed.
             try:
                 task = self._task(task_id)
             except (ApiError, CoordinatorError):
@@ -809,7 +810,9 @@ class Coordinator:
             comments = _all_pages(
                 self.api, f"repos/{REPOSITORY}/issues/{issue_number}/comments",
             )
-        except ApiError:
+        except CoordinatorError:
+            # Optional delivery cannot infer absence from incomplete pagination,
+            # but must not prevent unrelated dispatch or task polling forever.
             attempts = receipt.get("lookup_failures", 0) + 1
             state = "abandoned" if attempts >= MAX_READ_FAILURES else receipt.get("state")
             self.store.update(key, {
@@ -901,6 +904,14 @@ class Coordinator:
         )
 
     def _send_reserved(self, key, record):
+        # A reservation can survive a restart after an older task resumes.
+        prior = [
+            entry for entry in self._prior_commands(self.store.snapshot(), record["issue"])
+            if entry["command_id"] != record["command_id"]
+        ]
+        if not self._remote_tasks_terminal(prior):
+            return {"planned": 0, "pending": 1, "dispatched": 0,
+                    "handed_off": 0, "blocked": 1}
         try:
             issue_value = self._fresh_issue(record)
         except ApiError:
@@ -1007,21 +1018,24 @@ class Coordinator:
         artifact_id = pull_data.get("id")
         global_id = pull_data.get("global_id")
         if (type(artifact_id) is not int or artifact_id <= 0
-                or not isinstance(global_id, str) or not global_id):
+                or ("global_id" in pull_data
+                    and (not isinstance(global_id, str) or not global_id))):
             return None
         pull_list = _all_pages(self.api, f"repos/{REPOSITORY}/pulls?state=all")
         matches = []
         for pull in pull_list:
             if not isinstance(pull, dict):
                 continue
-            if (pull.get("id") == artifact_id
-                    and pull.get("node_id") == global_id):
+            if pull.get("id") == artifact_id:
                 matches.append(pull)
         if len(matches) != 1:
             return None
         list_pull = matches[0]
         number = list_pull.get("number")
-        if type(number) is not int or number <= 0:
+        node_id = list_pull.get("node_id")
+        if (type(number) is not int or number <= 0
+                or not isinstance(node_id, str) or not node_id
+                or (global_id is not None and node_id != global_id)):
             return None
         pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
         if not isinstance(pull, dict):
@@ -1032,7 +1046,7 @@ class Coordinator:
         base_repo = base.get("repo") if isinstance(base, dict) else None
         if (pull.get("id") != artifact_id
                 or pull.get("number") != number
-                or pull.get("node_id") != global_id
+                or pull.get("node_id") != node_id
                 or pull.get("state") != "open" or pull.get("merged") is not False
                 or type(pull.get("draft")) is not bool
                 or not isinstance(head, dict) or head.get("ref") != branch
@@ -1313,6 +1327,8 @@ class Coordinator:
                     "handed_off": 0, "blocked": 1}
         try:
             pull = self._current_pull(record)
+            if pull.get("draft") is not False:
+                raise CoordinatorError("Task pull request is no longer ready for enrollment")
         except Exception:
             self.store.update(key, {
                 "phase": "handoff_failed",
