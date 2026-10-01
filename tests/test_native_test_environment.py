@@ -144,7 +144,8 @@ def test_sqlite_library_export_is_private_and_rejects_newlines(tmp_path):
     runner_temp = tmp_path / 'runner'
     runner_temp.mkdir()
     env_file = runner_temp / 'set_env'
-    env_file.touch(mode=0o600)
+    env_file.touch()
+    env_file.chmod(0o644)
     library = runner_temp / 'sqlite/lib'
     library.mkdir(parents=True)
     (library / 'libsqlite3.so.3.51.3').write_bytes(b'synthetic library marker')
@@ -153,7 +154,11 @@ def test_sqlite_library_export_is_private_and_rejects_newlines(tmp_path):
     value = publish_sqlite_library(environment, runner_temp, library)
     assert value == f'{library}:/system/lib'
     assert env_file.read_text() == f'LD_LIBRARY_PATH={value}\n'
+    env_file.chmod(0o666)
     with pytest.raises(RuntimeError):
+        publish_sqlite_library(environment, runner_temp, library)
+    env_file.chmod(0o644)
+    with pytest.raises(RuntimeError, match='Unsafe inherited library path'):
         publish_sqlite_library(
             dict(environment, LD_LIBRARY_PATH='/bad\nLD_PRELOAD=/bad'),
             runner_temp,

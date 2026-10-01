@@ -140,8 +140,8 @@ def publish_sqlite_library(environ, runner_temp, library):
             or not env_file.is_relative_to(runner_temp)
             or env_file.stat().st_uid != os.getuid()
             or env_file.stat().st_nlink != 1
-            or env_file.stat().st_mode & 0o077):
-        raise RuntimeError('SQLite library and Actions environment file must be private runner paths')
+            or env_file.stat().st_mode & 0o022):
+        raise RuntimeError('SQLite library and Actions environment file must be runner-owned paths')
     library_file = library / f'libsqlite3.so.{SQLITE_VERSION}'
     soname = library / 'libsqlite3.so.0'
     if (not library_file.is_file()
