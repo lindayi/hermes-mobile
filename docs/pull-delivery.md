@@ -230,7 +230,7 @@ No test starts a real service, calls production API, writes the production journ
 or uses production artifacts. The focused managed test command is:
 
 ```sh
-HERMES_TEST_PYTHON=/home/lindayi/projects/hermes-mobile/.venv/bin/python \
+HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
   python3 scripts/test.py python -- tests/test_pull_delivery.py tests/test_release_policy.py
 ```
 

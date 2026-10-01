@@ -670,6 +670,39 @@ def promote_api(path='routine', reviews=None, *, base=BASE, sha=SHA, files=None,
     return api
 
 
+@pytest.mark.parametrize('metadata', [
+    pytest.param({}, id='missing_mode_and_type'),
+    pytest.param({'mode': '100777'}, id='unknown_mode_without_type'),
+    pytest.param({'mode': 100644, 'type': 'blob'}, id='numeric_mode'),
+])
+@pytest.mark.parametrize('job', ['classify', 'promote-routine', 'promote-sensitive'])
+def test_unchanged_invalid_tree_metadata_is_sensitive_before_promotion(job, metadata):
+    risk = 'sensitive' if job == 'promote-sensitive' else 'routine'
+    files = [{'filename': 'frontend/styles.css', 'status': 'modified'}]
+    api = promote_api(risk, files=files)
+    for tree in (TREE_BASE, TREE_HEAD):
+        api[PREFIX + f'/git/trees/{tree}?recursive=1']['tree'].append(
+            {'path': 'tests/test_unchanged.py', 'sha': OID, **metadata})
+    output = run_script(job, api, env={
+        'RELEASE_RISK': risk, 'CLASSIFIED_RISK': risk, 'BASE_SHA': BASE})
+    calls = [call['path'] for call in output['reads']]
+    for tree in (TREE_BASE, TREE_HEAD):
+        assert PREFIX + f'/git/trees/{tree}?recursive=1' in calls
+    if job == 'classify':
+        assert 'error' not in output, output
+        assert output['outputs'] == {'risk': 'sensitive', 'base_sha': BASE}
+        assert not output['writes']
+    elif job == 'promote-routine':
+        assert 'Promotion risk disagrees' in output.get('error', ''), output
+        assert not output['writes']
+    else:
+        assert 'error' not in output, output
+        assert len(output['writes']) == 2
+        assert output['writes'][0]['payload'] == {
+            'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE}
+        assert output['writes'][1]['state'] == 'queued'
+
+
 def test_promote_routine_creates_strict_v2_intent_without_owner_review():
     output = run_script('promote-routine', promote_api('routine'),
                         env={'RELEASE_RISK': 'routine', 'CLASSIFIED_RISK': 'routine', 'BASE_SHA': BASE})

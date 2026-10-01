@@ -164,7 +164,8 @@ jobs:
                const entries = new Map(), seen = new Set();
                for (const entry of tree.tree) {
                  if (!entry || typeof entry.path !== 'string' || !entry.path || entry.path.includes('\0') ||
-                     seen.has(entry.path) || types[entry.mode] !== entry.type || !HEX.test(entry.sha)) return null;
+                     seen.has(entry.path) || typeof entry.mode !== 'string' || typeof entry.type !== 'string' ||
+                     !Object.hasOwn(types, entry.mode) || types[entry.mode] !== entry.type || !HEX.test(entry.sha)) return null;
                  seen.add(entry.path);
                  if (entry.mode !== '040000') entries.set(entry.path, entry);
                }
@@ -324,7 +325,8 @@ jobs:
                 const entries = new Map(), seen = new Set();
                 for (const entry of tree.tree) {
                   if (!entry || typeof entry.path !== 'string' || !entry.path || entry.path.includes('\0') ||
-                      seen.has(entry.path) || types[entry.mode] !== entry.type || !HEX.test(entry.sha)) return null;
+                      seen.has(entry.path) || typeof entry.mode !== 'string' || typeof entry.type !== 'string' ||
+                      !Object.hasOwn(types, entry.mode) || types[entry.mode] !== entry.type || !HEX.test(entry.sha)) return null;
                   seen.add(entry.path);
                   if (entry.mode !== '040000') entries.set(entry.path, entry);
                 }
@@ -498,7 +500,8 @@ jobs:
                 const entries = new Map(), seen = new Set();
                 for (const entry of tree.tree) {
                   if (!entry || typeof entry.path !== 'string' || !entry.path || entry.path.includes('\0') ||
-                      seen.has(entry.path) || types[entry.mode] !== entry.type || !HEX.test(entry.sha)) return null;
+                      seen.has(entry.path) || typeof entry.mode !== 'string' || typeof entry.type !== 'string' ||
+                      !Object.hasOwn(types, entry.mode) || types[entry.mode] !== entry.type || !HEX.test(entry.sha)) return null;
                   seen.add(entry.path);
                   if (entry.mode !== '040000') entries.set(entry.path, entry);
                 }
