@@ -20,6 +20,11 @@ REVISION = '8911e2e0edf750b104edbdc106d63d6cdac88524'
 RUNTIME_PATH = Path('/usr/local/lib/hermes-agent')
 PYTHON_VERSION = '3.11'
 UV_VERSION = '0.9.28'
+OPTIONAL_EXTRAS = ('messaging',)
+SQLITE_REPOSITORY = 'https://github.com/sqlite/sqlite'
+SQLITE_REVISION = 'a5333afb9ad1aa473f8963b92caeaa955f47dc74'
+SQLITE_VERSION = '3.51.3'
+SQLITE_MINIMUM = (3, 51, 3)
 UPSTREAM_HASHES = {
     'pyproject.toml': '1f928b1560b0669291b3f7d562aa78c99ac4f927375939ca97fd3c3e7494cb91',
     'uv.lock': '8fd868b9da8b6bc2f4aa94a845e210eccdd5e31be7a0b404f0a8527ced0fddec',
@@ -64,6 +69,12 @@ def _expected_spec():
         'runtime_path': str(RUNTIME_PATH),
         'python_version': PYTHON_VERSION,
         'uv_version': UV_VERSION,
+        'extras': list(OPTIONAL_EXTRAS),
+        'sqlite': {
+            'repository': SQLITE_REPOSITORY,
+            'revision': SQLITE_REVISION,
+            'version': SQLITE_VERSION,
+        },
         'upstream_sha256': UPSTREAM_HASHES,
         'targets': TARGETS,
         'patches': [
@@ -103,6 +114,48 @@ def validate_hosted_runner(environ):
             or runner_temp != Path('/home/runner/work/_temp')):
         raise RuntimeError('Unexpected GitHub-hosted workspace layout')
     return workspace, runner_temp
+
+
+def validate_sqlite_version(version):
+    try:
+        parsed = tuple(int(part) for part in version.split('.'))
+    except (AttributeError, ValueError) as error:
+        raise RuntimeError(f'Invalid SQLite version: {version!r}') from error
+    if len(parsed) != 3 or parsed < SQLITE_MINIMUM:
+        raise RuntimeError('Native test runtime requires SQLite 3.51.3 or newer')
+    return parsed
+
+
+def publish_sqlite_library(environ, runner_temp, library):
+    runner_temp = Path(runner_temp)
+    library = Path(library)
+    env_file = Path(environ.get('GITHUB_ENV', ''))
+    if (runner_temp.resolve() != runner_temp
+            or library.is_symlink()
+            or library.resolve() != library
+            or not library.is_relative_to(runner_temp)
+            or env_file.is_symlink()
+            or not env_file.is_file()
+            or env_file.resolve() != env_file
+            or not env_file.is_relative_to(runner_temp)
+            or env_file.stat().st_uid != os.getuid()
+            or env_file.stat().st_nlink != 1
+            or env_file.stat().st_mode & 0o077):
+        raise RuntimeError('SQLite library and Actions environment file must be private runner paths')
+    library_file = library / f'libsqlite3.so.{SQLITE_VERSION}'
+    soname = library / 'libsqlite3.so.0'
+    if (not library_file.is_file()
+            or library_file.is_symlink()
+            or not soname.is_symlink()
+            or soname.resolve() != library_file):
+        raise RuntimeError('Pinned SQLite shared library is missing or unsafe')
+    previous = environ.get('LD_LIBRARY_PATH', '')
+    if any(character in previous for character in ('\n', '\r', '\0')):
+        raise RuntimeError('Unsafe inherited library path')
+    value = str(library) + (os.pathsep + previous if previous else '')
+    with env_file.open('a', encoding='utf-8') as stream:
+        stream.write(f'LD_LIBRARY_PATH={value}\n')
+    return value
 
 
 def validate_patch_inputs(repository_root, spec):
@@ -225,17 +278,45 @@ def _ignore_upstream_metadata(directory, names, source):
     return []
 
 
-def _clone_upstream(source, env):
+def _clone_public_source(source, repository, revision, env):
     git = shutil.which('git', path=env['PATH'])
     if not git:
         raise RuntimeError('Git is required on the hosted runner')
     _run([git, 'init', str(source)], env=env)
-    _run([git, '-C', str(source), 'remote', 'add', 'origin', REPOSITORY], env=env)
-    _run([git, '-C', str(source), 'fetch', '--depth=1', '--no-tags', 'origin', REVISION], env=env)
+    _run([git, '-C', str(source), 'remote', 'add', 'origin', repository], env=env)
+    _run([git, '-C', str(source), 'fetch', '--depth=1', '--no-tags', 'origin', revision], env=env)
     _run([git, '-C', str(source), 'checkout', '--detach', 'FETCH_HEAD'], env=env)
     actual = _run([git, '-C', str(source), 'rev-parse', 'HEAD'], env=env).strip()
-    if actual != REVISION:
-        raise RuntimeError('Fetched Hermes revision did not match the approved commit')
+    if actual != revision:
+        raise RuntimeError('Fetched public source did not match its approved commit')
+
+
+def _build_sqlite(source, prefix, env):
+    _clone_public_source(source, SQLITE_REPOSITORY, SQLITE_REVISION, env)
+    version_file = source / 'VERSION'
+    configure = source / 'configure'
+    if (version_file.is_symlink() or not version_file.is_file()
+            or version_file.read_text(encoding='utf-8').strip() != SQLITE_VERSION
+            or configure.is_symlink() or not configure.is_file() or not os.access(configure, os.X_OK)):
+        raise RuntimeError('Pinned SQLite source did not match its release metadata')
+    _run(
+        [str(configure), f'--prefix={prefix}', '--enable-shared', '--disable-static', '--fts5'],
+        cwd=source,
+        env=env,
+    )
+    make = shutil.which('make', path=env['PATH'])
+    if not make:
+        raise RuntimeError('GNU make is required on hosted Ubuntu')
+    _run([make, '-j2'], cwd=source, env=env)
+    _run([make, 'install'], cwd=source, env=env)
+    library = prefix / 'lib'
+    env['LD_LIBRARY_PATH'] = str(library)
+    version = _run(
+        [sys.executable, '-c', 'import sqlite3; print(sqlite3.sqlite_version)'],
+        env=env,
+    ).strip()
+    validate_sqlite_version(version)
+    return library, version
 
 
 def prepare_runtime(repository_root, environ):
@@ -249,13 +330,16 @@ def prepare_runtime(repository_root, environ):
         raise RuntimeError('Native runtime setup requires the pinned Python 3.11 action')
     target = Path(spec['runtime_path'])
     preserved = _validate_target(target, workspace)
+    sqlite_prefix = runner_temp / f'hermes-native-sqlite-{SQLITE_VERSION}'
+    if sqlite_prefix.exists() or sqlite_prefix.is_symlink():
+        raise RuntimeError('Refusing to overwrite an existing private SQLite build')
     work = Path(tempfile.mkdtemp(prefix='hermes-native-', dir=runner_temp))
     os.chmod(work, 0o700)
     stage = work / 'upstream'
     stage.mkdir(mode=0o700)
     try:
         env = _child_environment(work, target)
-        _clone_upstream(stage, env)
+        _clone_public_source(stage, REPOSITORY, REVISION, env)
         for name, expected in spec['upstream_sha256'].items():
             if _hash(stage / name) != expected:
                 raise RuntimeError(f'Pinned upstream input hash mismatch: {name}')
@@ -271,6 +355,9 @@ def prepare_runtime(repository_root, environ):
             )
         validate_baselines(stage, records, patched_only=True)
         _validate_public_tree(stage)
+        sqlite_source = work / 'sqlite-source'
+        sqlite_source.mkdir(mode=0o700)
+        sqlite_library, sqlite_version = _build_sqlite(sqlite_source, sqlite_prefix, env)
         python = str(Path(sys.executable).resolve())
         pip = [python, '-m', 'pip', 'install', '--disable-pip-version-check', '--no-input',
                '--cache-dir', env['PIP_CACHE_DIR'], f'uv=={spec["uv_version"]}']
@@ -278,15 +365,25 @@ def prepare_runtime(repository_root, environ):
         uv = str(Path(sys.executable).parent / ('uv.exe' if os.name == 'nt' else 'uv'))
         if not Path(uv).is_file():
             raise RuntimeError('Pinned uv installer did not provide its executable')
+        sync = [
+            uv, 'sync', '--locked', '--no-dev', '--no-install-project',
+            '--python', python, '--project', str(stage),
+        ]
+        for extra in spec['extras']:
+            sync.extend(('--extra', extra))
         _run(
-            [uv, 'sync', '--locked', '--no-dev', '--no-install-project',
-             '--python', python, '--project', str(stage)],
+            sync,
             cwd=stage,
             env=env,
         )
         native_python = target / 'venv/bin/python'
         if not native_python.is_file():
             raise RuntimeError('Locked dependency sync did not create the expected venv/bin/python')
+        native_sqlite = _run(
+            [str(native_python), '-c', 'import sqlite3; print(sqlite3.sqlite_version)'],
+            env=env,
+        ).strip()
+        validate_sqlite_version(native_sqlite)
         shutil.copytree(
             stage,
             target,
@@ -297,17 +394,27 @@ def prepare_runtime(repository_root, environ):
             ),
         )
         validate_baselines(target, records, patched_only=True)
+        publish_sqlite_library(environ, runner_temp, sqlite_library)
         print(f'Installed public Hermes revision {REVISION}')
         print(f'upstream pyproject.toml sha256={spec["upstream_sha256"]["pyproject.toml"]}')
         print(f'upstream uv.lock sha256={spec["upstream_sha256"]["uv.lock"]}')
         for entry in PATCHES:
             print(f'{entry["path"]} sha256={entry["sha256"]}')
-        print('Verified all four installed and staged source hashes; no optional extras installed.')
+        print(f'Verified SQLite {sqlite_version} and locked extras: {", ".join(spec["extras"])}.')
+        print('Verified all four installed and staged source hashes; no model or media extras installed.')
     except BaseException as error:
         try:
             _remove_created_runtime(target, preserved)
         except Exception as cleanup_error:
             error.add_note(f'Runtime rollback failed: {cleanup_error}')
+        if sqlite_prefix.exists() and not sqlite_prefix.is_symlink():
+            try:
+                if (sqlite_prefix.parent != runner_temp
+                        or sqlite_prefix.stat().st_uid != os.getuid()):
+                    raise RuntimeError('Unsafe private SQLite build during rollback')
+                shutil.rmtree(sqlite_prefix)
+            except Exception as cleanup_error:
+                error.add_note(f'SQLite rollback failed: {cleanup_error}')
         raise
     finally:
         shutil.rmtree(work)

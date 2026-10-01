@@ -10,8 +10,10 @@ from scripts.prepare_native_test_runtime import (
     _child_environment,
     load_runtime_spec,
     _remove_created_runtime,
+    publish_sqlite_library,
     validate_hosted_runner,
     validate_patch_inputs,
+    validate_sqlite_version,
 )
 
 
@@ -62,6 +64,12 @@ def test_runtime_spec_pins_public_sources_and_exact_four_preimages():
     assert spec['repository'] == 'https://github.com/NousResearch/hermes-agent'
     assert spec['revision'] == UPSTREAM_REVISION
     assert spec['python_version'] == '3.11'
+    assert spec['extras'] == ['messaging']
+    assert spec['sqlite'] == {
+        'repository': 'https://github.com/sqlite/sqlite',
+        'revision': 'a5333afb9ad1aa473f8963b92caeaa955f47dc74',
+        'version': '3.51.3',
+    }
     assert set(spec['targets']) == EXPECTED_TARGETS
     assert {entry['path'] for entry in spec['patches']} == {
         'patches/native-compat.patch',
@@ -123,3 +131,31 @@ def test_installer_uses_private_workspace_and_runner_certificate_store(tmp_path)
     assert environment['UV_CACHE_DIR'].startswith(str(work))
     assert environment['UV_NATIVE_TLS'] == 'true'
     assert not {'GITHUB_TOKEN', 'GH_TOKEN'} & environment.keys()
+
+
+def test_sqlite_version_gate_preserves_native_test_minimum():
+    assert validate_sqlite_version('3.51.3') == (3, 51, 3)
+    assert validate_sqlite_version('3.52.0') == (3, 52, 0)
+    with pytest.raises(RuntimeError, match='3.51.3'):
+        validate_sqlite_version('3.51.2')
+
+
+def test_sqlite_library_export_is_private_and_rejects_newlines(tmp_path):
+    runner_temp = tmp_path / 'runner'
+    runner_temp.mkdir()
+    env_file = runner_temp / 'set_env'
+    env_file.touch(mode=0o600)
+    library = runner_temp / 'sqlite/lib'
+    library.mkdir(parents=True)
+    (library / 'libsqlite3.so.3.51.3').write_bytes(b'synthetic library marker')
+    (library / 'libsqlite3.so.0').symlink_to('libsqlite3.so.3.51.3')
+    environment = {'GITHUB_ENV': str(env_file), 'LD_LIBRARY_PATH': '/system/lib'}
+    value = publish_sqlite_library(environment, runner_temp, library)
+    assert value == f'{library}:/system/lib'
+    assert env_file.read_text() == f'LD_LIBRARY_PATH={value}\n'
+    with pytest.raises(RuntimeError):
+        publish_sqlite_library(
+            dict(environment, LD_LIBRARY_PATH='/bad\nLD_PRELOAD=/bad'),
+            runner_temp,
+            library,
+        )
