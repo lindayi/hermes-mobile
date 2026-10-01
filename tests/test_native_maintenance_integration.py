@@ -90,8 +90,10 @@ def test_cli_forwards_explicit_approval_only_with_bootstrap(tmp_path,monkeypatch
 
 
 def test_worker_loads_verified_scoped_approval(tmp_path,monkeypatch):
+    from dataclasses import replace
     from test_self_deploy import deploy_fixture
     _,paths=deploy_fixture(tmp_path)
+    paths=replace(paths,database=paths.state/'runs.sqlite')
     monkeypatch.setattr(r.os,'geteuid',lambda:1000)
     monkeypatch.setenv('INVOCATION_ID','test-only')
     approval=tmp_path/'private-approval.json';seen=[]
