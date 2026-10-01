@@ -1,0 +1,35 @@
+{
+  "source_commit": "e1894f3f51e8bccf13e8e39b48a2d331a3b12079",
+  "source_file": "deploy/self_deploy.py",
+  "source_sha256": "cbfde7b36e307edb08772a541feafee0c2685540369c646cdef7489792ee0d8b",
+  "constants": {
+    "SOURCE_TREES": [
+      "backend",
+      "frontend",
+      "tests",
+      "deploy",
+      "patches",
+      "hermes-plugin",
+      "scripts",
+      "spikes",
+      "docs"
+    ],
+    "SOURCE_FILES": [
+      "requirements.lock",
+      "README.md"
+    ],
+    "SKIP": [
+      ".env",
+      ".git",
+      ".pytest_cache",
+      ".venv",
+      "__pycache__",
+      "artifacts",
+      "auth.sqlite",
+      "config.json",
+      "node_modules",
+      "runs.sqlite",
+      "state"
+    ]
+  }
+}

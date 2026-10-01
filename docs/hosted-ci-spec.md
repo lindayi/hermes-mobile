@@ -7,6 +7,18 @@ credential-free, disposable GitHub-hosted Ubuntu runners. Preserve all test
 coverage and exact-revision evidence. This change does not enable automatic
 production deployment, grant GitHub access to production, or restart services.
 
+The host-only session-release caller is retained approval-bound legacy code for
+`hermes-mobile-session-fixes`, not the canonical-main deployment controller. Its
+independent staging allowlist is pinned in
+`tests/fixtures/legacy-session-stage-scope.json` to `deploy/self_deploy.py` at
+`e1894f3f51e8bccf13e8e39b48a2d331a3b12079` (full-file SHA-256 recorded in the
+fixture; constants extracted via AST, without importing candidate code). Do not
+update that private operator or repin its contract merely to track main. Exact
+scope equality and all offline approval/security checks remain mandatory.
+Current staging intentionally includes `.github`, covered separately by
+`test_ci_workflow.py::test_release_stage_retains_ci_contract_files`; portable
+`test_ci_selection.py` checks the current manifest/partition contract.
+
 ## Acceptance
 
 1. PR and main workflows run syntax/secret checks, JavaScript tests, generated

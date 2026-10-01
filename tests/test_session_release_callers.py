@@ -255,19 +255,44 @@ module.require_approved_stage=race
     assert list(fixture['snapshots'].iterdir())==[]
 
 
+def assert_legacy_staging_scope(module):
+    """Pin the approval-bound caller, not the independently evolving main deployer."""
+    import json
+    # Extracted with ast.literal_eval from git show e1894f3:deploy/self_deploy.py;
+    # the fixture records the full commit and source SHA-256. No candidate imports
+    # or Git checkout/history are required to check this historical contract.
+    recorded=json.loads((Path(__file__).parent/'fixtures/legacy-session-stage-scope.json').read_text())
+    constants=recorded['constants']
+    constants={name:set(value) if name=='SKIP' else tuple(value)
+               for name,value in constants.items()}
+    assert set(constants)=={'SKIP','SOURCE_TREES','SOURCE_FILES'}
+    for name,value in constants.items():
+        assert getattr(module,name)==value,f'Legacy {name} differs from its pinned staging contract'
+    return constants
+
+
+@pytest.mark.parametrize('name',['SKIP','SOURCE_TREES','SOURCE_FILES'])
+@pytest.mark.parametrize('change',['added','removed'])
+def test_release_legacy_staging_contract_rejects_scope_drift(monkeypatch,name,change):
+    module=load('session-release')
+    original=getattr(module,name)
+    if isinstance(original,set):
+        changed=original|{'unexpected-scope'} if change=='added' else original-{'.env'}
+    else:
+        changed=(*original,'unexpected-scope') if change=='added' else original[:-1]
+    monkeypatch.setattr(module,name,changed)
+    with pytest.raises(AssertionError,match=name):
+        assert_legacy_staging_scope(module)
+
+
 def test_release_snapshot_matches_staging_scope_and_never_copies_secrets(tmp_path):
-    import ast,json
+    import json
     module=load('session-release');fixture=release_fixture(tmp_path)
     source=fixture['source']
-    # Read constants without executing stage helpers before approval.
-    tree=ast.parse((Path(__file__).parents[1]/'deploy/self_deploy.py').read_text())
-    constants={node.targets[0].id:ast.literal_eval(node.value) for node in tree.body
-               if isinstance(node,ast.Assign) and len(node.targets)==1
-               and isinstance(node.targets[0],ast.Name)
-               and node.targets[0].id in {'SKIP','SOURCE_TREES','SOURCE_FILES'}}
-    assert module.SKIP==constants['SKIP']
-    assert module.SOURCE_TREES==constants['SOURCE_TREES']
-    assert module.SOURCE_FILES==constants['SOURCE_FILES']
+    # This retained legacy candidate caller is not the canonical-main controller.
+    # Current .github staging is covered by test_ci_workflow.py; partitioning by
+    # test_ci_selection.py. Never repin this operator to follow current main.
+    constants=assert_legacy_staging_scope(module)
     for name in constants['SOURCE_TREES']:
         (source/name).mkdir(exist_ok=True)
         (source/name/'approved.txt').write_text('reviewed '+name)

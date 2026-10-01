@@ -210,6 +210,10 @@ async function cappedBody(card,body,page,label){
  });
  try{
   await summary.tap();assert.equal(await card.evaluate(el=>el.open),false,`${label}: native touch collapses`);
+  // Finish the touch-to-keyboard handoff before Enter clears :active itself.
+  // Blink's delayed touch release can otherwise clear Space's active flag
+  // between keydown/up, suppressing its native click even with focus retained.
+  await page.waitForFunction(el=>!el.querySelector(':scope > summary').matches(':active'),evidence);
   await summary.focus();await page.keyboard.press('Enter');assert.equal(await card.evaluate(el=>el.open),true,`${label}: keyboard reopens`);
   await page.keyboard.press('Space');
   // Observe the result of native keyboard activation, not just input dispatch.
