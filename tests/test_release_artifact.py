@@ -178,6 +178,19 @@ class GitHub:
         return SimpleNamespace(returncode=0)
 
 
+def test_attestation_uses_one_exact_identity_selector(tmp_path, monkeypatch):
+    # gh rejects combining any of these four mutually exclusive selectors.
+    fake = GitHub(tmp_path, monkeypatch)
+    fake.module.acquire_verified_bundle(fake.source, 51, tmp_path / 'verified', run=fake.run)
+    command = next(c for c in fake.calls if c[1:3] == ['attestation', 'verify'])
+    selectors = {'--cert-identity', '--cert-identity-regex', '--signer-repo', '--signer-workflow'}
+    assert selectors.intersection(command) == {'--cert-identity'}
+    assert command[command.index('--cert-identity') + 1] == (
+        'https://github.com/lindayi/hermes-mobile/.github/workflows/ci.yml@refs/heads/main'
+    )
+    assert command[command.index('--cert-oidc-issuer') + 1] == 'https://token.actions.githubusercontent.com'
+
+
 def test_acquire_verifies_live_success_and_signer_before_unpack(tmp_path, monkeypatch):
     fake = GitHub(tmp_path, monkeypatch)
     evidence = fake.module.acquire_verified_bundle(fake.source, 51, tmp_path / 'verified', run=fake.run)
@@ -187,8 +200,9 @@ def test_acquire_verifies_live_success_and_signer_before_unpack(tmp_path, monkey
     assert (evidence.public_path / 'index.html').read_text() == '<h1>built once</h1>'
     assert fake.run_reads == 2, 'run must still be the same successful latest attempt after verification'
     command = next(c for c in fake.calls if c[1:3] == ['attestation', 'verify'])
-    for flag, value in {'--repo': 'lindayi/hermes-mobile', '--signer-repo': 'lindayi/hermes-mobile',
-                       '--signer-workflow': 'lindayi/hermes-mobile/.github/workflows/ci.yml',
+    for flag, value in {'--repo': 'lindayi/hermes-mobile',
+                       '--cert-identity': 'https://github.com/lindayi/hermes-mobile/.github/workflows/ci.yml@refs/heads/main',
+                       '--cert-oidc-issuer': 'https://token.actions.githubusercontent.com',
                        '--source-ref': 'refs/heads/main', '--source-digest': 'a' * 40,
                        '--signer-digest': 'a' * 40, '--format': 'json'}.items():
         assert command[command.index(flag) + 1] == value
