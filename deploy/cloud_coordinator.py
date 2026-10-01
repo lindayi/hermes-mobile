@@ -29,6 +29,15 @@ MAX_FINDINGS = 8
 MAX_FINDING_CHARS = 1000
 FIX_MARKER_PREFIX = "hermes-coordinator-fix:"
 OUTBOX_MARKER_PREFIX = "hermes-coordinator-outcome:"
+CREDENTIAL_RE = re.compile(
+    r"(?i)(?:"
+    r"gh[pousr]_[a-z0-9_]{20,}|github_pat_[a-z0-9_]{20,}|"
+    r"bearer\s+[a-z0-9._~+/=-]{12,}|"
+    r"(?:token|secret|password|api[_-]?key)\s*[:=]\s*['\"]?[^\s,'\"`]+|"
+    r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----"
+    r")",
+    re.DOTALL,
+)
 GRAPHQL_THREADS = """
 query($number: Int!, $cursor: String) {
   repository(owner: "lindayi", name: "hermes-mobile") {
@@ -125,13 +134,16 @@ def classify_sensitive_paths(changes, *, complete=True):
                 return True
             normalized = decoded.casefold()
             parts = normalized.split("/")
-            if (normalized in sensitive_files or normalized in sensitive_docs
+            sensitive_name = any(
+                token in part for part in parts
+                for token in ("auth", "credential", "secret", "password", "migration",
+                              "security", "deploy", "policy", "provenance", "artifact",
+                              "instruction")
+            )
+            if (normalized in sensitive_files or normalized in sensitive_docs or sensitive_name
                     or any(parts[0] == prefix for prefix in sensitive_prefixes)):
                 return True
             if parts[0] not in routine_roots:
-                return True
-            if parts[0] == "docs" and any(
-                    token in normalized for token in ("security", "credential", "migration", "deploy-policy")):
                 return True
     return False
 
@@ -170,10 +182,28 @@ def _required_contexts(required):
         if isinstance(check, str):
             result.append({"context": check, "app_id": None})
         elif isinstance(check, dict) and isinstance(check.get("context"), str):
-            result.append({"context": check["context"], "app_id": check.get("app_id")})
+            result.append({
+                "context": check["context"],
+                "app_id": check.get("app_id", check.get("integration_id")),
+            })
         else:
             return []
     return result
+
+
+def _latest_statuses(statuses):
+    latest = {}
+    for status in statuses:
+        if (not isinstance(status, dict) or not isinstance(status.get("context"), str)
+                or not isinstance(status.get("created_at"), str)):
+            return None
+        name = status["context"]
+        current = latest.get(name)
+        if current is None or status["created_at"] > current["created_at"]:
+            latest[name] = status
+        elif status["created_at"] == current["created_at"] and status.get("state") != current.get("state"):
+            return None
+    return list(latest.values())
 
 
 def required_checks_pass(required, check_runs, statuses, *, complete):
@@ -181,6 +211,9 @@ def required_checks_pass(required, check_runs, statuses, *, complete):
     contexts = _required_contexts(required)
     if (not complete or not contexts or not isinstance(check_runs, list)
             or not isinstance(statuses, list)):
+        return False
+    statuses = _latest_statuses(statuses)
+    if statuses is None:
         return False
     for requirement in contexts:
         name, app_id = requirement["context"], requirement["app_id"]
@@ -193,19 +226,23 @@ def required_checks_pass(required, check_runs, statuses, *, complete):
         ]
         commits = [status for status in statuses
                    if isinstance(status, dict) and status.get("context") == name]
-        if not runs and (not commits or app_id is not None):
+        if app_id is not None:
+            if not runs or any(run.get("status") != "completed"
+                               or run.get("conclusion") != "success" for run in runs):
+                return False
+            continue
+        if not runs and not commits:
             return False
-        if any(run.get("status") != "completed" or run.get("conclusion") != "success"
-               for run in runs):
-            return False
-        if any(status.get("state") != "success" for status in commits):
+        if (any(run.get("status") != "completed" or run.get("conclusion") != "success"
+                for run in runs)
+                or any(status.get("state") != "success" for status in commits)):
             return False
     return True
 
 
 def eligible_for_auto_merge(pull, *, current_main_sha, required_checks, check_runs,
                             statuses, checks_complete, review_valid, sensitive_authorized,
-                            cloud_review_required, agent_running):
+                            cloud_review_required, cloud_review_status_owned, agent_running):
     """Pure eligibility gate; GitHub still enforces protected auto-merge."""
     if not isinstance(pull, dict):
         return False
@@ -214,7 +251,7 @@ def eligible_for_auto_merge(pull, *, current_main_sha, required_checks, check_ru
             or pull.get("mergeable_state") in {"dirty", "unknown", "blocked"}
             or base.get("ref") != MAIN_BRANCH or base.get("sha") != current_main_sha
             or not _is_sha(current_main_sha) or not review_valid or not sensitive_authorized
-            or not cloud_review_required or agent_running):
+            or not cloud_review_required or not cloud_review_status_owned or agent_running):
         return False
     contexts = _required_contexts(required_checks)
     if "cloud-review" not in {entry["context"] for entry in contexts}:
@@ -227,6 +264,8 @@ def eligible_for_auto_merge(pull, *, current_main_sha, required_checks, check_ru
 def _bounded_evidence(text):
     text = re.sub(r"https?://\S+", "[link removed]", str(text))
     text = re.sub(r"<[^>]*>", " ", text)
+    text = CREDENTIAL_RE.sub("[credential redacted]", text)
+    text = text.replace("@", "＠")
     text = "".join(char for char in text if char in "\n\t" or ord(char) >= 32)
     return text[:MAX_FINDING_CHARS]
 
@@ -266,7 +305,7 @@ def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0):
     evidence = json.dumps({"review_findings": findings, "failed_source_checks": failures},
                           ensure_ascii=True, separators=(",", ":"))
     digest = hashlib.sha256(
-        f"{pull_number}:{head_sha}:{evidence}".encode("utf-8")
+        f"{pull_number}:{head_sha}:{attempts + 1}:{evidence}".encode("utf-8")
     ).hexdigest()[:20]
     marker = f"{FIX_MARKER_PREFIX}{digest}"
     body = (
@@ -479,17 +518,13 @@ def _required_checks(api):
     return list(unique.values()), available
 
 
-def _workflow_runs(api, pull_number, branch, head_sha):
+def _workflow_runs(api, branch):
     route = (f"repos/{REPOSITORY}/actions/runs?per_page=100"
-             f"&head_branch={quote(branch, safe='')}&head_sha={head_sha}")
+             f"&head_branch={quote(branch, safe='')}")
     runs = _rest_list(api, route, collection="workflow_runs")
     matches = []
     for run in runs:
         if not isinstance(run, dict):
-            continue
-        if (run.get("head_sha") != head_sha
-                or not any(isinstance(item, dict) and item.get("number") == pull_number
-                           for item in run.get("pull_requests", []))):
             continue
         matches.append(run)
     return matches
@@ -512,11 +547,13 @@ def _matches_agent_run(run, action):
 
 
 def _status_owned(statuses, context, actor_id):
-    matches = [item for item in statuses if isinstance(item, dict)
+    normalized = _latest_statuses(statuses)
+    if normalized is None:
+        return None, False
+    matches = [item for item in normalized if isinstance(item, dict)
                and item.get("context") == context]
     if not matches:
         return None, False
-    matches.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
     latest = matches[0]
     creator = latest.get("creator")
     return latest, isinstance(creator, dict) and creator.get("id") == actor_id
@@ -564,11 +601,13 @@ class Coordinator:
                     continue
                 body = comment.get("body")
                 if body == "/hermes enroll":
+                    processed.append(key)
+                    if not issue.get("pull_request"):
+                        continue
                     pull = self.api.get(f"repos/{REPOSITORY}/pulls/{issue['number']}")
                     enrollment = enrollment_from_comment(issue, pull, comment)
                     if enrollment:
                         commands.append(("enroll", enrollment))
-                    processed.append(key)
                 else:
                     authorized_sha = _is_owner_sensitive_command(comment)
                     if authorized_sha:
@@ -587,7 +626,16 @@ class Coordinator:
             if action != "authorize":
                 continue
             enrollment = candidates.get(str(item["issue"]))
-            if enrollment and item["head"] == enrollment.get("head"):
+            if not enrollment:
+                continue
+            pull = self.api.get(f"repos/{REPOSITORY}/pulls/{item['issue']}")
+            head, base = pull.get("head"), pull.get("base")
+            if (isinstance(head, dict) and head.get("sha") == item["head"]
+                    and isinstance(head.get("repo"), dict)
+                    and head["repo"].get("id") == REPOSITORY_ID
+                    and isinstance(base, dict) and base.get("ref") == MAIN_BRANCH
+                    and isinstance(base.get("repo"), dict)
+                    and base["repo"].get("id") == REPOSITORY_ID):
                 enrollment["sensitive_sha"] = item["head"]
         return issues, commands, processed, candidates
 
@@ -597,6 +645,8 @@ class Coordinator:
         base = pull.get("base") if isinstance(pull, dict) else None
         if not isinstance(head, dict) or not isinstance(base, dict):
             raise CoordinatorError("Pull request data was incomplete")
+        if not _is_sha(head.get("sha")):
+            raise CoordinatorError("Pull request head was not a commit SHA")
         scoped = (
             isinstance(head.get("repo"), dict)
             and head["repo"].get("id") == REPOSITORY_ID
@@ -624,7 +674,7 @@ class Coordinator:
             self.api, f"repos/{REPOSITORY}/commits/{sha}/statuses?per_page=100",
         )
         comments = _all_review_comments(self.api, number, None)
-        workflows = _workflow_runs(self.api, number, head.get("ref", ""), sha)
+        workflows = _workflow_runs(self.api, head.get("ref", ""))
         source_failures = [{
             "id": run.get("id"), "name": "Source checks", "head_sha": sha,
             "status": run.get("status"), "conclusion": run.get("conclusion"),
@@ -653,9 +703,24 @@ class Coordinator:
         workflows = snapshot["workflows"]
         busy = False
         for key, action in actions.items():
-            if action.get("issue") != number or action.get("kind") != "fix":
+            if action.get("issue") != number:
                 continue
             status = action.get("status")
+            if action.get("kind") == "auto-merge" and status in {"sending", "uncertain"}:
+                if snapshot["pull"].get("auto_merge"):
+                    if apply:
+                        self.store.update_action(key, "sent")
+                continue
+            if action.get("kind") == "status" and status in {"sending", "uncertain"}:
+                current, owned = _status_owned(
+                    snapshot["statuses"], "cloud-review", OWNER_ID,
+                )
+                if current and owned and current.get("state") == action.get("state"):
+                    if apply:
+                        self.store.update_action(key, "sent")
+                continue
+            if action.get("kind") != "fix":
+                continue
             if status in {"sending", "uncertain"}:
                 found = _contains_marker(snapshot["comments"], action.get("marker", ""))
                 if apply:
@@ -708,8 +773,11 @@ class Coordinator:
             complete=snapshot["policy_complete"],
         )
         agent_busy = self._reconcile_actions(snapshot, actions, apply=apply)
+        mergeable = snapshot["pull"].get("mergeable")
+        conflict = (mergeable is not True
+                    or snapshot["pull"].get("mergeable_state") in {"dirty", "unknown"})
         repair = None
-        if snapshot["scoped"] and snapshot["threads_complete"]:
+        if snapshot["scoped"] and snapshot["threads_complete"] and not conflict:
             repair = repair_request(
                 head, snapshot["enrollment"].get("attempts", 0),
                 snapshot["threads"], snapshot["check_runs"], pull_number=number,
@@ -723,6 +791,8 @@ class Coordinator:
         reasons = []
         if not snapshot["scoped"]:
             reasons.append(("scope", "The pull request is not based on the current same-repository main branch."))
+        if conflict:
+            reasons.append(("conflict", "A neutral conflict reconciler must be assigned; this coordinator will not start a fixer."))
         if sensitive and not authorized:
             reasons.append(("sensitive", "Owner exact-head authorization is required for sensitive changes."))
         if not review_ok:
@@ -751,10 +821,15 @@ class Coordinator:
             statuses=snapshot["statuses"], checks_complete=snapshot["policy_complete"],
             review_valid=review_ok, sensitive_authorized=authorized,
             cloud_review_required=review_context_required,
+            cloud_review_status_owned=(
+                snapshot["status_owned"] and snapshot["status"] is not None
+                and snapshot["status"].get("state") == "success"
+            ),
             agent_running=agent_busy or repair is not None,
         )
         if merge and not snapshot["pull"].get("auto_merge"):
             merge_action = {"kind": "auto-merge", "issue": number, "head": head,
+                            "main_sha": snapshot["main_sha"],
                             "key": f"auto-merge:{number}:{head}"}
         else:
             merge_action = None
@@ -788,7 +863,7 @@ class Coordinator:
             "enrollments": enrollments, "snapshots": scans, "pull_requests": plans,
         }
 
-    def _fence_pull(self, number, head):
+    def _fence_pull(self, number, head, main_sha=None):
         pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
         base = pull.get("base") if isinstance(pull, dict) else None
         actual = pull.get("head") if isinstance(pull, dict) else None
@@ -799,7 +874,12 @@ class Coordinator:
                 or not isinstance(base.get("repo"), dict)
                 or base["repo"].get("id") != REPOSITORY_ID):
             return False
-        return True
+        if main_sha is not None:
+            current_main = self.api.get(f"repos/{REPOSITORY}/commits/{MAIN_BRANCH}")
+            if (not isinstance(current_main, dict) or current_main.get("sha") != main_sha
+                    or base.get("sha") != main_sha):
+                return False
+        return pull
 
     def _post_comment(self, action, *, route, body):
         key = action["key"]
@@ -850,7 +930,10 @@ class Coordinator:
         except CoordinatorError:
             self.store.mark_uncertain(key)
             return "uncertain"
-        if not isinstance(response, dict) or response.get("context") != "cloud-review":
+        creator = response.get("creator") if isinstance(response, dict) else None
+        if (not isinstance(response, dict) or response.get("context") != "cloud-review"
+                or response.get("state") != action["state"]
+                or not isinstance(creator, dict) or creator.get("id") != actor_id):
             self.store.mark_uncertain(key)
             return "uncertain"
         self.store.update_action(key, "sent")
@@ -861,10 +944,12 @@ class Coordinator:
         if not self.store.claim_action(key, action):
             existing = self.store.action(key)
             return existing.get("status") if existing else "not-claimed"
-        if not self._fence_pull(action["issue"], action["head"]):
+        pull = self._fence_pull(
+            action["issue"], action["head"], action.get("main_sha"),
+        )
+        if pull is False:
             self.store.update_action(key, "superseded")
             return "superseded"
-        pull = self.api.get(f"repos/{REPOSITORY}/pulls/{action['issue']}")
         if not isinstance(pull, dict) or not pull.get("node_id"):
             self.store.update_action(key, "uncertain")
             return "uncertain"
@@ -940,7 +1025,7 @@ class Coordinator:
             merge_action = pr_plan["merge_action"]
             if merge_action and not action:
                 self._enable_auto_merge(merge_action)
-            summaries.append({**pr_plan, "outcomes": len(pr_plan["outcomes"])})
+            summaries.append(self._summary(pr_plan))
         return summaries
 
     def run(self, *, apply=False):
@@ -948,22 +1033,31 @@ class Coordinator:
         try:
             plan = self._build_plan(apply=apply)
             pull_requests = self._apply(plan) if apply else [
-                {**item, "outcomes": len(item["outcomes"])} for item in plan["pull_requests"]
+                self._summary(item) for item in plan["pull_requests"]
             ]
             return {
                 "repository": REPOSITORY,
                 "mode": "apply" if apply else "plan",
                 "enrolled": len(plan["enrollments"]),
                 "pull_requests": pull_requests,
-                "actions": [] if not apply else [
-                    {"issue": item["issue"], "repair": bool(item["repair"]),
-                     "status": bool(item["status_action"]), "auto_merge": bool(item["merge_action"])}
-                    for item in plan["pull_requests"]
-                ],
+                "actions": [] if not apply else pull_requests,
             }
         finally:
             if lock_fd is not None:
                 os.close(lock_fd)
+
+    @staticmethod
+    def _summary(item):
+        return {
+            "issue": item["issue"], "head": item["head"],
+            "sensitive": item["sensitive"], "review_valid": item["review_valid"],
+            "required_checks_green": item["required_checks_green"],
+            "auto_merge_eligible": item["auto_merge_eligible"],
+            "repair_requested": bool(item["repair"]),
+            "status_action": item["status_action"]["state"] if item["status_action"] else None,
+            "auto_merge_requested": bool(item["merge_action"]),
+            "reasons": item["reasons"], "outcomes": len(item["outcomes"]),
+        }
 
 
 def _private_regular(path):
@@ -1090,6 +1184,8 @@ class StateStore:
         return self._mutate(add)
 
     def authorize_sensitive(self, issue, head_sha):
+        if not _is_sha(head_sha):
+            return False
         key = str(issue)
 
         def authorize(data):
@@ -1161,7 +1257,10 @@ class StateStore:
         path = self.directory / f".{self.path.name}.run.lock"
         fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
         info = os.fstat(fd)
-        if info.st_uid != os.getuid() or info.st_mode & 0o077 or not stat.S_ISREG(info.st_mode):
+        current = path.lstat()
+        if (info.st_uid != os.getuid() or info.st_mode & 0o077
+                or info.st_nlink != 1 or not stat.S_ISREG(info.st_mode)
+                or (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino)):
             os.close(fd)
             raise CoordinatorError("Coordinator run lock is not private")
         try:
