@@ -1,0 +1,21 @@
+name: Pinned native Hermes test runtime
+description: Prepare the public patched Hermes runtime on disposable hosted Ubuntu only
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        python3 scripts/prepare_native_test_runtime.py --preflight
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      with:
+        python-version: '3.11'
+    - shell: bash
+      env:
+        PLAYWRIGHT_SKIP_BROWSER_GC: '1'
+      run: |
+        set -euo pipefail
+        python3 scripts/prepare_native_test_runtime.py --preflight
+        sudo mkdir --mode=0755 -- /usr/local/lib/hermes-agent
+        sudo chown "$(id -u):$(id -g)" -- /usr/local/lib/hermes-agent
+        python scripts/prepare_native_test_runtime.py
