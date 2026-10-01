@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import sqlite3
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -138,6 +139,173 @@ def create_owned_ack(app, outbox, event, scope):
     app.notifications.background_acknowledged(scope, item['event_id'], item['lease_token'])
     outbox.ack(event_id=item['event_id'], payload_sha256=item['payload_sha256'],
                lease_token=item['lease_token'], receipt_id=receipt_id)
+
+
+def setup_controller_release(tmp_path, monkeypatch, *, delivered=True):
+    from backend import model_controls
+    from test_native_controls_release import fixture as controller_fixture
+
+    approved = {name: hashlib.sha256(content).hexdigest() for name, content in {
+        'backend/native_api_service.py': b'old launcher',
+        'backend/native_controls_service.py': b'new launcher',
+        'backend/native_run_controls.py': b'controls',
+        'backend/native_maintenance.py': b'maintenance',
+        'backend/native_session_deletion.py': b'deletion',
+        'backend/native_notifications.py': b'notifications',
+    }.items()}
+    monkeypatch.setattr(model_controls, '_CONTROL_HASHES', approved)
+    monkeypatch.setattr(release, 'APPROVED_CONTROL_HASHES', approved, raising=False)
+    tmp_path.mkdir(exist_ok=True)
+    paths, old, _, _, events, args = controller_fixture(tmp_path)
+    assert release.attested_controls(paths.source) == approved
+    for name in approved:
+        target = old / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(paths.source / name, target)
+    app = Fixture(paths.state)
+    paths = replace(paths, database=app.journal.path)
+
+    with sqlite3.connect(paths.state / 'auth.sqlite') as db:
+        db.execute('CREATE TABLE users(id TEXT, role TEXT, profile TEXT, status TEXT)')
+        db.execute("INSERT INTO users VALUES('owner','owner','default','ready')")
+    (paths.state / 'auth.sqlite').chmod(0o600)
+    outbox_path = paths.state / 'native-notifications.sqlite'
+    outbox = NotificationOutbox(outbox_path)
+    home = app.catalog.profiles['default']
+    NotificationCapture(outbox, home, OwnerRoute(home, paths.state))
+    event = app.items[0]['event']
+    outbox.capture(event, {'summary': 'Synthetic result'}, route='owned')
+    for path in (home / 'state.db', paths.database,
+                 paths.state / 'notifications.sqlite', outbox_path):
+        path.chmod(0o600)
+
+    controller_native = args['native']
+    native = FakeNative(old, None, outbox)
+
+    def capture(root, bootstrap):
+        events.append(('capture', root))
+        return dict(root=str(root), source_hashes=approved, pid=native.pid,
+                    start_ticks=native.started, caps={'legacy': False})
+
+    native.capture = capture
+    native.idle = controller_native.idle
+    native.verify = controller_native.verify
+    native.verify_unchanged = controller_native.verify_unchanged
+    native.config_bytes = json.dumps({'state_dir': str(paths.state)}).encode()
+    base_run = args['run']
+
+    def run(command, **kwargs):
+        base_run(command, **kwargs)
+        if command[:2] == ['systemctl', '--user'] and command[2] == 'restart':
+            native.active_root = (paths.state / 'current').resolve()
+            native.pid += 1
+            native.started += 1
+
+    args['run'] = run
+    callbacks = NativeNotificationCallbacks(
+        SimpleNamespace(state=paths.state, database=paths.database), native,
+        home=home, receipt_timeout=0)
+    args['native'] = native
+    args['rollback_verify'] = callbacks.verify_rollback
+    if delivered:
+        scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+        create_owned_ack(app, outbox, event, scope)
+    args['handoff'] = callbacks
+    args['probe'] = callbacks.probe
+    return app, outbox, native, paths, callbacks, args, old, event
+
+
+def delete_captured_evidence(app, outbox, event, kind):
+    if kind == 'record':
+        with outbox.transaction() as db:
+            db.execute('DELETE FROM notification_outbox WHERE event_id=?',
+                       ('async:' + event['delegation_id'],))
+    else:
+        with app.notifications._db() as db:
+            db.execute('DELETE FROM background_receipts WHERE event_id=?',
+                       ('async:' + event['delegation_id'],))
+
+
+@pytest.mark.parametrize(('kind', 'expected_error'), [
+    ('record', 'Durable native notification record was not preserved'),
+    ('receipt', 'Owned notification receipt was not preserved'),
+])
+def test_controller_keeps_gate_closed_on_prepublication_evidence_loss(
+        tmp_path, monkeypatch, kind, expected_error):
+    app, outbox, _, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch)
+
+    class FailingHandoff:
+        capture = callbacks.capture
+
+        def __call__(self, stage):
+            delete_captured_evidence(app, outbox, event, kind)
+            callbacks.handoff(stage)
+            raise RuntimeError('injected prepublication receipt evidence loss')
+
+    args['handoff'] = FailingHandoff()
+    with pytest.raises(RuntimeError):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status['error'] == expected_error
+    assert status['status'] == 'rollback_failed'
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT owner FROM deployment_gate').fetchone() == (status['release'],)
+
+
+@pytest.mark.parametrize(('kind', 'expected_error'), [
+    ('record', 'Native notification records changed after handoff'),
+    ('receipt', 'Owned notification receipt was not preserved'),
+])
+def test_controller_keeps_gate_closed_on_postpublication_evidence_loss(
+        tmp_path, monkeypatch, kind, expected_error):
+    app, outbox, _, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch)
+
+    def fail_probe(stage):
+        delete_captured_evidence(app, outbox, event, kind)
+        return callbacks.probe(stage)
+
+    args['probe'] = fail_probe
+    with pytest.raises(RuntimeError):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status['error'] == expected_error
+    assert status['status'] == 'rollback_failed'
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT owner FROM deployment_gate').fetchone() == (status['release'],)
+
+
+def test_controller_reopens_after_verified_candidate_rollback(tmp_path, monkeypatch):
+    _, _, _, paths, callbacks, args, _, _ = setup_controller_release(tmp_path, monkeypatch)
+
+    def fail_after_positive_probe(stage):
+        callbacks.probe(stage)
+        raise RuntimeError('ordinary candidate failure')
+
+    args['probe'] = fail_after_positive_probe
+    with pytest.raises(RuntimeError, match='ordinary candidate failure'):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'rolled_back'
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
+
+
+def test_controller_reopens_after_receipt_delay_with_preserved_pending_record(
+        tmp_path, monkeypatch):
+    _, _, _, paths, callbacks, args, _, _ = setup_controller_release(
+        tmp_path, monkeypatch, delivered=False)
+    callbacks.receipt_timeout = 0
+
+    with pytest.raises(RuntimeError, match='receipt verification timed out'):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'rolled_back'
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
 
 
 def test_handoff_verifies_durable_rows_without_claiming_or_importing(tmp_path, monkeypatch):

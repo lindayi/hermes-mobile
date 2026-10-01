@@ -210,11 +210,15 @@ def fixture(tmp_path):
             events.append(('unchanged-native', root))
     def run(cmd, **kw):
         events.append(('command', cmd))
+    def rollback_verify(root, baseline):
+        events.append(('rollback-preservation', root))
+        return True
     args = dict(checks=lambda stage: events.append(('checks', stage)), verify=verify,
                 native=Native(), native_dropin=native_dropin, run=run,
                 bootstrap_dedicated_native=True,
                 handoff=lambda stage: None,
-                probe=lambda stage: events.append(('receipt-probe', stage)))
+                probe=lambda stage: events.append(('receipt-probe', stage)),
+                rollback_verify=rollback_verify)
     return paths, old, journal, native_dropin, events, args
 
 

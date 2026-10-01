@@ -133,6 +133,7 @@ def test_worker_cli_wires_guarded_notification_callbacks(release_transaction, mo
     def callbacks(stage):
         return None
     callbacks.probe = lambda stage: None
+    callbacks.verify_rollback = lambda root, baseline: True
     monkeypatch.setattr(native_notification_release, 'NativeNotificationCallbacks',
                         lambda *a, **kw: callbacks)
     captured = {}
@@ -144,6 +145,7 @@ def test_worker_cli_wires_guarded_notification_callbacks(release_transaction, mo
     assert release.main(['--worker'], paths=paths) == 0
     assert callable(captured.get('handoff'))
     assert callable(captured.get('probe'))
+    assert callable(captured.get('rollback_verify'))
 
 
 def test_notification_baseline_capture_runs_under_owned_gate_before_drain(release_transaction):

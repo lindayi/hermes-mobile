@@ -17,6 +17,12 @@ backlog case is accepted only when the bound outbox is positively empty and the
 authenticated native status/readiness evidence agrees. Callback failures raise
 while the release controller still owns its lock and admission gate.
 
+Before either abort path reopens admission, the controller requires a separate
+read-only rollback proof against the captured source, database identities, durable
+records, and previously existing owner receipts. A candidate failure or receipt
+timeout may reopen only when that proof succeeds; missing, changed, or unknown
+evidence leaves the owned gate closed for operator recovery.
+
 These checks only inspect existing records; they never create a notification or
 invoke a model. Delivery evidence is the existing native outbox ACK linked to the
 bridge's owner-scoped durable Inbox receipt, not a claim that an external push

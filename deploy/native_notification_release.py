@@ -57,7 +57,9 @@ class NativeNotificationCallbacks:
         self.clock, self.sleep = clock, sleep
         self.receipt_timeout, self.poll_interval = receipt_timeout, poll_interval
         self.baseline = None
+        self.capture_attempted = False
         self.initial_records = None
+        self.initial_receipts = None
         self.handoff_records = None
         self.owner_id = None
         self.scope = None
@@ -323,9 +325,32 @@ class NativeNotificationCallbacks:
                          for key, value in after.items()):
             raise RuntimeError('Durable native notification record changed after handoff')
 
+    @staticmethod
+    def _receipt_fingerprints(snapshot):
+        return {key: _sha(_canonical(dict(receipt)))
+                for key, receipt in snapshot['receipts'].items()}
+
+    @staticmethod
+    def _preserved_receipts(before, snapshot):
+        after = snapshot['receipts']
+        if any(key not in after or _sha(_canonical(dict(after[key]))) != fingerprint
+               for key, fingerprint in before.items()):
+            raise RuntimeError('Owned notification receipt was not preserved')
+
+    def _require_delivered_receipts(self, snapshot):
+        for event_id, record in snapshot['records'].items():
+            if record['route'] != 'owned' or record['state'] != 'delivered':
+                continue
+            focused = dict(snapshot, records={event_id: record},
+                           receipts={event_id: snapshot['receipts'][event_id]}
+                           if event_id in snapshot['receipts'] else {})
+            if not self._receipts_complete(focused):
+                raise RuntimeError('Owned notification receipt is unavailable')
+
     def capture(self, baseline):
         if self.baseline is not None:
             raise RuntimeError('Native notification baseline was already captured')
+        self.capture_attempted = True
         root = Path(baseline.get('root', ''))
         source_hashes = self._source(root, baseline.get('source_hashes'))
         if ('backend/native_notifications.py' not in source_hashes
@@ -342,12 +367,14 @@ class NativeNotificationCallbacks:
         pointer = self.state / 'current'
         if not pointer.is_symlink():
             raise RuntimeError('Native notification bridge baseline is unavailable')
-        snapshot = self._snapshot()
+        snapshot = self._snapshot(include_receipts=True)
         self._require_health(baseline=baseline, require_idle=False, snapshot=snapshot)
         self.baseline = dict(baseline)
         self.owner_id, self.scope = snapshot['owner'], snapshot['scope']
+        self._require_delivered_receipts(snapshot)
         self.identities = snapshot['identities']
         self.initial_records = self._fingerprints(snapshot['records'])
+        self.initial_receipts = self._receipt_fingerprints(snapshot)
         self.bridge_root = pointer.resolve(strict=True)
 
     def handoff(self, stage):
@@ -361,8 +388,10 @@ class NativeNotificationCallbacks:
         if (self.native.attest(Path(self.baseline['root'])) != self.baseline['pid']
                 or self.native._start_ticks(self.baseline['pid']) != self.baseline['start_ticks']):
             raise RuntimeError('Native notification process identity changed before handoff')
-        snapshot = self._snapshot(expected_owner=self.owner_id)
+        snapshot = self._snapshot(expected_owner=self.owner_id, include_receipts=True)
         self._preserved(self.initial_records, snapshot['records'])
+        self._preserved_receipts(self.initial_receipts, snapshot)
+        self._require_delivered_receipts(snapshot)
         if snapshot['identities'] != self.identities:
             raise RuntimeError('Native notification database binding changed')
         self._require_health(baseline=self.baseline, require_idle=True, snapshot=snapshot)
@@ -429,6 +458,7 @@ class NativeNotificationCallbacks:
                 if snapshot['identities'] != self.identities:
                     raise RuntimeError('Native notification database binding changed')
                 self._preserved(self.handoff_records, self._fingerprints(snapshot['records']), exact=True)
+                self._preserved_receipts(self.initial_receipts, snapshot)
                 ready = self._require_health(root=stage, require_idle=True, snapshot=snapshot)
             except _EvidenceChanged:
                 ready = False
@@ -440,3 +470,30 @@ class NativeNotificationCallbacks:
             if remaining <= 0:
                 raise RuntimeError('Native notification receipt verification timed out')
             self.sleep(min(self.poll_interval, remaining))
+
+    def verify_rollback(self, root, baseline):
+        if not self.capture_attempted:
+            return True
+        if (self.baseline is None or self.initial_records is None or self.initial_receipts is None
+                or baseline != self.baseline
+                or Path(root).resolve(strict=True) != Path(self.baseline['root']).resolve(strict=True)):
+            raise RuntimeError('Native notification rollback baseline is unavailable')
+        self._require_controller_gate(self.baseline['gate_owner'])
+        self._require_native_state_dir()
+        pointer = self.state / 'current'
+        if not pointer.is_symlink() or pointer.resolve(strict=True) != self.bridge_root:
+            raise RuntimeError('Native notification rollback bridge binding changed')
+        self._source(root, self.baseline['source_hashes'])
+        pid = self.native.attest(Path(root))
+        started = self.native._start_ticks(pid)
+        if type(pid) is not int or pid <= 0 or type(started) is not int or started <= 0:
+            raise RuntimeError('Native notification rollback process identity is unknown')
+        snapshot = self._snapshot(expected_owner=self.owner_id, include_receipts=True)
+        if snapshot['identities'] != self.identities:
+            raise RuntimeError('Native notification database binding changed')
+        expected = self.handoff_records if self.handoff_records is not None else self.initial_records
+        self._preserved(expected, self._fingerprints(snapshot['records']), exact=True)
+        self._preserved_receipts(self.initial_receipts, snapshot)
+        self._require_delivered_receipts(snapshot)
+        self._require_health(baseline=self.baseline, require_idle=False, snapshot=snapshot)
+        return True

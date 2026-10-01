@@ -133,13 +133,16 @@ def require_controls_capabilities(caps, *, session_delete_version, notification_
 
 def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
            run=subprocess.run, sleep=time.sleep, idle_timeout=1800,
-           bootstrap_dedicated_native=False, probe=None, handoff=None):
+           bootstrap_dedicated_native=False, probe=None, handoff=None,
+           rollback_verify=None):
     """One lock and one candidate, with owner-gated verified rollback.
 
     Notification candidates require two synchronous callbacks:
     handoff(stage) proves durable retention in the existing private outbox after
     drain and before publication/restarts; it never mutates SDK source or registry.
     probe(stage) proves delivery receipts after activation.
+    rollback_verify(old, baseline) proves captured notification evidence before
+    either abort path reopens admission.
     Both run under the same deployment lock and owned admission gate. Callbacks
     must raise on incomplete work; explicit False is also a failure, and no
     return value substitutes for positive checks.
@@ -184,6 +187,8 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
                 raise RuntimeError('Notification release requires operator delivery receipt verification')
             if 'backend/native_notifications.py' in candidate_hashes and not callable(handoff):
                 raise RuntimeError('Notification release requires operator pre-restart handoff')
+            if 'backend/native_notifications.py' in candidate_hashes and not callable(rollback_verify):
+                raise RuntimeError('Notification release requires rollback preservation verification')
             protected = tuple(n for n in bridge.PROTECTED if n not in
                               ('backend/native_controls_service.py', 'backend/native_run_controls.py',
                                'backend/native_maintenance.py', 'backend/native_session_deletion.py',
@@ -315,10 +320,15 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
                         # identity, health, capabilities and auth must be unchanged.
                         native.verify_unchanged(Path(baseline['root']), baseline=baseline)
                         check_abort(db)
+                        if callable(rollback_verify) and rollback_verify(old, baseline) is not True:
+                            raise RuntimeError('Native notification rollback preservation was not verified')
+                        check_abort(db)
                         changed = db.execute('DELETE FROM deployment_gate WHERE singleton=1 AND owner=?', (release_id,))
                         if changed.rowcount != 1:
                             raise RuntimeError('Owned pre-mutation gate was not cleared')
                 else:
+                    if callable(rollback_verify) and rollback_verify(old, baseline) is not True:
+                        raise RuntimeError('Native notification rollback preservation was not verified')
                     journal.clear_deployment_gate(release_id)
             except Exception as rollback_error:
                 report('rollback_failed', error=str(error), rollback_error=str(rollback_error))
@@ -672,7 +682,8 @@ def main(argv=None, *, paths=None, run=subprocess.run):
     deploy(paths, checks=lambda stage: bridge.run_checks(paths, stage, run=run),
            verify=lambda stage, backend, **kw: bridge.verify_release(paths, stage, backend, run=run, **kw),
            native=native, run=run, bootstrap_dedicated_native=args.bootstrap_dedicated_native,
-           handoff=notifications, probe=notifications.probe)
+           handoff=notifications, probe=notifications.probe,
+           rollback_verify=notifications.verify_rollback)
     return 0
 
 
