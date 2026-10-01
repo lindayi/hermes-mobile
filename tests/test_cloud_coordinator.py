@@ -794,6 +794,28 @@ def test_terminal_historical_baseline_is_not_exported(tmp_path):
     assert not (tmp_path / "workflow-events.json").exists()
 
 
+def test_terminal_transition_after_enrollment_command_is_not_lost(tmp_path):
+    class CloseAfterEnrollment(FakeApi):
+        def get(self, route):
+            if route == "repos/lindayi/hermes-mobile/pulls/16" and self.pull_reads == 1:
+                self.pull_reads += 1
+                self.pull.update(
+                    state="closed", merged=False,
+                    closed_at="2026-10-01T12:10:00Z",
+                )
+                return self.pull
+            return super().get(route)
+
+    api = CloseAfterEnrollment()
+    store = StateStore(tmp_path / "state.json")
+
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+
+    event = json.loads((tmp_path / "workflow-events.json").read_text())["events"][0]
+    assert event["reason"] == "closed_without_merge"
+    assert store.snapshot()["enrollments"]["16"]["active"] is False
+
+
 def test_policy_incident_event_is_deduplicated_across_head_updates(tmp_path):
     api = FakeApi()
     api.strict_protection = False

@@ -841,6 +841,8 @@ class Coordinator:
                     pull = self.api.get(f"repos/{REPOSITORY}/pulls/{issue['number']}")
                     enrollment = enrollment_from_comment(issue, pull, comment)
                     if enrollment:
+                        enrollment["last_open_seen"] = True
+                        enrollment["last_open_head"] = enrollment["head"]
                         commands.append(("enroll", enrollment))
                 else:
                     authorized_sha = _is_owner_sensitive_command(comment)
