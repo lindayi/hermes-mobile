@@ -10,7 +10,6 @@
 .push-preferences .push-preference span{min-width:0;overflow-wrap:anywhere}
 /* Recorded message times share existing headers, never a separate bubble. */
 .message-time{font-size:11px;font-weight:400;color:var(--muted);line-height:1.4;min-width:0;text-align:right;font-variant-numeric:tabular-nums;overflow-wrap:normal}
-.message-author{justify-content:flex-start;gap:8px}
 .message-author>.message-time{margin-left:auto}
 :is(.process-history,.background-result,.activity-summary,.delegation-result)>summary:has(>.message-time){flex-wrap:wrap;column-gap:7px;row-gap:3px}
 :is(.process-history,.background-result,.activity-summary,.delegation-result)>summary>.message-time{margin-left:auto;flex-shrink:0}
