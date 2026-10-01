@@ -366,6 +366,18 @@ def test_checks_execute_full_suites_on_stage_with_fixed_venv_and_no_live_config(
     (stage / 'tests/browser/mobile.spec.mjs').write_text('')
     monkeypatch.setenv('HERMES_MOBILE_CONFIG', '/private/live.json')
     calls = []
+    from deploy import test_workspace
+    scan_processes = test_workspace._workspace_processes
+
+    def recorder_processes(workspace, *args, **kwargs):
+        # This callback only records commands, so its workspace has no children.
+        # Isolate only its /proc scan; retain real marker/lock/PGID guards and
+        # delegate scans of unrelated workspaces (including automatic cleanup).
+        if calls and workspace == Path(calls[0][1]['env']['HOME']).parent:
+            return {}, False
+        return scan_processes(workspace, *args, **kwargs)
+
+    monkeypatch.setattr(test_workspace, '_workspace_processes', recorder_processes)
     module.run_checks(paths, stage, run=lambda cmd, **kw: calls.append((cmd, kw)))
     assert len(calls) == 2
     assert calls[0][0][0] == str(paths.source / '.venv/bin/python')
@@ -379,6 +391,23 @@ def test_checks_execute_full_suites_on_stage_with_fixed_venv_and_no_live_config(
         assert kw['umask'] == 0o077
         assert 'HERMES_MOBILE_CONFIG' not in kw['env']
         assert kw['env']['HERMES_TEST_PYTHON'] == str(paths.source / '.venv/bin/python')
+
+
+def test_full_suite_recorder_is_isolated_from_host_scan_uncertainty(tmp_path, monkeypatch):
+    from deploy import test_workspace
+
+    def uncertain_scan(*args, **kwargs):
+        return {}, True
+
+    monkeypatch.setattr(test_workspace, '_workspace_processes', uncertain_scan)
+    assert test_workspace._workspace_active(tmp_path, {})
+    with monkeypatch.context() as recorder_patch:
+        test_checks_execute_full_suites_on_stage_with_fixed_venv_and_no_live_config(
+            tmp_path, recorder_patch)
+        # The recorder's isolation must not bless unrelated workspaces.
+        assert test_workspace._workspace_active(tmp_path / 'unrelated', {})
+    assert test_workspace._workspace_processes is uncertain_scan
+    assert test_workspace._workspace_active(tmp_path, {})
 
 
 @pytest.mark.parametrize('inherited_path', ['/usr/bin:/bin', '', None])

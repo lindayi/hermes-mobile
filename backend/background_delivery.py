@@ -395,9 +395,24 @@ class BackgroundDeliveryService:
                     'WHERE session_id=? LIMIT ?', (sid, _PROOF_ROWS + 1)):
                 # Reserve for repeated classifier projections + JSON identities.
                 budget.reserve(sizes, copies=8)
-            structures[sid] = (compression_ids(native, sid, columns) | runtime_notice_ids(native, sid, columns),
-                               _native_rewrites(native, sid, columns))
-        processes, rewrites = structures[sid]
+            compressions = compression_ids(native, sid, columns)
+            structures[sid] = (compressions | runtime_notice_ids(native, sid, columns),
+                               _native_rewrites(native, sid, columns), compressions)
+        processes, rewrites, compressions = structures[sid]
+        if compressions:
+            from .task_reminder_presentation import reminder_projections
+            journal_columns = {row[1] for row in db.execute('PRAGMA table_info(runs)')}
+            times = (dict(db.execute('SELECT created_at,updated_at FROM runs WHERE id=?', (run['id'],)).fetchone())
+                     if {'created_at', 'updated_at'} <= journal_columns else {})
+            admission = dict(run=dict(turn, id=run['id'], status=run['status'], **times),
+                             anchor=dict(anchor, canonical_session_id=sid), tool_events=tool_events)
+            proof_state = admission if end is None else dict(
+                run=None, anchor=dict(session_id=sid, canonical_session_id=sid, message_id=end),
+                prior=[admission])
+            reminders = reminder_projections(native, sid, columns, proof_state, compressions, processes, rewrites)
+            owned = [mid for mid, projection in reminders.items() if projection['run_id'] == run['id']]
+            if len(owned) == 1:
+                return owned[0]
         # Stream metadata, then bounded public proof fields from the SAME native
         # read snapshot. Tool bodies and function arguments never enter Python.
         call_size = 'length(CAST(tool_call_id AS BLOB))' if 'tool_call_id' in columns else '0'
