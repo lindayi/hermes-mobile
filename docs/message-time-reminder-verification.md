@@ -14,6 +14,12 @@ A pre-port frozen Python gate stopped with 3,732 passes and one failure in a moc
 
 A complete generated browser run passed 299 and failed two cases. One was an asynchronous fixture readiness race: document load was mistaken for session-list readiness. Explicit response latency reproduced the failure; awaiting the actual session button fixed it with all original assertions retained. The other was a genuine compact-header height regression introduced by timestamp flex wrapping. The correction scopes wrapping to headers with timestamps and lets timed receipt titles shrink beside their labels using the existing ellipsis. It preserves the unchanged compact-height assertion and adds timed, legacy-time, explicit-null-time and untimed header geometry coverage. Six focused generated-browser cases passed after the correction.
 
+## Native nested-scroll fixture follow-up
+
+During exact-head integration, the nested tool-list test exposed a fixture defect rather than a message-timestamp change. Sampling keyboard End after only 100 pixels could leave its animation running; those later frames could falsely satisfy the following touch assertion. After waiting for actual keyboard scroll completion and resetting to a proved zero baseline, Chromium's synthetic-scroll touch driver could move the pointer without producing native scrolling, including on a bare overflow control.
+
+The follow-up waits for the keyboard's completed scroll, checks the nested hit target, dispatches real browser touch input, and requires a trusted touch start, native pointer cancellation, actual nested offset change and touch-phase scroll completion. Parent scroll independence, retained last tool, and the final real-touch fold assertions remain in place. No timeout increase, assertion removal, gesture retry, or production scrolling change is used.
+
 ## Final gates
 
 The PR records exact-head independent review, follow-up commits and managed integration evidence. Passing historical checks does not set the current commit status. Required GitHub checks must pass and the prerequisite source migration must be merged before this task merges into main. No private candidate deployment bypass is permitted. Physical Safari/iPad testing is distinct from generated Chromium verification.

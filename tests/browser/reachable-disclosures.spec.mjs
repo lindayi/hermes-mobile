@@ -282,16 +282,54 @@ test('nested generated tool list retains real keyboard and touch scrolling indep
   await open(progress,page);await open(card,page);
   await progress.evaluate(el=>{el.scrollTop=el.scrollHeight;});
   await rows.evaluate(el=>{el.scrollTop=0;});
-  await rows.scrollIntoViewIfNeeded();await rows.focus();await page.keyboard.press('End');
-  await page.waitForFunction(()=>{const el=document.querySelector('.activity-summary .tool-rows');return el.scrollTop>100;});
+  await rows.scrollIntoViewIfNeeded();await rows.focus();
+  await rows.evaluate(el=>{
+   window.nestedKeyboardEnded=false;
+   const ended=event=>{
+    if(event.target!==el || el.scrollHeight-el.clientHeight-el.scrollTop>=2)return;
+    window.nestedKeyboardEnded=true;el.removeEventListener('scrollend',ended);
+   };
+   el.addEventListener('scrollend',ended);
+  });
+  await page.keyboard.press('End');
+  // A >100px sample is mid-animation: resetting there lets later keyboard
+  // frames overwrite zero and falsely satisfy the subsequent touch assertion.
+  await page.waitForFunction(()=>window.nestedKeyboardEnded);
+  assert.ok(await rows.evaluate(el=>el.scrollTop)>100,'End really scrolls the nested list');
   await rows.evaluate(el=>{el.scrollTop=0;});await settle(page);
   const parentBefore=await progress.evaluate(el=>el.scrollTop);
   const box=await rows.boundingBox(),messagesBox=await page.locator('.messages').boundingBox(),outer=await progress.boundingBox();
-  const y=Math.min(box.y+box.height,messagesBox.y+messagesBox.height,outer.y+outer.height)-12;
+  const x=box.x+box.width/2,y=Math.min(box.y+box.height,messagesBox.y+messagesBox.height,outer.y+outer.height)-12;
   assert.ok(y>Math.max(box.y,messagesBox.y,outer.y)+25,'nested content has a real touch surface');
+  const before=await rows.evaluate((el,{x,y})=>{
+   window.nestedTouch={start:null,cancelled:false,ended:false};
+   el.addEventListener('touchstart',event=>{
+    window.nestedTouch.start={trusted:event.isTrusted,inside:el.contains(event.target),scroll:el.scrollTop};
+   },{once:true,passive:true});
+   el.addEventListener('pointercancel',event=>{window.nestedTouch.cancelled=event.isTrusted;},{once:true});
+   el.addEventListener('scrollend',event=>{
+    const start=window.nestedTouch.start;
+    if(event.target===el && start && el.scrollTop>start.scroll)window.nestedTouch.ended=true;
+   });
+   return {scroll:el.scrollTop,hit:el.contains(document.elementFromPoint(x,y))};
+  },{x,y});
+  assert.equal(before.scroll,0,'keyboard scrolling has completed before the touch baseline');
+  assert.equal(before.hit,true,'gesture starts on the nested list, not an overlapping sticky bar');
   const cdp=await context.newCDPSession(page);
-  await cdp.send('Input.synthesizeScrollGesture',{x:box.x+box.width/2,y,yDistance:-100,xDistance:0,gestureSourceType:'touch',preventFling:true,speed:400});
-  await page.waitForFunction(()=>document.querySelector('.activity-summary .tool-rows').scrollTop>20);
+  // The synthetic-scroll touch driver emitted pointer motion without native
+  // scrolling even on a bare overflow:auto control. Dispatch real touch input
+  // instead, and prove the browser takes over the pan (trusted pointercancel).
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y}]});
+  for(const dy of [20,40,60,80,100]){
+   await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x,y:y-dy}]});
+   await settle(page);
+  }
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+  await page.waitForFunction(()=>document.querySelector('.activity-summary .tool-rows').scrollTop>20 && window.nestedTouch.ended);
+  const touch=await page.evaluate(()=>window.nestedTouch);
+  assert.deepEqual(touch.start,{trusted:true,inside:true,scroll:0},'trusted touch starts at the verified reset position');
+  assert.equal(touch.cancelled,true,'native browser scrolling takes over the pointer');
+  assert.ok(await rows.evaluate(el=>el.scrollTop)-before.scroll>20,'touch itself advances the nested list');
   assert.ok(Math.abs(await progress.evaluate(el=>el.scrollTop)-parentBefore)<2,'touch scroll remains within nested content');
   await rows.evaluate(el=>{el.scrollTop=el.scrollHeight;});
   assert.match(await rows.locator('.tool-preview').last().textContent(),/fixture-31/,'last tool is retained');
