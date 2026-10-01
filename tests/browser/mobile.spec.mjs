@@ -8,6 +8,17 @@ import {fileURLToPath} from 'node:url';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
 const dir=process.env.HERMES_FRONTEND_DIR ? process.env.HERMES_FRONTEND_DIR.replace(/\/$/,'')+'/' : fileURLToPath(new URL('../../frontend/',import.meta.url));
 
+async function resizeViewport(page,viewport){
+  await page.setViewportSize(viewport);
+  // setViewportSize can finish before viewport.mjs applies its resize/rAF update.
+  // Wait for the app's explicit height, not for the geometry assertions to pass.
+  await page.waitForFunction(({width,height})=>{
+    const root=document.getElementById('app');
+    return innerWidth===width && innerHeight===height && root?.dataset.viewport==='managed' &&
+      root.style.getPropertyValue('--app-viewport-height')===`${height}px`;
+  },viewport,{timeout:5000});
+}
+
 test('390px browser shell uses local assets, has no overflow, and supports all four authenticated tabs',async()=>{
   const server=createServer(async(req,res)=>{
     const path=new URL(req.url,'http://localhost').pathname;
@@ -90,12 +101,12 @@ test('390px browser shell uses local assets, has no overflow, and supports all f
     const small=await page.locator('button:visible').evaluateAll(elements=>elements.filter(el=>el.getBoundingClientRect().height<44 || el.getBoundingClientRect().width<44).map(el=>el.textContent));
     assert.deepEqual(small,[],'every visible button is at least 44px');
     for(const viewport of [{width:320,height:568},{width:390,height:450},{width:844,height:390},{width:1280,height:900}]) {
-      await page.setViewportSize(viewport);
+      await resizeViewport(page,viewport);
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`no overflow at ${viewport.width}`);
       const rect=await page.getByRole('button',{name:'Send message'}).boundingBox();assert.ok(rect.y+rect.height<=viewport.height,'composer visible above bottom navigation');
     }
     await page.screenshot({path:fileURLToPath(artifactURL('chat-desktop.png')),fullPage:true,animations:'disabled'});
-    await page.setViewportSize({width:390,height:844});
+    await resizeViewport(page,{width:390,height:844});
     await page.getByRole('textbox',{name:'Message Hermes'}).fill('Check the forecast');
     await page.getByRole('button',{name:'Send message'}).click();
     await page.locator('.live-message .tool-activity[data-status=success]').waitFor();

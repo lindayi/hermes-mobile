@@ -884,6 +884,11 @@ def test_runner_cli_explicit_python_without_source_venv(tmp_path, monkeypatch):
     cli = load_script('test.py')
     source = fixture_source(tmp_path)
     monkeypatch.setenv('HERMES_TEST_PYTHON', sys.executable)
+    # Isolate this Python-selection contract from the host's Node PATH layout.
+    node = tmp_path / 'node'
+    node.write_text('#!/bin/sh\nexit 99\n')
+    node.chmod(0o700)
+    monkeypatch.setenv('HERMES_TEST_NODE', str(node))
     calls = []
     assert cli.main(['--source', str(source), '--root', str(tmp_path / 'managed'),
                      'python', '--', '-k', 'synthetic'],
@@ -891,7 +896,7 @@ def test_runner_cli_explicit_python_without_source_venv(tmp_path, monkeypatch):
     args, kwargs = calls[0]
     assert args == (source,)
     assert kwargs['python'] == sys.executable
-    assert kwargs['node'] == NODE
+    assert kwargs['node'] == str(node)
     assert kwargs['suite'] == 'python'
     assert kwargs['extra_args'] == ['-k', 'synthetic']
 

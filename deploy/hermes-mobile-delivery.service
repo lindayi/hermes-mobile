@@ -1,0 +1,18 @@
+[Unit]
+Description=Guarded outbound Hermes Mobile delivery (one approved intent)
+# Stop the timer to disable future polling. Do not interrupt controller activation.
+RefuseManualStop=yes
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/lindayi/projects/hermes-mobile-git
+ExecStart=/home/lindayi/projects/hermes-mobile-git/.venv/bin/python -m deploy.pull_delivery --once
+NoNewPrivileges=yes
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=GIT_TERMINAL_PROMPT=0
+TimeoutStartSec=infinity
+TimeoutStopSec=infinity
+Restart=no
+# Existing owner gh authentication only. No new credential files or inbound ports.
+# Run as a user unit, never install in /etc/systemd/system or as root.

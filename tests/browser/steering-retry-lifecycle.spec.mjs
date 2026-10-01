@@ -44,7 +44,7 @@ async function fixture(options={}) {
  const close=async()=>{try{await browser?.close();}finally{server.closeAllConnections();if(server.listening)await new Promise(resolve=>server.close(resolve));}};
  try {
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
-  browser=await chromium.launch({executablePath:'/usr/bin/google-chrome',headless:true,env:{...process.env,TMPDIR:temporary},args:['--no-sandbox','--disable-dev-shm-usage']});
+  browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER || '/usr/bin/google-chrome',headless:true,env:{...process.env,TMPDIR:temporary},args:['--no-sandbox','--disable-dev-shm-usage']});
   const page=await browser.newPage({viewport:{width:320,height:740},serviceWorkers:'block'});page.setDefaultTimeout(4000);
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);

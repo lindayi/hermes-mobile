@@ -1,0 +1,84 @@
+name: Production approval
+on:
+  workflow_run:
+    workflows: [Source checks]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: read
+  actions: read
+  deployments: write
+concurrency:
+  group: production-approval-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+jobs:
+  approve-production:
+    name: Approve production
+    if: >-
+      github.repository == 'lindayi/hermes-mobile' &&
+      github.repository_id == '1399942965' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.repository.id == 1399942965 &&
+      github.event.workflow_run.head_repository.id == 1399942965 &&
+      github.event.workflow_run.conclusion == 'success'
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # No checkout, downloaded artifact execution, shell, or production credentials.
+      - name: Create exact approved deployment intent
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          APPROVAL_RUN_ID: ${{ github.run_id }}
+        with:
+          script: |
+            const owner = 'lindayi', repo = 'hermes-mobile';
+            const ensure = (condition, message) => { if (!condition) throw new Error(message); };
+            const sourceRunId = Number(process.env.SOURCE_RUN_ID);
+            const approvalRunId = Number(process.env.APPROVAL_RUN_ID);
+            const sha = process.env.SOURCE_SHA;
+            ensure(Number.isSafeInteger(sourceRunId) && sourceRunId > 0 &&
+                   Number.isSafeInteger(approvalRunId) && approvalRunId === context.runId &&
+                   /^[0-9a-f]{40}$/.test(sha), 'Invalid fixed intent inputs');
+            ensure(process.env.GITHUB_RUN_ATTEMPT === '1', 'Approval reruns require new owner approval intent');
+            ensure(context.repo.owner === owner && context.repo.repo === repo &&
+                   context.ref === 'refs/heads/main' && context.sha === sha, 'Default-main context mismatch');
+            const {data: repository} = await github.rest.repos.get({owner, repo});
+            const sameRepo = r => r && r.id === 1399942965 && r.full_name === 'lindayi/hermes-mobile';
+            ensure(sameRepo(repository) && repository.owner.id === 5164171 &&
+                   repository.default_branch === 'main', 'Repository identity mismatch');
+            const {data: source} = await github.rest.actions.getWorkflowRun({owner, repo, run_id: sourceRunId});
+            ensure(source.id === sourceRunId && source.workflow_id === 372155405 &&
+                   source.path === '.github/workflows/ci.yml' && source.event === 'push' &&
+                   source.head_branch === 'main' && source.head_sha === sha &&
+                   source.status === 'completed' && source.conclusion === 'success' &&
+                   sameRepo(source.repository) && sameRepo(source.head_repository), 'Source run is not release eligible');
+            const {data: ref} = await github.rest.git.getRef({owner, repo, ref: 'heads/main'});
+            ensure(ref.ref === 'refs/heads/main' && ref.object.type === 'commit' && ref.object.sha === sha,
+                   'Approved source has been superseded');
+            // The REST review-history schema is an array of {state,user,environments,comment}.
+            // A successful environment job alone is NOT approval (admins can bypass).
+            const {data: reviews} = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals',
+                                                        {owner, repo, run_id: approvalRunId});
+            ensure(Array.isArray(reviews), 'Missing owner review history');
+            const production = reviews.filter(r => Array.isArray(r.environments) &&
+                                                   r.environments.some(e => e.name === 'production'));
+            ensure(!production.some(r => r.state === 'rejected') &&
+                   production.some(r => r.state === 'approved' && r.user.id === 5164171 && r.user.login === 'lindayi'),
+                   'Actual owner approval required; environment bypass is not authorization');
+            const {data: deployment} = await github.rest.repos.createDeployment({
+              owner, repo, ref: sha, task: 'deploy:mobile', environment: 'production',
+              auto_merge: false, required_contexts: [], transient_environment: false, production_environment: true,
+              description: 'Owner-approved exact main release',
+              payload: {version: 1, source_run_id: sourceRunId, approval_run_id: approvalRunId}
+            });
+            ensure(Number.isSafeInteger(deployment.id), 'Deployment creation did not return an ID');
+            await github.rest.repos.createDeploymentStatus({
+              owner, repo, deployment_id: deployment.id, state: 'queued', auto_inactive: false,
+              description: 'Waiting for guarded outbound host worker',
+              log_url: `https://github.com/${owner}/${repo}/actions/runs/${approvalRunId}`
+            });

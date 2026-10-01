@@ -1,0 +1,44 @@
+name: Actionable work
+description: Propose a bounded, testable change to Hermes Mobile.
+title: ''
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Desired behavior
+      description: Describe the user-visible or operational behavior and current result.
+      placeholder: What should happen, and what happens today?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance cases
+      description: List observable cases, including relevant failure and privacy cases.
+      placeholder: Given ..., when ..., then ...
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and related work
+      description: Identify in-scope areas, exclusions, dependencies, related issues, and pull requests.
+      placeholder: Link specifications, dependencies, and concurrent work.
+    validations:
+      required: true
+  - type: textarea
+    id: risks_privacy
+    attributes:
+      label: Risks and privacy
+      description: Describe security, privacy, data, deployment, and rollback risks—or state none known.
+      placeholder: Do not include credentials, private account/session content, or production evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: duplicates
+    attributes:
+      label: Duplicate and overlap search
+      description: Search existing issues and open pull requests; link matching or related work and explain how this differs.
+      placeholder: Include issue/PR links or say what terms you searched and found no overlap.
+    validations:
+      required: true
