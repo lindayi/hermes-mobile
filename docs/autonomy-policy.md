@@ -173,6 +173,21 @@ do not constitute independent review, runtime evidence, or activation permission
 | `deploy/hermes-mobile-issue-starter.service` | `1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69` |
 | `deploy/hermes-mobile-issue-starter.timer` | `848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92` |
 
+Issue #58 deliberately refreshes only the notification service pin and its
+independent literal launch fixture; the historical issue #43 hash above is retained:
+
+| Issue #58 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/hermes-workflow-notifications.service` | `934effd6540b6a6ed026fcdac2dda6ebf176792e583c6738dc7b72dc737f199e` |
+
+This replaces unsupported `PrivateDevices` with UNIX-only address-family,
+native-architecture and raw-I/O syscall restrictions, retaining the other unit
+settings. It does not recreate private device or network namespaces; see the
+[security contract and activation boundary](workflow-notifications.md#issue-58-user-unit-security-contract).
+The `autonomy-launch-contract` blocker and all review/approval gates remain
+unchanged. This source pin proves neither installed-service qualification nor
+permission to enable the timer.
+
 The issue #48 starter and supported-user-unit changes retained from PR49 have
 these current assembly pins, also independently literal in the launch fixture:
 

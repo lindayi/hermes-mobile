@@ -8,7 +8,9 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
-PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=~@raw-io
 PrivateNetwork=yes
 ProtectSystem=strict
 ProtectHome=read-only
