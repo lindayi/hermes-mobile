@@ -1481,6 +1481,10 @@ class Coordinator:
                 or not all(isinstance(response.get(field), dict)
                            and _github_identity(response[field].get("repo"), REPOSITORY_ID)
                            for field in ("head", "base"))
+                or response["head"].get("sha") != head
+                or response["head"].get("ref") != action["head_ref"]
+                or response["base"].get("sha") != base
+                or response["base"].get("ref") != "main"
                 or not isinstance(response_reviewers, list)
                 or not any(_github_identity(item, COPILOT_REVIEWER_ID)
                            for item in response_reviewers)):

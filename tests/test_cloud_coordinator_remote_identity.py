@@ -163,6 +163,40 @@ def test_review_request_response_requires_numeric_pull_identity(tmp_path, monkey
     assert api.fix_attempts == 1
 
 
+@pytest.mark.parametrize("field", ["head_sha", "head_ref", "base_sha", "base_ref"])
+@pytest.mark.parametrize("change", ["valid", "changed", "missing"])
+def test_review_response_is_bound_to_handoff_revision(tmp_path, monkeypatch, field, change):
+    api, store, coordinator = setup(tmp_path)
+    coordinator.run(apply=True)
+    fix = next(a for a in store.actions().values() if a["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    plan = coordinator._build_plan(apply=True)
+    snapshot = plan["snapshots"][0]
+    original_write = api.write
+
+    def write(route, body):
+        response = deepcopy(original_write(route, body))
+        if route.endswith("/requested_reviewers"):
+            side, key = field.split("_")
+            if change == "missing":
+                response[side].pop(key)
+            elif change == "changed":
+                response[side][key] = "f" * 40 if key == "sha" else "other-branch"
+        return response
+
+    monkeypatch.setattr(api, "write", write)
+    coordinator._advance_task_handoff(fix["key"], store.action(fix["key"]), snapshot)
+    stored = store.action(fix["key"])
+    assert stored["review_request_state"] == ("sent" if change == "valid" else "uncertain")
+    assert stored["handoff_state"] == ("waiting_review" if change == "valid" else "review_request_uncertain")
+    api.requested_reviewers = []
+    writes = list(api.writes)
+    coordinator = Coordinator(api, StateStore(store.path), clock=lambda: 1790856660)
+    coordinator._advance_task_handoff(fix["key"], store.action(fix["key"]), snapshot)
+    assert api.writes == writes
+    assert api.fix_attempts == 1
+
+
 @pytest.mark.parametrize("stage", ["enrollment", "snapshot", "authorization"])
 @pytest.mark.parametrize("field", ["number", "id", "head_repo", "base_repo"])
 @pytest.mark.parametrize("kind", KINDS)
