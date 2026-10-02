@@ -1905,6 +1905,10 @@ UNCOMPUTED_MERGEABILITY = [
     {"mergeable": None, "mergeable_state": "dirty"},
     {"mergeable": None, "mergeable_state": "behind"},
     {},
+] + [
+    {"mergeable": malformed, "mergeable_state": state}
+    for malformed in ("false", "true", 0, 1, 0.0, 1.0, [], {})
+    for state in ("dirty", "behind")
 ]
 
 

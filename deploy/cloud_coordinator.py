@@ -908,7 +908,7 @@ def _github_identity(value, expected):
 
 def _mergeability_unknown(pull):
     state = pull.get("mergeable_state")
-    return (pull.get("mergeable") is None or state in {None, "unknown"}
+    return (type(pull.get("mergeable")) is not bool or state in {None, "unknown"}
             or (pull.get("mergeable") is not True and state not in {"dirty", "behind"}))
 
 
@@ -1871,10 +1871,8 @@ class Coordinator:
                     "queued", "in_progress", "waiting_for_user", "idle",
                     "completed", "failed", "timed_out", "cancelled",
                 } or not _valid_timestamp(response.get("created_at"))
-                or not isinstance(response.get("creator"), dict)
-                or response["creator"].get("id") != OWNER_ID
-                or not isinstance(response.get("repository"), dict)
-                or response["repository"].get("id") != REPOSITORY_ID):
+                or not _github_identity(response.get("creator"), OWNER_ID)
+                or not _github_identity(response.get("repository"), REPOSITORY_ID)):
             event = self._record_uncertain_task(claimed_action)
             self.store.update_action_with_lifecycle(
                 key, "uncertain", event, now=self.clock(),
@@ -2086,10 +2084,11 @@ class Coordinator:
             retirements=[
                 item["issue"] for item in plan["pull_requests"] if item.get("terminal")
             ],
-            lifecycle_events=plan.get("source_lifecycle_events", []) + [
+            # Keep causal pull events ahead of their derived deployment outcomes.
+            lifecycle_events=[
                 event for item in plan["pull_requests"]
                 for event in item.get("lifecycle_events", [])
-            ],
+            ] + plan.get("source_lifecycle_events", []),
             observations=plan.get("observations", []),
             now=plan["now"],
         )
