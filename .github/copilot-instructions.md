@@ -19,6 +19,8 @@ Merging and deployment are separate; only guarded deployment from verified main 
 
 Prefer small complete changes within the approved issue scope. Preserve existing behavior and assertions outside the requested change. Report exact observed verification; never claim a test, review, or check passed unless it did.
 
+Write PR descriptions as plain paragraphs using the repository template; include a literal Closes #N and all required evidence, with no Markdown markup in the body.
+
 The autonomous gate transition is conditional, not active by documentation alone.
 Until the parent operator verifies dependencies and actual current-head evidence and
 changes repository protection, require the exact pre-cutover contexts `source-ci`,

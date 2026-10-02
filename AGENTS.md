@@ -95,6 +95,8 @@ records acceptance cases, and reports exact observed test/CI evidence. Use the
 repository issue and pull-request templates. State clearly when a check was not
 run; do not imply an unobserved pass.
 
+Write PR descriptions as plain paragraphs using the repository template; include a literal Closes #N and all required evidence, with no Markdown markup in the body.
+
 A review comment is not an approval or a passing review status; verify every review and test result against the exact head SHA.
 
 Request Copilot review for pull requests when it is available, and request a fresh
