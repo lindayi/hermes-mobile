@@ -1,9 +1,7 @@
 """Exercise actual starter output through the paired coordinator source scanner."""
-import importlib.util
-import os
-from pathlib import Path
-
 import pytest
+
+from deploy import cloud_coordinator
 
 from test_issue_starter import (
     FakeApi, REPOSITORY, completed_task, make_coordinator, pull_request, start_task,
@@ -12,16 +10,7 @@ from test_issue_starter import (
 
 @pytest.fixture
 def consumer():
-    path = Path(os.environ.get(
-        "HERMES_COORDINATOR_SOURCE",
-        str(Path(__file__).parents[1] / "deploy" / "cloud_coordinator.py"),
-    ))
-    if not path.is_file() and "HERMES_COORDINATOR_SOURCE" not in os.environ:
-        pytest.skip("paired coordinator source not yet integrated; set HERMES_COORDINATOR_SOURCE")
-    spec = importlib.util.spec_from_file_location("paired_cloud_coordinator", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return cloud_coordinator
 
 
 @pytest.mark.parametrize("race", ["none", "before_post", "after_post"])

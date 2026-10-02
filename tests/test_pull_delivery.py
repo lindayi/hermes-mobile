@@ -1,6 +1,7 @@
 """Synthetic outbound API/subprocess/SQLite tests; never touch live services."""
 import copy
 import importlib.util
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -10,6 +11,13 @@ NOW = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
 REPO = {'id': 1399942965, 'full_name': 'lindayi/hermes-mobile',
         'owner': {'id': 5164171, 'login': 'lindayi'}, 'default_branch': 'main'}
 PREFIX = '/repos/lindayi/hermes-mobile'
+BASE = 'b' * 40
+RELEASE = 'e' * 32
+OID = '1' * 40
+ZERO = '0' * 40
+TREE_BASE = 'c' * 40
+TREE_HEAD = 'd' * 40
+V2_JOBS = PREFIX + '/actions/runs/20/jobs?filter=latest&per_page=100'
 
 
 def module():
@@ -328,19 +336,47 @@ def production_workflow():
     return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
 
 
+GITHUB_SCRIPT = 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'  # v9.0.0
+JOB_NAMES = {'classify': 'Classify release', 'promote-routine': 'Promote routine release',
+             'promote-sensitive': 'Promote sensitive release'}
+
+
 def test_workflow_and_units_have_no_untrusted_checkout_or_production_runner():
     from pathlib import Path
     workflow = production_workflow()
     assert workflow['on'] == {'workflow_run': {'workflows': ['Source checks'], 'types': ['completed'], 'branches': ['main']}}
-    assert workflow['permissions'] == {'contents': 'read', 'actions': 'read', 'deployments': 'write'}
-    job = workflow['jobs']['approve-production']
-    assert job['environment'] == 'production'
-    assert job['name'] == 'Approve production'
-    assert job['runs-on'] == 'ubuntu-24.04'
-    assert len(job['steps']) == 1
-    assert job['steps'][0]['uses'] == 'actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd'
-    assert 'github.event.workflow_run.event' in job['if']
-    assert 'github.event.workflow_run.conclusion' in job['if']
+    assert workflow['permissions'] == {}
+    assert {key: job['name'] for key, job in workflow['jobs'].items()} == JOB_NAMES
+    read = {'contents': 'read', 'actions': 'read', 'deployments': 'read'}
+    write = {'contents': 'read', 'actions': 'read', 'deployments': 'write'}
+    classify = workflow['jobs']['classify']
+    assert classify['permissions'] == read and 'environment' not in classify and 'needs' not in classify
+    for condition in ("github.repository == 'lindayi/hermes-mobile'", "github.repository_id == '1399942965'",
+                      "github.ref == 'refs/heads/main'", "github.event.workflow_run.event == 'push'",
+                      "github.event.workflow_run.head_branch == 'main'",
+                      'github.event.workflow_run.repository.id == 1399942965',
+                      'github.event.workflow_run.head_repository.id == 1399942965',
+                      "github.event.workflow_run.conclusion == 'success'"):
+        assert condition in classify['if']
+    environments = {'promote-routine': 'production', 'promote-sensitive': 'production-sensitive'}
+    for key, environment in environments.items():
+        job = workflow['jobs'][key]
+        risk = key.split('-')[1]
+        assert job['environment'] == environment
+        assert job['needs'] == 'classify'
+        assert job['if'] == f"needs.classify.outputs.risk == '{risk}'"
+        assert job['permissions'] == write
+        assert job['steps'][0]['env']['RELEASE_RISK'] == risk
+    scripts = [workflow['jobs'][key]['steps'][0]['with']['script'] for key in environments]
+    assert scripts[0] == scripts[1]  # One reviewed promotion script; job ID selects the path.
+    for job in workflow['jobs'].values():
+        assert job['runs-on'] == 'ubuntu-24.04'
+        assert len(job['steps']) == 1
+        assert job['steps'][0]['uses'] == GITHUB_SCRIPT
+        assert '${{' not in job['steps'][0]['with']['script']  # No expression-to-JavaScript injection.
+    text = (Path(__file__).resolve().parents[1] / '.github/workflows/production.yml').read_text()
+    assert 'checkout' not in text and 'secrets.' not in text
+    assert not re.search(r'^\s*(?:-\s*)?run:', text, re.M)  # No shell steps.
     root = Path(__file__).resolve().parents[1]
     service = root / 'deploy/hermes-mobile-delivery.service'
     timer = root / 'deploy/hermes-mobile-delivery.timer'
@@ -353,54 +389,531 @@ def test_workflow_and_units_have_no_untrusted_checkout_or_production_runner():
     assert 'OnUnitInactiveSec=' in timer.read_text()
 
 
-@pytest.mark.parametrize('fault', [None, 'pr', 'fork', 'old_main', 'no_owner', 'rerun'])
-def test_approval_script_executes_only_fixed_validated_intent(tmp_path, fault):
+HARNESS = r'''
+const INPUT = __INPUT__;
+const P = '/repos/lindayi/hermes-mobile';
+const reads = [], writes = [], outputs = {}, info = [];
+const read = async (path, params) => {
+  if (params.owner !== 'lindayi' || params.repo !== 'hermes-mobile') throw new Error('foreign repository');
+  reads.push({path, params});
+  if (!(path in INPUT.api)) { const error = new Error('Not Found: ' + path); error.status = 404; throw error; }
+  return {data: JSON.parse(JSON.stringify(INPUT.api[path]))};
+};
+const core = {setFailed: msg => {throw new Error(msg)}, info: msg => info.push(msg), notice: () => {},
+  setOutput: (name, value) => { outputs[name] = String(value); }};
+const context = {repo: {owner: 'lindayi', repo: 'hermes-mobile'}, runId: 20,
+  ref: 'refs/heads/main', sha: INPUT.sha};
+const github = {rest: {
+  repos: {get: p => read(`/repos/${p.owner}/${p.repo}`, p),
+    listDeployments: p => read(`${P}/deployments`, p),
+    listDeploymentStatuses: p => read(`${P}/deployments/${p.deployment_id}/statuses`, p),
+    compareCommitsWithBasehead: p => read(`${P}/compare/${p.basehead}`, p),
+    createDeployment: async data => { writes.push(data); return {data: {id: 50}}; },
+    createDeploymentStatus: async data => { writes.push(data); return {data: {}}; }},
+  git: {getRef: p => read(`${P}/git/ref/${p.ref}`, p),
+    getCommit: p => read(`${P}/git/commits/${p.commit_sha}`, p),
+    getTree: p => read(`${P}/git/trees/${p.tree_sha}?recursive=${p.recursive}`, p)},
+  actions: {getWorkflowRun: p => read(`${P}/actions/runs/${p.run_id}`, p)}},
+  request: (route, p) => read(route.split(' ')[1].replace(/\{(\w+)\}/g, (_, key) => p[key]), p)};
+(async () => { try { await (async () => { __SCRIPT__ })(); console.log(JSON.stringify({reads, writes, outputs, info})); }
+catch (e) { console.log(JSON.stringify({reads, writes, outputs, info, error: String(e)})); }})();
+'''
+
+
+def run_script(job, api, *, env=None, main=None, sha=SHA):
     import json
     import os
+    import shutil
     import subprocess
-    workflow = production_workflow()
-    script = workflow['jobs']['approve-production']['steps'][0]['with']['script']
-    assert '${{' not in script  # No expression-to-JavaScript injection.
-    request, api = evidence()
+    script = production_workflow()['jobs'][job]['steps'][0]['with']['script']
+    main = sha if main is None else main
+    api = {**api, PREFIX + '/git/ref/heads/main': {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': main}}}
+    harness = HARNESS.replace('__INPUT__', json.dumps({'api': api, 'sha': sha})).replace('__SCRIPT__', script)
+    environment = {**os.environ, 'SOURCE_RUN_ID': '10', 'APPROVAL_RUN_ID': '20', 'SOURCE_SHA': sha,
+                   'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_JOB': job, **(env or {})}
+    node = os.environ.get('HERMES_TEST_NODE')
+    if node is None:
+        node = shutil.which('node')
+    if not node:
+        raise RuntimeError('Managed test runner must provide Node through HERMES_TEST_NODE or PATH')
+    result = subprocess.run([node, '-e', harness],
+                            env=environment, check=True, text=True, capture_output=True, timeout=60)
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize('explicit', [True, False])
+def test_run_script_uses_managed_node_selection(monkeypatch, explicit):
+    import shutil
+    import subprocess
+    from types import SimpleNamespace
+    selected = '/managed/node'
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(stdout='{}')
+
+    if explicit:
+        monkeypatch.setenv('HERMES_TEST_NODE', selected)
+    else:
+        monkeypatch.delenv('HERMES_TEST_NODE', raising=False)
+        monkeypatch.setattr(shutil, 'which', lambda name: selected if name == 'node' else None)
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    assert run_script('classify', cloud_api()) == {}
+    assert calls[0][0][0] == selected
+
+
+BOT = {'id': 41898282, 'login': 'github-actions[bot]', 'type': 'Bot'}
+OWNER = {'id': 5164171, 'login': 'lindayi', 'type': 'User'}
+
+
+def add_cloud_tree_api(api, files, *, base=BASE, sha=SHA, base_entries=None, head_entries=None):
+    """Add authenticated-style commit/tree responses bound to exact Git commits."""
+    if base_entries is None or head_entries is None:
+        base_entries, head_entries = [], []
+        for index, file in enumerate(files):
+            status, path = file.get('status'), file.get('filename')
+            old_path = file.get('previous_filename', path)
+            if status in {'removed', 'modified', 'renamed'}:
+                base_entries.append({'path': old_path, 'mode': '100644', 'type': 'blob',
+                                     'sha': f'{index + 1:040x}'})
+            if status in {'added', 'modified', 'renamed'}:
+                head_entries.append({'path': path, 'mode': '100644', 'type': 'blob',
+                                     'sha': f'{index + 2:040x}'})
+    for commit, tree, entries in ((base, TREE_BASE, base_entries), (sha, TREE_HEAD, head_entries)):
+        api[PREFIX + f'/git/commits/{commit}'] = {'sha': commit, 'tree': {'sha': tree}}
+        api[PREFIX + f'/git/trees/{tree}?recursive=1'] = {
+            'sha': tree, 'truncated': False, 'tree': entries}
+
+
+def cloud_api(files=None, history=None, *, base=BASE, sha=SHA):
+    """Synthetic API: deployment 7 for BASE succeeded (owner-reported) unless overridden."""
+    _, api = evidence()
+    history = [(7, base, BOT, [('success', OWNER), ('in_progress', OWNER), ('queued', BOT)])] \
+        if history is None else history
+    api[PREFIX + '/deployments'] = [{'id': ident, 'sha': deployed_sha, 'task': 'deploy:mobile', 'environment': 'production',
+                                     'creator': creator} for ident, deployed_sha, creator, _ in history]
+    for ident, _, _, statuses in history:
+        api[PREFIX + f'/deployments/{ident}/statuses'] = [{'state': state, 'creator': who}
+                                                          for state, who in statuses]
+    files = [{'filename': 'frontend/styles.css', 'status': 'modified'}] if files is None else files
+    api[PREFIX + f'/compare/{base}...{sha}'] = {'status': 'ahead', 'ahead_by': 2, 'behind_by': 0,
+                                                'merge_base_commit': {'sha': base}, 'files': files}
+    api[PREFIX + '/actions/runs/10']['head_sha'] = sha
+    add_cloud_tree_api(api, files, base=base, sha=sha)
+    return api
+
+
+def test_classify_routine_from_owner_reported_deployed_base_is_read_only():
+    output = run_script('classify', cloud_api())
+    assert 'error' not in output, output
+    assert output['outputs'] == {'risk': 'routine', 'base_sha': BASE}
+    assert not output['writes']
+    listing = [r for r in output['reads'] if r['path'] == PREFIX + '/deployments'][0]['params']
+    assert (listing['task'], listing['environment']) == ('deploy:mobile', 'production')
+
+
+@pytest.mark.parametrize('history,base', [
+    ([], ''),  # Bootstrap: no authenticated deployment history.
+    ([(7, BASE, BOT, [('success', {'id': 9, 'login': 'mallory'}), ('queued', BOT)])], ''),
+    ([(7, BASE, BOT, [('success', BOT), ('queued', BOT)])], ''),
+    ([(7, BASE, OWNER, [('success', OWNER)])], ''),  # Not a bot-created intent.
+    ([(8, 'c' * 40, BOT, [('failure', OWNER), ('in_progress', OWNER), ('queued', BOT)]),
+      (7, BASE, BOT, [('success', OWNER), ('queued', BOT)])], ''),
+    ([(8, 'c' * 40, BOT, [('in_progress', OWNER), ('queued', BOT)]),
+      (7, BASE, BOT, [('success', OWNER), ('queued', BOT)])], ''),
+    ([(8, 'c' * 40, BOT, [('queued', BOT)]), (7, BASE, BOT, [('success', OWNER), ('queued', BOT)])], BASE),
+    ([(8, 'c' * 40, BOT, []), (7, BASE, BOT, [('success', OWNER)])], ''),
+])
+def test_classify_trusts_only_authentic_owner_reported_success(history, base):
+    output = run_script('classify', cloud_api(history=history))
+    assert 'error' not in output, output
+    assert output['outputs'] == {'risk': 'routine' if base else 'sensitive', 'base_sha': base}
+
+
+def test_classify_history_inspection_is_bounded():
+    history = [(200 - index, 'c' * 40, BOT, [('queued', BOT)]) for index in range(30)] + \
+        [(7, BASE, BOT, [('success', OWNER)])]
+    output = run_script('classify', cloud_api(history=history))
+    assert output['outputs'] == {'risk': 'sensitive', 'base_sha': ''}
+
+
+@pytest.mark.parametrize('compare', [
+    {'status': 'diverged', 'behind_by': 1}, {'status': 'behind', 'behind_by': 2},
+    {'merge_base_commit': {'sha': 'c' * 40}}, {'status': 'ahead', 'behind_by': None}])
+def test_classify_refuses_source_not_descending_from_base(compare):
+    api = cloud_api()
+    api[PREFIX + f'/compare/{BASE}...{SHA}'].update(compare)
+    output = run_script('classify', api)
+    assert output.get('error') and not output['outputs'] and not output['writes']
+
+
+@pytest.mark.parametrize('fault', ['pr', 'fork', 'old_main', 'rerun', 'source_failed', 'other_workflow'])
+def test_classify_requires_trusted_current_push_source(fault):
+    api = cloud_api()
     source = api[PREFIX + '/actions/runs/10']
+    env, main = {}, SHA
     if fault == 'pr':
         source['event'] = 'pull_request'
-    if fault == 'fork':
+    elif fault == 'fork':
         source['head_repository']['id'] = 123
-    main_sha = 'b' * 40 if fault == 'old_main' else SHA
-    reviews = [] if fault == 'no_owner' else api[PREFIX + '/actions/runs/20/approvals']
-    harness = '''
-const source = INPUT.source;
-const calls = [];
-const core = {setFailed: msg => {throw new Error(msg)}, info: () => {}};
-const context = {repo:{owner:'lindayi',repo:'hermes-mobile'}, runId:20,
-  ref:'refs/heads/main', sha:INPUT.sha, payload:{workflow_run:source}};
-const github = {rest:{
-  repos:{get:async()=>({data:INPUT.repo}),
-    createDeployment:async data=>{calls.push(data); return {data:{id:50}}},
-    createDeploymentStatus:async data=>{calls.push(data); return {data:{}}}},
-  git:{getRef:async()=>({data:{ref:'refs/heads/main',object:{type:'commit',sha:INPUT.main}}})},
-  actions:{getWorkflowRun:async()=>({data:source})}},
-  request:async()=>({data:INPUT.reviews})};
-(async()=>{try { await (async()=>{ SCRIPT })(); console.log(JSON.stringify({calls})); }
-catch (e) { console.log(JSON.stringify({calls,error:String(e)})); }})();
-'''.replace('INPUT', json.dumps({'source': source, 'sha': SHA, 'repo': REPO, 'main': main_sha,
-                               'reviews': reviews})).replace('SCRIPT', script)
-    # Syntax above uses object literals in property access; bracket for parser clarity.
-    env = {**os.environ, 'SOURCE_RUN_ID': '10', 'APPROVAL_RUN_ID': '20', 'SOURCE_SHA': SHA,
-           'GITHUB_RUN_ATTEMPT': '2' if fault == 'rerun' else '1'}
-    result = subprocess.run(['/home/lindayi/.hermes/node/bin/node', '-e', harness],
-                            env=env, check=True, text=True, capture_output=True)
-    output = json.loads(result.stdout)
-    if fault:
-        assert output.get('error') and not output['calls']
+    elif fault == 'old_main':
+        main = 'c' * 40
+    elif fault == 'rerun':
+        env['GITHUB_RUN_ATTEMPT'] = '2'
+    elif fault == 'source_failed':
+        source['conclusion'] = 'failure'
+    elif fault == 'other_workflow':
+        source['workflow_id'] = 9
+    output = run_script('classify', api, env=env, main=main)
+    assert output.get('error') and not output['outputs']
+
+
+def parity_cases():
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location('release_policy_cases', Path(__file__).with_name('test_release_policy.py'))
+    tables = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tables)
+    cases = [[('modified', path, None)] for path in tables.ROUTINE_PATHS + tables.SENSITIVE_PATHS]
+    docs_root = Path(__file__).resolve().parents[1] / 'docs'
+    cases += [[('modified', path.relative_to(docs_root.parent).as_posix(), None)]
+              for path in sorted(docs_root.rglob('*.md'))]
+    cases += [
+        [], [('added', 'frontend/new.js', None), ('removed', 'docs/ux.md', None)],
+        [('removed', 'frontend/viewport.mjs', None), ('added', 'docs/ux.md', None)],
+        [('renamed', 'frontend/styles.css', 'backend/app.py')],
+        [('renamed', 'frontend/styles.css', 'frontend/ui.mjs')],
+        [('renamed', 'frontend/viewport.mjs', 'frontend/session-swipe.mjs')],
+        [('renamed', 'frontend/viewport.mjs', None)],
+        [('copied', 'frontend/viewport.mjs', 'frontend/session-swipe.mjs')],
+        [('changed', 'frontend/styles.css', None)], [('unchanged', 'frontend/styles.css', None)],
+        [('modified', 'frontend/styles.css', 'frontend/styles.css')],
+        [('modified', f'tests/test_{index}.py', None) for index in range(250)],
+        [('modified', f'tests/test_{index}.py', None) for index in range(251)],
+    ]
+    return cases
+
+
+def test_cloud_classifier_matches_host_policy_exactly():
+    """Execute the actual workflow classifier for every case; compare with deploy.release_policy."""
+    from deploy import release_policy
+    letters = {'added': 'A', 'removed': 'D', 'modified': 'M', 'renamed': 'R'}
+    mismatches = []
+    for case in parity_cases():
+        files = [{'filename': path, 'status': status, **({'previous_filename': old} if old else {})}
+                 for status, path, old in case]
+        changes = [release_policy.Change(letters.get(status, status), path, old) for status, path, old in case]
+        expected = release_policy.classify(changes).risk
+        output = run_script('classify', cloud_api(files=files))
+        if output['outputs'].get('risk') != expected:
+            mismatches.append((case[:2], expected, output))
+    assert not mismatches
+
+
+@pytest.mark.parametrize('fault', [
+    'missing_file', 'duplicate_file', 'missing_tree_path', 'duplicate_tree_path', 'unexpected_tree_path',
+    'partial_file_inventory', 'unexpected_compare_path', 'missing_mode', 'unsupported_mode',
+    'unsupported_status', 'truncated_tree', 'missing_truncated', 'wrong_commit', 'wrong_tree',
+])
+def test_cloud_classifier_routes_incomplete_or_unexpected_git_metadata_sensitive(fault):
+    files = [{'filename': path, 'status': 'modified'}
+             for path in ('frontend/styles.css', 'docs/ux.md')] if fault == 'partial_file_inventory' else None
+    api = cloud_api(files)
+    comparison = api[PREFIX + f'/compare/{BASE}...{SHA}']
+    tree_key = PREFIX + f'/git/trees/{TREE_HEAD}?recursive=1'
+    tree = api[tree_key]
+    if fault == 'missing_file':
+        comparison['files'] = []
+    elif fault == 'duplicate_file':
+        comparison['files'].append(copy.deepcopy(comparison['files'][0]))
+    elif fault == 'missing_tree_path':
+        tree['tree'].clear()
+    elif fault == 'duplicate_tree_path':
+        tree['tree'].append(copy.deepcopy(tree['tree'][0]))
+    elif fault == 'unexpected_tree_path':
+        tree['tree'].append({'path': 'tests/test_unreported.py', 'mode': '100644', 'type': 'blob', 'sha': OID})
+    elif fault == 'partial_file_inventory':
+        comparison['files'].pop()
+    elif fault == 'unexpected_compare_path':
+        comparison['files'].append({'filename': 'tests/test_unreported.py', 'status': 'modified'})
+    elif fault == 'missing_mode':
+        tree['tree'][0].pop('mode')
+    elif fault == 'unsupported_mode':
+        tree['tree'][0]['mode'] = '100777'
+    elif fault == 'unsupported_status':
+        comparison['files'][0]['status'] = 'copied'
+    elif fault == 'truncated_tree':
+        tree['truncated'] = True
+    elif fault == 'missing_truncated':
+        tree.pop('truncated')
+    elif fault == 'wrong_commit':
+        api[PREFIX + f'/git/commits/{SHA}']['sha'] = BASE
+    elif fault == 'wrong_tree':
+        tree['sha'] = BASE
+    output = run_script('classify', api)
+    assert 'error' not in output, output
+    assert output['outputs'] == {'risk': 'sensitive', 'base_sha': BASE}
+
+
+def promote_api(path='routine', reviews=None, *, base=BASE, sha=SHA, files=None,
+                base_entries=None, head_entries=None):
+    request, api = evidence_v2(path, base=base)
+    approvals = api[PREFIX + '/actions/runs/20/approvals']
+    comparison_base = base or BASE
+    files = files or ([{'filename': 'frontend/styles.css', 'status': 'modified'}] if path == 'routine' else [
+        {'filename': 'backend/app.py', 'status': 'modified'}])
+    api.update(cloud_api(files, base=comparison_base, sha=sha))
+    add_cloud_tree_api(api, files, base=comparison_base, sha=sha,
+                       base_entries=base_entries, head_entries=head_entries)
+    api[PREFIX + '/actions/runs/10']['head_sha'] = sha
+    api[PREFIX + '/actions/runs/20/approvals'] = approvals if reviews is None else reviews
+    return api
+
+
+@pytest.mark.parametrize('metadata', [
+    pytest.param({}, id='missing_mode_and_type'),
+    pytest.param({'mode': '100777'}, id='unknown_mode_without_type'),
+    pytest.param({'mode': 100644, 'type': 'blob'}, id='numeric_mode'),
+])
+@pytest.mark.parametrize('job', ['classify', 'promote-routine', 'promote-sensitive'])
+def test_unchanged_invalid_tree_metadata_is_sensitive_before_promotion(job, metadata):
+    risk = 'sensitive' if job == 'promote-sensitive' else 'routine'
+    files = [{'filename': 'frontend/styles.css', 'status': 'modified'}]
+    api = promote_api(risk, files=files)
+    for tree in (TREE_BASE, TREE_HEAD):
+        api[PREFIX + f'/git/trees/{tree}?recursive=1']['tree'].append(
+            {'path': 'tests/test_unchanged.py', 'sha': OID, **metadata})
+    output = run_script(job, api, env={
+        'RELEASE_RISK': risk, 'CLASSIFIED_RISK': risk, 'BASE_SHA': BASE})
+    calls = [call['path'] for call in output['reads']]
+    for tree in (TREE_BASE, TREE_HEAD):
+        assert PREFIX + f'/git/trees/{tree}?recursive=1' in calls
+    if job == 'classify':
+        assert 'error' not in output, output
+        assert output['outputs'] == {'risk': 'sensitive', 'base_sha': BASE}
+        assert not output['writes']
+    elif job == 'promote-routine':
+        assert 'Promotion risk disagrees' in output.get('error', ''), output
+        assert not output['writes']
     else:
-        assert 'error' not in output
-        deployment, status = output['calls']
-        assert deployment['ref'] == SHA and deployment['task'] == 'deploy:mobile'
-        assert deployment['auto_merge'] is False and deployment['required_contexts'] == []
-        assert deployment['payload'] == {'version': 1, 'source_run_id': 10, 'approval_run_id': 20}
-        assert status['state'] == 'queued' and status['deployment_id'] == 50
+        assert 'error' not in output, output
+        assert len(output['writes']) == 2
+        assert output['writes'][0]['payload'] == {
+            'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE}
+        assert output['writes'][1]['state'] == 'queued'
+
+
+PRIMITIVE_VARIANTS = ['array', 'nested_array', 'empty_array', 'null', 'boolean', 'number', 'object',
+                      'lf', 'cr', 'crlf', 'line_separator', 'paragraph_separator']
+
+
+def invalid_primitive(value, variant):
+    return {'array': [value], 'nested_array': [[value]], 'empty_array': [], 'null': None,
+            'boolean': True, 'number': 100644, 'object': {'value': value},
+            'lf': value + '\n', 'cr': value + '\r', 'crlf': value + '\r\n',
+            'line_separator': value + '\u2028', 'paragraph_separator': value + '\u2029'}[variant]
+
+
+def assert_sensitive_route(job, output, base=BASE):
+    if job == 'classify':
+        assert 'error' not in output, output
+        assert output['outputs'] == {'risk': 'sensitive', 'base_sha': base}
+        assert not output['writes']
+    elif job == 'promote-routine':
+        assert 'Promotion risk disagrees' in output.get('error', ''), output
+        assert not output['writes']
+    else:
+        assert 'error' not in output, output
+        assert len(output['writes']) == 2
+        assert output['writes'][0]['payload'] == {
+            'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': base}
+        assert output['writes'][1]['state'] == 'queued'
+
+
+@pytest.mark.parametrize('job', list(JOB_NAMES))
+@pytest.mark.parametrize('variant', PRIMITIVE_VARIANTS)
+@pytest.mark.parametrize('slot', [
+    'base_entry.sha', 'head_entry.sha', 'unchanged_entry.sha', 'directory_entry.sha',
+    'base_commit.tree.sha', 'head_commit.tree.sha', 'commit.sha', 'tree.sha',
+    'entry.mode', 'entry.type', 'entry.path', 'file.status', 'file.filename', 'file.previous_filename',
+])
+def test_cloud_metadata_requires_strict_primitives(job, variant, slot):
+    risk = 'sensitive' if job == 'promote-sensitive' else 'routine'
+    files = [{'filename': 'tests/test_new.py', 'status': 'renamed',
+              'previous_filename': 'tests/test_old.py'}] if slot == 'file.previous_filename' else [
+        {'filename': 'tests/test_new.py', 'status': 'added' if slot == 'file.status' else 'modified'}]
+    api = promote_api(risk, files=files)
+    old_tree = api[PREFIX + f'/git/trees/{TREE_BASE}?recursive=1']
+    new_tree = api[PREFIX + f'/git/trees/{TREE_HEAD}?recursive=1']
+    invalid_tree = None
+    if slot in {'unchanged_entry.sha', 'directory_entry.sha'}:
+        entry = {'path': 'tests/test_unchanged.py', 'mode': '100644', 'type': 'blob', 'sha': OID}
+        if slot == 'directory_entry.sha':
+            entry.update(path='tests', mode='040000', type='tree')
+        entry['sha'] = invalid_primitive(OID, variant)
+        for tree in (old_tree, new_tree):
+            tree['tree'].append(copy.deepcopy(entry))
+    else:
+        if slot.startswith(('base_commit.', 'head_commit.')):
+            commit = BASE if slot.startswith('base_') else SHA
+            target, key = api[PREFIX + f'/git/commits/{commit}']['tree'], 'sha'
+            invalid_tree = invalid_primitive(target[key], variant)
+        elif slot == 'commit.sha':
+            target, key = api[PREFIX + f'/git/commits/{SHA}'], 'sha'
+        elif slot == 'tree.sha':
+            target, key = new_tree, 'sha'
+        elif slot.startswith('file.'):
+            target, key = api[PREFIX + f'/compare/{BASE}...{SHA}']['files'][0], slot.split('.')[1]
+        else:
+            target = (old_tree if slot.startswith('base_') else new_tree)['tree'][0]
+            key = slot.split('.')[1]
+        target[key] = invalid_primitive(target[key], variant)
+    output = run_script(job, api, env={
+        'RELEASE_RISK': risk, 'CLASSIFIED_RISK': risk, 'BASE_SHA': BASE})
+    assert_sensitive_route(job, output)
+    if slot.startswith(('base_commit.', 'head_commit.')):
+        # Reject malformed IDs before using them in an API request (not just on response mismatch).
+        assert all(call['params']['tree_sha'] != invalid_tree for call in output['reads']
+                   if 'tree_sha' in call['params'])
+    if job == 'promote-sensitive' and variant == 'array':
+        api[PREFIX + '/actions/runs/20/approvals'] = []
+        unapproved = run_script(job, api, env={
+            'RELEASE_RISK': risk, 'CLASSIFIED_RISK': risk, 'BASE_SHA': BASE})
+        assert 'Actual owner approval required' in unapproved.get('error', ''), unapproved
+        assert not unapproved['writes']
+
+
+@pytest.mark.parametrize('variant', PRIMITIVE_VARIANTS)
+@pytest.mark.parametrize('field', ['sha', 'environment'])
+def test_cloud_deployed_base_requires_strict_primitives(field, variant):
+    api = cloud_api()
+    deployment = api[PREFIX + '/deployments'][0]
+    deployment[field] = invalid_primitive(deployment[field], variant)
+    output = run_script('classify', api)
+    assert_sensitive_route('classify', output, base='')
+    assert not any('/compare/' in call['path'] for call in output['reads'])
+
+
+@pytest.mark.parametrize('job,field', [(job, field) for job in JOB_NAMES
+                                     for field in ('SOURCE_SHA', 'BASE_SHA')
+                                     if job != 'classify' or field == 'SOURCE_SHA'])
+@pytest.mark.parametrize('ending', ['\n', '\r', '\r\n', '\u2028', '\u2029'])
+def test_cloud_environment_sha_requires_exact_match(job, ending, field):
+    risk = 'sensitive' if job == 'promote-sensitive' else 'routine'
+    env = {'RELEASE_RISK': risk, 'CLASSIFIED_RISK': risk, 'BASE_SHA': BASE,
+           field: (SHA if field == 'SOURCE_SHA' else BASE) + ending}
+    output = run_script(job, promote_api(risk), env=env)
+    expected = 'Invalid fixed intent inputs' if field == 'SOURCE_SHA' else 'Invalid deployed base'
+    assert expected in output.get('error', ''), output
+    assert not output['reads'] and not output['writes']
+
+
+@pytest.mark.parametrize('job', list(JOB_NAMES))
+@pytest.mark.parametrize('ending', ['\n', '\r', '\r\n', '\u2028', '\u2029'])
+@pytest.mark.parametrize('path', ['frontend/styles.css', 'tests/test_new.py', 'docs/ux.md',
+                                 'tests/browser/chat.spec.mjs', 'tests/browser/chat_fixture.py',
+                                 'tests/fixtures/chat.json'])
+def test_cloud_and_host_line_ending_paths_are_sensitive_not_malformed(job, ending, path):
+    from deploy import release_policy
+
+    path += ending  # A valid Git filename, not a malformed API field.
+    assert release_policy.classify([release_policy.Change('A', path)]).risk == 'sensitive'
+    risk = 'sensitive' if job == 'promote-sensitive' else 'routine'
+    api = promote_api(risk, files=[{'filename': path, 'status': 'added'}])
+    output = run_script(job, api, env={
+        'RELEASE_RISK': risk, 'CLASSIFIED_RISK': risk, 'BASE_SHA': BASE})
+    assert_sensitive_route(job, output)
+    if job == 'classify':
+        assert any('sensitive path: ' + path in message for message in output['info'])
+        assert not any('inconsistent Git-tree' in message for message in output['info'])
+
+
+def test_promote_routine_creates_strict_v2_intent_without_owner_review():
+    output = run_script('promote-routine', promote_api('routine'),
+                        env={'RELEASE_RISK': 'routine', 'CLASSIFIED_RISK': 'routine', 'BASE_SHA': BASE})
+    assert 'error' not in output, output
+    deployment, status = output['writes']
+    assert deployment['ref'] == SHA and deployment['task'] == 'deploy:mobile'
+    assert deployment['environment'] == 'production' and deployment['production_environment'] is True
+    assert deployment['transient_environment'] is False
+    assert deployment['auto_merge'] is False and deployment['required_contexts'] == []
+    assert deployment['payload'] == {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE}
+    assert status['state'] == 'queued' and status['deployment_id'] == 50
+    assert status['log_url'] == 'https://github.com/lindayi/hermes-mobile/actions/runs/20'
+
+
+@pytest.mark.parametrize('change', ['regular_to_executable', 'executable_to_regular',
+                                    'add_symlink', 'regular_to_symlink'])
+def test_both_promotion_paths_recompute_real_git_modes_before_intent(tmp_path, change):
+    from deploy import release_policy
+
+    m = module()
+    repo, base, sha, base_entries, head_entries = real_git_mode_release(tmp_path, change)
+    changes = m.release_changes(repo, base, sha)
+    assert changes and release_policy.classify(changes).risk == 'sensitive'
+    statuses = {'A': 'added', 'D': 'removed', 'M': 'modified', 'T': 'modified'}
+    files = [{'filename': item.path, 'status': statuses[item.status]} for item in changes]
+    api = promote_api('sensitive', base=base, sha=sha, files=files,
+                      base_entries=base_entries, head_entries=head_entries)
+    sensitive = run_script('promote-sensitive', api, sha=sha,
+                           env={'RELEASE_RISK': 'sensitive', 'CLASSIFIED_RISK': 'sensitive', 'BASE_SHA': base})
+    assert 'error' not in sensitive, sensitive
+    assert sensitive['writes'][0]['payload']['base_sha'] == base
+    calls = [call['path'] for call in sensitive['reads']]
+    assert f'{PREFIX}/git/commits/{base}' in calls and f'{PREFIX}/git/commits/{sha}' in calls
+    assert f'{PREFIX}/git/trees/{TREE_BASE}?recursive=1' in calls
+    assert f'{PREFIX}/git/trees/{TREE_HEAD}?recursive=1' in calls
+    routine = run_script('promote-routine', api, sha=sha,
+                         env={'RELEASE_RISK': 'routine', 'CLASSIFIED_RISK': 'routine', 'BASE_SHA': base})
+    assert routine.get('error') and not routine['writes']
+
+
+@pytest.mark.parametrize('base,expected', [(BASE, BASE), ('', None)])
+def test_promote_sensitive_requires_actual_owner_approval(base, expected):
+    output = run_script('promote-sensitive', promote_api('sensitive'),
+                        env={'RELEASE_RISK': 'sensitive', 'CLASSIFIED_RISK': 'sensitive', 'BASE_SHA': base})
+    assert 'error' not in output, output
+    assert output['writes'][0]['payload'] == {'version': 2, 'source_run_id': 10, 'approval_run_id': 20,
+                                              'base_sha': expected}
+
+
+@pytest.mark.parametrize('job,fault', [
+    ('promote-sensitive', 'no_review'), ('promote-sensitive', 'wrong_environment'),
+    ('promote-sensitive', 'other_user'), ('promote-sensitive', 'rejected'),
+    ('promote-routine', 'rejected'), ('promote-routine', 'no_base'), ('promote-routine', 'bad_base'),
+    ('promote-routine', 'risk_mismatch'), ('promote-routine', 'job_mismatch'),
+    ('promote-routine', 'pr'), ('promote-routine', 'fork'), ('promote-routine', 'old_main'),
+    ('promote-routine', 'rerun'), ('promote-sensitive', 'rerun'), ('promote-sensitive', 'old_main'),
+])
+def test_promote_rejects_bypass_replay_superseded_or_mismatched_intent(job, fault):
+    risk = job.split('-')[1]
+    approval = {'state': 'approved', 'user': {'id': 5164171, 'login': 'lindayi'},
+                'environments': [{'name': 'production-sensitive'}]}
+    reviews = {'no_review': [], 'wrong_environment': [{**approval, 'environments': [{'name': 'production'}]}],
+               'other_user': [{**approval, 'user': {'id': 1, 'login': 'lindayi'}}],
+               'rejected': [approval, {**approval, 'state': 'rejected'}]}.get(fault)
+    api = promote_api(risk, reviews)
+    env = {'RELEASE_RISK': risk, 'CLASSIFIED_RISK': risk, 'BASE_SHA': BASE}
+    main = SHA
+    source = api[PREFIX + '/actions/runs/10']
+    if fault == 'no_base':
+        env['BASE_SHA'] = ''
+    elif fault == 'bad_base':
+        env['BASE_SHA'] = 'BASE'
+    elif fault == 'risk_mismatch':
+        env['CLASSIFIED_RISK'] = 'sensitive'
+    elif fault == 'job_mismatch':
+        env['GITHUB_JOB'] = 'promote-sensitive'
+    elif fault == 'pr':
+        source['event'] = 'pull_request'
+    elif fault == 'fork':
+        source['head_repository']['id'] = 123
+    elif fault == 'old_main':
+        main = 'c' * 40
+    elif fault == 'rerun':
+        env['GITHUB_RUN_ATTEMPT'] = '2'
+    output = run_script(job, api, env=env, main=main)
+    assert output.get('error') and not output['writes'], output
 
 
 def test_latest_request_only_and_durable_high_watermark(tmp_path, monkeypatch):
@@ -460,3 +973,689 @@ def test_worker_crash_reservation_and_state_symlinks_do_not_replay(tmp_path, mon
     with pytest.raises(ValueError, match='Symlink'):
         m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)
     assert victim.read_text() == 'must not touch'
+
+
+# ---- Version 2: routine/sensitive risk policy (issue #17) -------------------
+
+
+
+def raw(*entries):
+    """Synthetic `git diff --raw -z --no-abbrev` output for (status, path[, old, new])."""
+    text = ''
+    for status, path, *modes in entries:
+        old, new = modes or (('000000', '100644') if status == 'A' else
+                             ('100644', '000000') if status == 'D' else ('100644', '100644'))
+        text += f':{old} {new} {OID} {OID} {status}\0{path}\0'
+    return text
+
+
+def evidence_v2(path='routine', base=BASE):
+    request, api = evidence()
+    request['payload'] = {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': base}
+
+    def job(job_id, name, conclusion, started, completed):
+        return {'id': job_id, 'run_id': 20, 'run_attempt': 1, 'head_sha': SHA, 'head_branch': 'main',
+                'workflow_name': 'Production approval', 'name': name, 'status': 'completed',
+                'conclusion': conclusion, 'started_at': started, 'completed_at': completed}
+    routine = path == 'routine'
+    api[V2_JOBS] = {'total_count': 3, 'jobs': [
+        job(31, 'Classify release', 'success', '2026-10-01T11:27:00Z', '2026-10-01T11:28:00Z'),
+        job(32, 'Promote routine release', 'success' if routine else 'skipped',
+            '2026-10-01T11:29:00Z', '2026-10-01T11:31:00Z'),
+        job(33, 'Promote sensitive release', 'skipped' if routine else 'success',
+            '2026-10-01T11:29:00Z', '2026-10-01T11:31:00Z')]}
+    api[PREFIX + '/actions/runs/20/approvals'] = [] if routine else [
+        {'state': 'approved', 'user': {'id': 5164171, 'login': 'lindayi'},
+         'environments': [{'id': 41, 'name': 'production-sensitive'}], 'comment': 'ship'}]
+    return request, api
+
+
+def test_v2_routine_intent_needs_no_owner_review_and_carries_no_risk_flag():
+    m = module()
+    request, api = evidence_v2('routine')
+    intent = m.validate_intent(request, api.__getitem__, now=NOW)
+    assert (intent.version, intent.risk, intent.base_sha) == (2, 'routine', BASE)
+    assert intent.key == SHA + ':20'
+
+
+def test_v2_sensitive_intent_requires_owner_approval_for_sensitive_environment():
+    m = module()
+    request, api = evidence_v2('sensitive')
+    intent = m.validate_intent(request, api.__getitem__, now=NOW)
+    assert (intent.version, intent.risk, intent.base_sha) == (2, 'sensitive', BASE)
+    request, api = evidence_v2('sensitive', base=None)
+    assert m.validate_intent(request, api.__getitem__, now=NOW).base_sha is None
+
+
+def test_v1_owner_approved_intent_remains_legacy_owner_path():
+    m = module()
+    request, api = evidence()
+    intent = m.validate_intent(request, api.__getitem__, now=NOW)
+    assert (intent.version, intent.risk, intent.base_sha) == (1, None, None)
+
+
+@pytest.mark.parametrize('payload', [
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE, 'risk': 'routine'},
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE, 'safe': True},
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20},
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE.upper()},
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE[:39]},
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': ''},
+    {'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': 7},
+    {'version': 2, 'source_run_id': '10', 'approval_run_id': 20, 'base_sha': BASE},
+    {'version': 2.0, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE},
+    {'version': True, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE},
+    {'version': 3, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE},
+    {'version': 1, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': BASE},
+])
+def test_v2_payload_schema_is_strict_and_cannot_assert_safety(payload):
+    m = module()
+    request, api = evidence_v2('routine')
+    request['payload'] = payload
+    with pytest.raises(m.Blocked):
+        m.validate_intent(request, api.__getitem__, now=NOW)
+
+
+def test_v2_routine_without_authenticated_base_is_blocked():
+    m = module()
+    request, api = evidence_v2('routine', base=None)
+    with pytest.raises(m.Blocked, match='base'):
+        m.validate_intent(request, api.__getitem__, now=NOW)
+
+
+def _jobs(api):
+    return api[V2_JOBS]['jobs']
+
+
+@pytest.mark.parametrize('tamper', [
+    'missing_job', 'extra_job', 'duplicate_name', 'renamed', 'both_success', 'both_skipped',
+    'classify_failed', 'classify_skipped', 'promote_failed', 'in_progress', 'attempt', 'run_id',
+    'head_sha', 'head_branch', 'workflow_name', 'total_count', 'created_before', 'created_after',
+    'skipped_classify_but_success_promote'])
+def test_v2_exact_job_set_and_runtime_binding(tamper):
+    m = module()
+    request, api = evidence_v2('routine')
+    jobs = _jobs(api)
+    if tamper == 'missing_job':
+        jobs.pop()
+        api[V2_JOBS]['total_count'] = 2
+    elif tamper == 'extra_job':
+        jobs.append({**jobs[0], 'id': 34, 'name': 'Approve production'})
+        api[V2_JOBS]['total_count'] = 4
+    elif tamper == 'duplicate_name':
+        jobs[2] = {**jobs[1], 'id': 33}
+    elif tamper == 'renamed':
+        jobs[1]['name'] = 'Promote routine'
+    elif tamper == 'both_success':
+        jobs[2]['conclusion'] = 'success'
+    elif tamper == 'both_skipped':
+        jobs[1]['conclusion'] = 'skipped'
+    elif tamper == 'classify_failed':
+        jobs[0]['conclusion'] = 'failure'
+    elif tamper == 'classify_skipped':
+        jobs[0]['conclusion'] = 'skipped'
+    elif tamper == 'promote_failed':
+        jobs[1]['conclusion'] = 'failure'
+    elif tamper == 'in_progress':
+        jobs[2]['status'] = 'in_progress'
+    elif tamper == 'attempt':
+        jobs[1]['run_attempt'] = 2
+    elif tamper == 'run_id':
+        jobs[0]['run_id'] = 21
+    elif tamper == 'head_sha':
+        jobs[2]['head_sha'] = BASE
+    elif tamper == 'head_branch':
+        jobs[1]['head_branch'] = 'topic'
+    elif tamper == 'workflow_name':
+        jobs[1]['workflow_name'] = 'Source checks'
+    elif tamper == 'total_count':
+        api[V2_JOBS]['total_count'] = 4
+    elif tamper == 'created_before':
+        request['created_at'] = '2026-10-01T11:28:30Z'
+    elif tamper == 'created_after':
+        jobs[1]['completed_at'] = '2026-10-01T11:29:30Z'
+    elif tamper == 'skipped_classify_but_success_promote':
+        jobs[0]['conclusion'] = 'skipped'
+        jobs[2]['conclusion'] = 'success'
+    with pytest.raises(m.Blocked):
+        m.validate_intent(request, api.__getitem__, now=NOW)
+
+
+@pytest.mark.parametrize('reviews', [
+    [],
+    [{'state': 'approved', 'user': {'id': 5164171, 'login': 'lindayi'}, 'environments': [{'name': 'production'}]}],
+    [{'state': 'approved', 'user': {'id': 1, 'login': 'lindayi'}, 'environments': [{'name': 'production-sensitive'}]}],
+    [{'state': 'approved', 'user': {'id': 5164171, 'login': 'other'}, 'environments': [{'name': 'production-sensitive'}]}],
+    [{'state': 'pending', 'user': {'id': 5164171, 'login': 'lindayi'}, 'environments': [{'name': 'production-sensitive'}]}],
+    [{'state': 'approved', 'user': {'id': 5164171, 'login': 'lindayi'}, 'environments': [{'name': 'production-sensitive'}]},
+     {'state': 'rejected', 'user': {'id': 5164171, 'login': 'lindayi'}, 'environments': [{'name': 'production-sensitive'}]}],
+    {'state': 'approved'},
+])
+def test_v2_sensitive_bypass_wrong_environment_or_rejection_is_not_approval(reviews):
+    m = module()
+    request, api = evidence_v2('sensitive')
+    api[PREFIX + '/actions/runs/20/approvals'] = reviews
+    with pytest.raises(m.Blocked):
+        m.validate_intent(request, api.__getitem__, now=NOW)
+
+
+def test_v2_any_rejection_blocks_routine_and_rerun_approval_is_not_replayed():
+    m = module()
+    request, api = evidence_v2('routine')
+    api[PREFIX + '/actions/runs/20/approvals'] = [
+        {'state': 'rejected', 'user': {'id': 5164171, 'login': 'lindayi'}, 'environments': [{'name': 'production'}]}]
+    with pytest.raises(m.Blocked):
+        m.validate_intent(request, api.__getitem__, now=NOW)
+    request, api = evidence_v2('sensitive')
+    api[PREFIX + '/actions/runs/20']['run_attempt'] = 2
+    with pytest.raises(m.Blocked):
+        m.validate_intent(request, api.__getitem__, now=NOW)
+
+
+def installed(controller, sha=BASE, *, status='succeeded', release=RELEASE, provenance=None, link=None):
+    import json
+    import os
+    releases = controller / 'releases'
+    (releases / RELEASE).mkdir(parents=True, exist_ok=True)
+    (releases / RELEASE / 'git-provenance.json').write_text(json.dumps(provenance or {'git_sha': sha}))
+    current = controller / 'current'
+    if current.is_symlink():
+        current.unlink()
+    os.symlink(link or releases / RELEASE, current)
+    record = {'status': status, 'release': release, 'git_sha': sha, 'hosted_run_id': 9}
+    (controller / 'status.json').write_text(json.dumps({k: v for k, v in record.items() if v is not None}))
+
+
+def test_installed_basis_binds_controller_success_current_release_and_provenance(tmp_path):
+    m = module()
+    controller = tmp_path / 'controller'
+    controller.mkdir()
+    assert m.installed_basis(controller) is None  # No controller status: bootstrap.
+    installed(controller)
+    assert m.installed_basis(controller) == BASE
+
+
+@pytest.mark.parametrize('variant', ['failed', 'rolled_back', 'running', 'rollback_failed', 'no_sha',
+                                     'short_sha', 'bad_release', 'other_release', 'provenance',
+                                     'outside_link', 'not_link', 'corrupt'])
+def test_installed_basis_unverifiable_is_bootstrap(tmp_path, variant):
+    m = module()
+    controller = tmp_path / 'controller'
+    controller.mkdir()
+    kwargs = {}
+    if variant in {'failed', 'rolled_back', 'running', 'rollback_failed'}:
+        kwargs['status'] = variant
+    elif variant == 'no_sha':
+        kwargs['sha'] = None
+    elif variant == 'short_sha':
+        kwargs['sha'] = BASE[:12]
+    elif variant == 'bad_release':
+        kwargs['release'] = '../x'
+    elif variant == 'other_release':
+        kwargs['release'] = 'f' * 32
+    elif variant == 'provenance':
+        kwargs['provenance'] = {'git_sha': SHA}
+    elif variant == 'outside_link':
+        other = tmp_path / RELEASE
+        other.mkdir()
+        (other / 'git-provenance.json').write_text('{"git_sha": "%s"}' % BASE)
+        kwargs['link'] = other
+    installed(controller, **kwargs)
+    if variant == 'not_link':
+        (controller / 'current').unlink()
+        (controller / 'current').mkdir()
+    if variant == 'corrupt':
+        (controller / 'status.json').write_text('{')
+    assert m.installed_basis(controller) is None
+
+
+def worker_v2(tmp_path, monkeypatch, path='routine', *, diff=None, base=BASE, local=BASE, ancestor=True):
+    from deploy import git_source
+    m, paths, request, api, effects, run, post = worker_fixture(tmp_path, monkeypatch)
+    request_v2, api_v2 = evidence_v2(path, base=base)
+    request.clear()
+    request.update(request_v2)
+    api.update(api_v2)
+    if local:
+        installed(paths.controller_state, local)
+    original = git_source._git
+
+    def git(source, *args):
+        if args[:1] in {('cat-file',), ('merge-base',), ('diff',)}:
+            effects.append(('git', args))
+            if args[0] == 'merge-base' and not ancestor:
+                raise RuntimeError('Git source verification failed')
+            if args[0] == 'diff':
+                return raw(('M', 'frontend/styles.css')) if diff is None else diff
+            return ''
+        return original(source, *args)
+    monkeypatch.setattr(git_source, '_git', git)
+    return m, paths, request, api, effects, run, post
+
+
+def git_calls(effects):
+    return [e[1] for e in effects if e[0] == 'git']
+
+
+def test_v2_routine_recomputes_host_diff_from_git_objects_before_merge(tmp_path, monkeypatch):
+    m, paths, request, api, effects, run, post = worker_v2(tmp_path, monkeypatch)
+    result = m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)
+    assert result['status'] == 'deployed', result
+    calls = git_calls(effects)
+    diff = ('diff', '--raw', '-z', '--no-renames', '--no-abbrev', '--no-ext-diff', '--no-textconv', BASE, SHA)
+    assert ('merge-base', '--is-ancestor', BASE, SHA) in calls and diff in calls
+    fetch = calls.index(('fetch', '--no-tags', 'origin', 'refs/heads/main:refs/remotes/origin/main'))
+    merge = calls.index(('merge', '--ff-only', '--no-edit', SHA))
+    assert fetch < calls.index(diff) < merge
+    assert [e[2]['state'] for e in effects if e[0] == 'post'] == ['in_progress', 'success']
+    assert [e[1] for e in effects if e[0] == 'run'][0][-2:] == ['--hosted-run-id', '10']
+
+
+def test_v2_sensitive_owner_approved_bootstrap_without_any_base_deploys(tmp_path, monkeypatch):
+    m, paths, request, api, effects, run, post = worker_v2(tmp_path, monkeypatch, 'sensitive',
+                                                           base=None, local=None)
+    assert m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)['status'] == 'deployed'
+    assert not [c for c in git_calls(effects) if c[0] == 'diff']
+
+
+def test_v2_sensitive_owner_approved_sensitive_diff_deploys(tmp_path, monkeypatch):
+    m, paths, request, api, effects, run, post = worker_v2(tmp_path, monkeypatch, 'sensitive',
+                                                           diff=raw(('M', 'backend/app.py')))
+    assert m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)['status'] == 'deployed'
+
+
+@pytest.mark.parametrize('case,reason', [
+    ('host_sensitive_diff', 'disagree'),
+    ('rename_from_backend', 'disagree'),
+    ('symlink_mode', 'disagree'),
+    ('executable_mode', 'disagree'),
+    ('empty_diff', 'disagree'),
+    ('malformed_diff', 'Malformed'),
+    ('overlarge', 'disagree'),
+    ('base_mismatch', 'bases disagree'),
+    ('no_local_basis', 'disagree'),
+    ('not_descendant', 'Git'),
+    ('sensitive_but_host_routine', 'disagree'),
+    ('sensitive_cloud_bootstrap_local_not_ancestor', 'Git'),
+    ('sensitive_base_mismatch', 'bases disagree'),
+])
+def test_v2_disagreement_or_bad_evidence_blocks_before_merge_and_controller(tmp_path, monkeypatch, case, reason):
+    kwargs = {}
+    path = 'routine'
+    if case == 'host_sensitive_diff':
+        kwargs['diff'] = raw(('M', 'frontend/styles.css'), ('M', 'deploy/self_deploy.py'))
+    elif case == 'rename_from_backend':
+        kwargs['diff'] = raw(('R087', 'backend/app.py', '100644', '100644')).replace(
+            '\0backend/app.py\0', '\0backend/app.py\0frontend/styles.css\0')
+    elif case == 'symlink_mode':
+        kwargs['diff'] = raw(('A', 'frontend/viewport.mjs', '000000', '120000'))
+    elif case == 'executable_mode':
+        kwargs['diff'] = raw(('M', 'tests/test_x.py', '100644', '100755'))
+    elif case == 'empty_diff':
+        kwargs['diff'] = ''
+    elif case == 'malformed_diff':
+        kwargs['diff'] = 'frontend/styles.css\0'
+    elif case == 'overlarge':
+        kwargs['diff'] = raw(*[('M', f'tests/test_{index}.py') for index in range(251)])
+    elif case == 'base_mismatch':
+        kwargs['local'] = 'c' * 40
+    elif case == 'no_local_basis':
+        kwargs['local'] = None
+    elif case == 'not_descendant':
+        kwargs['ancestor'] = False
+    elif case == 'sensitive_but_host_routine':
+        path = 'sensitive'
+    elif case == 'sensitive_cloud_bootstrap_local_not_ancestor':
+        path, kwargs['base'], kwargs['ancestor'] = 'sensitive', None, False
+    elif case == 'sensitive_base_mismatch':
+        path, kwargs['local'] = 'sensitive', 'c' * 40
+    m, paths, request, api, effects, run, post = worker_v2(tmp_path, monkeypatch, path, **kwargs)
+    result = m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)
+    assert result['status'] == 'blocked' and reason in result['reason'], result
+    assert not [e for e in effects if e[0] in {'run', 'post'}]
+    assert not [c for c in git_calls(effects) if c[0] in {'merge', 'reset', 'stash', 'checkout'}]
+    # Consumed: a later tick never retries the same intent.
+    effects.clear()
+    assert m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)['status'] == 'duplicate'
+    assert not effects
+
+
+@pytest.mark.parametrize('local,status', [('c' * 40, 'blocked'), (BASE, 'ready')])
+def test_v2_check_only_compares_bases_without_fetch_or_writes(tmp_path, monkeypatch, local, status):
+    m, paths, request, api, effects, run, post = worker_v2(tmp_path, monkeypatch, local=local)
+    result = m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW, check_only=True)
+    assert result['status'] == status, result
+    if status == 'blocked':
+        assert 'bases disagree' in result['reason']
+    assert not paths.state.exists()
+    assert not [e for e in effects if e[0] in {'post', 'run'} or e[1][0] in {'fetch', 'merge', 'diff'}]
+
+
+def test_v2_policy_module_is_loaded_before_any_source_sync():
+    """Never import incoming policy code: it is bound at worker import time."""
+    import sys
+    m = module()
+    assert m.release_policy is sys.modules['deploy.release_policy']
+
+
+def real_git_release(tmp_path, edit):
+    """Commit the actual frontend tree, apply `edit`, commit again; return (repo, base, sha)."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+    repo = tmp_path / 'source'
+    shutil.copytree(Path(__file__).resolve().parents[1] / 'frontend', repo / 'frontend')
+
+    def git(*args):
+        return subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@invalid',
+                               '-c', 'commit.gpgsign=false', *args],
+                              check=True, capture_output=True, text=True, timeout=60).stdout.strip()
+    git('init', '-q', '-b', 'main')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'base')
+    base = git('rev-parse', 'HEAD')
+    edit(repo / 'frontend')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'change')
+    return repo, base, git('rev-parse', 'HEAD')
+
+
+def real_git_mode_release(tmp_path, change):
+    """Commit a real allowed-path mode/type change and return its exact tree entries."""
+    import subprocess
+
+    repo = tmp_path / 'mode-repo'
+    test_dir = repo / 'tests'
+    test_dir.mkdir(parents=True)
+    mode_path = test_dir / 'test_mode.py'
+    mode_path.write_text('assert True\n')
+    mode_path.chmod(0o755 if change == 'executable_to_regular' else 0o644)
+    type_path = test_dir / 'test_type.py'
+    if change == 'regular_to_symlink':
+        type_path.write_text('assert True\n')
+
+    def git(*args):
+        return subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@invalid',
+                               '-c', 'commit.gpgsign=false', *args],
+                              check=True, capture_output=True, text=True, timeout=60).stdout.strip()
+
+    git('init', '-q', '-b', 'main')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'base')
+    base = git('rev-parse', 'HEAD')
+
+    if change == 'regular_to_executable':
+        mode_path.chmod(0o755)
+    elif change == 'executable_to_regular':
+        mode_path.chmod(0o644)
+    elif change == 'add_symlink':
+        (test_dir / 'test_link.py').symlink_to('test_mode.py')
+    elif change == 'regular_to_symlink':
+        type_path.unlink()
+        type_path.symlink_to('test_mode.py')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'change')
+    sha = git('rev-parse', 'HEAD')
+
+    def tree_entries(revision):
+        raw = subprocess.run(['git', '-C', str(repo), 'ls-tree', '-r', '-t', '-z', '--full-tree', revision],
+                             check=True, capture_output=True, timeout=60).stdout
+        entries = []
+        for record in raw.split(b'\0'):
+            if record:
+                header, path = record.split(b'\t', 1)
+                mode, kind, oid = header.decode('ascii').split()
+                entries.append({'path': path.decode('utf-8'), 'mode': mode, 'type': kind, 'sha': oid})
+        return entries
+
+    return repo, base, sha, tree_entries(base), tree_entries(sha)
+
+
+@pytest.mark.parametrize('old,new', [
+    (None, ':notes.md'), ('docs/ux.md', ':notes.md'), (':notes.md', 'docs/ux.md'),
+    (None, 'tests/test_new.py\n'), ('docs/ux.md', 'docs/ux.md\n'), ('docs/ux.md\n', 'docs/ux.md'),
+])
+@pytest.mark.parametrize('consumer', ['inventory', 'worker'])
+def test_real_git_colon_paths_remain_sensitive_and_owner_approved(tmp_path, monkeypatch, old, new, consumer):
+    import subprocess
+    from deploy import release_policy
+
+    repo = tmp_path / 'colon-repo'
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@invalid',
+                               '-c', 'commit.gpgsign=false', *args],
+                              check=True, capture_output=True, text=True, timeout=60).stdout
+
+    git('init', '-q', '-b', 'main')
+    if old:
+        (repo / old).parent.mkdir(parents=True, exist_ok=True)
+        (repo / old).write_text('notes\n')
+    git('add', '-A')  # Avoid treating the colon-prefixed filename as a Git pathspec.
+    git('commit', '-q', '--allow-empty', '-m', 'base')
+    base = git('rev-parse', 'HEAD').strip()
+    (repo / new).parent.mkdir(parents=True, exist_ok=True)
+    if old:
+        (repo / old).rename(repo / new)
+    else:
+        (repo / new).write_text('notes\n')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'change')
+    sha = git('rev-parse', 'HEAD').strip()
+
+    def entries(revision):
+        result = []
+        for record in git('ls-tree', '-r', '-z', revision).split('\0'):
+            if record:
+                header, path = record.split('\t', 1)
+                mode, kind, oid = header.split()
+                result.append({'path': path, 'mode': mode, 'type': kind, 'sha': oid})
+        return result
+
+    files = [{'filename': new, 'status': 'renamed' if old else 'added',
+              **({'previous_filename': old} if old else {})}]
+    api = promote_api('sensitive', base=base, sha=sha, files=files,
+                      base_entries=entries(base), head_entries=entries(sha))
+    cloud = run_script('classify', api, sha=sha)
+    assert 'error' not in cloud and not cloud['writes'], cloud
+    assert cloud['outputs'] == {'risk': 'sensitive', 'base_sha': base}
+    env = {'RELEASE_RISK': 'sensitive', 'CLASSIFIED_RISK': 'sensitive', 'BASE_SHA': base}
+    approved = run_script('promote-sensitive', api, sha=sha, env=env)
+    assert 'error' not in approved and len(approved['writes']) == 2, approved
+    assert approved['writes'][0]['payload']['base_sha'] == base
+    assert approved['writes'][1]['state'] == 'queued'
+    api[PREFIX + '/actions/runs/20/approvals'] = []
+    unapproved = run_script('promote-sensitive', api, sha=sha, env=env)
+    assert unapproved.get('error') and not unapproved['writes'], unapproved
+    routine = run_script('promote-routine', api, sha=sha, env={
+        **env, 'RELEASE_RISK': 'routine', 'CLASSIFIED_RISK': 'routine'})
+    assert routine.get('error') and not routine['writes'], routine
+
+    if consumer == 'inventory':
+        changes = module().release_changes(repo, base, sha)
+        assert {item.path for item in changes} == {path for path in (old, new) if path}
+        assert release_policy.classify(changes).risk == 'sensitive'
+        # With rename detection, NUL framing assigns two paths, including either colon side.
+        renamed = release_policy.parse_git_raw(git('diff', '--raw', '-z', '--no-abbrev', '-M', base, sha))
+        assert renamed == [release_policy.Change('R' if old else 'A', new, old,
+                                                 '100644' if old else '000000', '100644')]
+        assert release_policy.classify(renamed).risk == 'sensitive'
+    else:
+        # Exercise poll_once with real Git output; API, sync and controller remain synthetic.
+        diff = git('diff', '--raw', '-z', '--no-renames', '--no-abbrev', base, sha)
+        m, paths, request, api, effects, run, post = worker_v2(
+            tmp_path, monkeypatch, 'sensitive', diff=diff)
+        result = m.poll_once(paths, get=api.__getitem__, post=post, run=run, now=NOW)
+        assert result['status'] == 'deployed', result
+        calls = git_calls(effects)
+        assert next(i for i, call in enumerate(calls) if call[0] == 'diff') < next(
+            i for i, call in enumerate(calls) if call[0] == 'merge')
+        assert len([e for e in effects if e[0] == 'run']) == 1
+        assert [e[2]['state'] for e in effects if e[0] == 'post'] == ['in_progress', 'success']
+
+
+@pytest.mark.parametrize('consumer', ['host', 'classify', 'promote-routine', 'promote-sensitive'])
+@pytest.mark.parametrize('operation', ['modify', 'add', 'delete', 'rename_from', 'rename_to'])
+@pytest.mark.parametrize('path,expected', [
+    ('docs/session-telemetry-contract.md', 'sensitive'),
+    ('docs/endpoint-map.md', 'sensitive'),
+    ('docs/egress-routing.md', 'sensitive'),
+    ('docs/quickstart.md', 'sensitive'),
+    ('docs/keyboard-viewport-spec.md', 'routine'),
+    ('docs/sticky-activity-spacing-spec.md', 'routine'),
+    ('docs/touch-fold-contract.md', 'routine'),
+])
+def test_real_git_docs_require_positive_allowlist_on_host_and_all_cloud_jobs(
+        tmp_path, consumer, operation, path, expected):
+    """Actual docs + benign unknown docs; both rename sides and all three JS scripts."""
+    import subprocess
+    from pathlib import Path
+    from deploy import release_policy
+
+    repo = tmp_path / 'docs-repo'
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@invalid',
+                               '-c', 'commit.gpgsign=false', *args],
+                              check=True, capture_output=True, text=True, timeout=60).stdout
+
+    harmless = 'docs/touch-fold-contract.md' if path != 'docs/touch-fold-contract.md' else 'docs/keyboard-viewport-spec.md'
+    old = None if operation == 'add' else harmless if operation == 'rename_to' else path
+    new = None if operation == 'delete' else harmless if operation == 'rename_from' else path
+    source = Path(__file__).resolve().parents[1] / path
+    # Unknown operational and innocent names have deliberately harmless content:
+    # no keyword/content sniffing may turn an unreviewed path into routine.
+    text = source.read_text() if source.exists() else '# Notes\n\nAdjust paragraph spacing.\n'
+    if path == 'docs/session-telemetry-contract.md':
+        assert 'ready authenticated user, own loaded profile' in text
+
+    git('init', '-q', '-b', 'main')
+    if old:
+        (repo / old).parent.mkdir(parents=True, exist_ok=True)
+        (repo / old).write_text(text)
+    git('add', '-A')
+    git('commit', '-q', '--allow-empty', '-m', 'base')
+    base = git('rev-parse', 'HEAD').strip()
+    if new:
+        (repo / new).parent.mkdir(parents=True, exist_ok=True)
+    if operation == 'modify':
+        (repo / new).write_text(text + '\nUpdated notes.\n')
+    elif operation == 'add':
+        (repo / new).write_text(text)
+    elif operation == 'delete':
+        (repo / old).unlink()
+    else:
+        (repo / old).rename(repo / new)
+    git('add', '-A')
+    git('commit', '-q', '-m', 'change')
+    sha = git('rev-parse', 'HEAD').strip()
+
+    if consumer == 'host':
+        changes = module().release_changes(repo, base, sha)
+        assert changes and release_policy.classify(changes).risk == expected
+        renamed = release_policy.parse_git_raw(git('diff', '--raw', '-z', '--no-abbrev', '-M', base, sha))
+        assert release_policy.classify(renamed).risk == expected
+        if operation.startswith('rename'):
+            assert renamed == [release_policy.Change('R', new, old, '100644', '100644')]
+        return
+
+    def entries(revision):
+        result = []
+        for record in git('ls-tree', '-r', '-z', revision).split('\0'):
+            if record:
+                header, name = record.split('\t', 1)
+                mode, kind, oid = header.split()
+                result.append({'path': name, 'mode': mode, 'type': kind, 'sha': oid})
+        return result
+
+    status = {'modify': 'modified', 'add': 'added', 'delete': 'removed'}.get(operation, 'renamed')
+    files = [{'filename': new or old, 'status': status,
+              **({'previous_filename': old} if status == 'renamed' else {})}]
+    api = promote_api(expected, base=base, sha=sha, files=files,
+                      base_entries=entries(base), head_entries=entries(sha))
+    if consumer == 'classify':
+        output = run_script(consumer, api, sha=sha)
+        assert 'error' not in output and not output['writes'], output
+        assert output['outputs'] == {'risk': expected, 'base_sha': base}
+        return
+
+    risk = consumer.removeprefix('promote-')
+    env = {'RELEASE_RISK': risk, 'CLASSIFIED_RISK': risk, 'BASE_SHA': base}
+    output = run_script(consumer, api, sha=sha, env=env)
+    if risk != expected:
+        assert output.get('error') and not output['writes'], output
+    else:
+        assert 'error' not in output and len(output['writes']) == 2, output
+        assert output['writes'][0]['payload'] == {
+            'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': base}
+        assert output['writes'][1]['state'] == 'queued'
+    if risk == 'sensitive':
+        api[PREFIX + '/actions/runs/20/approvals'] = []
+        unapproved = run_script(consumer, api, sha=sha, env=env)
+        assert unapproved.get('error') and not unapproved['writes'], unapproved
+
+
+def replace_once(name, old, new):
+    def edit(frontend):
+        path = frontend / name
+        text = path.read_text()
+        assert text.count(old) == 1, (name, old)
+        path.write_text(text.replace(old, new))
+    return edit
+
+
+def add_file(name, text):
+    return lambda frontend: (frontend / name).write_text(text)
+
+
+SEC1_CASES = {
+    # SEC-1: passkey recovery enrollment lives in the ui.mjs authentication monolith.
+    'ui_auth_recovery': (replace_once('ui.mjs', "kind === 'register' || kind === 'recovery'",
+                                      "kind === 'register'"), 'sensitive'),
+    'app_bootstrap_sw': (replace_once('app.js', "{scope:'/hermes/'}", "{scope:'/'}"), 'sensitive'),
+    'index_auth_markup': (replace_once('index.html', 'secure passkey sign-in', 'sign-in'), 'sensitive'),
+    'markdown_links': (replace_once('markdown.mjs', 'const token=match[0];', 'const token=match[0];//'),
+                       'sensitive'),
+    'new_code_module': (add_file('profile-card.mjs', 'export const x = 1;\n'), 'sensitive'),
+    'new_stylesheet': (add_file('extra.css', 'body{}\n'), 'sensitive'),
+    'presentation_only': (lambda frontend: (frontend / 'styles.css').write_text(
+        (frontend / 'styles.css').read_text() + '\n/* spacing */\n'), 'routine'),
+}
+
+
+@pytest.mark.parametrize('change', ['regular_to_executable', 'executable_to_regular',
+                                    'add_symlink', 'regular_to_symlink'])
+def test_cloud_and_host_classify_real_git_mode_changes_as_sensitive(tmp_path, change):
+    """The executed producer must use exact commit-tree modes just like the host."""
+    from deploy import release_policy
+
+    m = module()
+    repo, base, sha, base_entries, head_entries = real_git_mode_release(tmp_path, change)
+    changes = m.release_changes(repo, base, sha)
+    assert changes and release_policy.classify(changes).risk == 'sensitive'
+    statuses = {'A': 'added', 'D': 'removed', 'M': 'modified', 'T': 'modified'}
+    files = [{'filename': item.path, 'status': statuses[item.status]} for item in changes]
+    api = cloud_api(files, base=base, sha=sha)
+    add_cloud_tree_api(api, files, base=base, sha=sha,
+                       base_entries=base_entries, head_entries=head_entries)
+    output = run_script('classify', api, sha=sha)
+    assert 'error' not in output, output
+    assert output['outputs'] == {'risk': 'sensitive', 'base_sha': base}
+
+
+@pytest.mark.parametrize('case', sorted(SEC1_CASES))
+def test_sec1_real_git_diff_and_executed_cloud_classifier_agree_on_auth_modules(tmp_path, case):
+    """Host full Git diff and the actual workflow classifier both classify real frontend edits."""
+    from deploy import release_policy
+    m = module()
+    edit, expected = SEC1_CASES[case]
+    repo, base, sha = real_git_release(tmp_path, edit)
+    changes = m.release_changes(repo, base, sha)
+    assert changes and release_policy.classify(changes).risk == expected
+    statuses = {'A': 'added', 'D': 'removed', 'M': 'modified'}
+    files = [{'filename': change.path, 'status': statuses[change.status]} for change in changes]
+    output = run_script('classify', cloud_api(files))
+    assert 'error' not in output, output
+    assert output['outputs'] == {'risk': expected, 'base_sha': BASE}

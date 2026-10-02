@@ -3,4 +3,5 @@ Description=Run one bounded owner-authorized Hermes issue-starter poll
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 -B %h/hermes-mobile/scripts/issue_starter.py --once --apply
+WorkingDirectory=%h/projects/hermes-mobile-git
+ExecStart=/usr/bin/python3 -B %h/projects/hermes-mobile-git/scripts/issue_starter.py --once --apply

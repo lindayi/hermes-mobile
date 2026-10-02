@@ -14,7 +14,9 @@ def load():
     return module
 
 
-@pytest.mark.parametrize('suite,managed', [('host','python'),('python','python'),('js','js'),('browser','browser')])
+@pytest.mark.parametrize('suite,managed', [
+    ('host','python'),('native','python'),('python','python'),('js','js'),('browser','browser')
+])
 def test_wrapper_uses_managed_selection_and_serial_browser(monkeypatch, tmp_path, suite, managed):
     m = load()
     monkeypatch.setattr(m, 'select_tests', lambda source, kind, **kw: ['tests/example'])

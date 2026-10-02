@@ -123,17 +123,17 @@ dispatch, readiness updates, or comments.
 ## Operations and verification boundary
 
 The user service and timer files under `deploy/` are disabled templates only;
-they expect the checkout at `%h/hermes-mobile` and a configured owner `gh`
+they expect the canonical checkout at `%h/projects/hermes-mobile-git` and a configured owner `gh`
 login in that user environment. They contain no install target and are not
 installed or enabled here. A parent operator must review this code and perform
 a read-only live API probe before any activation. No authenticated live probe,
 task dispatch, enrollment, service installation, settings change, or production
 action is performed by this implementation task. Tests use only synthetic
 GitHub API fixtures through the managed test runner. The handoff integration test
-loads the actual consumer source (not a replacement acceptance predicate). Until
-both changes share a checkout, set `HERMES_COORDINATOR_SOURCE` to the paired
-checkout's `deploy/cloud_coordinator.py`; absent both an integrated source and
-that explicit path, the paired cases are reported as skipped, not as coverage:
+imports the actual in-checkout coordinator; there is no absent-consumer skip or
+external source override. After current-main assembly, the SHA-bound consumer
+and authenticated fixer-result continuation remain explicit integration blockers:
+these tests must pass before merge, not merely the producer-only suite.
 
 ```sh
 HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
