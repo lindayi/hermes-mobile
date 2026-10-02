@@ -71,34 +71,29 @@ review collection. Every record, author, and present record ID is validated
 before author filtering; a malformed, tied, pending, stale-head, or foreign-author
 latest review yields no body evidence. Only a single latest Copilot review on the
 current head with a positive record ID is read, and only when it is `COMMENTED` or
-`CHANGES_REQUESTED`. From a `ccr-overview-v2` body, each item of a
+`CHANGES_REQUESTED`. Review list and detail GETs use
+`Accept: application/vnd.github.full+json`; the real adapter retains complete
+pagination and the same authenticated record's raw `body`, rendered `body_html`,
+author, head and submission time. Missing, empty, malformed or oversized rendered
+content blocks body dispatch; there is no raw-Markdown fallback.
+From a `ccr-overview-v2` body, each item of a
 `Previously missed (N)` section is forwarded (including under a `Findings: None`
 headline). One stdlib HTML parser builds bounded disclosure structure, respecting
 nested markup, quoted attributes (including `>`), case, and closing whitespace.
-A bounded lexical step shields Markdown backtick code spans and line-oriented
-backtick/tilde fences from interpretation as HTML (including literal disclosure
-tags in review explanations). Inline spans retain exact run-length matching;
-fences require at least three matching opener characters and a same-character
-closer at least as long, alone on its line except trailing spaces/tabs. Fence
-indentation permits zero to three spaces. Unclosed/unsupported fences are ambiguous,
-not a license to parse their contents as active HTML. Shielded code is retained as
-explicit inert quotation nodes, not live strings. Inline/fenced code, four-column
-indented code lines (including tabs), and bounded HTML `code`, `pre`, and
-`blockquote` quotations cannot confer overview authority, section labels, or
-summary actionability. Literal quoted context is retained inside independently
-real findings; quoted horizontal rules, framing, and validation sentences remain
-opaque through summary filtering. Complete HTML tokens protect quoted attributes
-and comments while finding quotation boundaries. Unclosed or same-tag nested HTML
-quotations are conservatively ambiguous.
-
-Markdown blockquote scope and immediately container-prefixed disclosure markup,
-quotation markup, overview comments, or fences are unsupported and ambiguous,
-not repaired with a generic Markdown renderer. Ordinary list correction prose
-and ordinary code identifiers in genuine correction context remain supported.
-Unfenced disclosure tags at four-column indentation are still conservatively
-ambiguous. Overview authority additionally requires a standalone live root marker
-with zero to three leading spaces and only trailing whitespace; embedded markers
-in ordinary prose or list items cannot authorize an unstructured COMMENTED body.
+Only GitHub-rendered HTML is parsed. The exact raw marker
+`<!-- ccr-overview-v2 -->` must be the first complete line (no indentation or
+trailing text), solely as format identity; GitHub omits this comment from rendered
+HTML. Rendered comments never establish format identity or approval.
+HTML `code`, `pre`, and `blockquote` subtrees are inert for disclosure scope,
+section labels and summary actionability. Literal decoded text remains context
+inside independently genuine findings, including nested quotation, horizontal
+rules and validation sentences. Entity callbacks append decoded text directly:
+escaped disclosure/overview text is never reparsed as markup. Incomplete raw
+markup and unclosed/crossed elements fail closed. No Markdown engine or lexical
+shielding is used. Ordinary rendered list corrections and code identifiers in
+genuine correction context remain supported. Overview framing removes only known
+metadata labels/values, never an entire paragraph containing subsequent correction
+text; quoted context is not framing.
 All disclosure traversal is iterative. There are no repeated HTML-removal passes. Limits are
 64 Ki characters, 4,096 parser events, 32 nested elements and 256 disclosures;
 exceeding any limit or unclosed/crossed markup yields `ambiguous`, not a truncated
@@ -117,22 +112,27 @@ Validation-only requires complete recognized status prose (optionally accompanie
 by no-code-issues sentences), not the presence of `pending` anywhere. Examples
 include `The exact-head verification remains pending.` and `Exact-head verification
 is still pending.`. Separate required corrections survive validation status or a
-`Looks good`/`Findings: None` headline; domain requests such as `reject pending
-receipts` remain active. Mixed summaries exclude only complete validation-status
+`Looks good`/`Findings: None` headline; explicit requests such as
+`Required correction: reject pending receipts.` remain active.
+Mixed summaries exclude only complete validation-status
 sentences, retaining the correction. Complete negative verdict sentences such as
 `No bugs found.` and `No code defects were found in the reviewed changes.` are
-recognized before affirmative keyword matching, including beside validation status.
+recognized before correction classification, including beside validation status.
 The bounded grammar permits issues, bugs, defects, problems, vulnerabilities or
 findings, optional `code`/`were`, and found/identified/detected verdicts. Optional
 `in` scopes are finite code/change/diff/patch/implementation phrases, not arbitrary
 trailing prose that could hide a correction. In mixed summaries the recognized
 negative sentence remains quoted context but cannot itself supply affirmative
 defect evidence; separate or compound required corrections remain actionable.
-Bare `CHANGES_REQUESTED` prose remains an
-explicit request without requiring imperative keywords; explicit validation-only
-and no-issues text is nonactionable. Unstructured overview summaries require
-correction/defect evidence; uncertain overview prose stays blocked without consuming
-a fixer attempt. Positive `Open (N)` counts suppress
+Both bare `CHANGES_REQUESTED` prose and overview summaries require a nonempty
+explicit `Required correction:`, `Required change:`, `Requested correction:` or
+`Requested change:` clause at a sentence/line boundary or after `, but`/`, however`.
+Generic modal/bug/defect words, formatting and file scopes do not establish a
+correction. This deliberately narrows the prior broad-English heuristic: even a
+bare requested-changes verdict without explicit correction evidence stays
+ambiguous/non-dispatching, never approved. Negative or status-only prose does not
+consume a fixer attempt; separate explicit corrections remain eligible.
+Positive `Open (N)` counts suppress
 summary duplication because those findings are already represented by threads;
 explicit `Previously missed` sections still forward body-only items.
 `Open (0)` never suppresses an actionable summary. COMMENTED summaries alone do
@@ -147,9 +147,11 @@ remains eligible. Each body finding records the genuine review ID, head SHA, and
 submission time; it never carries a thread ID. Body text is untrusted evidence:
 it is never approval, and approval is never inferred from prose.
 
-This scoped issue #39/PR #40 revision starts at
-`ab9137c1d8f20b30c4a09c7c8013d46194a33e2a` and addresses review `5391291258`.
-Acceptance includes real RED/GREEN spaced-close and validation-sentence regressions,
+This scoped issue #39/PR #40 architectural revision starts at
+`b1cd397d4378c7300a5de2f527bbe4f3eb69da8d` and addresses review `5392186494`.
+Acceptance includes real RED/GREEN entity-text, formatted-negative and modal-only
+regressions using public synthetic raw/rendered API pairs, full-media paginated
+adapter and missing-rendered negatives,
 structural classification/bounds cases, active body-only forwarding, ambiguity
 without repair/approval, and the existing fresh-evidence dispatch fence. Candidate
 helper pins are refreshed without clearing the unconditional source-contract hold.

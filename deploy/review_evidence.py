@@ -4,9 +4,9 @@ Body text is untrusted evidence, never approval or executable instructions.
 """
 from __future__ import annotations
 
-from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime
+from html import unescape
 from html.parser import HTMLParser
 import re
 
@@ -63,13 +63,6 @@ def latest_reviews(reviews, reviewer_id):
 
 
 @dataclass
-class _Quoted:
-    """Literal context, never structure, authority, or affirmative evidence."""
-
-    text: str
-
-
-@dataclass
 class _Element:
     tag: str
     children: list = field(default_factory=list)
@@ -82,107 +75,20 @@ class _DisclosureParser(HTMLParser):
                        "link", "meta", "param", "source", "track", "wbr"})
 
     def __init__(self):
-        super().__init__(convert_charrefs=True)
+        super().__init__(convert_charrefs=False)
         self.root = _Element("root")
         self.stack = [self.root]
         self.events = self.disclosures = 0
-        self.overview = False
-        self.overview_token = False
 
     def feed_review(self, body):
-        # GitHub supplies Markdown, not rendered HTML. Shield code before the
-        # sole HTML parse; complete HTML tokens protect quoted attributes. Line
-        # fences use same-character >= length closers, unlike exact inline runs.
-        runs = {}
-        for match in re.finditer(r"`+", body):
-            runs.setdefault(len(match[0]), []).append(match.start())
-        html_token = r"<!--.*?-->|</?[A-Za-z](?:[^<>\"']|\"[^\"]*\"|'[^']*')*>"
-        html_tokens = re.compile(html_token, re.DOTALL)
-        tokens = re.compile(
-            r"^(?P<container>[ \t]*(?:>|(?:[-+*]|\d{1,9}[.)])[ \t]+"
-            r"(?=(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)*(?:>|`{3,}|~{3,}|<!--|"
-            r"</?(?i:details|summary|code|pre|blockquote)\b))))|"
-            r"^(?P<indented>(?: {4}| {0,3}\t)[ \t]*)(?P<code_line>[^\n]*)|"
-            + html_token + "|" +
-            r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})(?P<info>[^\n]*)|`+",
-            re.DOTALL | re.MULTILINE)
-        cursor = fed = 0
-        while match := tokens.search(body, cursor):
-            cursor = match.end()
-            if match["container"]:
-                # Container/lazy-continuation scope is deliberately unsupported.
-                # Ordinary list prose remains live; container markup/fences do not.
-                raise ValueError("unsupported-markdown-container")
-            html_quote = re.match(r"<(?P<tag>code|pre|blockquote)\b", match[0], re.IGNORECASE)
-            fence = match["fence"]
-            if match["indented"]:
-                if re.search(r"</?(?:details|summary)\b", match["code_line"], re.IGNORECASE):
-                    raise ValueError("indented-disclosure")
-                if re.match(r"`{3,}|~{3,}", match["code_line"]):
-                    raise ValueError("unsupported-code-fence")
-                end = cursor
-            elif html_quote:
-                # Quoted HTML is opaque, including literal malformed disclosure
-                # tags. Nested same-tag quotation is unsupported, not recovered.
-                tag = html_quote["tag"]
-                closer = next((token for token in html_tokens.finditer(body, cursor)
-                               if re.match(r"</?" + tag + r"\b", token[0], re.IGNORECASE)), None)
-                if closer is None or not re.fullmatch(r"</" + tag + r"\s*>", closer[0], re.IGNORECASE):
-                    raise ValueError("unsupported-html-quotation")
-                end = closer.end()
-            elif fence:
-                # Indented code is outside this bounded fence grammar.
-                if len(match["indent"]) > 3 or "\t" in match["indent"]:
-                    raise ValueError("unsupported-code-fence")
-                if fence[0] == "`" and "`" in match["info"]:
-                    # A same-line exact span (```code```) is inline, not a
-                    # fence with a backtick-bearing info string. Other invalid
-                    # info shapes stay unsupported rather than guessing scope.
-                    positions = runs[len(fence)]
-                    index = bisect_right(positions, match.start("fence"))
-                    if index == len(positions) or positions[index] >= cursor:
-                        raise ValueError("unsupported-code-fence")
-                    end = positions[index] + len(fence)
-                else:
-                    closer = re.compile(
-                        r"^ {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*\r?$",
-                        re.MULTILINE).search(body, cursor)
-                    if closer is None:
-                        raise ValueError("unclosed-code-fence")
-                    end = closer.end()
-            elif match[0].startswith("`"):
-                # Index exact inline run lengths once, avoiding suffix rescans.
-                positions = runs[len(match[0])]
-                index = bisect_right(positions, match.start())
-                if index == len(positions):
-                    continue  # An unmatched inline backtick is literal Markdown.
-                end = positions[index] + len(match[0])
-            elif match[0].startswith("<!--"):
-                # Authority requires a standalone live marker, not a marker
-                # embedded in prose/list text. Use original lexical positions;
-                # HTMLParser positions omit the already-shielded quotation nodes.
-                self.feed(body[fed:match.start()])
-                line_start = body.rfind("\n", 0, match.start()) + 1
-                line_end = body.find("\n", cursor)
-                if line_end < 0:
-                    line_end = len(body)
-                self.overview_token = bool(
-                    re.fullmatch(r" {0,3}", body[line_start:match.start()])
-                    and re.fullmatch(r"[ \t\r]*", body[cursor:line_end]))
-                self.feed(match[0])
-                self.overview_token = False
-                fed = cursor
-                continue
-            else:
-                continue
-            self.feed(body[fed:match.start()])
-            if self.rawdata:
-                raise ValueError("code-in-incomplete-markup")
-            self._event()
-            self.stack[-1].children.append(_Quoted(body[match.start():end]))
-            cursor = fed = end
-        self.feed(body[fed:])
+        self.source = body
+        self.line_offsets = [0] + [match.end() for match in re.finditer("\n", body)]
+        self.feed(body)
+        if self.rawdata:
+            raise ValueError("unfinished-markup")
         self.close()
+        if self.rawdata:
+            raise ValueError("unfinished-markup")
 
     def _event(self):
         self.events += 1
@@ -191,15 +97,21 @@ class _DisclosureParser(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         self._event()
+        if tag in {"script", "style", "template", "iframe", "object"}:
+            raise ValueError("unsupported-element")
         if len(self.stack) > MAX_PARSE_DEPTH:
             raise ValueError("depth-limit")
         if tag == "details":
             self.disclosures += 1
             if self.disclosures > MAX_DISCLOSURES:
                 raise ValueError("disclosure-limit")
-            if any(node.tag == "summary" for node in self.stack):
+            if any(node.tag == "summary" for node in self.stack) and not any(
+                node.tag in {"code", "pre", "blockquote"} for node in self.stack
+            ):
                 raise ValueError("details-in-summary")
-        if tag == "summary":
+        if tag == "summary" and not any(
+            node.tag in {"code", "pre", "blockquote"} for node in self.stack
+        ):
             parent = self.stack[-1]
             if parent.tag != "details" or any(
                 not isinstance(child, str) or child.strip() for child in parent.children
@@ -215,10 +127,16 @@ class _DisclosureParser(HTMLParser):
             raise ValueError("self-closing-disclosure")
         self.handle_starttag(tag, attrs)
         if tag not in self._VOID:
-            self.handle_endtag(tag)
+            self.stack.pop()
 
     def handle_endtag(self, tag):
         self._event()
+        line, column = self.getpos()
+        start = self.line_offsets[line - 1] + column
+        end = self.source.find(">", start)
+        if end < 0 or not re.fullmatch(r"</" + re.escape(tag) + r"\s*>",
+                                      self.source[start:end + 1], re.IGNORECASE):
+            raise ValueError("malformed-closing-tag")
         if len(self.stack) == 1 or self.stack[-1].tag != tag:
             raise ValueError("unbalanced-markup")
         self.stack.pop()
@@ -227,14 +145,20 @@ class _DisclosureParser(HTMLParser):
         self._event()
         # HTMLParser returns unfinished tags as data at EOF. Do not recover a
         # partial disclosure as summary prose or approve a parsed prefix.
-        if re.search(r"</?(?:details|summary)\b", data, re.IGNORECASE):
+        if re.search(r"</?[A-Za-z]|<!--", data):
             raise ValueError("unfinished-disclosure")
         self.stack[-1].children.append(data)
 
+    def handle_entityref(self, name):
+        self._event()
+        self.stack[-1].children.append(unescape("&" + name + ";"))
+
+    def handle_charref(self, name):
+        self._event()
+        self.stack[-1].children.append(unescape("&#" + name + ";"))
+
     def handle_comment(self, data):
         self._event()
-        if self.overview_token and data.strip() == "ccr-overview-v2" and len(self.stack) == 1:
-            self.overview = True
 
     def handle_decl(self, decl):
         raise ValueError("unsupported-declaration")
@@ -269,7 +193,8 @@ def _section_kind(node):
     return "ambiguous", label
 
 
-def _text(node, *, exclude_details=False, exclude_history=False, quoted=True, render_quote=None):
+def _text(node, *, exclude_details=False, exclude_history=False, quoted=True, render_quote=None,
+          literal=False):
     # Iterative even though parser depth is capped: hostile nesting never drives
     # Python recursion. Inline markup preserves word boundaries as authored.
     pieces, pending = [], [node]
@@ -277,18 +202,21 @@ def _text(node, *, exclude_details=False, exclude_history=False, quoted=True, re
         current = pending.pop()
         if current is None:
             continue
-        if isinstance(current, _Quoted):
-            pieces.append((render_quote(current.text) if render_quote else current.text) if quoted else " ")
-            continue
         if isinstance(current, str):
             pieces.append(current)
             continue
-        if current.tag == "details" and (
+        if not literal and current.tag in {"code", "pre", "blockquote"}:
+            text = _text(current, literal=True)
+            pieces.append((render_quote(text) if render_quote else text) if quoted else " ")
+            continue
+        if not literal and current.tag == "details" and (
             exclude_details or (exclude_history and _section_kind(current)[0] in {"resolved", "history"})
         ):
             pieces.append("\n")
             continue
-        if current.tag in {"summary", "details", "p", "div", "li", "br", "hr"}:
+        if current.tag in {"summary", "details", "p", "div", "li", "br", "hr",
+                           "h1", "h2", "h3", "h4", "pre", "blockquote"}:
+            pieces.append("\n")
             pending.append("\n")
         pending.extend(reversed(current.children))
     return "".join(pieces)
@@ -300,26 +228,65 @@ def _disclosures(node):
     while pending:
         child = pending.pop()
         if isinstance(child, _Element):
+            if child.tag in {"code", "pre", "blockquote"}:
+                continue
             if child.tag == "details":
                 yield child
             else:
                 pending.extend(reversed(child.children))
 
 
-def _summary_prose(summary, overview):
-    lines = summary.split("\n---", 1)[0].splitlines() if overview else summary.splitlines()
-    # Remove only known overview framing, not arbitrary headings or prose.
-    return "\n".join(line for line in lines if not (overview and re.fullmatch(
-        r"\s*(?:## Copilot review overview|### (?:[🟢🔵🟡] )?"
-        r"(?:Looks good|Needs a closer look|Changes recommended)|"
-        r"\*\*(?:Review effort|Findings):\*\*.*)\s*", line, re.IGNORECASE))).strip()
+def _without_metadata(node):
+    children = list(node.children)
+    index = 0
+    while index < len(children):
+        child = children[index]
+        if isinstance(child, str) and not child.strip() or (
+            isinstance(child, _Element) and child.tag == "br"
+        ):
+            index += 1
+            continue
+        if not isinstance(child, _Element) or child.tag != "strong":
+            break
+        label = _text(child).strip()
+        values = {
+            "Findings:": r"(?:None|\d+)",
+            "Review effort:": r"(?:Light|Balanced|Thorough)",
+        }.get(label)
+        if (not values or _text(child, quoted=False).strip() != label
+                or index + 1 >= len(children) or not isinstance(children[index + 1], str)):
+            break
+        match = re.match(r"\s*" + values + r"(?=\s|$)", children[index + 1], re.IGNORECASE)
+        if not match:
+            break
+        index += 1
+        children[index] = children[index][match.end():]
+    return _Element(node.tag, children[index:])
+
+
+def _summary_content(root, overview):
+    children = []
+    for child in root.children:
+        if overview and isinstance(child, _Element):
+            if child.tag == "hr":
+                break
+            if child.tag == "p":
+                child = _without_metadata(child)
+            label = " ".join(_text(child, quoted=False).split())
+            if (child.tag == "h2" and label == "Copilot review overview"
+                    or child.tag == "h3" and re.fullmatch(
+                        r"(?:[🟢🔵🟡] )?(?:Looks good|Needs a closer look|Changes recommended)", label)
+                    ):
+                continue
+        children.append(child)
+    return _Element("root", children)
 
 
 def _summary_disposition(summary, *, overview, state, context=None):
     # Classification sees only live prose; literal context is rendered separately
     # and can be forwarded only after live prose independently proves a finding.
-    prose = _summary_prose(summary, overview)
-    context = _summary_prose(context if context is not None else summary, overview)
+    prose = summary.strip()
+    context = (context if context is not None else summary).strip()
     if not prose:
         return "no-findings", ""
     sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", prose) if part.strip()]
@@ -352,26 +319,18 @@ def _summary_disposition(summary, *, overview, state, context=None):
                             if sentence.strip() and not validation.fullmatch(re.sub(
                                 r"^It changes [^.!?]+, while\s+", "", sentence.strip(),
                                 flags=re.IGNORECASE)))
-    # Bare CHANGES_REQUESTED is already an explicit request. Overview summaries
-    # need affirmative correction/defect evidence, not a generic closer-look label.
-    # Keep negative verdicts as quoted context, but never mistake their nouns
-    # for affirmative defect evidence in a mixed or otherwise uncertain summary.
+    # Summary prose needs an explicit correction clause, not a modal/bug keyword.
     affirmative = "\n".join(sentence for sentence, wait, negative in zip(sentences, waits, negatives)
                             if not wait and not negative)
     actionable = re.search(
-        r"\b(?:required (?:correction|change)|request(?:ed)?:|must|should|"
-        r"(?:please )?(?:reject|fix|prevent|ensure|validate|remove|preserve|add)\b|"
-        r"(?:fails? to|incorrectly|bug|defect|vulnerability))", affirmative, re.IGNORECASE)
-    if actionable or (not overview and state == "CHANGES_REQUESTED"):
+        r"(?:^|\n+|[.!?]\s+|,\s*(?:but|however)\s+)"
+        r"(?:required|requested) (?:correction|change):\s*\S", affirmative, re.IGNORECASE)
+    if actionable:
         return ("active" if state == "CHANGES_REQUESTED" else "ambiguous"), context
-    if overview and re.search(r"^### (?:🟢 )?Looks good\s*$", summary, re.MULTILINE | re.IGNORECASE) and re.search(
-        r"^\*\*Findings:\*\* None\s*$", summary, re.MULTILINE | re.IGNORECASE
-    ):
-        return "no-findings", prose
     return "ambiguous", prose
 
 
-def parse_body(body, state):
+def parse_body(body, state, *, body_html=None):
     """Classify a complete body; ambiguity is not repair evidence or approval.
 
     Findings are (kind, quoted text) pairs. Classifications are explicit section
@@ -382,13 +341,18 @@ def parse_body(body, state):
     try:
         if not isinstance(body, str) or len(body) > MAX_BODY_CHARS:
             raise ValueError("body-limit")
-        parser.feed_review(body)
+        if (not isinstance(body_html, str) or not body_html.strip()
+                or len(body_html) > MAX_BODY_CHARS):
+            raise ValueError("rendered-body-limit")
+        overview = body == OVERVIEW_MARKER or body.startswith(
+            (OVERVIEW_MARKER + "\n", OVERVIEW_MARKER + "\r\n"))
+        parser.feed_review(body_html)
         if len(parser.stack) != 1:
             raise ValueError("unclosed-markup")
     except (ValueError, AssertionError) as exc:
         return dict(result, classifications=["ambiguous"], ambiguous=True, reason=str(exc))
 
-    if not parser.overview and state != "CHANGES_REQUESTED":
+    if not overview and state != "CHANGES_REQUESTED":
         return dict(result, classifications=["ambiguous"], ambiguous=True, reason="unstructured-comment")
 
     sections = list(_disclosures(parser.root))
@@ -421,12 +385,13 @@ def parse_body(body, state):
                 texts = [_text(node, exclude_history=True).strip()]
             result["findings"].extend(("previously-missed", text) for text in texts if text)
 
-    summary = _text(parser.root, exclude_details=True, quoted=False).strip()
+    summary_root = _summary_content(parser.root, overview)
+    summary = _text(summary_root, exclude_details=True, quoted=False).strip()
     # Keep quoted nodes opaque through footer/framing/status removal as well as
     # classification. Fresh render tokens cannot collide with any input text;
     # expand once only after a disposition has been determined from live prose.
     prefix = "\x00"
-    while prefix in body:
+    while prefix in body_html or prefix in _text(parser.root):
         prefix *= 2
     quotations = []
 
@@ -434,8 +399,8 @@ def parse_body(body, state):
         quotations.append(text)
         return prefix + str(len(quotations) - 1) + prefix
 
-    context = _text(parser.root, exclude_details=True, render_quote=render_quote).strip()
-    kind, prose = _summary_disposition(summary, overview=parser.overview, state=state, context=context)
+    context = _text(summary_root, exclude_details=True, render_quote=render_quote).strip()
+    kind, prose = _summary_disposition(summary, overview=overview, state=state, context=context)
     prose = re.sub(re.escape(prefix) + r"(\d+)" + re.escape(prefix),
                    lambda match: quotations[int(match[1])], prose)
     result["classifications"].append(kind)
@@ -464,7 +429,7 @@ def review_body_disposition(reviews, head_sha, *, reviewer_id):
             or type(state) is not str or state not in {"COMMENTED", "CHANGES_REQUESTED"}
             or not isinstance(body, str) or not body.strip()):
         return empty
-    result = parse_body(body, state)
+    result = parse_body(body, state, body_html=review.get("body_html"))
     result["findings"] = [
         {"review": review["id"], "head": head_sha,
          "submitted_at": review["submitted_at"], "kind": kind, "text": text}

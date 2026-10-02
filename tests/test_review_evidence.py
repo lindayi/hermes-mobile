@@ -25,16 +25,16 @@ PICTURE = (
     'images/icons/copilot-code-review/medium-v2-light.svg"></picture>'
 )
 FOOTER = (
-    "\n---\n\n💡 <a href=\"/lindayi/hermes-mobile/new/main?filename=.github/skills/"
-    "code-review/SKILL.md\" class=\"Link--inTextBlock\">Add a `code-review` agent skill</a>\n"
+    "\n<hr>\n<p>💡 <a href=\"/lindayi/hermes-mobile/new/main?filename=.github/skills/"
+    "code-review/SKILL.md\" class=\"Link--inTextBlock\">Add a <code>code-review</code> agent skill</a></p>\n"
 )
 
 
 def overview(status, summary, findings, *sections):
     return (
-        "<!-- ccr-overview-v2 -->\n\n## Copilot review overview\n\n"
-        f"### {status}\n\n{summary}\n\n**Review effort:** Balanced  \n"
-        f"**Findings:** {findings}\n\n" + "\n\n".join(sections) + FOOTER
+        "<!-- ccr-overview-v2 -->\n\n<h2>Copilot review overview</h2>\n\n"
+        f"<h3>{status}</h3>\n\n<p>{summary}</p>\n\n<p><strong>Review effort:</strong> Balanced</p>\n"
+        f"<p><strong>Findings:</strong> {findings}</p>\n\n" + "\n\n".join(sections) + FOOTER
     )
 
 
@@ -44,7 +44,7 @@ def section(title, inner, *, open_=False):
 
 
 def missed_item(title, location, explanation):
-    return (f"<details>\n<summary>{PICTURE} {title}</summary>\n\n`{location}`\n\n"
+    return (f"<details>\n<summary>{PICTURE} {title}</summary>\n\n<code>{location}</code>\n\n"
             f"{explanation}\n</details>")
 
 
@@ -90,7 +90,10 @@ SUBMITTED = "2026-10-01T12:30:00Z"
 
 def copilot_review(body, *, state="COMMENTED", review_id=REVIEW_ID, commit_id=HEAD,
                    submitted_at=SUBMITTED, user_id=COPILOT_REVIEWER):
-    return {"id": review_id, "state": state, "body": body, "commit_id": commit_id,
+    # Legacy structural fixtures are authored HTML, not a Markdown renderer.
+    return {"id": review_id, "state": state, "body": body,
+            "body_html": body.removeprefix("<!-- ccr-overview-v2 -->"),
+            "commit_id": commit_id,
             "submitted_at": submitted_at, "user": {"id": user_id},
             "author_association": "CONTRIBUTOR"}
 
@@ -152,7 +155,7 @@ def test_body_only_previously_missed_finding_dispatches_bounded_fixer(tmp_path, 
 
 
 def test_changes_requested_prose_without_inline_findings_is_forwarded(tmp_path):
-    prose = "Synthetic request: reject non-integer receipt author IDs before accepting."
+    prose = "Required correction: reject non-integer receipt author IDs before accepting."
     api = ReviewApi([copilot_review(prose, state="CHANGES_REQUESTED")])
     result = _managed_cycle(api, tmp_path / "state.json")
     assert result["pull_requests"][0]["repair_requested"]
@@ -210,14 +213,14 @@ def test_looks_good_without_findings_never_consumes_budget(tmp_path):
 
 
 def test_changes_requested_overview_without_open_or_missed_items_forwards_summary():
-    body = overview("🟡 Changes recommended", "Synthetic summary of a required change.",
+    body = overview("🟡 Changes recommended", "Required change: reject stale receipts.",
                     "None", RESOLVED)
     request = repair_request(HEAD, 0, [], [], pull_number=16, reviews=[
         copilot_review(body, state="CHANGES_REQUESTED"),
     ])
     [finding] = _evidence(request)["review_findings"]
     assert finding["kind"] == "changes-requested"
-    assert "Synthetic summary of a required change." in finding["comment"]
+    assert "Required change: reject stale receipts." in finding["comment"]
     assert "Synthetic resolved finding" not in finding["comment"]
     assert "code-review" not in finding["comment"]
     # Inline Open findings are carried by their review threads, not duplicated.

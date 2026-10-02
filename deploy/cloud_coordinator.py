@@ -595,7 +595,13 @@ class GhApi:
             raise ApiError("GitHub API returned invalid data") from exc
 
     def get(self, route):
-        return self._call(["--method", "GET", route])
+        return self._call(["--method", "GET", *self._review_media(route), route])
+
+    @staticmethod
+    def _review_media(route):
+        if re.fullmatch(r"repos/lindayi/hermes-mobile/pulls/\d+/reviews(?:/\d+)?(?:\?[^#]*)?", route):
+            return ["-H", "Accept: application/vnd.github.full+json"]
+        return []
 
     def get_all(self, route, *, collection=None):
         env = dict(os.environ)
@@ -604,7 +610,7 @@ class GhApi:
         try:
             result = self.run(
                 [self.executable, "api", "--hostname", "github.com", "--paginate",
-                 "--method", "GET", route],
+                 "--method", "GET", *self._review_media(route), route],
                 capture_output=True, text=True, timeout=90, env=env, check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
