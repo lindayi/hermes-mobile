@@ -35,14 +35,18 @@ certificate extensions. A caller assertion or PR overview is not proof.
 read-back bytes. The reviewed main-source baseline is the merged commit
 `f84063e9aed55994c4ae4d3eae14fec922e12929`; its workflow, actions, manifests,
 deployment sources, runtime/test inputs, dependency locks, and patch inputs are
-fingerprinted. This includes the test-environment action and the statically
-reachable local Python control modules rooted at the pinned CI, installer, test
-runner, and release entrypoints. The static closure is a deliberately reviewed
-inventory, not a runtime-discovered allowlist. The focused closure test rejects
-unlisted local imports and recognized dynamic import/loading constructs. If dynamic
-loading or another unbounded local execution path is introduced, readiness remains
-blocked until that dependency closure is independently established; do not silently
-add its digest or claim that this inventory proves arbitrary transitive execution.
+included in a deliberately reviewed, but currently incomplete, fingerprint
+inventory. The mandatory `issue-link.yml` workflow is not pinned; the static
+closure test misses explicit relative imports such as `deploy.native_readiness`
+and local subprocess module entrypoints such as `deploy.observe_release`.
+Passing that test does not establish complete execution-source coverage.
+
+These confirmed gaps, their transitive dependencies, and specific mutation and
+traversal regressions must be independently repaired and reviewed before the
+`pending-source-contract` hold below may be cleared or updated. They remain
+mandatory activation work, not claims of a completed closure. No digest is
+accepted automatically. The current unconditional hold keeps every phase unready
+regardless of the incomplete inventory or caller-supplied evidence.
 
 The coordinator fingerprint remains tied to the published checkpoint
 `403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83` from pending PR16, not to a candidate
@@ -63,8 +67,8 @@ roots remain rejected with their existing diagnostics.
 
 That checkpoint also does not establish that PR16 is merged, and
 `deploy/cloud_coordinator.py` is absent from merged main at the baseline above.
-A missing source still adds `main-source-missing`. Issue #26 activation follow-up
-must independently review the real merged coordinator and its complete control
+A missing source still adds `main-source-missing`. The activation follow-up in
+issue #35 must independently review the real merged coordinator and its complete control
 contract, establish strict review timestamps/ordering and per-head sensitive
 review enforcement, deliberately update operational source pins and fixtures, and
 make a separately reviewed source change to clear or update this hold. Neither a
