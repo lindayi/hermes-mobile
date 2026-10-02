@@ -2167,6 +2167,121 @@ def test_cloud_review_success_status_is_not_published_from_stale_threads(tmp_pat
     assert not any(route.endswith("/statuses/" + HEAD) for route, _ in api.writes)
 
 
+INVALID_MERGEABLE_STATES = [
+    None, True, False, 0, 1, 0.0, 1.0, "", "unknown", "CLEAN", "future-state",
+    [], {}, ["clean"], {"state": "clean"},
+]
+
+
+@pytest.mark.parametrize("state", INVALID_MERGEABLE_STATES)
+@pytest.mark.parametrize("mergeable", [True, False])
+@pytest.mark.parametrize("repair_evidence", [False, True])
+def test_invalid_mergeable_state_defers_planning_and_apply(
+        tmp_path, state, mergeable, repair_evidence):
+    api = FakeApi(unresolved=repair_evidence)
+    api.pull.update(mergeable=mergeable, mergeable_state=state)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+
+    for apply in (False, True):
+        summary = coordinator.run(apply=apply)["pull_requests"][0]
+        assert "mergeability-unknown" in summary["reasons"]
+        assert not summary["repair_requested"]
+        assert not summary["auto_merge_eligible"]
+        assert not summary["auto_merge_requested"]
+        assert summary["outcomes"] == 0
+    assert api.fix_attempts == 0
+    assert not api.graphql_writes
+    assert not any(route.endswith(("/tasks", "/comments")) for route, _ in api.writes)
+    persisted = store.snapshot()
+    assert persisted["enrollments"]["16"]["attempts"] == 0
+    assert not any(a["kind"] in {"fix", "auto-merge"}
+                   for a in persisted["actions"].values())
+    assert not persisted["lifecycle_events"]
+
+
+@pytest.mark.parametrize("state", INVALID_MERGEABLE_STATES)
+@pytest.mark.parametrize("fence_read", [3, 4], ids=["dispatch", "final-dispatch"])
+def test_invalid_mergeable_state_at_task_fences_never_claims(tmp_path, state, fence_read):
+    class StateRace(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/pulls/16") and self.pull_reads >= fence_read:
+                return value | {"mergeable_state": state}
+            return value
+
+    api = StateRace(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    summary = Coordinator(api, store).run(apply=True)["pull_requests"][0]
+
+    assert api.pull_reads >= fence_read
+    assert "mergeability-unknown" in summary["reasons"]
+    assert not summary["repair_requested"] and not summary["auto_merge_requested"]
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    persisted = store.snapshot()
+    assert persisted["enrollments"]["16"]["attempts"] == 0
+    assert not any(a["kind"] == "fix" for a in persisted["actions"].values())
+    assert not persisted["lifecycle_events"]
+
+
+@pytest.mark.parametrize("state", INVALID_MERGEABLE_STATES)
+@pytest.mark.parametrize("fence_read", [2, 3], ids=["fresh-plan", "final-merge"])
+def test_invalid_mergeable_state_at_merge_fences_never_mutates(tmp_path, state, fence_read):
+    class StateRace(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/pulls/16") and self.pull_reads >= fence_read:
+                return value | {"mergeable_state": state}
+            return value
+
+    api = StateRace()
+    store = StateStore(tmp_path / "state.json")
+    action = {"kind": "auto-merge", "issue": 16, "head": HEAD, "main_sha": BASE,
+              "key": f"auto-merge:16:{HEAD}:{BASE}"}
+    summary = Coordinator(api, store)._enable_auto_merge(
+        action, {"enrollment": enrolled_record()},
+    )
+
+    assert api.pull_reads >= fence_read
+    assert not summary["auto_merge_eligible"] and summary["merge_action"] is None
+    assert not api.writes and not api.graphql_writes
+    assert store.action(action["key"])["status"] == "blocked"
+
+
+@pytest.mark.parametrize("state, merge_eligible", [
+    ("clean", True), ("unstable", True), ("has_hooks", True),
+    ("blocked", False), ("behind", False), ("dirty", False), ("draft", False),
+])
+@pytest.mark.parametrize("fence_read", [2, 3], ids=["fresh-plan", "final-merge"])
+def test_supported_mergeable_states_preserve_merge_gate(
+        tmp_path, state, merge_eligible, fence_read):
+    class StateRace(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/pulls/16") and self.pull_reads >= fence_read:
+                return value | {"mergeable_state": state}
+            return value
+
+    api = StateRace()  # draft=False and mergeable=True cannot override the state.
+    store = StateStore(tmp_path / "state.json")
+    action = {"kind": "auto-merge", "issue": 16, "head": HEAD, "main_sha": BASE,
+              "key": f"auto-merge:16:{HEAD}:{BASE}"}
+    result = Coordinator(api, store)._enable_auto_merge(
+        action, {"enrollment": enrolled_record()},
+    )
+
+    assert api.pull_reads >= fence_read
+    assert not api.writes
+    if merge_eligible:
+        assert result == "sent"
+        assert len(api.graphql_writes) == 1
+        assert api.graphql_writes[0][1]["expectedHeadOid"] == HEAD
+    else:
+        assert not api.graphql_writes
+        assert not result["auto_merge_eligible"] and result["merge_action"] is None
+        assert store.action(action["key"])["status"] == "blocked"
+
+
 UNCOMPUTED_MERGEABILITY = [
     {"mergeable": None, "mergeable_state": "unknown"},
     {"mergeable": None, "mergeable_state": "clean"},
@@ -2784,6 +2899,64 @@ def test_post_task_review_cannot_replace_invalid_persisted_completion_proof(
     assert StateStore(path).action(fix["key"])["handoff_state"] != "done"
     assert "agent" in summary["pull_requests"][0]["reasons"]
     assert api.writes == writes and api.graphql_writes == graphql_writes
+
+
+@pytest.mark.parametrize("result_head", [HEAD, "c" * 40], ids=["same-head", "new-head"])
+def test_exhausted_review_handoff_survives_compaction_and_restart(tmp_path, result_head):
+    api = RecordingApi(unresolved=True)
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.complete_task(fix["task_id"], fix, head_sha=result_head)
+    api.review_state = "PENDING"
+
+    for _ in range(MAX_HANDOFF_POLLS):
+        coordinator.run(apply=True)
+
+    action = store.action(fix["key"])
+    assert action is not None, "Compaction must retain the result-head owner blocker"
+    assert action["status"] == "completed" and action["handoff_state"] == "failed"
+    assert action["blocker"] == "review_handoff_exhausted"
+    assert action["head"] == HEAD and action["receipt_head"] == result_head
+    assert action["receipt_base"] == BASE
+    assert action["receipt_comment_id"] == 9001
+    assert action["receipt_session_id"] == "session-task-1"
+    assert action["receipt_completed_at"] == "2026-10-01T12:05:30Z"
+    events = store.snapshot()["lifecycle_events"]
+    assert [event["reason"] for event in events] == ["execution_exhausted"]
+    assert events[0]["head_sha"] == result_head
+    export = (tmp_path / "workflow-events.json").read_bytes()
+
+    # Neither live task inventory nor a later review replaces the exhausted claim.
+    api.tasks.clear()
+    api.review_state = "APPROVED"
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    writes, graphql_writes = list(api.writes), list(api.graphql_writes)
+    restarted = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+    before = path.read_bytes()
+    plan = restarted.run(apply=False)["pull_requests"][0]
+    assert path.read_bytes() == before
+    summary = restarted.run(apply=True)["pull_requests"][0]
+    for item in (plan, summary):
+        assert "agent" in item["reasons"]
+        assert not item["repair_requested"] and not item["auto_merge_eligible"]
+    StateStore(path).retire(16, result_head)
+    persisted = StateStore(path).snapshot()
+    assert persisted["actions"][fix["key"]] == action
+    assert persisted["enrollments"]["16"]["attempts"] == 1
+    assert persisted["lifecycle_events"] == events
+    assert (tmp_path / "workflow-events.json").read_bytes() == export
+    assert api.fix_attempts == 1
+    assert api.writes == writes and api.graphql_writes == graphql_writes
+
+    # Once positively non-current, this terminal blocker remains compactable.
+    StateStore(path).retire(16, "d" * 40)
+    assert StateStore(path).action(fix["key"]) is None
+    assert StateStore(path).snapshot()["lifecycle_events"] == events
 
 
 def test_task_handoff_requests_ready_review_once_and_fails_closed_after_wait(tmp_path):
