@@ -400,6 +400,16 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
             result = super().commit_scan(*args, **kwargs)
             if self.armed:
                 self.committed = True
+                if change == "authorized":
+                    # ACK retirement alone can clear the approval event: prove
+                    # authorization was committed before any handoff or race.
+                    enrollment = self.snapshot()["enrollments"]["16"]
+                    assert enrollment["sensitive_sha"] == HEAD
+                    assert enrollment["sensitive_authorization"]["head_sha"] == HEAD
+                    assert enrollment["sensitive_authorization"]["review_id"] == api.owner_review_id
+                    assert enrollment["sensitive_authorization"]["body_sha256"] == api.owner_review_digest
+                    assert enrollment["targeted_review"]["head_sha"] == HEAD
+                    assert enrollment["targeted_review"]["review_id"] == api.owner_review_id
                 if failure == "race":
                     api.head_sha = "c" * 40
                     api.pull["head"]["sha"] = api.head_sha
@@ -448,8 +458,10 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
     api.pull["draft"] = True
     api.review_state = "PENDING"
     if change == "authorized":
+        api.authorize_sha_review = True
         api.comments.append({"id": 124, "user": {"id": GITHUB_OWNER},
-                             "body": f"/hermes authorize-sensitive {HEAD}",
+                             "body": (f"/hermes authorize-sensitive {HEAD} review "
+                                      f"{api.owner_review_id} {api.owner_review_digest}"),
                              "updated_at": "2026-10-01T20:59:00Z"})
     else:
         api.head_sha = "c" * 40
