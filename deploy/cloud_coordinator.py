@@ -44,6 +44,9 @@ MAX_HANDOFF_POLLS = 6
 HANDOFF_ACTIVE_STATES = frozenset({
     "pending", "waiting_review", "ready_uncertain", "review_request_uncertain",
 })
+COMPUTED_MERGEABLE_STATES = frozenset({
+    "clean", "unstable", "has_hooks", "blocked", "behind", "dirty", "draft",
+})
 COPILOT_REVIEWER_LOGIN = "copilot-pull-request-reviewer[bot]"
 MAX_PAGES = 100
 MAX_FINDINGS = 8
@@ -313,7 +316,8 @@ def _pull_merge_eligible(pull, current_main_sha):
     base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
     return (pull.get("state") == "open" and pull.get("merged") is False
             and pull.get("draft") is False and pull.get("mergeable") is True
-            and pull.get("mergeable_state") not in {"behind", "dirty", "unknown", "blocked"}
+            and not _mergeability_unknown(pull)
+            and pull.get("mergeable_state") in {"clean", "unstable", "has_hooks"}
             and base.get("ref") == MAIN_BRANCH and base.get("sha") == current_main_sha
             and _is_sha(current_main_sha))
 
@@ -921,7 +925,8 @@ def _pull_identity(pull, binding):
 
 def _mergeability_unknown(pull):
     state = pull.get("mergeable_state")
-    return (type(pull.get("mergeable")) is not bool or state in {None, "unknown"}
+    return (type(pull.get("mergeable")) is not bool or type(state) is not str
+            or state not in COMPUTED_MERGEABLE_STATES
             or (pull.get("mergeable") is not True and state not in {"dirty", "behind"}))
 
 
@@ -2302,7 +2307,9 @@ def _retirable_action(action, current_head, inactive):
             return False
         action_head = (
             action.get("receipt_head")
-            if action.get("blocker") in {"conflict_incompatible", "policy_broken"}
+            if action.get("blocker") in {
+                "conflict_incompatible", "policy_broken", "review_handoff_exhausted",
+            }
             else action.get("head")
         )
         return status == "completed" and (
