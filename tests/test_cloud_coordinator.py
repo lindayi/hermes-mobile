@@ -516,6 +516,62 @@ def test_rest_pagination_combines_all_pages_or_fails_closed():
     ]
 
 
+def _parse_inventory(output, collection=None):
+    # Exercise the production GhApi/get_all parser, replacing only gh's transport.
+    def transport(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    return GhApi(run=transport).get_all("synthetic-inventory", collection=collection)
+
+
+@pytest.mark.parametrize("collection", [None, "tasks", "workflow_runs"])
+@pytest.mark.parametrize("output", [
+    "", " \n\t", "null", "false", "42", '"rows"', "{}",
+    '{"other":[]}', '{"tasks":null,"workflow_runs":null}',
+    '{"tasks":{},"workflow_runs":{}}', '[{"id":1}]\nnull',
+    '[]\n{"other":[]}', '[]\n{"tasks":',
+])
+def test_inventory_parser_rejects_unproven_pages(output, collection):
+    with pytest.raises(ApiError, match="pagination was incomplete"):
+        _parse_inventory(output, collection)
+
+
+@pytest.mark.parametrize("output,collection,expected", [
+    ("[]", None, []), ("[]", "tasks", []), ('{"tasks":[]}', "tasks", []),
+    ('{"workflow_runs":[]}', "workflow_runs", []),
+    ('[{"id":1}]\n[]\n[{"id":2}]', None, [{"id": 1}, {"id": 2}]),
+    ('{"tasks":[{"id":1}]}\n{"tasks":[{"id":2}]}\n{"tasks":[]}',
+     "tasks", [{"id": 1}, {"id": 2}]),
+])
+def test_inventory_parser_preserves_explicit_empty_and_all_pages(output, collection, expected):
+    assert _parse_inventory(output, collection) == expected
+
+
+@pytest.mark.parametrize("inventory", ["issues", "comments", "tasks", "fresh-tasks"])
+@pytest.mark.parametrize("output", ["null", " \n", '{"other":[]}'])
+def test_malformed_inventory_cannot_advance_scan_or_claim_repair(tmp_path, inventory, output):
+    class RawInventory(FakeApi):
+        def get_all(self, route, *, collection=None):
+            if ((inventory == "issues" and "/issues?" in route)
+                    or (inventory == "comments" and "/comments?" in route)
+                    or (inventory in {"tasks", "fresh-tasks"} and collection == "tasks"
+                        and (inventory == "tasks" or self.task_reads > 0))):
+                return _parse_inventory(output, collection)
+            return super().get_all(route, collection=collection)
+
+    api = RawInventory(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    before = store.snapshot()
+    with pytest.raises(ApiError, match="pagination was incomplete"):
+        Coordinator(api, store).run(apply=True)
+    if inventory != "fresh-tasks":
+        assert store.snapshot() == before
+    else:
+        assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in store.actions().values())
+    assert api.fix_attempts == 0 and not api.graphql_writes
+
+
 class FakeApi:
     def __init__(self, *, author_id=OWNER, race=False, fail=False,
                  sensitive=False, authorize=False, authorize_sha=HEAD, source_failure=False,
@@ -1226,6 +1282,59 @@ def test_agent_starting_after_plan_is_rechecked_before_fix_dispatch(tmp_path):
     assert result["pull_requests"][0]["repair_requested"] is False
 
 
+@pytest.mark.parametrize("fresh_only", [False, True])
+@pytest.mark.parametrize("changes,busy", [
+    ({}, True), ({"name": "Addressing comment on PR #16"}, True),
+    ({"status": "queued"}, True), ({"status": "waiting"}, True),
+    ({"status": "completed"}, False), ({"head_branch": "other"}, False),
+    ({"workflow_id": 1}, False), ({"path": ".github/workflows/lookalike.yml"}, False),
+    ({"actor": {"id": 1}}, False), ({"actor": None}, False),
+    ({"event": "pull_request"}, False),
+    ({"repository": {"id": 1}}, False), ({"head_repository": {"id": 1}}, False),
+    ({"repository": None}, False), ({"head_repository": None}, False),
+])
+def test_workflow_inventory_alone_fences_repairs(tmp_path, fresh_only, changes, busy):
+    # Identity/path verified from recorded run 36950302847 (workflow 372426410).
+    # Only synthetic branch/SHA/status are used; run names are not identity.
+    run = {
+        "id": 789, "name": "Running Copilot cloud agent",
+        "workflow_id": 372426410, "path": "dynamic/copilot-swe-agent/copilot",
+        "event": "dynamic", "actor": {"id": 198982749},
+        "repository": {"id": 1399942965}, "head_repository": {"id": 1399942965},
+        "head_branch": "topic", "head_sha": "c" * 40, "status": "in_progress",
+        "pull_requests": [],
+    } | changes
+
+    class WorkflowInventory(FakeApi):
+        def get_all(self, route, *, collection=None):
+            if collection == "workflow_runs":
+                self.workflow_reads += 1
+                rows = [run] if not fresh_only or self.workflow_reads > 1 else []
+                return _parse_inventory(json.dumps({"workflow_runs": rows}), collection)
+            if collection == "tasks":
+                self.task_reads += 1
+                return _parse_inventory('{"tasks":[]}', collection)
+            return super().get_all(route, collection=collection)
+
+    api = WorkflowInventory(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    plan = coordinator._build_plan(apply=False)
+    planned = plan["pull_requests"][0]
+    assert (planned["repair"] is None) == (busy and not fresh_only)
+    assert ("agent" in planned["reasons"]) == (busy and not fresh_only)
+    assert not api.writes and not api.graphql_writes
+    result = coordinator._apply(plan)
+    assert api.fix_attempts == (0 if busy else 1)
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == (0 if busy else 1)
+    assert not api.graphql_writes
+    if busy:
+        assert not any(action["kind"] == "fix" for action in store.actions().values())
+        assert not result[0]["repair_requested"]
+    if fresh_only:
+        assert api.workflow_reads == 2 and api.task_reads == 2
+
+
 def test_response_uncertain_agent_dispatch_is_reconciled_never_retried(tmp_path):
     api = FakeApi(unresolved=True, fail_fix=True)
     store = StateStore(tmp_path / "state.json")
@@ -1428,6 +1537,61 @@ def test_other_branch_task_session_does_not_block_this_pr(tmp_path):
     api = OtherBranchTask(unresolved=True)
     Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
     assert api.fix_attempts == 1
+
+
+@pytest.mark.parametrize("fresh_only", [False, True])
+@pytest.mark.parametrize("evidence,busy", [
+    ({"artifacts": [{"provider": "github", "type": "branch", "data": {"base_ref": "main"}}]}, True),
+    *[({"artifacts": [{"provider": "github", "type": "branch",
+                       "data": {"head_ref": value, "base_ref": "main"}}]}, True)
+      for value in [None, "", " \t", 17, ["other"]]],
+    *[({"artifacts": [{"provider": "github", "type": "branch",
+                       "data": {"head_ref": "other", "base_ref": value}}]}, True)
+      for value in [None, "", " \t", 17]],
+    *[({"artifacts": [{"provider": provider, "type": "branch",
+                       "data": {"head_ref": "other", "base_ref": "main"}}]}, True)
+      for provider in [None, "unknown"]],
+    *[({"sessions": [{"head_ref": value, "base_ref": "main"}]}, True)
+      for value in [None, "", " \t", 17, ["other"]]],
+    *[({"sessions": [{"head_ref": "other", "base_ref": value}]}, True)
+      for value in [None, "", " \t", 17]],
+    ({"artifacts": [{"type": "pull", "data": {"id": 99}}]}, True),
+    ({"artifacts": [{"provider": "github", "type": "pull", "data": {"id": True}}]}, True),
+    ({"artifacts": [{"provider": "github", "type": "pull", "data": {"id": 0}}]}, True),
+    ({"artifacts": 17}, True), ({"sessions": 17}, True),
+    ({"artifacts": [{"provider": "github", "type": "branch", "data": []}]}, True),
+    ({"sessions": ["other"]}, True), ({"artifacts": [{"type": "unknown"}]}, True),
+    ({"artifacts": [{"provider": "github", "type": "branch",
+                     "data": {"head_ref": "other", "base_ref": "main"}}]}, False),
+    ({"sessions": [{"head_ref": "other", "base_ref": "main"}]}, False),
+    ({"artifacts": [{"provider": "github", "type": "pull", "data": {"id": 99}}]}, False),
+    ({"artifacts": [{"provider": "github", "type": "branch",
+                     "data": {"head_ref": "topic", "base_ref": "main"}}]}, True),
+    ({"sessions": [{"head_ref": "topic", "base_ref": "main"}]}, True),
+    ({"artifacts": [{"provider": "github", "type": "pull", "data": {"id": 1600}}]}, True),
+])
+def test_task_inventory_requires_identifiable_evidence(tmp_path, fresh_only, evidence, busy):
+    class TaskInventory(FakeApi):
+        def get_all(self, route, *, collection=None):
+            if collection == "tasks":
+                self.task_reads += 1
+                rows = ([{"id": "other-task", "state": "in_progress", **evidence}]
+                        if not fresh_only or self.task_reads > 1 else [])
+                return _parse_inventory(json.dumps({"tasks": rows}), collection)
+            return super().get_all(route, collection=collection)
+
+    api = TaskInventory(unresolved=True)
+    api.pull["id"] = 1600
+    store = StateStore(tmp_path / "state.json")
+    result = Coordinator(api, store).run(apply=True)
+    assert api.fix_attempts == (0 if busy else 1)
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == (0 if busy else 1)
+    assert not api.graphql_writes
+    if busy:
+        assert not any(action["kind"] == "fix" for action in store.actions().values())
+        assert not result["pull_requests"][0]["repair_requested"]
+        if not fresh_only:
+            assert "agent" in result["pull_requests"][0]["reasons"]
 
 
 def test_crash_after_reservation_cannot_replay_task_post(tmp_path):

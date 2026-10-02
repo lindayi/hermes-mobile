@@ -23,6 +23,9 @@ REPOSITORY_ID = 1399942965
 OWNER_ID = 5164171
 COPILOT_REVIEWER_ID = 175728472
 SOURCE_WORKFLOW_ID = 372155405
+COPILOT_WORKFLOW_ID = 372426410
+COPILOT_WORKFLOW_PATH = "dynamic/copilot-swe-agent/copilot"
+COPILOT_AGENT_ID = 198982749
 MAIN_BRANCH = "main"
 REPAIR_LIMIT = 3
 MAX_PAGES = 100
@@ -406,16 +409,16 @@ def _decode_pages(output, collection=None):
         value, end = decoder.raw_decode(output, offset)
         values.append(value)
         offset = end
-    if len(values) == 1 and isinstance(values[0], list):
-        return values[0]
+    if not values:
+        raise ValueError("Missing inventory page")
     result = []
     for value in values:
         if isinstance(value, list):
             result.extend(value)
         elif isinstance(value, dict) and collection and isinstance(value.get(collection), list):
             result.extend(value[collection])
-        elif value is not None:
-            result.append(value)
+        else:
+            raise ValueError("Malformed inventory page")
     return result
 
 
@@ -647,6 +650,24 @@ def _workflow_runs(api, branch, pull_number):
     return matches, pull_bound
 
 
+def _cloud_agent_active(runs, branch):
+    # Verified dynamic workflow identity, not its changeable display name.
+    # A run on an earlier SHA can still be working on this branch.
+    return any(
+        isinstance(run, dict) and run.get("head_branch") == branch
+        and run.get("workflow_id") == COPILOT_WORKFLOW_ID
+        and run.get("path") == COPILOT_WORKFLOW_PATH
+        and run.get("event") == "dynamic"
+        and isinstance(run.get("actor"), dict)
+        and run["actor"].get("id") == COPILOT_AGENT_ID
+        and all(isinstance(run.get(field), dict)
+                and run[field].get("id") == REPOSITORY_ID
+                for field in ("repository", "head_repository"))
+        and run.get("status") != "completed"
+        for run in runs
+    )
+
+
 def _latest_source_failure(runs, head_sha, branch, pull_number):
     candidates = [
         run for run in runs
@@ -728,23 +749,36 @@ def _task_terminal(task):
 def _other_task_active(tasks, snapshot):
     head = snapshot["pull"]["head"]["ref"]
     for task in tasks:
-        if not isinstance(task, dict) or not _task_terminal(task):
-            artifacts = task.get("artifacts") if isinstance(task, dict) else None
-            branches = [item["data"] for item in artifacts or ()
-                        if isinstance(item, dict) and item.get("type") == "branch"
-                        and isinstance(item.get("data"), dict)]
-            sessions = task.get("sessions") if isinstance(task, dict) else None
-            branches.extend(session for session in sessions or ()
-                            if isinstance(session, dict) and session.get("head_ref"))
-            pull_ids = [item["data"]["id"] for item in artifacts or ()
-                        if isinstance(item, dict) and item.get("type") == "pull"
-                        and isinstance(item.get("data"), dict)
-                        and isinstance(item["data"].get("id"), int)]
-            pull_id = snapshot["pull"].get("id")
-            if (any(item.get("head_ref") == head for item in branches)
-                    or (pull_id is not None and pull_id in pull_ids)
-                    or (not branches and (not pull_ids or pull_id is None))):
+        if not isinstance(task, dict):
+            return True
+        if _task_terminal(task):
+            continue
+        artifacts = task.get("artifacts", [])
+        sessions = task.get("sessions", [])
+        if not isinstance(artifacts, list) or not isinstance(sessions, list):
+            return True
+        branches, pull_ids = list(sessions), []
+        for item in artifacts:
+            if (not isinstance(item, dict) or item.get("provider") != "github"
+                    or not isinstance(item.get("data"), dict)):
                 return True
+            data = item["data"]
+            if item.get("type") == "branch":
+                branches.append(data)
+            elif item.get("type") == "pull" and type(data.get("id")) is int and data["id"] > 0:
+                pull_ids.append(data["id"])
+            else:
+                return True
+        # A truthy partial object is not proof that a task belongs elsewhere.
+        if any(not isinstance(item, dict) or any(
+                not isinstance(item.get(field), str) or not item[field].strip()
+                for field in ("head_ref", "base_ref")) for item in branches):
+            return True
+        pull_id = snapshot["pull"].get("id")
+        if (any(item["head_ref"] == head for item in branches)
+                or (pull_id is not None and pull_id in pull_ids)
+                or (not branches and (not pull_ids or pull_id is None))):
+            return True
     return False
 
 
@@ -983,7 +1017,9 @@ class Coordinator:
                         self.store.update_action(key, "completed")
                 else:
                     busy = True
-        return busy or _other_task_active(snapshot["tasks"], snapshot)
+        return (busy or _other_task_active(snapshot["tasks"], snapshot)
+                or _cloud_agent_active(snapshot.get("workflows", []),
+                                       snapshot["pull"]["head"]["ref"]))
 
     def _outcome(self, snapshot, code, message):
         key = f"{snapshot['issue']}:{snapshot['head']}:{code}"
@@ -1194,7 +1230,8 @@ class Coordinator:
         reconciliation = _reconciliation_reasons(current)
         if reconciliation:
             return reconciliation[0][0]
-        if _other_task_active(tasks, {"pull": current}):
+        if (_other_task_active(tasks, {"pull": current})
+                or _cloud_agent_active(workflows, branch)):
             return "agent-running"
         claimed = self.store.claim_action(key, action)
         if not claimed:
