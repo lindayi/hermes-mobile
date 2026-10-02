@@ -91,7 +91,7 @@ def find_receipt(comments, *, complete, nonce, task_id, session_id,
             continue
         author = comment.get("user")
         body = comment.get("body")
-        if (not isinstance(author, dict) or author.get("id") != COPILOT_AGENT_ID
+        if (not _identity(author, COPILOT_AGENT_ID)
                 or not isinstance(body, str) or nonce not in body):
             continue
         if comment.get("updated_at") != comment.get("created_at"):
@@ -148,7 +148,7 @@ def validate_task_receipt(task, action, pull, comments, *, now):
                     or data.get("base_ref") != "main"):
                 raise ReceiptError("Task branch artifact does not match the dispatch")
             branches.append(data)
-        elif (data.get("id") != action.get("pull_id")
+        elif (not _identity(data, action.get("pull_id"))
               or (data.get("global_id") is not None
                   and data.get("global_id") != action.get("pull_node_id"))):
             raise ReceiptError("Task pull artifact does not match the enrolled pull request")

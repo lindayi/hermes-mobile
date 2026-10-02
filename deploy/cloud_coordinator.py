@@ -2078,7 +2078,7 @@ class Coordinator:
         self.store.update_action(key, "sent")
         return "sent"
 
-    def _apply(self, plan):
+    def _apply(self, plan, *, after_commit=None):
         self.store.commit_scan(
             plan["cursor"], plan["processed"], commands=plan["commands"],
             retirements=[
@@ -2091,6 +2091,9 @@ class Coordinator:
             observations=plan.get("observations", []),
             now=plan["now"],
         )
+        # Publish only committed observations before fallible reads or mutations.
+        if after_commit is not None:
+            after_commit()
         summaries = []
         for pr_plan, snapshot in zip(plan["pull_requests"], plan["snapshots"]):
             if pr_plan.get("terminal"):
@@ -2215,7 +2218,12 @@ class Coordinator:
                 # Independent sources share the complete scan's atomic commit;
                 # malformed scans must not persist even valid source events.
                 plan["source_lifecycle_events"] = source_events
-                pull_requests = self._apply(plan)
+                pull_requests = self._apply(
+                    plan, after_commit=lambda: self.store.write_lifecycle_export(
+                        now=self.clock(), owner_user_id=owner_user_id,
+                        directory=export_directory,
+                    ),
+                )
                 if self.lifecycle_source_paths is not None:
                     from deploy.workflow_lifecycle_sources import collect_controller_verified_events
 

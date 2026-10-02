@@ -64,6 +64,40 @@ def test_receipt_is_full_exact_and_bound_to_task_session_pr_and_heads():
     assert "task=" in receipt_instruction(NONCE)
 
 
+@pytest.mark.parametrize("field", [
+    "comment_author", "comment_id", "task_creator", "task_owner", "task_repository",
+    "session_user", "session_owner", "session_repository", "artifact_pull", "pull_number",
+])
+@pytest.mark.parametrize("kind", ["float", "string", "bool", "null"])
+def test_receipt_numeric_identities_require_exact_integers(completed_task_binding, field, kind):
+    import json
+    # JSON round-trip separates fixture aliases so each identity is tested alone.
+    task, action, pull = json.loads(json.dumps(completed_task_binding))
+    comment = receipt()
+    targets = {
+        "comment_author": (comment["user"], "id"),
+        "comment_id": (comment, "id"),
+        "task_creator": (task["creator"], "id"),
+        "task_owner": (task["owner"], "id"),
+        "task_repository": (task["repository"], "id"),
+        "session_user": (task["sessions"][0]["user"], "id"),
+        "session_owner": (task["sessions"][0]["owner"], "id"),
+        "session_repository": (task["sessions"][0]["repository"], "id"),
+        "artifact_pull": (task["artifacts"][1]["data"], "id"),
+        "pull_number": (pull, "number"),
+    }
+    target, key = targets[field]
+    target[key] = {"float": float(target[key]), "string": str(target[key]),
+                   "bool": True, "null": None}[kind]
+    if field == "comment_author":
+        assert validate_task_receipt(task, action, pull, [comment], now=NOW) is None
+        # An unauthenticated copy cannot poison an otherwise valid receipt.
+        assert validate_task_receipt(task, action, pull, [comment, receipt()], now=NOW)
+    else:
+        with pytest.raises(ReceiptError):
+            validate_task_receipt(task, action, pull, [comment], now=NOW)
+
+
 @pytest.mark.parametrize("comment_id", [None, True, 0, -1, "777"])
 def test_receipt_requires_a_positive_numeric_comment_identity(comment_id):
     item = receipt()

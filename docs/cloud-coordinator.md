@@ -29,6 +29,14 @@ change. The timer requires an explicit owner-reviewed activation after external
 policy wiring. No production service, GitHub setting, branch protection, or
 deployment behavior is changed here.
 
+The service uses the canonical checkout's `.venv/bin/python`, like the workflow
+notification consumer. Provision and verify that environment from the repository
+lockfile before activation; the unit never installs dependencies or falls back to
+system Python. Lifecycle owner/configuration reads import application dependencies,
+so a standard-library-only interpreter or a successful CLI `--help` alone is not
+sufficient qualification. The focused unit regression imports that lazy dependency
+path under a synthetic home without loading live settings or making API calls.
+
 ## What is and is not enforced
 
 Implemented in this slice:
