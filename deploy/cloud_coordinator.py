@@ -939,13 +939,19 @@ class Coordinator:
         commands, processed = [], []
         cursor = state.get("cursor")
         issues = self._issues(cursor)
+        if not isinstance(issues, list):
+            raise CoordinatorError("GitHub issue inventory was malformed")
         for issue in issues:
-            if not isinstance(issue, dict) or type(issue.get("number")) is not int:
-                continue
+            if (not isinstance(issue, dict) or type(issue.get("number")) is not int
+                    or not 1 <= issue["number"] <= 2**31 - 1):
+                raise CoordinatorError("GitHub issue row identity was malformed")
             comments = _all_review_comments(self.api, issue["number"], cursor)
+            if not isinstance(comments, list):
+                raise CoordinatorError("GitHub issue comment inventory was malformed")
             for comment in comments:
-                if not isinstance(comment, dict) or comment.get("id") is None:
-                    continue
+                if (not isinstance(comment, dict) or type(comment.get("id")) is not int
+                        or comment["id"] <= 0):
+                    raise CoordinatorError("GitHub issue comment identity was malformed")
                 key = str(comment["id"])
                 if _event_consumed(state, key):
                     continue
@@ -1372,20 +1378,7 @@ class Coordinator:
             and _github_identity(review.get("user"), COPILOT_REVIEWER_ID)
         ]
         has_submitted_review = bool(submitted_reviews)
-        has_actionable_review = any(
-            review.get("state") in {"COMMENTED", "CHANGES_REQUESTED"}
-            for review in submitted_reviews
-        )
         if has_submitted_review:
-            if (action.get("receipt_head") != action.get("head")
-                    and not has_actionable_review):
-                self.store.update_action(
-                    key, "completed", handoff_state="waiting_review",
-                    review_request_state="observed",
-                )
-                return self._handoff_wait(
-                    key, action | {"handoff_state": "waiting_review"}, snapshot,
-                )
             self.store.update_action(
                 key, "completed", handoff_state="done",
                 review_request_state="observed",
@@ -1652,7 +1645,7 @@ class Coordinator:
                         "state": status_state, "generation": generation,
                         "key": f"status:{number}:{head}:{generation}",
                     }
-        merge = eligible_for_auto_merge(
+        merge = snapshot["scoped"] and eligible_for_auto_merge(
             snapshot["pull"], current_main_sha=snapshot["main_sha"],
             required_checks=required, check_runs=snapshot["check_runs"],
             statuses=snapshot["statuses"], checks_complete=snapshot["policy_complete"],
@@ -1677,8 +1670,9 @@ class Coordinator:
         notification_outcomes, lifecycle_events = self._notification_outcomes(
             snapshot, reasons,
         )
-        if (not agent_busy and attempts >= REPAIR_LIMIT and needs_reconciliation
-                and not neutral_blocker
+        if (snapshot["scoped"] and not agent_busy
+                and snapshot["pull"].get("draft") is not True
+                and attempts >= REPAIR_LIMIT and needs_reconciliation and not neutral_blocker
                 and neutral_reconciliation_request(snapshot, 0)):
             lifecycle_events.append(_lifecycle_event(
                 snapshot, "execution_exhausted", occurred_at=self._now_string(),
@@ -1776,10 +1770,16 @@ class Coordinator:
         )
         workflows, _ = _workflow_runs(self.api, branch, action["issue"])
         source_failure = _latest_source_failure(workflows, action["head"], branch, action["issue"])
-        fresh = repair_request(
-            action["head"], action["attempt"] - 1, threads, check_runs, pull_number=action["issue"],
-            source_failure=source_failure,
-        )
+        if neutral:
+            fresh = neutral_reconciliation_request({
+                "issue": action["issue"], "head": action["head"],
+                "main_sha": action["main_sha"], "pull": current,
+            }, action["attempt"] - 1)
+        else:
+            fresh = repair_request(
+                action["head"], action["attempt"] - 1, threads, check_runs,
+                pull_number=action["issue"], source_failure=source_failure,
+            )
         if not fresh or fresh["marker"] != action["marker"] or fresh["body"] != action["body"]:
             # Do not claim stale evidence, nor substitute a new repair/merge in this cycle.
             return "superseded"
@@ -1789,7 +1789,9 @@ class Coordinator:
         if not current or current["head"].get("ref") != branch:
             return "superseded"
         reconciliation = _reconciliation_reasons(current)
-        if reconciliation:
+        if neutral and not reconciliation:
+            return "superseded"
+        if not neutral and reconciliation:
             return reconciliation[0][0]
         if (_other_task_active(tasks, {"pull": current})
                 or _cloud_agent_active(workflows, branch)):

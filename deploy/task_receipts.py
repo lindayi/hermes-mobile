@@ -103,7 +103,10 @@ def find_receipt(comments, *, complete, nonce, task_id, session_id,
         ]
         if len(matches) != 1:
             raise ReceiptError("Task receipt fields or result do not match")
-        found.append({"result": matches[0], "comment_id": comment.get("id")})
+        comment_id = comment.get("id")
+        if type(comment_id) is not int or comment_id <= 0:
+            raise ReceiptError("Task receipt comment identity is malformed")
+        found.append({"result": matches[0], "comment_id": comment_id})
     if len(found) > 1:
         raise ReceiptError("Conflicting or duplicate task receipts")
     return found[0] if found else None

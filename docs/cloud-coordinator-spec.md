@@ -31,7 +31,8 @@ event in durable state before retiring its enrollment. A terminal PR already clo
 at the first observation is treated as historical baseline and is not exported;
 reopening requires a fresh owner enrollment command. API errors,
 rate limits, malformed pagination, and incomplete GraphQL review-thread pages
-fail closed; the cursor is advanced only after a complete read.
+fail closed; malformed issue/comment rows or IDs also abort the whole scan. The
+cursor is advanced only after a complete read.
 
 Only current unresolved review-thread comments and completed failed/timed-out
 `Source checks` workflow runs are eligible repair evidence. It sends at most
@@ -39,6 +40,8 @@ eight findings, clips each finding to 1,000 characters, removes links, and never
 fetches check logs. The Copilot request labels all embedded evidence untrusted,
 and the text is never interpreted as shell input. Draft PRs and ordinary pending
 review/check/task activity do not dispatch repairs or create owner notices.
+Budget exhaustion is reported only for currently scoped, non-draft, idle work
+that would otherwise be eligible for a bounded repair or neutral reconciliation.
 
 Behind or genuinely conflicted enrolled PRs receive a neutral task through the same
 durable reservation, exact task-ID reconciliation, serialization lock, and three
@@ -68,8 +71,10 @@ idle and unknown task states do not release the fixer lock. Completion only
 releases the fixer lock; it is not review or CI success.
 Unidentifiable nonterminal repository tasks conservatively block new dispatch
 until GitHub exposes enough branch, session, or PR evidence to scope them.
-Conflicted, unmergeable, or `behind` pull requests are not sent to a fixer;
-they are reported as needing a separately assigned neutral reconciler.
+Only a positively pre-send superseded reservation can advance to a distinct
+bounded attempt on unchanged head/base; sent or uncertain reservations are never
+retried. Conflicted, unmergeable, or `behind` pull requests receive the neutral
+reconciliation task described above, not an ordinary repair task.
 Immediately before claiming a repair, the coordinator re-reads its bounded
 thread/check evidence and fences the planned head, branch, main SHA, base binding,
 mergeability and active tasks. Changed or incomplete evidence suppresses that
@@ -91,6 +96,9 @@ regardless of response order. This same gate controls planning, status publicati
 and revocation, and the final merge recheck. If the authenticated reviewer
 identity differs, the check fails closed and requires policy review rather than
 inferring approval.
+For task handoff, an authenticated submitted review on the exact result head
+completes the review request even if unresolved threads keep this gate false; those
+threads then remain eligible for the next bounded repair.
 
 Path classification includes both sides of renames and treats malformed,
 unknown, empty, oversized, or incomplete file inventories as sensitive. Only the
@@ -173,6 +181,13 @@ time supplies the incident timestamp. Deployed events are emitted only for an
 existing exact merged event when the current delivery ledger, successful
 controller status, current release, and git provenance validate for that merge
 SHA. A merge alone is never treated as a deployment.
+
+Task receipts bind the exact task, session, dispatch nonce, authenticated receipt
+comment, PR, dispatched head, resulting head, and current main base. SHA-continuation
+for issue-starter commands is not part of this change; PR29 must build on this
+receipt identity without carrying authorization to a different head. The exact
+receipt comment must have a positive numeric GitHub ID; no authorization is
+inherited when its head or base proof differs.
 
 The owner mobile Inbox consumer is a separate adapter and must validate this
 producer's exact event schema and bind the export to the actual ready application

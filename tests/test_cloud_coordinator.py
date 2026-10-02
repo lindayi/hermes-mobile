@@ -16,6 +16,7 @@ from deploy.cloud_coordinator import (
     CoordinatorError,
     GhApi,
     MAX_HANDOFF_POLLS,
+    REPAIR_LIMIT,
     StateStore,
     classify_sensitive_paths,
     collect_review_threads,
@@ -931,7 +932,9 @@ def test_final_merge_get_rechecks_pull_eligibility_and_identity(tmp_path, change
     store = StateStore(tmp_path / "state.json")
     action = {"kind": "auto-merge", "issue": 16, "head": HEAD, "main_sha": BASE,
               "key": f"auto-merge:16:{HEAD}:{BASE}"}
-    result = Coordinator(api, store)._enable_auto_merge(action, {"enrollment": {}})
+    result = Coordinator(api, store)._enable_auto_merge(
+        action, {"enrollment": enrolled_record()},
+    )
     assert api.pull_reads == 3  # Race occurs only after the complete fresh plan.
     assert not api.writes and not api.graphql_writes
     assert not result["auto_merge_eligible"] and result["merge_action"] is None
@@ -1296,6 +1299,28 @@ def test_completed_comment_review_on_new_head_releases_handoff_for_repair(tmp_pa
                    for event in store.snapshot()["lifecycle_events"])
 
 
+def test_approved_review_on_exact_result_head_releases_handoff_for_repair(tmp_path):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    initial = coordinator.run(apply=True)
+    assert initial["pull_requests"][0]["repair_requested"], initial
+    action = next(item for item in store.actions().values() if item["kind"] == "fix")
+    result_head = "c" * 40
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.complete_task(action["task_id"], action, head_sha=result_head)
+
+    coordinator.run(apply=True)
+
+    assert api.fix_attempts == 2
+    assert store.action(action["key"]) is None
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert any(item.get("attempt") == 2 for item in store.actions().values())
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+
+
 def test_running_last_allowed_task_is_not_reported_as_exhausted(tmp_path):
     api = FakeApi(unresolved=True)
     store = StateStore(tmp_path / "state.json")
@@ -1317,6 +1342,26 @@ def test_running_last_allowed_task_is_not_reported_as_exhausted(tmp_path):
     assert "budget" not in result["pull_requests"][0]["reasons"]
     assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
+
+
+@pytest.mark.parametrize("draft,busy", [(True, False), (False, True)])
+def test_neutral_budget_exhaustion_requires_scoped_nondraft_idle_work(
+        tmp_path, draft, busy):
+    api = FakeApi(unresolved=True, active_agent=busy)
+    api.pull.update(mergeable=True, mergeable_state="behind", draft=draft)
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record(attempts=REPAIR_LIMIT))
+    store._mutate(lambda data: data["enrollments"]["16"].update(
+        attempts=REPAIR_LIMIT,
+    ))
+
+    result = Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+
+    plan = result["pull_requests"][0]
+    assert "budget" not in plan["reasons"]
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+    assert api.fix_attempts == 0
 
 
 @pytest.mark.parametrize("change", [
@@ -1731,7 +1776,7 @@ def test_normalized_source_identity_survives_snapshot_and_final_dispatch(tmp_pat
     api = FakeApi(workflow_runs=[source_run(conclusion=conclusion)])
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store)
-    snapshot = coordinator._snapshot_pull(16, {"attempts": 0}, BASE)
+    snapshot = coordinator._snapshot_pull(16, enrolled_record(attempts=0), BASE)
     expected = {
         "check": "Source checks", "workflow_id": 372155405,
         "repository_id": 1399942965, "head_sha": HEAD,
@@ -1748,7 +1793,8 @@ def test_normalized_source_identity_survives_snapshot_and_final_dispatch(tmp_pat
     assert api.fix_attempts == 1
     assert api.workflow_reads >= 3  # snapshot, plan, final dispatch
     prompt = next(body["prompt"] for route, body in api.writes if route.endswith("/tasks"))
-    assert prompt == planned["body"]
+    assert prompt.startswith(planned["body"] + "\n\n")
+    assert "Hermes-Task-Receipt: v1" in prompt
     evidence = json.loads(prompt.split("Untrusted evidence: `", 1)[1].split("`\n\n<!--", 1)[0])
     assert evidence == {"review_findings": [], "failed_source_checks": [expected]}
     assert result["pull_requests"][0]["repair_requested"]
@@ -2174,6 +2220,7 @@ def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
 def test_task_api_identity_reconciles_across_head_changes(tmp_path):
     api = FakeApi(unresolved=True)
     store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
     coordinator = Coordinator(api, store)
     coordinator.run(apply=True)
     fix = next(action for action in store.actions().values() if action["kind"] == "fix")
@@ -2186,8 +2233,10 @@ def test_task_api_identity_reconciles_across_head_changes(tmp_path):
     api.pull["head"]["sha"] = api.head_sha
     api.complete_task("task-1", fix)
     coordinator.run(apply=True)
-    assert api.fix_attempts == 1
-    assert store.action(fix["key"])["status"] == "completed"
+    assert api.fix_attempts == 2
+    second = next(item for item in store.actions().values()
+                  if item.get("kind") == "fix" and item.get("task_id") == "task-2")
+    assert second["head"] == api.head_sha
 
 
 def test_task_handoff_requests_ready_review_once_and_fails_closed_after_wait(tmp_path):
@@ -2382,6 +2431,7 @@ def test_units_are_templates_only_and_apply_is_explicit():
     assert "--once --apply" in service
     assert "StateDirectoryMode=0700" in service
     assert "ProtectSystem=strict" in service
+    assert "ReadWritePaths=%S/hermes-mobile-coordinator %h/.local/share/hermes-mobile-live" in service
     assert "[Install]" not in service
     assert "WantedBy=timers.target" in timer
 
@@ -3136,6 +3186,98 @@ def test_fresh_repair_evidence_supersedes_plan_without_replacement_or_budget(tmp
     state = StateStore(path).snapshot()
     assert state["enrollments"]["16"]["attempts"] == 0
     assert not any(action["kind"] == "fix" for action in state["actions"].values())
+
+
+@pytest.mark.parametrize("malformed", [
+    None, [], {}, {"number": None}, {"number": True}, {"number": 0},
+    {"number": -1}, {"number": "16"}, {"number": 1.0},
+])
+@pytest.mark.parametrize("inventory", ["issue", "comment"])
+def test_malformed_scan_rows_abort_without_cursor_or_external_actions(
+        tmp_path, malformed, inventory):
+    bad_row = malformed
+    if inventory == "comment" and isinstance(malformed, dict) and "number" in malformed:
+        bad_row = {"id": malformed["number"]}
+
+    class MalformedRows(FakeApi):
+        def get_all(self, route, *, collection=None):
+            if route.startswith("repos/lindayi/hermes-mobile/issues?"):
+                return [self.issue, bad_row] if inventory == "issue" else [self.issue]
+            if route.startswith("repos/lindayi/hermes-mobile/issues/16/comments?"):
+                return [*self.comments, bad_row] if inventory == "comment" else self.comments
+            return super().get_all(route, collection=collection)
+
+    api = MalformedRows()
+    store = StateStore(tmp_path / "state.json")
+    store.commit_scan("2026-10-01T10:00:00Z", [])
+    before = store.path.read_bytes()
+
+    with pytest.raises(CoordinatorError, match="malformed"):
+        Coordinator(api, store).run(apply=True)
+
+    assert store.path.read_bytes() == before
+    assert api.writes == []
+    assert api.graphql_writes == []
+    assert api.fix_attempts == 0
+
+
+def test_unscoped_snapshot_cannot_plan_auto_merge(tmp_path):
+    api = FakeApi()
+    coordinator = Coordinator(api, StateStore(tmp_path / "state.json"))
+    snapshot = coordinator._snapshot_pull(16, enrolled_record(), BASE)
+    snapshot["scoped"] = False
+
+    plan = coordinator._plan_pull(snapshot, {}, apply=False)
+
+    assert plan["merge_action"] is None
+    assert not plan["auto_merge_eligible"]
+
+
+def test_failed_task_still_persists_task_failed_lifecycle_event(tmp_path):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    coordinator.run(apply=True)
+    task = next(item for item in store.actions().values() if item["kind"] == "fix")
+    api.tasks[task["task_id"]]["state"] = "failed"
+
+    coordinator.run(apply=True)
+
+    assert [event["reason"] for event in store.snapshot()["lifecycle_events"]] == [
+        "task_failed",
+    ]
+
+
+def test_pre_send_superseded_repair_can_use_next_attempt_but_uncertain_cannot(
+        tmp_path):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    coordinator = Coordinator(api, store)
+    plan = coordinator._build_plan(apply=False)
+    first = plan["pull_requests"][0]["repair"]
+    assert store.claim_action(first["key"], first)
+    store.update_action(first["key"], "superseded")
+
+    coordinator.run(apply=True)
+
+    assert api.fix_attempts == 1
+    assert store.action(first["key"])["status"] == "superseded"
+    assert any(action.get("attempt") == 2 and action.get("status") == "sent"
+               for action in store.actions().values() if action.get("kind") == "fix")
+
+    blocked_api = FakeApi(unresolved=True)
+    blocked_store = StateStore(tmp_path / "uncertain.json")
+    blocked_store.enroll(enrolled_record())
+    blocked_coordinator = Coordinator(blocked_api, blocked_store)
+    plan = blocked_coordinator._build_plan(apply=False)
+    first = plan["pull_requests"][0]["repair"]
+    assert blocked_store.claim_action(first["key"], first)
+    blocked_store.update_action(first["key"], "uncertain")
+
+    blocked_coordinator.run(apply=True)
+
+    assert blocked_api.fix_attempts == 0
 
 
 @pytest.mark.parametrize("race", ["main", "base", "both", "missing-main"])

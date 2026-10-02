@@ -62,6 +62,15 @@ def test_receipt_is_full_exact_and_bound_to_task_session_pr_and_heads():
     assert "task=" in receipt_instruction(NONCE)
 
 
+@pytest.mark.parametrize("comment_id", [None, True, 0, -1, "777"])
+def test_receipt_requires_a_positive_numeric_comment_identity(comment_id):
+    item = receipt()
+    item["id"] = comment_id
+
+    with pytest.raises(ReceiptError):
+        parse([item])
+
+
 @pytest.mark.parametrize("field,value", [
     ("task", "other-task"),
     ("session", "other-session"),
