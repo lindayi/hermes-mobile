@@ -32,28 +32,29 @@ attestation using the existing exact certificate identity and authenticated
 certificate extensions. A caller assertion or PR overview is not proof.
 
 `main.files` maps every required source path to its SHA-256 digest over the exact
-read-back bytes. The reviewed main-source baseline is the merged commit
-`f84063e9aed55994c4ae4d3eae14fec922e12929`; its workflow, actions, manifests,
-deployment sources, runtime/test inputs, dependency locks, and patch inputs are
-included in a deliberately reviewed, but currently incomplete, fingerprint
-inventory. The mandatory `issue-link.yml` workflow is not pinned; the static
-closure test misses explicit relative imports such as `deploy.native_readiness`
-and local subprocess module entrypoints such as `deploy.observe_release`.
-Passing that test does not establish complete execution-source coverage.
+read-back bytes. The reviewed current-main source baseline for non-coordinator
+inventory paths is `b85c098857e7fb8229f47bd688d703bb677aeb34`. The inventory
+includes the mandatory `issue-link.yml` workflow and the statically traversed local Python dependencies of
+the explicitly listed source-control roots, including `deploy.observe_release`.
+The closure test resolves relative package imports and initializers and rejects
+unresolved local imports and unsupported dynamic imports. This bounded inventory
+does not discover arbitrary subprocess roots or establish complete execution-source
+coverage by itself.
 
-These confirmed gaps, their transitive dependencies, and specific mutation and
-traversal regressions must be independently repaired and reviewed before the
-`pending-source-contract` hold below may be cleared or updated. They remain
-mandatory activation work, not claims of a completed closure. No digest is
-accepted automatically. The current unconditional hold keeps every phase unready
-regardless of the incomplete inventory or caller-supplied evidence.
+The source-level workflow, import traversal, subprocess-root, and mutation
+regressions recorded in issue #35 are repaired in this revision. That does not
+complete issue #35, certify operational source pins, or permit the
+`pending-source-contract` hold to be cleared or updated. No digest is accepted
+automatically. The current unconditional hold keeps every phase unready regardless
+of the fixed inventory or caller-supplied evidence.
 
 The coordinator fingerprint remains tied to the published checkpoint
-`403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83` from pending PR16, not to a candidate
-or the current main tree. This known unsafe baseline lacks strict timezone-aware,
-deterministic review ordering and separate targeted independent review enforcement
-for every sensitive head before status publication or auto-merge. Matching its
-fingerprint does **not** certify the intended coordinator contract.
+`403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83` from pending PR16 and has not been
+reconciled to current-main bytes in this bounded repair. This known unsafe baseline
+lacks strict timezone-aware, deterministic review ordering and separate targeted
+independent review enforcement for every sensitive head before status publication
+or auto-merge. Matching its fingerprint does **not** certify the intended
+coordinator contract.
 
 The validator therefore adds the explicit `pending-source-contract` blocker in
 **every phase**, even for otherwise complete evidence matching every pinned digest.
@@ -65,14 +66,12 @@ positive tests require exactly this one known blocker, not readiness; negative
 security assertions retain their own blockers as well. Invalid phase/evidence
 roots remain rejected with their existing diagnostics.
 
-That checkpoint also does not establish that PR16 is merged, and
-`deploy/cloud_coordinator.py` is absent from merged main at the baseline above.
-A missing source still adds `main-source-missing`. The activation follow-up in
-issue #35 must independently review the real merged coordinator and its complete control
-contract, establish strict review timestamps/ordering and per-head sensitive
-review enforcement, deliberately update operational source pins and fixtures, and
-make a separately reviewed source change to clear or update this hold. Neither a
-pin refresh alone nor a caller assertion is sufficient; pins never auto-refresh.
+The activation follow-up in issue #35 must independently review the actual
+current-main coordinator and its complete control contract, establish strict review
+timestamps/ordering and per-head sensitive review enforcement, deliberately
+reconcile operational source pins and fixtures, and make a separately reviewed
+source change to clear or update this hold. Neither a pin refresh alone nor a caller
+assertion is sufficient; pins never auto-refresh.
 Merging this inactive read-only validator is separate from activation and does not
 change the coordinator, repository protection, services, or existing merge gates.
 The synthetic fixtures exercise evidence components only, not live readiness.
