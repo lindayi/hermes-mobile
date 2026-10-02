@@ -72,6 +72,19 @@ its `native25-route-bound-review.json` and PR33 merged-preservation lineage is
 accepted source evidence, not a still-unreviewed PR25 candidate or activation approval.
 It was absent only from the historical b85c098 baseline.
 
+### Issue #52 native hosted-artifact candidate
+
+The proposed native hosted-artifact release change updates the current source
+inventory for the two release controllers below. The policy fixture keeps their
+historical merged-main bytes separate from these exact candidate hashes and checks
+the candidate against the source bytes. These are issue #52 candidate pins only;
+they do not assert independent review, merge, deployment, or gate activation.
+
+| Issue #52 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/native_controls_release.py` | `d0d0f705632baa1d5128a51bbeb6993359322a70129dbac292d2b1e09a917159` |
+| `deploy/self_deploy.py` | `592cc957ad79a1f020a02ec1ca72b53d68bbbd49a8800c16af8cdead13d45469` |
+
 The coordinator's exact 36-file static closure and fixed dependency inventory are
 retained. Shared backend dependencies keep their existing blocker labels. The five
 PR29/PR40/PR42 dependency pins below match the accepted merged bytes in main5316;

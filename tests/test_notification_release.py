@@ -164,7 +164,7 @@ def test_worker_cli_wires_guarded_notification_callbacks(release_transaction, mo
         captured.update(kwargs)
 
     monkeypatch.setattr(release, 'deploy', deploy)
-    assert release.main(['--worker'], paths=paths) == 0
+    assert release.main(['--worker', '--local-full-checks'], paths=paths) == 0
     assert callable(captured.get('handoff'))
     assert callable(captured.get('probe'))
     assert callable(captured.get('rollback_verify'))

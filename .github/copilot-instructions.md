@@ -32,3 +32,8 @@ Installed/private host compatibility remains a guarded exact-main deployment gat
 See [`docs/autonomy-policy.md`](../docs/autonomy-policy.md). Coding agents and the
 read-only validator never change settings, publish statuses, activate services, or
 execute untrusted PR code on the host.
+
+Native-controls maintenance normally requires the scheduler-bound run ID/source
+SHA, an independently verified exact-main hosted artifact, and the managed
+installed-runtime host checks. Never fall back to a full local suite when hosted
+evidence is missing; `--local-full-checks` is an explicit diagnostic mode only.

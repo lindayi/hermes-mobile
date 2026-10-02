@@ -158,6 +158,12 @@ the guarded deployment path. Preserve its drain, lock, native fingerprint, and
 rollback protections. Never restart active sessions or use candidate operators to
 bypass Git provenance. Record the deployed commit.
 
+Native-controls maintenance normally uses `--hosted-run-id` with the independently
+verified exact-main artifact; the scheduler-bound run ID and source SHA must match
+at the worker, and the managed installed-runtime host partition still runs. Never
+fall back to the full local suite when hosted evidence is missing;
+`--local-full-checks` is an explicit diagnostic mode only.
+
 Never edit immutable deployed releases. Older source copies are migration inputs,
 not deployment sources. Port unfinished legacy work as a diff against its own verified
 baseline into a new task worktree; never overlay an older source tree onto current main.
