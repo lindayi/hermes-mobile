@@ -82,9 +82,12 @@ an absent event.
 Run `python3 scripts/workflow_notifications.py` (or `--plan`) for a read-only
 preflight. It validates the explicit config/state path, event export, exactly
 one ready default-profile owner, existing compatible notification schema, and
-any deployment evidence. It prints only a bounded status/count summary. It does
-not create adapter state, write Inbox/outbox rows, call a sender, or write
-bytecode.
+any deployment evidence. It prints a bounded status/count summary plus explicit
+per-event deferrals when needed (at most the 256 input events). It does not create
+adapter state, write Inbox/outbox rows, call a sender, or write bytecode. Schema,
+owner, recipient and digest conflicts anywhere in the complete snapshot remain
+whole-batch failures before writes; durable identities are rechecked for the
+complete batch again after taking the apply lock.
 
 SQLite inputs are opened read-only only when their header identifies
 rollback-journal mode and no `-wal`, `-shm`, or `-journal` sidecar exists. WAL
@@ -92,9 +95,10 @@ databases and sidecar states fail closed before SQLite is opened, avoiding
 SQLite's permitted WAL shared-memory side effects in a writable directory.
 
 Only an explicit `--apply` may create the private
-`workflow-notifications.sqlite` and its lock file, after all evidence validates.
-The database pins the fixed repository, owner, event digest, recipient, and
-acknowledgement. Applying calls the existing `NotificationService.ingest`
+`workflow-notifications.sqlite` and its lock file, after batch security checks
+validate. An event without sufficient deployment proof may be reserved as pending,
+but cannot be ingested or ACKed. The database pins the fixed repository, owner,
+event digest, recipient, and acknowledgement. Applying calls the existing `NotificationService.ingest`
 implementation through a constructor-free, mode-`rw` adapter: it never runs the
 service constructor or migrates the app notification database. It creates one
 Inbox item per stable event ID with `category='operational'`, default profile,
@@ -109,6 +113,62 @@ the same delivery ID through the existing `(user_id, delivery_id)` uniqueness
 constraint. Altered content or a different owner using the same event ID is a
 hard conflict. Acknowledged identities are retained so Inbox retention does
 not cause replay.
+
+### Deferred results and bounded capacity
+
+A valid snapshot can make partial progress. Optional `deferred` entries have only
+`event_id`, `status: "deferred"`, and a fixed adapter diagnostic `reason`:
+
+* `deployment_evidence_unavailable`: the event is correctly typed, but its exact
+  current deployment proof is missing, stale, superseded, unsafe or inconsistent.
+  No deployment Inbox item is created and no ACK is issued for this event.
+  Apply retains its digest/recipient as pending when reservation capacity permits;
+  an existing pending row (and any Inbox item committed before an earlier crash)
+  is unchanged. Other verified events still progress.
+* `state_capacity`: SQLite could not reserve a new event or commit an ACK within
+  its capacity (SQLite's disk-full result is also treated conservatively). A new
+  event without a durable reservation is not ingested. An ACK failure may follow
+  an already committed Inbox item; its durable pending identity remains for
+  same-delivery-ID reconciliation, without duplicate Inbox insertion while that
+  item is retained. Other existing pending and ACKed records remain readable and
+  are processed even when earlier new reservations cannot fit.
+
+These are adapter diagnostics, **not** lifecycle `reason`/`outcome` values. No
+export field, event ID, timestamp or canonical digest is rewritten, and no event
+is converted to a fabricated failure, merge or success. When both proof and
+reservation are unavailable, the deployment-proof diagnostic remains primary.
+The producer must retain every unACKed event, including events not yet reserved
+locally. The existing fresh-envelope/immutable-incident recovery contract and
+shared schema 1 are unchanged.
+
+`status: "applied"` means the validated batch was processed, not that every event
+was ACKed; consumers/operators must inspect `deferred`. The CLI exits zero for a
+processed partial batch, as for an ordinary apply. `events` counts input records;
+`inbox_items` counts ingestions that completed adapter ACK during this run (not
+physical pushes, and not necessarily newly inserted Inbox rows). Read-only plan
+reports proof deferrals but does not attempt reservations or predict their exact
+SQLite space requirements.
+
+The adapter database has a hard **4 MiB main-file limit** (`MAX_STATE_BYTES`).
+Every adapter write connection, including initialization, reservation and ACK,
+sets SQLite `max_page_count` to `floor(MAX_STATE_BYTES / page_size)` before
+writing. A transaction requiring more pages fails before committing an oversized
+database; failed reservation/ACK writes are rolled back. Previous replay records
+and readable state survive. Rollback journal/disk space is additional to this
+main-file bound; this is not a total filesystem quota. The application Inbox
+remains governed by its existing service, not the adapter's 4 MiB limit.
+
+This is a finite capacity boundary, **not infinite history retention**. ACKs are
+never deleted to make room. An existing pending ACK can itself require more pages
+and remain deferred even though it can be read and retried. Operators must monitor
+deferrals and halt new lifecycle admission before the retained export reaches its
+256-record bound. Preserve both producer and consumer state for inspection; do
+not delete/reset the adapter database or age-prune unACKed events. Permanently
+full history needs a separately reviewed cross-source retirement/archive protocol
+that proves which identities can never replay. No such watermark or safe automatic
+history compaction is defined by schema 1; this change does not invent one or
+raise the size limit. A previously oversized database is still rejected and needs
+operator recovery, not automatic destructive truncation.
 
 ## Deployment evidence paths
 
@@ -132,9 +192,21 @@ Each file must be canonical, private, current-user-owned, bounded, and
 unaliased. Both status/ledger timestamps must be within 24 hours; the ledger
 must not predate controller success, and controller success cannot postdate a
 new deployed event beyond clock-skew tolerance. Missing records, a queued
-or uncertain delivery intent, stale controller state, or any mismatch blocks
-the entire apply before adapter state is created. No network query or
-subprocess is used to reconstruct missing proof.
+or uncertain delivery intent, stale controller state, or any mismatch defers
+that unACKed deployment without weakening any deployment proof check. No network
+query or subprocess is used to reconstruct missing proof. A superseded or irrecoverably
+missing proof may leave this event pending indefinitely; it does not poison other
+valid events in the snapshot.
+
+The delivery worker's existing `deploy/pull_delivery.py` contract records terminal
+`deployed` only after a successful controller invocation and a changed success
+status for the exact approved SHA (`_poll`, `finish`). A retained terminal record
+can therefore attest that worker-observed historical success. It does **not** store
+a release ID or controller-success timestamp, and does not establish the adapter's
+current-release/provenance/freshness claim for an old exported event. The adapter
+neither pretends that historical record is current proof nor fabricates a new
+historical-deployment schema/message. Previously ACKed exact digests/recipients
+continue to deduplicate without obsolete proof, even after Inbox retention.
 
 A `merged` event needs no deployment proof and is described distinctly from a
 verified `deployed` outcome.

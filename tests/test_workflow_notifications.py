@@ -587,6 +587,308 @@ def _write_deployed_proof(paths, merge_sha, *, status='succeeded', duplicate_las
         os.utime(path, (NOW.timestamp(), NOW.timestamp()))
 
 
+@pytest.mark.parametrize('proof', ['superseded', 'stale', 'missing'])
+@pytest.mark.parametrize('reserved', [False, True])
+def test_unacked_deployment_defers_without_poisoning_fresh_batch(tmp_path, proof, reserved):
+    from deploy import workflow_notifications as adapter
+
+    old = event('deployed', 'controller_verified', event_id='pr:32:deployed:old',
+                pr_number=32, head_sha='a' * 40, merge_sha='b' * 40,
+                occurred_at='2026-09-28T20:58:00Z')
+    fresh = event(event_id='issue:31:fresh:1')
+    current = event('deployed', 'controller_verified', event_id='pr:33:deployed:new',
+                    pr_number=33, head_sha='d' * 40, merge_sha='e' * 40)
+    items = [old, fresh, current] if proof == 'superseded' else [old, fresh]
+    paths, state_dir, auth, inbox, event_path, _ = adapter_fixture(tmp_path, export(*items))
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    if reserved:
+        adapter._initialize_state(state, 'owner-user')
+        with sqlite3.connect(state) as db:
+            db.execute('INSERT INTO events VALUES(?,?,?,?,?,?,?)',
+                       (old['event_id'], event_digest(old), 'owner-user', 'pending', None, 1, 1))
+    if proof != 'missing':
+        _write_deployed_proof(paths, current['merge_sha'] if proof == 'superseded' else old['merge_sha'])
+        if proof == 'superseded':
+            # Even a retained terminal ledger record is not current controller proof.
+            ledger = json.loads(paths.delivery_state.read_text())
+            ledger['records'][old['merge_sha'] + ':122'] = {
+                'status': 'deployed', 'reason': '', 'sha': old['merge_sha'],
+                'approval_run_id': 122, 'source_run_id': 455, 'deployment_id': 788,
+            }
+            paths.delivery_state.write_text(json.dumps(ledger))
+            os.utime(paths.delivery_state, (NOW.timestamp(), NOW.timestamp()))
+        else:
+            for path in (paths.delivery_state, paths.controller_state / 'status.json'):
+                stamp = NOW.timestamp() - 3 * 86400
+                os.utime(path, (stamp, stamp))
+    expected = [{'event_id': old['event_id'], 'status': 'deferred',
+                 'reason': 'deployment_evidence_unavailable'}]
+    before = {p: p.read_bytes() for p in (auth, inbox, event_path)}
+    plan = adapter.process(paths, now=NOW)
+    assert plan['deferred'] == expected
+    assert {p: p.read_bytes() for p in before} == before
+    assert state.exists() == reserved
+    assert not (state_dir / adapter.LOCK_NAME).exists()
+
+    result = adapter.process(paths, apply=True, now=NOW)
+    assert result['deferred'] == expected
+    assert result['events'] == len(items)
+    assert result['inbox_items'] == len(items) - 1
+    with sqlite3.connect(state) as db:
+        assert db.execute('SELECT digest,recipient_id,status,inbox_id FROM events WHERE event_id=?',
+                          (old['event_id'],)).fetchone() == (
+                              event_digest(old), 'owner-user', 'pending', None)
+    with sqlite3.connect(inbox) as db:
+        assert db.execute("SELECT count(*) FROM inbox WHERE title='PR #32 verified deployed'").fetchone() == (0,)
+        assert db.execute('SELECT count(*) FROM inbox').fetchone() == (len(items) - 1,)
+    assert event_path.read_bytes() == before[event_path]
+    assert adapter.process(paths, apply=True, now=NOW)['inbox_items'] == 0
+    assert adapter.process(paths, apply=True, now=NOW)['deferred'] == expected
+
+
+@pytest.mark.parametrize('hazard', [
+    'event_schema', 'owner', 'digest', 'recipient', 'binding', 'adapter_schema', 'ack_identity',
+])
+def test_deferred_deployment_does_not_hide_later_batch_security_conflict(tmp_path, hazard):
+    from deploy import workflow_notifications as adapter
+
+    old = event('deployed', 'controller_verified', pr_number=32,
+                head_sha='a' * 40, merge_sha='b' * 40)
+    fresh = event(event_id='fresh:1')
+    paths, state_dir, auth, inbox, event_path, _ = adapter_fixture(tmp_path, export(old, fresh))
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    adapter._initialize_state(state, 'owner-user')
+    with sqlite3.connect(state) as db:
+        db.execute('INSERT INTO events VALUES(?,?,?,?,?,?,?)',
+                   (fresh['event_id'], event_digest(fresh), 'owner-user', 'pending', None, 1, 1))
+        if hazard == 'digest':
+            db.execute("UPDATE events SET digest=?", ('0' * 64,))
+        elif hazard == 'recipient':
+            db.execute("UPDATE events SET recipient_id='member-user'")
+        elif hazard == 'binding':
+            db.execute("UPDATE binding SET owner_user_id='member-user'")
+        elif hazard == 'adapter_schema':
+            db.execute('ALTER TABLE events RENAME COLUMN digest TO invalid_digest')
+        elif hazard == 'ack_identity':
+            db.execute("UPDATE events SET status='acked',inbox_id=''")
+    if hazard == 'event_schema':
+        fresh['body'] = 'arbitrary untrusted body'
+        event_path.write_text(json.dumps(export(old, fresh)))
+        os.utime(event_path, (NOW.timestamp(), NOW.timestamp()))
+    elif hazard == 'owner':
+        with sqlite3.connect(auth) as db:
+            db.execute("UPDATE users SET id='replacement-owner' WHERE role='owner'")
+    before = {p: p.read_bytes() for p in (state, auth, inbox, event_path)}
+    for apply in (False, True):
+        with pytest.raises(adapter.Blocked):
+            adapter.process(paths, apply=apply, now=NOW)
+        assert {p: p.read_bytes() for p in before} == before
+    assert not (state_dir / adapter.LOCK_NAME).exists()
+
+
+def test_complete_batch_identity_rechecked_after_lock_before_any_reservation(tmp_path, monkeypatch):
+    from deploy import workflow_notifications as adapter
+
+    old = event('deployed', 'controller_verified', pr_number=32,
+                head_sha='a' * 40, merge_sha='b' * 40)
+    fresh = event(event_id='fresh:1')
+    paths, state_dir, _, inbox, _, _ = adapter_fixture(tmp_path, export(fresh, old))
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    adapter._initialize_state(state, 'owner-user')
+    real_flock = adapter.fcntl.flock
+    snapshots = {}
+
+    def conflict_while_waiting(fd, operation):
+        real_flock(fd, operation)
+        with sqlite3.connect(state) as db:
+            db.execute('INSERT INTO events VALUES(?,?,?,?,?,?,?)',
+                       (old['event_id'], '0' * 64, 'owner-user', 'pending', None, 1, 1))
+        snapshots[state] = state.read_bytes()
+
+    monkeypatch.setattr(adapter.fcntl, 'flock', conflict_while_waiting)
+    before = inbox.read_bytes()
+    with pytest.raises(adapter.Blocked):
+        adapter.process(paths, apply=True, now=NOW)
+    assert inbox.read_bytes() == before
+    assert state.read_bytes() == snapshots[state]
+
+
+def _fill_adapter_to_capacity(state, limit, *, status='acked'):
+    """Real SQLite fixture: retain bounded, valid synthetic event identities."""
+    with sqlite3.connect(state) as db:
+        page_size = db.execute('PRAGMA page_size').fetchone()[0]
+        db.execute(f'PRAGMA max_page_count={limit // page_size}')
+        index = 0
+        for batch_size in (512, 32, 1):
+            while True:
+                rows = []
+                for number in range(index, index + batch_size):
+                    item = event(event_id=f'history:{number:08d}:' + 'x' * 111)
+                    rows.append((item['event_id'], event_digest(item), 'owner-user',
+                                 status, 'i' * 36 if status == 'acked' else None,
+                                 NOW.timestamp(), NOW.timestamp()))
+                try:
+                    db.executemany('INSERT INTO events VALUES(?,?,?,?,?,?,?)', rows)
+                    db.commit()
+                    index += batch_size
+                except sqlite3.OperationalError as error:
+                    assert error.sqlite_errorcode == sqlite3.SQLITE_FULL
+                    db.rollback()
+                    break
+        assert db.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+    assert state.stat().st_size == limit
+
+
+def test_real_capacity_boundary_preserves_history_and_reconciles_inflight(tmp_path):
+    from deploy import workflow_notifications as adapter
+
+    old = event('deployed', 'controller_verified', pr_number=32,
+                head_sha='a' * 40, merge_sha='b' * 40)
+    after_inbox = event(event_id='recover:after-inbox')
+    before_inbox = event(event_id='recover:before-inbox')
+    paths, state_dir, _, inbox, event_path, _ = adapter_fixture(tmp_path, export(old, after_inbox))
+    _write_deployed_proof(paths, old['merge_sha'])
+    adapter.process(paths, apply=True, now=NOW)
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    with sqlite3.connect(state) as db:
+        # Reserve eventual ACK space for an inflight item without an Inbox row.
+        db.execute('INSERT INTO events VALUES(?,?,?,?,?,?,?)',
+                   (before_inbox['event_id'], event_digest(before_inbox), 'owner-user',
+                    'acked', 'i' * 36, NOW.timestamp(), NOW.timestamp()))
+    _fill_adapter_to_capacity(state, adapter.MAX_STATE_BYTES)
+    with sqlite3.connect(state) as db:
+        db.execute("UPDATE events SET status='pending',inbox_id=NULL WHERE event_id IN (?,?)",
+                   (after_inbox['event_id'], before_inbox['event_id']))
+        preserved = db.execute("SELECT * FROM events WHERE status='acked' ORDER BY event_id").fetchall()
+    # Replay must not recheck old deployment proof, including under capacity pressure.
+    paths.delivery_state.unlink()
+    incoming = [event(event_id=f'new:{n:08d}:' + 'y' * 115) for n in range(253)]
+    event_path.write_text(json.dumps(export(*incoming, after_inbox, before_inbox, old)))
+    os.utime(event_path, (NOW.timestamp(), NOW.timestamp()))
+    try:
+        result = adapter.process(paths, apply=True, now=NOW)
+    except adapter.Blocked:
+        result = None
+    # The original bug commits over the bound then bricks its very next open.
+    assert state.stat().st_size <= adapter.MAX_STATE_BYTES
+    assert result is not None
+    assert result['deferred']
+    assert all(row['reason'] == 'state_capacity' for row in result['deferred'])
+    assert {row['event_id'] for row in result['deferred']} <= {e['event_id'] for e in incoming}
+    with sqlite3.connect(state) as db:
+        assert db.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+        assert db.execute("SELECT * FROM events WHERE status='acked' AND event_id NOT LIKE 'new:%' "
+                          "AND event_id NOT LIKE 'recover:%' ORDER BY event_id").fetchall() == preserved
+        assert db.execute("SELECT event_id,status FROM events WHERE event_id LIKE 'recover:%' ORDER BY event_id").fetchall() == [
+            (after_inbox['event_id'], 'acked'), (before_inbox['event_id'], 'acked')]
+    with sqlite3.connect(inbox) as db:
+        for item in (after_inbox, before_inbox, old):
+            assert db.execute('SELECT count(*) FROM inbox WHERE delivery_id=?',
+                              ('workflow-event:v1:' + item['event_id'],)).fetchone() == (1,)
+        for deferred in result['deferred']:
+            assert db.execute('SELECT count(*) FROM inbox WHERE delivery_id=?',
+                              ('workflow-event:v1:' + deferred['event_id'],)).fetchone() == (0,)
+    # Retained ACKs still deduplicate after Inbox retention; no history deletion.
+    with sqlite3.connect(inbox) as db:
+        db.execute('DELETE FROM notification_policy')
+        db.execute('DELETE FROM inbox')
+    event_path.write_text(json.dumps(export(old, after_inbox, before_inbox)))
+    os.utime(event_path, (NOW.timestamp(), NOW.timestamp()))
+    snapshot = state.read_bytes()
+    assert adapter.process(paths, now=NOW)['status'] == 'plan'
+    assert adapter.process(paths, apply=True, now=NOW)['inbox_items'] == 0
+    assert state.read_bytes() == snapshot
+    with sqlite3.connect(inbox) as db:
+        assert db.execute('SELECT count(*) FROM inbox').fetchone() == (0,)
+
+
+def test_ack_capacity_failure_keeps_pending_identity_and_inbox_replay(tmp_path):
+    from deploy import workflow_notifications as adapter
+
+    paths, state_dir, _, inbox, event_path, _ = adapter_fixture(tmp_path)
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    adapter._initialize_state(state, 'owner-user')
+    _fill_adapter_to_capacity(state, adapter.MAX_STATE_BYTES, status='pending')
+    with sqlite3.connect(state) as db:
+        page_size = db.execute('PRAGMA page_size').fetchone()[0]
+        db.execute(f'PRAGMA max_page_count={adapter.MAX_STATE_BYTES // page_size}')
+        candidates = db.execute('SELECT event_id FROM events ORDER BY rowid LIMIT 256').fetchall()
+        for (event_id,) in candidates:
+            try:
+                db.execute("UPDATE events SET status='acked',inbox_id=? WHERE event_id=?",
+                           ('i' * 36, event_id))
+                db.commit()
+            except sqlite3.OperationalError as error:
+                assert error.sqlite_errorcode == sqlite3.SQLITE_FULL
+                db.rollback()
+                target = event(event_id=event_id)
+                break
+        else:
+            pytest.fail('Fixture did not reach an ACK page split at the real limit')
+    event_path.write_text(json.dumps(export(target)))
+    os.utime(event_path, (NOW.timestamp(), NOW.timestamp()))
+    before = state.read_bytes()
+    expected = [{'event_id': target['event_id'], 'status': 'deferred', 'reason': 'state_capacity'}]
+    for _ in range(2):
+        result = adapter.process(paths, apply=True, now=NOW)
+        assert result['deferred'] == expected
+        assert result['inbox_items'] == 0
+        assert state.read_bytes() == before
+        with sqlite3.connect(state) as db:
+            assert db.execute('SELECT digest,status,inbox_id FROM events WHERE event_id=?',
+                              (target['event_id'],)).fetchone() == (event_digest(target), 'pending', None)
+            assert db.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+        with sqlite3.connect(inbox) as db:
+            assert db.execute('SELECT count(*) FROM inbox').fetchone() == (1,)
+        assert adapter.process(paths, now=NOW)['status'] == 'plan'
+
+
+@pytest.mark.parametrize('page_size', [1024, 4096, 65536])
+def test_every_adapter_write_connection_bounds_sqlite_pages(tmp_path, page_size):
+    from contextlib import closing
+    from deploy import workflow_notifications as adapter
+
+    paths, state_dir, _, _, _, _ = adapter_fixture(tmp_path)
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    adapter.process(paths, apply=True, now=NOW)
+    with sqlite3.connect(state) as db:
+        db.execute(f'PRAGMA page_size={page_size}')
+        db.execute('VACUUM')
+    before = state.read_bytes()
+    # SQLite does not persist max_page_count; reconnect twice and exercise a
+    # real growing UPDATE, not only an assertion on configured PRAGMAs.
+    for _ in range(2):
+        with closing(adapter._state_connection(state)) as db:
+            with pytest.raises(sqlite3.OperationalError) as failure:
+                with db:
+                    db.execute('UPDATE events SET inbox_id=?', ('x' * adapter.MAX_STATE_BYTES,))
+            assert failure.value.sqlite_errorcode == sqlite3.SQLITE_FULL
+        assert state.read_bytes() == before
+        assert state.stat().st_size <= adapter.MAX_STATE_BYTES
+    assert adapter.process(paths, now=NOW)['status'] == 'plan'
+
+
+def test_cli_reports_sanitized_partial_apply_without_forging_event_reason(tmp_path, capsys):
+    from deploy import workflow_notifications as adapter
+
+    deployed = event('deployed', 'controller_verified', pr_number=32,
+                     head_sha='a' * 40, merge_sha='b' * 40)
+    paths, _, _, _, event_path, _ = adapter_fixture(tmp_path, export(deployed, event()))
+    _write_deployed_proof(paths, deployed['merge_sha'], status='synthetic-private-error')
+    original = event_path.read_bytes()
+    assert adapter.main(['--apply'], paths=paths, now=NOW) == 0
+    output = capsys.readouterr()
+    assert not output.err
+    assert json.loads(output.out) == {
+        'status': 'applied', 'events': 2, 'inbox_items': 1,
+        'deferred': [{'event_id': deployed['event_id'], 'status': 'deferred',
+                      'reason': 'deployment_evidence_unavailable'}],
+    }
+    assert 'synthetic-private-error' not in output.out
+    assert str(paths.config.parent) not in output.out
+    assert event_path.read_bytes() == original
+
+
 def test_deployed_event_uses_durable_terminal_after_duplicate_poll(tmp_path):
     from deploy.workflow_notifications import process
 
@@ -598,6 +900,21 @@ def test_deployed_event_uses_durable_terminal_after_duplicate_poll(tmp_path):
     assert process(paths, apply=True, now=NOW)['inbox_items'] == 1
     with sqlite3.connect(inbox) as db:
         assert 'verified deployed' in db.execute('SELECT title FROM inbox').fetchone()[0].lower()
+
+
+def _assert_deployment_deferred(paths, state_dir, inbox, item):
+    from deploy import workflow_notifications as adapter
+
+    before = inbox.read_bytes()
+    result = adapter.process(paths, apply=True, now=NOW)
+    assert result['inbox_items'] == 0
+    assert result['deferred'] == [
+        {'event_id': item['event_id'], 'status': 'deferred',
+         'reason': 'deployment_evidence_unavailable'}]
+    assert inbox.read_bytes() == before
+    with sqlite3.connect(state_dir / adapter.ADAPTER_STATE_NAME) as db:
+        assert db.execute('SELECT digest,status,inbox_id FROM events').fetchall() == [
+            (event_digest(item), 'pending', None)]
 
 
 def test_deployed_event_rejects_terminal_record_behind_latest_intent(tmp_path):
@@ -613,10 +930,7 @@ def test_deployed_event_rejects_terminal_record_behind_latest_intent(tmp_path):
     paths.delivery_state.chmod(0o600)
     os.utime(paths.delivery_state, (NOW.timestamp(), NOW.timestamp()))
 
-    with pytest.raises(ValueError):
-        process(paths, apply=True, now=NOW)
-    assert inbox.exists()
-    assert not (state_dir / 'workflow-notifications.sqlite').exists()
+    _assert_deployment_deferred(paths, state_dir, inbox, deployed)
 
 
 def test_acked_deployment_replay_skips_obsolete_proof_without_blocking_new_events(tmp_path):
@@ -678,9 +992,7 @@ def test_merged_is_not_deployed_and_deployed_requires_fresh_exact_controller_led
     deployed = event('deployed', 'controller_verified', pr_number=32,
                      head_sha='a' * 40, merge_sha='b' * 40)
     deployed_paths, state_dir, _, inbox, _, _ = adapter_fixture(tmp_path / 'deployed', export(deployed))
-    with pytest.raises(ValueError):
-        process(deployed_paths, apply=True, now=NOW)
-    assert not (state_dir / 'workflow-notifications.sqlite').exists()
+    _assert_deployment_deferred(deployed_paths, state_dir, inbox, deployed)
 
     _write_deployed_proof(deployed_paths, 'b' * 40)
     process(deployed_paths, apply=True, now=NOW)
@@ -696,19 +1008,16 @@ def test_merged_is_not_deployed_and_deployed_requires_fresh_exact_controller_led
             head_sha='a' * 40, merge_sha='d' * 40)))
     _write_deployed_proof(mismatch_paths, 'b' * 40)
     before = mismatch_inbox.read_bytes()
-    with pytest.raises(ValueError):
-        process(mismatch_paths, apply=True, now=NOW)
+    _assert_deployment_deferred(mismatch_paths, mismatch_state, mismatch_inbox,
+                                dict(deployed, merge_sha='d' * 40))
     assert mismatch_inbox.read_bytes() == before
-    assert not (mismatch_state / 'workflow-notifications.sqlite').exists()
 
     failed_paths, failed_state, _, failed_inbox, _, _ = adapter_fixture(
         tmp_path / 'failed-controller', export(deployed))
     _write_deployed_proof(failed_paths, 'b' * 40, status='running')
     before = failed_inbox.read_bytes()
-    with pytest.raises(ValueError):
-        process(failed_paths, apply=True, now=NOW)
+    _assert_deployment_deferred(failed_paths, failed_state, failed_inbox, deployed)
     assert failed_inbox.read_bytes() == before
-    assert not (failed_state / 'workflow-notifications.sqlite').exists()
 
     stale_paths, stale_state, _, stale_inbox, _, _ = adapter_fixture(
         tmp_path / 'stale-controller', export(deployed))
@@ -717,7 +1026,5 @@ def test_merged_is_not_deployed_and_deployed_requires_fresh_exact_controller_led
     old = NOW.timestamp() - 24 * 60 * 60 - 1
     os.utime(status_path, (old, old))
     before = stale_inbox.read_bytes()
-    with pytest.raises(ValueError):
-        process(stale_paths, apply=True, now=NOW)
+    _assert_deployment_deferred(stale_paths, stale_state, stale_inbox, deployed)
     assert stale_inbox.read_bytes() == before
-    assert not (stale_state / 'workflow-notifications.sqlite').exists()

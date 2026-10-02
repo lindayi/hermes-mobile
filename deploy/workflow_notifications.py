@@ -392,10 +392,16 @@ def _load(paths, now):
         _validate_adapter_state(state_path)
         _check_binding(state_path, owner)
     acked = _acked_event_ids(state_path, payload, owner)
+    deferred = {}
     for item in payload['events']:
         if item['outcome'] == 'deployed' and item['event_id'] not in acked:
-            _deployed_evidence(item, paths, now)
-    return state_dir, owner, auth_path, inbox_path, payload, state_path
+            try:
+                _deployed_evidence(item, paths, now)
+            except Blocked:
+                # Only deployment proof is event-local. Schema, owner and all
+                # durable identity checks above remain whole-batch failures.
+                deferred[item['event_id']] = 'deployment_evidence_unavailable'
+    return state_dir, owner, auth_path, inbox_path, payload, state_path, deferred
 
 
 def _check_binding(path, owner):
@@ -412,8 +418,17 @@ def _state_connection(path):
         db = sqlite3.connect(path.as_uri() + '?mode=rw', uri=True, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA foreign_keys=ON')
+        # max_page_count is connection-local: set it before *every* write,
+        # including initialization and ACK updates, not just reservations.
+        page_size = db.execute('PRAGMA page_size').fetchone()[0]
+        max_pages = MAX_STATE_BYTES // page_size
+        if (max_pages < 1 or db.execute('PRAGMA page_count').fetchone()[0] > max_pages
+                or db.execute(f'PRAGMA max_page_count={max_pages}').fetchone()[0] != max_pages):
+            raise Blocked('Adapter state capacity cannot be enforced')
         return db
-    except sqlite3.Error as error:
+    except (sqlite3.Error, Blocked) as error:
+        if 'db' in locals():
+            db.close()
         raise Blocked('Adapter state database is unavailable') from error
 
 
@@ -530,7 +545,15 @@ def _message(event):
     return title, body
 
 
-def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, now):
+def _with_deferred(result, deferred):
+    if deferred:
+        result['deferred'] = [
+            {'event_id': event_id, 'status': 'deferred', 'reason': reason}
+            for event_id, reason in deferred.items()]
+    return result
+
+
+def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, now, deferred):
     lock_path = state_dir / LOCK_NAME
     existed = lock_path.exists() or lock_path.is_symlink()
     if existed:
@@ -555,13 +578,16 @@ def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, 
                 or lock_info.st_nlink != 1 or lock_info.st_mode & 0o077):
             raise Blocked('Adapter lock file is unsafe')
         fcntl.flock(fd, fcntl.LOCK_EX)
+        if _owner(auth_path) != owner:
+            raise Blocked('Owner binding changed before apply')
         if state_path.exists() or state_path.is_symlink():
             _owned_private_path(state_path, max_bytes=MAX_STATE_BYTES)
             _validate_adapter_state(state_path)
             _check_binding(state_path, owner)
+            # A lock waiter must recheck the entire batch, not discover a later
+            # conflict only after committing an earlier event.
+            _acked_event_ids(state_path, payload, owner)
         else:
-            if _owner(auth_path) != owner:
-                raise Blocked('Owner binding changed before apply')
             _initialize_state(state_path, owner)
         notifications = _notification_copy(inbox_path, clock=lambda: now.timestamp())
         ingested = 0
@@ -582,13 +608,23 @@ def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, 
                         raise Blocked('Existing lifecycle adapter state is inconsistent')
                     if prior['status'] == 'acked':
                         db.commit()
+                        deferred.pop(item['event_id'], None)
                         continue
-                if prior is None:
-                    db.execute('''INSERT INTO events
-                        (event_id,digest,recipient_id,status,inbox_id,created_at,updated_at)
-                        VALUES(?,?,?,'pending',NULL,?,?)''',
-                        (item['event_id'], digest, owner, now.timestamp(), now.timestamp()))
-                db.commit()
+                try:
+                    if prior is None:
+                        db.execute('''INSERT INTO events
+                            (event_id,digest,recipient_id,status,inbox_id,created_at,updated_at)
+                            VALUES(?,?,?,'pending',NULL,?,?)''',
+                            (item['event_id'], digest, owner, now.timestamp(), now.timestamp()))
+                    db.commit()
+                except sqlite3.OperationalError as error:
+                    if error.sqlite_errorcode != sqlite3.SQLITE_FULL:
+                        raise
+                    db.rollback()
+                    deferred.setdefault(item['event_id'], 'state_capacity')
+                    continue
+            if item['event_id'] in deferred:
+                continue
             title, body = _message(item)
             delivery_id = 'workflow-event:v1:' + item['event_id']
             if _owner(auth_path) != owner:
@@ -601,14 +637,25 @@ def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, 
                 db.execute('BEGIN IMMEDIATE')
                 if _owner(auth_path) != owner:
                     raise Blocked('Owner binding changed before event acknowledgement')
-                result = db.execute('''UPDATE events SET status='acked',inbox_id=?,updated_at=?
-                    WHERE event_id=? AND digest=? AND recipient_id=? AND status='pending' ''',
-                    (inbox_item['id'], now.timestamp(), item['event_id'], digest, owner))
-                if result.rowcount != 1:
-                    raise Blocked('Lifecycle event acknowledgement binding changed')
-                db.commit()
+                try:
+                    result = db.execute('''UPDATE events SET status='acked',inbox_id=?,updated_at=?
+                        WHERE event_id=? AND digest=? AND recipient_id=? AND status='pending' ''',
+                        (inbox_item['id'], now.timestamp(), item['event_id'], digest, owner))
+                    if result.rowcount != 1:
+                        raise Blocked('Lifecycle event acknowledgement binding changed')
+                    db.commit()
+                except sqlite3.OperationalError as error:
+                    if error.sqlite_errorcode != sqlite3.SQLITE_FULL:
+                        raise
+                    # Inbox may already be durable; retain pending identity and
+                    # retry its stable delivery ID, never discard replay records.
+                    db.rollback()
+                    deferred[item['event_id']] = 'state_capacity'
+                    continue
             ingested += 1
-        return {'status': 'applied', 'events': len(payload['events']), 'inbox_items': ingested}
+        return _with_deferred(
+            {'status': 'applied', 'events': len(payload['events']), 'inbox_items': ingested},
+            deferred)
     except OSError as error:
         raise Blocked('Adapter state lock is unavailable') from error
     finally:
@@ -617,13 +664,14 @@ def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, 
 
 
 def process(paths=None, *, apply=False, now=None):
-    """Plan without writes by default; apply only after all evidence is validated."""
+    """Validate the full batch; apply eligible events and report explicit deferrals."""
     paths = paths or Paths()
     now = now or datetime.now(timezone.utc)
-    state_dir, owner, auth_path, inbox_path, payload, state_path = _load(paths, now)
+    state_dir, owner, auth_path, inbox_path, payload, state_path, deferred = _load(paths, now)
     if not apply:
-        return {'status': 'plan', 'events': len(payload['events']), 'writes': False}
-    return _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, now)
+        return _with_deferred(
+            {'status': 'plan', 'events': len(payload['events']), 'writes': False}, deferred)
+    return _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, now, deferred)
 
 
 def main(argv=None, *, paths=None, now=None):
