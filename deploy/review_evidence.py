@@ -82,24 +82,54 @@ class _DisclosureParser(HTMLParser):
         self.overview = False
 
     def feed_review(self, body):
-        # GitHub supplies Markdown, not rendered HTML. Backtick code can quote
-        # literal </details> tokens. Lex code spans before the sole HTML parse;
-        # complete HTML tokens shield backticks inside quoted attributes. Index
-        # matching run lengths once to avoid rescanning unmatched code suffixes.
+        # GitHub supplies Markdown, not rendered HTML. Shield code before the
+        # sole HTML parse; complete HTML tokens protect quoted attributes. Line
+        # fences use same-character >= length closers, unlike exact inline runs.
         runs = {}
         for match in re.finditer(r"`+", body):
             runs.setdefault(len(match[0]), []).append(match.start())
-        tokens = re.compile(r"<!--.*?-->|</?[A-Za-z](?:[^<>\"']|\"[^\"]*\"|'[^']*')*>|`+", re.DOTALL)
+        tokens = re.compile(
+            r"<!--.*?-->|</?[A-Za-z](?:[^<>\"']|\"[^\"]*\"|'[^']*')*>|"
+            r"^(?P<indented>(?: {4}| {0,3}\t)[ \t]*)(?=</?(?i:details|summary)\b)|"
+            r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})(?P<info>[^\n]*)|`+",
+            re.DOTALL | re.MULTILINE)
         cursor = fed = 0
         while match := tokens.search(body, cursor):
             cursor = match.end()
-            if not match[0].startswith("`"):
+            if match["indented"]:
+                # Four-column Markdown examples cannot confer disclosure scope.
+                # Do not attempt general indented-code/HTML block rendering.
+                raise ValueError("indented-disclosure")
+            fence = match["fence"]
+            if fence:
+                # Indented code is outside this bounded fence grammar.
+                if len(match["indent"]) > 3 or "\t" in match["indent"]:
+                    raise ValueError("unsupported-code-fence")
+                if fence[0] == "`" and "`" in match["info"]:
+                    # A same-line exact span (```code```) is inline, not a
+                    # fence with a backtick-bearing info string. Other invalid
+                    # info shapes stay unsupported rather than guessing scope.
+                    positions = runs[len(fence)]
+                    index = bisect_right(positions, match.start("fence"))
+                    if index == len(positions) or positions[index] >= cursor:
+                        raise ValueError("unsupported-code-fence")
+                    end = positions[index] + len(fence)
+                else:
+                    closer = re.compile(
+                        r"^ {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*\r?$",
+                        re.MULTILINE).search(body, cursor)
+                    if closer is None:
+                        raise ValueError("unclosed-code-fence")
+                    end = closer.end()
+            elif match[0].startswith("`"):
+                # Index exact inline run lengths once, avoiding suffix rescans.
+                positions = runs[len(match[0])]
+                index = bisect_right(positions, match.start())
+                if index == len(positions):
+                    continue  # An unmatched inline backtick is literal Markdown.
+                end = positions[index] + len(match[0])
+            else:
                 continue
-            positions = runs[len(match[0])]
-            index = bisect_right(positions, match.start())
-            if index == len(positions):
-                continue  # An unmatched inline backtick is literal Markdown.
-            end = positions[index] + len(match[0])
             self.feed(body[fed:match.start()])
             if self.rawdata:
                 raise ValueError("code-in-incomplete-markup")
@@ -239,16 +269,23 @@ def _summary_disposition(summary, *, overview, state):
     validation = re.compile(
         r"(?:the )?(?:exact-head )?(?:verification|validation) "
         r"(?:remains|is)(?: still)? pending[.!]?", re.IGNORECASE)
-    no_issues = re.compile(r"No (?:code )?issues were found(?: in [^.!?]+)?[.!]?", re.IGNORECASE)
+    # Recognize whole negative verdicts, never arbitrary prose containing 'no'.
+    # Scope suffixes are deliberately finite: an unrestricted 'in ...' would
+    # swallow a same-sentence defect/correction after an otherwise neutral prefix.
+    no_findings = re.compile(
+        r"No (?:code )?(?:issues|bugs|defects|problems|vulnerabilities|findings) "
+        r"(?:were )?(?:found|identified|detected)"
+        r"(?: in (?:(?:the|this|these) )?(?:(?:reviewed|synthetic|current|proposed|latest) )?"
+        r"(?:code|changes?|diff|patch|implementation))?[.!]?", re.IGNORECASE)
+    negatives = [bool(no_findings.fullmatch(sentence)) for sentence in sentences]
     waits = []
     for sentence in sentences:
         # A neutral template clause is status, not a general 'pending' keyword.
         clause = re.sub(r"^It changes [^.!?]+, while\s+", "", sentence, flags=re.IGNORECASE)
         waits.append(bool(validation.fullmatch(clause)))
-    if any(waits) and all(wait or no_issues.fullmatch(sentence)
-                          for wait, sentence in zip(waits, sentences)):
+    if any(waits) and all(wait or negative for wait, negative in zip(waits, negatives)):
         return "validation-only", prose
-    if all(no_issues.fullmatch(sentence) for sentence in sentences):
+    if all(negatives):
         return "no-findings", prose
     if any(waits):
         # Remove only whole validation sentences; retain every other sentence,
@@ -256,10 +293,14 @@ def _summary_disposition(summary, *, overview, state):
         prose = "\n".join(sentence for wait, sentence in zip(waits, sentences) if not wait)
     # Bare CHANGES_REQUESTED is already an explicit request. Overview summaries
     # need affirmative correction/defect evidence, not a generic closer-look label.
+    # Keep negative verdicts as quoted context, but never mistake their nouns
+    # for affirmative defect evidence in a mixed or otherwise uncertain summary.
+    affirmative = "\n".join(sentence for sentence, wait, negative in zip(sentences, waits, negatives)
+                            if not wait and not negative)
     actionable = re.search(
         r"\b(?:required (?:correction|change)|request(?:ed)?:|must|should|"
         r"(?:please )?(?:reject|fix|prevent|ensure|validate|remove|preserve|add)\b|"
-        r"(?:fails? to|incorrectly|bug|defect|vulnerability))", prose, re.IGNORECASE)
+        r"(?:fails? to|incorrectly|bug|defect|vulnerability))", affirmative, re.IGNORECASE)
     if actionable or (not overview and state == "CHANGES_REQUESTED"):
         return ("active" if state == "CHANGES_REQUESTED" else "ambiguous"), prose
     if overview and re.search(r"^### (?:🟢 )?Looks good\s*$", summary, re.MULTILINE | re.IGNORECASE) and re.search(

@@ -75,9 +75,16 @@ current head with a positive record ID is read, and only when it is `COMMENTED` 
 `Previously missed (N)` section is forwarded (including under a `Findings: None`
 headline). One stdlib HTML parser builds bounded disclosure structure, respecting
 nested markup, quoted attributes (including `>`), case, and closing whitespace.
-A bounded lexical step shields Markdown backtick code spans from interpretation
-as HTML (including literal disclosure tags in review explanations). All disclosure
-traversal is iterative. There are no repeated HTML-removal passes. Limits are
+A bounded lexical step shields Markdown backtick code spans and line-oriented
+backtick/tilde fences from interpretation as HTML (including literal disclosure
+tags in review explanations). Inline spans retain exact run-length matching;
+fences require at least three matching opener characters and a same-character
+closer at least as long, alone on its line except trailing spaces/tabs. Fence
+indentation permits zero to three spaces. Unclosed/unsupported fences are ambiguous,
+not a license to parse their contents as active HTML. Unfenced disclosure tags at
+four-column indentation (including tabs) are conservatively ambiguous code
+examples, not active evidence; no general Markdown rendering is attempted.
+All disclosure traversal is iterative. There are no repeated HTML-removal passes. Limits are
 64 Ki characters, 4,096 parser events, 32 nested elements and 256 disclosures;
 exceeding any limit or unclosed/crossed markup yields `ambiguous`, not a truncated
 repair request. An unknown but balanced section is locally ambiguous: it never
@@ -97,7 +104,16 @@ include `The exact-head verification remains pending.` and `Exact-head verificat
 is still pending.`. Separate required corrections survive validation status or a
 `Looks good`/`Findings: None` headline; domain requests such as `reject pending
 receipts` remain active. Mixed summaries exclude only complete validation-status
-sentences, retaining the correction. Bare `CHANGES_REQUESTED` prose remains an
+sentences, retaining the correction. Complete negative verdict sentences such as
+`No bugs found.` and `No code defects were found in the reviewed changes.` are
+recognized before affirmative keyword matching, including beside validation status.
+The bounded grammar permits issues, bugs, defects, problems, vulnerabilities or
+findings, optional `code`/`were`, and found/identified/detected verdicts. Optional
+`in` scopes are finite code/change/diff/patch/implementation phrases, not arbitrary
+trailing prose that could hide a correction. In mixed summaries the recognized
+negative sentence remains quoted context but cannot itself supply affirmative
+defect evidence; separate or compound required corrections remain actionable.
+Bare `CHANGES_REQUESTED` prose remains an
 explicit request without requiring imperative keywords; explicit validation-only
 and no-issues text is nonactionable. Unstructured overview summaries require
 correction/defect evidence; uncertain overview prose stays blocked without consuming

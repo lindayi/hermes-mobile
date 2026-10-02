@@ -81,6 +81,102 @@ def test_markdown_code_is_literal_not_disclosure_structure(quoted):
     assert kind == "previously-missed" and quoted in text
 
 
+@pytest.mark.parametrize("marker, opening, closing, indent", [
+    ("`", 3, 3, 0), ("`", 3, 4, 0), ("`", 4, 6, 3),
+    ("~", 3, 3, 0), ("~", 3, 4, 3), ("~", 4, 6, 0),
+])
+def test_line_fences_preserve_literal_disclosures_with_longer_closers(marker, opening, closing, indent):
+    quoted = (" " * indent + marker * opening + "html\n"
+              "</details><details><summary>History</summary>literal snippet\n"
+              + " " * (3 - indent) + marker * closing + " \t")
+    body = overview("🔵 Needs a closer look", "No code issues were found.", "None",
+                    section("Previously missed (1)", missed_item(
+                        "Fix parser quoting", "parser.py:1", "Required correction:\n" + quoted + "\nCurrent tail.")),
+                    RESOLVED)
+    result = parse(body)
+    assert not result["ambiguous"], result
+    [(kind, text)] = result["findings"]
+    assert kind == "previously-missed" and quoted in text
+    assert "Synthetic resolved finding" not in text
+    request = repair_request(HEAD, 0, [], [], reviews=[copilot_review(body)])
+    assert len(_evidence(request)["review_findings"]) == 1
+
+
+@pytest.mark.parametrize("marker, false_close", [
+    ("`", "```"), ("~", "~~~"),  # Shorter than the four-character opener.
+    ("`", "~~~~"), ("~", "````"),
+    ("`", "```` trailing"), ("~", "~~~~ trailing"),
+    ("`", "    ````"), ("~", "    ~~~~"),
+    ("`", "\t````"), ("~", "\t~~~~"),
+])
+def test_line_fences_ignore_nonclosing_lines(marker, false_close):
+    quoted = (marker * 4 + "html\n" + false_close + "\n"
+              "</details><summary>literal after false closer</summary>\n" + marker * 5)
+    body = overview("🔵 Needs a closer look", "No code issues were found.", "None",
+                    section("Previously missed (1)", missed_item(
+                        "Fix parser quoting", "parser.py:1", "Required correction:\n" + quoted)))
+    result = parse(body)
+    assert not result["ambiguous"], result
+    assert quoted in result["findings"][0][1]
+
+
+@pytest.mark.parametrize("quoted", [
+    "```html\n</details>\n``", "~~~~html\n</details>\n~~~",
+    "```html\n</details>\n~~~", "~~~html\n</details>\n```",
+    "    ```html\n</details>\n    ```", "\t~~~html\n</details>\n\t~~~",
+    "```html`invalid\n</details>\n```",
+])
+def test_line_fences_unbounded_or_unsupported_shapes_fail_closed(quoted):
+    body = overview("🟡 Changes recommended", "Required correction: fix parser.", "None",
+                    section("Previously missed (1)", missed_item(
+                        "Fix parser quoting", "parser.py:1", "Reproduction:\n" + quoted)))
+    result = parse(body)
+    assert result["ambiguous"] and result["findings"] == []
+
+
+@pytest.mark.parametrize("quoted", [
+    "`</details>``", "``</details>```", "~~~</details>~~~",
+])
+def test_inline_code_does_not_acquire_fence_closing_rules(quoted):
+    body = overview("🔵 Needs a closer look", "No code issues were found.", "None",
+                    section("Previously missed (1)", missed_item(
+                        "Fix parser quoting", "parser.py:1", "Required correction: " + quoted)))
+    result = parse(body)
+    assert result["ambiguous"] and not result["findings"]
+
+
+@pytest.mark.parametrize("indent", ["    ", "        ", "\t", " \t"])
+def test_indented_disclosure_examples_never_become_active_findings(indent):
+    quoted = "\n".join(indent + line for line in MISSED.splitlines())
+    body = overview("🟢 Looks good", "No code issues were found.", "None", quoted)
+    result = parse(body, "COMMENTED")
+    assert result["ambiguous"] and result["findings"] == []
+    review = copilot_review(body)
+    assert repair_request(HEAD, 0, [], [], reviews=[review]) is None
+    assert not copilot_review_valid(HEAD, [review], [])
+
+
+@pytest.mark.parametrize("indent", ["", " ", "   "])
+def test_supported_disclosure_indentation_retains_active_findings(indent):
+    disclosure = "\n".join(indent + line for line in MISSED.splitlines())
+    body = overview("🟢 Looks good", "No code issues were found.", "None", disclosure)
+    result = parse(body, "COMMENTED")
+    assert not result["ambiguous"]
+    [(kind, text)] = result["findings"]
+    assert kind == "previously-missed" and "Defer synthetic transient state" in text
+
+
+@pytest.mark.parametrize("length", [1, 2, 3, 4])
+def test_inline_exact_runs_at_line_start_are_not_fence_openers(length):
+    quoted = "`" * length + "</details>" + "`" * length
+    body = overview("🔵 Needs a closer look", "No code issues were found.", "None",
+                    section("Previously missed (1)", missed_item(
+                        "Fix parser quoting", "parser.py:1", "Required correction:\n" + quoted)))
+    result = parse(body)
+    assert not result["ambiguous"], result
+    assert quoted in result["findings"][0][1]
+
+
 def test_backticks_in_attributes_do_not_open_markdown_code():
     body = overview("🟡 Changes recommended", "Required correction: reject pending receipts.", "None",
                     RESOLVED.replace('<details>', '<details title="`">').replace(
@@ -132,6 +228,93 @@ def test_validation_only_is_an_explicit_disposition(prose):
         result = parse(body)
         assert result["classifications"] == ["validation-only"]
         assert not result["ambiguous"] and result["findings"] == []
+
+
+@pytest.mark.parametrize("prose", [
+    "No bugs found.", "No bugs were found.", "No defects found.",
+    "No code defects were found in the reviewed changes.",
+    "No issues found.", "No problems were detected.",
+    "No vulnerabilities were identified in this diff.", "No findings found!",
+    "NO CODE BUGS WERE FOUND", "No bugs found. No defects were found.",
+])
+@pytest.mark.parametrize("state", ["COMMENTED", "CHANGES_REQUESTED"])
+def test_complete_negative_verdicts_are_not_affirmative_findings(prose, state):
+    body = overview("🟢 Looks good", prose, "None")
+    result = parse(body, state)
+    assert result["classifications"] == ["no-findings"]
+    assert not result["ambiguous"] and not result["findings"]
+    assert repair_request(HEAD, 0, [], [], reviews=[copilot_review(body, state=state)]) is None
+    assert not copilot_review_valid(HEAD, [copilot_review(body, state=state)], [])
+    # Bare requested-changes remains authoritative except for explicit negatives.
+    if state == "CHANGES_REQUESTED":
+        assert parse(prose)["classifications"] == ["no-findings"]
+
+
+@pytest.mark.parametrize("prose", [
+    "No bugs found. Exact-head verification remains pending.",
+    "The exact-head verification is still pending. No code defects were found.",
+    "No vulnerabilities were identified. Validation is pending. No issues found.",
+])
+def test_complete_negative_verdicts_allow_validation_only(prose):
+    for body in (prose, overview("🔵 Needs a closer look", prose, "None")):
+        result = parse(body)
+        assert result["classifications"] == ["validation-only"]
+        assert not result["ambiguous"] and not result["findings"]
+
+
+@pytest.mark.parametrize("prose", [
+    "No bugs found. Receipt behavior remains unclear.",
+    "No defects found. Exact-head verification remains pending. Receipt behavior remains unclear.",
+])
+def test_complete_negative_verdict_does_not_make_uncertain_prose_actionable(prose):
+    result = parse(overview("🔵 Needs a closer look", prose, "None"))
+    assert result["ambiguous"] and result["findings"] == []
+
+
+@pytest.mark.parametrize("prose, correction", [
+    ("No bugs found. Required correction: reject pending receipts.",
+     "Required correction: reject pending receipts."),
+    ("No defects found. The parser fails to exclude history. Validation is pending.",
+     "The parser fails to exclude history."),
+    ("No bugs were found in the diff, but required correction: reject pending receipts.",
+     "required correction: reject pending receipts."),
+    ("No issues were found in code that incorrectly accepts boolean IDs.",
+     "incorrectly accepts boolean IDs."),
+    ("Required correction: preserve validation failures. No vulnerabilities were found.",
+     "Required correction: preserve validation failures."),
+])
+def test_complete_negative_verdict_never_swallows_separate_or_compound_correction(prose, correction):
+    body = overview("🟢 Looks good", prose, "None", RESOLVED)
+    result = parse(body)
+    assert not result["ambiguous"]
+    [(kind, text)] = result["findings"]
+    assert kind == "changes-requested" and correction in text
+    assert "Validation is pending." not in text
+    assert "Synthetic resolved finding" not in text
+
+
+@pytest.mark.parametrize("disclosure", [OPEN, MISSED])
+def test_complete_negative_verdict_preserves_independent_structural_findings(disclosure):
+    body = overview("🟢 Looks good", "No bugs found. Required correction: reject pending receipts.",
+                    "None", disclosure)
+    result = parse(body)
+    assert not result["ambiguous"]
+    if disclosure == OPEN:
+        assert result["findings"] == []
+    else:
+        [(kind, text)] = result["findings"]
+        assert kind == "previously-missed" and "Defer synthetic transient state" in text
+
+
+@pytest.mark.parametrize("prose", ["No bugs found.", "No defects were found. Validation is pending."])
+def test_complete_negative_verdict_never_consumes_fixer_attempt(tmp_path, prose):
+    review = copilot_review(overview("🟢 Looks good", prose, "None"), state="CHANGES_REQUESTED")
+    api = ReviewApi([review])
+    path = tmp_path / "state.json"
+    plan = _managed_cycle(api, path)["pull_requests"][0]
+    assert not plan["repair_requested"] and not plan["review_valid"]
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
 
 
 def test_existing_bare_changes_requested_contract_is_preserved():
