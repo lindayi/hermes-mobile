@@ -673,7 +673,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const failure=(token=revision,value='disconnected')=>{if(!active() || token!==revision)return;revision++;transport=value;render();};
     const run=value=>{if(!active() || !value)return;revision++;activity=['completed','done'].includes(value)?'idle':Object.hasOwn(labels,value)?value:'unknown';render();};
     const snapshot=(data,token)=>{if(!active() || token!==revision)return;success(token);run(data.run?.status || data.last_run?.status || session.run_status || 'idle');};
-    async function probe(backgroundOnly=false){
+    async function probe(backgroundOnly=false,includeTitle=true){
       if(!active() || controller || offline){schedule();return;}
       // Share this bounded watcher with receipts, even while the run stream is healthy.
       const token=revision;controller=new win.AbortController();
@@ -685,7 +685,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         // guard while the independent receipt request is still outstanding.
         await Promise.all([
           refreshBackground?.(controller.signal),
-          renaming ? null : refreshTitle(controller.signal,()=>active() && !renaming && titleToken===titleRevision),
+          !includeTitle || renaming ? null : refreshTitle(controller.signal,()=>active() && !renaming && titleToken===titleRevision),
           backgroundOnly || stream && transport==='connected' ? null : api.request(`/sessions/${encodeURIComponent(session.id)}/messages?latest=true&limit=1`,{signal:controller.signal}).then(data=>{if(!Array.isArray(data.items))throw new Error('Invalid conversation snapshot');snapshot(data,token);}).catch(failed)
         ]);
       }catch(error){failed(error);}
@@ -697,7 +697,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const focus=()=>{void probe(true);};
     win.addEventListener('offline',onOffline);win.addEventListener('online',onOnline);win.addEventListener('focus',focus);doc.addEventListener('visibilitychange',visible);
     render();schedule();
-    return {token:()=>revision,success,failure,run,snapshot,rename(pending){titleRevision++;renaming=pending;},background(callback){refreshBackground=callback;void probe(true);},refresh:focus,destroy(){disposed=true;controller?.abort();win.clearTimeout(timer);win.clearTimeout(deadline);win.removeEventListener('offline',onOffline);win.removeEventListener('online',onOnline);win.removeEventListener('focus',focus);doc.removeEventListener('visibilitychange',visible);}};
+    return {token:()=>revision,success,failure,run,snapshot,rename(pending){titleRevision++;renaming=pending;},background(callback,includeTitle=true){refreshBackground=callback;void probe(true,includeTitle);},refresh:focus,destroy(){disposed=true;controller?.abort();win.clearTimeout(timer);win.clearTimeout(deadline);win.removeEventListener('offline',onOffline);win.removeEventListener('online',onOnline);win.removeEventListener('focus',focus);doc.removeEventListener('visibilitychange',visible);}};
   }
   function releasePresenceIdentity() {releasePushIdentity?.();releasePushIdentity=null;pushIdentityKey=null;}
   async function preparePresenceIdentity(data,current) {
@@ -1172,7 +1172,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         else if([403,404,410].includes(error.status))clearBackground();
       }
     };
-    connection.background(refreshBackground);
+    // Opening already resolved missing metadata; only the initial receipt read reuses it.
+    connection.background(refreshBackground,!resolveTitle);
     void api.request(`/sessions/${encodeURIComponent(session.id)}/telemetry`).then(renderTelemetry).catch(error=>{if(version===routeVersion && error.status===401)expiredSession();});
     content.classList.add('conversation');
     messages.scrollTop=messages.scrollHeight;
