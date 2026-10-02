@@ -250,6 +250,31 @@ excluded. Export persistence is bounded to 256 events and 1 MiB; plan mode never
 writes it. Stable event IDs preserve polling replay identity, and terminal
 enrollment retirement is committed with event persistence.
 
+Before `_build_plan` can add lifecycle events, apply mode holds the coordinator
+execution lock and prepares state. When the existing notification consumer is
+configured, preparation resolves the sole ready default-profile application
+owner and reads `workflow-notifications.sqlite` through the consumer's existing
+read-only, private-path, size, rollback-journal, and no-sidecar boundary. One
+read transaction validates the adapter schema/binding (version 1 and repository
+ID `1399942965`) and every stored event identity against active lifecycle events
+or retained context. A row authorizes producer retirement only when its
+`event_id`, canonical event digest, recipient owner, `acked` status, and nonempty
+durable `inbox_id` all match. Missing and pending rows retain events; malformed,
+foreign, tampered, or unbound adapter state blocks preparation. The coordinator
+does not initialize, recover, or write the consumer database.
+
+Exact ACKed outcomes move from the active export list into optional
+`lifecycle_context`, which has a closed schema, fixed repository binding, exact
+owner binding, and a bounded set of validated canonical events. It is replay and
+correlation context only, never an ACK source. The existing 256-event lifecycle
+and 1 MiB export limits remain unchanged. Receipt-source replays are filtered
+against the same ACK snapshot before their cap; exact canonical payloads and
+timestamps are preserved when persistent incidents are regenerated. Retained
+merged outcomes continue to anchor later exact `controller_verified` evidence.
+The prepared retirement and scan commit together before export or external
+mutation, followed by a fresh owner binding check immediately before commit.
+Plan mode neither reads ACK state nor changes producer or consumer state.
+
 Before each export, sensitive approval events are filtered against durable
 active enrollment, the exact last observed open head, and still-pending
 `authorize_sensitive_action` authorization. Apply commits the complete scan's
@@ -354,6 +379,15 @@ lists of retired auto-merge and outbox key digests). Pending, sending, uncertain
 and sent fixer claims, every record on the current head, enrollments with their
 command fence and attempt budget, and consumed command IDs are never dropped;
 the oldest command IDs fold into a numeric watermark that still fences replays.
+
+ACK-backed lifecycle retirement does not erase history. The optional
+`lifecycle_context` preserves each retired event's canonical payload and exact
+identity for stable replay and merge-to-deployment correlation; it is validated
+against a closed schema and owner/repository binding. Context is not independent
+ACK authority, is never age-evicted, and remains inside the same 4 MiB total state
+bound. If it fills the state bound, preparation fails before export or external
+writes. This is finite retention, not unlimited history storage or unattended
+activation approval.
 
 ## External policy boundary
 
