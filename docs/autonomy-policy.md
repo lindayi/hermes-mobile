@@ -53,7 +53,7 @@ refreshed after matching the accepted source-review hashes, merged-preservation
 hashes, and actual bytes from main `5316f7c75dced1bffafdb545cdd7677e98e855a6`.
 No native source is changed and no other historical pin is automatically refreshed.
 
-| Deliberately refreshed path | Current SHA-256 |
+| Historical native refresh path | SHA-256 at main5316 |
 | --- | --- |
 | `deploy/native_controls_release.py` | `b3d3c601db4afd9ff003f4df759fcb057c19a83b920206fb2766d1560fd99175` |
 | `backend/model_controls.py` | `206fb5164283c16f46c51da99babe1b5f5e8932f062b4a1ee5bc07affe1f2c34` |
@@ -121,11 +121,13 @@ retains `pr29-producer-identities-review.json` lineage. The lifecycle/event/
 notification hashes are recorded in `pr40-final-status-assembly-review.json`,
 including the accepted PR42 retention assembly. Earlier PR33/PR32 reports remain
 historical lineage, not claims that their superseded hashes are current. All five
-dependencies and all ten launch paths below are byte-identical to main5316.
+dependency hashes above describe main5316, not all current assembly bytes. The
+receipt overlay and the retained issue #48 starter/unit changes supersede only
+their corresponding historical hashes; the other dependency/launch bytes remain.
 
 ### Issue #43 accepted source prerequisites and remaining operational debt
 
-The current coordinator and helper fingerprints below are issue #43 candidates,
+The historical coordinator and helper fingerprints below are issue #43 candidates,
 not the old unsafe PR16 checkpoint. The helper combines issue #43 strict review
 identity/owner-published structured evidence with the final PR40 helper
 `0480bde8fdd3ce714011ca4604de8ef1f4c500bc2bd82d7801ed2fb4da8955de`
@@ -156,7 +158,7 @@ the coordinator, workflow notifications, and issue starter. The pins and an
 independently spelled-out test fixture represent source consistency only; they
 do not constitute independent review, runtime evidence, or activation permission.
 
-| Issue #43 candidate path | SHA-256 |
+| Historical issue #43 candidate path | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c` |
 | `deploy/review_evidence.py` | `c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae` |
@@ -171,10 +173,32 @@ do not constitute independent review, runtime evidence, or activation permission
 | `deploy/hermes-mobile-issue-starter.service` | `1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69` |
 | `deploy/hermes-mobile-issue-starter.timer` | `848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92` |
 
-This assembly integrates final PR40 main
+The issue #48 starter and supported-user-unit changes retained from PR49 have
+these current assembly pins, also independently literal in the launch fixture:
+
+| Retained issue #48 path | SHA-256 |
+| --- | --- |
+| `deploy/issue_starter.py` | `49debd3c1da5252ea67322a0febb9eb5b56d0ac1a830f3718e4d07377993b517` |
+| `deploy/hermes-mobile-coordinator.service` | `49d6ebb6e24b4c0a06af3d10e6e2cce11dd6af7ee8056c99268058c2f6f2cab3` |
+
+Issue #50's receipt-transport candidate overlays only
+`deploy/cloud_coordinator.py` and `deploy/task_receipts.py` in the current source
+inventory. The historical PR40 and issue #43 table hashes above remain unchanged:
+
+| Issue #50 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `0935088cb9e3429b83dcc7daa8552cf2c58830e5494549270ec276a076e3193b` |
+| `deploy/task_receipts.py` | `60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb` |
+
+These pins identify candidate bytes only. Both files retain the
+`coordinator-review-contract` blocker; refreshing pins does not satisfy independent
+review, clear the source-contract hold, or authorize operational activation.
+
+Before the Issue #50 overlay, this assembly integrated final PR40 main
 `5316f7c75dced1bffafdb545cdd7677e98e855a6`, preserving its parser and previously
-merged retention behavior. Source acceptance and removal of the historical hold
-do not authorize activation.
+merged retention behavior. The Issue #50 transport adjustment is separately pinned
+above and does not change that historical lineage. Source acceptance and removal of
+the historical hold do not authorize activation.
 
 The read-only validator can now report `ready: true` (CLI exit zero) in any selected
 phase **only when every source, run, provenance, review, approval, thread and
