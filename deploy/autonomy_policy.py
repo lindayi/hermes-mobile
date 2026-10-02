@@ -182,7 +182,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
     'backend/native_notifications.py': '0159fbdd02705469853f51be7bb32479ea9e2fa0d6fdbc6789253d3b3c1c85fe',
     # Pending PR25 candidate bytes, absent from the main baseline; parent review only.
-    'deploy/native_notification_release.py': '7f324db4bf04c84675106e918f55483d8ad399665feb60339d781867f5742d50',
+    'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
 }
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',

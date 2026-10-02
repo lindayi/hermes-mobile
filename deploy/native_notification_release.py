@@ -178,12 +178,16 @@ class _RouteSession:
         for offset in range(0, len(missing), 400):
             page = missing[offset:offset + 400]
             placeholders = ','.join('?' for _ in page)
+            # Prove uniqueness across all default-profile owners in SQL before
+            # returning rows: one ambiguous key must not fan out Python storage
+            # or lineage walks. COUNT(*)=1 also makes the selected row exact.
             found = runs.execute(
                 f'''SELECT upstream_id,session_id,user_id FROM runs
-                    WHERE profile='default' AND upstream_id IN ({placeholders})''',
-                page).fetchall()
+                    WHERE profile='default' AND upstream_id IN ({placeholders})
+                    GROUP BY upstream_id HAVING COUNT(*)=1''', page)
             for row in found:
-                run_rows.setdefault(row['upstream_id'], []).append(row)
+                if row['user_id'] == self.owner_id:
+                    run_rows[row['upstream_id']] = row
 
         sessions, children = {}, {}
 
@@ -232,24 +236,25 @@ class _RouteSession:
                 if row['end_reason'] != 'compression':
                     return frozenset(chain), current
                 if current not in children:
+                    # Two eligible children positively prove ambiguity; do not
+                    # materialize siblings beyond that proof. Filter before LIMIT.
                     children[current] = [child['id'] for child in native.execute(
                         '''SELECT id FROM sessions WHERE parent_session_id=?
                            AND COALESCE(source,'') NOT IN ('tool','subagent')
                            AND json_extract(COALESCE(model_config,'{}'),
                                '$._branched_from') IS NULL
                            AND json_extract(COALESCE(model_config,'{}'),
-                               '$._delegate_from') IS NULL''',
-                        (current,)).fetchall()]
+                               '$._delegate_from') IS NULL LIMIT 2''',
+                        (current,))]
                 if len(children[current]) != 1:
                     return None
                 current = children[current][0]
             return None
 
         lineages = {}
-        for matches in run_rows.values():
-            for row in matches:
-                if isinstance(row['session_id'], str) and row['session_id']:
-                    lineages.setdefault(row['session_id'], None)
+        for row in run_rows.values():
+            if isinstance(row['session_id'], str) and row['session_id']:
+                lineages.setdefault(row['session_id'], None)
         for root in lineages:
             lineages[root] = lineage(root)
 
@@ -271,10 +276,10 @@ class _RouteSession:
 
         resolved_keys = {}
         for key in missing:
-            matches = run_rows.get(key, ())
+            row = run_rows.get(key)
             resolved = None
-            if len(matches) == 1 and matches[0]['user_id'] == self.owner_id:
-                root = matches[0]['session_id']
+            if row is not None:
+                root = row['session_id']
                 found = lineages.get(root)
                 if found is not None:
                     chain, tip = found

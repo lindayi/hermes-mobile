@@ -101,7 +101,7 @@ _PENDING_PR16_COORDINATOR_FIXTURE = {
 }
 # PR25 candidate bytes awaiting parent review; not present in the main baseline.
 _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
-    'deploy/native_notification_release.py': '7f324db4bf04c84675106e918f55483d8ad399665feb60339d781867f5742d50',
+    'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
 }
 
 
