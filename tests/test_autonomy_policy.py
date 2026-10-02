@@ -35,6 +35,7 @@ IDENTITY = f'https://github.com/{REPOSITORY}/{WORKFLOW_PATH}@{REF}'
 
 _MERGED_MAIN_SOURCE_FIXTURE = {
     '.github/workflows/ci.yml': '39110e6f940fc59ef3aec9846f07616a86a2e07335d2aaed6c6cd0ab444ff195',
+    '.github/workflows/issue-link.yml': '5569875b9fc45d686f857712bc035d75a100fcfc4f3862f48b0d8bd045eca415',
     '.github/native-tests.json': 'b97ddb088e595197cf65d97b0b4af89f4f83f5c4ad25463c566df7099817209f',
     '.github/host-tests.json': '8af5fc30188f81ba95d3d7c11ba6801f52795175c2cac7f634424f906947ce5a',
     '.github/actions/test-environment/action.yml': '638ed56955c8c8202fdd41640abe3be8b8065129e2965b8dc67b69f024017604',
@@ -45,6 +46,8 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'deploy/git_source.py': 'c69c7c5a45bc3a16ab26996872c258cc352cf2ec56c19d6256595e18ac713d63',
     'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
     'deploy/native_controls_release.py': 'a2d00ebe7fa8add88afdeda28599b47e68f2eaab6935a8b2c9eaa46f585a11fe',
+    'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
+    'deploy/observe_release.py': '49d784af17d0807c95b460b2a285254f0a616361c390afa69b3cc0345a56b498',
     'deploy/public_http.py': 'dd352b8d0295f242f4a5d31a55eaaec523ef8405601461d4ab5fa8dc6dc302e7',
     'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
     'deploy/self_deploy.py': 'c8b9febf5e73c22de2aebbbf6ecb63e08597f58ea7ff5eede979d4be51783550',
@@ -60,6 +63,37 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/native-compat.patch': '2add04e93a5ea74eeeb407dc9d5556bb38c1454b5c8bf307c3e8490e9b72dd32',
+    'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
+    'backend/model_controls.py': 'a6276a114d770f8a52677ae11a48011b586daf7cd047dd667099e4a6251ccb6b',
+    'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
+    'backend/runs.py': 'f8ee1d2547a794f277c5dc6b52e491e17ada1bda65acba9f3083eee8522de04e',
+    'backend/app.py': 'fad986aa3fd601041e9f2926dd8c128292e796ca75dac9613c3c5592128e9e67',
+    'backend/auth.py': '411529a1d53bdcd01eae4bf5e35c44d3d5099e4dc9e77eb9dbbe67df6433f335',
+    'backend/auth_store.py': '8827856de744de03648924b0ff83011bdb70417781620724acd84078181c193e',
+    'backend/background_delivery.py': '2da2bdd89d27f18beee0e0099d1bb39b325a9f70dcba099d55ceb3dea2e88629',
+    'backend/catalog_search.py': 'f19c8f94816e6c68681c8db5aa7f7c21cedefb6e3ddaa3fb03612a61e5b2c433',
+    'backend/chat_snapshot.py': 'f46435b77435deb6eaf419c46b5175247ae6f507ad2dd9d9f8c6f3c89ba9d99e',
+    'backend/context_compression_presentation.py': 'dea9ea4a45e4a61a6df123b8622aa0ee0a5ee628c80d1644dc20f320b6daa729',
+    'backend/delivery.py': 'c241a5bf745011a7a7820313da6db688a5446703ae42c8a97c77f96ce05ff18f',
+    'backend/hermes_client.py': '20a0a6f48e42647e1536efb7395ebe2d24c1525c2bf36a53a65ccec45fb5a733',
+    'backend/jobs.py': 'fd9c4a2ac2c2f292c4616fd7dd04281b4c6a5753e9c432756345d85d175eee5e',
+    'backend/native_catalog.py': '8c161ec64446b9297cfde860ac1132df7cd388549bca6b6f6481ba676d6a1f5f',
+    'backend/notification_policy.py': '69c7c6807210dbf9300cd25c5ba14604be75730d06f41879074208d62655684d',
+    'backend/operational_notifications.py': '9edbc496bb931a02096bf820d984a4032107e003924492e1120684a0f5cdad31',
+    'backend/orchestration.py': 'a3e3d88bf7e2918b63a9ad09e9715099878f13ac964b1082ca173669bee6cc9b',
+    'backend/profiles.py': '8bf7681b69f6273d6a6f86a9835cc7e2fc0bd6f31fdb59e7934bd8dbb7515f40',
+    'backend/public_commentary.py': 'a52a81b0852fdcff13057bcd25ee39836abdc2d8ab658b90a9db7197ca0cf57a',
+    'backend/request_notifications.py': '1136806183f7b3cbb51b65691fc5c26b41f22c2d06098d1440bb3c42a869ede8',
+    'backend/runtime_binding.py': '96912dfc875807d7f44e520caac33e408ca4897f021af68b55bf8eb5ef35c072',
+    'backend/runtime_notice_presentation.py': '117649d3ef0779b08d5c540fdc88add671180a35e90d894e116f5b5bbd6cf34c',
+    'backend/session_deletion.py': '44a9ef22524a7bbfc87a6a855583b1e1b88affbc2c4961c2c2efff9efc3f9d71',
+    'backend/session_telemetry.py': '74141c1f154e4a7fb10d3eb25d5676b894e13b545be40335d8960222506bf825',
+    'backend/session_visibility.py': 'e6332e0104c82cb871627078145d36006e7d681956c69ab73e968448b40c50c8',
+    'backend/steering.py': '3bdd2134e8617d9b76f2431b4b1d07fdf9bd609cedd9587062b05fb8516b8fdd',
+    'backend/task_reminder_presentation.py': '549a29784ef6f778ef55658d5a05961fed3919579faeeba567545004d7e9bcf3',
+    'backend/tool_presentation.py': '4cfd8d468f75213d3aee3f8ab3c9f9409bb3b97e50a2aa05492181b49a1b474f',
+    'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
 }
 _PENDING_PR16_COORDINATOR_FIXTURE = {
     'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
@@ -181,62 +215,227 @@ def _changed_source(evidence, path, source):
     evidence['main']['files'][path] = hashlib.sha256(source.encode()).hexdigest()
 
 
-def _static_python_control_closure():
-    source_root = Path(__file__).resolve().parents[1]
-    pending = list(SOURCE_CONTROL_ROOTS)
+def _static_python_control_closure(source_root=None, roots=None):
+    source_root = Path(source_root or Path(__file__).resolve().parents[1]).resolve()
+    pending = list(roots if roots is not None else SOURCE_CONTROL_ROOTS)
     seen = set()
     dynamic_imports = set()
     unresolved_imports = set()
+    local_roots = {'backend', 'deploy', 'scripts'}
 
-    def enqueue(module):
-        if not module.startswith(('deploy', 'scripts')):
-            return
-        module_path = source_root / module.replace('.', '/')
-        source = module_path.with_suffix('.py')
+    def initializer_attributes(module_path):
         initializer = module_path / '__init__.py'
-        if source.is_file():
-            pending.append(source.relative_to(source_root).as_posix())
-        elif initializer.is_file():
-            pending.append(initializer.relative_to(source_root).as_posix())
-        elif module not in ('deploy', 'scripts'):
+        if not initializer.is_file():
+            return set()
+        attributes = set()
+        # Only direct declarations prove an attribute. Import requests, nested
+        # scopes and annotation-only names do not prove a package member exists.
+        for statement in ast.parse(initializer.read_text()).body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                attributes.add(statement.name)
+            elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                if isinstance(statement, ast.AnnAssign) and statement.value is None:
+                    continue
+                targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                attributes.update(target.id for target in targets if isinstance(target, ast.Name))
+        return attributes
+
+    def enqueue(module, *, optional=False):
+        namespace = module.partition('.')[0]
+        if namespace not in local_roots:
+            return
+        module_path = source_root.joinpath(*module.split('.'))
+        initializer = module_path / '__init__.py'
+        source = module_path.with_suffix('.py')
+        if initializer.is_file():
+            target = initializer
+        elif source.is_file():
+            target = source
+        elif module_path.is_dir():
+            target = None
+        elif not optional:
             unresolved_imports.add(module)
+            return
+        else:
+            return
+        if target is not None:
+            pending.append(target.relative_to(source_root).as_posix())
+        parts = module.split('.')
+        for index in range(1, len(parts)):
+            parent = source_root.joinpath(*parts[:index]) / '__init__.py'
+            if parent.is_file():
+                pending.append(parent.relative_to(source_root).as_posix())
 
     while pending:
-        path = pending.pop()
+        path = Path(pending.pop()).as_posix()
         if path in seen:
             continue
         seen.add(path)
         tree = ast.parse((source_root / path).read_text())
+        parts = Path(path).with_suffix('').parts
+        package = '.'.join(parts[:-1])
+        dynamic_names = {'__import__', 'eval', 'exec'}
+        for imported in ast.walk(tree):
+            if isinstance(imported, ast.ImportFrom) and imported.module in {
+                    'builtins', 'importlib', 'importlib.util'}:
+                for alias in imported.names:
+                    if alias.name in {'__import__', 'eval', 'exec', 'import_module',
+                                      'spec_from_file_location', 'load_module'}:
+                        dynamic_names.add(alias.asname or alias.name)
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     enqueue(alias.name)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                enqueue(node.module)
-                module_path = source_root / node.module.replace('.', '/')
-                if node.module in ('deploy', 'scripts') or not module_path.with_suffix('.py').is_file():
-                    for alias in node.names:
-                        enqueue(f'{node.module}.{alias.name}')
-            elif isinstance(node, ast.ImportFrom) and node.level:
-                package = path.rsplit('/', 1)[0].replace('/', '.')
-                module = f'{"." * node.level}{node.module or ""}'
-                try:
-                    resolved = importlib.util.resolve_name(module, package)
-                except (AttributeError, ImportError, ValueError):
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ''
+                if node.level:
+                    try:
+                        module = importlib.util.resolve_name(
+                            '.' * node.level + module, package,
+                        )
+                    except (ImportError, ValueError):
+                        unresolved_imports.add(path)
+                        continue
+                if not module:
                     unresolved_imports.add(path)
-                else:
-                    enqueue(resolved)
-                    if node.module is None:
-                        for alias in node.names:
-                            enqueue(f'{resolved}.{alias.name}')
+                    continue
+                enqueue(module)
+                module_path = source_root.joinpath(*module.split('.'))
+                if node.module is None or module_path.is_dir():
+                    attributes = initializer_attributes(module_path)
+                    for alias in node.names:
+                        if alias.name == '*':
+                            unresolved_imports.add(path)
+                        else:
+                            enqueue(f'{module}.{alias.name}', optional=alias.name in attributes)
             if isinstance(node, ast.Call):
                 function = node.func
-                if ((isinstance(function, ast.Name) and function.id in
-                     {'__import__', 'eval', 'exec'})
+                if ((isinstance(function, ast.Name) and function.id in dynamic_names)
                         or (isinstance(function, ast.Attribute) and function.attr in
                             {'import_module', 'spec_from_file_location', 'load_module'})):
                     dynamic_imports.add(path)
     return seen, dynamic_imports, unresolved_imports
+
+
+def _write_python(source_root, path, source):
+    target = source_root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source)
+
+
+def test_static_python_closure_resolves_relative_package_and_initializer_imports(tmp_path):
+    _write_python(tmp_path, 'deploy/__init__.py', 'from . import child\n')
+    _write_python(tmp_path, 'deploy/runner.py', 'from .nested import checks\n')
+    _write_python(tmp_path, 'deploy/child.py', 'from .nested import helpers\n')
+    _write_python(tmp_path, 'deploy/nested/__init__.py', 'from . import startup\n')
+    _write_python(tmp_path, 'deploy/nested/checks.py', 'from .. import child\n')
+    _write_python(tmp_path, 'deploy/nested/helpers.py', '')
+    _write_python(tmp_path, 'deploy/nested/startup.py', 'from ..child import run\n')
+
+    closure, dynamic_imports, unresolved_imports = _static_python_control_closure(
+        tmp_path, roots={'deploy/runner.py'},
+    )
+
+    assert closure == {
+        'deploy/__init__.py', 'deploy/runner.py', 'deploy/child.py',
+        'deploy/nested/__init__.py', 'deploy/nested/checks.py',
+        'deploy/nested/helpers.py', 'deploy/nested/startup.py',
+    }
+    assert not dynamic_imports
+    assert not unresolved_imports
+
+
+def test_static_python_closure_reports_unsupported_execution_and_missing_modules(tmp_path):
+    _write_python(
+        tmp_path, 'deploy/runner.py',
+        "import importlib\nfrom importlib import import_module as load_module\n"
+        "import deploy.missing\nimportlib.import_module('deploy.dynamic')\n"
+        "load_module('deploy.also_dynamic')\n",
+    )
+
+    closure, dynamic_imports, unresolved_imports = _static_python_control_closure(
+        tmp_path, roots={'deploy/runner.py'},
+    )
+
+    assert closure == {'deploy/runner.py'}
+    assert dynamic_imports == {'deploy/runner.py'}
+    assert unresolved_imports == {'deploy.missing'}
+
+
+@pytest.mark.parametrize(('module', 'name'), [
+    ('builtins', '__import__'),
+    ('builtins', 'eval'),
+    ('builtins', 'exec'),
+    ('importlib', 'import_module'),
+    ('importlib.util', 'spec_from_file_location'),
+    ('importlib.util', 'load_module'),
+])
+@pytest.mark.parametrize('aliased', [False, True])
+def test_static_python_closure_reports_direct_dynamic_callable_imports(tmp_path, module, name, aliased):
+    binding = 'load' if aliased else name
+    suffix = ' as load' if aliased else ''
+    _write_python(
+        tmp_path, 'deploy/runner.py',
+        f'from {module} import {name}{suffix}\n{binding}("synthetic")\n',
+    )
+
+    closure, dynamic_imports, unresolved_imports = _static_python_control_closure(
+        tmp_path, roots={'deploy/runner.py'},
+    )
+
+    assert closure == {'deploy/runner.py'}
+    assert dynamic_imports == {'deploy/runner.py'}
+    assert not unresolved_imports
+
+
+@pytest.mark.parametrize('import_statement', [
+    'from . import missing',
+    'from deploy import missing as alias',
+])
+@pytest.mark.parametrize('initializer', [
+    None,
+    '',
+    'known = 1\n',
+    'missing: object\n',
+    'class Container:\n    missing = 1\n',
+    'def factory():\n    missing = 1\n',
+    'from . import missing\n',
+])
+def test_static_python_closure_rejects_missing_package_members(tmp_path, import_statement, initializer):
+    _write_python(tmp_path, 'deploy/runner.py', import_statement + '\n')
+    if initializer is not None:
+        _write_python(tmp_path, 'deploy/__init__.py', initializer)
+
+    closure, dynamic_imports, unresolved_imports = _static_python_control_closure(
+        tmp_path, roots={'deploy/runner.py'},
+    )
+
+    expected = {'deploy/runner.py'}
+    if initializer is not None:
+        expected.add('deploy/__init__.py')
+    assert closure == expected
+    assert not dynamic_imports
+    assert unresolved_imports == {'deploy.missing'}
+
+
+@pytest.mark.parametrize('initializer', [
+    'exported = 1\n',
+    'exported: int = 1\n',
+    'def exported():\n    pass\n',
+    'async def exported():\n    pass\n',
+    'class exported:\n    pass\n',
+])
+def test_static_python_closure_accepts_declared_initializer_attributes(tmp_path, initializer):
+    _write_python(tmp_path, 'deploy/__init__.py', initializer)
+    _write_python(tmp_path, 'deploy/runner.py', 'from . import exported as alias\n')
+
+    closure, dynamic_imports, unresolved_imports = _static_python_control_closure(
+        tmp_path, roots={'deploy/runner.py'},
+    )
+
+    assert closure == {'deploy/__init__.py', 'deploy/runner.py'}
+    assert not dynamic_imports
+    assert not unresolved_imports
 
 
 def test_reviewed_source_fixture_matches_complete_required_contract():
@@ -252,7 +451,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert SOURCE_CONTROL_PYTHON_FILES <= set(REQUIRED_FILES)
     assert SOURCE_CONTROL_ROOTS <= SOURCE_CONTROL_PYTHON_FILES
     assert SOURCE_BASELINES == {
-        'main': 'f84063e9aed55994c4ae4d3eae14fec922e12929',
+        'main': 'b85c098857e7fb8229f47bd688d703bb677aeb34',
         'deploy/cloud_coordinator.py': '403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83',
     }
 
@@ -536,6 +735,31 @@ def test_mutating_each_executable_dependency_blocks(path):
     assert SOURCE_BLOCKERS[path] in _blockers(evidence)
 
 
+@pytest.mark.parametrize('path', [
+    '.github/workflows/issue-link.yml',
+    'backend/app.py', 'backend/auth.py', 'backend/auth_store.py',
+    'backend/background_delivery.py', 'backend/catalog_search.py', 'backend/chat_snapshot.py',
+    'backend/configuration.py', 'backend/context_compression_presentation.py',
+    'backend/delivery.py', 'backend/hermes_client.py', 'backend/jobs.py',
+    'backend/model_controls.py', 'backend/native_api_service.py', 'backend/native_catalog.py',
+    'backend/notification_policy.py', 'backend/notifications.py',
+    'backend/operational_notifications.py', 'backend/orchestration.py',
+    'backend/profiles.py', 'backend/public_commentary.py', 'backend/request_notifications.py',
+    'backend/runs.py', 'backend/runtime_binding.py', 'backend/runtime_notice_presentation.py',
+    'backend/session_deletion.py', 'backend/session_telemetry.py',
+    'backend/session_visibility.py', 'backend/steering.py',
+    'backend/task_reminder_presentation.py', 'backend/tool_presentation.py',
+    'deploy/backup.py', 'deploy/native_readiness.py', 'deploy/observe_release.py',
+])
+def test_new_source_inventory_mutations_keep_the_hold_and_specific_blocker(path):
+    evidence = _evidence()
+    _changed_source(evidence, path, 'unreviewed source mutation')
+
+    assert _blockers(evidence) == {
+        'pending-source-contract', SOURCE_BLOCKERS[path],
+    }
+
+
 def test_mismatched_current_head_and_sensitive_approval_block():
     evidence = _evidence()
     evidence['source_ci']['head_sha'] = 'd' * 40
@@ -701,7 +925,12 @@ def test_sensitive_targeted_review_matches_authenticated_record(phase, state):
 def test_sensitive_targeted_review_rejects_unbound_claim(phase, mutate):
     evidence = _sensitive_evidence(phase)
     mutate(evidence['cloud_review'])
-    assert _blockers(evidence, phase) == {'pending-source-contract', 'sensitive-review-authorization'}
+    expected = {'pending-source-contract', 'sensitive-review-authorization'}
+    reviewer = evidence['cloud_review']['reviews'][-1].get('user')
+    if (not isinstance(reviewer, dict) or type(reviewer.get('id')) is not int
+            or reviewer['id'] < 1):
+        expected.add('cloud-review-approval')
+    assert _blockers(evidence, phase) == expected
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -760,7 +989,10 @@ def test_sensitive_targeted_reviewer_must_be_positive_and_independent(reviewer_i
     review['pull_author_id'] = 77
     review['change']['targeted_review']['reviewer_id'] = reviewer_id
     review['reviews'][-1]['user']['id'] = reviewer_id
-    assert _blockers(evidence) == {'pending-source-contract', 'sensitive-review-authorization'}
+    expected = {'pending-source-contract', 'sensitive-review-authorization'}
+    if type(reviewer_id) is not int or reviewer_id < 1:
+        expected.add('cloud-review-approval')
+    assert _blockers(evidence) == expected
 
 
 @pytest.mark.parametrize('author_id', [None, 0, -1, '198982749', 1.5])
@@ -784,6 +1016,37 @@ def test_malformed_authenticated_review_ordering_fails_closed(field, value):
     evidence = _evidence()
     evidence['cloud_review']['reviews'][0][field] = value
     assert 'cloud-review-approval' in _blockers(evidence)
+
+
+@pytest.mark.parametrize('malformed', [
+    pytest.param(None, id='non-object-review'),
+    pytest.param({'state': 'CHANGES_REQUESTED'}, id='missing-user'),
+    pytest.param({'user': None, 'state': 'CHANGES_REQUESTED'}, id='non-object-user'),
+    pytest.param({'user': {}, 'state': 'CHANGES_REQUESTED'}, id='missing-user-id'),
+    *[
+        pytest.param({'user': {'id': value}, 'state': 'CHANGES_REQUESTED'}, id=f'user-id-{label}')
+        for label, value in (
+            ('string', '76'), ('boolean', True), ('zero', 0), ('negative', -1),
+            ('float', 76.0), ('null', None),
+        )
+    ],
+])
+def test_every_review_author_is_validated_before_copilot_filtering(malformed):
+    evidence = _evidence()
+    evidence['cloud_review']['reviews'].append(malformed)
+
+    assert _blockers(evidence) == {'cloud-review-approval', 'pending-source-contract'}
+
+
+def test_well_formed_non_copilot_review_is_validated_then_filtered():
+    evidence = _evidence()
+    evidence['cloud_review']['reviews'].append({
+        'id': 2, 'user': {'id': 76}, 'state': 'CHANGES_REQUESTED',
+        'commit_id': evidence['cloud_review']['head_sha'],
+        'submitted_at': '2026-10-01T22:00:00Z',
+    })
+
+    assert _blockers(evidence) == {'pending-source-contract'}
 
 
 def test_review_order_uses_timestamp_then_positive_review_id():
