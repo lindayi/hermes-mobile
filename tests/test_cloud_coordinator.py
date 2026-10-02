@@ -1964,6 +1964,7 @@ def test_cli_help_does_not_create_bytecode_in_fresh_checkout(tmp_path):
     (tmp_path / "deploy").mkdir()
     (tmp_path / "scripts").mkdir()
     shutil.copy2(root / "deploy/cloud_coordinator.py", tmp_path / "deploy/cloud_coordinator.py")
+    shutil.copy2(root / "deploy/review_evidence.py", tmp_path / "deploy/review_evidence.py")
     for module in ("workflow_lifecycle.py", "workflow_events.py", "task_receipts.py"):
         shutil.copy2(root / "deploy" / module, tmp_path / "deploy" / module)
     shutil.copy2(root / "scripts/cloud_coordinator.py", tmp_path / "scripts/cloud_coordinator.py")

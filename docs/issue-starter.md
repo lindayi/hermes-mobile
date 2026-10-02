@@ -5,7 +5,7 @@ authorized public issue. It does not activate a service, alter GitHub settings,
 merge changes, or deploy code. The implementation uses GitHub's public-preview
 agent-task REST API (`POST` and `GET
 /agents/repos/{owner}/{repo}/tasks[/{task_id}]`; see the
-[official API reference](https://docs.github.com/en/rest/agent-tasks/agent-tasks).
+[official API reference](https://docs.github.com/en/rest/agent-tasks/agent-tasks)).
 The contract may change.
 
 ## Authorization and data boundary

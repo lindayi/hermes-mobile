@@ -59,11 +59,165 @@ rate limits, malformed pagination, and incomplete GraphQL review-thread pages
 fail closed; malformed issue/comment rows or IDs also abort the whole scan. The
 cursor is advanced only after a complete read.
 
-Only current unresolved review-thread comments and completed failed/timed-out
+Only current unresolved review-thread comments, body-only findings of the latest
+authenticated exact-head Copilot review, and completed failed/timed-out
 `Source checks` workflow runs are eligible repair evidence. It sends at most
-eight findings, clips each finding to 1,000 characters, removes links, and never
-fetches check logs. The Copilot request labels all embedded evidence untrusted,
-and the text is never interpreted as shell input. Draft PRs and ordinary pending
+eight findings in one combined budget (threads first, then body findings, with one
+slot reserved for a workflow failure), clips each finding to 1,000 characters,
+removes links, and never fetches check logs. Body findings are already decoded
+plaintext: the coordinator preserves literal angle-bracket text such as
+`<details>` and `<summary>` in repair evidence, with the same credential/link
+redaction and character/item caps. Thread and PR-intent sanitization is unchanged.
+A literal edit within the retained evidence changes the final request and its
+deterministic marker, so the existing fresh-evidence fence suppresses stale dispatch.
+
+Body-only findings are read by `deploy/review_evidence.py` from the complete
+review collection. Every record, author, and present record ID is validated
+before author filtering; a malformed, tied, pending, stale-head, or foreign-author
+latest review yields no body evidence. Only a single latest Copilot review on the
+current head with a positive record ID is read, and only when it is `COMMENTED` or
+`CHANGES_REQUESTED`. Review list and detail GETs use
+`Accept: application/vnd.github.full+json`; the real adapter retains complete
+pagination and the same authenticated record's raw `body`, rendered `body_html`,
+author, head and submission time. Missing, empty, malformed or oversized rendered
+content blocks body dispatch; there is no raw-Markdown fallback.
+From a `ccr-overview-v2` body, each item of a
+`Previously missed (N)` section is forwarded (including under a `Findings: None`
+headline). One stdlib HTML parser builds bounded disclosure structure, respecting
+nested markup, quoted attributes (including `>`), case, and closing whitespace.
+Only GitHub-rendered HTML is parsed. The exact raw marker
+`<!-- ccr-overview-v2 -->` must be the first complete line (no indentation or
+trailing text), solely as format identity; GitHub omits this comment from rendered
+HTML. Rendered comments never establish format identity or approval. Overview
+section classification runs only for canonically marked raw bodies, including
+when the state is `CHANGES_REQUESTED`. An unmarked disclosure never substitutes
+for the separate bare explicit-correction path; its labels also cannot suppress
+an independently eligible bare correction outside disclosures.
+HTML `code`, `pre`, and `blockquote` subtrees are inert for disclosure scope,
+section labels and summary actionability. Literal decoded text remains context
+inside independently genuine findings, including nested quotation, horizontal
+rules and validation sentences. Entity callbacks append decoded text directly:
+escaped disclosure/overview text is never reparsed as markup. Incomplete raw
+markup and unclosed/crossed elements fail closed. No Markdown engine or lexical
+shielding is used. Ordinary rendered list corrections and code identifiers in
+genuine correction context remain supported. Overview framing removes only known
+metadata labels/values, never an entire paragraph containing subsequent correction
+text; quoted context is not framing.
+All disclosure traversal is iterative. There are no repeated HTML-removal passes. Limits are
+64 Ki characters, 4,096 parser events, 32 nested elements and 256 disclosures;
+exceeding any limit or unclosed/crossed markup yields `ambiguous`, not a truncated
+repair request. An unknown but balanced section is locally ambiguous: it never
+becomes fixer evidence and never erases a separately bounded active section.
+
+The helper explicitly classifies `active`, `resolved`, `history`, `validation-only`,
+`no-findings`, `inline`, and `ambiguous` content. Resolved/history ancestors exclude
+their entire subtree, even a nested active-looking label; they never leak into
+summary evidence. Structurally intact, explicitly labelled `Previously missed`
+sections may still be forwarded whole when the count or child-item shape cannot
+be proven (including unknown counts), rather than dropping known active evidence.
+This fallback requires live nonhistorical content beyond the outer summary and
+the known `In code that hasn't changed since last review` introduction. Empty,
+intro-only and history-only sections never emit their label as a finding, even
+with a positive or unknown count; they consume no repair attempt and confer no
+approval. Populated fallback sections and independently genuine findings remain
+eligible under the existing review gates. Count-matched items use the same live
+content predicate as fallback sections: each item must contain nonempty unquoted,
+nonhistorical text beyond the known introduction before its literal context is
+retained. Quoted-only matched items are omitted individually, without dropping a
+genuine sibling or its quoted context. A matched section with no eligible items
+is `no-findings`, not a repair request. Both intro comparisons normalize whitespace,
+including rendered line breaks. Matched-item and fallback live eligibility reuse
+the existing complete-negative/status-only grammar after excluding the known intro,
+preserving sentence/block boundaries even when status sentences lack punctuation.
+Neutral-only content cannot supply a finding; genuine corrections, independent
+siblings and their literal context remain eligible.
+Unsupported top-level disclosures remain ambiguous, not implicitly resolved.
+
+Validation-only requires complete recognized status prose (optionally accompanied
+by no-code-issues sentences), not the presence of `pending` anywhere. Examples
+include `The exact-head verification remains pending.` and `Exact-head verification
+is still pending.`. Separate required corrections survive validation status or a
+`Looks good`/`Findings: None` headline; explicit requests such as
+`Required correction: reject pending receipts.` remain active.
+Mixed summaries exclude only complete validation-status
+sentences, retaining the correction. Complete negative verdict sentences such as
+`No bugs found.` and `No code defects were found in the reviewed changes.` are
+recognized before correction classification, including beside validation status.
+The bounded grammar permits issues, bugs, defects, problems, vulnerabilities or
+findings, optional `code`/`were`, and found/identified/detected verdicts. Optional
+`in` scopes are finite code/change/diff/patch/implementation phrases, not arbitrary
+trailing prose that could hide a correction. In mixed summaries the recognized
+negative sentence remains quoted context but cannot itself supply affirmative
+defect evidence; separate or compound required corrections remain actionable.
+Both bare `CHANGES_REQUESTED` prose and overview summaries require a nonempty
+explicit `Required correction:`, `Required change:`, `Requested correction:` or
+`Requested change:` clause at a sentence/line boundary or after `, but`/`, however`.
+Generic modal/bug/defect words, formatting and file scopes do not establish a
+correction. This deliberately narrows the prior broad-English heuristic: even a
+bare requested-changes verdict without explicit correction evidence stays
+ambiguous/non-dispatching, never approved. Negative or status-only prose does not
+consume a fixer attempt; separate explicit corrections remain eligible.
+Positive `Open (N)` counts suppress
+summary duplication because those findings are already represented by threads;
+explicit `Previously missed` sections still forward body-only items.
+`Open (0)` never suppresses an actionable summary. COMMENTED summaries alone do
+not authorize repairs; explicitly active disclosures do.
+
+`body_findings` retains its caller interface. Dispositions remain in the helper's
+internal result; no new review-authority protocol or coordinator lifecycle path
+is introduced. The existing formal review gate continues to require actual
+exact-head APPROVED evidence. Ambiguous body text is
+never passed blindly to a fixer; independent authenticated thread/check evidence
+remains eligible. Each body finding records the genuine review ID, head SHA, and
+submission time; it never carries a thread ID. Body text is untrusted evidence:
+it is never approval, and approval is never inferred from prose.
+
+This scoped issue #39/PR #40 architectural revision starts at
+`b1cd397d4378c7300a5de2f527bbe4f3eb69da8d` and addresses review `5392186494`.
+Acceptance includes real RED/GREEN entity-text, formatted-negative and modal-only
+regressions using public synthetic raw/rendered API pairs, full-media paginated
+adapter and missing-rendered negatives,
+structural classification/bounds cases, active body-only forwarding, ambiguity
+without repair/approval, and the existing fresh-evidence dispatch fence. Candidate
+helper pins are refreshed without clearing the unconditional source-contract hold.
+No activation, protection, lifecycle redesign, or production change is included.
+
+The bounded follow-up at `0f34afa7f6aeead6af73016464d342099d86b991` addresses
+review `5392482450`, comments `4166255676` and `4166255756`, only: decoded literal
+preservation through the request/marker/dispatch fence, and nonempty live fallback
+content. Finite RED/GREEN cases cover literal edits and sanitization plus empty,
+intro-only, resolved/history-only and populated sections with counts 1, 0 and
+unknown. Only the helper's pending digest and independent fixture are refreshed;
+the coordinator baseline, other pins and unconditional source-contract hold stay
+unchanged.
+
+The final bounded structural follow-up at
+`b27fa36e17c25df02232324e49d1e5e15dc0bac0` addresses review `5392668833` only:
+canonical raw-marker gating of overview sections and live-content eligibility
+before forwarding matched items. Finite managed RED/GREEN cases cover both
+review states, missing/noncanonical and canonical LF/CRLF raw markers, bare
+explicit corrections, quoted-only code/pre/blockquote items at matched and
+unknown counts, and mixed genuine/quoted items. No-dispatch cases consume no
+attempt or approval; independent marked findings and genuine literal context
+remain eligible. Only the helper candidate digest and independent fixture change;
+the coordinator baseline, other pins and unconditional source-contract hold stay
+unchanged. This is not activation or full integration evidence.
+
+The bounded follow-up at `c8bb08d0c47ac1d49a33f0c2cc962ebb9be2d641` addresses
+review `5392848133`, comment `4166553619`, only: whitespace-equivalent introductions
+and complete negative/status-only matched-item and fallback eligibility. Finite
+managed RED/GREEN regressions cover newline/`br` intros, negative/status mixtures,
+unpunctuated status blocks, no dispatch/attempt/approval, and preservation of real
+findings, independent siblings and quoted literal context. No new language grammar,
+Markdown architecture or authority is added. Only the helper candidate digest and
+independent fixture are refreshed; other pins, the coordinator baseline and the
+unconditional source-contract hold remain unchanged. No activation or full
+integration evidence is claimed.
+
+The Copilot request labels all embedded evidence untrusted,
+and the text is never interpreted as shell input. A deterministic marker
+deduplicates a request. At most three requests are claimed per enrollment.
+Draft PRs and ordinary pending
 review/check/task activity do not dispatch repairs or create owner notices.
 Budget exhaustion is reported only for currently scoped, non-draft, idle work
 that would otherwise be eligible for a bounded repair or neutral reconciliation.
@@ -135,7 +289,7 @@ this boundary; a dispatch-time deferral clears `repair_requested` and reports
 `mergeability-unknown` rather than a stale conflict/behind reason. A later poll
 may resume ordinary repair or confirmed neutral reconciliation once computed.
 Immediately before claiming a repair, the coordinator re-reads its bounded
-thread/check evidence and fences the planned head, branch, main SHA, base binding,
+thread/review/check evidence and fences the planned head, branch, main SHA, base binding,
 mergeability and active tasks. Changed or incomplete evidence suppresses that
 planned request without consuming an attempt; it does not substitute another
 repair or fall back to auto-merge in the same cycle.
@@ -146,7 +300,11 @@ The `cloud-review` gate accepts only a latest `APPROVED` review authored by the
 authenticated Copilot review identity (GitHub ID `175728472`) on the exact current
 head SHA, plus fully paginated review threads that are all resolved. A `COMMENTED`
 review, arbitrary comment, stale approval, author assertion, or truncated thread
-list does not pass. All authenticated reviews must have valid timezone-aware
+list does not pass. Every review record must be an object whose user ID is a positive integer
+(not a boolean or string), and any present record ID must be a unique positive
+integer; these are validated across the complete collection before author
+filtering, so a malformed later record cannot be skipped to reuse an earlier
+approval. All authenticated reviews must have valid timezone-aware
 submission times. Missing, malformed, or naive timestamps fail closed; this
 includes an unsubmitted `PENDING` review, for which GitHub omits `submitted_at`.
 Times are compared as instants, not strings. Every review tied at the latest

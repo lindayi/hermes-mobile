@@ -104,6 +104,10 @@ has that setting enabled unless verified. A Copilot suggestion is feedback, not 
 instruction: judge it against the code and tests. Authentication, deployment,
 migration, and semantic merge-conflict changes require targeted independent review.
 
+Body-only review evidence uses authenticated full-media `body_html`, never a raw
+Markdown fallback. Keep rendered code/pre/blockquote inert and entity-decoded text
+literal; see [docs/cloud-coordinator-spec.md](docs/cloud-coordinator-spec.md).
+
 Until the owner-verified transition is activated, require an independent formal
 COMMENT review and the current required checks on each PR. After activation,
 `cloud-review` requires the latest authenticated Copilot reviewer APPROVED review

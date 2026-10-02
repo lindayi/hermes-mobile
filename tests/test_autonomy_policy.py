@@ -104,10 +104,29 @@ _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
     'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
 }
 
+# Issue #39 coordinator dependency candidate bytes; not present in the main baseline.
+_PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE = {
+    'deploy/review_evidence.py': '1f37e42fc52c574040b4214bca6f2a1239ed738b02b724d5b7c7823cd34b9df1',
+}
+
+
+# PR40 assembled dependency candidates, independently spelled out (not copied
+# from policy constants at runtime). Historical source-review lineage is recorded
+# in docs/autonomy-policy.md; assembled inventory review is still pending.
+_PENDING_PR40_LIFECYCLE_FIXTURE = {
+    'deploy/task_receipts.py': '8ad9e60ec697de8135679b9110ed5d924057e0d8a59e731c67fceedec6525197',
+    'deploy/workflow_events.py': '5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af',
+    'deploy/workflow_lifecycle.py': '71be9101223f40511818bde2db9f6bd6b021736f35152e16cb3e1c9c3e2085a3',
+    'deploy/workflow_lifecycle_sources.py': 'dfff5b5ec33b9bd1756a67150827541ea86193b87e6de5b5c3a965f02f19b837',
+    'deploy/workflow_notifications.py': 'f0af01bdc797e0abd0494fa7a1fa304060c734ed8fc2ba1fa2b4515a9a3bcda2',
+}
+
 
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR16_COORDINATOR_FIXTURE
-            | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE)
+            | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
+            | _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE
+            | _PENDING_PR40_LIFECYCLE_FIXTURE)
 
 
 def _source_ci():
@@ -445,7 +464,8 @@ def test_static_python_closure_accepts_declared_initializer_attributes(tmp_path,
 
 
 def test_reviewed_source_fixture_matches_complete_required_contract():
-    pending = {'deploy/cloud_coordinator.py', 'deploy/native_notification_release.py'}
+    pending = {'deploy/cloud_coordinator.py', 'deploy/native_notification_release.py',
+               'deploy/review_evidence.py'} | set(_PENDING_PR40_LIFECYCLE_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
@@ -458,7 +478,17 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path == 'deploy/native_notification_release.py'
     } == _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
+    assert {
+        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
+        if path == 'deploy/review_evidence.py'
+    } == _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE
+    assert {
+        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
+        if path in _PENDING_PR40_LIFECYCLE_FIXTURE
+    } == _PENDING_PR40_LIFECYCLE_FIXTURE
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
+    assert set(SOURCE_BLOCKERS) == set(REQUIRED_FILES)
+    assert len(REQUIRED_FILES) == len(set(REQUIRED_FILES))
     assert SOURCE_CONTROL_PYTHON_FILES <= set(REQUIRED_FILES)
     assert SOURCE_CONTROL_ROOTS <= SOURCE_CONTROL_PYTHON_FILES
     assert SOURCE_BASELINES == {
@@ -467,9 +497,90 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     }
 
 
+@pytest.mark.parametrize('pins', [
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE,
+], ids=['policy', 'independent-fixture'])
+def test_pending_review_evidence_pin_matches_actual_candidate_bytes(pins):
+    path = 'deploy/review_evidence.py'
+    source = Path(__file__).resolve().parents[1] / path
+    assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize('path', sorted(_PENDING_PR40_LIFECYCLE_FIXTURE))
+@pytest.mark.parametrize('pins', [
+    SOURCE_FINGERPRINTS, _PENDING_PR40_LIFECYCLE_FIXTURE,
+], ids=['policy', 'independent-fixture'])
+def test_pending_lifecycle_pin_matches_actual_candidate_bytes(path, pins):
+    source = Path(__file__).resolve().parents[1] / path
+    assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('path', sorted(_PENDING_PR40_LIFECYCLE_FIXTURE))
+@pytest.mark.parametrize('change', ['missing', 'malformed', 'mutated'])
+def test_pending_lifecycle_actual_byte_mutation_or_missing_source_blocks(phase, path, change):
+    evidence = _phase_evidence(phase)
+    source = (Path(__file__).resolve().parents[1] / path).read_bytes()
+    evidence['main']['files'][path] = hashlib.sha256(source).hexdigest()
+    assert _blockers(evidence, phase) == {'pending-source-contract'}
+    if change == 'missing':
+        evidence['main']['files'].pop(path)
+        blocker = 'main-source-missing'
+    elif change == 'malformed':
+        evidence['main']['files'][path] = 'not-a-sha256'
+        blocker = 'main-source-invalid'
+    else:
+        evidence['main']['files'][path] = hashlib.sha256(
+            source + b'\n# unreviewed source mutation\n',
+        ).hexdigest()
+        blocker = 'coordinator-review-contract'
+    before = copy.deepcopy(evidence)
+    assert validate_transition(evidence, phase=phase) == {
+        'ready': False, 'phase': phase,
+        'blockers': sorted([blocker, 'pending-source-contract']),
+    }
+    assert evidence == before
+
+
 def test_reviewed_static_python_closure_is_complete_and_has_no_dynamic_imports():
     closure, dynamic_imports, unresolved_imports = _static_python_control_closure()
     assert closure == SOURCE_CONTROL_PYTHON_FILES
+    assert not dynamic_imports
+    assert not unresolved_imports
+
+
+def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
+    closure, dynamic_imports, unresolved_imports = _static_python_control_closure(
+        roots=['deploy/cloud_coordinator.py'],
+    )
+    # Exact assembled static closure, not a live-derived whitelist. Existing
+    # shared imports keep their original execution-source-contract labels.
+    shared = {
+        'backend/app.py', 'backend/auth.py', 'backend/auth_store.py',
+        'backend/background_delivery.py', 'backend/catalog_search.py',
+        'backend/chat_snapshot.py', 'backend/configuration.py',
+        'backend/context_compression_presentation.py', 'backend/delivery.py',
+        'backend/hermes_client.py', 'backend/jobs.py', 'backend/model_controls.py',
+        'backend/native_catalog.py', 'backend/notification_policy.py',
+        'backend/notifications.py', 'backend/operational_notifications.py',
+        'backend/orchestration.py', 'backend/profiles.py', 'backend/public_commentary.py',
+        'backend/request_notifications.py', 'backend/runs.py', 'backend/runtime_binding.py',
+        'backend/runtime_notice_presentation.py', 'backend/session_deletion.py',
+        'backend/session_telemetry.py', 'backend/session_visibility.py',
+        'backend/steering.py', 'backend/task_reminder_presentation.py',
+        'backend/tool_presentation.py',
+    }
+    coordinator = {
+        'deploy/cloud_coordinator.py', 'deploy/review_evidence.py',
+        'deploy/task_receipts.py', 'deploy/workflow_events.py',
+        'deploy/workflow_lifecycle.py', 'deploy/workflow_lifecycle_sources.py',
+        'deploy/workflow_notifications.py',
+    }
+    assert closure == shared | coordinator
+    assert len(closure) == 36
+    assert closure <= set(REQUIRED_FILES)
+    assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in coordinator)
+    assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract' for path in shared)
     assert not dynamic_imports
     assert not unresolved_imports
 
@@ -763,6 +874,7 @@ def test_mutating_each_executable_dependency_blocks(path):
     'backend/session_visibility.py', 'backend/steering.py',
     'backend/task_reminder_presentation.py', 'backend/tool_presentation.py',
     'deploy/backup.py', 'deploy/native_readiness.py', 'deploy/observe_release.py',
+    'deploy/review_evidence.py',
 ])
 def test_new_source_inventory_mutations_keep_the_hold_and_specific_blocker(path):
     evidence = _evidence()

@@ -65,6 +65,58 @@ independent review enforcement for every sensitive head before status publicatio
 or auto-merge. Matching its fingerprint does **not** certify the intended
 coordinator contract.
 
+The coordinator statically imports `deploy/review_evidence.py` (issue #39), so
+that dependency is an explicit inventory entry under the same
+`coordinator-review-contract` blocker. It is absent from the main baseline; its
+pin and separate test fixture are the pending issue #39 candidate bytes, awaiting
+parent review. They are not independently verified, are not runtime evidence, and
+do not affect the unconditional `pending-source-contract` hold.
+
+The PR40 assembly with incoming PR29/33 parent
+`80bf9e73de3aec689cd68374bc21ad50642ee14e` expands the coordinator's static
+local-import closure from two files to exactly 36. The fixed closure regression
+lists every path explicitly, rejects dynamic/unresolved imports, and requires
+inventory coverage. The original source-control roots and their separate exact
+closure assertion are unchanged. Shared backend dependencies retain their existing
+`execution-source-contract` labels; no existing pin or baseline is refreshed.
+
+Five previously absent dependencies are added as **pending assembly candidates**
+under `coordinator-review-contract`, with separate literal test fixtures and
+actual-byte, missing-source, malformed-digest and byte-mutation checks in every
+phase. Their SHA-256 digests match the incoming parent's exact bytes:
+
+| Pending path | Candidate SHA-256 |
+| --- | --- |
+| `deploy/task_receipts.py` | `8ad9e60ec697de8135679b9110ed5d924057e0d8a59e731c67fceedec6525197` |
+| `deploy/workflow_events.py` | `5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af` |
+| `deploy/workflow_lifecycle.py` | `83643df2f642b6c949031e067968c0dd5a06e4c3230ab1b7f7bdb02b3be8c626` |
+| `deploy/workflow_lifecycle_sources.py` | `a6be88f79862966a6e09f10f9eee2e7f6c8957ededeb1005f435b70759a0e5a6` |
+| `deploy/workflow_notifications.py` | `4684a5db2229a9491a99af04b6437ff215ffcbd6900d53c653fa7e897055d87d` |
+
+Historical independent source-review lineage (parent-retained workflow reports,
+not runtime evidence or portable test inputs):
+
+- `task_receipts.py` matches `pr29-2b49-assembly-review.json`'s source hash,
+  which retains the PR29 receipt and immutable-enrollment review lineage.
+- `workflow_events.py`, `workflow_lifecycle.py` and
+  `workflow_lifecycle_sources.py` match `lifecycle-second-followup-review.json`
+  at `c69670cefc2e0264ad90498ba44a0d225e3f6cca`, and the explicit read-back
+  hashes in `lifecycle-final-integration-review.json`.
+- `workflow_notifications.py` matches the integrated PR32 repair hashes in
+  `notifications-integrated-fix.json` and `lifecycle-final-integration-review.json`.
+  The former binds the bounded independent review transcript
+  `notifications-integrated-independent-review.txt` (SHA-256
+  `1dee539ffa8cd17a1ce8009d68dfefd48a4dbdc2a368835e7e9443e0305dee58`).
+
+Those historical reports have bounded scopes and include historical assembly or
+activation blockers; matching a module hash is not an approval of the complete
+PR40 assembly or its control flow. Parent independent **assembly and inventory
+review remains required**. These candidate pins do not certify complete operational
+source coverage, repair issue #35's targeted-review implementation, or refresh the
+old coordinator pin. In particular, exact static coverage of the current candidate
+is not a claim that the old pinned coordinator has this same closure. The
+unconditional hold below is unchanged; no activation is authorized.
+
 The validator therefore adds the explicit `pending-source-contract` blocker in
 **every phase**, even for otherwise complete evidence matching every pinned digest.
 No snapshot can report ready with this source version; the CLI returns nonzero.
