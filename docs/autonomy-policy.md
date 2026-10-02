@@ -166,26 +166,33 @@ current-main readback. Readiness requires:
   changed-file classification must be complete for that exact head. Evidence binds
   the positive numeric PR-author ID. Every authenticated Copilot review (ID
   `175728472`) must have a positive review ID and a valid timezone-aware timestamp;
-  latest is selected by chronological timestamp, then review ID as a deterministic
-  tie-breaker. Malformed authenticated review records block. The latest review must
-  be an actual `APPROVED` review on the current PR head, and every review thread and
-  page must be complete and resolved. A `COMMENTED` review, body text, empty
-  overview, or a status without the authenticated review is not approval.
+  all review IDs are unique. Malformed review records block. Latest is selected by
+  chronological timestamp; every Copilot review tied at that instant must be an
+  actual `APPROVED` review on the current PR head. Offsets compare as instants, not
+  strings or review-ID order. Every review thread and page must be complete and
+  resolved. A `COMMENTED` review, body text, empty overview, or a status without the
+  authenticated review is not approval.
 
 If the PR under review changes sensitive files, readiness additionally requires
-owner ID `5164171` authorization for that exact head and a separate targeted
-independent review of that head. The targeted reviewer must be a positive numeric
-identity distinct from the owner, PR author, coding-agent identity (`198982749`),
-and mandatory Copilot reviewer (`175728472`). The `targeted_review.review_id` must
-be a positive integer identifying exactly one record in the complete authenticated
-`cloud_review.reviews` collection. Its `user.id`, `commit_id`, and `state` must
-match the claim's `reviewer_id`, exact `head_sha`, and `state` (`COMMENTED` or
-`APPROVED`). The matched record's `submitted_at` must parse as a valid
-timezone-aware timestamp using the same helper as mandatory Copilot reviews;
-missing, naive, or malformed values block with `sensitive-review-authorization`.
-A timestamp supplied only on the claim cannot substitute for that record.
-Missing records, duplicate IDs, or conflicting claims block readiness.
-A later commit invalidates both.
+owner ID `5164171` authorization for that exact head, bound to one owner-published
+independent-agent review in the complete authenticated `cloud_review.reviews`
+collection. The existing command is extended to
+`/hermes authorize-sensitive <head-sha> review <positive-review-id> <body-sha256>`;
+the former head-only command cannot authorize sensitive work. The review must be a
+unique positive review ID authored by the owner, submitted with a valid
+timezone-aware timestamp, in state `COMMENTED`, on the exact head. Its raw UTF-8
+body must match the command's SHA-256 and be a bounded (at most 4096-character)
+JSON object with exactly these fields: `schema` set to
+`hermes-independent-agent-review-v1`, `reviewed_head_sha`, `review_method` set to
+`independent-agent`, `verdict` set to `pass`, and a lowercase 64-character
+`evidence_sha256`. The owner publication is the trust assertion that independent
+review occurred; it does not prove cryptographic or model independence or claim a
+different GitHub identity. The selected record must remain the sole latest owner
+review; a missing, malformed, edited, removed, dismissed, duplicate, stale, negative,
+or conflicting record blocks with `sensitive-review-authorization`. Both the owner
+authorization and selected review are re-read during planning and the fresh status
+and merge fences. A later head clears the authorization; approval is not blanket
+consent for future commits.
 
 ## Policy phases and activation
 

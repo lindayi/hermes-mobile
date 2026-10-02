@@ -474,17 +474,17 @@ def test_only_audited_presentation_tests_and_non_operational_docs_are_routine(pa
 
 def test_review_requires_authenticated_copilot_approval_on_current_head():
     reviews = [{
-        "state": "APPROVED", "commit_id": HEAD,
+        "id": 1, "state": "APPROVED", "commit_id": HEAD,
         "submitted_at": "2026-10-01T12:00:00Z",
         "user": {"id": COPILOT_REVIEWER},
     }]
     assert copilot_review_valid(HEAD, reviews, [])
     for invalid in (
-        [{"state": "APPROVED", "commit_id": HEAD, "user": {"id": OWNER}}],
-        [{"state": "APPROVED", "commit_id": BASE, "user": {"id": COPILOT_REVIEWER}}],
-        [{"state": "COMMENTED", "commit_id": HEAD, "user": {"id": COPILOT_REVIEWER}}],
+        [{"id": 2, "state": "APPROVED", "commit_id": HEAD, "user": {"id": OWNER}}],
+        [{"id": 2, "state": "APPROVED", "commit_id": BASE, "user": {"id": COPILOT_REVIEWER}}],
+        [{"id": 2, "state": "COMMENTED", "commit_id": HEAD, "user": {"id": COPILOT_REVIEWER}}],
         reviews + [{
-            "state": "CHANGES_REQUESTED", "commit_id": HEAD,
+            "id": 2, "state": "CHANGES_REQUESTED", "commit_id": HEAD,
             "submitted_at": "2026-10-01T13:00:00Z",
             "user": {"id": COPILOT_REVIEWER},
         }],
@@ -506,11 +506,11 @@ def test_review_requires_authenticated_copilot_approval_on_current_head():
 @pytest.mark.parametrize("state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
 def test_review_rejects_every_authenticated_invalid_timestamp(timestamp, state):
     approved = {
-        "state": "APPROVED", "commit_id": HEAD,
+        "id": 1, "state": "APPROVED", "commit_id": HEAD,
         "submitted_at": "2026-10-01T12:00:00Z",
         "user": {"id": COPILOT_REVIEWER},
     }
-    invalid = {"state": state, "commit_id": HEAD,
+    invalid = {"id": 2, "state": state, "commit_id": HEAD,
                "user": {"id": COPILOT_REVIEWER}, **timestamp}
     assert not copilot_review_valid(HEAD, [invalid], [])
     for reviews in ([approved, invalid], [invalid, approved]):
@@ -521,12 +521,12 @@ def test_review_rejects_every_authenticated_invalid_timestamp(timestamp, state):
 
 def test_pending_review_without_submission_time_blocks_approval():
     approved = {
-        "state": "APPROVED", "commit_id": HEAD,
+        "id": 1, "state": "APPROVED", "commit_id": HEAD,
         "submitted_at": "2026-10-01T12:00:00Z",
         "user": {"id": COPILOT_REVIEWER},
     }
     # GitHub's REST API omits submitted_at for an unsubmitted PENDING review.
-    pending = {"state": "PENDING", "commit_id": HEAD,
+    pending = {"id": 2, "state": "PENDING", "commit_id": HEAD,
                "user": {"id": COPILOT_REVIEWER}}
     assert not copilot_review_valid(HEAD, [pending], [])
     for reviews in ([approved, pending], [pending, approved]):
@@ -543,7 +543,7 @@ def test_invalid_review_timestamp_revokes_owned_success_on_same_head(tmp_path, t
         def get_all(self, route, *, collection=None):
             values = super().get_all(route, collection=collection)
             if self.invalid and route.endswith("/pulls/16/reviews?per_page=100"):
-                return values + [{"state": "APPROVED", "commit_id": HEAD,
+                return values + [{"id": 63002, "state": "APPROVED", "commit_id": HEAD,
                                   "user": {"id": COPILOT_REVIEWER}, **timestamp}]
             return values
 
@@ -566,19 +566,21 @@ def test_invalid_review_timestamp_revokes_owned_success_on_same_head(tmp_path, t
 @pytest.mark.parametrize("timestamp", ["2026-10-01T12:00:00Z", "2026-10-01T14:00:00+02:00"])
 def test_review_latest_time_bucket_must_unanimously_approve_current_head(conflict, timestamp):
     approved = {
-        "state": "APPROVED", "commit_id": HEAD,
+        "id": 1, "state": "APPROVED", "commit_id": HEAD,
         "submitted_at": "2026-10-01T12:00:00Z",
         "user": {"id": COPILOT_REVIEWER},
     }
-    conflicting = approved | conflict | {"submitted_at": timestamp}
+    conflicting = approved | conflict | {"id": 2, "submitted_at": timestamp}
     for reviews in ([approved, conflicting], [conflicting, approved]):
         assert not copilot_review_valid(HEAD, reviews, [])
         # Only the latest bucket must agree; old disagreement cannot poison a
         # subsequent unambiguous approval, regardless of API list order.
-        later = approved | {"submitted_at": "2026-10-01T15:00:00Z"}
+        later = approved | {"id": 3, "submitted_at": "2026-10-01T15:00:00Z"}
         assert copilot_review_valid(HEAD, [later, *reviews], [])
         assert copilot_review_valid(HEAD, [*reviews, later], [])
-    assert copilot_review_valid(HEAD, [approved, approved | {"submitted_at": timestamp}], [])
+    assert copilot_review_valid(
+        HEAD, [approved, approved | {"id": 2, "submitted_at": timestamp}], [],
+    )
 
 
 @pytest.mark.parametrize("newer", [
@@ -586,11 +588,11 @@ def test_review_latest_time_bucket_must_unanimously_approve_current_head(conflic
 ])
 def test_review_order_uses_instants_not_timestamp_strings(newer):
     approved = {
-        "state": "APPROVED", "commit_id": HEAD,
+        "id": 1, "state": "APPROVED", "commit_id": HEAD,
         "submitted_at": "2026-10-01T12:00:00Z",
         "user": {"id": COPILOT_REVIEWER},
     }
-    commented = approved | {"state": "COMMENTED", "submitted_at": newer}
+    commented = approved | {"id": 2, "state": "COMMENTED", "submitted_at": newer}
     for reviews in ([approved, commented], [commented, approved]):
         assert not copilot_review_valid(HEAD, reviews, [])
     assert copilot_review_valid(HEAD, [
@@ -610,7 +612,8 @@ def test_review_races_fail_closed_at_each_consumer(tmp_path, phase, invalid):
             if route.endswith("/pulls/16/reviews?per_page=100"):
                 self.review_reads += 1
                 if phase == "plan-revocation" or self.review_reads > 1:
-                    conflicting = values[0] | {"state": "COMMENTED"}
+                    conflicting = values[0] | {"id": values[0]["id"] + 1,
+                                               "state": "COMMENTED"}
                     if invalid:
                         conflicting.pop("submitted_at")
                     return values + [conflicting]
@@ -1400,6 +1403,43 @@ def test_owner_can_authorize_a_new_current_head_after_enrollment(tmp_path):
     assert enrollment["sensitive_sha"] == new_head
 
 
+@pytest.mark.parametrize("invalid_on_read", [2, 3, 4])
+def test_sensitive_owner_review_is_revalidated_at_planning_status_and_merge_fences(
+        tmp_path, invalid_on_read):
+    class ChangingOwnerReview(FakeApi):
+        review_reads = 0
+
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                self.review_reads += 1
+                if self.review_reads == invalid_on_read:
+                    for review in values:
+                        if review.get("id") == self.owner_review_id:
+                            review["body"] += " "
+            return values
+
+    api = ChangingOwnerReview(
+        sensitive=True, authorize=True, review_status_present=(invalid_on_read != 3),
+    )
+    store = StateStore(tmp_path / f"fence-{invalid_on_read}.json")
+    result = Coordinator(api, store).run(apply=True)
+
+    assert api.review_reads >= invalid_on_read
+    assert not api.graphql_writes
+    assert not any(
+        body.get("context") == "cloud-review" and body.get("state") == "success"
+        for route, body in api.writes if "/statuses/" in route
+    )
+    if invalid_on_read == 3:
+        assert any(
+            action["kind"] == "status" and action["status"] == "blocked"
+            for action in store.actions().values()
+        )
+    else:
+        assert "sensitive" in result["pull_requests"][0]["reasons"]
+
+
 @pytest.mark.parametrize("merged", [False, True])
 def test_terminal_enrollment_requires_fresh_owner_command_after_reopen(tmp_path, merged):
     api = FakeApi()
@@ -2023,8 +2063,24 @@ def test_scan_cursor_and_owner_commands_commit_atomically(tmp_path):
     path = tmp_path / "state.json"
     store = StateStore(path)
     enrollment = {"issue": 16, "comment": 123, "head": HEAD, "base": BASE}
+    body = json.dumps({
+        "schema": "hermes-independent-agent-review-v1",
+        "reviewed_head_sha": "c" * 40,
+        "review_method": "independent-agent",
+        "verdict": "pass",
+        "evidence_sha256": "d" * 64,
+    }, separators=(",", ":"))
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     authorization = {
         "issue": 16, "comment": "124", "head": "c" * 40, "validated": True,
+        "owner_authorization": {
+            "actor_id": OWNER, "head_sha": "c" * 40, "state": "approved",
+            "review_id": 64001, "body_sha256": digest,
+        },
+        "targeted_review": {
+            "review_id": 64001, "reviewer_id": OWNER, "head_sha": "c" * 40,
+            "state": "COMMENTED", "body_sha256": digest, "evidence_sha256": "d" * 64,
+        },
     }
     store.commit_scan(
         "2026-10-01T12:00:00Z", ["123", "124"],

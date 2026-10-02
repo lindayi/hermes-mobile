@@ -2378,6 +2378,30 @@ class Coordinator:
             current_plan["auto_merge_eligible"] = False
             current_plan["merge_action"] = None
             return current_plan
+        try:
+            final_reviews = _rest_list(
+                self.api,
+                f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
+            )
+            if (classify_sensitive_paths(
+                    current["files"], complete=current["files_complete"],
+                )
+                    and not sensitive_review_authorized(
+                        final_reviews, action["head"],
+                        current["enrollment"].get("sensitive_authorization"),
+                        current["enrollment"].get("targeted_review"),
+                        owner_id=OWNER_ID,
+                    )):
+                self.store.update_action(key, "blocked")
+                current_plan["auto_merge_eligible"] = False
+                current_plan["merge_action"] = None
+                current_plan["reasons"] = list(dict.fromkeys(
+                    current_plan["reasons"] + ["sensitive"],
+                ))
+                return current_plan
+        except CoordinatorError:
+            self.store.update_action(key, "blocked")
+            raise
         query = """
         mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!,
                  $expectedHeadOid: GitObjectID!) {

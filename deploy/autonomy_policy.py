@@ -14,10 +14,21 @@ COPILOT_AGENT_ID = 198982749
 WORKFLOW_ID = 372155405
 WORKFLOW_PATH = '.github/workflows/ci.yml'
 REF = 'refs/heads/main'
+AUTONOMY_LAUNCH_ROOTS = frozenset({
+    'deploy/issue_starter.py', 'scripts/cloud_coordinator.py',
+    'scripts/issue_starter.py', 'scripts/workflow_notifications.py',
+})
+AUTONOMY_LAUNCH_UNITS = frozenset({
+    'deploy/hermes-mobile-coordinator.service', 'deploy/hermes-mobile-coordinator.timer',
+    'deploy/hermes-mobile-issue-starter.service', 'deploy/hermes-mobile-issue-starter.timer',
+    'deploy/hermes-workflow-notifications.service',
+    'deploy/hermes-workflow-notifications.timer',
+})
 SOURCE_CONTROL_ROOTS = frozenset({
     'deploy/release_artifact.py', 'deploy/self_deploy.py', 'deploy/ci_selection.py',
     'deploy/observe_release.py', 'scripts/ci_tests.py',
     'scripts/prepare_native_test_runtime.py', 'scripts/test.py',
+    *AUTONOMY_LAUNCH_ROOTS,
 })
 SOURCE_CONTROL_PYTHON_FILES = frozenset({
     'backend/app.py', 'backend/auth.py', 'backend/auth_store.py',
@@ -37,6 +48,11 @@ SOURCE_CONTROL_PYTHON_FILES = frozenset({
     'deploy/git_source.py', 'deploy/install_core.py', 'deploy/native_controls_release.py',
     'deploy/native_notification_release.py', 'deploy/native_readiness.py', 'deploy/observe_release.py', 'deploy/public_http.py',
     'deploy/release_artifact.py', 'deploy/self_deploy.py', 'deploy/test_workspace.py',
+    'deploy/cloud_coordinator.py', 'deploy/issue_starter.py', 'deploy/review_evidence.py',
+    'deploy/task_receipts.py', 'deploy/workflow_events.py', 'deploy/workflow_lifecycle.py',
+    'deploy/workflow_lifecycle_sources.py', 'deploy/workflow_notifications.py',
+    'scripts/cloud_coordinator.py', 'scripts/issue_starter.py',
+    'scripts/workflow_notifications.py',
     'scripts/ci_tests.py',
     'scripts/prepare_native_test_runtime.py', 'scripts/test.py',
 })
@@ -87,12 +103,22 @@ REQUIRED_FILES = (
     'patches/native-compat-baseline.json',
     'patches/cron-delivery-baseline.json',
     'deploy/cloud_coordinator.py',
+    'deploy/issue_starter.py',
     'deploy/review_evidence.py',
     'deploy/task_receipts.py',
     'deploy/workflow_events.py',
     'deploy/workflow_lifecycle.py',
     'deploy/workflow_lifecycle_sources.py',
     'deploy/workflow_notifications.py',
+    'scripts/cloud_coordinator.py',
+    'scripts/issue_starter.py',
+    'scripts/workflow_notifications.py',
+    'deploy/hermes-mobile-coordinator.service',
+    'deploy/hermes-mobile-coordinator.timer',
+    'deploy/hermes-mobile-issue-starter.service',
+    'deploy/hermes-mobile-issue-starter.timer',
+    'deploy/hermes-workflow-notifications.service',
+    'deploy/hermes-workflow-notifications.timer',
     'backend/app.py',
     'backend/auth.py',
     'backend/auth_store.py',
@@ -157,9 +183,10 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
+    'deploy/cloud_coordinator.py': '0810bb4509fca1806ef160cac917570a163084e34a2ac83e037a1b0492d4fa4f',
     # Pending issue #39 coordinator dependency candidate bytes; parent review only.
-    'deploy/review_evidence.py': '1f37e42fc52c574040b4214bca6f2a1239ed738b02b724d5b7c7823cd34b9df1',
+    'deploy/issue_starter.py': '701faa6e15a2717cb3c79f7e93c728bdde326e4f72e451ccd77ec1f8eabdc011',
+    'deploy/review_evidence.py': '6a146ff4fa90c8bd24ffe941391237d2a78ce1d2c51d6e4f55afd0130743b3f5',
     # Pending PR40 assembly candidates from incoming 80bf9e7. Historical source
     # review lineage: docs/autonomy-policy.md. Not assembled/operational approval;
     # existing pins and the unconditional pending-source-contract hold stay fixed.
@@ -168,6 +195,15 @@ SOURCE_FINGERPRINTS = {
     'deploy/workflow_lifecycle.py': '71be9101223f40511818bde2db9f6bd6b021736f35152e16cb3e1c9c3e2085a3',
     'deploy/workflow_lifecycle_sources.py': 'dfff5b5ec33b9bd1756a67150827541ea86193b87e6de5b5c3a965f02f19b837',
     'deploy/workflow_notifications.py': 'f0af01bdc797e0abd0494fa7a1fa304060c734ed8fc2ba1fa2b4515a9a3bcda2',
+    'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
+    'scripts/issue_starter.py': '09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1',
+    'scripts/workflow_notifications.py': '03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f',
+    'deploy/hermes-mobile-coordinator.service': '672f1e134e2cb5acbcd648eb7e124947af8d7c11143f20cea8e5be5d97c42807',
+    'deploy/hermes-mobile-coordinator.timer': 'ffa239c67b492b5a361b823c754d5f204eb4efaa2c69f7df99df577e12d2a6c1',
+    'deploy/hermes-workflow-notifications.service': '998ee55dc5df990c6004f0f435e073766702e5efbf56aa83e946b6d05e21c000',
+    'deploy/hermes-workflow-notifications.timer': '627463b4dd06eb72f7fecc88a79dad29ec8ab4b5514b29c62c131cdbd2963cc8',
+    'deploy/hermes-mobile-issue-starter.service': '1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69',
+    'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
     'backend/model_controls.py': 'a6276a114d770f8a52677ae11a48011b586daf7cd047dd667099e4a6251ccb6b',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
@@ -234,12 +270,22 @@ SOURCE_BLOCKERS = {
     'patches/native-compat-baseline.json': 'native-job-contract',
     'patches/cron-delivery-baseline.json': 'native-job-contract',
     'deploy/cloud_coordinator.py': 'coordinator-review-contract',
+    'deploy/issue_starter.py': 'autonomy-launch-contract',
     'deploy/review_evidence.py': 'coordinator-review-contract',
     'deploy/task_receipts.py': 'coordinator-review-contract',
     'deploy/workflow_events.py': 'coordinator-review-contract',
     'deploy/workflow_lifecycle.py': 'coordinator-review-contract',
     'deploy/workflow_lifecycle_sources.py': 'coordinator-review-contract',
     'deploy/workflow_notifications.py': 'coordinator-review-contract',
+    'scripts/cloud_coordinator.py': 'autonomy-launch-contract',
+    'scripts/issue_starter.py': 'autonomy-launch-contract',
+    'scripts/workflow_notifications.py': 'autonomy-launch-contract',
+    'deploy/hermes-mobile-coordinator.service': 'autonomy-launch-contract',
+    'deploy/hermes-mobile-coordinator.timer': 'autonomy-launch-contract',
+    'deploy/hermes-mobile-issue-starter.service': 'autonomy-launch-contract',
+    'deploy/hermes-mobile-issue-starter.timer': 'autonomy-launch-contract',
+    'deploy/hermes-workflow-notifications.service': 'autonomy-launch-contract',
+    'deploy/hermes-workflow-notifications.timer': 'autonomy-launch-contract',
     'backend/configuration.py': 'execution-source-contract',
     'backend/model_controls.py': 'execution-source-contract',
     'backend/native_api_service.py': 'execution-source-contract',
