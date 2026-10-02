@@ -93,7 +93,7 @@ including the accepted PR42 retention assembly. Earlier PR33/PR32 reports remain
 historical lineage, not claims that their superseded hashes are current. All five
 dependencies and all ten launch paths below are byte-identical to main5316.
 
-### Issue #43 assembled candidates and remaining debt
+### Issue #43 accepted source prerequisites and remaining operational debt
 
 The current coordinator and helper fingerprints below are issue #43 candidates,
 not the old unsafe PR16 checkpoint. The helper combines issue #43 strict review
@@ -103,16 +103,19 @@ soft-text normalization, preserving literal context and structural boundaries.
 `pr40-softline-review.json` covers that retained parser delta, not new authority
 logic. The coordinator also revalidates the separately mandatory actual Copilot
 approval against the final reviews read before auto-merge, in addition to the
-selected sensitive review. Parent independent **assembly and inventory review
-remains required** for these final candidate bytes.
+selected sensitive review. Independent final **S1-S5 assembled-source and inventory
+acceptance** is recorded in the parent-retained `pr44-final-review.json`, with the
+assembly and focused/adjacent test evidence in `pr44-final-fix.json`. The accepted
+bytes are preserved at `03dea0e87eeee91f2b88ee97a072b0eaf3fe2d5d`. These reports
+accept source prerequisites, not runtime readiness or this follow-up delta.
 
-The three historical native mismatches are now reconciled; the complete fixed
-inventory has no remaining byte mismatch in this assembled tree. That does not
-complete issue #35 or clear source acceptance debt: exact final independent
-assembled-source acceptance, final hosted/residual-host evidence, authenticated
-current-main readback and a separately reviewed source hold-clearance change remain
-required. Matching hashes or prior component reports alone authorize none of those.
-The unconditional `pending-source-contract` hold remains in every phase.
+The three historical native mismatches are reconciled and all 79 fixed source pins
+match the accepted assembly. The separately authorized final source phase removes
+only the historical unconditional `pending-source-contract` blocker. Its own
+exact-head independent review and complete required hosted/residual-host evidence
+remain merge obligations. Authenticated current-main readback and operational
+acceptance remain separate; **issue #35 stays open**. Matching hashes or source
+review reports alone authorize no activation.
 
 Issue #43 adds four explicit launch roots to the source-control inventory:
 `scripts/cloud_coordinator.py`, `scripts/workflow_notifications.py`,
@@ -120,9 +123,8 @@ Issue #43 adds four explicit launch roots to the source-control inventory:
 Python import closure is checked against the fixed inventory and rejects unresolved
 or dynamic imports. Three service/timer pairs are separately required and pinned:
 the coordinator, workflow notifications, and issue starter. The pins and an
-independently spelled-out test fixture represent candidate source bytes only; they
-do not constitute independent review, runtime evidence, or permission to clear the
-hold.
+independently spelled-out test fixture represent source consistency only; they
+do not constitute independent review, runtime evidence, or activation permission.
 
 | Issue #43 candidate path | SHA-256 |
 | --- | --- |
@@ -141,29 +143,31 @@ hold.
 
 This assembly integrates final PR40 main
 `5316f7c75dced1bffafdb545cdd7677e98e855a6`, preserving its parser and previously
-merged retention behavior. Final issue #43 independent acceptance of the assembled
-source remains pending. The unconditional hold below is unchanged; no activation
-is authorized.
+merged retention behavior. Source acceptance and removal of the historical hold
+do not authorize activation.
 
-The validator therefore adds the explicit `pending-source-contract` blocker in
-**every phase**, even for otherwise complete evidence matching every pinned digest.
-No snapshot can report ready with this source version; the CLI returns nonzero.
-The hold is enforced in source, not by an input flag: caller booleans, matching
-hashes, claimed review success, or a supplied readiness result cannot clear it.
-All other evidence checks still run, preserving their specific blockers. Component
-positive tests require exactly this one known blocker, not readiness; negative
-security assertions retain their own blockers as well. Invalid phase/evidence
-roots remain rejected with their existing diagnostics.
+The read-only validator can now report `ready: true` (CLI exit zero) in any selected
+phase **only when every source, run, provenance, review, approval, thread and
+protection component satisfies that phase's contract**. Every genuine component
+failure retains its specific blocker and a nonzero CLI result. Invalid phase or
+evidence roots retain their existing diagnostics. No source pins, identities,
+exact-head or review-ordering requirements, authority predicates, freshness
+requirements, or protection maps are relaxed. There is no caller override:
+`pending_source_contract`, `source_contract_reviewed`, supplied `ready`/`blockers`,
+or other caller claims cannot bypass a failed component.
 
-The activation follow-up in issue #35 must independently review the actual
-current-main coordinator and its complete control contract, establish strict review
-timestamps/ordering and per-head sensitive review enforcement, deliberately
-reconcile operational source pins and fixtures, and make a separately reviewed
-source change to clear or update this hold. Neither a pin refresh alone nor a caller
-assertion is sufficient; pins never auto-refresh.
-Merging this inactive read-only validator is separate from activation and does not
-change the coordinator, repository protection, services, or existing merge gates.
-The synthetic fixtures exercise evidence components only, not live readiness.
+Complete synthetic fixtures now expect readiness and an empty blocker list in all
+three phases, including valid sensitive authorization. Negative fixtures continue
+to assert their actual component blockers without filtering them; malicious caller
+flags are tested against broken components. Synthetic readiness proves only the
+source policy behavior, not evidence authenticity or permission to operate.
+
+The activation follow-up in issue #35 must still verify the actual current-main
+coordinator and complete control contract, authenticated API/source provenance and
+actual current-head replacement evidence through the owner-controlled sequence
+below. Neither a pin refresh alone nor a caller assertion is sufficient; pins never
+auto-refresh. Merging this read-only validator is separate from activation and does
+not change the coordinator, repository protection, services, or existing merge gates.
 
 Any fingerprint-set or dependency-inventory update must be independently reviewed
 against the complete source, its local control dependencies, and intended control
@@ -270,9 +274,10 @@ bridge this gap. The owner-controlled sequence is:
    contract are absent from current main. A PR branch or expected merge is not a
    dependency proof. Once the final merged core (and later PR33 changes) is known,
    deliberately review and replace any changed fingerprint and provenance fixture;
-   never auto-pin candidate evidence or expand a whitelist. This is an issue #26
-   activation follow-up, including the separately reviewed source change required
-   to clear/update `pending-source-contract`, not part of this validator's merge.
+   never auto-pin candidate evidence or expand a whitelist. Issue #43 accepts the
+   assembled source prerequisites and separately authorizes historical hold removal;
+   issue #35 retains operational acceptance. Neither source change establishes the
+   authenticated current-main or runtime evidence required by this sequence.
 2. Collect authenticated current-main source, successful complete hosted results,
    release provenance, retained installed-host gate and genuine complete exact-head
    APPROVED review evidence, including sensitive authorization where required.

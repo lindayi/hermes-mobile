@@ -106,8 +106,8 @@ _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
 }
 
 # Accepted PR29/PR40/PR42 dependency bytes retained from main5316, independently
-# spelled out (not copied from policy constants at runtime). Final issue43
-# assembled-source acceptance and hold clearance remain separate.
+# spelled out (not copied from policy constants at runtime). Issue43 source
+# acceptance does not authorize operational activation.
 _PENDING_PR40_LIFECYCLE_FIXTURE = {
     'deploy/task_receipts.py': '8ad9e60ec697de8135679b9110ed5d924057e0d8a59e731c67fceedec6525197',
     'deploy/workflow_events.py': '5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af',
@@ -557,7 +557,7 @@ def test_pending_lifecycle_actual_byte_mutation_or_missing_source_blocks(phase, 
     evidence = _phase_evidence(phase)
     source = (Path(__file__).resolve().parents[1] / path).read_bytes()
     evidence['main']['files'][path] = hashlib.sha256(source).hexdigest()
-    assert _blockers(evidence, phase) == {'pending-source-contract'}
+    assert _blockers(evidence, phase) == set()
     if change == 'missing':
         evidence['main']['files'].pop(path)
         blocker = 'main-source-missing'
@@ -572,7 +572,7 @@ def test_pending_lifecycle_actual_byte_mutation_or_missing_source_blocks(phase, 
     before = copy.deepcopy(evidence)
     assert validate_transition(evidence, phase=phase) == {
         'ready': False, 'phase': phase,
-        'blockers': sorted([blocker, 'pending-source-contract']),
+        'blockers': [blocker],
     }
     assert evidence == before
 
@@ -584,7 +584,7 @@ def test_issue43_launch_actual_byte_mutation_or_missing_source_blocks(phase, pat
     evidence = _phase_evidence(phase)
     source = (Path(__file__).resolve().parents[1] / path).read_bytes()
     evidence['main']['files'][path] = hashlib.sha256(source).hexdigest()
-    assert _blockers(evidence, phase) == {'pending-source-contract'}
+    assert _blockers(evidence, phase) == set()
     if change == 'missing':
         evidence['main']['files'].pop(path)
         blocker = 'main-source-missing'
@@ -599,7 +599,7 @@ def test_issue43_launch_actual_byte_mutation_or_missing_source_blocks(phase, pat
     before = copy.deepcopy(evidence)
     assert validate_transition(evidence, phase=phase) == {
         'ready': False, 'phase': phase,
-        'blockers': sorted([blocker, 'pending-source-contract']),
+        'blockers': [blocker],
     }
     assert evidence == before
 
@@ -659,34 +659,55 @@ def test_launch_roots_have_complete_fixed_closure_and_independent_unit_pins():
 @pytest.mark.parametrize('phase', PHASES)
 @pytest.mark.parametrize('sensitive', [False, True])
 @pytest.mark.parametrize('claimed_ready', [False, True])
-def test_known_pending_source_contract_cannot_be_overridden(phase, sensitive, claimed_ready):
+@pytest.mark.parametrize(('path', 'value', 'blocker'), [
+    (('main', 'files', 'deploy/cloud_coordinator.py'), '0' * 64, 'coordinator-review-contract'),
+    (('main', 'current'), False, 'current-main-snapshot'),
+    (('source_ci', 'conclusion'), 'failure', 'source-ci-evidence'),
+    (('source_ci', 'jobs_complete'), False, 'source-ci-jobs'),
+    (('source_ci', 'artifact', 'expired'), True, 'release-artifact-evidence'),
+    (('source_ci', 'artifact', 'attestation', 'verified'), False, 'release-attestation'),
+    (('cloud_review', 'reviews', 0, 'id'), True, 'cloud-review-approval'),
+    (('cloud_review', 'reviews', 0, 'submitted_at'), '2026-10-01T21:00:00', 'cloud-review-approval'),
+    (('cloud_review', 'reviews', 0, 'state'), 'COMMENTED', 'cloud-review-approval'),
+    (('cloud_review', 'reviews_complete'), False, 'cloud-review-evidence'),
+    (('cloud_review', 'threads', 0, 'isResolved'), False, 'cloud-review-threads'),
+    (('protection', 'strict'), False, 'branch-protection'),
+])
+def test_caller_flags_cannot_override_failed_components(phase, sensitive, claimed_ready, path, value, blocker):
     evidence = _sensitive_evidence(phase) if sensitive else _phase_evidence(phase)
-    # Caller claims cannot certify 403ac3d's weaker timestamps or per-head review.
+    node = evidence
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    # Historical hold flags and a claimed result cannot replace any actual gate.
     evidence.update(pending_source_contract=False, source_contract_reviewed=claimed_ready,
                     ready=claimed_ready, blockers=[])
     evidence['main'].update(source_contract_reviewed=claimed_ready,
                             pending_source_contract=False)
     before = copy.deepcopy(evidence)
 
+    expected = {blocker}
+    if path == ('main', 'current'):
+        expected.add('main-source-missing')
+    if sensitive and path == ('cloud_review', 'reviews', 0, 'id'):
+        expected.add('sensitive-review-authorization')
     assert validate_transition(evidence, phase=phase) == {
-        'ready': False, 'phase': phase, 'blockers': ['pending-source-contract'],
+        'ready': False, 'phase': phase, 'blockers': sorted(expected),
     }
     assert evidence == before
 
 
-def test_complete_synthetic_components_leave_only_pending_source_contract():
-    # 403ac3d is known unsafe: component positives must not imply activation readiness.
-    pre = validate_transition(_evidence(), phase='pre-cutover')
-    assert pre == {'ready': False, 'phase': 'pre-cutover', 'blockers': ['pending-source-contract']}
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('sensitive', [False, True])
+def test_complete_synthetic_components_report_source_policy_ready(phase, sensitive):
+    # A complete synthetic snapshot is not authenticated operational authorization.
+    evidence = _sensitive_evidence(phase) if sensitive else _phase_evidence(phase)
+    before = copy.deepcopy(evidence)
 
-    post_evidence = _evidence()
-    post_evidence['protection']['required_checks'] = [
-        {'context': 'source-ci', 'app_id': 15368},
-        {'context': 'issue-link', 'app_id': 15368},
-        {'context': 'cloud-review', 'app_id': None},
-    ]
-    post = validate_transition(post_evidence, phase='post-cutover')
-    assert post == {'ready': False, 'phase': 'post-cutover', 'blockers': ['pending-source-contract']}
+    assert validate_transition(evidence, phase=phase) == {
+        'ready': True, 'phase': phase, 'blockers': [],
+    }
+    assert evidence == before
 
 
 @pytest.mark.parametrize('source_app', [None, 15368])
@@ -705,7 +726,7 @@ def test_pre_cutover_preserves_actual_four_checks_without_bootstrap_deadlock(sou
     before = copy.deepcopy(evidence)
 
     assert validate_transition(evidence, phase='pre-cutover') == {
-        'ready': False, 'phase': 'pre-cutover', 'blockers': ['pending-source-contract'],
+        'ready': True, 'phase': 'pre-cutover', 'blockers': [],
     }
     assert evidence == before
 
@@ -717,7 +738,7 @@ def test_missing_pending_pr16_source_cannot_satisfy_current_main_contract():
     report = validate_transition(evidence, phase='pre-cutover')
 
     assert report['ready'] is False
-    assert report['blockers'] == ['main-source-missing', 'pending-source-contract']
+    assert report['blockers'] == ['main-source-missing']
     assert SOURCE_BASELINES['deploy/cloud_coordinator.py'] != SOURCE_BASELINES['main']
 
 
@@ -947,12 +968,12 @@ def test_mutating_each_executable_dependency_blocks(path):
     'deploy/backup.py', 'deploy/native_readiness.py', 'deploy/observe_release.py',
     'deploy/review_evidence.py',
 ])
-def test_new_source_inventory_mutations_keep_the_hold_and_specific_blocker(path):
+def test_new_source_inventory_mutations_keep_the_specific_blocker(path):
     evidence = _evidence()
     _changed_source(evidence, path, 'unreviewed source mutation')
 
     assert _blockers(evidence) == {
-        'pending-source-contract', SOURCE_BLOCKERS[path],
+        SOURCE_BLOCKERS[path],
     }
 
 
@@ -981,7 +1002,7 @@ def test_additive_staging_synthetic_positive_and_no_input_mutation(phase):
     evidence = _phase_evidence(phase)
     before = copy.deepcopy(evidence)
     assert validate_transition(evidence, phase=phase) == {
-        'ready': False, 'phase': phase, 'blockers': ['pending-source-contract'],
+        'ready': True, 'phase': phase, 'blockers': [],
     }
     assert evidence == before
 
@@ -993,11 +1014,11 @@ def test_additive_staging_requires_every_context_and_no_unknown_superset(phase):
     for removed in checks:
         changed = copy.deepcopy(evidence)
         changed['protection']['required_checks'].remove(removed)
-        assert _blockers(changed, phase) == {'pending-source-contract', 'required-check-policy'}, removed['context']
+        assert _blockers(changed, phase) == {'required-check-policy'}, removed['context']
     for added in ({'context': 'unknown', 'app_id': None}, checks[0]):
         changed = copy.deepcopy(evidence)
         changed['protection']['required_checks'].append(added)
-        assert _blockers(changed, phase) == {'pending-source-contract', 'required-check-policy'}
+        assert _blockers(changed, phase) == {'required-check-policy'}
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -1010,10 +1031,10 @@ def test_additive_staging_requires_exact_app_bindings(phase):
         for app in bad_apps:
             changed = copy.deepcopy(evidence)
             changed['protection']['required_checks'][index]['app_id'] = app
-            assert _blockers(changed, phase) == {'pending-source-contract', 'required-check-policy'}, (check, app)
+            assert _blockers(changed, phase) == {'required-check-policy'}, (check, app)
         changed = copy.deepcopy(evidence)
         changed['protection']['required_checks'][index].pop('app_id')
-        assert _blockers(changed, phase) == {'pending-source-contract', 'required-check-policy'}, check
+        assert _blockers(changed, phase) == {'required-check-policy'}, check
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -1061,7 +1082,7 @@ def test_additive_staging_never_substitutes_status_for_review_or_source(phase, p
 def test_additive_staging_missing_merged_coordinator_blocks(phase):
     evidence = _phase_evidence(phase)
     evidence['main']['files'].pop('deploy/cloud_coordinator.py')
-    assert _blockers(evidence, phase) == {'main-source-missing', 'pending-source-contract'}
+    assert _blockers(evidence, phase) == {'main-source-missing'}
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -1070,10 +1091,10 @@ def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(p
     review = evidence['cloud_review']
     review['reviews'].append(dict(review['reviews'][0], state='COMMENTED',
                                   submitted_at='2026-10-01T22:00:00Z'))
-    assert _blockers(evidence, phase) == {'cloud-review-approval', 'pending-source-contract'}
+    assert _blockers(evidence, phase) == {'cloud-review-approval'}
     review['reviews'].pop()
     evidence = _sensitive_evidence(phase)
-    assert _blockers(evidence, phase) == {'pending-source-contract'}
+    assert _blockers(evidence, phase) == set()
     for record, field, value in (
         ('owner_authorization', 'actor_id', 1),
         ('owner_authorization', 'head_sha', 'd' * 40),
@@ -1084,7 +1105,7 @@ def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(p
     ):
         changed = copy.deepcopy(evidence)
         changed['cloud_review']['change'][record][field] = value
-        assert _blockers(changed, phase) == {'pending-source-contract', 'sensitive-review-authorization'}
+        assert _blockers(changed, phase) == {'sensitive-review-authorization'}
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -1092,7 +1113,7 @@ def test_sensitive_owner_published_independent_review_matches_authenticated_reco
     evidence = _sensitive_evidence(phase)
     before = copy.deepcopy(evidence)
     assert validate_transition(evidence, phase=phase) == {
-        'ready': False, 'phase': phase, 'blockers': ['pending-source-contract'],
+        'ready': True, 'phase': phase, 'blockers': [],
     }
     assert evidence == before
 
@@ -1126,7 +1147,7 @@ def test_sensitive_owner_review_must_be_a_formal_comment_not_approval(phase):
 def test_sensitive_targeted_review_rejects_unbound_claim(phase, mutate):
     evidence = _sensitive_evidence(phase)
     mutate(evidence['cloud_review'])
-    expected = {'pending-source-contract', 'sensitive-review-authorization'}
+    expected = {'sensitive-review-authorization'}
     reviewer = evidence['cloud_review']['reviews'][-1].get('user')
     if (not isinstance(reviewer, dict) or type(reviewer.get('id')) is not int
             or reviewer['id'] < 1):
@@ -1156,7 +1177,7 @@ def test_targeted_review_timestamp_must_be_valid_and_timezone_aware(phase, state
     before = copy.deepcopy(evidence)
 
     assert _blockers(evidence, phase) == {
-        'pending-source-contract', 'sensitive-review-authorization',
+        'sensitive-review-authorization',
     }
     assert evidence == before
 
@@ -1166,7 +1187,7 @@ def test_targeted_review_timestamp_must_be_valid_and_timezone_aware(phase, state
 def test_targeted_review_timestamp_accepts_valid_aware_record(phase, timestamp):
     evidence = _sensitive_evidence(phase)
     evidence['cloud_review']['reviews'][-1]['submitted_at'] = timestamp
-    assert _blockers(evidence, phase) == {'pending-source-contract'}
+    assert _blockers(evidence, phase) == set()
 
 
 @pytest.mark.parametrize('review_id', [None, 0, -1, True, 2.0, '2'])
@@ -1182,7 +1203,7 @@ def test_sensitive_targeted_review_requires_positive_integer_id(review_id):
 def test_sensitive_targeted_review_requires_complete_collection(phase):
     evidence = _sensitive_evidence(phase)
     evidence['cloud_review']['reviews_complete'] = False
-    assert _blockers(evidence, phase) == {'cloud-review-evidence', 'pending-source-contract'}
+    assert _blockers(evidence, phase) == {'cloud-review-evidence'}
 
 
 @pytest.mark.parametrize('reviewer_id', [
@@ -1194,7 +1215,7 @@ def test_sensitive_targeted_reviewer_must_be_positive_and_independent(reviewer_i
     review['pull_author_id'] = 77
     review['change']['targeted_review']['reviewer_id'] = reviewer_id
     review['reviews'][-1]['user']['id'] = reviewer_id
-    expected = {'pending-source-contract', 'sensitive-review-authorization'}
+    expected = {'sensitive-review-authorization'}
     if type(reviewer_id) is not int or reviewer_id < 1:
         expected.add('cloud-review-approval')
     assert _blockers(evidence) == expected
@@ -1240,7 +1261,7 @@ def test_every_review_author_is_validated_before_copilot_filtering(malformed):
     evidence = _evidence()
     evidence['cloud_review']['reviews'].append(malformed)
 
-    assert _blockers(evidence) == {'cloud-review-approval', 'pending-source-contract'}
+    assert _blockers(evidence) == {'cloud-review-approval'}
 
 
 def test_well_formed_non_copilot_review_is_validated_then_filtered():
@@ -1251,7 +1272,7 @@ def test_well_formed_non_copilot_review_is_validated_then_filtered():
         'submitted_at': '2026-10-01T22:00:00Z',
     })
 
-    assert _blockers(evidence) == {'pending-source-contract'}
+    assert _blockers(evidence) == set()
 
 
 def test_tied_latest_reviews_require_every_copilot_review_to_approve():
@@ -1266,17 +1287,17 @@ def test_tied_latest_reviews_require_every_copilot_review_to_approve():
     review['reviews'][0]['state'] = 'COMMENTED'
     review['reviews'][1]['state'] = 'APPROVED'
     review['reviews'].reverse()
-    assert _blockers(evidence) == {'cloud-review-approval', 'pending-source-contract'}
+    assert _blockers(evidence) == {'cloud-review-approval'}
     for record in review['reviews']:
         record['state'] = 'APPROVED'
-    assert _blockers(evidence) == {'pending-source-contract'}
+    assert _blockers(evidence) == set()
 
 
 @pytest.mark.parametrize('phase', PHASES)
 def test_additive_staging_status_omission_only_before_staging(phase):
     evidence = _phase_evidence(phase)
     evidence['cloud_review'].pop('status', None)
-    assert _blockers(evidence, phase) == {'pending-source-contract'} | (
+    assert _blockers(evidence, phase) == (
         set() if phase == 'pre-cutover' else {'cloud-review-status'}
     )
 
@@ -1292,7 +1313,7 @@ def test_additive_staging_status_omission_only_before_staging(phase):
 def test_additive_staging_supplied_status_must_be_fixed_creator_exact_head_success(phase, status):
     evidence = _phase_evidence(phase)
     evidence['cloud_review']['status'] = status
-    assert _blockers(evidence, phase) == {'cloud-review-status', 'pending-source-contract'}
+    assert _blockers(evidence, phase) == {'cloud-review-status'}
 
 
 def test_additive_staging_rejects_other_phase_maps():
@@ -1325,15 +1346,15 @@ def test_cli_phase_selection_is_read_only_and_never_bootstraps_status(tmp_path, 
     path = tmp_path / 'evidence.json'
     raw = json.dumps(evidence)
     path.write_text(raw)
-    expected_blockers = ['pending-source-contract']
+    expected_blockers = []
     if phase != 'pre-cutover' and not published_status:
         expected_blockers.insert(0, 'cloud-review-status')
 
     result = cli_main(['--phase', phase, str(path)])
 
-    assert result == 1
+    assert result == int(bool(expected_blockers))
     assert json.loads(capsys.readouterr().out) == {
-        'ready': False, 'phase': phase, 'blockers': expected_blockers,
+        'ready': not expected_blockers, 'phase': phase, 'blockers': expected_blockers,
     }
     assert path.read_text() == raw
     assert list(tmp_path.iterdir()) == [path]

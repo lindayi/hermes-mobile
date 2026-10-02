@@ -501,11 +501,6 @@ def validate_transition(evidence, *, phase):
         return {'ready': False, 'phase': phase, 'blockers': ['invalid-phase']}
     if not isinstance(evidence, dict):
         return {'ready': False, 'phase': phase, 'blockers': ['invalid-evidence']}
-    # Source-enforced hold in every phase, never an evidence-supplied opt-out.
-    # Historical coordinator 403ac3d is superseded by issue43 candidate pins.
-    # Final independent assembled-source acceptance and a separately reviewed
-    # source change remain required to clear this hold; matching pins cannot.
-    blockers.add('pending-source-contract')
     _check_identity(evidence, blockers)
     main = evidence.get('main')
     if (not isinstance(main, dict) or main.get('repository_id') != REPOSITORY_ID
