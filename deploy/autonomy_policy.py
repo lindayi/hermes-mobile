@@ -13,13 +13,27 @@ WORKFLOW_PATH = '.github/workflows/ci.yml'
 REF = 'refs/heads/main'
 SOURCE_CONTROL_ROOTS = frozenset({
     'deploy/release_artifact.py', 'deploy/self_deploy.py', 'deploy/ci_selection.py',
-    'scripts/ci_tests.py', 'scripts/prepare_native_test_runtime.py', 'scripts/test.py',
+    'deploy/observe_release.py', 'scripts/ci_tests.py',
+    'scripts/prepare_native_test_runtime.py', 'scripts/test.py',
 })
 SOURCE_CONTROL_PYTHON_FILES = frozenset({
-    'deploy/assets.py', 'deploy/ci_selection.py', 'deploy/frontend_release.py',
+    'backend/app.py', 'backend/auth.py', 'backend/auth_store.py',
+    'backend/background_delivery.py', 'backend/catalog_search.py', 'backend/chat_snapshot.py',
+    'backend/configuration.py', 'backend/model_controls.py', 'backend/native_api_service.py',
+    'backend/context_compression_presentation.py', 'backend/delivery.py',
+    'backend/hermes_client.py', 'backend/jobs.py', 'backend/native_catalog.py',
+    'backend/notification_policy.py', 'backend/notifications.py',
+    'backend/operational_notifications.py', 'backend/orchestration.py',
+    'backend/profiles.py', 'backend/public_commentary.py', 'backend/request_notifications.py',
+    'backend/runs.py', 'backend/runtime_binding.py', 'backend/runtime_notice_presentation.py',
+    'backend/session_deletion.py', 'backend/session_telemetry.py',
+    'backend/session_visibility.py', 'backend/steering.py',
+    'backend/task_reminder_presentation.py', 'backend/tool_presentation.py',
+    'deploy/assets.py', 'deploy/backup.py', 'deploy/ci_selection.py', 'deploy/frontend_release.py',
     'deploy/git_source.py', 'deploy/install_core.py', 'deploy/native_controls_release.py',
-    'deploy/public_http.py', 'deploy/release_artifact.py', 'deploy/self_deploy.py',
-    'deploy/test_workspace.py', 'scripts/ci_tests.py',
+    'deploy/native_readiness.py', 'deploy/observe_release.py', 'deploy/public_http.py',
+    'deploy/release_artifact.py', 'deploy/self_deploy.py', 'deploy/test_workspace.py',
+    'scripts/ci_tests.py',
     'scripts/prepare_native_test_runtime.py', 'scripts/test.py',
 })
 HOSTED_JOBS = frozenset({'build', 'checks', 'js', 'python', 'browser', 'native'})
@@ -40,6 +54,7 @@ REQUIRED_CHECKS = {
 }
 REQUIRED_FILES = (
     WORKFLOW_PATH,
+    '.github/workflows/issue-link.yml',
     '.github/native-tests.json',
     '.github/host-tests.json',
     '.github/actions/test-environment/action.yml',
@@ -57,6 +72,8 @@ REQUIRED_FILES = (
     'deploy/frontend_release.py',
     'deploy/git_source.py',
     'deploy/native_controls_release.py',
+    'deploy/native_readiness.py',
+    'deploy/observe_release.py',
     'deploy/public_http.py',
     'scripts/ci_tests.py',
     'scripts/prepare_native_test_runtime.py',
@@ -66,9 +83,41 @@ REQUIRED_FILES = (
     'patches/native-compat-baseline.json',
     'patches/cron-delivery-baseline.json',
     'deploy/cloud_coordinator.py',
+    'backend/app.py',
+    'backend/auth.py',
+    'backend/auth_store.py',
+    'backend/background_delivery.py',
+    'backend/catalog_search.py',
+    'backend/chat_snapshot.py',
+    'backend/configuration.py',
+    'backend/context_compression_presentation.py',
+    'backend/delivery.py',
+    'backend/hermes_client.py',
+    'backend/jobs.py',
+    'backend/model_controls.py',
+    'backend/native_catalog.py',
+    'backend/native_api_service.py',
+    'backend/notification_policy.py',
+    'backend/notifications.py',
+    'backend/operational_notifications.py',
+    'backend/orchestration.py',
+    'backend/profiles.py',
+    'backend/public_commentary.py',
+    'backend/request_notifications.py',
+    'backend/runs.py',
+    'backend/runtime_binding.py',
+    'backend/runtime_notice_presentation.py',
+    'backend/session_deletion.py',
+    'backend/session_telemetry.py',
+    'backend/session_visibility.py',
+    'backend/steering.py',
+    'backend/task_reminder_presentation.py',
+    'backend/tool_presentation.py',
+    'deploy/backup.py',
 )
 SOURCE_FINGERPRINTS = {
     '.github/workflows/ci.yml': '39110e6f940fc59ef3aec9846f07616a86a2e07335d2aaed6c6cd0ab444ff195',
+    '.github/workflows/issue-link.yml': '5569875b9fc45d686f857712bc035d75a100fcfc4f3862f48b0d8bd045eca415',
     '.github/native-tests.json': 'b97ddb088e595197cf65d97b0b4af89f4f83f5c4ad25463c566df7099817209f',
     '.github/host-tests.json': '8af5fc30188f81ba95d3d7c11ba6801f52795175c2cac7f634424f906947ce5a',
     '.github/actions/test-environment/action.yml': '638ed56955c8c8202fdd41640abe3be8b8065129e2965b8dc67b69f024017604',
@@ -82,6 +131,8 @@ SOURCE_FINGERPRINTS = {
     'deploy/git_source.py': 'c69c7c5a45bc3a16ab26996872c258cc352cf2ec56c19d6256595e18ac713d63',
     'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
     'deploy/native_controls_release.py': 'a2d00ebe7fa8add88afdeda28599b47e68f2eaab6935a8b2c9eaa46f585a11fe',
+    'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
+    'deploy/observe_release.py': '49d784af17d0807c95b460b2a285254f0a616361c390afa69b3cc0345a56b498',
     'deploy/public_http.py': 'dd352b8d0295f242f4a5d31a55eaaec523ef8405601461d4ab5fa8dc6dc302e7',
     'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
     'deploy/self_deploy.py': 'c8b9febf5e73c22de2aebbbf6ecb63e08597f58ea7ff5eede979d4be51783550',
@@ -95,9 +146,41 @@ SOURCE_FINGERPRINTS = {
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
+    'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
+    'backend/model_controls.py': 'a6276a114d770f8a52677ae11a48011b586daf7cd047dd667099e4a6251ccb6b',
+    'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
+    'backend/runs.py': 'f8ee1d2547a794f277c5dc6b52e491e17ada1bda65acba9f3083eee8522de04e',
+    'backend/app.py': 'fad986aa3fd601041e9f2926dd8c128292e796ca75dac9613c3c5592128e9e67',
+    'backend/auth.py': '411529a1d53bdcd01eae4bf5e35c44d3d5099e4dc9e77eb9dbbe67df6433f335',
+    'backend/auth_store.py': '8827856de744de03648924b0ff83011bdb70417781620724acd84078181c193e',
+    'backend/background_delivery.py': '2da2bdd89d27f18beee0e0099d1bb39b325a9f70dcba099d55ceb3dea2e88629',
+    'backend/catalog_search.py': 'f19c8f94816e6c68681c8db5aa7f7c21cedefb6e3ddaa3fb03612a61e5b2c433',
+    'backend/chat_snapshot.py': 'f46435b77435deb6eaf419c46b5175247ae6f507ad2dd9d9f8c6f3c89ba9d99e',
+    'backend/context_compression_presentation.py': 'dea9ea4a45e4a61a6df123b8622aa0ee0a5ee628c80d1644dc20f320b6daa729',
+    'backend/delivery.py': 'c241a5bf745011a7a7820313da6db688a5446703ae42c8a97c77f96ce05ff18f',
+    'backend/hermes_client.py': '20a0a6f48e42647e1536efb7395ebe2d24c1525c2bf36a53a65ccec45fb5a733',
+    'backend/jobs.py': 'fd9c4a2ac2c2f292c4616fd7dd04281b4c6a5753e9c432756345d85d175eee5e',
+    'backend/native_catalog.py': '8c161ec64446b9297cfde860ac1132df7cd388549bca6b6f6481ba676d6a1f5f',
+    'backend/notification_policy.py': '69c7c6807210dbf9300cd25c5ba14604be75730d06f41879074208d62655684d',
+    'backend/operational_notifications.py': '9edbc496bb931a02096bf820d984a4032107e003924492e1120684a0f5cdad31',
+    'backend/orchestration.py': 'a3e3d88bf7e2918b63a9ad09e9715099878f13ac964b1082ca173669bee6cc9b',
+    'backend/profiles.py': '8bf7681b69f6273d6a6f86a9835cc7e2fc0bd6f31fdb59e7934bd8dbb7515f40',
+    'backend/public_commentary.py': 'a52a81b0852fdcff13057bcd25ee39836abdc2d8ab658b90a9db7197ca0cf57a',
+    'backend/request_notifications.py': '1136806183f7b3cbb51b65691fc5c26b41f22c2d06098d1440bb3c42a869ede8',
+    'backend/runtime_binding.py': '96912dfc875807d7f44e520caac33e408ca4897f021af68b55bf8eb5ef35c072',
+    'backend/runtime_notice_presentation.py': '117649d3ef0779b08d5c540fdc88add671180a35e90d894e116f5b5bbd6cf34c',
+    'backend/session_deletion.py': '44a9ef22524a7bbfc87a6a855583b1e1b88affbc2c4961c2c2efff9efc3f9d71',
+    'backend/session_telemetry.py': '74141c1f154e4a7fb10d3eb25d5676b894e13b545be40335d8960222506bf825',
+    'backend/session_visibility.py': 'e6332e0104c82cb871627078145d36006e7d681956c69ab73e968448b40c50c8',
+    'backend/steering.py': '3bdd2134e8617d9b76f2431b4b1d07fdf9bd609cedd9587062b05fb8516b8fdd',
+    'backend/task_reminder_presentation.py': '549a29784ef6f778ef55658d5a05961fed3919579faeeba567545004d7e9bcf3',
+    'backend/tool_presentation.py': '4cfd8d468f75213d3aee3f8ab3c9f9409bb3b97e50a2aa05492181b49a1b474f',
+    'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
 }
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',
+    '.github/workflows/issue-link.yml': 'hosted-workflow-contract',
     '.github/native-tests.json': 'installed-host-gate',
     '.github/host-tests.json': 'installed-host-gate',
     '.github/actions/test-environment/action.yml': 'hosted-workflow-contract',
@@ -115,6 +198,8 @@ SOURCE_BLOCKERS = {
     'deploy/frontend_release.py': 'execution-source-contract',
     'deploy/git_source.py': 'installed-host-gate',
     'deploy/native_controls_release.py': 'installed-host-gate',
+    'deploy/native_readiness.py': 'execution-source-contract',
+    'deploy/observe_release.py': 'execution-source-contract',
     'deploy/public_http.py': 'installed-host-gate',
     'scripts/ci_tests.py': 'installed-host-gate',
     'scripts/prepare_native_test_runtime.py': 'native-job-contract',
@@ -124,9 +209,40 @@ SOURCE_BLOCKERS = {
     'patches/native-compat-baseline.json': 'native-job-contract',
     'patches/cron-delivery-baseline.json': 'native-job-contract',
     'deploy/cloud_coordinator.py': 'coordinator-review-contract',
+    'backend/configuration.py': 'execution-source-contract',
+    'backend/model_controls.py': 'execution-source-contract',
+    'backend/native_api_service.py': 'execution-source-contract',
+    'backend/notifications.py': 'execution-source-contract',
+    'backend/runs.py': 'execution-source-contract',
+    'backend/app.py': 'execution-source-contract',
+    'backend/auth.py': 'execution-source-contract',
+    'backend/auth_store.py': 'execution-source-contract',
+    'backend/background_delivery.py': 'execution-source-contract',
+    'backend/catalog_search.py': 'execution-source-contract',
+    'backend/chat_snapshot.py': 'execution-source-contract',
+    'backend/context_compression_presentation.py': 'execution-source-contract',
+    'backend/delivery.py': 'execution-source-contract',
+    'backend/hermes_client.py': 'execution-source-contract',
+    'backend/jobs.py': 'execution-source-contract',
+    'backend/native_catalog.py': 'execution-source-contract',
+    'backend/notification_policy.py': 'execution-source-contract',
+    'backend/operational_notifications.py': 'execution-source-contract',
+    'backend/orchestration.py': 'execution-source-contract',
+    'backend/profiles.py': 'execution-source-contract',
+    'backend/public_commentary.py': 'execution-source-contract',
+    'backend/request_notifications.py': 'execution-source-contract',
+    'backend/runtime_binding.py': 'execution-source-contract',
+    'backend/runtime_notice_presentation.py': 'execution-source-contract',
+    'backend/session_deletion.py': 'execution-source-contract',
+    'backend/session_telemetry.py': 'execution-source-contract',
+    'backend/session_visibility.py': 'execution-source-contract',
+    'backend/steering.py': 'execution-source-contract',
+    'backend/task_reminder_presentation.py': 'execution-source-contract',
+    'backend/tool_presentation.py': 'execution-source-contract',
+    'deploy/backup.py': 'execution-source-contract',
 }
 SOURCE_BASELINES = {
-    'main': 'f84063e9aed55994c4ae4d3eae14fec922e12929',
+    'main': 'b85c098857e7fb8229f47bd688d703bb677aeb34',
     'deploy/cloud_coordinator.py': '403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83',
 }
 SHA_RE = re.compile(r'[0-9a-f]{40}\Z')
@@ -281,15 +397,21 @@ def _check_review(evidence, main_sha, phase, blockers):
     if not isinstance(reviews, list) or not isinstance(threads, list):
         blockers.add('cloud-review-evidence')
         return
-    authored = [
-        item for item in reviews
-        if isinstance(item, dict) and isinstance(item.get('user'), dict)
-        and type(item['user'].get('id')) is int
-        and item['user']['id'] == COPILOT_REVIEWER_ID
-    ]
+    authored = []
+    malformed_review = False
+    for item in reviews:
+        if not isinstance(item, dict):
+            malformed_review = True
+            continue
+        user = item.get('user')
+        if (not isinstance(user, dict) or type(user.get('id')) is not int
+                or user['id'] < 1):
+            malformed_review = True
+            continue
+        if user['id'] == COPILOT_REVIEWER_ID:
+            authored.append(item)
     ordered = []
     review_ids = set()
-    malformed_review = False
     for item in authored:
         review_id, submitted_at = item.get('id'), item.get('submitted_at')
         if type(review_id) is not int or review_id < 1 or review_id in review_ids:
