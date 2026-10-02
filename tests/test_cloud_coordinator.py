@@ -64,7 +64,11 @@ def test_enrollment_requires_an_authenticated_owner_command_and_main_pr():
     pr = valid_pr()
     assert enrollment_from_comment(issue, pr, {
         "id": 123, "user": {"id": OWNER}, "body": "/hermes enroll",
-    }) == {"issue": 16, "comment": 123, "head": HEAD, "base": BASE}
+    }) == {
+        "issue": 16, "comment": 123, "head": HEAD, "base": BASE,
+        "pull_id": 160000016, "pull_node_id": "PR_node_16",
+        "repository_id": 1399942965,
+    }
     for author in ({"id": 1}, {"id": str(OWNER)}, None):
         assert enrollment_from_comment(issue, pr, {
             "id": 123, "user": author, "body": "/hermes enroll",
@@ -898,6 +902,119 @@ def test_policy_incident_event_is_deduplicated_across_head_updates(tmp_path):
 
     assert len(store.snapshot()["lifecycle_events"]) == 1
     assert store.snapshot()["lifecycle_events"][0]["event_id"] == first_id
+
+
+@pytest.mark.parametrize("reason", ["sensitive_approval", "conflict_incompatible"])
+def test_repeated_incident_keeps_its_original_timestamp(tmp_path, reason):
+    from deploy.cloud_coordinator import _lifecycle_event
+
+    store = StateStore(tmp_path / "state.json")
+    snapshot = {
+        "issue": 16, "head": HEAD,
+        "enrollment": {"comment": 123},
+    }
+    first = _lifecycle_event(
+        snapshot, reason, occurred_at="2026-10-01T12:00:00Z", incident="same",
+        decision="authorize_sensitive_action" if reason == "sensitive_approval" else None,
+    )
+    repeated = _lifecycle_event(
+        snapshot, reason, occurred_at="2026-10-01T12:01:00Z", incident="same",
+        decision="authorize_sensitive_action" if reason == "sensitive_approval" else None,
+    )
+
+    store.record_lifecycle(first, now=1790856540)
+    store.record_lifecycle(repeated, now=1790856600)
+
+    assert store.snapshot()["lifecycle_events"] == [first]
+    assert store.snapshot()["lifecycle_events"][0]["occurred_at"] == "2026-10-01T12:00:00Z"
+
+
+@pytest.mark.parametrize("result", ["conflict_incompatible", "policy_broken"])
+def test_new_head_receipt_blocker_vetoes_that_result_head(tmp_path, result):
+    api = FakeApi(unresolved=True)
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    action = next(item for item in store.actions().values() if item["kind"] == "fix")
+    result_head = "c" * 40
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.complete_task(action["task_id"], action, result=result, head_sha=result_head)
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    blocker = next(
+        event for event in store.snapshot()["lifecycle_events"]
+        if event["reason"] == result
+    )
+    assert blocker["head_sha"] == result_head
+    assert summary["auto_merge_eligible"] is False
+    assert not any("enablePullRequestAutoMerge" in query for query, _ in api.graphql_writes)
+
+
+def test_completed_comment_review_on_new_head_releases_handoff_for_repair(tmp_path):
+    api = FakeApi(unresolved=True)
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    action = next(item for item in store.actions().values() if item["kind"] == "fix")
+    result_head = "c" * 40
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.review_state = "COMMENTED"
+    api.complete_task(action["task_id"], action, head_sha=result_head)
+
+    coordinator.run(apply=True)
+
+    assert api.fix_attempts == 2
+    assert any(item.get("attempt") == 2 for item in store.actions().values())
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+
+
+def test_running_last_allowed_task_is_not_reported_as_exhausted(tmp_path):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    for attempt in range(2):
+        coordinator.run(apply=True)
+        action = next(
+            item for item in store.actions().values()
+            if item["kind"] == "fix" and item.get("status") == "sent"
+        )
+        api.complete_task(action["task_id"], action)
+    coordinator.run(apply=True)
+    assert api.fix_attempts == 3
+
+    result = coordinator.run(apply=True)
+
+    assert result["pull_requests"][0]["repair_requested"] is False
+    assert "agent" in result["pull_requests"][0]["reasons"]
+    assert "budget" not in result["pull_requests"][0]["reasons"]
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+
+
+@pytest.mark.parametrize("change", [
+    {"number": 17},
+    {"id": 160000017},
+    {"node_id": "PR_node_17"},
+    {"head": {"sha": HEAD, "ref": "topic", "repo": {"id": 1}}},
+    {"base": {"sha": BASE, "ref": "main", "repo": {"id": 1}}},
+])
+def test_terminal_pull_snapshot_must_match_enrolled_identity(tmp_path, change):
+    api = FakeApi()
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    api.pull.update(state="closed", merged=True, merge_commit_sha="e" * 40)
+    api.pull.update(change)
+
+    with pytest.raises(CoordinatorError, match="Pull request identity"):
+        coordinator.run(apply=True)
 
 
 @pytest.mark.parametrize("link_type", ["symlink", "hardlink"])

@@ -135,8 +135,15 @@ def enrollment_from_comment(issue, pull, comment):
             or not isinstance(base_repo, dict) or base_repo.get("id") != REPOSITORY_ID
             or base.get("ref") != MAIN_BRANCH or not _is_sha(head_sha) or not _is_sha(base_sha)):
         return None
-    return {"issue": issue["number"], "comment": comment.get("id"),
-            "head": head_sha, "base": base_sha}
+    pull_id, pull_node_id = pull.get("id"), pull.get("node_id")
+    if (type(pull_id) is not int or pull_id <= 0
+            or not isinstance(pull_node_id, str) or not pull_node_id):
+        return None
+    return {
+        "issue": issue["number"], "comment": comment.get("id"),
+        "head": head_sha, "base": base_sha, "pull_id": pull_id,
+        "pull_node_id": pull_node_id, "repository_id": REPOSITORY_ID,
+    }
 
 
 def classify_sensitive_paths(changes, *, complete=True):
@@ -892,6 +899,22 @@ class Coordinator:
             raise CoordinatorError("Pull request data was incomplete")
         if not _is_sha(head.get("sha")):
             raise CoordinatorError("Pull request head was not a commit SHA")
+        head_repo, base_repo = head.get("repo"), base.get("repo")
+        if (
+            type(number) is not int or enrollment.get("issue") != number
+            or pull.get("number") != number
+            or type(pull.get("id")) is not int
+            or pull.get("id") != enrollment.get("pull_id")
+            or not isinstance(pull.get("node_id"), str)
+            or pull.get("node_id") != enrollment.get("pull_node_id")
+            or enrollment.get("repository_id") != REPOSITORY_ID
+            or not isinstance(head_repo, dict)
+            or head_repo.get("id") != REPOSITORY_ID
+            or not isinstance(base_repo, dict)
+            or base_repo.get("id") != REPOSITORY_ID
+            or base.get("ref") != MAIN_BRANCH
+        ):
+            raise CoordinatorError("Pull request identity did not match enrollment")
         if pull.get("state") != "open" or pull.get("merged") is not False:
             return {
                 "issue": number, "enrollment": enrollment, "pull": pull,
@@ -1075,7 +1098,7 @@ class Coordinator:
                                     ) or busy
                                 else:
                                     event = _lifecycle_event(
-                                        {"issue": number, "head": action["head"],
+                                        {"issue": number, "head": fields["receipt_head"],
                                          "enrollment": snapshot["enrollment"]},
                                         receipt["result"], occurred_at=self._now_string(),
                                         incident=str(action.get("attempt", "")),
@@ -1240,14 +1263,6 @@ class Coordinator:
             for review in reviews
         )
         if has_submitted_review:
-            if action.get("receipt_head") != action.get("head"):
-                self.store.update_action(
-                    key, "completed", handoff_state="waiting_review",
-                    review_request_state="observed",
-                )
-                return self._handoff_wait(
-                    key, action | {"handoff_state": "waiting_review"}, snapshot,
-                )
             self.store.update_action(
                 key, "completed", handoff_state="done",
                 review_request_state="observed",
@@ -1421,7 +1436,8 @@ class Coordinator:
         neutral_blocker = next((
             action for action in actions.values()
             if action.get("kind") == "fix" and action.get("issue") == number
-            and action.get("head") == head and action.get("status") == "completed"
+            and action.get("receipt_head", action.get("head")) == head
+            and action.get("status") == "completed"
             and action.get("blocker") in {"conflict_incompatible", "policy_broken"}
         ), None)
         if neutral_blocker:
@@ -1479,7 +1495,7 @@ class Coordinator:
         if agent_busy:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
         budget_needed = (
-            snapshot["pull"].get("draft") is not True and not neutral_blocker
+            not agent_busy and snapshot["pull"].get("draft") is not True and not neutral_blocker
             and (needs_reconciliation or repair_request(
                 head, 0, snapshot["threads"], snapshot["check_runs"],
                 pull_number=number,
@@ -1537,7 +1553,7 @@ class Coordinator:
         notification_outcomes, lifecycle_events = self._notification_outcomes(
             snapshot, reasons,
         )
-        if (attempts >= REPAIR_LIMIT and needs_reconciliation
+        if (not agent_busy and attempts >= REPAIR_LIMIT and needs_reconciliation
                 and not neutral_blocker
                 and neutral_reconciliation_request(snapshot, 0)):
             lifecycle_events.append(_lifecycle_event(
@@ -1994,8 +2010,13 @@ def _retirable_action(action, current_head, inactive):
     if action.get("kind") == "fix":
         if action.get("handoff_state") not in {None, "done", "failed"}:
             return False
+        action_head = (
+            action.get("receipt_head")
+            if action.get("blocker") in {"conflict_incompatible", "policy_broken"}
+            else action.get("head")
+        )
         return status == "completed" and (
-            inactive or action.get("head") != current_head
+            inactive or action_head != current_head
         )
     if status not in {"sent", "superseded", "blocked", "completed"}:
         return False

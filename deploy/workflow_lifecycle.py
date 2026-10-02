@@ -65,13 +65,15 @@ def merge_events(existing, additions, *, now=None, limit=MAX_EVENTS):
             persistent_incident = (
                 prior.get("reason") in {
                     "execution_exhausted", "execution_uncertain", "policy_broken",
+                    "sensitive_approval", "conflict_incompatible",
                 }
-                and prior.get("reason") == event.get("reason")
-                and prior.get("outcome") == event.get("outcome")
-                and prior.get("issue_number") == event.get("issue_number")
-                and prior.get("pr_number") == event.get("pr_number")
-                and prior.get("merge_sha") == event.get("merge_sha")
-                and prior.get("decision") == event.get("decision")
+                and {
+                    key: value for key, value in prior.items()
+                    if key != "occurred_at"
+                } == {
+                    key: value for key, value in event.items()
+                    if key != "occurred_at"
+                }
             )
             if prior != event and not persistent_incident:
                 raise ValueError("Lifecycle event identity conflicts with its immutable payload")
