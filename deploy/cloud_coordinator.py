@@ -266,19 +266,26 @@ def required_checks_pass(required, check_runs, statuses, *, complete):
     return True
 
 
+def _pull_merge_eligible(pull, current_main_sha):
+    """Share pull-level eligibility between planning and the last mutation fence."""
+    if not isinstance(pull, dict):
+        return False
+    base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
+    return (pull.get("state") == "open" and pull.get("merged") is False
+            and pull.get("draft") is False and pull.get("mergeable") is True
+            and pull.get("mergeable_state") not in {"behind", "dirty", "unknown", "blocked"}
+            and base.get("ref") == MAIN_BRANCH and base.get("sha") == current_main_sha
+            and _is_sha(current_main_sha))
+
+
 def eligible_for_auto_merge(pull, *, current_main_sha, required_checks, check_runs,
                             statuses, checks_complete, review_valid, sensitive_authorized,
                             cloud_review_required, cloud_review_status_owned,
                             up_to_date_required, conversation_resolution_required,
                             agent_running):
     """Pure eligibility gate; GitHub still enforces protected auto-merge."""
-    if not isinstance(pull, dict):
-        return False
-    base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
-    if (pull.get("draft") is not False or pull.get("mergeable") is not True
-            or pull.get("mergeable_state") in {"behind", "dirty", "unknown", "blocked"}
-            or base.get("ref") != MAIN_BRANCH or base.get("sha") != current_main_sha
-            or not _is_sha(current_main_sha) or not review_valid or not sensitive_authorized
+    if (not _pull_merge_eligible(pull, current_main_sha)
+            or not review_valid or not sensitive_authorized
             or not cloud_review_required or not cloud_review_status_owned
             or not up_to_date_required or not conversation_resolution_required
             or agent_running):
@@ -943,14 +950,10 @@ class Coordinator:
                 current, owned = _status_owned(
                     snapshot["statuses"], "cloud-review", OWNER_ID,
                 )
-                try:
-                    written_at = datetime.fromisoformat(
-                        current["created_at"].replace("Z", "+00:00")
-                    ).timestamp()
-                except (KeyError, TypeError, ValueError, AttributeError):
-                    written_at = 0
+                watermark = action.get("status_id_watermark")
                 if (current and owned and current.get("state") == action.get("state")
-                        and written_at >= action.get("created_at", float("inf")) - 2):
+                        and type(watermark) is int and watermark >= 0
+                        and type(current.get("id")) is int and current["id"] > watermark):
                     if apply:
                         self.store.update_action(key, "sent")
                 elif status == "sending" and apply:
@@ -1221,7 +1224,23 @@ class Coordinator:
 
     def _publish_status(self, action, snapshot, actor_id):
         key = action["key"]
-        if not self.store.claim_action(key, action):
+        existing = self.store.action(key)
+        if existing and existing.get("status") != "blocked":
+            return existing.get("status")
+        # Capture all existing same-context IDs before the durable claim, not a
+        # wall-clock approximation. Never retrofit proof onto an ambiguous claim.
+        statuses = _rest_list(
+            self.api, f"repos/{REPOSITORY}/commits/{action['head']}/statuses?per_page=100",
+        )
+        if (not isinstance(statuses, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get("context"), str)
+                or (item["context"] == "cloud-review"
+                    and (type(item.get("id")) is not int or item["id"] <= 0))
+                for item in statuses)):
+            raise CoordinatorError("Preclaim status identity inventory was incomplete")
+        watermark = max((item["id"] for item in statuses
+                         if item["context"] == "cloud-review"), default=0)
+        if not self.store.claim_action(key, action | {"status_id_watermark": watermark}):
             existing = self.store.action(key)
             if not existing:
                 raise CoordinatorError("Planned status generation could not be claimed")
@@ -1346,7 +1365,9 @@ class Coordinator:
                 current_plan["reasons"] + ["head-or-base-race"],
             ))
             return current_plan
-        if not isinstance(pull, dict) or not pull.get("node_id"):
+        if (not _pull_merge_eligible(pull, action.get("main_sha"))
+                or pull.get("number") != action["issue"] or not pull.get("node_id")
+                or pull["node_id"] != current["pull"].get("node_id")):
             self.store.update_action(key, "blocked")
             current_plan["auto_merge_eligible"] = False
             current_plan["merge_action"] = None

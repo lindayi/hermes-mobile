@@ -547,6 +547,7 @@ class FakeApi:
         self.reopen_after_first = reopen_after_first
         self.review_status_present = review_status_present
         self.status_state = "success"
+        self.status_id = 1
         self.status_created_at = "2026-10-01T12:01:00Z"
         self.workflow_runs = workflow_runs
         self.pull_state = pull_state
@@ -660,6 +661,7 @@ class FakeApi:
             if not self.review_status_present:
                 return []
             return [{
+                "id": self.status_id,
                 "context": "cloud-review", "state": self.status_state,
                 "creator": {"id": self.status_author_id}, "created_at": self.status_created_at,
             }]
@@ -759,6 +761,36 @@ def test_head_race_fences_auto_merge_and_marks_action_superseded(tmp_path):
     assert not api.graphql_writes
     actions = store.actions()
     assert actions[f"auto-merge:16:{HEAD}:{BASE}"]["status"] == "superseded"
+
+
+@pytest.mark.parametrize("change", [
+    {"draft": True}, {"draft": None}, {"state": "closed"}, {"merged": True},
+    {"mergeable": False}, {"mergeable": None},
+    *[{"mergeable_state": state} for state in ("behind", "dirty", "unknown", "blocked")],
+    {"node_id": "different-node"}, {"node_id": None}, {"number": 17},
+    {"head": {"sha": "c" * 40, "repo": {"id": 1399942965}}},
+    {"head": {"sha": HEAD, "repo": {"id": 1}}},
+    {"base": {"sha": "c" * 40, "ref": "main", "repo": {"id": 1399942965}}},
+    {"base": {"sha": BASE, "ref": "other", "repo": {"id": 1399942965}}},
+    {"base": {"sha": BASE, "ref": "main", "repo": {"id": 1}}},
+])
+def test_final_merge_get_rechecks_pull_eligibility_and_identity(tmp_path, change):
+    class FinalGetRace(FakeApi):
+        def get(self, route):
+            result = super().get(route)
+            if route.endswith("/pulls/16") and self.pull_reads == 3:
+                return result | change
+            return result
+
+    api = FinalGetRace()
+    store = StateStore(tmp_path / "state.json")
+    action = {"kind": "auto-merge", "issue": 16, "head": HEAD, "main_sha": BASE,
+              "key": f"auto-merge:16:{HEAD}:{BASE}"}
+    result = Coordinator(api, store)._enable_auto_merge(action, {"enrollment": {}})
+    assert api.pull_reads == 3  # Race occurs only after the complete fresh plan.
+    assert not api.writes and not api.graphql_writes
+    assert not result["auto_merge_eligible"] and result["merge_action"] is None
+    assert store.action(action["key"])["status"] in {"blocked", "superseded"}
 
 
 def test_server_fences_head_moved_after_final_get_before_merge_mutation(tmp_path):
@@ -924,17 +956,152 @@ def test_uncertain_status_reconciles_only_new_owned_remote_generation(tmp_path):
     store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
     key = f"status:16:{HEAD}:1"
     store.claim_action(key, {"kind": "status", "issue": 16, "head": HEAD,
-                             "generation": 1, "state": "pending", "key": key})
+                             "generation": 1, "state": "pending", "key": key,
+                             "status_id_watermark": 1})
     api.status_created_at = "2026-10-01T12:01:00Z"
     coordinator = Coordinator(api, store)
     coordinator.run(apply=True)
     assert store.action(key)["status"] == "uncertain"
     assert not [body for route, body in api.writes if "/statuses/" in route]
     api.status_created_at = datetime.now(timezone.utc).isoformat()
+    api.status_id = 2
     coordinator.run(apply=True)
     assert store.action(key)["status"] == "sent"
     coordinator.run(apply=True)
     assert store.action(f"status:16:{HEAD}:2")["status"] == "sent"
+
+
+def test_status_reconciliation_requires_durable_preclaim_id_watermark(tmp_path, monkeypatch):
+    import deploy.cloud_coordinator as coordinator_module
+
+    now = 1790856540
+    monkeypatch.setattr(coordinator_module.time, "time", lambda: now)
+    timestamp = datetime.fromtimestamp(now - 1, timezone.utc).isoformat()
+    path = tmp_path / "state.json"
+    key = f"status:16:{HEAD}:1"
+    action = {"kind": "status", "issue": 16, "head": HEAD, "generation": 1,
+              "state": "pending", "key": key}
+    old_match = {"id": 20, "context": "cloud-review", "state": "pending",
+                 "creator": {"id": OWNER}, "created_at": timestamp}
+
+    class LostStatus(RecordingApi):
+        claim_at_post = None
+
+        def write(self, route, body):
+            self.writes.append((route, body))
+            self.claim_at_post = StateStore(path).action(key)
+            raise ApiError("response lost")
+
+    class ClaimStore(StateStore):
+        claimed_payload = None
+
+        def claim_action(self, key, action):
+            self.claimed_payload = dict(action)
+            return super().claim_action(key, action)
+
+    api = LostStatus()
+    # The maximum is not the latest timestamp, first row, or other context's ID.
+    api.status_log[HEAD] = [
+        old_match | {"id": 10, "state": "success",
+                     "created_at": datetime.fromtimestamp(now, timezone.utc).isoformat()},
+        old_match | {"id": 999, "context": "unrelated"}, old_match,
+    ]
+    store = ClaimStore(path)
+    snapshot = {"issue": 16, "head": HEAD, "main_sha": BASE,
+                "pull": api.pull, "tasks": []}
+    assert Coordinator(api, store)._publish_status(action, snapshot, OWNER) == "uncertain"
+    # An old matching row within the former two-second window is not this POST.
+    snapshot["statuses"] = [old_match]
+    restarted = StateStore(path)
+    coordinator = Coordinator(api, restarted)
+    coordinator._reconcile_actions(snapshot, restarted.actions(), apply=True)
+    assert restarted.action(key)["status"] == "uncertain"
+    assert store.claimed_payload == action | {"status_id_watermark": 20}
+    assert api.claim_at_post == action | {
+        "status_id_watermark": 20, "status": "sending", "created_at": now,
+    }
+    # Restart/replay cannot replace the watermark or retry the ambiguous POST.
+    assert coordinator._publish_status(action, snapshot, OWNER) == "uncertain"
+    assert len(api.writes) == 1
+    # A new owned ID proves the transition even with an older remote clock.
+    snapshot["statuses"] = [old_match | {"id": 21, "created_at": "2020-01-01T00:00:00Z"}]
+    coordinator._reconcile_actions(snapshot, restarted.actions(), apply=True)
+    assert restarted.action(key)["status"] == "sent"
+    assert len(api.writes) == 1
+    assert api.writes[0] == (f"repos/lindayi/hermes-mobile/statuses/{HEAD}", {
+        "context": "cloud-review", "state": "pending",
+        "description": "Awaiting current Copilot approval and resolved review threads",
+    })
+
+
+@pytest.mark.parametrize("watermark", [{}, {"status_id_watermark": None},
+                                      {"status_id_watermark": True},
+                                      {"status_id_watermark": -1}])
+@pytest.mark.parametrize("status", ["sending", "uncertain"])
+def test_legacy_status_claim_never_invents_a_watermark(tmp_path, watermark, status):
+    api = FakeApi()
+    store = StateStore(tmp_path / "state.json")
+    key = f"status:16:{HEAD}:1"
+    action = {"kind": "status", "issue": 16, "head": HEAD, "generation": 1,
+              "state": "pending", "key": key} | watermark
+    store.claim_action(key, action)
+    store.update_action(key, status)
+    snapshot = {"issue": 16, "head": HEAD, "pull": api.pull, "tasks": [], "statuses": [{
+        "id": 100, "context": "cloud-review", "state": "pending",
+        "creator": {"id": OWNER}, "created_at": datetime.now(timezone.utc).isoformat(),
+    }]}
+    coordinator = Coordinator(api, StateStore(store.path))
+    coordinator._reconcile_actions(snapshot, store.actions(), apply=True)
+    assert store.action(key)["status"] == "uncertain"
+    assert coordinator._publish_status(action, snapshot, OWNER) == "uncertain"
+    assert {k: v for k, v in store.action(key).items() if k in watermark} == watermark
+    if not watermark:
+        assert "status_id_watermark" not in store.action(key)
+    assert not api.writes and not api.graphql_writes
+
+
+@pytest.mark.parametrize("change", [
+    {"id": 19}, {"id": 20}, {"id": None}, {"id": True}, {"id": "21"},
+    {"creator": {"id": 1}}, {"creator": None},
+    {"context": "other"}, {"state": "success"},
+])
+def test_status_watermark_preserves_authenticated_generation_scope(tmp_path, change):
+    api = FakeApi()
+    store = StateStore(tmp_path / "state.json")
+    key = f"status:16:{HEAD}:1"
+    store.claim_action(key, {"kind": "status", "issue": 16, "head": HEAD,
+                            "generation": 1, "state": "pending", "status_id_watermark": 20})
+    snapshot = {"issue": 16, "head": HEAD, "pull": api.pull, "tasks": [], "statuses": [{
+        "id": 21, "context": "cloud-review", "state": "pending",
+        "creator": {"id": OWNER}, "created_at": datetime.now(timezone.utc).isoformat(),
+    } | change]}
+    Coordinator(api, store)._reconcile_actions(snapshot, store.actions(), apply=True)
+    assert store.action(key)["status"] == "uncertain"
+    assert not api.writes and not api.graphql_writes
+
+
+@pytest.mark.parametrize("inventory", [None, [None], [{}],
+    [{"context": "cloud-review", "id": None}],
+    [{"context": "cloud-review", "id": True}],
+    [{"context": "cloud-review", "id": 0}],
+    [{"context": "cloud-review", "id": "10"}], "page-error",
+])
+def test_incomplete_preclaim_status_inventory_cannot_claim_or_post(tmp_path, inventory):
+    class IncompleteStatuses(FakeApi):
+        def get_all(self, route, *, collection=None):
+            assert route == f"repos/lindayi/hermes-mobile/commits/{HEAD}/statuses?per_page=100"
+            if inventory == "page-error":
+                raise ApiError("later page unavailable")
+            return inventory
+
+    api = IncompleteStatuses()
+    store = StateStore(tmp_path / "state.json")
+    action = {"kind": "status", "issue": 16, "head": HEAD, "generation": 1,
+              "state": "pending", "key": f"status:16:{HEAD}:1"}
+    with pytest.raises(CoordinatorError):
+        Coordinator(api, store)._publish_status(action, {}, OWNER)
+    assert not store.actions()
+    assert not api.writes and not api.graphql_writes
 
 
 def test_precollection_watermark_overlaps_late_comments(tmp_path):
@@ -1634,6 +1801,7 @@ class RecordingApi(FakeApi):
                                   "body": body["body"], "updated_at": "2026-10-01T11:00:00Z"})
         elif "/statuses/" in route:
             self.status_log.setdefault(route.rsplit("/", 1)[-1], []).append({
+                "id": response["id"],
                 "context": body["context"], "state": body["state"],
                 "creator": {"id": OWNER},
                 "created_at": datetime.now(timezone.utc).isoformat(),
