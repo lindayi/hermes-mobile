@@ -147,7 +147,9 @@ def test_enrollment_requires_an_authenticated_owner_command_and_main_pr():
 def test_sha_bound_enrollment_requires_exact_current_head():
     issue = {"number": 16, "pull_request": {"url": "pull/16"}}
     comment = {"id": 123, "user": {"id": OWNER},
-               "body": f"/hermes enroll {HEAD}"}
+               "body": f"/hermes enroll {HEAD}",
+               "created_at": "2026-10-01T11:00:00Z",
+               "updated_at": "2026-10-01T11:00:00Z"}
 
     assert enrollment_from_comment(issue, valid_pr(), comment) == {
         "issue": 16, "comment": 123, "head": HEAD, "base": BASE,
@@ -164,6 +166,28 @@ def test_sha_bound_enrollment_requires_exact_current_head():
     assert enrollment_from_comment(
         issue, valid_pr(), comment | {"body": f"/hermes enroll {HEAD} extra"},
     ) is None
+
+
+@pytest.mark.parametrize("timestamps", [
+    {},
+    {"created_at": "2026-10-01T11:00:00Z"},
+    {"updated_at": "2026-10-01T11:00:00Z"},
+    {"created_at": None, "updated_at": None},
+    {"created_at": 1, "updated_at": 1},
+    {"created_at": "", "updated_at": ""},
+    {"created_at": "invalid", "updated_at": "invalid"},
+    {"created_at": "2026-10-01T11:00:00", "updated_at": "2026-10-01T11:00:00"},
+    {"created_at": "2026-10-01T11:00:00Z", "updated_at": "2026-10-01T11:01:00Z"},
+])
+def test_sha_bound_enrollment_requires_immutable_timestamp_evidence(timestamps):
+    issue = {"number": 16, "pull_request": {"url": "pull/16"}}
+    comment = {"id": 123, "user": {"id": OWNER},
+               "body": f"/hermes enroll {HEAD}", **timestamps}
+    assert enrollment_from_comment(issue, valid_pr(), comment) is None
+    # The historical broad/manual command retains its existing timestamp contract.
+    assert enrollment_from_comment(
+        issue, valid_pr(), comment | {"body": "/hermes enroll"},
+    ) == enrolled_record()
 
 
 def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
@@ -953,6 +977,7 @@ class FakeApi:
         self.issue = {"number": 16, "pull_request": {"url": "pull/16"} if issue_is_pull else None}
         self.comments = [{
             "id": 123, "user": {"id": author_id}, "body": "/hermes enroll",
+            "created_at": "2026-10-01T11:00:00Z",
             "updated_at": "2026-10-01T11:00:00Z",
         }]
         if authorize:

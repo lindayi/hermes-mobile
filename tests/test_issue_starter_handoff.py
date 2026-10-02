@@ -14,7 +14,7 @@ def consumer():
     return cloud_coordinator
 
 
-@pytest.mark.parametrize("race", ["none", "before_post", "after_post"])
+@pytest.mark.parametrize("race", ["none", "before_post", "after_post", "edited_comment"])
 def test_real_starter_command_is_sha_bound_at_consumer_scan(tmp_path, consumer, race):
     class PushApi(FakeApi):
         def post(self, route, body):
@@ -28,8 +28,13 @@ def test_real_starter_command_is_sha_bound_at_consumer_scan(tmp_path, consumer, 
     assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == 1
     emitted = next(c for c in api.comments if c["id"] == 9101)
     assert emitted["body"] == "/hermes enroll " + "a" * 40
-    if race == "after_post":
+    if race in {"after_post", "edited_comment"}:
         api.pulls[0]["head"]["sha"] = "c" * 40
+    if race == "edited_comment":
+        # The producer accepted A, but the same owner comment ID now names B.
+        emitted["body"] = "/hermes enroll " + "c" * 40
+        emitted["updated_at"] = "2026-10-01T21:01:00Z"
+        assert emitted["created_at"] != emitted["updated_at"]
 
     class ScanApi:
         def get_all(self, route, *, collection=None):
@@ -58,6 +63,18 @@ def test_real_starter_command_is_sha_bound_at_consumer_scan(tmp_path, consumer, 
     _, replay, processed_again, _ = worker._scan_enrollments(store.snapshot())
     assert replay == []
     assert processed_again == []
+    if race == "edited_comment":
+        assert store.snapshot()["enrollments"] == {}
+        api.pulls[0]["head"]["sha"] = "c" * 40
+        emitted["updated_at"] = emitted["created_at"]
+        # Even restored metadata cannot revive a consumed ID across restart.
+        worker = consumer.Coordinator(ScanApi(), consumer.StateStore(store.path))
+        assert worker._scan_enrollments(store.snapshot())[1:] == ([], [], {})
+        emitted["id"] += 1  # Only a genuinely new immutable command can enroll B.
+        _, fresh, processed_fresh, candidates = worker._scan_enrollments(store.snapshot())
+        assert len(fresh) == 1
+        assert processed_fresh == [str(emitted["id"])]
+        assert candidates["41"]["authorized_head"] == "c" * 40
 
 
 @pytest.mark.parametrize("outcome", ["response", "lost", "crash"])

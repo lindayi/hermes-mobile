@@ -132,7 +132,8 @@ def enrollment_from_comment(issue, pull, comment):
         if not isinstance(body, str):
             return None
         match = re.fullmatch(r"/hermes enroll ([0-9a-f]{40})", body)
-        if not match:
+        if (not match or not _valid_timestamp(comment.get("created_at"))
+                or comment.get("updated_at") != comment["created_at"]):
             return None
         authorized_head = match.group(1)
     if (not isinstance(issue, dict) or not issue.get("pull_request")

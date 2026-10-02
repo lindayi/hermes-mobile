@@ -20,7 +20,12 @@ to this repository and whose base branch is `main`. Existing pull requests are n
 enrolled by their age, label, author, or open state. The issue starter instead hands
 off with `/hermes enroll <40-lowercase-hex-head-sha>`; the consumer requires the
 value to match the current pull request head and stores it as immutable
-`authorized_head`. A stale or mismatched command is consumed without enrollment.
+`authorized_head`. SHA-bound commands also require a valid timezone-aware
+`created_at` and an identical explicit `updated_at`; an edited or unverifiable
+comment is consumed without enrollment, even when its body names the current
+head. Only a genuinely new immutable command can authorize that head. The legacy
+bare command retains its historical timestamp compatibility.
+A stale or mismatched command is consumed without enrollment.
 For a sensitive head, the owner must separately comment
 `/hermes authorize-sensitive <40-char-head-sha>`. Authorization is recorded only
 if that SHA is still the pull request's current head; it does not carry forward to
