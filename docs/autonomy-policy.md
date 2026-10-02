@@ -128,7 +128,7 @@ do not constitute independent review, runtime evidence, or activation permission
 
 | Issue #43 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `8ceaed2788467afd1ee677643bab3de7f594c5901fd98d8077c4d02b1058b7b1` |
+| `deploy/cloud_coordinator.py` | `3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c` |
 | `deploy/review_evidence.py` | `c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae` |
 | `deploy/issue_starter.py` | `701faa6e15a2717cb3c79f7e93c728bdde326e4f72e451ccd77ec1f8eabdc011` |
 | `scripts/cloud_coordinator.py` | `992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790` |

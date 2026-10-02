@@ -42,7 +42,14 @@ qualify. The previous head-only command remains recognized as no authorization.
 Planning and fresh status/merge fences re-read and revalidate the selected review,
 body digest, author, state, timestamp, ID uniqueness, and head. Removal, edit,
 dismissal, a later negative owner review, or a head change invalidates authorization;
-it is not blanket consent for future commits.
+it is not blanket consent for future commits. Complete scan validation clears all
+three persisted fields (`sensitive_sha`, `sensitive_authorization`, `targeted_review`)
+atomically with commands, observations and lifecycle events before export. This
+also invalidates readable head-only authorization without selected-review proof;
+it does not migrate unsupported legacy enrollment identities. Plan mode only
+projects the change. Incomplete collection, preparation or scan-commit failure
+preserves prior durable state, export and consumer ACKs and performs no external
+write. Revocation itself consumes no repair attempt and never authorizes merge.
 
 This is a source/first-activation boundary, not an upgrade path for historical
 coordinator state. Version-1 records remain readable for inspection, but active
@@ -484,6 +491,20 @@ remain unchanged; consumer ACK history is neither read nor rewritten, and export
 never grants or revokes an approval. If filtering leaves no events, the previous
 export is removed rather than refreshing an obsolete request. This is a polling
 snapshot of observed state, not a live authorization endpoint.
+
+Each enrollment has an optional bounded `sensitive_generation` (absent means zero,
+maximum `2**31 - 1`). Invalidating a persisted grant advances it exactly once in
+the same scan commit; repeated invalid polls/restarts do not advance it. It feeds
+the existing lifecycle `incident` identity, so a renewed approval request reaches
+the unchanged consumer even if the prior request was ACKed and retired. A new
+owner command may select the same restored review ID/body, but revoking that new
+grant advances the generation again. Export includes only the current enrollment,
+head and generation's approval request, excluding older unACKed requests without
+rewriting canonical events or ACK history. A fresh valid selected review/command
+suppresses the current request. Head changes clear old-head authority and use the
+head-bound event identity; new enrollment commands reset the generation under
+their distinct enrollment identity. Invalid or exhausted generation fails closed.
+No event schema, consumer protocol, credential or notification framework changes.
 
 The export is written to the existing state directory selected by application
 configuration, not the coordinator's private state directory. The coordinator
