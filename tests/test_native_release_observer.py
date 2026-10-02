@@ -58,7 +58,6 @@ def operational_probe(tmp_path,monkeypatch,health_change=None):
                    web_delivered=0,shutdown_publications=0)
     if health_change == 'busy':
         work['active_run_tasks']=1
-        health['readiness']['checks']['background_queues']['active_api_runs']=1
     elif health_change and health_change.startswith('unsafe:'):
         work[health_change.partition(':')[2]]=1
     elif health_change == 'unknown':
