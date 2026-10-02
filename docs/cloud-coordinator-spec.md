@@ -81,9 +81,24 @@ tags in review explanations). Inline spans retain exact run-length matching;
 fences require at least three matching opener characters and a same-character
 closer at least as long, alone on its line except trailing spaces/tabs. Fence
 indentation permits zero to three spaces. Unclosed/unsupported fences are ambiguous,
-not a license to parse their contents as active HTML. Unfenced disclosure tags at
-four-column indentation (including tabs) are conservatively ambiguous code
-examples, not active evidence; no general Markdown rendering is attempted.
+not a license to parse their contents as active HTML. Shielded code is retained as
+explicit inert quotation nodes, not live strings. Inline/fenced code, four-column
+indented code lines (including tabs), and bounded HTML `code`, `pre`, and
+`blockquote` quotations cannot confer overview authority, section labels, or
+summary actionability. Literal quoted context is retained inside independently
+real findings; quoted horizontal rules, framing, and validation sentences remain
+opaque through summary filtering. Complete HTML tokens protect quoted attributes
+and comments while finding quotation boundaries. Unclosed or same-tag nested HTML
+quotations are conservatively ambiguous.
+
+Markdown blockquote scope and immediately container-prefixed disclosure markup,
+quotation markup, overview comments, or fences are unsupported and ambiguous,
+not repaired with a generic Markdown renderer. Ordinary list correction prose
+and ordinary code identifiers in genuine correction context remain supported.
+Unfenced disclosure tags at four-column indentation are still conservatively
+ambiguous. Overview authority additionally requires a standalone live root marker
+with zero to three leading spaces and only trailing whitespace; embedded markers
+in ordinary prose or list items cannot authorize an unstructured COMMENTED body.
 All disclosure traversal is iterative. There are no repeated HTML-removal passes. Limits are
 64 Ki characters, 4,096 parser events, 32 nested elements and 256 disclosures;
 exceeding any limit or unclosed/crossed markup yields `ambiguous`, not a truncated

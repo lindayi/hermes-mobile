@@ -317,6 +317,150 @@ def test_complete_negative_verdict_never_consumes_fixer_attempt(tmp_path, prose)
     assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
 
 
+@pytest.mark.parametrize("quoted", [
+    "`Required correction: reject pending receipts.`",
+    "```text\nRequired correction: reject pending receipts.\n```",
+    "~~~text\nRequired correction: reject pending receipts.\n~~~",
+])
+def test_quoted_provenance_summary_never_dispatches(tmp_path, quoted):
+    body = overview("🟢 Looks good", "No bugs found.\n\n" + quoted, "None")
+    result = parse(body)
+    assert result["findings"] == []
+    review = copilot_review(body, state="CHANGES_REQUESTED")
+    assert repair_request(HEAD, 0, [], [], reviews=[review]) is None
+    api = ReviewApi([review])
+    path = tmp_path / "state.json"
+    plan = _managed_cycle(api, path)["pull_requests"][0]
+    assert not plan["repair_requested"] and not plan["review_valid"]
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
+
+
+@pytest.mark.parametrize("label", ["`Previously missed (1)`", "Previously missed (1) `example`"])
+def test_quoted_provenance_section_label_is_not_authority(label):
+    body = overview("🟢 Looks good", "No bugs found.", "None", section(label, MISSED))
+    result = parse(body, "COMMENTED")
+    assert result["ambiguous"] and result["findings"] == []
+    # Unknown quotation scope must not erase an independently real finding.
+    result = parse(body + MISSED, "COMMENTED")
+    assert result["ambiguous"] and len(result["findings"]) == 1
+
+
+@pytest.mark.parametrize("prose", [
+    "Required correction: preserve `reject_pending` before dispatch.",
+    "Required correction: preserve the identifier.\n```text\nreject_pending\n```",
+])
+def test_quoted_provenance_real_summary_retains_literal_context(prose):
+    result = parse(overview("🟢 Looks good", prose, "None"))
+    assert result["findings"] == [("changes-requested", prose)]
+
+
+@pytest.mark.parametrize("prefix", ["> ", "> > ", "- ", "1. ", "2) "])
+@pytest.mark.parametrize("fence", ["~~~", "```"])
+def test_quoted_provenance_container_fence_is_ambiguous(tmp_path, prefix, fence):
+    quoted = prefix + fence + "html\n" + MISSED + "\n" + prefix + fence
+    body = overview("🟢 Looks good", "No bugs found.", "None", quoted)
+    result = parse(body, "COMMENTED")
+    assert result["ambiguous"] and result["findings"] == []
+    api = ReviewApi([copilot_review(body)])
+    path = tmp_path / "state.json"
+    plan = _managed_cycle(api, path)["pull_requests"][0]
+    assert not plan["repair_requested"] and not plan["review_valid"]
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
+
+
+@pytest.mark.parametrize("prefix", ["    ", "\t", " \t", "> ", "- ", "1. ", "- Example: "])
+def test_quoted_provenance_prefixed_marker_cannot_authorize_commented(tmp_path, prefix):
+    body = prefix + evidence.OVERVIEW_MARKER + "\n\n" + MISSED
+    result = parse(body, "COMMENTED")
+    assert result["ambiguous"] and result["findings"] == []
+    api = ReviewApi([copilot_review(body)])
+    path = tmp_path / "state.json"
+    plan = _managed_cycle(api, path)["pull_requests"][0]
+    assert not plan["repair_requested"] and not plan["review_valid"]
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
+
+
+@pytest.mark.parametrize("tag", ["code", "pre", "blockquote"])
+def test_quoted_provenance_html_subtrees_are_inert(tag):
+    quoted = f"<{tag}>" + evidence.OVERVIEW_MARKER + MISSED + f"</{tag}>"
+    body = overview("🟢 Looks good", "No bugs found.", "None", quoted)
+    assert parse(body)["findings"] == []
+    assert parse(quoted + MISSED, "COMMENTED")["findings"] == []
+    active = overview("🟢 Looks good", "No bugs found.", "None", section(
+        "Previously missed (1)", missed_item("Fix quoting", "a.py:1", "Required correction: " + quoted)))
+    [(kind, text)] = parse(active)["findings"]
+    assert kind == "previously-missed" and quoted in text
+
+
+@pytest.mark.parametrize("quoted", [
+    "    Required correction: reject pending receipts.",
+    "\tRequired correction: reject pending receipts.",
+    "> Required correction: reject pending receipts.",
+    "<code>Required correction: reject pending receipts.</code>",
+    "<pre>Required correction: reject pending receipts.</pre>",
+    "<blockquote>Required correction: reject pending receipts.</blockquote>",
+])
+def test_quoted_provenance_sibling_summary_never_actionable(quoted):
+    body = overview("🟢 Looks good", "No bugs found.\n\n" + quoted, "None")
+    assert parse(body)["findings"] == []
+
+
+@pytest.mark.parametrize("prefix", ["> ", "- ", "1. "])
+def test_quoted_provenance_container_disclosures_are_not_live(prefix):
+    quoted = "\n".join(prefix + line for line in MISSED.splitlines())
+    result = parse(overview("🟢 Looks good", "No bugs found.", "None", quoted), "COMMENTED")
+    assert result["ambiguous"] and result["findings"] == []
+
+
+@pytest.mark.parametrize("tag", ["code", "pre", "blockquote"])
+def test_quoted_provenance_html_section_labels_are_not_live(tag):
+    body = overview("🟢 Looks good", "No bugs found.", "None",
+                    section(f"<{tag}>Previously missed (1)</{tag}>", MISSED))
+    result = parse(body, "COMMENTED")
+    assert result["ambiguous"] and result["findings"] == []
+
+
+@pytest.mark.parametrize("quoted", [
+    "```text\nValidation is pending.\n---\n**Findings:** None\n```",
+    '<pre><span title="</pre>">literal context</span></pre>',
+    '<code><!-- </code> -->literal context</code>',
+])
+def test_quoted_provenance_context_survives_summary_filters(quoted):
+    correction = "Required correction: preserve this example.\n" + quoted
+    body = overview("🟢 Looks good", "Validation is pending.\n" + correction, "None")
+    result = parse(body)
+    assert not result["ambiguous"]
+    [(kind, text)] = result["findings"]
+    assert kind == "changes-requested" and quoted in text
+    assert not text.startswith("Validation is pending.")
+
+
+def test_quoted_provenance_horizontal_rule_cannot_truncate_later_correction():
+    quoted = "```text\n---\nNo bugs found.\n```"
+    prose = quoted + "\nRequired correction: reject pending receipts."
+    result = parse(overview("🟢 Looks good", prose, "None"))
+    assert result["findings"] == [("changes-requested", prose)]
+
+
+@pytest.mark.parametrize("prefix", ["- ", "* ", "+ ", "1. ", "2) "])
+def test_quoted_provenance_ordinary_list_corrections_remain_live(prefix):
+    prose = prefix + "Required correction: reject `pending_receipts` before dispatch."
+    result = parse(overview("🟢 Looks good", prose, "None"))
+    assert result["findings"] == [("changes-requested", prose)]
+
+
+@pytest.mark.parametrize("quoted", [
+    "<pre>unclosed", "<code>outer<code>nested</code></code>",
+    "<blockquote>outer<blockquote>nested</blockquote></blockquote>",
+])
+def test_quoted_provenance_unsupported_html_is_ambiguous(quoted):
+    result = parse(overview("🟢 Looks good", "No bugs found.", "None", quoted, MISSED))
+    assert result["ambiguous"] and not result["findings"]
+
+
 def test_existing_bare_changes_requested_contract_is_preserved():
     prose = "The coordinator accepts boolean receipt identities as integers."
     result = parse(prose)
