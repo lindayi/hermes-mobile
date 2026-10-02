@@ -117,6 +117,12 @@ inferring approval.
 For task handoff, an authenticated submitted review on the exact result head
 completes the review request even if unresolved threads keep this gate false; those
 threads then remain eligible for the next bounded repair.
+Handoff planning only reads and records verified receipt/handoff state; the
+ready-for-review mutation and Copilot review request run only after that cycle's
+scan commit succeeds, and then re-fence the exact result head. A failed scan
+commit (including the state-capacity bound) therefore makes no handoff mutation.
+A PR that becomes draft at the final dispatch fence is reported as a suppressed
+repair with the `draft` reason; no task is claimed or posted.
 
 Path classification includes both sides of renames and treats malformed,
 unknown, empty, oversized, or incomplete file inventories as sensitive. Only the

@@ -2268,6 +2268,94 @@ def test_task_handoff_requests_ready_review_once_and_fails_closed_after_wait(tmp
     assert api.fix_attempts == 1
 
 
+@pytest.mark.parametrize("path_kind", ["draft_ready", "review_request"])
+def test_scan_commit_failure_precedes_every_handoff_mutation(tmp_path, monkeypatch,
+                                                              path_kind):
+    import deploy.cloud_coordinator as coordinator_module
+
+    class CapacityFailingScanStore(StateStore):
+        def commit_scan(self, *args, **kwargs):
+            # Exercise the real pre-replace state-capacity guard at the scan commit.
+            with monkeypatch.context() as patch:
+                patch.setattr(coordinator_module, "MAX_STATE_BYTES", 1)
+                return super().commit_scan(*args, **kwargs)
+
+    api = FakeApi(unresolved=True)
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    fix = next(action for action in StateStore(path).actions().values()
+               if action["kind"] == "fix")
+    api.complete_task("task-1", fix)
+    if path_kind == "draft_ready":
+        api.pull["draft"] = True
+        api.review_state = "PENDING"
+    else:
+        api.review_state = "DISMISSED"
+    writes, graphql_writes = list(api.writes), list(api.graphql_writes)
+    prior = StateStore(path).snapshot()
+
+    for _ in range(2):
+        with pytest.raises(CoordinatorError, match="safety bound"):
+            Coordinator(api, CapacityFailingScanStore(path),
+                        clock=lambda: 1790856720).run(apply=True)
+        assert api.writes == writes and api.graphql_writes == graphql_writes
+        state = StateStore(path).snapshot()
+        assert state["cursor"] == prior["cursor"]
+        assert state["events"] == prior["events"]
+        assert state["lifecycle_events"] == prior["lifecycle_events"]
+        action = state["actions"][fix["key"]]
+        assert action["status"] == "completed" and action["receipt_result"] == "ready"
+        assert action["handoff_state"] == "pending"
+        assert action.get("ready_state") == (
+            None if path_kind == "draft_ready" else "done"
+        )
+        assert "review_request_state" not in action
+        assert action.get("handoff_waits", 0) == 0
+        assert api.fix_attempts == 1
+
+    result = Coordinator(api, StateStore(path), clock=lambda: 1790856780).run(apply=True)
+
+    state = StateStore(path).snapshot()
+    assert state["cursor"] != prior["cursor"]
+    action = state["actions"][fix["key"]]
+    assert action["ready_state"] == "done"
+    assert action["handoff_state"] == "waiting_review"
+    assert action["handoff_waits"] == 1
+    ready = [query for query, _ in api.graphql_writes[len(graphql_writes):]
+             if "markPullRequestReadyForReview" in query]
+    requests = [route for route, _ in api.writes[len(writes):]
+                if route.endswith("/requested_reviewers")]
+    if path_kind == "draft_ready":
+        assert len(ready) == 1 and requests == []
+    else:
+        assert ready == [] and len(requests) == 1
+        assert action["review_request_state"] == "sent"
+    assert api.fix_attempts == 1
+    assert result["pull_requests"][0]["repair_requested"] is False
+    assert "agent" in result["pull_requests"][0]["reasons"]
+
+
+def test_draft_race_at_dispatch_is_reported_as_suppressed_repair(tmp_path):
+    class DraftAfterScanStore(StateStore):
+        def commit_scan(self, *args, **kwargs):
+            result = super().commit_scan(*args, **kwargs)
+            api.pull["draft"] = True
+            return result
+
+    api = FakeApi(unresolved=True)
+    store = DraftAfterScanStore(tmp_path / "state.json")
+
+    result = Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    summary = result["pull_requests"][0]
+    assert summary["repair_requested"] is False
+    assert "draft" in summary["reasons"]
+    assert api.fix_attempts == 0
+    assert not [body for route, body in api.writes if route.endswith("/tasks")]
+    assert not any(action.get("kind") == "fix" for action in store.actions().values())
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
+
+
 def test_unrelated_or_unverified_task_completion_cannot_release_fixer(tmp_path):
     api = FakeApi(unresolved=True)
     store = StateStore(tmp_path / "state.json")

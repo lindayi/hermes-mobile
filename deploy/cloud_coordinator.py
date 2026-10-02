@@ -40,6 +40,9 @@ MAIN_BRANCH = "main"
 REPAIR_LIMIT = 3
 MAX_RECEIPT_POLLS = 3
 MAX_HANDOFF_POLLS = 6
+HANDOFF_ACTIVE_STATES = frozenset({
+    "pending", "waiting_review", "ready_uncertain", "review_request_uncertain",
+})
 COPILOT_REVIEWER_LOGIN = "copilot-pull-request-reviewer[bot]"
 MAX_PAGES = 100
 MAX_FINDINGS = 8
@@ -1108,7 +1111,9 @@ class Coordinator:
             "status": latest_status, "status_owned": status_is_owned,
         }
 
-    def _reconcile_actions(self, snapshot, actions, *, apply):
+    def _reconcile_actions(self, snapshot, actions, *, apply, handoffs=None):
+        # Reconciliation never performs handoff mutations; it only collects them.
+        handoffs = [] if handoffs is None else handoffs
         number = snapshot["issue"]
         busy = False
         for key, action in actions.items():
@@ -1137,12 +1142,11 @@ class Coordinator:
             if action.get("kind") != "fix":
                 continue
             if (status == "completed"
-                    and action.get("handoff_state") in {
-                        "pending", "waiting_review", "ready_uncertain",
-                        "review_request_uncertain",
-                    }):
+                    and action.get("handoff_state") in HANDOFF_ACTIVE_STATES):
                 if apply:
-                    busy = self._advance_task_handoff(key, action, snapshot) or busy
+                    busy = self._advance_task_handoff(
+                        key, action, snapshot, deferred=handoffs,
+                    ) or busy
                 else:
                     busy = True
                 continue
@@ -1217,6 +1221,7 @@ class Coordinator:
                                     )
                                     busy = self._advance_task_handoff(
                                         key, self.store.action(key), snapshot,
+                                        deferred=handoffs,
                                     ) or busy
                                 else:
                                     event = _lifecycle_event(
@@ -1287,7 +1292,12 @@ class Coordinator:
         )
         return True
 
-    def _advance_task_handoff(self, key, action, snapshot):
+    def _advance_task_handoff(self, key, action, snapshot, *, deferred=None):
+        """Advance a verified ready handoff.
+
+        During planning, ``deferred`` collects keys whose next step is a remote
+        mutation; those steps run only after the scan commit succeeds.
+        """
         head = action.get("receipt_head")
         base = action.get("receipt_base")
         current = self._fence_pull(action.get("issue"), head, base)
@@ -1307,6 +1317,9 @@ class Coordinator:
                 return self._handoff_wait(
                     key, action | {"handoff_state": "ready_uncertain"}, snapshot,
                 )
+            if deferred is not None:
+                deferred.append(key)
+                return True
             self.store.update_action(
                 key, "completed", ready_state="sending", handoff_state="pending",
             )
@@ -1418,6 +1431,9 @@ class Coordinator:
             return self._handoff_wait(
                 key, action | {"handoff_state": "review_request_uncertain"}, snapshot,
             )
+        if deferred is not None:
+            deferred.append(key)
+            return True
 
         # Re-fence immediately before the notification-producing reviewer request.
         current = self._fence_pull(action["issue"], head, base)
@@ -1555,7 +1571,10 @@ class Coordinator:
             required, snapshot["check_runs"], snapshot["statuses"],
             complete=snapshot["policy_complete"],
         )
-        agent_busy = self._reconcile_actions(snapshot, actions, apply=apply)
+        handoffs = []
+        agent_busy = self._reconcile_actions(
+            snapshot, actions, apply=apply, handoffs=handoffs,
+        )
         if apply:
             actions = self.store.actions()
         neutral_blocker = next((
@@ -1698,7 +1717,7 @@ class Coordinator:
                 "repair": repair, "status_action": status_action,
                 "merge_action": merge_action, "auto_merge_requested": merge_requested,
                 "outcomes": notification_outcomes,
-                "lifecycle_events": lifecycle_events}
+                "lifecycle_events": lifecycle_events, "handoffs": handoffs}
 
     def _build_plan(self, *, apply):
         state = self.store.snapshot()
@@ -2063,6 +2082,12 @@ class Coordinator:
                 continue
             # Compact first so retired records cannot block new evidence at capacity.
             self.store.retire(snapshot["issue"], snapshot["head"])
+            # Handoff mutations require the successfully committed scan above.
+            for key in pr_plan.get("handoffs", ()):
+                handoff = self.store.action(key)
+                if (handoff and handoff.get("status") == "completed"
+                        and handoff.get("handoff_state") in HANDOFF_ACTIVE_STATES):
+                    self._advance_task_handoff(key, handoff, snapshot)
             for key, entry in pr_plan["outcomes"]:
                 self.store.add_outbox(key, entry)
             comments = snapshot["comments"]
@@ -2102,7 +2127,7 @@ class Coordinator:
             action = pr_plan["repair"]
             if action:
                 result = self._dispatch_task(action)
-                if result in {"agent-running", "superseded", "conflict", "behind"}:
+                if result in {"agent-running", "superseded", "conflict", "behind", "draft"}:
                     pr_plan["repair"] = None
                     if result != "superseded":
                         reason = "agent" if result == "agent-running" else result
