@@ -222,6 +222,12 @@ def _text(node, *, exclude_details=False, exclude_history=False, quoted=True, re
     return "".join(pieces)
 
 
+def _has_live_content(node):
+    return _text(node, exclude_history=True, quoted=False).strip() not in {
+        "", "In code that hasn't changed since last review"
+    }
+
+
 def _disclosures(node):
     """Nearest disclosure descendants, not nested sections counted twice."""
     pending = list(reversed(node.children))
@@ -355,7 +361,7 @@ def parse_body(body, state, *, body_html=None):
     if not overview and state != "CHANGES_REQUESTED":
         return dict(result, classifications=["ambiguous"], ambiguous=True, reason="unstructured-comment")
 
-    sections = list(_disclosures(parser.root))
+    sections = list(_disclosures(parser.root)) if overview else []
     positive_open = False
     for node in sections:
         kind, label = _section_kind(node)
@@ -380,16 +386,15 @@ def parse_body(body, state, *, body_html=None):
             only_intro = outside_items in {"", intro}
             if (only_intro and expected == len(children)
                     and all(_summary(child) is not None for child in children)):
-                texts = [_text(child, exclude_history=True).strip() for child in children]
+                texts = [_text(child, exclude_history=True).strip() for child in children
+                         if _has_live_content(child)]
             else:
                 # Count/shape uncertainty may preserve a populated active section,
                 # but its label, intro and history cannot themselves be a finding.
-                live = _text(content, exclude_history=True, quoted=False).strip()
-                if live in {"", intro}:
-                    texts = []
-                    result["classifications"][-1] = "no-findings"
-                else:
-                    texts = [_text(node, exclude_history=True).strip()]
+                texts = ([_text(node, exclude_history=True).strip()]
+                         if _has_live_content(content) else [])
+            if not texts:
+                result["classifications"][-1] = "no-findings"
             result["findings"].extend(("previously-missed", text) for text in texts if text)
 
     summary_root = _summary_content(parser.root, overview)

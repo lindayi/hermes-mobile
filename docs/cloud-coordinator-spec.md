@@ -88,7 +88,11 @@ nested markup, quoted attributes (including `>`), case, and closing whitespace.
 Only GitHub-rendered HTML is parsed. The exact raw marker
 `<!-- ccr-overview-v2 -->` must be the first complete line (no indentation or
 trailing text), solely as format identity; GitHub omits this comment from rendered
-HTML. Rendered comments never establish format identity or approval.
+HTML. Rendered comments never establish format identity or approval. Overview
+section classification runs only for canonically marked raw bodies, including
+when the state is `CHANGES_REQUESTED`. An unmarked disclosure never substitutes
+for the separate bare explicit-correction path; its labels also cannot suppress
+an independently eligible bare correction outside disclosures.
 HTML `code`, `pre`, and `blockquote` subtrees are inert for disclosure scope,
 section labels and summary actionability. Literal decoded text remains context
 inside independently genuine findings, including nested quotation, horizontal
@@ -116,7 +120,12 @@ the known `In code that hasn't changed since last review` introduction. Empty,
 intro-only and history-only sections never emit their label as a finding, even
 with a positive or unknown count; they consume no repair attempt and confer no
 approval. Populated fallback sections and independently genuine findings remain
-eligible under the existing review gates.
+eligible under the existing review gates. Count-matched items use the same live
+content predicate as fallback sections: each item must contain nonempty unquoted,
+nonhistorical text beyond the known introduction before its literal context is
+retained. Quoted-only matched items are omitted individually, without dropping a
+genuine sibling or its quoted context. A matched section with no eligible items
+is `no-findings`, not a repair request.
 Unsupported top-level disclosures remain ambiguous, not implicitly resolved.
 
 Validation-only requires complete recognized status prose (optionally accompanied
@@ -176,6 +185,18 @@ intro-only, resolved/history-only and populated sections with counts 1, 0 and
 unknown. Only the helper's pending digest and independent fixture are refreshed;
 the coordinator baseline, other pins and unconditional source-contract hold stay
 unchanged.
+
+The final bounded structural follow-up at
+`b27fa36e17c25df02232324e49d1e5e15dc0bac0` addresses review `5392668833` only:
+canonical raw-marker gating of overview sections and live-content eligibility
+before forwarding matched items. Finite managed RED/GREEN cases cover both
+review states, missing/noncanonical and canonical LF/CRLF raw markers, bare
+explicit corrections, quoted-only code/pre/blockquote items at matched and
+unknown counts, and mixed genuine/quoted items. No-dispatch cases consume no
+attempt or approval; independent marked findings and genuine literal context
+remain eligible. Only the helper candidate digest and independent fixture change;
+the coordinator baseline, other pins and unconditional source-contract hold stay
+unchanged. This is not activation or full integration evidence.
 
 The Copilot request labels all embedded evidence untrusted,
 and the text is never interpreted as shell input. A deterministic marker

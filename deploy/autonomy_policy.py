@@ -156,7 +156,7 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
     # Pending issue #39 coordinator dependency candidate bytes; parent review only.
-    'deploy/review_evidence.py': '9336ce343040adc7ad4bd0883decbf47f2dc3ffa50ff8e3530178b26a3a71905',
+    'deploy/review_evidence.py': 'fb71b9fcd4cf42699e160108195b3445a1c29dfec0eb29ea8309396c410ed6ef',
     # Pending PR40 assembly candidates from incoming 80bf9e7. Historical source
     # review lineage: docs/autonomy-policy.md. Not assembled/operational approval;
     # existing pins and the unconditional pending-source-contract hold stay fixed.
