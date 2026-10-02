@@ -1263,7 +1263,7 @@ class FakeApi:
         }}}}
 
 
-def _compare_result(base_sha, head_sha, *, ahead_by, status="ahead",
+def _compare_result(base_sha, *, ahead_by, status="ahead",
                     behind_by=0, merge_base_sha=None):
     return {
         "status": status,
@@ -1306,10 +1306,10 @@ def _ready_sha_bound_handoff(tmp_path):
     api.pull["mergeable_state"] = "behind"
     api.compare_results = {
         f"{BASE}...{CURRENT_MAIN}": _compare_result(
-            BASE, CURRENT_MAIN, ahead_by=21,
+            BASE, ahead_by=21,
         ),
         f"{BASE}...{RESULT_HEAD}": _compare_result(
-            BASE, RESULT_HEAD, ahead_by=1,
+            BASE, ahead_by=1,
         ),
     }
     return api, store, coordinator, first
@@ -1317,6 +1317,20 @@ def _ready_sha_bound_handoff(tmp_path):
 
 def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
     api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
+    store._mutate(lambda state: state["actions"].__setitem__(
+        "fix:17:uncertain",
+        {"kind": "fix", "issue": 17, "status": "uncertain"},
+    ))
+    before_state = store.path.read_bytes()
+    before_writes = list(api.writes)
+
+    plan = coordinator.run()
+
+    assert plan["pull_requests"][0]["repair_requested"] is True
+    assert plan["pull_requests"][0]["status_action"] is None
+    assert plan["pull_requests"][0]["auto_merge_eligible"] is False
+    assert store.path.read_bytes() == before_state
+    assert api.writes == before_writes
 
     result = coordinator.run(apply=True)
     actions = list(store.actions().values())
@@ -1326,17 +1340,67 @@ def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
     assert len(neutral) == 1
     assert api.fix_attempts == 2
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
-    assert first["receipt_base"] == BASE
+    assert store.action(first["key"])["receipt_base"] == BASE
     assert store.action(first["key"])["handoff_state"] == "superseded"
     assert neutral[0]["main_sha"] == CURRENT_MAIN
     assert neutral[0]["head"] == RESULT_HEAD
     assert "repair_requested" in result["pull_requests"][0]
+    assert result["pull_requests"][0]["status_action"] is None
     assert result["pull_requests"][0]["auto_merge_eligible"] is False
 
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
     before_writes = list(api.writes)
     Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
     assert api.fix_attempts == 2
     assert api.writes == before_writes
+
+
+def test_stale_base_reconciliation_uses_the_existing_repair_budget(tmp_path):
+    api, store, coordinator, _ = _ready_sha_bound_handoff(tmp_path)
+    store._mutate(lambda state: state["enrollments"]["16"].update(
+        attempts=REPAIR_LIMIT,
+    ))
+
+    coordinator.run(apply=True)
+
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == REPAIR_LIMIT
+    assert api.fix_attempts == 1
+    assert not [action for action in store.actions().values()
+                if action.get("task_type") == "neutral"]
+
+
+def test_stale_base_reconciliation_releases_exhausted_review_handoff(tmp_path):
+    api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
+    store.update_action(
+        first["key"], "completed", handoff_state="failed",
+        blocker="review_handoff_exhausted",
+    )
+
+    coordinator.run(apply=True)
+
+    assert store.action(first["key"])["handoff_state"] == "superseded"
+    assert api.fix_attempts == 2
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
+
+
+def test_stale_base_reconciliation_rechecks_current_main_before_claim(tmp_path):
+    api, store, coordinator, _ = _ready_sha_bound_handoff(tmp_path)
+    original_get = api.get
+
+    def move_main_after_ancestry(route):
+        result = original_get(route)
+        if route.endswith(f"/compare/{BASE}...{RESULT_HEAD}"):
+            api.current_main_sha = "f" * 40
+        return result
+
+    api.get = move_main_after_ancestry
+
+    coordinator.run(apply=True)
+
+    assert api.fix_attempts == 1
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert not [action for action in store.actions().values()
+                if action.get("task_type") == "neutral"]
 
 
 def test_stale_base_reconciliation_accepts_a_validated_new_head_handoff(tmp_path):
@@ -1349,12 +1413,22 @@ def test_stale_base_reconciliation_accepts_a_validated_new_head_handoff(tmp_path
         neutral["task_id"], neutral, head_sha=NEXT_RESULT_HEAD,
         base_sha=CURRENT_MAIN,
     )
+    api.comments[-1]["body"] = (
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={neutral['dispatch_nonce']}\n"
+        "pr=16\n"
+        f"session=session-{neutral['task_id']}\n"
+        f"start_head={RESULT_HEAD}\n"
+        f"base={CURRENT_MAIN}\n"
+        f"head={NEXT_RESULT_HEAD}\n"
+        "result=ready"
+    )
     api.head_sha = NEXT_RESULT_HEAD
     api.pull["head"]["sha"] = NEXT_RESULT_HEAD
     api.pull["base"]["sha"] = CURRENT_MAIN
     api.pull["mergeable_state"] = "clean"
     api.requested_reviewers.clear()
-    api.review_state = "PENDING"
+    api.review_state = "DISMISSED"
 
     coordinator.run(apply=True)
     updated = store.action(neutral["key"])
@@ -1372,7 +1446,8 @@ def test_stale_base_reconciliation_accepts_a_validated_new_head_handoff(tmp_path
 
 @pytest.mark.parametrize("hazard", [
     "active-task", "uncertain-task", "wrong-ref", "wrong-repository", "wrong-head",
-    "main-diverged", "head-diverged", "partial-compare", "edited-receipt",
+    "wrong-head-repo", "wrong-compare-base", "main-diverged", "head-diverged", "unknown-history",
+    "partial-compare", "edited-receipt",
 ])
 def test_stale_base_reconciliation_fails_closed(tmp_path, hazard):
     api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
@@ -1384,18 +1459,28 @@ def test_stale_base_reconciliation_fails_closed(tmp_path, hazard):
         api.pull["base"]["ref"] = "other"
     elif hazard == "wrong-repository":
         api.pull["base"]["repo"]["id"] = 42
+    elif hazard == "wrong-head-repo":
+        api.pull["head"]["repo"]["id"] = 42
     elif hazard == "wrong-head":
         api.pull["head"]["sha"] = "f" * 40
         api.head_sha = "f" * 40
     elif hazard == "main-diverged":
         api.compare_results[f"{BASE}...{CURRENT_MAIN}"] = _compare_result(
-            BASE, CURRENT_MAIN, ahead_by=21, status="diverged", behind_by=2,
+            BASE, ahead_by=21, status="diverged", behind_by=2,
             merge_base_sha="a" * 40,
         )
     elif hazard == "head-diverged":
         api.compare_results[f"{BASE}...{RESULT_HEAD}"] = _compare_result(
-            BASE, RESULT_HEAD, ahead_by=1, status="diverged", behind_by=1,
+            BASE, ahead_by=1, status="diverged", behind_by=1,
             merge_base_sha="a" * 40,
+        )
+    elif hazard == "unknown-history":
+        api.compare_results[f"{BASE}...{CURRENT_MAIN}"] = _compare_result(
+            BASE, ahead_by=0, status="unknown",
+        )
+    elif hazard == "wrong-compare-base":
+        api.compare_results[f"{BASE}...{CURRENT_MAIN}"] = _compare_result(
+            "a" * 40, ahead_by=21,
         )
     elif hazard == "partial-compare":
         api.compare_results[f"{BASE}...{CURRENT_MAIN}"] = {

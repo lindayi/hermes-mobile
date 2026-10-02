@@ -470,7 +470,10 @@ def neutral_reconciliation_request(snapshot, attempts):
         "pull_request_description": _bounded_evidence(pull.get("body", ""))[:1600],
     }
     encoded_intent = json.dumps(intent, ensure_ascii=True, separators=(",", ":"))
-    key = f"{snapshot['issue']}:{head}:{main_sha}:{attempts + 1}:{encoded_intent}"
+    key = (
+        f"{snapshot['issue']}:{head}:{main_sha}:{base['sha']}:"
+        f"{attempts + 1}:{encoded_intent}"
+    )
     marker = f"{FIX_MARKER_PREFIX}{hashlib.sha256(key.encode()).hexdigest()[:20]}"
     body = (
         f"Neutral reconciliation for PR #{snapshot['issue']} at exact PR head `{head}`. "
@@ -495,6 +498,7 @@ def neutral_reconciliation_request(snapshot, attempts):
         "marker": marker, "body": body, "head": head, "attempt": attempts + 1,
         "issue": snapshot["issue"], "kind": "fix", "task_type": "neutral",
         "head_ref": branch, "main_sha": main_sha,
+        "recorded_base_sha": base["sha"],
     }
 
 
@@ -1236,7 +1240,48 @@ class Coordinator:
                 item["validated"] = True
         return issues, commands, processed, candidates
 
-    def _snapshot_pull(self, number, enrollment, main_sha):
+    def _compare_proves_ancestry(self, base_sha, tip_sha, *, allow_identical=False):
+        if not _is_sha(base_sha) or not _is_sha(tip_sha):
+            return False
+        try:
+            comparison = self.api.get(
+                f"repos/{REPOSITORY}/compare/{base_sha}...{tip_sha}",
+            )
+        except CoordinatorError:
+            return False
+        if not isinstance(comparison, dict):
+            return False
+        base_commit = comparison.get("base_commit")
+        merge_base = comparison.get("merge_base_commit")
+        ahead_by = comparison.get("ahead_by")
+        behind_by = comparison.get("behind_by")
+        if (not isinstance(base_commit, dict) or base_commit.get("sha") != base_sha
+                or not isinstance(merge_base, dict) or merge_base.get("sha") != base_sha
+                or type(ahead_by) is not int or ahead_by < 0
+                or type(behind_by) is not int or behind_by != 0):
+            return False
+        return (
+            comparison.get("status") == "ahead" and ahead_by > 0
+        ) or (
+            allow_identical and comparison.get("status") == "identical"
+            and ahead_by == 0
+        )
+
+    def _historical_base_is_behind(self, pull, main_sha, head_sha):
+        base = pull.get("base") if isinstance(pull, dict) else None
+        if (not isinstance(base, dict) or pull.get("mergeable") is not True
+                or pull.get("mergeable_state") != "behind"
+                or base.get("ref") != MAIN_BRANCH
+                or not _github_identity(base.get("repo"), REPOSITORY_ID)
+                or not _is_sha(base.get("sha")) or base["sha"] == main_sha
+                or not self._compare_proves_ancestry(base["sha"], main_sha)
+                or not self._compare_proves_ancestry(
+                    base["sha"], head_sha, allow_identical=True,
+                )):
+            return False
+        return True
+
+    def _snapshot_pull(self, number, enrollment, main_sha, actions=None):
         if not {"pull_id", "pull_node_id", "repository_id"}.issubset(enrollment):
             raise CoordinatorError(
                 "Unsupported legacy enrollment: missing pull/repository identity; "
@@ -1282,6 +1327,39 @@ class Coordinator:
             and _is_sha(head.get("sha"))
         )
         sha = head.get("sha")
+        actions = self.store.actions() if actions is None else actions
+        has_ready_handoff = (
+            enrollment.get("authorized_head") is not None
+            and any(
+                isinstance(action, dict)
+                and action.get("kind") == "fix"
+                and action.get("issue") == number
+                and action.get("status") == "completed"
+                and (
+                    action.get("handoff_state") in HANDOFF_ACTIVE_STATES
+                    or (action.get("handoff_state") == "failed"
+                        and action.get("blocker") == "review_handoff_exhausted")
+                )
+                and action.get("receipt_result") == "ready"
+                and action.get("receipt_head") == sha
+                and action.get("receipt_base") == base.get("sha")
+                for action in actions.values()
+            )
+        )
+        has_neutral_claim = any(
+            isinstance(action, dict)
+            and action.get("kind") == "fix"
+            and action.get("task_type") == "neutral"
+            and action.get("issue") == number
+            and action.get("status") in {"sending", "uncertain", "sent"}
+            and action.get("head") == sha
+            and action.get("recorded_base_sha") == base.get("sha")
+            for action in actions.values()
+        )
+        historical_base = (
+            not scoped and (has_ready_handoff or has_neutral_claim)
+            and self._historical_base_is_behind(pull, main_sha, sha)
+        )
         files = _rest_list(
             self.api, f"repos/{REPOSITORY}/pulls/{number}/files?per_page=100",
         )
@@ -1313,7 +1391,8 @@ class Coordinator:
         )
         return {
             "issue": number, "enrollment": enrollment, "pull": pull, "head": sha,
-            "main_sha": main_sha, "scoped": scoped, "files": files,
+            "main_sha": main_sha, "scoped": scoped,
+            "historical_base": historical_base, "files": files,
             "files_complete": len(files) < 300, "reviews": reviews,
             "threads": threads, "threads_complete": threads_complete,
             "required": required, "policy_complete": policy_complete,
@@ -1325,6 +1404,71 @@ class Coordinator:
             "pull_workflows": pull_workflows,
             "status": latest_status, "status_owned": status_is_owned,
         }
+
+    def _verified_stale_ready_handoff(self, action, snapshot):
+        pull = snapshot["pull"]
+        enrollment = snapshot["enrollment"]
+        base = pull.get("base") if isinstance(pull, dict) else None
+        comments = snapshot["comments"]
+        if (
+            not snapshot.get("historical_base")
+            or enrollment.get("authorized_head") is None
+            or (
+                action.get("handoff_state") not in {"pending", "waiting_review"}
+                and not (
+                    action.get("handoff_state") == "failed"
+                    and action.get("blocker") == "review_handoff_exhausted"
+                )
+            )
+            or action.get("ready_state") in {"sending", "ready_uncertain"}
+            or action.get("review_request_state") in {"sending", "uncertain"}
+            or action.get("receipt_result") != "ready"
+            or action.get("receipt_head") != snapshot["head"]
+            or not isinstance(base, dict)
+            or base.get("sha") != action.get("main_sha")
+            or action.get("receipt_base") != base.get("sha")
+            or not _pull_identity(pull, action)
+            or not _valid_receipt_proof(action, comments)
+        ):
+            return False
+        initial, authorized, blocked = _authorized_result_heads(
+            action["issue"], enrollment, self.store.actions(), comments,
+            base.get("sha"),
+        )
+        if (initial != enrollment.get("authorized_head")
+                or snapshot["head"] not in authorized
+                or snapshot["head"] in blocked):
+            return False
+        task_id = action.get("task_id")
+        if not isinstance(task_id, str) or not task_id or len(task_id) > 128:
+            return False
+        try:
+            task = self.api.get(
+                f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}",
+            )
+            receipt = validate_task_receipt(
+                task, action, pull, comments,
+                now=datetime.fromtimestamp(self.clock(), timezone.utc),
+            )
+        except (CoordinatorError, ReceiptError, TypeError, ValueError):
+            return False
+        return bool(
+            _task_terminal(task)
+            and task.get("state") == "completed"
+            and _task_scoped(task, snapshot)
+            and isinstance(receipt, dict)
+            and receipt.get("result") == "ready"
+            and receipt.get("comment_id") == action.get("receipt_comment_id")
+            and receipt.get("created_at") == action.get("receipt_created_at")
+            and receipt.get("body") == action.get("receipt_body")
+            and receipt.get("task_id") == action.get("receipt_task_id")
+            and receipt.get("session_id") == action.get("receipt_session_id")
+            and receipt.get("nonce") == action.get("receipt_nonce")
+            and receipt.get("start_head") == action.get("receipt_start_head")
+            and receipt.get("head") == action.get("receipt_head")
+            and receipt.get("base") == action.get("receipt_base")
+            and receipt.get("completed_at") == action.get("receipt_completed_at")
+        )
 
     def _reconcile_actions(self, snapshot, actions, *, apply, handoffs=None):
         # Reconciliation never performs handoff mutations; it only collects them.
@@ -1356,9 +1500,14 @@ class Coordinator:
                 continue
             if action.get("kind") != "fix":
                 continue
-            if (status == "completed"
-                    and action.get("handoff_state") in HANDOFF_ACTIVE_STATES):
-                if apply:
+            if (status == "completed" and (
+                    action.get("handoff_state") in HANDOFF_ACTIVE_STATES
+                    or action.get("handoff_state") == "failed"
+            )):
+                if self._verified_stale_ready_handoff(action, snapshot):
+                    snapshot.setdefault("stale_handoff_keys", []).append(key)
+                    continue
+                if action.get("handoff_state") in HANDOFF_ACTIVE_STATES and apply:
                     busy = self._advance_task_handoff(
                         key, action, snapshot, deferred=handoffs,
                     ) or busy
@@ -1890,10 +2039,15 @@ class Coordinator:
             snapshot["neutral_blocker_attempt"] = neutral_blocker.get("attempt")
         reconciliation = _reconciliation_reasons(snapshot["pull"])
         needs_reconciliation = bool(reconciliation)
+        repair_scoped = (
+            snapshot["scoped"]
+            or (snapshot.get("historical_base")
+                and bool(snapshot.get("stale_handoff_keys")))
+        )
         mergeability_unknown = _mergeability_unknown(snapshot["pull"])
         repair = None
         attempts = snapshot["enrollment"].get("attempts", 0)
-        if (snapshot["scoped"] and not neutral_blocker and not mergeability_unknown
+        if (repair_scoped and not neutral_blocker and not mergeability_unknown
                 and snapshot["pull"].get("draft") is not True):
             if needs_reconciliation:
                 repair = neutral_reconciliation_request(snapshot, attempts)
@@ -1914,7 +2068,7 @@ class Coordinator:
         else:
             repair = None
         reasons = []
-        if not snapshot["scoped"]:
+        if not snapshot["scoped"] and not snapshot.get("historical_base"):
             reasons.append(("scope", "The pull request is not based on the current same-repository main branch."))
         reasons.extend(reconciliation)
         if mergeability_unknown:
@@ -1944,7 +2098,7 @@ class Coordinator:
         if agent_busy:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
         budget_needed = (
-            snapshot["scoped"] and not agent_busy and not mergeability_unknown
+            repair_scoped and not agent_busy and not mergeability_unknown
             and snapshot["pull"].get("draft") is not True and not neutral_blocker
             and (needs_reconciliation or repair_request(
                 head, 0, snapshot["threads"], snapshot["check_runs"],
@@ -2008,7 +2162,7 @@ class Coordinator:
         notification_outcomes, lifecycle_events = self._notification_outcomes(
             snapshot, reasons,
         )
-        if (snapshot["scoped"] and not agent_busy
+        if (repair_scoped and not agent_busy
                 and snapshot["pull"].get("draft") is not True
                 and attempts >= REPAIR_LIMIT and needs_reconciliation and not neutral_blocker
                 and neutral_reconciliation_request(snapshot, 0)):
@@ -2036,7 +2190,9 @@ class Coordinator:
         issues, commands, processed, enrollments = self._scan_enrollments(state)
         scans, sensitive_revocations = [], []
         for key, enrollment in enrollments.items():
-            snapshot = self._snapshot_pull(int(key), enrollment, main_sha)
+            snapshot = self._snapshot_pull(
+                int(key), enrollment, main_sha, actions=state["actions"],
+            )
             if (not snapshot.get("terminal") and enrollment.get("sensitive_sha")
                     and (enrollment["sensitive_sha"] != snapshot["head"]
                          or not sensitive_review_authorized(
@@ -2070,7 +2226,8 @@ class Coordinator:
             "now": self.clock(),
         }
 
-    def _fence_pull(self, number, head, main_sha=None):
+    def _fence_pull(self, number, head, main_sha=None, *,
+                    allow_historical_behind=False, expected_base_sha=None):
         pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
         base = pull.get("base") if isinstance(pull, dict) else None
         actual = pull.get("head") if isinstance(pull, dict) else None
@@ -2084,10 +2241,17 @@ class Coordinator:
                 or not _github_identity(actual.get("repo"), REPOSITORY_ID)
                 or not _github_identity(base.get("repo"), REPOSITORY_ID)):
             return False
+        if expected_base_sha is not None and base.get("sha") != expected_base_sha:
+            return False
         if main_sha is not None:
             current_main = self.api.get(f"repos/{REPOSITORY}/commits/{MAIN_BRANCH}")
-            if (not isinstance(current_main, dict) or current_main.get("sha") != main_sha
-                    or base.get("sha") != main_sha):
+            if not isinstance(current_main, dict) or current_main.get("sha") != main_sha:
+                return False
+            if (base.get("sha") != main_sha
+                    and (not allow_historical_behind
+                         or not self._historical_base_is_behind(
+                             pull, main_sha, head,
+                         ))):
                 return False
         return pull
 
@@ -2111,9 +2275,16 @@ class Coordinator:
 
     def _dispatch_task(self, action):
         key = action["key"]
+        neutral = action.get("task_type") == "neutral"
         if not _is_sha(action.get("main_sha")):
             return "superseded"
-        current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
+        current = self._fence_pull(
+            action["issue"], action["head"], action["main_sha"],
+            allow_historical_behind=neutral,
+            expected_base_sha=(
+                action.get("recorded_base_sha") if neutral else None
+            ),
+        )
         if not current:
             return "superseded"
         if current.get("draft") is not False:
@@ -2134,7 +2305,6 @@ class Coordinator:
         if _mergeability_unknown(current):
             return "mergeability-unknown"
         reconciliation = _reconciliation_reasons(current)
-        neutral = action.get("task_type") == "neutral"
         if neutral and not reconciliation:
             return "superseded"
         if not neutral and reconciliation:
@@ -2174,7 +2344,13 @@ class Coordinator:
             return "superseded"
         tasks = _rest_list(self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
                            collection="tasks")
-        current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
+        current = self._fence_pull(
+            action["issue"], action["head"], action["main_sha"],
+            allow_historical_behind=neutral,
+            expected_base_sha=(
+                action.get("recorded_base_sha") if neutral else None
+            ),
+        )
         if not _pull_identity(current, action) or current["head"].get("ref") != branch:
             return "superseded"
         if not self._authorized_dispatch_head(
@@ -2236,6 +2412,23 @@ class Coordinator:
             task_created_at=response["created_at"],
             owner_id=OWNER_ID, repository_id=REPOSITORY_ID,
         )
+        if neutral:
+            for previous_key, previous in self.store.actions().items():
+                if (
+                    previous.get("kind") == "fix"
+                    and previous.get("issue") == action["issue"]
+                    and previous.get("status") == "completed"
+                    and previous.get("receipt_result") == "ready"
+                    and previous.get("receipt_head") == action["head"]
+                    and (
+                        previous.get("handoff_state") in HANDOFF_ACTIVE_STATES
+                        or (previous.get("handoff_state") == "failed"
+                            and previous.get("blocker") == "review_handoff_exhausted")
+                    )
+                ):
+                    self.store.update_action(
+                        previous_key, "completed", handoff_state="superseded",
+                    )
         return "sent"
 
     def _publish_status(self, action, snapshot, actor_id):

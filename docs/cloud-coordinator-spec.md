@@ -302,6 +302,29 @@ Deferred ready/review handoffs recheck it after the scan commit; a new observed 
 head clears stale sensitive authorization. A typed blocker remains `task-result-blocked`,
 not an unrelated push. A receipt is not review or CI success. Bare manual enrollments
 retain PR33 lifecycle and receipt handoff behavior.
+
+If main advances while a completed SHA-bound `ready` receipt is awaiting its review
+handoff, including a handoff blocked only by its bounded review-wait limit, a stale
+PR base may be used only for the bounded neutral reconciliation path. The live PR
+must still be the enrolled same-repository pull request on `main`,
+with `mergeable: true`, `mergeable_state: behind`, and the exact unchanged receipt
+result head. The coordinator reads the authenticated compare endpoint for the
+recorded base against both current main and that result head. It requires the real
+compare fields `status`, `ahead_by`, `behind_by`, `base_commit.sha`, and
+`merge_base_commit.sha`, with the recorded base as both base and merge base,
+non-boolean nonnegative counts, zero `behind_by`, and `ahead` (or `identical` only
+for a result head equal to its base). Missing, malformed, unknown, diverged, or
+inconsistent compare evidence fails closed. Before releasing the old handoff lock,
+the coordinator re-fetches the exact task by its durable ID and revalidates its
+terminal state, identity, session, nonce, and complete unchanged remote receipt.
+The recorded dispatch base and immutable initial authorization are never rewritten.
+Only a positively authorized result head can use this exception, and the neutral
+task consumes the existing combined three-attempt budget. Once that neutral task is
+positively accepted, its new receipt owns the next head handoff; replay does not
+dispatch it twice. Historical-base scope is not current-main eligibility: stale PRs
+receive no status action or merge eligibility, and exact current-main, fresh
+review/check, status, and merge fences remain mandatory after reconciliation.
+
 Polling a claimed task requires positive integer creator, owner, and repository
 identities matching the fixed owner/repository before any terminal failure can
 release the lock or emit `task_failed`. Missing or malformed identity evidence
