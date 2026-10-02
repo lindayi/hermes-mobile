@@ -183,7 +183,7 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    'deploy/cloud_coordinator.py': 'a3d011e97862aa76b07fb88ae40b5307db77d3cd9f46bf170a2cf5b78ec3b7d8',
+    'deploy/cloud_coordinator.py': 'b089cf168c2d384b56855c0979853f0d692ec9564d6787bef6424b930d3b0e3e',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     'deploy/issue_starter.py': 'c47d5a305375a20003bdf0e76e17b91ef5cbae8678e7459ebe8756f6d82bb3fb',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',

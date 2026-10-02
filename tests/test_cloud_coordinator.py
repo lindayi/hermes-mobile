@@ -1505,7 +1505,7 @@ def test_neutral_acceptance_and_predecessor_supersession_are_atomic(tmp_path):
     Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
 
     assert api.fix_attempts == 2
-    assert not any(event["reason"] == "review_handoff_exhausted"
+    assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
 
 
@@ -1533,7 +1533,7 @@ def test_neutral_atomic_acceptance_survives_restart_without_duplicate_post(tmp_p
 
     assert api.fix_attempts == 2
     assert store.action(first["key"]) is None
-    assert not any(event["reason"] == "review_handoff_exhausted"
+    assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
 
 
@@ -1576,8 +1576,97 @@ def test_neutral_acceptance_replace_failure_recovers_as_uncertain_lock(tmp_path)
     assert store.action(first["key"]) is None
     assert any(event["reason"] == "execution_uncertain"
                for event in store.snapshot()["lifecycle_events"])
-    assert not any(event["reason"] == "review_handoff_exhausted"
+    assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
+
+
+@pytest.mark.parametrize("predecessor_first", [False, True])
+@pytest.mark.parametrize("claim_status", ["sending", "uncertain"])
+@pytest.mark.parametrize("at_wait_limit", [False, True])
+def test_neutral_restart_after_head_advance_never_advances_predecessor(
+        tmp_path, monkeypatch, predecessor_first, claim_status, at_wait_limit):
+    class FailAcceptance(StateStore):
+        def accept_task(self, key, task_id, task_created_at):
+            raise CoordinatorError("injected acceptance persistence failure")
+
+    api, original, _, first = _ready_sha_bound_handoff(tmp_path)
+    store = FailAcceptance(original.path)
+    with pytest.raises(CoordinatorError, match="injected acceptance persistence failure"):
+        Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    neutral = next(action for action in store.actions().values()
+                   if action.get("task_type") == "neutral")
+    assert neutral["status"] == "sending"
+    assert api.fix_attempts == 2
+    assert store.action(first["key"])["handoff_state"] == "waiting_review"
+    if claim_status == "uncertain":
+        # Legacy/interrupted uncertainty recovery without a lifecycle commit.
+        store.mark_uncertain(neutral["key"])
+    if at_wait_limit:
+        store.update_action(first["key"], "completed", handoff_waits=MAX_HANDOFF_POLLS - 1)
+    initial_waits = store.action(first["key"]).get("handoff_waits", 0)
+    receipt_proofs = store.snapshot()["enrollments"]["16"]["receipt_proofs"]
+    api.head_sha = NEXT_RESULT_HEAD
+    api.pull["head"]["sha"] = NEXT_RESULT_HEAD
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull["mergeable_state"] = "clean"
+
+    reconcile = CloudCoordinator._reconcile_actions
+    advance = CloudCoordinator._advance_task_handoff
+    predecessor_advances = []
+    observed_orders = []
+    busy_results = []
+    predecessor_states = []
+
+    def ordered_reconcile(self, snapshot, actions, **kwargs):
+        ordered = dict(sorted(actions.items(), key=lambda item: (
+            (item[0] == first["key"]) != predecessor_first, item[0],
+        )))
+        if first["key"] in ordered and neutral["key"] in ordered:
+            observed_orders.append(list(ordered).index(first["key"])
+                                   < list(ordered).index(neutral["key"]))
+        busy = reconcile(self, snapshot, ordered, **kwargs)
+        busy_results.append(busy)
+        # Observe prepared state before end-of-cycle retirement can remove it.
+        predecessor_states.append(self.store.action(first["key"]))
+        return busy
+
+    def record_advance(self, key, action, snapshot, **kwargs):
+        if key == first["key"]:
+            predecessor_advances.append(action.copy())
+        return advance(self, key, action, snapshot, **kwargs)
+
+    monkeypatch.setattr(CloudCoordinator, "_reconcile_actions", ordered_reconcile)
+    monkeypatch.setattr(CloudCoordinator, "_advance_task_handoff", record_advance)
+    for _ in range(7):
+        fresh = StateStore(store.path)
+        Coordinator(api, fresh, clock=lambda: 1790856660).run(apply=True)
+        predecessor_states.append(fresh.action(first["key"]))
+        assert fresh.action(neutral["key"])["status"] == "uncertain"
+        assert fresh.snapshot()["enrollments"]["16"]["attempts"] == 2
+        assert fresh.snapshot()["enrollments"]["16"]["receipt_proofs"] == receipt_proofs
+        assert api.fix_attempts == 2
+
+    assert observed_orders and all(order == predecessor_first for order in observed_orders)
+    assert any(event["reason"] == "execution_uncertain"
+               for event in fresh.snapshot()["lifecycle_events"])
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in fresh.snapshot()["lifecycle_events"])
+    assert not predecessor_advances
+    assert predecessor_states[0]["handoff_state"] == "superseded"
+    assert all(previous is None or (
+        previous["handoff_state"] == "superseded"
+        and previous.get("handoff_waits", 0) == initial_waits
+    ) for previous in predecessor_states)
+
+    # Empty remote task listing cannot release the durable uncertain claim.
+    api.tasks.clear()
+    result = Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+    assert busy_results[-1] is True
+    assert result["pull_requests"][0]["repair_requested"] is False
+    assert result["pull_requests"][0]["auto_merge_eligible"] is False
+    assert store.action(neutral["key"])["status"] == "uncertain"
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
+    assert api.fix_attempts == 2
 
 
 def test_ambiguous_neutral_post_stays_locked_and_is_never_retried(tmp_path):
@@ -1597,7 +1686,7 @@ def test_ambiguous_neutral_post_stays_locked_and_is_never_retried(tmp_path):
     assert api.fix_attempts == 2
     assert store.action(neutral["key"])["status"] == "uncertain"
     assert store.action(first["key"]) is None
-    assert not any(event["reason"] == "review_handoff_exhausted"
+    assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
 
 

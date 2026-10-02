@@ -1475,6 +1475,22 @@ class Coordinator:
         handoffs = [] if handoffs is None else handoffs
         number = snapshot["issue"]
         busy = False
+        if apply:
+            # Recover ambiguous ownership before advancing any predecessor,
+            # regardless of the detached scan snapshot's iteration order.
+            for key, action in actions.items():
+                if (action.get("issue") == number and action.get("kind") == "fix"
+                        and action.get("status") in {"sending", "uncertain"}
+                        and (action.get("status") == "sending"
+                             or not action.get("lifecycle_event_id"))):
+                    event = self._record_uncertain_task(action)
+                    self.store.update_action_with_lifecycle(
+                        key, "uncertain", event, now=self.clock(),
+                        blocker="execution_uncertain",
+                    )
+            # Recovery can supersede a handoff in prepared state. Never write
+            # its stale waiting_review scan record back over that transition.
+            actions = self.store.actions()
         for key, action in actions.items():
             if action.get("issue") != number:
                 continue
@@ -1518,14 +1534,6 @@ class Coordinator:
                 busy = True
                 continue
             if status in {"sending", "uncertain"}:
-                if apply and (
-                    status == "sending" or not action.get("lifecycle_event_id")
-                ):
-                    event = self._record_uncertain_task(action)
-                    self.store.update_action_with_lifecycle(
-                        key, "uncertain", event, now=self.clock(),
-                        blocker="execution_uncertain",
-                    )
                 busy = True
                 continue
             if status == "sent":
