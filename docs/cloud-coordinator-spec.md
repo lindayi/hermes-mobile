@@ -87,6 +87,14 @@ not evidence that an earlier task stopped. No second
 `@copilot` dispatch comment is posted. Queued, in-progress, waiting-for-user,
 idle and unknown task states do not release the fixer lock. Completion only
 releases the fixer lock; it is not review or CI success.
+Polling a claimed task requires positive integer creator, owner, and repository
+identities matching the fixed owner/repository before any terminal failure can
+release the lock or emit `task_failed`. Missing or malformed identity evidence
+retains the sent claim, then reaches bounded `execution_uncertain`; it never
+blindly starts another task. Task and session IDs remain opaque strings.
+Live REST pull numbers, pull IDs, and head/base repository IDs must be positive
+integers at collection and every dispatch, ready/review handoff, and merge fence;
+booleans, floats, strings, and missing values are not identity proof.
 Unidentifiable nonterminal repository tasks conservatively block new dispatch
 until GitHub exposes enough branch, session, or PR evidence to scope them.
 Only a positively pre-send superseded reservation can advance to a distinct
