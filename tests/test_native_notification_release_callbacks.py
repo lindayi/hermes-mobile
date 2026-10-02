@@ -393,6 +393,34 @@ def test_probe_requires_existing_owned_delivery_and_ack_chain(tmp_path):
     assert sum(row['route'] == 'owned' for row in callbacks.handoff_records.values()) == 1
 
 
+def test_receipt_must_match_the_routed_owner_session(tmp_path):
+    app, outbox, _, paths, callbacks, baseline, _, _, event = setup_release(tmp_path)
+    scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+    create_owned_ack(app, outbox, event, scope)
+    with app.notifications._db() as db:
+        db.execute('''UPDATE inbox SET session_id=?
+            WHERE id=(SELECT inbox_id FROM background_receipts WHERE event_id=?)''',
+                   ('another-session', 'async:' + event['delegation_id']))
+    with pytest.raises(RuntimeError, match='receipt is inconsistent'):
+        under_owned_lock(paths, lambda: callbacks.capture(baseline))
+
+
+def test_receipt_retry_token_change_does_not_break_preservation(tmp_path):
+    app, outbox, native, paths, callbacks, baseline, _, candidate, event = setup_release(tmp_path)
+    scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+    create_owned_ack(app, outbox, event, scope)
+    capture_and_handoff(paths, callbacks, baseline, candidate)
+    retried_token = 'lease-after-retry'
+    with outbox.transaction() as db:
+        db.execute('UPDATE notification_outbox SET lease_token=? WHERE event_id=?',
+                   (retried_token, 'async:' + event['delegation_id']))
+    with app.notifications._db() as db:
+        db.execute('UPDATE background_receipts SET lease_token=? WHERE event_id=?',
+                   (retried_token, 'async:' + event['delegation_id']))
+    activate(native, paths, candidate)
+    assert probe_under_owned_lock(paths, callbacks, candidate) is True
+
+
 def test_probe_retries_a_transient_status_snapshot_race(tmp_path):
     app, outbox, native, paths, callbacks, baseline, _, candidate, event = setup_release(tmp_path)
     capture_and_handoff(paths, callbacks, baseline, candidate)
