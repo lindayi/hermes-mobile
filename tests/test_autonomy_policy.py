@@ -98,19 +98,10 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
     'backend/native_notifications.py': '0159fbdd02705469853f51be7bb32479ea9e2fa0d6fdbc6789253d3b3c1c85fe',
 }
-_PENDING_PR16_COORDINATOR_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
-}
 # PR25 candidate bytes awaiting parent review; not present in the main baseline.
 _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
     'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
 }
-
-# Issue #39 coordinator dependency candidate bytes; not present in the main baseline.
-_PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE = {
-    'deploy/review_evidence.py': '1f37e42fc52c574040b4214bca6f2a1239ed738b02b724d5b7c7823cd34b9df1',
-}
-
 
 # PR40 assembled dependency candidates, independently spelled out (not copied
 # from policy constants at runtime). Historical source-review lineage is recorded
@@ -140,9 +131,7 @@ _PENDING_ISSUE43_LAUNCH_FIXTURE = {
 
 
 def _source_files():
-    return (_MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR16_COORDINATOR_FIXTURE
-            | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
-            | _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE
+    return (_MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
             | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE)
 
 
@@ -1263,7 +1252,7 @@ def test_well_formed_non_copilot_review_is_validated_then_filtered():
     assert _blockers(evidence) == {'pending-source-contract'}
 
 
-def test_review_order_uses_timestamp_then_positive_review_id():
+def test_tied_latest_reviews_require_every_copilot_review_to_approve():
     evidence = _evidence()
     review = evidence['cloud_review']
     review['reviews'].append({
@@ -1275,6 +1264,9 @@ def test_review_order_uses_timestamp_then_positive_review_id():
     review['reviews'][0]['state'] = 'COMMENTED'
     review['reviews'][1]['state'] = 'APPROVED'
     review['reviews'].reverse()
+    assert _blockers(evidence) == {'cloud-review-approval', 'pending-source-contract'}
+    for record in review['reviews']:
+        record['state'] = 'APPROVED'
     assert _blockers(evidence) == {'pending-source-contract'}
 
 

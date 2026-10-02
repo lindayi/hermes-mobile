@@ -57,28 +57,29 @@ complete issue #35, certify operational source pins, or permit the
 automatically. The current unconditional hold keeps every phase unready regardless
 of the fixed inventory or caller-supplied evidence.
 
-The coordinator fingerprint remains tied to the published checkpoint
-`403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83` from pending PR16 and has not been
-reconciled to current-main bytes in this bounded repair. This known unsafe baseline
-lacks strict timezone-aware, deterministic review ordering and separate targeted
-independent review enforcement for every sensitive head before status publication
-or auto-merge. Matching its fingerprint does **not** certify the intended
-coordinator contract.
+The recorded coordinator baseline remains the published checkpoint
+`403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83` from pending PR16. That known unsafe
+baseline lacks strict timezone-aware, deterministic review ordering and separate
+targeted independent review enforcement for every sensitive head before status
+publication or auto-merge. This branch adds a separate issue #43 candidate
+fingerprint and fixture for the coordinator; neither changes that baseline nor
+certifies the complete source contract.
 
-The coordinator statically imports `deploy/review_evidence.py` (issue #39), so
-that dependency is an explicit inventory entry under the same
-`coordinator-review-contract` blocker. It is absent from the main baseline; its
-pin and separate test fixture are the pending issue #39 candidate bytes, awaiting
-parent review. They are not independently verified, are not runtime evidence, and
-do not affect the unconditional `pending-source-contract` hold.
+The coordinator statically imports `deploy/review_evidence.py`, so that dependency
+is an explicit inventory entry under the same `coordinator-review-contract` blocker.
+Its issue #39 candidate digest is superseded by the issue #43 candidate fingerprint
+and separate literal fixture below, which reflect the current source bytes. This
+updated candidate is not independently verified, is not runtime evidence, and does
+not affect the unconditional `pending-source-contract` hold.
 
-The PR40 assembly with incoming PR29/33 parent
+The PR40 development snapshot with incoming PR29/33 parent
 `80bf9e73de3aec689cd68374bc21ad50642ee14e` expands the coordinator's static
 local-import closure from two files to exactly 36. The fixed closure regression
 lists every path explicitly, rejects dynamic/unresolved imports, and requires
-inventory coverage. The original source-control roots and their separate exact
-closure assertion are unchanged. Shared backend dependencies retain their existing
-`execution-source-contract` labels; no existing pin or baseline is refreshed.
+inventory coverage. Shared backend dependencies retain their existing
+`execution-source-contract` labels. The main baseline remains unchanged; candidate
+pins for the coordinator and review-evidence helper below reflect this branch's
+current bytes, not final PR40-on-main acceptance.
 
 Five previously absent dependencies are added as **pending assembly candidates**
 under `coordinator-review-contract`, with separate literal test fixtures and
@@ -112,9 +113,39 @@ Those historical reports have bounded scopes and include historical assembly or
 activation blockers; matching a module hash is not an approval of the complete
 PR40 assembly or its control flow. Parent independent **assembly and inventory
 review remains required**. These candidate pins do not certify complete operational
-source coverage, repair issue #35's targeted-review implementation, or refresh the
-old coordinator pin. In particular, exact static coverage of the current candidate
-is not a claim that the old pinned coordinator has this same closure. The
+source coverage or repair issue #35's targeted-review implementation. In particular,
+exact static coverage of the current candidate is not a claim that the old baseline
+coordinator has this same closure.
+
+Issue #43 adds four explicit launch roots to the source-control inventory:
+`scripts/cloud_coordinator.py`, `scripts/workflow_notifications.py`,
+`scripts/issue_starter.py`, and `deploy/issue_starter.py`. Their complete local
+Python import closure is checked against the fixed inventory and rejects unresolved
+or dynamic imports. Three service/timer pairs are separately required and pinned:
+the coordinator, workflow notifications, and issue starter. The pins and an
+independently spelled-out test fixture represent candidate source bytes only; they
+do not constitute independent review, runtime evidence, or permission to clear the
+hold.
+
+| Issue #43 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `0810bb4509fca1806ef160cac917570a163084e34a2ac83e037a1b0492d4fa4f` |
+| `deploy/review_evidence.py` | `6a146ff4fa90c8bd24ffe941391237d2a78ce1d2c51d6e4f55afd0130743b3f5` |
+| `deploy/issue_starter.py` | `701faa6e15a2717cb3c79f7e93c728bdde326e4f72e451ccd77ec1f8eabdc011` |
+| `scripts/cloud_coordinator.py` | `992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790` |
+| `scripts/workflow_notifications.py` | `03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f` |
+| `scripts/issue_starter.py` | `09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1` |
+| `deploy/hermes-mobile-coordinator.service` | `672f1e134e2cb5acbcd648eb7e124947af8d7c11143f20cea8e5be5d97c42807` |
+| `deploy/hermes-mobile-coordinator.timer` | `ffa239c67b492b5a361b823c754d5f204eb4efaa2c69f7df99df577e12d2a6c1` |
+| `deploy/hermes-workflow-notifications.service` | `998ee55dc5df990c6004f0f435e073766702e5efbf56aa83e946b6d05e21c000` |
+| `deploy/hermes-workflow-notifications.timer` | `627463b4dd06eb72f7fecc88a79dad29ec8ab4b5514b29c62c131cdbd2963cc8` |
+| `deploy/hermes-mobile-issue-starter.service` | `1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69` |
+| `deploy/hermes-mobile-issue-starter.timer` | `848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92` |
+
+The task branch preserves PR40 history for development and does not modify PR40.
+Final acceptance still requires integrating the final independently reviewed
+PR40 merge on `main` and rechecking this inventory against that exact source; this
+development snapshot is not represented as that accepted dependency. The
 unconditional hold below is unchanged; no activation is authorized.
 
 The validator therefore adds the explicit `pending-source-contract` blocker in
