@@ -1260,12 +1260,12 @@ class Coordinator:
                 or type(ahead_by) is not int or ahead_by < 0
                 or type(behind_by) is not int or behind_by != 0):
             return False
-        return (
-            comparison.get("status") == "ahead" and ahead_by > 0
-        ) or (
-            allow_identical and comparison.get("status") == "identical"
-            and ahead_by == 0
-        )
+        if base_sha == tip_sha:
+            return (
+                allow_identical and comparison.get("status") == "identical"
+                and ahead_by == 0
+            )
+        return comparison.get("status") == "ahead" and ahead_by > 0
 
     def _historical_base_is_behind(self, pull, main_sha, head_sha):
         base = pull.get("base") if isinstance(pull, dict) else None
@@ -2407,28 +2407,7 @@ class Coordinator:
                 task_created_at=response["created_at"],
             )
             return "uncertain"
-        self.store.update_action(
-            key, "sent", task_id=task_id,
-            task_created_at=response["created_at"],
-            owner_id=OWNER_ID, repository_id=REPOSITORY_ID,
-        )
-        if neutral:
-            for previous_key, previous in self.store.actions().items():
-                if (
-                    previous.get("kind") == "fix"
-                    and previous.get("issue") == action["issue"]
-                    and previous.get("status") == "completed"
-                    and previous.get("receipt_result") == "ready"
-                    and previous.get("receipt_head") == action["head"]
-                    and (
-                        previous.get("handoff_state") in HANDOFF_ACTIVE_STATES
-                        or (previous.get("handoff_state") == "failed"
-                            and previous.get("blocker") == "review_handoff_exhausted")
-                    )
-                ):
-                    self.store.update_action(
-                        previous_key, "completed", handoff_state="superseded",
-                    )
+        self.store.accept_task(key, task_id, response["created_at"])
         return "sent"
 
     def _publish_status(self, action, snapshot, actor_id):
@@ -2927,7 +2906,7 @@ def _retirable_action(action, current_head, inactive):
     """Only positively terminal records may be retired; unresolved claims stay."""
     status = action.get("status")
     if action.get("kind") == "fix":
-        if action.get("handoff_state") not in {None, "done", "failed"}:
+        if action.get("handoff_state") not in {None, "done", "failed", "superseded"}:
             return False
         action_head = (
             action.get("receipt_head")
@@ -3312,9 +3291,17 @@ class StateStore:
                         # Mirror the terminal action deletion above for retired keys.
                         if key in data["retired"]:
                             data["retired"][key]["actions"] = []
-                    data["enrollments"][key] = {
+                    enrollment = {
                         **item, "attempts": attempts, "sensitive_sha": None, "active": True,
                     }
+                    previous = data["enrollments"].get(key, {})
+                    if "receipt_proofs" in previous:
+                        if not isinstance(previous["receipt_proofs"], list):
+                            raise CoordinatorError("Stored task receipt proofs are invalid")
+                        enrollment["receipt_proofs"] = deepcopy(
+                            previous["receipt_proofs"],
+                        )
+                    data["enrollments"][key] = enrollment
             for action, item in commands:
                 if action == "authorize" and item.get("validated") is True:
                     enrollment = data["enrollments"].get(str(item.get("issue")))
@@ -3437,6 +3424,44 @@ class StateStore:
                 action.update(fields)
         self._mutate(update)
 
+    @staticmethod
+    def _supersede_neutral_predecessors(data, action):
+        for previous in data["actions"].values():
+            if (
+                previous.get("kind") == "fix"
+                and previous.get("issue") == action.get("issue")
+                and previous.get("pull_id") == action.get("pull_id")
+                and previous.get("pull_node_id") == action.get("pull_node_id")
+                and previous.get("repository_id") == REPOSITORY_ID
+                and previous.get("status") == "completed"
+                and previous.get("receipt_result") == "ready"
+                and previous.get("receipt_head") == action.get("head")
+                and previous.get("receipt_base") == action.get("recorded_base_sha")
+                and (
+                    previous.get("handoff_state") in HANDOFF_ACTIVE_STATES
+                    or (previous.get("handoff_state") == "failed"
+                        and previous.get("blocker") == "review_handoff_exhausted")
+                )
+            ):
+                previous["handoff_state"] = "superseded"
+
+    def accept_task(self, key, task_id, task_created_at):
+        def accept(data):
+            action = data["actions"].get(key)
+            if (not isinstance(action, dict) or action.get("status") != "sending"
+                    or action.get("kind") != "fix"
+                    or not isinstance(task_id, str) or not task_id or len(task_id) > 128
+                    or not _valid_timestamp(task_created_at)):
+                raise CoordinatorError("Task claim could not be accepted atomically")
+            action.update(
+                status="sent", task_id=task_id,
+                task_created_at=task_created_at,
+                owner_id=OWNER_ID, repository_id=REPOSITORY_ID,
+            )
+            if action.get("task_type") == "neutral":
+                self._supersede_neutral_predecessors(data, action)
+        self._mutate(accept)
+
     def update_action_with_lifecycle(self, key, status, event, *, now=None, **fields):
         def update(data):
             action = data["actions"].get(key)
@@ -3448,6 +3473,9 @@ class StateStore:
                 )
             action["status"] = status
             action.update(fields)
+            if (status == "uncertain" and action.get("kind") == "fix"
+                    and action.get("task_type") == "neutral"):
+                self._supersede_neutral_predecessors(data, action)
             enrollment = data["enrollments"].get(str(action.get("issue")), {})
             if (enrollment.get("authorized_head") is not None
                     and status == "completed" and fields.get("receipt_result")):
