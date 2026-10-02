@@ -20,6 +20,7 @@ SOURCE_CONTROL_PYTHON_FILES = frozenset({
     'backend/app.py', 'backend/auth.py', 'backend/auth_store.py',
     'backend/background_delivery.py', 'backend/catalog_search.py', 'backend/chat_snapshot.py',
     'backend/configuration.py', 'backend/model_controls.py', 'backend/native_api_service.py',
+    'backend/native_notifications.py',
     'backend/context_compression_presentation.py', 'backend/delivery.py',
     'backend/hermes_client.py', 'backend/jobs.py', 'backend/native_catalog.py',
     'backend/notification_policy.py', 'backend/notifications.py',
@@ -31,7 +32,7 @@ SOURCE_CONTROL_PYTHON_FILES = frozenset({
     'backend/task_reminder_presentation.py', 'backend/tool_presentation.py',
     'deploy/assets.py', 'deploy/backup.py', 'deploy/ci_selection.py', 'deploy/frontend_release.py',
     'deploy/git_source.py', 'deploy/install_core.py', 'deploy/native_controls_release.py',
-    'deploy/native_readiness.py', 'deploy/observe_release.py', 'deploy/public_http.py',
+    'deploy/native_notification_release.py', 'deploy/native_readiness.py', 'deploy/observe_release.py', 'deploy/public_http.py',
     'deploy/release_artifact.py', 'deploy/self_deploy.py', 'deploy/test_workspace.py',
     'scripts/ci_tests.py',
     'scripts/prepare_native_test_runtime.py', 'scripts/test.py',
@@ -114,6 +115,8 @@ REQUIRED_FILES = (
     'backend/task_reminder_presentation.py',
     'backend/tool_presentation.py',
     'deploy/backup.py',
+    'backend/native_notifications.py',
+    'deploy/native_notification_release.py',
 )
 SOURCE_FINGERPRINTS = {
     '.github/workflows/ci.yml': '39110e6f940fc59ef3aec9846f07616a86a2e07335d2aaed6c6cd0ab444ff195',
@@ -177,6 +180,9 @@ SOURCE_FINGERPRINTS = {
     'backend/task_reminder_presentation.py': '549a29784ef6f778ef55658d5a05961fed3919579faeeba567545004d7e9bcf3',
     'backend/tool_presentation.py': '4cfd8d468f75213d3aee3f8ab3c9f9409bb3b97e50a2aa05492181b49a1b474f',
     'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
+    'backend/native_notifications.py': '0159fbdd02705469853f51be7bb32479ea9e2fa0d6fdbc6789253d3b3c1c85fe',
+    # Pending PR25 candidate bytes, absent from the main baseline; parent review only.
+    'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
 }
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',
@@ -240,6 +246,8 @@ SOURCE_BLOCKERS = {
     'backend/task_reminder_presentation.py': 'execution-source-contract',
     'backend/tool_presentation.py': 'execution-source-contract',
     'deploy/backup.py': 'execution-source-contract',
+    'backend/native_notifications.py': 'execution-source-contract',
+    'deploy/native_notification_release.py': 'installed-host-gate',
 }
 SOURCE_BASELINES = {
     'main': 'b85c098857e7fb8229f47bd688d703bb677aeb34',

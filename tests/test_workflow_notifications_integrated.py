@@ -51,12 +51,27 @@ def test_actual_worker_v2_terminal_is_consumed(tmp_path, monkeypatch, risk, boot
         assert db.execute('SELECT count(*) FROM inbox').fetchone() == (1,)
 
 
+@pytest.mark.parametrize('clock_year', [2026, 2036])
 @pytest.mark.parametrize(('risk', 'bootstrap'), [
     ('routine', False), ('sensitive', False), ('sensitive', True),
 ])
 def test_cli_lifecycle_export_uses_real_v2_ledger_and_reaches_owner_inbox(
-        tmp_path, monkeypatch, capsys, risk, bootstrap):
+        tmp_path, monkeypatch, capsys, risk, bootstrap, clock_year):
     from datetime import datetime, timezone
+    import deploy.cloud_coordinator as coordinator_module
+
+    now = datetime(clock_year, 10, 3, 21, tzinfo=timezone.utc)
+    import test_workflow_notifications as notification_fixture
+    monkeypatch.setattr(notification_fixture, "NOW", now)
+    # Event construction also validates against a default clock. Keep that
+    # clock on the same injected timeline; do not bypass freshness validation.
+    from deploy import workflow_lifecycle
+    real_lifecycle_now = workflow_lifecycle._now
+    monkeypatch.setattr(workflow_lifecycle, "_now", lambda value:
+                        real_lifecycle_now(now if value is None else value))
+    real_coordinator = coordinator_module.Coordinator
+    monkeypatch.setattr(coordinator_module, "Coordinator", lambda *a, **kw:
+                        real_coordinator(*a, clock=now.timestamp, **kw))
 
     from deploy.cloud_coordinator import StateStore, main
     from deploy.workflow_lifecycle_sources import LifecycleSourcePaths
@@ -71,12 +86,26 @@ def test_cli_lifecycle_export_uses_real_v2_ledger_and_reaches_owner_inbox(
         local=None if bootstrap else BASE,
         diff=raw(('M', 'backend/app.py' if risk == 'sensitive' else 'frontend/styles.css')),
     )
+    def shift_evidence(value):
+        if isinstance(value, dict):
+            return {key: shift_evidence(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [shift_evidence(item) for item in value]
+        if isinstance(value, str) and "T" in value:
+            try:
+                stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if stamp.tzinfo is not None:
+                    return (stamp + (now - WORKER_NOW)).isoformat().replace("+00:00", "Z")
+            except ValueError:
+                pass
+        return value
+    api = shift_evidence(api)
     result = producer.poll_once(
-        worker_paths, get=api.__getitem__, post=post, run=run, now=WORKER_NOW,
+        worker_paths, get=api.__getitem__, post=post, run=run, now=now,
     )
     assert result['status'] == 'deployed', result
     assert producer.poll_once(
-        worker_paths, get=api.__getitem__, post=post, run=run, now=WORKER_NOW,
+        worker_paths, get=api.__getitem__, post=post, run=run, now=now,
     )['status'] == 'duplicate'
     ledger = json.loads((worker_paths.state / 'state.json').read_text())
 
@@ -138,10 +167,10 @@ def test_cli_lifecycle_export_uses_real_v2_ledger_and_reaches_owner_inbox(
     ) == 0
     capsys.readouterr()
 
+    os.utime(export_path, (now.timestamp(), now.timestamp()))
     unchanged_export = export_path.read_bytes()
     payload = json.loads(unchanged_export)
     assert {item['reason'] for item in payload['events']} >= {'merged', 'controller_verified'}
-    now = datetime.now(timezone.utc)
     assert adapter.process(consumer_paths, now=now)['writes'] is False
     assert adapter.process(consumer_paths, apply=True, now=now)['inbox_items'] == 2
     assert adapter.process(consumer_paths, apply=True, now=now)['inbox_items'] == 0

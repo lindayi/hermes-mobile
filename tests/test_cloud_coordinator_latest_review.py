@@ -119,3 +119,49 @@ def test_apply_refreshes_approval_export_from_current_scan(tmp_path, authorize):
     assert [event["head_sha"] for event in approvals] == ([] if authorize else ["c" * 40])
     assert old_event in store.snapshot()["lifecycle_events"]
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] == (HEAD if authorize else None)
+
+
+@pytest.mark.parametrize("field", ["creator", "repository"])
+@pytest.mark.parametrize("identity", [
+    "exact", "float", "string", "true", "false", "zero", "negative",
+    "null", "missing", "list", "object",
+])
+@pytest.mark.parametrize("artifacts", [False, True])
+@pytest.mark.parametrize("neutral", [False, True])
+def test_task_post_requires_exact_positive_integer_identity(
+        tmp_path, field, identity, artifacts, neutral):
+    class TaskResponseApi(FakeApi):
+        def write(self, route, body):
+            response = super().write(route, body)
+            if route.endswith("/tasks"):
+                expected = response[field]["id"]
+                malformed = {
+                    "exact": expected, "float": float(expected), "string": str(expected),
+                    "true": True, "false": False, "zero": 0, "negative": -expected,
+                    "null": None, "list": [], "object": {},
+                }
+                response[field] = {} if identity == "missing" else {"id": malformed[identity]}
+                if not artifacts:
+                    response.pop("artifacts")
+            return response
+
+    api = TaskResponseApi(unresolved=True)
+    if neutral:
+        api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    action = next(a for a in store.actions().values() if a["kind"] == "fix")
+    assert action["status"] == ("sent" if identity == "exact" else "uncertain")
+    # A POST was attempted: retain its reserved attempt and never resend ambiguity.
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert api.fix_attempts == 1
+    if identity != "exact":
+        assert action["blocker"] == "execution_uncertain"
+        events = store.snapshot()["lifecycle_events"]
+        assert [event["reason"] for event in events] == ["execution_uncertain"]
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856661).run(apply=True)
+        assert store.action(action["key"])["status"] == "uncertain"
+        assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+        assert store.snapshot()["lifecycle_events"] == events
+        assert api.fix_attempts == 1
+    assert not api.graphql_writes

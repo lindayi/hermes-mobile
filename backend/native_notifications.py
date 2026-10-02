@@ -43,43 +43,46 @@ class OwnerRoute:
     def __init__(self, home, state_dir):
         self.home, self.state_dir = Path(home), Path(state_dir)
 
-    def __call__(self, event):
+    def __call__(self, event, *, with_session=False):
+        def result(route, session_id=None):
+            return (route, session_id) if with_session else route
+
         if event.get('type') not in ('async_delegation', 'completion', 'watch_match'):
-            return 'quarantined'
+            return result('quarantined')
         if event.get('type') == 'async_delegation' and not event.get('delegation_id'):
-            return 'quarantined'
+            return result('quarantined')
         key = event.get('session_key')
         if isinstance(key, str) and ':' in key:
-            return 'foreign'
+            return result('foreign')
         # Keep immutable event routing aligned with the bridge's _route guard.
         if (event.get('platform') not in (None, '', 'api', 'api_server')
                 or any(event.get(k) for k in ('scope_id', 'chat_id', 'chat_type', 'thread_id', 'user_id'))):
-            return 'foreign'
+            return result('foreign')
         try:
             with readonly(self.state_dir / 'auth.sqlite') as auth, readonly(self.state_dir / 'runs.sqlite') as runs, readonly(self.home / 'state.db') as native:
                 owners = auth.execute("SELECT id FROM users WHERE role='owner' AND profile='default' AND status='ready'").fetchall()
                 if len(owners) != 1:
-                    return 'quarantined'
+                    return result('quarantined')
                 rows = runs.execute("SELECT session_id,user_id FROM runs WHERE upstream_id=? AND profile='default'", (key,)).fetchall()
                 if len(rows) != 1 or rows[0]['user_id'] != owners[0]['id']:
-                    return 'quarantined'
+                    return result('quarantined')
                 root = rows[0]['session_id']
                 chain, current = set(), root
                 # Walk backward only over explicitly compression-ended parents.
                 for _ in range(100):
                     row = native.execute('SELECT * FROM sessions WHERE id=?', (current,)).fetchone()
                     if row is None:
-                        return 'quarantined'
+                        return result('quarantined')
                     parent = row['parent_session_id']
                     if not parent:
                         break
                     ancestor = native.execute('SELECT * FROM sessions WHERE id=?', (parent,)).fetchone()
                     if ancestor is None or ancestor['end_reason'] != 'compression' or parent in chain:
-                        return 'quarantined'
+                        return result('quarantined')
                     chain.add(current)
                     current = parent
                 else:
-                    return 'quarantined'
+                    return result('quarantined')
                 chain = set()
                 for _ in range(100):
                     row = native.execute('SELECT * FROM sessions WHERE id=?', (current,)).fetchone()
@@ -90,7 +93,7 @@ class OwnerRoute:
                     if (row['source'] in ('tool', 'subagent') or row['profile_name'] not in (None, '', 'default')
                             or not isinstance(config, dict) or '_branched_from' in config or '_delegate_from' in config
                             or current in chain):
-                        return 'quarantined'
+                        return result('quarantined')
                     chain.add(current)
                     if row['end_reason'] != 'compression':
                         break
@@ -99,24 +102,29 @@ class OwnerRoute:
                         AND json_extract(COALESCE(model_config,'{}'),'$._branched_from') IS NULL
                         AND json_extract(COALESCE(model_config,'{}'),'$._delegate_from') IS NULL''', (current,)).fetchall()
                     if len(children) != 1:
-                        return 'quarantined'
+                        return result('quarantined')
                     current = children[0]['id']
                 else:
-                    return 'quarantined'
+                    return result('quarantined')
                 origin = (event.get('task_id') if event.get('type') in ('completion', 'watch_match')
                           else event.get('origin_session_id'))
                 if event.get('type') in ('completion', 'watch_match') and event.get('origin_session_id') not in (None, '', origin):
-                    return 'quarantined'
+                    return result('quarantined')
                 if not origin or origin not in chain or root not in chain:
-                    return 'quarantined'
+                    return result('quarantined')
                 if any(event.get(k) and event[k] not in chain for k in ('origin_ui_session_id', 'parent_session_id')):
-                    return 'quarantined'
+                    return result('quarantined')
                 for sid in chain:
                     if runs.execute("SELECT 1 FROM session_deletions WHERE user_id=? AND profile='default' AND session_id=?", (owners[0]['id'], sid)).fetchone():
-                        return 'quarantined'
-                return 'owned'
+                        return result('quarantined')
+                if not isinstance(current, str) or not current:
+                    return result('quarantined')
+                return result('owned', current)
         except (sqlite3.Error, ValueError, TypeError, KeyError):
-            return 'quarantined'
+            return result('quarantined')
+
+    def resolve(self, event):
+        return self(event, with_session=True)
 
 
 class NotificationOutbox:

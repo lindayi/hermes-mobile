@@ -29,6 +29,53 @@ from deploy.cloud_coordinator import (
 from deploy.cloud_coordinator import _authorized_result_heads
 
 
+
+@pytest.mark.parametrize("hazard", [None, "head", "main", "repo"])
+def test_accepted_receipt_handoff_uses_fresh_scanned_main(tmp_path, monkeypatch, hazard):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(a for a in store.actions().values() if a["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.review_state = "PENDING"
+    coordinator.run(apply=True)
+    assert store.action(fix["key"])["receipt_base"] == BASE
+    api.advance_main = True
+    api.pull["base"]["sha"] = "d" * 40
+    api.pull["mergeable_state"] = "behind"
+    api.review_state = "COMMENTED"
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    from copy import deepcopy
+    original_get = api.get
+    pull_reads = 0
+    def get(route):
+        nonlocal pull_reads
+        value = original_get(route)
+        if route.endswith("/pulls/16"):
+            pull_reads += 1
+            if pull_reads > 1:
+                value = deepcopy(value)
+                if hazard == "head":
+                    value["head"]["sha"] = "c" * 40
+                elif hazard == "main":
+                    value["base"]["sha"] = "e" * 40
+                elif hazard == "repo":
+                    value["head"]["repo"]["id"] = 9
+        return value
+    monkeypatch.setattr(api, "get", get)
+    graphql = list(api.graphql_writes)
+    coordinator.run(apply=True)
+    action = store.action(fix["key"])
+    if hazard is None:
+        assert action["handoff_state"] == "done"
+        assert api.fix_attempts == 2
+        assert action["receipt_base"] == BASE
+    else:
+        assert api.fix_attempts == 1
+        assert api.graphql_writes == graphql
+
+
 def test_auto_merge_requires_strict_current_base_and_conversation_resolution(tmp_path):
     for index, api in enumerate((
         FakeApi(strict_protection=False),
@@ -2104,6 +2151,10 @@ UNCOMPUTED_MERGEABILITY = [
     {"mergeable": None, "mergeable_state": "dirty"},
     {"mergeable": None, "mergeable_state": "behind"},
     {},
+] + [
+    {"mergeable": malformed, "mergeable_state": state}
+    for malformed in ("false", "true", 0, 1, 0.0, 1.0, [], {})
+    for state in ("dirty", "behind")
 ]
 
 
@@ -2774,14 +2825,7 @@ def test_scan_commit_failure_precedes_every_handoff_mutation(tmp_path, monkeypat
         assert state["cursor"] == prior["cursor"]
         assert state["events"] == prior["events"]
         assert state["lifecycle_events"] == prior["lifecycle_events"]
-        action = state["actions"][fix["key"]]
-        assert action["status"] == "completed" and action["receipt_result"] == "ready"
-        assert action["handoff_state"] == "pending"
-        assert action.get("ready_state") == (
-            None if path_kind == "draft_ready" else "done"
-        )
-        assert "review_request_state" not in action
-        assert action.get("handoff_waits", 0) == 0
+        assert state == prior  # Receipt acceptance is prepared, not persisted.
         assert api.fix_attempts == 1
 
     result = Coordinator(api, StateStore(path), clock=lambda: 1790856780).run(apply=True)

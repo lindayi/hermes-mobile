@@ -203,6 +203,84 @@ def test_real_starter_and_controller_sources_reach_owner_inbox_unchanged(tmp_pat
     assert len(notifications.list_inbox(APP_OWNER)) == 3
 
 
+@pytest.mark.parametrize("reject_commit", [False, True])
+def test_newly_observed_merge_precedes_derived_deployment_through_inbox(
+        tmp_path, monkeypatch, reject_commit):
+    import deploy.cloud_coordinator as coordinator_module
+    from test_cloud_coordinator import Coordinator, CoordinatorError, FakeApi, enrolled_record
+
+    notification_paths, state_dir, _, inbox, notifications = app_fixture(tmp_path / "app")
+    controller_evidence(notification_paths)
+    paths = LifecycleSourcePaths(
+        notifications=notification_paths, starter_state=tmp_path / "starter" / "state.json",
+    )
+    store = StateStore(tmp_path / "coordinator" / "state.json")
+    store.enroll(enrolled_record(last_open_seen=True, last_open_head=HEAD))
+    api = FakeApi(pull_state="closed", merged=True)
+    api.pull.update(merge_commit_sha=MERGE, merged_at="2026-10-01T20:58:00Z")
+    coordinator = Coordinator(api, store, clock=NOW.timestamp, lifecycle_source_paths=paths)
+    before = store.path.read_bytes()
+    export = state_dir / "workflow-events.json"
+    original_commit = store.commit_scan
+
+    def checked_commit(*args, **kwargs):
+        # Source preparation must neither persist the merge nor publish deployment.
+        assert store.path.read_bytes() == before
+        assert not export.exists()
+        assert api.writes == [] and api.graphql_writes == []
+        return original_commit(*args, **kwargs)
+
+    monkeypatch.setattr(store, "commit_scan", checked_commit)
+    if reject_commit:
+        def capacity_failure(*args, **kwargs):
+            with monkeypatch.context() as patch:
+                patch.setattr(coordinator_module, "MAX_STATE_BYTES", 1)
+                return checked_commit(*args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "commit_scan", capacity_failure)
+            with pytest.raises(CoordinatorError, match="safety bound"):
+                coordinator.run(apply=True)
+        assert store.path.read_bytes() == before
+        assert store.snapshot()["lifecycle_events"] == []
+        assert store.snapshot()["enrollments"]["16"]["active"] is True
+        assert not export.exists()
+        assert api.writes == [] and api.graphql_writes == []
+
+    exports = []
+    original_export = store.write_lifecycle_export
+
+    def capture_export(*args, **kwargs):
+        result = original_export(*args, **kwargs)
+        events = json.loads(export.read_bytes())["events"]
+        assert events == StateStore(store.path).snapshot()["lifecycle_events"]
+        exports.append(events)
+        return result
+
+    monkeypatch.setattr(store, "write_lifecycle_export", capture_export)
+    coordinator.run(apply=True)
+    events = StateStore(store.path).snapshot()["lifecycle_events"]
+    assert [event["reason"] for event in events] == ["merged", "controller_verified"]
+    assert len(exports) == 2 and exports == [events, events]
+    assert store.snapshot()["enrollments"]["16"]["active"] is False
+    assert api.writes == [] and api.graphql_writes == []
+
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == 2
+    with sqlite3.connect(inbox) as db:
+        deliveries = db.execute("SELECT delivery_id FROM inbox ORDER BY rowid").fetchall()
+    assert deliveries == [("workflow-event:v1:" + event["event_id"],) for event in events]
+    assert notifications.list_inbox("synthetic-member") == []
+
+    # A restarted coordinator preserves causal order and consumer deduplication.
+    Coordinator(api, StateStore(store.path), clock=NOW.timestamp,
+                lifecycle_source_paths=paths).run(apply=True)
+    assert json.loads(export.read_bytes())["events"] == events
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == 0
+    assert len(notifications.list_inbox(APP_OWNER)) == 2
+
+
 @pytest.mark.parametrize("failure", ["issue", "comment", "commit"])
 def test_source_events_wait_for_atomic_scan_commit(tmp_path, monkeypatch, failure):
     from deploy.cloud_coordinator import Coordinator, CoordinatorError
@@ -386,3 +464,69 @@ def test_application_owner_binding_rejects_multiple_ready_default_owners(tmp_pat
 
     with pytest.raises(LifecycleSourceError, match="Trusted application owner binding"):
         resolve_application_binding(notification_paths)
+
+
+@pytest.mark.parametrize("failure", ["capacity", "record", "invalid", "scan"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_whole_preparation_failure_preserves_state_before_remote_writes(
+        tmp_path, monkeypatch, failure, existing):
+    from deploy import cloud_coordinator as module
+    from test_cloud_coordinator import FakeApi, enrolled_record, valid_pr
+
+    notification_paths, state_dir, _, _, _ = app_fixture(tmp_path / "app")
+    controller_evidence(notification_paths)
+    paths = LifecycleSourcePaths(notifications=notification_paths,
+                                 starter_state=tmp_path / "absent-starter.json")
+    store = StateStore(tmp_path / "coordinator" / "state.json")
+    api = FakeApi(unresolved=True)
+    coordinator = module.Coordinator(api, store, clock=NOW.timestamp,
+                                     lifecycle_source_paths=paths)
+    coordinator.run(apply=True)
+    fix = next(a for a in store.actions().values() if a["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.pull["draft"] = True
+    api.review_state = "PENDING"
+    merged = pull_event({"issue": 31, "head": HEAD, "enrollment": {"comment": 55}},
+                        "merged", occurred_at="2026-10-01T20:58:00Z", merge_sha=MERGE)
+    store.enroll(enrolled_record(issue=31, comment=55, last_open_seen=True))
+    if existing:
+        store.record_lifecycle(merged, now=NOW)
+    original_get = api.get
+    def get(route):
+        if route.endswith("/pulls/31"):
+            return valid_pr(number=31, state="closed", merged=True,
+                            merged_at="2026-10-01T20:58:00Z", merge_commit_sha=MERGE)
+        return original_get(route)
+    monkeypatch.setattr(api, "get", get)
+    before = store.path.read_bytes()
+    snapshot = store.snapshot()
+    exported = (state_dir / "workflow-events.json")
+    export_before = exported.read_bytes() if exported.exists() else None
+    writes, graphql = list(api.writes), list(api.graphql_writes)
+    original_add = store._add_lifecycle_events
+    def add(data, events, *, now):
+        if any(e.get("reason") == "controller_verified" for e in events):
+            if failure == "record":
+                raise module.CoordinatorError("injected lifecycle record failure")
+            if failure == "invalid":
+                events = [dict(e, outcome="invalid") if e.get("reason") == "controller_verified"
+                          else e for e in events]
+        return original_add(data, events, now=now)
+    with monkeypatch.context() as patcher:
+        patcher.setattr(store, "_add_lifecycle_events", add)
+        if failure == "capacity":
+            patcher.setattr(module, "MAX_LIFECYCLE_EVENTS", 1)
+        if failure == "scan":
+            def fail(*args, **kwargs):
+                raise module.CoordinatorError("injected scan failure")
+            patcher.setattr(store, "commit_scan", fail)
+        with pytest.raises(module.CoordinatorError):
+            coordinator.run(apply=True)
+    assert api.writes == writes and api.graphql_writes == graphql
+    assert store.path.read_bytes() == before
+    assert store.snapshot() == snapshot
+    assert (exported.read_bytes() if exported.exists() else None) == export_before
+    coordinator.run(apply=True)
+    assert {e["reason"] for e in store.snapshot()["lifecycle_events"]} >= {
+        "merged", "controller_verified"}
+    assert api.graphql_writes != graphql

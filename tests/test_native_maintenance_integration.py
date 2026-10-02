@@ -90,16 +90,32 @@ def test_cli_forwards_explicit_approval_only_with_bootstrap(tmp_path,monkeypatch
 
 
 def test_worker_loads_verified_scoped_approval(tmp_path,monkeypatch):
+    from backend import native_api_service
     from test_self_deploy import deploy_fixture
     _,paths=deploy_fixture(tmp_path)
     monkeypatch.setattr(r.os,'geteuid',lambda:1000)
     monkeypatch.setenv('INVOCATION_ID','test-only')
+    monkeypatch.setattr(native_api_service,'OWNER_HOME',tmp_path/'synthetic-home')
     approval=tmp_path/'private-approval.json';seen=[]
     monkeypatch.setattr(n,'load_legacy_notice_approval',lambda path:seen.append(path) or {'pid':123})
-    monkeypatch.setattr(r,'NativeProbe',lambda source,**kw:kw)
-    monkeypatch.setattr(r,'deploy',lambda paths,**kw:seen.append(kw['native']))
+
+    class FakeNativeProbe(dict):
+        def __init__(self, source, **kwargs):
+            super().__init__(kwargs)
+            self.config_bytes=json.dumps(
+                {'state_dir':str(paths.database.parent.resolve())}).encode()
+
+    deployed=[]
+    monkeypatch.setattr(r,'NativeProbe',FakeNativeProbe)
+    monkeypatch.setattr(r,'deploy',lambda deployed_paths,**kw:deployed.append((deployed_paths,kw)))
     assert r.main(['--worker','--bootstrap-dedicated-native','--legacy-restart-approval',str(approval)],paths=paths)==0
-    assert seen[0]==approval and seen[1]['legacy_notice_approval']=={'pid':123}
+    assert seen[0]==approval and deployed[0][1]['native']['legacy_notice_approval']=={'pid':123}
+    deployed_paths,callbacks=deployed[0]
+    notification_callbacks=callbacks['handoff']
+    assert deployed_paths.state.resolve()==notification_callbacks.controller
+    assert deployed_paths.database.resolve()==notification_callbacks.runs
+    assert notification_callbacks.state==deployed_paths.database.parent.resolve()
+    assert notification_callbacks.controller!=notification_callbacks.state
 
 
 def test_controller_new_readiness_consumes_scoped_evidence(tmp_path,monkeypatch,versions):
