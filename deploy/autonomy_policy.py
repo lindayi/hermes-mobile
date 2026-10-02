@@ -252,6 +252,17 @@ def _check_source_run(evidence, sha, blockers):
         blockers.add('release-attestation')
 
 
+def _review_timestamp(submitted_at):
+    """Use the same fail-closed timestamp semantics for both review roles."""
+    try:
+        timestamp = datetime.fromisoformat(submitted_at.replace('Z', '+00:00'))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        return None
+    return timestamp
+
+
 def _check_review(evidence, main_sha, phase, blockers):
     review = evidence.get('cloud_review')
     if not isinstance(review, dict):
@@ -285,12 +296,8 @@ def _check_review(evidence, main_sha, phase, blockers):
             malformed_review = True
             continue
         review_ids.add(review_id)
-        try:
-            timestamp = datetime.fromisoformat(submitted_at.replace('Z', '+00:00'))
-        except (AttributeError, TypeError, ValueError):
-            malformed_review = True
-            continue
-        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        timestamp = _review_timestamp(submitted_at)
+        if timestamp is None:
             malformed_review = True
             continue
         ordered.append((timestamp, review_id, item))
@@ -344,7 +351,8 @@ def _check_review(evidence, main_sha, phase, blockers):
                         or type(user.get('id')) is not int
                         or user['id'] != targeted['reviewer_id']
                         or record.get('commit_id') != head
-                        or record.get('state') != targeted['state']):
+                        or record.get('state') != targeted['state']
+                        or _review_timestamp(record.get('submitted_at')) is None):
                     blockers.add('sensitive-review-authorization')
 
 
@@ -355,6 +363,12 @@ def validate_transition(evidence, *, phase):
         return {'ready': False, 'phase': phase, 'blockers': ['invalid-phase']}
     if not isinstance(evidence, dict):
         return {'ready': False, 'phase': phase, 'blockers': ['invalid-evidence']}
+    # Source-enforced hold in every phase, never an evidence-supplied opt-out.
+    # Pinned coordinator 403ac3d lacks strict timestamp ordering and targeted
+    # independent review for every sensitive head. Issue #26 activation requires
+    # a reviewed merged replacement, deliberate pin updates, and a source change
+    # to clear this hold; matching the known unsafe fingerprint is insufficient.
+    blockers.add('pending-source-contract')
     _check_identity(evidence, blockers)
     main = evidence.get('main')
     if (not isinstance(main, dict) or main.get('repository_id') != REPOSITORY_ID

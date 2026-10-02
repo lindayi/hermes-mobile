@@ -44,14 +44,34 @@ loading or another unbounded local execution path is introduced, readiness remai
 blocked until that dependency closure is independently established; do not silently
 add its digest or claim that this inventory proves arbitrary transitive execution.
 
-The coordinator fingerprint remains tied to the reviewed published checkpoint
+The coordinator fingerprint remains tied to the published checkpoint
 `403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83` from pending PR16, not to a candidate
-or the current main tree. That checkpoint does not establish that PR16 is merged,
-and `deploy/cloud_coordinator.py` is absent from merged main at the baseline above.
-Consequently, an actual complete current-main readback is missing a required source
-and readiness remains blocked until final coordinator assembly is merged, its exact
-bytes are reviewed, and the fingerprint is deliberately updated. The synthetic
-fixtures exercise the contract only and do not establish readiness.
+or the current main tree. This known unsafe baseline lacks strict timezone-aware,
+deterministic review ordering and separate targeted independent review enforcement
+for every sensitive head before status publication or auto-merge. Matching its
+fingerprint does **not** certify the intended coordinator contract.
+
+The validator therefore adds the explicit `pending-source-contract` blocker in
+**every phase**, even for otherwise complete evidence matching every pinned digest.
+No snapshot can report ready with this source version; the CLI returns nonzero.
+The hold is enforced in source, not by an input flag: caller booleans, matching
+hashes, claimed review success, or a supplied readiness result cannot clear it.
+All other evidence checks still run, preserving their specific blockers. Component
+positive tests require exactly this one known blocker, not readiness; negative
+security assertions retain their own blockers as well. Invalid phase/evidence
+roots remain rejected with their existing diagnostics.
+
+That checkpoint also does not establish that PR16 is merged, and
+`deploy/cloud_coordinator.py` is absent from merged main at the baseline above.
+A missing source still adds `main-source-missing`. Issue #26 activation follow-up
+must independently review the real merged coordinator and its complete control
+contract, establish strict review timestamps/ordering and per-head sensitive
+review enforcement, deliberately update operational source pins and fixtures, and
+make a separately reviewed source change to clear or update this hold. Neither a
+pin refresh alone nor a caller assertion is sufficient; pins never auto-refresh.
+Merging this inactive read-only validator is separate from activation and does not
+change the coordinator, repository protection, services, or existing merge gates.
+The synthetic fixtures exercise evidence components only, not live readiness.
 
 Any fingerprint-set or dependency-inventory update must be independently reviewed
 against the complete source, its local control dependencies, and intended control
@@ -96,7 +116,11 @@ and mandatory Copilot reviewer (`175728472`). The `targeted_review.review_id` mu
 be a positive integer identifying exactly one record in the complete authenticated
 `cloud_review.reviews` collection. Its `user.id`, `commit_id`, and `state` must
 match the claim's `reviewer_id`, exact `head_sha`, and `state` (`COMMENTED` or
-`APPROVED`). Missing records, duplicate IDs, or conflicting claims block readiness.
+`APPROVED`). The matched record's `submitted_at` must parse as a valid
+timezone-aware timestamp using the same helper as mandatory Copilot reviews;
+missing, naive, or malformed values block with `sensitive-review-authorization`.
+A timestamp supplied only on the claim cannot substitute for that record.
+Missing records, duplicate IDs, or conflicting claims block readiness.
 A later commit invalidates both.
 
 ## Policy phases and activation
@@ -147,7 +171,9 @@ bridge this gap. The owner-controlled sequence is:
    contract are absent from current main. A PR branch or expected merge is not a
    dependency proof. Once the final merged core (and later PR33 changes) is known,
    deliberately review and replace any changed fingerprint and provenance fixture;
-   never auto-pin candidate evidence or expand a whitelist.
+   never auto-pin candidate evidence or expand a whitelist. This is an issue #26
+   activation follow-up, including the separately reviewed source change required
+   to clear/update `pending-source-contract`, not part of this validator's merge.
 2. Collect authenticated current-main source, successful complete hosted results,
    release provenance, retained installed-host gate and genuine complete exact-head
    APPROVED review evidence, including sensitive authorization where required.
