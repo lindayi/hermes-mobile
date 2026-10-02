@@ -157,3 +157,19 @@ def test_new_chat_leaves_native_title_available_for_auto_naming_and_repeat_creat
             assert db.execute('SELECT title FROM sessions WHERE id=?',('native-1',)).fetchone()==(None,)
             db.execute('UPDATE sessions SET title=? WHERE id=?',('Automatically titled fixture','native-1'))
         assert c.get(BASE+'/sessions/native-1').json()=={'id':'native-1','title':'Automatically titled fixture'}
+
+
+@pytest.mark.parametrize('native_title',[None,'','   '])
+def test_explicit_unresolved_native_creation_title_does_not_fall_back_to_requested_title(tmp_path,native_title):
+    import httpx
+    from backend.app import create_app,Settings
+    from backend.hermes_client import GatewayClient
+    async def upstream(request):
+        return httpx.Response(200,json={'session':{'id':'native-untitled','title':native_title}})
+    gateway=GatewayClient('http://localhost:8642','test',execution_ready=True,transport=httpx.MockTransport(upstream))
+    home=tmp_path/'hermes';home.mkdir();create_native_db(home/'state.db')
+    with TestClient(create_app(Settings(state_dir=tmp_path/'state',profiles={'default':home},bootstrap_secret=BOOTSTRAP),gateway_client=gateway),base_url=ORIGIN) as c:
+        c.headers['Origin']=ORIGIN;enroll(c)
+        response=c.post(BASE+'/sessions',json={'title':'Requested title'})
+        assert response.status_code==200,response.text
+        assert response.json()=={'id':'native-untitled'}

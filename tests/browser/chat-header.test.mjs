@@ -68,3 +68,39 @@ test('rename validation and server failure retain input and title',async()=>{
 test('one compact authenticated header replaces branding and retains back navigation',async()=>{
  const h=await setup();try{assert.equal(h.doc.querySelector('.topbar .brand'),null);await h.open();const header=h.doc.querySelector('.conversation-head');assert.ok(header);assert.equal(header.querySelector('h1').textContent,'First conversation');assert.ok(header.querySelector('[aria-label="Rename session"]'));assert.equal(h.doc.querySelectorAll('.conversation-head').length,1);click(h.doc,'Back to chats');await tick();assert.ok(h.doc.querySelector('.session-list'));}finally{h.close();}
 });
+
+for(const trigger of ['completion','watcher'])test(`native automatic title refreshes an active untitled session after ${trigger} without navigation`,async()=>{
+ let title=null;
+ const h=await setup(p=>{
+  if(p.startsWith('/sessions?'))return {items:[{id:'s1',title:null}],total:1};
+  if(p==='/sessions/s1')return {id:'s1',title};
+ },{items:[],run:trigger==='completion'?{id:'r1',session_id:'s1',status:'running',input:'Hello'}:null});
+ try{
+  click(h.doc,'Untitled conversation');await tick();
+  const header=h.doc.querySelector('.conversation-head'),textarea=h.doc.querySelector('textarea');
+  textarea.value='Retained draft';assert.equal(header.querySelector('h1').textContent,'Untitled conversation');
+  title='Generated native title';
+  if(trigger==='completion')h.streams[0].emit('done',{status:'completed'});
+  else {const entry=[...h.timers.entries()].find(([,v])=>v.delay===30000);h.timers.delete(entry[0]);entry[1].fn();}
+  await tick();
+  assert.equal(header.querySelector('h1').textContent,title);assert.equal(header.querySelector('h1').title,title);
+  assert.equal(h.doc.querySelector('.conversation-head'),header);assert.equal(h.doc.querySelector('textarea'),textarea);assert.equal(textarea.value,'Retained draft');
+ }finally{h.close();}
+});
+
+for(const departure of ['rename','navigation'])test(`late native title refresh cannot overwrite ${departure}`,async()=>{
+ let pending=null;
+ const h=await setup((p,o)=>{
+  if(o.method==='PATCH')return {id:'s1',title:'Manual title'};
+  if(p==='/sessions/s1')return pending?pending.promise:{id:'s1',title:null};
+ });
+ try{
+  await h.open();pending=deferred();h.win.dispatchEvent(new h.win.Event('focus'));await tick();
+  assert.ok(h.calls.some(c=>c.path==='/sessions/s1'),'watcher refresh reads native metadata');
+  if(departure==='rename'){
+   click(h.doc,'Rename session');const form=h.doc.querySelector('[role=dialog] form');form.querySelector('input').value='Manual title';form.dispatchEvent(new h.win.Event('submit',{cancelable:true}));await tick();
+  }else{click(h.doc,'Back to chats');await tick();click(h.doc,'Second conversation');await tick();}
+  pending.resolve({id:'s1',title:'Stale generated title'});await tick();
+  assert.equal(h.doc.querySelector('.conversation-head h1').textContent,departure==='rename'?'Manual title':'Second conversation');
+ }finally{h.close();}
+});

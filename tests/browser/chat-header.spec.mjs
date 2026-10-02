@@ -17,7 +17,9 @@ test('compact chat header preserves space, title editing, draft and connection s
    let data;
    if(p.endsWith('/auth/me'))data={user:{id:'header-fixture',role:'owner',status:'ready'},csrf_token:'fixture'};
    else if(p.endsWith('/sessions/header-session') && req.method==='PATCH'){patches++;title=body.title;data={id:'header-session',title};}
+   else if(p.endsWith('/sessions/header-session'))data={id:'header-session',title};
    else if(p.endsWith('/messages'))data={items:[{role:'assistant',content:'This is isolated fixture content, not a live model result.'}],offset:0,total:1,run:null,last_run:null};
+   else if(p.endsWith('/sessions') && req.method==='POST'){title=null;data={id:'header-session'};}
    else if(p.endsWith('/sessions'))data={items:[{id:'header-session',title,source:'cli',updated_at:1700000000}],total:1};
    else if(p.endsWith('/health'))data={status:'ok',agent_execution:true};
    else data={items:[]};
@@ -66,5 +68,12 @@ test('compact chat header preserves space, title editing, draft and connection s
   const status=header.getByRole('status'),statusBox=await status.boundingBox(),editBox=await edit.boundingBox();assert.ok(statusBox.x>=editBox.x+editBox.width-1,'status is to the right of title/edit');
   await back.click();await page.getByRole('button',{name:'Renamed fixture',exact:true}).waitFor();await page.reload();await page.getByRole('button',{name:'Renamed fixture',exact:true}).click();
   assert.match(await header.innerText(),/Renamed fixture/);assert.deepEqual(errors,[]);
+  await back.click();await page.getByRole('button',{name:'New chat',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('.conversation-head h1')?.textContent==='Untitled conversation');
+  await page.getByRole('textbox',{name:'Message Hermes'}).fill('Draft stays while native naming completes');
+  const before=page.url();title='Automatically generated native title';
+  await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
+  await page.waitForFunction(()=>document.querySelector('.conversation-head h1')?.textContent==='Automatically generated native title');
+  assert.equal(page.url(),before);assert.equal(await page.getByRole('textbox',{name:'Message Hermes'}).inputValue(),'Draft stays while native naming completes');assert.equal(patches,1);assert.deepEqual(errors,[]);
  }finally{await browser.close();server.closeAllConnections();await new Promise(r=>server.close(r));}
 });
