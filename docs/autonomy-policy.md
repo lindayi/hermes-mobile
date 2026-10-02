@@ -102,8 +102,24 @@ the separate PR47 and PR53 controller candidate hashes, not historical-main pins
 The observer, self-deploy, and issue #48 starter/unit pins retain their accepted
 source bytes. This local assembly does not authorize activation or deployment.
 
-The coordinator's exact 36-file static closure and fixed dependency inventory are
-retained. Shared backend dependencies keep their existing blocker labels. The five
+PR57 extends the assembled starter/consumer authority contract with the exact
+head/issue/body-digest command and a final prepared-scan admission fence. Its new
+`deploy/pull_handoff_binding.py` leaf is explicitly required, independently pinned,
+and mapped to `coordinator-review-contract`; missing, malformed and mutated bytes
+remain blocking. The current PR57 candidate pins supersede the historical source
+tables below only for the following paths; PR55 recovery bytes are retained and
+PR58 notification-unit pins are unchanged. A subsequent recovery integration must
+reconcile its changed coordinator pin on the final assembled head.
+
+| PR57 paired admission path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `ce40eadc705bf3887b7f6a7bf9f35f3a9c73241baf473fa83a65316bda5eac6a` |
+| `deploy/issue_starter.py` | `c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9` |
+| `deploy/pull_handoff_binding.py` | `e4cf47de3e1b7846da92796781f05437e8225773ddf13debcfc489b58aa50550` |
+
+The coordinator's exact 37-file static closure includes the PR57 shared canonical
+handoff proof leaf; the fixed dependency inventory remains explicit. Shared backend
+dependencies keep their existing blocker labels. The five
 PR29/PR40/PR42 dependency pins below match the accepted merged bytes in main5316;
 the separate literal fixtures and actual-byte/missing/malformed/mutation checks
 remain in every phase.

@@ -6,7 +6,7 @@ import pytest
 from deploy.issue_starter import Coordinator, MAX_READ_FAILURES, StateStore
 from deploy.workflow_lifecycle_sources import _issue_starter_events
 from test_issue_starter import (
-    FakeApi, OWNER_ID, REPOSITORY, completed_task, issue_comment, pull_request,
+    enrollment_command, FakeApi, OWNER_ID, REPOSITORY, completed_task, issue_comment, pull_request,
     start_task, task,
 )
 
@@ -71,7 +71,7 @@ def test_invalid_enrollment_proof_never_hands_off_or_reposts(tmp_path, path, cha
     start_task(tmp_path, api)
     api.task_detail = completed_task()
     if path == "existing":
-        comment = issue_comment(comment_id=9100, body="/hermes enroll " + "a" * 40,
+        comment = issue_comment(comment_id=9100, body=enrollment_command(),
                                 created_at="2026-10-01T21:00:00Z")
         corrupt(comment, change)
         api.comments.append(comment)

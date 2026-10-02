@@ -4760,3 +4760,128 @@ def test_dispatch_rechecks_reconciliation_after_planning(tmp_path, mergeable, me
     state = StateStore(path).snapshot()
     assert state["enrollments"]["16"]["attempts"] == 0
     assert not any(action["kind"] == "fix" for action in state["actions"].values())
+
+
+# The starter form is deliberately separate from explicit legacy manual authority.
+def starter_admission_inputs():
+    from test_issue_starter import FakeApi as StarterApi, enrollment_command, issue_comment, pull_request
+
+    pull = pull_request(draft=False)
+    api = StarterApi(pulls=[pull])
+    issue = {"number": pull["number"], "pull_request": {"url": "pull/41"}}
+    comment = issue_comment(body=enrollment_command())
+    return api, issue, pull, comment
+
+
+@pytest.mark.parametrize("change", [
+    "none", "no_api", "leading_zero", "zero", "negative", "overflow", "huge",
+    "uppercase_digest", "short_digest", "uppercase_head", "suffix", "newline",
+    "missing_digest", "wrong_issue", "float_owner", "string_owner", "float_id",
+    "bool_id", "zero_id", "edited", "missing_updated", "invalid_time", "draft",
+    "body_whitespace", "body_unicode", "wrong_head", "foreign_repository",
+])
+def test_starter_admission_exact_grammar_and_authenticated_binding(change):
+    api, issue, pull, comment = starter_admission_inputs()
+    body = comment["body"]
+    if change in {"leading_zero", "zero", "negative", "overflow", "huge", "wrong_issue"}:
+        number = {"leading_zero": "028", "zero": "0", "negative": "-28",
+                  "overflow": "2147483648", "huge": "9" * 5000, "wrong_issue": "29"}[change]
+        comment["body"] = body.replace("issue 28", "issue " + number)
+    elif change == "uppercase_digest":
+        comment["body"] = body.rsplit(" ", 1)[0] + " " + body.rsplit(" ", 1)[1].upper()
+    elif change == "short_digest":
+        comment["body"] = body[:-1]
+    elif change == "uppercase_head":
+        comment["body"] = body.replace(HEAD, HEAD.upper())
+    elif change in {"suffix", "newline"}:
+        comment["body"] += " " if change == "suffix" else "\n"
+    elif change == "missing_digest":
+        comment["body"] = body.split(" body-sha256")[0]
+    elif change in {"float_owner", "string_owner"}:
+        comment["user"]["id"] = float(OWNER) if change == "float_owner" else str(OWNER)
+    elif change in {"float_id", "bool_id", "zero_id"}:
+        comment["id"] = {"float_id": 9001.0, "bool_id": True, "zero_id": 0}[change]
+    elif change == "edited":
+        comment["updated_at"] = "2026-10-01T20:00:01Z"
+    elif change == "missing_updated":
+        comment.pop("updated_at")
+    elif change == "invalid_time":
+        comment["created_at"] = comment["updated_at"] = "2026-10-01"
+    elif change == "draft":
+        pull["draft"] = True
+    elif change.startswith("body_"):
+        pull["body"] += " " if change == "body_whitespace" else "é"
+    elif change == "wrong_head":
+        pull["head"]["sha"] = "c" * 40
+    elif change == "foreign_repository":
+        pull["base"]["repo"]["id"] = 1
+    accepted = enrollment_from_comment(issue, pull, comment, api=None if change == "no_api" else api)
+    assert bool(accepted) is (change == "none")
+
+
+@pytest.mark.parametrize("change", [
+    "missing", "errors", "duplicate", "wrong_repository_anchor", "wrong_pull",
+    "wrong_body", "wrong_head", "wrong_branch", "null_connection", "too_many_nodes",
+    "incomplete_page", "repeated_cursor", "page_bound",
+])
+def test_starter_admission_rejects_incomplete_or_unanchored_canonical_proof(change):
+    from copy import deepcopy
+    from test_issue_starter import closing_issue_response, issue_reference
+
+    api, issue, pull, comment = starter_admission_inputs()
+    calls = []
+
+    def graphql(query, variables):
+        calls.append(variables)
+        if change == "missing":
+            return None
+        response = closing_issue_response(pull, nodes=[issue_reference()])
+        repo = response["data"]["repository"]
+        node = repo["pullRequest"]
+        connection = node["closingIssuesReferences"]
+        if change == "errors":
+            response["errors"] = [{"message": "partial"}]
+        elif change == "duplicate":
+            connection["nodes"] *= 2
+        elif change == "wrong_repository_anchor":
+            repo["id"] = connection["nodes"][0]["repository"]["id"] = "self-consistent-but-not-REST"
+        elif change.startswith("wrong_"):
+            node[{"wrong_pull": "id", "wrong_body": "body", "wrong_head": "headRefOid",
+                  "wrong_branch": "headRefName"}[change]] = "different"
+        elif change == "null_connection":
+            node["closingIssuesReferences"] = None
+        elif change == "too_many_nodes":
+            connection["nodes"] = [issue_reference(n) for n in range(1, 102)]
+        else:
+            # Unique non-originating references keep page exhaustion distinct from duplicates.
+            connection["nodes"] = [] if len(calls) > 1 else [issue_reference()]
+            connection["pageInfo"] = {
+                "hasNextPage": True,
+                "endCursor": (None if change == "incomplete_page" else
+                              "same" if change == "repeated_cursor" else str(len(calls))),
+            }
+        return deepcopy(response)
+
+    api.graphql = graphql
+    assert enrollment_from_comment(issue, pull, comment, api=api) is None
+    assert len(calls) <= 20
+    if change == "page_bound":
+        assert len(calls) == 20
+
+
+@pytest.mark.parametrize("change", ["body", "draft", "repository_anchor", "head", "base"])
+def test_starter_admission_rejects_changed_final_rest_snapshot(change):
+    from copy import deepcopy
+
+    api, issue, pull, comment = starter_admission_inputs()
+    fresh = deepcopy(pull)
+    if change == "body":
+        fresh["body"] += " changed"
+    elif change == "draft":
+        fresh["draft"] = True
+    elif change == "repository_anchor":
+        fresh["base"]["repo"]["node_id"] = "changed"
+    else:
+        fresh[change]["sha"] = "e" * 40
+    api.get = lambda route: fresh
+    assert enrollment_from_comment(issue, pull, comment, api=api) is None

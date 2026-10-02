@@ -32,6 +32,11 @@ COMMAND_ID = 9001
 CREATED = "2026-10-01T20:00:00Z"
 
 
+def enrollment_command(head="a" * 40, body="Closes #28", issue_number=28):
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return f"/hermes enroll {head} issue {issue_number} body-sha256 {digest}"
+
+
 def issue_reference(number=ISSUE_NUMBER, repository=None):
     return {
         "number": number,
@@ -1079,7 +1084,7 @@ def test_completed_bound_task_marks_its_draft_pr_ready_and_enrolls_once(tmp_path
         body["body"] for route, body in api.posts
         if route.endswith("/issues/41/comments")
     ]
-    assert enrollment == [("/hermes enroll " + "a" * 40)]
+    assert enrollment == [enrollment_command()]
     assert api.pulls[0]["draft"] is False
 
     from deploy.cloud_coordinator import Coordinator as CloudCoordinator
@@ -1092,11 +1097,14 @@ def test_completed_bound_task_marks_its_draft_pr_ready_and_enrolls_once(tmp_path
     assert owner_comment["body"] == body
     assert owner_comment["created_at"] == owner_comment["updated_at"]
     handoff = enrollment_from_comment(
-        pull_issue, api.pulls[0], owner_comment,
+        pull_issue, api.pulls[0], owner_comment, api=api,
     )
     assert handoff["authorized_head"] == api.pulls[0]["head"]["sha"]
 
     class ConsumerApi:
+        def graphql(self, query, variables):
+            return api.graphql(query, variables)
+
         def get(self, route):
             if route == f"repos/{REPOSITORY}/pulls/41":
                 return api.pulls[0]
@@ -1132,7 +1140,7 @@ def test_uncertain_enrollment_comment_reconciles_without_duplicate_comment(tmp_p
 
         def post(self, route, body):
             response = super().post(route, body)
-            if route.endswith("/issues/41/comments") and body["body"] == ("/hermes enroll " + "a" * 40) and not self.lost:
+            if route.endswith("/issues/41/comments") and body["body"] == enrollment_command() and not self.lost:
                 self.lost = True
                 raise TimeoutError("response lost")
             return response
@@ -1150,7 +1158,7 @@ def test_uncertain_enrollment_comment_reconciles_without_duplicate_comment(tmp_p
     assert final["handed_off"] == 0
     assert len([
         item for item in api.posts
-        if item[0].endswith("/issues/41/comments") and item[1]["body"] == ("/hermes enroll " + "a" * 40)
+        if item[0].endswith("/issues/41/comments") and item[1]["body"] == enrollment_command()
     ]) == 1
 
 
@@ -1196,7 +1204,7 @@ def test_task_change_after_readiness_mutation_blocks_enrollment(tmp_path):
 
     assert result["handed_off"] == 0
     assert not any(
-        route.endswith("/issues/41/comments") and body.get("body") == ("/hermes enroll " + "a" * 40)
+        route.endswith("/issues/41/comments") and body.get("body") == enrollment_command()
         for route, body in api.posts
     )
 
@@ -1281,7 +1289,7 @@ def test_task_pull_without_optional_global_id_resolves_and_binds_detail_node(tmp
     assert len(readiness) == 1
     assert readiness[0]["variables"]["pullRequestId"] == "PR_kwDO123"
     assert [body["body"] for route, body in api.posts
-            if route.endswith("/issues/41/comments")] == [("/hermes enroll " + "a" * 40)]
+            if route.endswith("/issues/41/comments")] == [enrollment_command()]
 
 
 @pytest.mark.parametrize("invalid", ["global_mismatch", "global_null", "id_missing",
@@ -1325,7 +1333,7 @@ def test_task_pull_artifact_binding_failures_never_handoff(tmp_path, invalid):
         for call in api.graphql_calls
     )
     assert not any(
-        route.endswith("/issues/41/comments") and body.get("body") == ("/hermes enroll " + "a" * 40)
+        route.endswith("/issues/41/comments") and body.get("body") == enrollment_command()
         for route, body in api.posts
     )
 
@@ -1603,7 +1611,7 @@ def test_final_fresh_draft_read_blocks_enrollment_without_readiness_retry(tmp_pa
     assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == 0
     assert len([call for call in api.graphql_calls
                 if "markPullRequestReadyForReview" in call["query"]]) == int(path != "already_ready")
-    assert not any(route.endswith("/issues/41/comments") and body["body"] == ("/hermes enroll " + "a" * 40)
+    assert not any(route.endswith("/issues/41/comments") and body["body"] == enrollment_command()
                    for route, body in api.posts)
 
 

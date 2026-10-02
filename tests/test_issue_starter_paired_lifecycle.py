@@ -1,4 +1,5 @@
 """Synthetic regression seams between SHA-bound enrollment and durable lifecycle."""
+from copy import deepcopy
 import hashlib
 import json
 
@@ -233,7 +234,7 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
         pull_id=pull["id"], node_id=pull["node_id"], head_ref="topic",
     )
     assert make_coordinator(tmp_path, producer).run(apply=True)["handed_off"] == 1
-    emitted = next(c for c in producer.comments if c["body"] == f"/hermes enroll {HEAD}")
+    emitted = next(c for c in producer.comments if c["body"].startswith(f"/hermes enroll {HEAD} issue "))
     assert any(route.endswith("/issues/41/comments") and body["body"] == emitted["body"]
                for route, body in producer.posts)
 
@@ -241,6 +242,7 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     api.comments = [dict(emitted)]  # Actual in-checkout producer output, no fallback.
     api.pull.update(pull)
     api.pull["draft"] = False
+    attach_closing_issue_api(api)
     api.review_sha = HEAD
     store = StateStore(tmp_path / "paired" / "state.json")
 
@@ -305,7 +307,7 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     assert len(api.graphql_writes) == 1 and api.fix_attempts == 2
 
 
-def actual_starter_consumer(tmp_path):
+def actual_starter_consumer(tmp_path, *, admit=True):
     from test_issue_starter import (
         FakeApi as StarterApi, completed_task, make_coordinator, pull_request, start_task,
     )
@@ -325,12 +327,15 @@ def actual_starter_consumer(tmp_path):
         pull_id=pull["id"], node_id=pull["node_id"], head_ref="topic",
     )
     assert make_coordinator(tmp_path, producer).run(apply=True)["handed_off"] == 1
-    emitted = next(c for c in producer.comments if c["body"] == f"/hermes enroll {HEAD}")
+    emitted = next(c for c in producer.comments if c["body"].startswith(f"/hermes enroll {HEAD} issue "))
     api = FakeApi(unresolved=True)
     api.comments = [dict(emitted)]
     api.pull.update(pull)
     api.pull["draft"] = False
+    attach_closing_issue_api(api)
     store = StateStore(tmp_path / "paired-main" / "state.json")
+    if not admit:
+        return api, store
     Coordinator(api, store, clock=lambda: NOW).run(apply=True)
     action = next(a for a in store.actions().values() if a["kind"] == "fix")
     return api, store, action
@@ -563,3 +568,214 @@ def test_bound_consumer_rejects_unverified_task_session_and_receipt_identity(tmp
     assert store.action(action["key"])["status"] != "completed"
     assert not store.snapshot()["enrollments"]["16"].get("receipt_proofs")
     assert api.fix_attempts == 1 and not api.graphql_writes
+
+
+@pytest.mark.parametrize("change", ["none", "body_and_edge", "edge_only"])
+def test_published_starter_command_is_not_authority_for_changed_unlinked_pull(tmp_path, change):
+    from test_issue_starter import (
+        FakeApi as StarterApi, completed_task, make_coordinator, pull_request,
+        start_task, closing_issue_response,
+    )
+
+    consumer = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "consumer" / "state.json")
+    observed = {}
+
+    class Producer(StarterApi):
+        def get(self, route):
+            return super().get(route.replace("/issues/16/comments", "/issues/41/comments"))
+
+        def post(self, route, body):
+            result = super().post(route.replace("/issues/16/comments", "/issues/41/comments"), body)
+            if route.endswith("/issues/16/comments") and body.get("body", "").startswith("/hermes enroll "):
+                # Run downstream before the producer receives its own POST response.
+                if change != "none":
+                    self.closing_issues = []
+                if change == "body_and_edge":
+                    self.pulls[0]["body"] = "Changed without a closing reference."
+                consumer.comments = [deepcopy(result)]
+                consumer.pull.update(deepcopy(self.pulls[0]))
+                consumer.pull["draft"] = False
+                old_graphql = consumer.graphql
+                def graphql(query, variables):
+                    if "closingIssuesReferences" in query:
+                        return closing_issue_response(consumer.pull, nodes=deepcopy(self.closing_issues))
+                    return old_graphql(query, variables)
+                consumer.graphql = graphql
+                observed["consumer_result"] = Coordinator(
+                    consumer, store, clock=lambda: 1790888460,
+                ).run(apply=True)
+                observed["enrollments"] = store.snapshot()["enrollments"]
+            return result
+
+    pull = pull_request(pull_id=160000016, node_id="PR_node_16", head_ref="topic")
+    pull["number"] = 16
+    producer = Producer(pulls=[pull])
+    start_task(tmp_path, producer)
+    producer.task_detail = completed_task(
+        pull_id=pull["id"], node_id=pull["node_id"], head_ref="topic",
+    )
+    result = make_coordinator(tmp_path, producer).run(apply=True)
+    emitted = [c for c in producer.comments if c["body"].startswith("/hermes enroll ")]
+    assert len(emitted) == 1
+    if change == "none":
+        assert result["handed_off"] == 1
+        assert observed["enrollments"]["16"]["authorized_head"] == "a" * 40
+        assert consumer.fix_attempts == 1
+    else:
+        assert result["handed_off"] == 0
+        # Expected RED: downstream must not persist or act on this stale handoff.
+        assert not observed["enrollments"], "Published handoff enrolled changed/unlinked same-SHA PR"
+        assert consumer.fix_attempts == 0
+        assert not consumer.writes and not consumer.graphql_writes
+
+
+def attach_closing_issue_api(api):
+    from test_issue_starter import closing_issue_response, issue_reference
+
+    api.closing_issues = [issue_reference()]
+    original = api.graphql
+
+    def graphql(query, variables):
+        if "closingIssuesReferences" in query:
+            return closing_issue_response(api.pull, nodes=deepcopy(api.closing_issues))
+        return original(query, variables)
+
+    api.graphql = graphql
+
+
+def test_actual_starter_admission_persists_compact_provenance(tmp_path):
+    api, store = actual_starter_consumer(tmp_path, admit=False)
+    emitted = api.comments[0]
+    digest = hashlib.sha256(api.pull["body"].encode("utf-8")).hexdigest()
+    assert emitted["body"] == f"/hermes enroll {HEAD} issue 28 body-sha256 {digest}"
+    Coordinator(api, store, clock=lambda: NOW).run(apply=True)
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert enrollment["issue"] == 16
+    assert enrollment["starter_admission"] == {
+        "version": 1, "issue_number": 28, "head_sha": HEAD,
+        "body_sha256": digest, "comment_id": emitted["id"],
+        "comment_created_at": emitted["created_at"],
+    }
+
+
+@pytest.mark.parametrize("change", [
+    "body", "edge", "draft", "head", "comment_body", "comment_time",
+    "comment_author", "comment_missing", "comment_duplicate", "incomplete",
+])
+@pytest.mark.parametrize("renewal", [False, True])
+def test_starter_admission_final_precommit_aborts_entire_preparation(tmp_path, monkeypatch, change, renewal):
+    from deploy.cloud_coordinator import ApiError, CoordinatorError
+
+    api, store = actual_starter_consumer(tmp_path, admit=False)
+    if renewal:
+        Coordinator(api, store, clock=lambda: NOW).run(apply=True)
+        command = deepcopy(api.comments[0])
+        command["id"] += 100
+        api.comments.append(command)
+    store.record_event(7)
+    before = store.path.read_bytes()
+    baseline = store.snapshot()
+    writes, graphql_writes = deepcopy(api.writes), deepcopy(api.graphql_writes)
+    exported = []
+    monkeypatch.setattr(store, "write_lifecycle_export", lambda **kw: exported.append(kw))
+    worker = Coordinator(api, store, clock=lambda: NOW)
+    original = worker._build_plan
+
+    def changed_after_plan(*, apply):
+        plan = original(apply=apply)
+        assert plan["commands"] and plan["starter_admissions"]
+        if not renewal:
+            assert plan["pull_requests"][0]["repair"]
+        # Other prepared scan work must roll back too, not just the enrollment.
+        store.record_event(8)
+        if change == "body":
+            api.pull["body"] += " changed after planning"
+        elif change == "edge":
+            api.closing_issues = []
+        elif change == "draft":
+            api.pull["draft"] = True
+        elif change == "head":
+            api.pull["head"]["sha"] = RESULT_HEAD
+        elif change == "comment_body":
+            api.comments[-1]["body"] += " "
+        elif change == "comment_time":
+            api.comments[-1]["created_at"] = api.comments[-1]["updated_at"] = "2026-10-01T20:01:00Z"
+        elif change == "comment_author":
+            api.comments[-1]["user"]["id"] = float(OWNER)
+        elif change == "comment_missing":
+            api.comments.clear()
+        elif change == "comment_duplicate":
+            api.comments.append(deepcopy(api.comments[-1]))
+        else:
+            def unavailable(*args):
+                raise ApiError("incomplete canonical evidence")
+            api.graphql = unavailable
+        return plan
+
+    monkeypatch.setattr(worker, "_build_plan", changed_after_plan)
+    with pytest.raises(CoordinatorError):
+        worker.run(apply=True)
+    assert store.path.read_bytes() == before
+    assert StateStore(store.path).snapshot() == store.snapshot()
+    assert store.snapshot() == baseline
+    assert not exported and api.writes == writes and api.graphql_writes == graphql_writes
+
+
+@pytest.mark.parametrize("field,value", [
+    ("version", True), ("version", 2), ("issue_number", True),
+    ("issue_number", 0), ("issue_number", 2147483648), ("issue_number", "28"),
+    ("head_sha", "A" * 40), ("body_sha256", "f" * 63),
+    ("comment_id", 0), ("comment_id", 9100.0),
+    ("comment_created_at", "2026-10-01"), ("unexpected", "unbounded"),
+    (None, None), (None, {}),
+])
+def test_starter_admission_provenance_rejects_malformed_durable_state(tmp_path, field, value):
+    from deploy.cloud_coordinator import CoordinatorError
+
+    api, store, _ = actual_starter_consumer(tmp_path)
+    state = store.snapshot()
+    enrollment = state["enrollments"]["16"]
+    if field is None:
+        enrollment["starter_admission"] = value
+    else:
+        enrollment["starter_admission"][field] = value
+    store.path.write_text(json.dumps(state))
+    with pytest.raises(CoordinatorError, match="Starter admission"):
+        StateStore(store.path).snapshot()
+
+
+def test_admitted_starter_body_report_and_v2_receipt_survive_restart_and_manual_renewal(tmp_path):
+    api, store, action = actual_starter_consumer(tmp_path)
+    original = store.snapshot()["enrollments"]["16"]["starter_admission"]
+    api.pull["body"] += "\n\nFocused checks and independent review report."
+    api.closing_issues = []  # The starter proof is not lifetime PR authority.
+    finish_v2(api, action)
+    api.unresolved = False
+    api.pending_required = True
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+
+    def run():
+        return Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)["pull_requests"][0]
+
+    assert not run()["auto_merge_requested"]
+    assert store.action(action["key"]) is None
+    api.tasks.clear()
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["starter_admission"] == original
+    assert enrollment["authorized_head"] == HEAD and enrollment["attempts"] == 1
+    proofs = enrollment["receipt_proofs"]
+    api.comments.append({
+        "id": 10001, "body": f"/hermes enroll {RESULT_HEAD}",
+        "user": {"id": OWNER}, "created_at": "2026-10-01T20:11:00Z",
+        "updated_at": "2026-10-01T20:11:00Z",
+    })
+    assert not run()["auto_merge_requested"]
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["starter_admission"] == original
+    assert enrollment["receipt_proofs"] == proofs
+    assert enrollment["authorized_head"] == HEAD and enrollment["attempts"] == 1
+    assert enrollment["owner_authorized_head"] == RESULT_HEAD
+    api.pending_required = False
+    assert run()["auto_merge_requested"]
+    assert len(api.graphql_writes) == 1 and api.fix_attempts == 1
