@@ -221,8 +221,9 @@ The adapter reads only these fixed, existing private records:
   result (`status`, `reason`, `sha`, `approval_run_id`, `source_run_id`,
   `deployment_id`) or the worker's exact nine-key version-2 result adding
   integer `version: 2`, `risk: "routine" | "sensitive"`, and `base_sha`.
-  The base must be a lowercase 40-character SHA; only sensitive bootstrap may use
-  null. Unknown or incomplete fields and untyped metadata are rejected. The outer
+  Routine records require a lowercase 40-character base SHA. Sensitive records
+  may use either that SHA format or null, including but not limited to bootstrap.
+  Unknown or incomplete fields and untyped metadata are rejected. The outer
   ledger remains version 1. These metadata do not replace any current deployment
   proof gate. Its deployment ID must equal `latest_id`. The volatile
   `last` poll result may be that terminal record or the producer's exact
