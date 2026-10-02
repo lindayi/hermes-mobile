@@ -31,10 +31,31 @@ requires a fresh owner enrollment command. API errors,
 rate limits, malformed pagination, and incomplete GraphQL review-thread pages
 fail closed; the cursor is advanced only after a complete read.
 
-Only current unresolved review-thread comments and completed failed/timed-out
+Only current unresolved review-thread comments, body-only findings of the latest
+authenticated exact-head Copilot review, and completed failed/timed-out
 `Source checks` workflow runs are eligible repair evidence. It sends at most
-eight findings, clips each finding to 1,000 characters, removes links, and never
-fetches check logs. The Copilot request labels all embedded evidence untrusted,
+eight findings in one combined budget (threads first, then body findings, with one
+slot reserved for a workflow failure), clips each finding to 1,000 characters,
+removes links, and never fetches check logs.
+
+Body-only findings are read by `deploy/review_evidence.py` from the complete
+review collection. Every record, author, and present record ID is validated
+before author filtering; a malformed, tied, pending, stale-head, or foreign-author
+latest review yields no body evidence. Only a single latest Copilot review on the
+current head with a positive record ID is read, and only when it is `COMMENTED` or
+`CHANGES_REQUESTED`. From a `ccr-overview-v2` body, each item of a
+`Previously missed (N)` section is forwarded (including under a `Findings: None`
+headline); a section whose item structure or count cannot be proven is forwarded
+whole as one item. `Open` items are carried by their review threads and are not
+duplicated. No-findings, pending-validation, and resolved-only overviews yield
+nothing. `CHANGES_REQUESTED` prose without structured items (a plain body, or an
+overview with neither `Open` nor `Previously missed` items) is forwarded as one
+summary. Each body finding records the genuine review ID, head SHA, and submission
+time; it never carries a thread ID. Body text is untrusted evidence: it is never
+approval, and approval is never inferred from prose. At most 64 KiB of a body is
+parsed.
+
+The Copilot request labels all embedded evidence untrusted,
 and the text is never interpreted as shell input. A deterministic marker
 deduplicates a request. At most three requests are claimed per enrollment.
 
@@ -57,7 +78,7 @@ until GitHub exposes enough branch, session, or PR evidence to scope them.
 Conflicted, unmergeable, or `behind` pull requests are not sent to a fixer;
 they are reported as needing a separately assigned neutral reconciler.
 Immediately before claiming a repair, the coordinator re-reads its bounded
-thread/check evidence and fences the planned head, branch, main SHA, base binding,
+thread/review/check evidence and fences the planned head, branch, main SHA, base binding,
 mergeability and active tasks. Changed or incomplete evidence suppresses that
 planned request without consuming an attempt; it does not substitute another
 repair or fall back to auto-merge in the same cycle.
@@ -68,7 +89,11 @@ The `cloud-review` gate accepts only a latest `APPROVED` review authored by the
 authenticated Copilot review identity (GitHub ID `175728472`) on the exact current
 head SHA, plus fully paginated review threads that are all resolved. A `COMMENTED`
 review, arbitrary comment, stale approval, author assertion, or truncated thread
-list does not pass. All authenticated reviews must have valid timezone-aware
+list does not pass. Every review record must be an object whose user ID is a positive integer
+(not a boolean or string), and any present record ID must be a unique positive
+integer; these are validated across the complete collection before author
+filtering, so a malformed later record cannot be skipped to reuse an earlier
+approval. All authenticated reviews must have valid timezone-aware
 submission times. Missing, malformed, or naive timestamps fail closed; this
 includes an unsubmitted `PENDING` review, for which GitHub omits `submitted_at`.
 Times are compared as instants, not strings. Every review tied at the latest

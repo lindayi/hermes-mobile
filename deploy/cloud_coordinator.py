@@ -17,6 +17,8 @@ import sys
 import time
 from urllib.parse import quote, unquote, urlencode
 
+from deploy.review_evidence import FINDING_KINDS, body_findings, latest_reviews
+
 
 REPOSITORY = "lindayi/hermes-mobile"
 REPOSITORY_ID = 1399942965
@@ -182,25 +184,17 @@ def copilot_review_valid(head_sha, reviews, threads, *, threads_complete=True,
     if (not _is_sha(head_sha) or not reviews_complete or not isinstance(reviews, list)
             or not _complete_resolved_threads(threads, complete=threads_complete)):
         return False
-    authored = [
-        review for review in reviews
-        if isinstance(review, dict)
-        and isinstance(review.get("user"), dict)
-        and type(review["user"].get("id")) is int
-        and review["user"]["id"] == COPILOT_REVIEWER_ID
-    ]
+    # Every record and author ID is validated before author filtering, so a
+    # malformed later record cannot be skipped to reuse an earlier approval.
     # PENDING reviews have no submitted_at in GitHub's API. They cannot be
     # ordered against an approval; do not invent a time or ignore that evidence.
-    if not authored or any(not _valid_timestamp(review.get("submitted_at"))
-                           for review in authored):
-        return False
-    submitted = [datetime.fromisoformat(review["submitted_at"].replace("Z", "+00:00"))
-                 for review in authored]
-    latest = max(submitted)
+    latest = latest_reviews(reviews, COPILOT_REVIEWER_ID)
     # GitHub timestamp precision can tie submissions. Neither list position nor
     # review ID proves their order: every review at the latest instant must agree.
-    return all(review.get("state") == "APPROVED" and review.get("commit_id") == head_sha
-               for review, timestamp in zip(authored, submitted) if timestamp == latest)
+    return bool(latest) and all(
+        review.get("state") == "APPROVED" and review.get("commit_id") == head_sha
+        for review in latest
+    )
 
 
 def _required_contexts(required):
@@ -311,11 +305,13 @@ def _bounded_evidence(text):
 
 
 def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0,
-                   source_failure=None):
+                   source_failure=None, reviews=None):
     """Build evidence; source_failure comes only from _latest_source_failure.
 
     Raw check_runs cannot authenticate a workflow, even with copied identity
     fields or a same-named GitHub Actions job. They are never repair evidence.
+    Body-only findings come only from the complete review collection's latest
+    authenticated exact-head Copilot review; they are never approval.
     """
     if not _is_sha(head_sha) or type(attempts) is not int or attempts >= REPAIR_LIMIT:
         return None
@@ -333,6 +329,15 @@ def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0,
                     break
         if len(findings) >= MAX_FINDINGS:
             break
+    for item in body_findings(reviews, head_sha, reviewer_id=COPILOT_REVIEWER_ID):
+        if len(findings) >= MAX_FINDINGS:
+            break
+        if item["kind"] in FINDING_KINDS and item["head"] == head_sha:
+            findings.append({
+                "review": item["review"], "head": head_sha,
+                "submitted_at": item["submitted_at"], "kind": item["kind"],
+                "comment": _bounded_evidence(item["text"]),
+            })
     failures = []
     if (isinstance(source_failure, dict)
             and source_failure.get("workflow_id") == SOURCE_WORKFLOW_ID
@@ -1067,7 +1072,7 @@ class Coordinator:
             repair = repair_request(
                 head, snapshot["enrollment"].get("attempts", 0),
                 snapshot["threads"], snapshot["check_runs"], pull_number=number,
-                source_failure=snapshot["source_failure"],
+                source_failure=snapshot["source_failure"], reviews=snapshot["reviews"],
             )
         if repair and not agent_busy and snapshot["enrollment"].get("attempts", 0) < REPAIR_LIMIT:
             repair["issue"] = number
@@ -1095,7 +1100,7 @@ class Coordinator:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
         if snapshot["enrollment"].get("attempts", 0) >= REPAIR_LIMIT and repair_request(
                 head, 0, snapshot["threads"], snapshot["check_runs"], pull_number=number,
-                source_failure=snapshot["source_failure"]):
+                source_failure=snapshot["source_failure"], reviews=snapshot["reviews"]):
             reasons.append(("budget", "The three-repair limit is exhausted; owner attention is required."))
         status_state = "success" if review_ok and authorized else "pending"
         status_action = None
@@ -1222,9 +1227,12 @@ class Coordinator:
         )
         workflows, _ = _workflow_runs(self.api, branch, action["issue"])
         source_failure = _latest_source_failure(workflows, action["head"], branch, action["issue"])
+        reviews = _rest_list(
+            self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
+        )
         fresh = repair_request(
             action["head"], action["attempt"] - 1, threads, check_runs, pull_number=action["issue"],
-            source_failure=source_failure,
+            source_failure=source_failure, reviews=reviews,
         )
         if not fresh or fresh["marker"] != action["marker"] or fresh["body"] != action["body"]:
             # Do not claim stale evidence, nor substitute a new repair/merge in this cycle.

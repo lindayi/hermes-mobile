@@ -104,10 +104,16 @@ _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
     'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
 }
 
+# Issue #39 coordinator dependency candidate bytes; not present in the main baseline.
+_PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE = {
+    'deploy/review_evidence.py': '538fd629a7df4632d89ba8e9d40c3850c452c24de2bc4d39cb39c43d524f7916',
+}
+
 
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR16_COORDINATOR_FIXTURE
-            | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE)
+            | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
+            | _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE)
 
 
 def _source_ci():
@@ -445,7 +451,8 @@ def test_static_python_closure_accepts_declared_initializer_attributes(tmp_path,
 
 
 def test_reviewed_source_fixture_matches_complete_required_contract():
-    pending = {'deploy/cloud_coordinator.py', 'deploy/native_notification_release.py'}
+    pending = {'deploy/cloud_coordinator.py', 'deploy/native_notification_release.py',
+               'deploy/review_evidence.py'}
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
@@ -458,6 +465,10 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path == 'deploy/native_notification_release.py'
     } == _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
+    assert {
+        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
+        if path == 'deploy/review_evidence.py'
+    } == _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
     assert SOURCE_CONTROL_PYTHON_FILES <= set(REQUIRED_FILES)
     assert SOURCE_CONTROL_ROOTS <= SOURCE_CONTROL_PYTHON_FILES
@@ -470,6 +481,17 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
 def test_reviewed_static_python_closure_is_complete_and_has_no_dynamic_imports():
     closure, dynamic_imports, unresolved_imports = _static_python_control_closure()
     assert closure == SOURCE_CONTROL_PYTHON_FILES
+    assert not dynamic_imports
+    assert not unresolved_imports
+
+
+def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
+    closure, dynamic_imports, unresolved_imports = _static_python_control_closure(
+        roots=['deploy/cloud_coordinator.py'],
+    )
+    assert closure == {'deploy/cloud_coordinator.py', 'deploy/review_evidence.py'}
+    assert closure <= set(REQUIRED_FILES)
+    assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in closure)
     assert not dynamic_imports
     assert not unresolved_imports
 
@@ -763,6 +785,7 @@ def test_mutating_each_executable_dependency_blocks(path):
     'backend/session_visibility.py', 'backend/steering.py',
     'backend/task_reminder_presentation.py', 'backend/tool_presentation.py',
     'deploy/backup.py', 'deploy/native_readiness.py', 'deploy/observe_release.py',
+    'deploy/review_evidence.py',
 ])
 def test_new_source_inventory_mutations_keep_the_hold_and_specific_blocker(path):
     evidence = _evidence()

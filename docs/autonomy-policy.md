@@ -65,6 +65,13 @@ independent review enforcement for every sensitive head before status publicatio
 or auto-merge. Matching its fingerprint does **not** certify the intended
 coordinator contract.
 
+The coordinator statically imports `deploy/review_evidence.py` (issue #39), so
+that dependency is an explicit inventory entry under the same
+`coordinator-review-contract` blocker. It is absent from the main baseline; its
+pin and separate test fixture are the pending issue #39 candidate bytes, awaiting
+parent review. They are not independently verified, are not runtime evidence, and
+do not affect the unconditional `pending-source-contract` hold.
+
 The validator therefore adds the explicit `pending-source-contract` blocker in
 **every phase**, even for otherwise complete evidence matching every pinned digest.
 No snapshot can report ready with this source version; the CLI returns nonzero.
