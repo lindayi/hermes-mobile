@@ -151,7 +151,8 @@ def create_unacked_owned_receipt(app, outbox, event, scope):
     return item, receipt_id
 
 
-def setup_controller_release(tmp_path, monkeypatch, *, delivered=True, wire_callbacks=True):
+def setup_controller_release(tmp_path, monkeypatch, *, delivered=True, wire_callbacks=True,
+                             distinct_native_root=False):
     from backend import model_controls
     from test_native_controls_release import fixture as controller_fixture
 
@@ -192,11 +193,15 @@ def setup_controller_release(tmp_path, monkeypatch, *, delivered=True, wire_call
         path.chmod(0o600)
 
     controller_native = args['native']
-    native = FakeNative(old, None, outbox)
+    native_root = old
+    if distinct_native_root:
+        native_root = paths.state / 'releases' / ('d' * 32)
+        shutil.copytree(old, native_root)
+    native = FakeNative(native_root, None, outbox)
 
     def capture(root, bootstrap):
         events.append(('capture', root))
-        return dict(root=str(root), source_hashes=approved, pid=native.pid,
+        return dict(root=str(native_root), source_hashes=approved, pid=native.pid,
                     start_ticks=native.started, caps={'legacy': False})
 
     native.capture = capture
@@ -209,7 +214,8 @@ def setup_controller_release(tmp_path, monkeypatch, *, delivered=True, wire_call
     def run(command, **kwargs):
         base_run(command, **kwargs)
         if command[:2] == ['systemctl', '--user'] and command[2] == 'restart':
-            native.active_root = (paths.state / 'current').resolve()
+            restored = (paths.state / 'current').resolve()
+            native.active_root = native_root if restored == old else restored
             native.pid += 1
             native.started += 1
 
@@ -304,6 +310,46 @@ def test_controller_reopens_after_verified_candidate_rollback(tmp_path, monkeypa
     assert json.loads((paths.state / 'status.json').read_text())['status'] == 'rolled_back'
     with sqlite3.connect(paths.database) as db:
         assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
+
+
+def test_real_rollback_callback_accepts_distinct_native_and_bridge_roots(
+        tmp_path, monkeypatch):
+    app, outbox, native, paths, callbacks, args, bridge_root, event = setup_controller_release(
+        tmp_path, monkeypatch, distinct_native_root=True)
+    native_root = native.active_root
+    assert native_root != bridge_root
+
+    def fail_after_positive_probe(stage):
+        assert callbacks.probe(stage) is True
+        raise RuntimeError('ordinary candidate failure')
+
+    args['probe'] = fail_after_positive_probe
+    with pytest.raises(RuntimeError, match='ordinary candidate failure'):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    assert callbacks.baseline['root'] == str(native_root)
+    assert callbacks.baseline['pid'] == 123
+    assert callbacks.baseline['start_ticks'] == 456
+    assert callbacks.baseline['source_hashes'] == release.APPROVED_CONTROL_HASHES
+    assert callbacks.owner_id == 'owner'
+    assert callbacks.bridge_root == bridge_root
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status['status'] == 'rolled_back'
+    assert callbacks.baseline['gate_owner'] == status['release']
+    assert (paths.state / 'current').resolve() == bridge_root
+    assert native.active_root == native_root
+    event_id = 'async:' + event['delegation_id']
+    assert callbacks.initial_deliveries[event_id] == callbacks.handoff_deliveries[event_id]
+    assert callbacks.initial_receipts[event_id]['acknowledged'] == 1
+    with app.notifications._db() as db:
+        receipt = db.execute(
+            'SELECT r.acknowledged,i.user_id,i.session_id FROM background_receipts r '
+            'JOIN inbox i ON i.id=r.inbox_id WHERE r.event_id=?',
+            (event_id,)).fetchone()
+    assert tuple(receipt) == (1, 'owner', 'chat')
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
+    assert outbox.record('async:' + event['delegation_id'])['state'] == 'delivered'
 
 
 def test_controller_reopens_prepublication_after_positive_rollback_proof(
@@ -421,20 +467,87 @@ def test_bounded_route_snapshot_supplies_receipt_session_binding(tmp_path, monke
     under_owned_lock(paths, lambda: callbacks.capture(baseline))
     second = {**event, 'delegation_id': 'deleg_2'}
     outbox.capture(second, {'summary': 'Second synthetic result'}, route='owned')
-    original = OwnerRoute.resolve
+    from deploy import native_notification_release as callbacks_module
+    original = callbacks_module._resolve_routes
     calls = []
 
-    def resolve(router, routed_event):
-        calls.append(routed_event['delegation_id'])
-        return original(router, routed_event)
+    def resolve(events, home, state):
+        calls.extend(event['delegation_id'] for event in events)
+        return original(events, home, state)
 
-    monkeypatch.setattr(OwnerRoute, 'resolve', resolve)
+    monkeypatch.setattr(callbacks_module, '_resolve_routes', resolve)
     snapshot = callbacks._snapshot(include_receipts=True)
     assert calls == ['deleg_1', 'deleg_2']
     assert {record['session_id'] for record in snapshot['records'].values()} == {'chat'}
-    monkeypatch.setattr(OwnerRoute, 'resolve',
+    monkeypatch.setattr(callbacks_module, '_resolve_routes',
                         lambda *_: pytest.fail('receipt validation rescanned owner routes'))
     callbacks._require_delivered_receipts(snapshot)
+
+
+def test_owned_route_snapshot_reuses_coherent_batched_database_reads(
+        tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from deploy import native_notification_release as callbacks_module
+    import backend.native_notifications as native_notifications
+
+    app, outbox, _, paths, callbacks, _, _, event = setup_controller_release(
+        tmp_path, monkeypatch)
+    monkeypatch.setattr(callbacks_module, 'PAGE_SIZE', 2)
+    opened = {}
+    queries = {}
+    original_callback_readonly = callbacks_module._readonly
+    original_native_readonly = native_notifications.readonly
+
+    class CountedDatabase:
+        def __init__(self, db, name):
+            self.db, self.name = db, name
+
+        def execute(self, *args, **kwargs):
+            queries[self.name] = queries.get(self.name, 0) + 1
+            return self.db.execute(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.db, name)
+
+    @contextmanager
+    def counted(readonly, path):
+        name = Path(path).name
+        opened[name] = opened.get(name, 0) + 1
+        with readonly(path) as db:
+            yield CountedDatabase(db, name)
+
+    @contextmanager
+    def callback_readonly(path):
+        with counted(original_callback_readonly, path) as db:
+            yield db
+
+    @contextmanager
+    def route_readonly(path):
+        with counted(original_native_readonly, path) as db:
+            yield db
+
+    monkeypatch.setattr(callbacks_module, '_readonly', callback_readonly)
+    monkeypatch.setattr(native_notifications, 'readonly', route_readonly)
+
+    def measure_snapshot():
+        opened.clear()
+        queries.clear()
+        snapshot = callbacks._snapshot(include_receipts=True)
+        route_names = ('auth.sqlite', 'runs.sqlite', 'state.db')
+        return snapshot, tuple(opened.get(name, 0) for name in route_names), \
+            tuple(queries.get(name, 0) for name in route_names)
+
+    first, first_opens, first_queries = measure_snapshot()
+    for index in range(2, 9):
+        append_owned_record(outbox, event, 'deleg_%d' % index)
+    many, many_opens, many_queries = measure_snapshot()
+
+    assert first_opens == many_opens == (1, 1, 1)
+    assert first_queries == many_queries
+    assert len(first['records']) == 1
+    assert len(many['records']) == 8
+    assert all(row['route'] == 'owned' and row['session_id'] == 'chat'
+               for row in many['records'].values())
 
 
 def test_receipt_retry_token_change_does_not_break_preservation(tmp_path):
@@ -892,18 +1005,18 @@ def test_snapshot_pages_retained_delivered_history_in_one_transaction(tmp_path, 
         create_owned_ack(app, outbox, routed, scope)
     monkeypatch.setattr(callbacks_module, 'PAGE_SIZE', 3)
     opened, original_readonly = [], callbacks_module._readonly
-    resolved, original_resolve = [], OwnerRoute.resolve
+    resolved, original_resolve = [], callbacks_module._resolve_routes
 
     def readonly(path):
         opened.append(Path(path).name)
         return original_readonly(path)
 
-    def resolve(router, routed_event):
-        resolved.append(routed_event['delegation_id'])
-        return original_resolve(router, routed_event)
+    def resolve(events, home, state):
+        resolved.extend(event['delegation_id'] for event in events)
+        return original_resolve(events, home, state)
 
     monkeypatch.setattr(callbacks_module, '_readonly', readonly)
-    monkeypatch.setattr(OwnerRoute, 'resolve', resolve)
+    monkeypatch.setattr(callbacks_module, '_resolve_routes', resolve)
     snapshot = callbacks._snapshot(include_receipts=True)
     assert opened.count('native-notifications.sqlite') == 1
     assert sorted(resolved) == ['deleg_1', 'deleg_2', 'deleg_3', 'deleg_4']

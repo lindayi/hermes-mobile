@@ -1,5 +1,5 @@
 """Read-only preservation and receipt checks for guarded native releases."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
 import json
@@ -41,6 +41,169 @@ def _readonly(path):
         yield db
     finally:
         db.close()
+
+
+def _resolve_routes(events, home, state):
+    """Route one outbox snapshot against shared per-database read snapshots."""
+    from backend.native_notifications import readonly
+
+    routes = [None] * len(events)
+    keys = set()
+    for index, event in enumerate(events):
+        kind = event.get('type')
+        if kind not in ('async_delegation', 'completion', 'watch_match'):
+            routes[index] = ('quarantined', None)
+        elif kind == 'async_delegation' and not event.get('delegation_id'):
+            routes[index] = ('quarantined', None)
+        elif (event.get('platform') not in (None, '', 'api', 'api_server')
+                or any(event.get(key) for key in
+                       ('scope_id', 'chat_id', 'chat_type', 'thread_id', 'user_id'))):
+            routes[index] = ('foreign', None)
+        else:
+            key = event.get('session_key')
+            if isinstance(key, str) and ':' in key:
+                routes[index] = ('foreign', None)
+            elif isinstance(key, str):
+                keys.add(key)
+            else:
+                routes[index] = ('quarantined', None)
+
+    with ExitStack() as stack:
+        auth = stack.enter_context(readonly(Path(state) / 'auth.sqlite'))
+        owners = auth.execute(
+            "SELECT id FROM users WHERE role='owner' AND profile='default' AND status='ready'"
+        ).fetchall()
+        if (len(owners) != 1 or not isinstance(owners[0]['id'], str)
+                or not owners[0]['id']):
+            raise ValueError('default owner is unavailable')
+        owner_id = owners[0]['id']
+        if not keys:
+            return owner_id, routes
+
+        runs = stack.enter_context(readonly(Path(state) / 'runs.sqlite'))
+        native = stack.enter_context(readonly(Path(home) / 'state.db'))
+        run_rows = {}
+        sorted_keys = sorted(keys)
+        for offset in range(0, len(sorted_keys), 400):
+            page = sorted_keys[offset:offset + 400]
+            placeholders = ','.join('?' for _ in page)
+            found = runs.execute(
+                f'''SELECT upstream_id,session_id,user_id FROM runs
+                    WHERE profile='default' AND upstream_id IN ({placeholders})''',
+                page).fetchall()
+            for row in found:
+                run_rows.setdefault(row['upstream_id'], []).append(row)
+
+        sessions, children = {}, {}
+
+        def session(session_id):
+            if session_id not in sessions:
+                row = native.execute('SELECT * FROM sessions WHERE id=?',
+                                     (session_id,)).fetchone()
+                sessions[session_id] = None if row is None else dict(row)
+            return sessions[session_id]
+
+        def lineage(root):
+            current = root
+            ancestors = set()
+            for _ in range(100):
+                row = session(current)
+                if row is None:
+                    return None
+                parent = row['parent_session_id']
+                if not parent:
+                    break
+                ancestor = session(parent)
+                if (ancestor is None or ancestor['end_reason'] != 'compression'
+                        or parent in ancestors):
+                    return None
+                ancestors.add(current)
+                current = parent
+            else:
+                return None
+
+            chain = set()
+            for _ in range(100):
+                row = session(current)
+                if row is None:
+                    return None
+                try:
+                    config = json.loads(row['model_config'] or '{}')
+                except (TypeError, ValueError):
+                    return None
+                if (row['source'] in ('tool', 'subagent')
+                        or row['profile_name'] not in (None, '', 'default')
+                        or not isinstance(config, dict)
+                        or '_branched_from' in config or '_delegate_from' in config
+                        or current in chain):
+                    return None
+                chain.add(current)
+                if row['end_reason'] != 'compression':
+                    return chain, current
+                if current not in children:
+                    children[current] = [child['id'] for child in native.execute(
+                        '''SELECT id FROM sessions WHERE parent_session_id=?
+                           AND COALESCE(source,'') NOT IN ('tool','subagent')
+                           AND json_extract(COALESCE(model_config,'{}'),
+                               '$._branched_from') IS NULL
+                           AND json_extract(COALESCE(model_config,'{}'),
+                               '$._delegate_from') IS NULL''',
+                        (current,)).fetchall()]
+                if len(children[current]) != 1:
+                    return None
+                current = children[current][0]
+            return None
+
+        lineages = {}
+        for matches in run_rows.values():
+            for row in matches:
+                if isinstance(row['session_id'], str) and row['session_id']:
+                    lineages.setdefault(row['session_id'], None)
+        for root in lineages:
+            lineages[root] = lineage(root)
+
+        lineage_sessions = {
+            session_id
+            for resolved in lineages.values() if resolved is not None
+            for session_id in resolved[0]
+        }
+        deleted = set()
+        sorted_sessions = sorted(lineage_sessions)
+        for offset in range(0, len(sorted_sessions), 400):
+            page = sorted_sessions[offset:offset + 400]
+            placeholders = ','.join('?' for _ in page)
+            deleted.update(row['session_id'] for row in runs.execute(
+                f'''SELECT session_id FROM session_deletions
+                    WHERE user_id=? AND profile='default'
+                    AND session_id IN ({placeholders})''',
+                [owner_id, *page]).fetchall())
+
+        for index, event in enumerate(events):
+            if routes[index] is not None:
+                continue
+            matches = run_rows.get(event['session_key'], ())
+            if len(matches) != 1 or matches[0]['user_id'] != owner_id:
+                routes[index] = ('quarantined', None)
+                continue
+            root = matches[0]['session_id']
+            resolved = lineages.get(root)
+            if resolved is None:
+                routes[index] = ('quarantined', None)
+                continue
+            chain, tip = resolved
+            origin = (event.get('task_id') if event['type'] in
+                      ('completion', 'watch_match') else event.get('origin_session_id'))
+            if (event['type'] in ('completion', 'watch_match')
+                    and event.get('origin_session_id') not in (None, '', origin)):
+                routes[index] = ('quarantined', None)
+            elif (not origin or origin not in chain or root not in chain
+                  or any(event.get(name) and event[name] not in chain
+                         for name in ('origin_ui_session_id', 'parent_session_id'))
+                  or any(session_id in deleted for session_id in chain)):
+                routes[index] = ('quarantined', None)
+            else:
+                routes[index] = ('owned', tip)
+    return owner_id, routes
 
 
 class NativeNotificationCallbacks:
@@ -226,12 +389,7 @@ class NativeNotificationCallbacks:
             raise RuntimeError('Native notification record is unknown or inconsistent') from None
 
     def _snapshot(self, *, expected_owner=None, include_receipts=False):
-        from backend.native_notifications import OwnerRoute
-
         identities = self._file_identities()
-        owner = self._owner()
-        if expected_owner is not None and owner != expected_owner:
-            raise RuntimeError('Native notification owner changed')
         scope = json.dumps(['default', str(self.home)], separators=(',', ':'))
         try:
             with _readonly(self.outbox) as db:
@@ -252,16 +410,22 @@ class NativeNotificationCallbacks:
                 raise ValueError()
             if type(total) is not int or len(rows) != total:
                 raise ValueError()
-            classify = OwnerRoute(self.home, self.state)
-            records = {}
+            pending, events, event_ids = [], [], set()
             for row in rows:
                 if (not isinstance(row['event_id'], str) or not row['event_id']
-                        or row['event_id'] in records):
+                        or row['event_id'] in event_ids):
                     raise ValueError()
+                event_ids.add(row['event_id'])
                 event = json.loads(row['event_json'])
                 if not isinstance(event, dict):
                     raise ValueError()
-                route, session_id = classify.resolve(event)
+                pending.append((row, event))
+                events.append(event)
+            owner, routes = _resolve_routes(events, self.home, self.state)
+            if expected_owner is not None and owner != expected_owner:
+                raise RuntimeError('Native notification owner changed')
+            records = {}
+            for (row, event), (route, session_id) in zip(pending, routes):
                 records[row['event_id']] = self._record(row, route, session_id, event)
             receipt_rows = []
             if include_receipts:
@@ -581,15 +745,16 @@ class NativeNotificationCallbacks:
             return True
         if (self.baseline is None or self.initial_records is None or self.initial_receipts is None
                 or baseline != self.baseline
-                or Path(root).resolve(strict=True) != Path(self.baseline['root']).resolve(strict=True)):
+                or Path(root).resolve(strict=True) != self.bridge_root):
             raise RuntimeError('Native notification rollback baseline is unavailable')
         self._require_controller_gate(self.baseline['gate_owner'])
         self._require_native_state_dir()
         pointer = self.controller / 'current'
         if not pointer.is_symlink() or pointer.resolve(strict=True) != self.bridge_root:
             raise RuntimeError('Native notification rollback bridge binding changed')
-        self._source(root, self.baseline['source_hashes'])
-        pid = self.native.attest(Path(root))
+        native_root = Path(self.baseline['root']).resolve(strict=True)
+        self._source(native_root, self.baseline['source_hashes'])
+        pid = self.native.attest(native_root)
         started = self.native._start_ticks(pid)
         if type(pid) is not int or pid <= 0 or type(started) is not int or started <= 0:
             raise RuntimeError('Native notification rollback process identity is unknown')

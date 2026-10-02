@@ -133,6 +133,38 @@ def test_positive_route_lineage_foreign_and_deletion(tmp_path):
     assert classify(event()) == 'quarantined'
 
 
+def test_batched_route_resolution_preserves_family_and_negative_evidence(tmp_path):
+    from deploy.native_notification_release import _resolve_routes
+
+    home, state = routing_fixture(tmp_path)
+    with sqlite3.connect(home / 'state.db') as db:
+        db.execute("UPDATE sessions SET end_reason='compression' WHERE id='session_a'")
+        db.execute("INSERT INTO sessions VALUES('session_b','session_a','api_server','default','{}',NULL,NULL,NULL,NULL,NULL,NULL)")
+        db.execute("INSERT INTO sessions VALUES('branch','session_a','api_server','default','{\"_branched_from\":\"session_a\"}',NULL,NULL,NULL,NULL,NULL,NULL)")
+    owner, routes = _resolve_routes([
+        event(),
+        {**event('deleg_family'), 'origin_session_id': 'session_b',
+         'parent_session_id': 'session_a'},
+        {**event('deleg_branch'), 'origin_session_id': 'branch'},
+        {**event('deleg_wrong_session'), 'origin_session_id': 'missing'},
+        {**event('deleg_foreign'), 'session_key': 'telegram:chat'},
+        event('deleg_api_alias', platform='api'),
+    ], home, state)
+
+    assert owner == 'owner'
+    assert routes == [
+        ('owned', 'session_b'),
+        ('owned', 'session_b'),
+        ('quarantined', None),
+        ('quarantined', None),
+        ('foreign', None),
+        ('owned', 'session_b'),
+    ]
+    with sqlite3.connect(state / 'runs.sqlite') as db:
+        db.execute("INSERT INTO session_deletions VALUES('owner','default','session_a')")
+    assert _resolve_routes([event()], home, state)[1] == [('quarantined', None)]
+
+
 @pytest.mark.parametrize('field', ['chat_id', 'chat_type', 'thread_id', 'user_id'])
 def test_explicit_foreign_route_is_retained_without_source_claim(tmp_path, field):
     from backend.background_delivery import BackgroundDeliveryService
