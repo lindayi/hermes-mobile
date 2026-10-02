@@ -21,8 +21,9 @@ Prefer small complete changes within the approved issue scope. Preserve existing
 
 The autonomous gate transition is conditional, not active by documentation alone.
 Until the parent operator verifies dependencies and actual current-head evidence and
-changes repository protection, require the existing `source-ci`,
-`integration-tests`, `agent-review`, and independent formal COMMENT review. After
+changes repository protection, require the exact pre-cutover contexts `source-ci`,
+`integration-tests`, `agent-review`, and `issue-link`, plus independent formal
+COMMENT review. After
 activation, routine premerge requires complete hosted `source-ci` (including native),
 `issue-link`, a successful `cloud-review` status, and an actual authenticated Copilot `APPROVED` review on the exact
 current head with complete resolved threads; `COMMENTED` is never approval. Sensitive

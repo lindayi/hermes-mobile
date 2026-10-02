@@ -167,7 +167,8 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         text = ' '.join((ROOT / path).read_text().split())
         for clause in (
             'docs/git-development-spec.md',
-            '`source-ci`, `integration-tests`, and `agent-review` must pass',
+            'the exact pre-cutover contexts `source-ci`, `integration-tests`, '
+            '`agent-review`, and `issue-link` must pass',
             'independent formal COMMENT review',
             'Publish `agent-review` only after verifying the independent review',
             'Publish `integration-tests` only after verifying complete final integration',
@@ -200,7 +201,8 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
     assert 'Full managed integration result, if required' not in template
     for clause in (
         'Mandatory final integration evidence',
-        'before cutover `source-ci`, `integration-tests`, and `agent-review`',
+        'before cutover `source-ci`, `integration-tests`, `agent-review`, and `issue-link`',
+        'staging retains those four plus `cloud-review`',
         'after cutover `source-ci`, `issue-link`, and `cloud-review`',
         'actual authenticated Copilot `APPROVED` review',
         'resolved review threads',
@@ -208,6 +210,27 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         'No owner/admin bypass',
     ):
         assert clause in template, clause
+
+
+def test_all_pre_cutover_context_lists_include_issue_link():
+    context_list = '`source-ci`, `integration-tests`, `agent-review`, and `issue-link`'
+    for path in (
+        'AGENTS.md',
+        '.github/copilot-instructions.md',
+        '.github/pull_request_template.md',
+        'docs/development-workflow.md',
+        'docs/git-development-spec.md',
+        'docs/github-policy.md',
+        'README.md',
+    ):
+        text = ' '.join((ROOT / path).read_text().split())
+        assert context_list in text, path
+
+    policy = ' '.join((ROOT / 'docs/autonomy-policy.md').read_text().split())
+    assert (
+        '| `staging` | `source-ci`, `integration-tests`, `agent-review`, '
+        '`issue-link`, `cloud-review` |'
+    ) in policy
 
 
 def test_agent_instructions_use_the_available_hosted_partition_portably():

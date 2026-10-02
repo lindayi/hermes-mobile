@@ -74,7 +74,8 @@ current head and prove merge-rule recognition. Retain high-risk independent
 review and a usable local fallback. New commits invalidate prior-head evidence.
 
 Main protection remains strict/up-to-date, owner-enforced and thread-resolution
-required, with `source-ci`, `integration-tests`, and `agent-review`. Report
+required, with pre-cutover contexts `source-ci`, `integration-tests`, `agent-review`,
+and `issue-link`. Report
 `integration-tests` only after matching complete hosted and residual host results.
 Do not let an untrusted PR publish these privileged verdicts. Auto-merge can wait
 for these gates; use an exact-head merge precondition for operator-driven merges.

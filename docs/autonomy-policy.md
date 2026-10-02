@@ -32,24 +32,34 @@ attestation using the existing exact certificate identity and authenticated
 certificate extensions. A caller assertion or PR overview is not proof.
 
 `main.files` maps every required source path to its SHA-256 digest over the exact
-read-back bytes. The validator compares those values with a narrow reviewed
-fingerprint set; it does not parse, import, or execute evidence source. The
-fingerprints for the hosted workflow, native/runtime pin and action, complete
-native/host manifests, release verifier, test partition, runtime preflight, and
-deployment controller are from merged main `66a64245b6c9c632d5ca4087e3d1e4e4fa2a4e83`.
-The coordinator fingerprint is from reviewed but still-pending PR16 head
-`403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83`; that pin is not evidence that PR16 is
-merged or that current main contains the coordinator. A final PR16 assembly that
-changes the source requires a follow-up fingerprint update. Readiness remains false
-until required dependencies are merged and genuine current-head evidence is verified;
-the synthetic unit fixtures do not establish readiness.
+read-back bytes. The reviewed main-source baseline is the merged commit
+`f84063e9aed55994c4ae4d3eae14fec922e12929`; its workflow, actions, manifests,
+deployment sources, runtime/test inputs, dependency locks, and patch inputs are
+fingerprinted. This includes the test-environment action and the statically
+reachable local Python control modules rooted at the pinned CI, installer, test
+runner, and release entrypoints. The static closure is a deliberately reviewed
+inventory, not a runtime-discovered allowlist. The focused closure test rejects
+unlisted local imports and recognized dynamic import/loading constructs. If dynamic
+loading or another unbounded local execution path is introduced, readiness remains
+blocked until that dependency closure is independently established; do not silently
+add its digest or claim that this inventory proves arbitrary transitive execution.
 
-Any fingerprint-set update must be independently reviewed against the complete
-source and its intended control flow. The digest comparison is only a consistency
-check: it does not authenticate the evidence file, prove how hashes were collected,
-or turn operator-supplied booleans into cryptographic proof. The operator must
-independently verify authenticated API provenance and the exact current-main
-readback. Readiness requires:
+The coordinator fingerprint remains tied to the reviewed published checkpoint
+`403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83` from pending PR16, not to a candidate
+or the current main tree. That checkpoint does not establish that PR16 is merged,
+and `deploy/cloud_coordinator.py` is absent from merged main at the baseline above.
+Consequently, an actual complete current-main readback is missing a required source
+and readiness remains blocked until final coordinator assembly is merged, its exact
+bytes are reviewed, and the fingerprint is deliberately updated. The synthetic
+fixtures exercise the contract only and do not establish readiness.
+
+Any fingerprint-set or dependency-inventory update must be independently reviewed
+against the complete source, its local control dependencies, and intended control
+flow; additions are never accepted automatically. The digest comparison is only a
+consistency check: it does not authenticate the evidence file, prove how hashes
+were collected, or turn operator-supplied booleans into cryptographic proof. The
+operator must independently verify authenticated API provenance and the exact
+current-main readback. Readiness requires:
 
 - A hosted `native` job on GitHub-hosted Ubuntu that runs the managed native test
   suite, is a direct dependency of the `always()` `source-ci` aggregate, and is
@@ -69,15 +79,20 @@ readback. Readiness requires:
   administrator enforcement and resolved-conversation protection.
 - The fixed repository/coordinator identities and a complete exact-head review
   contract. The reviewed PR must be open, non-draft, based on current main, and its
-  changed-file classification must be complete for that exact head. The latest
-  authenticated Copilot reviewer (ID `175728472`) must have an actual `APPROVED`
-  review on the current PR head, and every review thread and page must be complete
-  and resolved. A `COMMENTED` review, body text, empty overview, or a status without
-  the authenticated review is not approval.
+  changed-file classification must be complete for that exact head. Evidence binds
+  the positive numeric PR-author ID. Every authenticated Copilot review (ID
+  `175728472`) must have a positive review ID and a valid timezone-aware timestamp;
+  latest is selected by chronological timestamp, then review ID as a deterministic
+  tie-breaker. Malformed authenticated review records block. The latest review must
+  be an actual `APPROVED` review on the current PR head, and every review thread and
+  page must be complete and resolved. A `COMMENTED` review, body text, empty
+  overview, or a status without the authenticated review is not approval.
 
 If the PR under review changes sensitive files, readiness additionally requires
 owner ID `5164171` authorization for that exact head and a separate targeted
-independent review of that head. A later commit invalidates both.
+independent review of that head. The targeted reviewer must be a positive numeric
+identity distinct from the owner, PR author, coding-agent identity (`198982749`),
+and mandatory Copilot reviewer (`175728472`). A later commit invalidates both.
 
 ## Policy phases and activation
 
@@ -168,9 +183,10 @@ the verified certificate identity, issuer, repository ID, ref, source/signer SHA
 run invocation URI, trigger and runner environment.
 
 `cloud_review` identifies the current PR repository, base ref/SHA and head SHA,
-open/draft state, complete changed-file classification for its exact head,
-complete review/thread pagination, review authors/states/commit SHAs, resolved
-thread state, and the `cloud-review` status context, state, head and creator ID
+positive `pull_author_id`, open/draft state, complete changed-file classification
+for its exact head, complete review/thread pagination, review IDs, authors, valid
+timestamps, states and commit SHAs, resolved thread state, and the `cloud-review`
+status context, state, head and creator ID
 (status may be omitted only in pre-cutover, as described above).
 For a sensitive change it also carries the exact-head owner authorization and
 targeted-review identities. Consult `deploy/autonomy_policy.py` for the executable

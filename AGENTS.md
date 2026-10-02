@@ -42,8 +42,8 @@ The target routine premerge gate is the complete hosted `source-ci` aggregate
 required native suite), issue-link validation, and exact-head `cloud-review`. This
 target is not active because its documentation or validator exists: until the
 parent operator verifies every dependency and actual current-head evidence and
-changes repository protection, the existing `source-ci`, `integration-tests`, and
-`agent-review` requirements remain authoritative. See
+changes repository protection, the exact pre-cutover contexts `source-ci`,
+`integration-tests`, `agent-review`, and `issue-link` remain authoritative. See
 [`docs/autonomy-policy.md`](docs/autonomy-policy.md). After an authorized cutover,
 the installed/private host-compatibility suite remains required at guarded
 exact-main deployment; never execute untrusted PR code on a production or
@@ -117,10 +117,11 @@ the exact head SHA; any new commit invalidates it. Address findings with follow-
 commits and reply to their actual GitHub threads. Never self-approve, bypass
 protections, or write directly to `main`.
 
-Until the transition is activated, `source-ci`, `integration-tests`, and
-`agent-review` must pass on the exact head SHA. Publish `agent-review` only after
-verifying the independent review of that head. Publish `integration-tests` only
-after verifying complete final integration under the linked development workflow:
+Until the transition is activated, the exact pre-cutover contexts `source-ci`,
+`integration-tests`, `agent-review`, and `issue-link` must pass on the exact head
+SHA. Publish `agent-review` only after verifying the independent review of that
+head. Publish `integration-tests` only after verifying complete final integration
+under the linked development workflow:
 the entire residual host-compatibility suite and the matching hosted `source-ci`
 aggregate must succeed on the same exact head SHA. Record both results and the
 workflow URL. Never use only a hosted subset or only local host tests to claim full

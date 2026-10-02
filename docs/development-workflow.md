@@ -79,9 +79,9 @@ The authoritative [Git development contract](git-development-spec.md)
 runner capabilities on the revision being integrated, not a pending PR's promises.
 
 Until the parent operator verifies the dependencies and exact-head replacement
-evidence and changes repository protection, the existing `source-ci`,
-`integration-tests`, and `agent-review` contexts remain required. In this
-pre-cutover policy, integration requires complete matching hosted results plus all
+evidence and changes repository protection, the exact pre-cutover contexts
+`source-ci`, `integration-tests`, `agent-review`, and `issue-link` remain required.
+In this pre-cutover policy, integration requires complete matching hosted results plus all
 residual host tests listed in `.github/host-tests.json` through
 `scripts/ci_tests.py host` on the same exact head SHA.
 Verify coverage, configuration and successful results against that revision's
@@ -119,8 +119,9 @@ See [GitHub's setup workflow documentation](https://docs.github.com/en/copilot/h
 For behavior changes, record a real focused RED followed by GREEN and preserve
 existing assertions. Describe the baseline, linked issue, acceptance cases,
 scope, risks, exact commands/results, and any unrun checks in the pull request.
-Until cutover, `source-ci`, `integration-tests`, and `agent-review` must pass on the
-exact head SHA before GitHub merge. Require an independent formal COMMENT review
+Until cutover, the exact pre-cutover contexts `source-ci`, `integration-tests`,
+`agent-review`, and `issue-link` must pass on the exact head SHA before GitHub merge.
+Require an independent formal COMMENT review
 for every PR, with actionable inline findings where needed. Publish `agent-review`
 only after verifying the independent review of that head; a COMMENT review alone
 is neither an approval nor a passing status, and does not claim a human approval

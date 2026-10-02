@@ -45,7 +45,7 @@
 - [ ] Until gate cutover, an independent formal COMMENT review is verified on the exact head and `agent-review` is published only after that verification; after cutover, `cloud-review` requires an actual authenticated Copilot `APPROVED` review on the exact head with complete resolved threads. A COMMENTED overview is not approval.
 - [ ] Findings have follow-up fix commits/test evidence and resolved review threads, checked before resolution.
 - [ ] Branch is current with freshly fetched `origin/main`; conflicts preserve both PRs' intents and are retested/reviewed on the resulting head.
-- [ ] Required contexts for the active policy phase are verified on the exact head: before cutover `source-ci`, `integration-tests`, and `agent-review`; after cutover `source-ci`, `issue-link`, and `cloud-review`. New commits invalidate old-head evidence.
+- [ ] Required contexts for the active policy phase are verified on the exact head: before cutover `source-ci`, `integration-tests`, `agent-review`, and `issue-link`; staging retains those four plus `cloud-review`; after cutover `source-ci`, `issue-link`, and `cloud-review`. New commits invalidate old-head evidence.
 - [ ] Before cutover, complete hosted `source-ci` and residual host coverage pass on the same head; after cutover, installed/private host compatibility remains a guarded exact-main deployment gate, not PR execution.
 - [ ] No owner/admin bypass, self-approval, fabricated approvals/statuses/identities, or direct writes to `main`.
 - [ ] Any required high-risk/semantic-conflict targeted review is complete.

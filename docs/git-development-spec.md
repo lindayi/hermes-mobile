@@ -11,9 +11,10 @@ source import and subsequent changes use protected pull requests.
 ## Required observable outcomes
 
 1. Repository `lindayi/hermes-mobile` exists; remote source readback matches commits.
-2. Until an owner-verified gate transition is activated, main requires
-   `source-ci`, `integration-tests`, `agent-review`, an up-to-date branch and
-   resolved review conversations; protections apply to administrators. The target
+2. Until an owner-verified gate transition is activated, main requires the exact
+   pre-cutover contexts `source-ci`, `integration-tests`, `agent-review`, and
+   `issue-link`, an up-to-date branch and resolved review conversations; protections
+   apply to administrators. The target
    post-cutover routine premerge policy is `source-ci`, `issue-link`, and
    exact-head `cloud-review`, with strict/up-to-date main and resolved
    conversations. The target is not active merely because it is specified or validated.

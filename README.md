@@ -9,8 +9,9 @@ Canonical source: https://github.com/lindayi/hermes-mobile
 
 Read [AGENTS.md](AGENTS.md) before editing. Every task uses a branch/worktree and a
 GitHub pull request. GitHub reviews carry findings; fixes are separate follow-up
-commits. Main requires `source-ci`, `integration-tests`, `agent-review`, resolved
-review threads and an up-to-date branch, including for the repository owner.
+commits. Before an authorized gate transition, main requires `source-ci`,
+`integration-tests`, `agent-review`, and `issue-link`, plus resolved review threads
+and an up-to-date branch, including for the repository owner.
 
 The author can merge their own PR after these gates pass. GitHub does not allow
 self-approval, so independent reviewer agents post formal COMMENT reviews and the
