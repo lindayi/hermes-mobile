@@ -33,6 +33,9 @@ REPOSITORY_ID = 1399942965
 OWNER_ID = 5164171
 COPILOT_REVIEWER_ID = 175728472
 SOURCE_WORKFLOW_ID = 372155405
+COPILOT_WORKFLOW_ID = 372426410
+COPILOT_WORKFLOW_PATH = "dynamic/copilot-swe-agent/copilot"
+COPILOT_AGENT_ID = 198982749
 MAIN_BRANCH = "main"
 REPAIR_LIMIT = 3
 MAX_RECEIPT_POLLS = 3
@@ -218,10 +221,18 @@ def copilot_review_valid(head_sha, reviews, threads, *, threads_complete=True,
         and type(review["user"].get("id")) is int
         and review["user"]["id"] == COPILOT_REVIEWER_ID
     ]
-    if not authored:
+    # PENDING reviews have no submitted_at in GitHub's API. They cannot be
+    # ordered against an approval; do not invent a time or ignore that evidence.
+    if not authored or any(not _valid_timestamp(review.get("submitted_at"))
+                           for review in authored):
         return False
-    latest = max(authored, key=lambda review: str(review.get("submitted_at") or ""))
-    return latest.get("state") == "APPROVED" and latest.get("commit_id") == head_sha
+    submitted = [datetime.fromisoformat(review["submitted_at"].replace("Z", "+00:00"))
+                 for review in authored]
+    latest = max(submitted)
+    # GitHub timestamp precision can tie submissions. Neither list position nor
+    # review ID proves their order: every review at the latest instant must agree.
+    return all(review.get("state") == "APPROVED" and review.get("commit_id") == head_sha
+               for review, timestamp in zip(authored, submitted) if timestamp == latest)
 
 
 def _required_contexts(required):
@@ -290,19 +301,26 @@ def required_checks_pass(required, check_runs, statuses, *, complete):
     return True
 
 
+def _pull_merge_eligible(pull, current_main_sha):
+    """Share pull-level eligibility between planning and the last mutation fence."""
+    if not isinstance(pull, dict):
+        return False
+    base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
+    return (pull.get("state") == "open" and pull.get("merged") is False
+            and pull.get("draft") is False and pull.get("mergeable") is True
+            and pull.get("mergeable_state") not in {"behind", "dirty", "unknown", "blocked"}
+            and base.get("ref") == MAIN_BRANCH and base.get("sha") == current_main_sha
+            and _is_sha(current_main_sha))
+
+
 def eligible_for_auto_merge(pull, *, current_main_sha, required_checks, check_runs,
                             statuses, checks_complete, review_valid, sensitive_authorized,
                             cloud_review_required, cloud_review_status_owned,
                             up_to_date_required, conversation_resolution_required,
                             agent_running):
     """Pure eligibility gate; GitHub still enforces protected auto-merge."""
-    if not isinstance(pull, dict):
-        return False
-    base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
-    if (pull.get("draft") is not False or pull.get("mergeable") is not True
-            or pull.get("mergeable_state") in {"behind", "dirty", "unknown", "blocked"}
-            or base.get("ref") != MAIN_BRANCH or base.get("sha") != current_main_sha
-            or not _is_sha(current_main_sha) or not review_valid or not sensitive_authorized
+    if (not _pull_merge_eligible(pull, current_main_sha)
+            or not review_valid or not sensitive_authorized
             or not cloud_review_required or not cloud_review_status_owned
             or not up_to_date_required or not conversation_resolution_required
             or agent_running):
@@ -324,8 +342,13 @@ def _bounded_evidence(text):
     return text[:MAX_FINDING_CHARS]
 
 
-def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0):
-    """Make one bounded Copilot request from current unresolved public evidence."""
+def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0,
+                   source_failure=None):
+    """Build evidence; source_failure comes only from _latest_source_failure.
+
+    Raw check_runs cannot authenticate a workflow, even with copied identity
+    fields or a same-named GitHub Actions job. They are never repair evidence.
+    """
     if not _is_sha(head_sha) or type(attempts) is not int or attempts >= REPAIR_LIMIT:
         return None
     findings = []
@@ -343,17 +366,14 @@ def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0):
         if len(findings) >= MAX_FINDINGS:
             break
     failures = []
-    for check in check_runs if isinstance(check_runs, list) else ():
-        if (not isinstance(check, dict) or check.get("name") != "Source checks"
-                or check.get("status") != "completed"
-                or check.get("conclusion") not in {"failure", "timed_out"}
-                or check.get("head_sha", head_sha) != head_sha):
-            continue
-        app = check.get("app")
-        if isinstance(app, dict) and app.get("name") not in {"GitHub Actions", "GitHub Actions (bot)"}:
-            continue
-        failures.append({"check": "Source checks", "run_id": str(check.get("id", ""))[:40],
-                         "conclusion": check["conclusion"]})
+    if (isinstance(source_failure, dict)
+            and source_failure.get("workflow_id") == SOURCE_WORKFLOW_ID
+            and source_failure.get("repository_id") == REPOSITORY_ID
+            and source_failure.get("head_sha") == head_sha
+            and source_failure.get("pull_number") == pull_number):
+        failures.append(source_failure)
+    # Reserve one of the shared slots for the authenticated workflow failure.
+    findings = findings[:MAX_FINDINGS - len(failures)]
     if not findings and not failures:
         return None
     evidence = json.dumps({"review_findings": findings, "failed_source_checks": failures},
@@ -482,16 +502,16 @@ def _decode_pages(output, collection=None):
         value, end = decoder.raw_decode(output, offset)
         values.append(value)
         offset = end
-    if len(values) == 1 and isinstance(values[0], list):
-        return values[0]
+    if not values:
+        raise ValueError("Missing inventory page")
     result = []
     for value in values:
         if isinstance(value, list):
             result.extend(value)
         elif isinstance(value, dict) and collection and isinstance(value.get(collection), list):
             result.extend(value[collection])
-        elif value is not None:
-            result.append(value)
+        else:
+            raise ValueError("Malformed inventory page")
     return result
 
 
@@ -598,19 +618,60 @@ def _review_thread_complete(threads_complete, threads):
     return _complete_resolved_threads(threads, complete=threads_complete)
 
 
+def _branch_rules(api):
+    """Read bounded REST pages; only a short, well-formed page proves completion."""
+    rules = []
+    for page in range(1, MAX_PAGES + 1):
+        values = api.get(
+            f"repos/{REPOSITORY}/rules/branches/{MAIN_BRANCH}?per_page=100&page={page}"
+        )
+        if (not isinstance(values, list) or len(values) > 100
+                or any(not isinstance(rule, dict)
+                       or not isinstance(rule.get("type"), str) or not rule["type"]
+                       for rule in values)):
+            raise ApiError("GitHub branch rules pagination was malformed")
+        rules.extend(values)
+        if len(values) < 100:
+            return rules
+    raise ApiError("GitHub branch rules pagination exceeded the safety bound")
+
+
 def _required_checks(api):
     required, available = [], False
+    malformed = False
     up_to_date_required = False
     conversation_resolution_required = False
+
+    def add_checks(checks):
+        nonlocal malformed
+        if not isinstance(checks, list):
+            malformed = True
+            return
+        for check in checks:
+            normalized = _required_contexts([check])
+            if (not normalized or not normalized[0]["context"].strip()
+                    or (normalized[0]["app_id"] is not None
+                        and (type(normalized[0]["app_id"]) is not int
+                             or normalized[0]["app_id"] <= 0))):
+                malformed = True
+            else:
+                required.extend(normalized)
+
     protection_root_route = f"repos/{REPOSITORY}/branches/{MAIN_BRANCH}/protection"
     try:
         protection_root = api.get(protection_root_route)
         if isinstance(protection_root, dict):
             available = True
             conversation = protection_root.get("required_conversation_resolution")
+            if conversation is not None and (
+                    not isinstance(conversation, dict)
+                    or type(conversation.get("enabled")) is not bool):
+                malformed = True
             conversation_resolution_required = (
                 isinstance(conversation, dict) and conversation.get("enabled") is True
             )
+        else:
+            malformed = True
     except ApiError as exc:
         if exc.status != 404:
             raise
@@ -618,42 +679,43 @@ def _required_checks(api):
     try:
         protection = api.get(protection_route)
         if isinstance(protection, dict):
-            required.extend(protection.get("checks") or protection.get("contexts") or [])
+            add_checks(protection.get("checks", []))
+            add_checks(protection.get("contexts", []))
+            if (type(protection.get("strict")) is not bool
+                    or not {"checks", "contexts"}.intersection(protection)):
+                malformed = True
             up_to_date_required = protection.get("strict") is True
             available = True
+        else:
+            malformed = True
     except ApiError as exc:
         if exc.status != 404:
             raise
-    rules_route = f"repos/{REPOSITORY}/rules/branches/{MAIN_BRANCH}"
-    malformed = False
-    try:
-        rules = api.get(rules_route)
-        if isinstance(rules, list):
-            available = True
-            for rule in rules:
-                if isinstance(rule, dict) and rule.get("type") == "pull_request":
-                    params = rule.get("parameters")
-                    resolution = (params.get("required_review_thread_resolution")
-                                  if isinstance(params, dict) else None)
-                    if type(resolution) is not bool:
-                        malformed = True
-                    elif resolution:
-                        conversation_resolution_required = True
-                    continue
-                if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
-                    continue
-                params = rule.get("parameters")
-                if isinstance(params, dict):
-                    required.extend(params.get("required_status_checks") or [])
-                    up_to_date_required = (
-                        up_to_date_required
-                        or params.get("strict_required_status_checks_policy") is True
-                    )
-    except ApiError as exc:
-        if exc.status != 404:
-            raise
+    rules = _branch_rules(api)
+    available = True
+    for rule in rules:
+        if rule.get("type") == "pull_request":
+            params = rule.get("parameters")
+            resolution = (params.get("required_review_thread_resolution")
+                          if isinstance(params, dict) else None)
+            if type(resolution) is not bool:
+                malformed = True
+            elif resolution:
+                conversation_resolution_required = True
+            continue
+        if rule.get("type") != "required_status_checks":
+            continue
+        params = rule.get("parameters")
+        if (not isinstance(params, dict)
+                or type(params.get("strict_required_status_checks_policy")) is not bool):
+            malformed = True
+            continue
+        add_checks(params.get("required_status_checks"))
+        up_to_date_required = (
+            up_to_date_required or params["strict_required_status_checks_policy"]
+        )
     if malformed:
-        # A malformed pull-request rule leaves the merge policy unproven.
+        # Never authorize with the valid subset of an unreadable policy.
         available = False
         conversation_resolution_required = False
     unique = {}
@@ -681,17 +743,38 @@ def _workflow_runs(api, branch, pull_number):
     return matches, pull_bound
 
 
+def _cloud_agent_active(runs, branch):
+    # Verified dynamic workflow identity, not its changeable display name.
+    # A run on an earlier SHA can still be working on this branch.
+    return any(
+        isinstance(run, dict) and run.get("head_branch") == branch
+        and run.get("workflow_id") == COPILOT_WORKFLOW_ID
+        and run.get("path") == COPILOT_WORKFLOW_PATH
+        and run.get("event") == "dynamic"
+        and isinstance(run.get("actor"), dict)
+        and run["actor"].get("id") == COPILOT_AGENT_ID
+        and all(isinstance(run.get(field), dict)
+                and run[field].get("id") == REPOSITORY_ID
+                for field in ("repository", "head_repository"))
+        and run.get("status") != "completed"
+        for run in runs
+    )
+
+
 def _latest_source_failure(runs, head_sha, branch, pull_number):
     candidates = [
         run for run in runs
-        if run.get("name") == "Source checks"
+        if isinstance(run, dict) and run.get("name") == "Source checks"
         and run.get("workflow_id") == SOURCE_WORKFLOW_ID
+        and all(isinstance(run.get(field), dict)
+                and run[field].get("id") == REPOSITORY_ID
+                for field in ("repository", "head_repository"))
         and run.get("head_branch") == branch
         and run.get("head_sha") == head_sha
         and any(isinstance(pr, dict) and pr.get("number") == pull_number
                 for pr in run.get("pull_requests", []))
-        and type(run.get("run_number")) is int
-        and type(run.get("run_attempt")) is int
+        and all(type(run.get(field)) is int and run[field] > 0
+                for field in ("id", "run_number", "run_attempt"))
     ]
     if not candidates:
         return None
@@ -702,15 +785,25 @@ def _latest_source_failure(runs, head_sha, branch, pull_number):
             or latest.get("conclusion") not in {"failure", "timed_out"}):
         return None
     return {
-        "id": latest.get("id"), "name": "Source checks", "head_sha": head_sha,
-        "status": latest["status"], "conclusion": latest["conclusion"],
-        "app": {"name": "GitHub Actions"},
+        "check": "Source checks", "workflow_id": SOURCE_WORKFLOW_ID,
+        "repository_id": REPOSITORY_ID, "head_sha": head_sha,
+        "head_branch": branch, "pull_number": pull_number,
+        "run_id": str(latest["id"]), "run_number": latest["run_number"],
+        "run_attempt": latest["run_attempt"], "conclusion": latest["conclusion"],
     }
 
 
-def _contains_marker(comments, marker):
-    return any(isinstance(comment, dict) and isinstance(comment.get("body"), str)
-               and marker in comment["body"] for comment in comments)
+def _contains_marker(comments, marker, *, expected_body):
+    # _identity requires OWNER_ID for every cycle and every coordinator write.
+    # A copied marker, or an edited body retaining it, is not publication proof.
+    if (not isinstance(marker, str) or not marker
+            or not isinstance(expected_body, str) or marker not in expected_body):
+        return False
+    return any(isinstance(comment, dict)
+               and isinstance(comment.get("user"), dict)
+               and type(comment["user"].get("id")) is int
+               and comment["user"]["id"] == OWNER_ID
+               and comment.get("body") == expected_body for comment in comments)
 
 
 def _task_scoped(task, snapshot):
@@ -754,23 +847,36 @@ def _task_terminal(task):
 def _other_task_active(tasks, snapshot):
     head = snapshot["pull"]["head"]["ref"]
     for task in tasks:
-        if not isinstance(task, dict) or not _task_terminal(task):
-            artifacts = task.get("artifacts") if isinstance(task, dict) else None
-            branches = [item["data"] for item in artifacts or ()
-                        if isinstance(item, dict) and item.get("type") == "branch"
-                        and isinstance(item.get("data"), dict)]
-            sessions = task.get("sessions") if isinstance(task, dict) else None
-            branches.extend(session for session in sessions or ()
-                            if isinstance(session, dict) and session.get("head_ref"))
-            pull_ids = [item["data"]["id"] for item in artifacts or ()
-                        if isinstance(item, dict) and item.get("type") == "pull"
-                        and isinstance(item.get("data"), dict)
-                        and isinstance(item["data"].get("id"), int)]
-            pull_id = snapshot["pull"].get("id")
-            if (any(item.get("head_ref") == head for item in branches)
-                    or (pull_id is not None and pull_id in pull_ids)
-                    or (not branches and (not pull_ids or pull_id is None))):
+        if not isinstance(task, dict):
+            return True
+        if _task_terminal(task):
+            continue
+        artifacts = task.get("artifacts", [])
+        sessions = task.get("sessions", [])
+        if not isinstance(artifacts, list) or not isinstance(sessions, list):
+            return True
+        branches, pull_ids = list(sessions), []
+        for item in artifacts:
+            if (not isinstance(item, dict) or item.get("provider") != "github"
+                    or not isinstance(item.get("data"), dict)):
                 return True
+            data = item["data"]
+            if item.get("type") == "branch":
+                branches.append(data)
+            elif item.get("type") == "pull" and type(data.get("id")) is int and data["id"] > 0:
+                pull_ids.append(data["id"])
+            else:
+                return True
+        # A truthy partial object is not proof that a task belongs elsewhere.
+        if any(not isinstance(item, dict) or any(
+                not isinstance(item.get(field), str) or not item[field].strip()
+                for field in ("head_ref", "base_ref")) for item in branches):
+            return True
+        pull_id = snapshot["pull"].get("id")
+        if (any(item["head_ref"] == head for item in branches)
+                or (pull_id is not None and pull_id in pull_ids)
+                or (not branches and (not pull_ids or pull_id is None))):
+            return True
     return False
 
 
@@ -969,8 +1075,6 @@ class Coordinator:
         source_failure = _latest_source_failure(
             workflows, sha, head.get("ref", ""), number,
         )
-        if source_failure:
-            check_runs.append(source_failure)
         latest_status, status_is_owned = _status_owned(
             statuses, "cloud-review", OWNER_ID,
         )
@@ -983,6 +1087,7 @@ class Coordinator:
             "up_to_date_required": up_to_date_required,
             "conversation_resolution_required": conversation_resolution_required,
             "check_runs": check_runs, "statuses": statuses,
+            "source_failure": source_failure,
             "comments": comments, "workflows": workflows, "tasks": tasks,
             "pull_workflows": pull_workflows,
             "status": latest_status, "status_owned": status_is_owned,
@@ -1005,14 +1110,10 @@ class Coordinator:
                 current, owned = _status_owned(
                     snapshot["statuses"], "cloud-review", OWNER_ID,
                 )
-                try:
-                    written_at = datetime.fromisoformat(
-                        current["created_at"].replace("Z", "+00:00")
-                    ).timestamp()
-                except (KeyError, TypeError, ValueError, AttributeError):
-                    written_at = 0
+                watermark = action.get("status_id_watermark")
                 if (current and owned and current.get("state") == action.get("state")
-                        and written_at >= action.get("created_at", float("inf")) - 2):
+                        and type(watermark) is int and watermark >= 0
+                        and type(current.get("id")) is int and current["id"] > watermark):
                     if apply:
                         self.store.update_action(key, "sent")
                 elif status == "sending" and apply:
@@ -1119,7 +1220,9 @@ class Coordinator:
                             busy = True
                 else:
                     busy = True
-        return busy or _other_task_active(snapshot["tasks"], snapshot)
+        return (busy or _other_task_active(snapshot["tasks"], snapshot)
+                or _cloud_agent_active(snapshot.get("workflows", []),
+                                       snapshot["pull"]["head"]["ref"]))
 
     def _now_string(self):
         return datetime.fromtimestamp(self.clock(), timezone.utc).isoformat(
@@ -1474,7 +1577,7 @@ class Coordinator:
             elif snapshot["threads_complete"]:
                 repair = repair_request(
                     head, attempts, snapshot["threads"], snapshot["check_runs"],
-                    pull_number=number,
+                    pull_number=number, source_failure=snapshot["source_failure"],
                 )
         if repair and not agent_busy and snapshot["enrollment"].get("attempts", 0) < REPAIR_LIMIT:
             repair.setdefault("issue", number)
@@ -1515,10 +1618,11 @@ class Coordinator:
         if agent_busy:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
         budget_needed = (
-            not agent_busy and snapshot["pull"].get("draft") is not True and not neutral_blocker
+            snapshot["scoped"] and not agent_busy
+            and snapshot["pull"].get("draft") is not True and not neutral_blocker
             and (needs_reconciliation or repair_request(
                 head, 0, snapshot["threads"], snapshot["check_runs"],
-                pull_number=number,
+                pull_number=number, source_failure=snapshot["source_failure"],
             ))
         )
         if snapshot["enrollment"].get("attempts", 0) >= REPAIR_LIMIT and budget_needed:
@@ -1637,9 +1741,9 @@ class Coordinator:
 
     def _dispatch_task(self, action):
         key = action["key"]
-        current = self._fence_pull(
-            action["issue"], action["head"], action.get("main_sha"),
-        )
+        if not _is_sha(action.get("main_sha")):
+            return "superseded"
+        current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
         if not current:
             return "superseded"
         if current.get("draft") is not False:
@@ -1662,9 +1766,33 @@ class Coordinator:
                and item.get("status") in {"sending", "uncertain", "sent"}
                for item in self.store.actions().values()):
             return "agent-running"
+        threads, complete = collect_review_threads(self.api, action["issue"])
+        if not complete:
+            return "superseded"
+        check_runs = _rest_list(
+            self.api,
+            f"repos/{REPOSITORY}/commits/{action['head']}/check-runs?filter=latest&per_page=100",
+            collection="check_runs",
+        )
+        workflows, _ = _workflow_runs(self.api, branch, action["issue"])
+        source_failure = _latest_source_failure(workflows, action["head"], branch, action["issue"])
+        fresh = repair_request(
+            action["head"], action["attempt"] - 1, threads, check_runs, pull_number=action["issue"],
+            source_failure=source_failure,
+        )
+        if not fresh or fresh["marker"] != action["marker"] or fresh["body"] != action["body"]:
+            # Do not claim stale evidence, nor substitute a new repair/merge in this cycle.
+            return "superseded"
         tasks = _rest_list(self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
                            collection="tasks")
-        if _other_task_active(tasks, {"pull": current}):
+        current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
+        if not current or current["head"].get("ref") != branch:
+            return "superseded"
+        reconciliation = _reconciliation_reasons(current)
+        if reconciliation:
+            return reconciliation[0][0]
+        if (_other_task_active(tasks, {"pull": current})
+                or _cloud_agent_active(workflows, branch)):
             return "agent-running"
         claimed = self.store.claim_action(key, action)
         if not claimed:
@@ -1716,7 +1844,23 @@ class Coordinator:
 
     def _publish_status(self, action, snapshot, actor_id):
         key = action["key"]
-        if not self.store.claim_action(key, action):
+        existing = self.store.action(key)
+        if existing and existing.get("status") != "blocked":
+            return existing.get("status")
+        # Capture all existing same-context IDs before the durable claim, not a
+        # wall-clock approximation. Never retrofit proof onto an ambiguous claim.
+        statuses = _rest_list(
+            self.api, f"repos/{REPOSITORY}/commits/{action['head']}/statuses?per_page=100",
+        )
+        if (not isinstance(statuses, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get("context"), str)
+                or (item["context"] == "cloud-review"
+                    and (type(item.get("id")) is not int or item["id"] <= 0))
+                for item in statuses)):
+            raise CoordinatorError("Preclaim status identity inventory was incomplete")
+        watermark = max((item["id"] for item in statuses
+                         if item["context"] == "cloud-review"), default=0)
+        if not self.store.claim_action(key, action | {"status_id_watermark": watermark}):
             existing = self.store.action(key)
             if not existing:
                 raise CoordinatorError("Planned status generation could not be claimed")
@@ -1841,7 +1985,9 @@ class Coordinator:
                 current_plan["reasons"] + ["head-or-base-race"],
             ))
             return current_plan
-        if not isinstance(pull, dict) or not pull.get("node_id"):
+        if (not _pull_merge_eligible(pull, action.get("main_sha"))
+                or pull.get("number") != action["issue"] or not pull.get("node_id")
+                or pull["node_id"] != current["pull"].get("node_id")):
             self.store.update_action(key, "blocked")
             current_plan["auto_merge_eligible"] = False
             current_plan["merge_action"] = None
@@ -1905,7 +2051,9 @@ class Coordinator:
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") not in {"sending", "uncertain"}):
                     continue
-                found = _contains_marker(comments, entry.get("marker", ""))
+                found = _contains_marker(
+                    comments, entry.get("marker"), expected_body=entry.get("body"),
+                )
                 self.store.update_outbox(key, "sent" if found else "uncertain")
             for key, entry in self.store.snapshot()["outbox"].items():
                 if (entry.get("issue") != snapshot["issue"]
@@ -1915,8 +2063,8 @@ class Coordinator:
                     self.store.update_outbox(key, "superseded")
                     continue
                 marker = entry.get("marker")
-                if isinstance(marker, str) and marker and _contains_marker(comments, marker):
-                    # The public comment already exists; never post it twice.
+                if _contains_marker(comments, marker, expected_body=entry.get("body")):
+                    # The authenticated, unaltered comment exists; do not duplicate it.
                     self.store.update_outbox(key, "sent")
                     continue
                 self.store.update_outbox(key, "sending")
@@ -1928,9 +2076,10 @@ class Coordinator:
                 except CoordinatorError:
                     self.store.update_outbox(key, "uncertain")
                     continue
-                self.store.update_outbox(
-                    key, "sent" if isinstance(response, dict) and response.get("id") else "uncertain",
-                )
+                proven = (isinstance(response, dict)
+                          and type(response.get("id")) is int and response["id"] > 0
+                          and _contains_marker([response], marker, expected_body=entry["body"]))
+                self.store.update_outbox(key, "sent" if proven else "uncertain")
             action = pr_plan["repair"]
             if action:
                 result = self._dispatch_task(action)
