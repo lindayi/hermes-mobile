@@ -71,10 +71,10 @@ current trusted `main` SHA. The request uses `create_pull_request: true` and
 plain-paragraph PR description with a literal `Closes #N` reference and all
 required evidence fields from the repository template, managed strict TDD, exact
 test/review evidence, cloud-only execution, and no merge, production access,
-settings, or permissions changes. PR descriptions must contain no Markdown
-headings, lists, links, code, quotes, HTML, or inline markup because the
-conservative closing-reference parser rejects unsupported markup throughout the
-body. Optional rich evidence belongs in comments, not the description.
+settings, or permissions changes. Keep the plain-paragraph description and
+literal closing reference for readability; neither its punctuation nor its
+contents prove issue linkage. Optional rich evidence belongs in comments, not
+the description.
 
 The worker polls only the persisted task ID. It requires the task's repository
 and owner/creator identity, a completed task with a bounded positive
@@ -84,16 +84,17 @@ includes `sessions` (in the second `allOf` member of its OpenAPI response schema
 unlike the task-list summary. Coordinator continuation binds the persisted task
 to that authenticated session's identity, dispatch nonce, branch and completion
 time, then validates the exact result receipt. `session_count` alone is not
-evidence that tests or reviews passed. It checks the PR's repository,
-main target, branch, open state, issue-closing reference, and exact current head
-before any handoff. Closing references are accepted only in a conservative plain
-Markdown subset. Raw HTML, links/images, code, lists/quotes (including lazy
-continuations), escapes, and other unsupported markup fail closed for the whole
-body, even if a separate valid directive exists. Complete same-line inline HTML
-comments within a text paragraph are ignored without joining surrounding text;
-line-start comments are HTML blocks, not inline text (CommonMark §4.6). Use the
-plain-paragraph repository template for every PR description, rather than
-waiting for a rich description to be rejected. Include baseline, scope,
+evidence that tests or reviews passed. For each handoff it reads the actual
+`PullRequest.closingIssuesReferences` GraphQL connection from the fixed
+repository, follows every bounded page, and requires exactly one matching
+issue number and repository ID. It binds the GraphQL repository and PR node,
+number, head branch and SHA, base branch, and body to the detailed REST pull.
+Null, partial, malformed, duplicate, inconsistent, or unbounded results fail
+closed. Every page must describe the same PR snapshot, and a fresh REST pull
+must match after collection. The body digest and exact head are reserved with
+the handoff and rechecked before and after readiness and enrollment operations;
+linkage is never cached across a changed body or head. There is no fallback to
+description parsing or caller-supplied linkage flags. Include baseline, scope,
 acceptance, RED/GREEN, exact tests and review evidence, rollout, and
 merged-versus-deployed state. Unsupported source claims remain blocked. No
 renderer or additional runtime dependency is introduced.
