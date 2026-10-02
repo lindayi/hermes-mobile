@@ -322,9 +322,14 @@ never rewritten. Only a positively authorized result head can use this exception
 and the neutral task consumes the existing combined three-attempt budget. Once that
 neutral task is positively accepted, its task ID and the superseded predecessor
 handoff are committed in one StateStore mutation. An ambiguous neutral POST instead
-leaves an uncertain claim as the lock and atomically supersedes the predecessor;
-neither the claim nor the predecessor can trigger a duplicate POST or a false
-review-handoff exhaustion. Superseded completed handoffs are terminal for retirement,
+leaves an uncertain claim as the lock and atomically supersedes the predecessor.
+Restart recovery resolves pending sending/uncertain ownership before advancing any
+predecessor, irrespective of action iteration order, then reads the updated prepared
+state rather than replaying stale scan records. This also holds when the accepted
+remote task advanced the PR head before its acceptance metadata was persisted:
+no predecessor wait is charged and neither claim nor predecessor can trigger a
+duplicate POST or a false `execution_exhausted` lifecycle event. Superseded completed
+handoffs are terminal for retirement,
 while their validated receipt proofs remain in the enrollment across compaction and
 re-enrollment. Replay does not dispatch an accepted task twice. Historical-base
 scope is not current-main eligibility: stale PRs receive no status action or merge

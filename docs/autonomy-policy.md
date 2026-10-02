@@ -181,14 +181,32 @@ these current assembly pins, also independently literal in the launch fixture:
 | `deploy/issue_starter.py` | `49debd3c1da5252ea67322a0febb9eb5b56d0ac1a830f3718e4d07377993b517` |
 | `deploy/hermes-mobile-coordinator.service` | `49d6ebb6e24b4c0a06af3d10e6e2cce11dd6af7ee8056c99268058c2f6f2cab3` |
 
-Issue #50's receipt-transport candidate overlays only
-`deploy/cloud_coordinator.py` and `deploy/task_receipts.py` in the current source
-inventory. The historical PR40 and issue #43 table hashes above remain unchanged:
+Issue #50's historical receipt-transport candidate overlaid only
+`deploy/cloud_coordinator.py` and `deploy/task_receipts.py` in the source inventory.
+The historical PR40 and issue #43 table hashes above remain unchanged:
 
-| Issue #50 candidate path | SHA-256 |
+| Historical issue #50 candidate path | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `0935088cb9e3429b83dcc7daa8552cf2c58830e5494549270ec276a076e3193b` |
 | `deploy/task_receipts.py` | `60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb` |
+
+PR55 (issue #54) now overlays only the coordinator entry from that historical
+candidate; `deploy/task_receipts.py` retains the Issue #50 bytes above. This
+restart-ordering follow-up starts at `00f47230596fd68649088823268b8b76ac2dc884`
+(coordinator SHA-256 `a3d011e97862aa76b07fb88ae40b5307db77d3cd9f46bf170a2cf5b78ec3b7d8`).
+Review 5396963413 reproduced pending neutral recovery resurrecting a superseded
+predecessor after remote head advancement. The follow-up resolves ownership before
+handoff advancement and reads the updated prepared state. It preserves the prior
+retirement, atomic task acceptance, receipt-proof and compare-evidence fixes.
+
+| Current PR55 restart-ordering candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `b089cf168c2d384b56855c0979853f0d692ec9564d6787bef6424b930d3b0e3e` |
+
+The policy pin and independent fixture spell out this candidate digest explicitly;
+no validator predicate or historical baseline is changed. Focused synthetic
+RED/GREEN evidence is not independent source acceptance: these corrected bytes
+still require exact-head independent review and final integration evidence.
 
 These pins identify candidate bytes only. Both files retain the
 `coordinator-review-contract` blocker; refreshing pins does not satisfy independent

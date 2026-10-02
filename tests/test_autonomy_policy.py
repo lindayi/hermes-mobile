@@ -146,7 +146,7 @@ _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE = {
 }
 
 _PENDING_ISSUE50_RECEIPT_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'a3d011e97862aa76b07fb88ae40b5307db77d3cd9f46bf170a2cf5b78ec3b7d8',
+    'deploy/cloud_coordinator.py': 'b089cf168c2d384b56855c0979853f0d692ec9564d6787bef6424b930d3b0e3e',
     'deploy/task_receipts.py': '60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb',
 }
 
