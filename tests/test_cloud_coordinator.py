@@ -330,7 +330,7 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     first_fix = next(action for action in store.actions().values()
                      if action.get("kind") == "fix")
 
-    def finish_task(action, current_head, comment_id):
+    def finish_task(action, current_head, comment_id, *, transported=False):
         task = api.tasks[action["task_id"]]
         created = "2026-10-01T12:04:00Z"
         task.update(
@@ -350,17 +350,32 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
                 "completed_at": created,
             }],
         )
-        body = (
-            "Hermes-Task-Receipt: v1\n"
-            f"nonce={action['dispatch_nonce']}\n"
-            f"task={action['task_id']}\n"
-            f"session=session-{action['task_id']}\n"
-            "pr=16\n"
-            f"start_head={action['head']}\n"
-            f"head={current_head}\n"
-            f"base={BASE}\n"
-            "result=ready"
-        )
+        if transported:
+            body = (
+                "\n> Cloud completion report preserved before parent normalization:\n"
+                "> \n"
+                "> This quoted report is not receipt evidence.\n\n"
+                "Hermes-Task-Receipt: v2\n"
+                f"nonce={action['dispatch_nonce']}\n"
+                "pr=16\n"
+                f"session=session-{action['task_id']}\n"
+                f"start_head={action['head']}\n"
+                f"base={BASE}\n"
+                f"head={current_head}\n"
+                "result=ready"
+            )
+        else:
+            body = (
+                "Hermes-Task-Receipt: v1\n"
+                f"nonce={action['dispatch_nonce']}\n"
+                f"task={action['task_id']}\n"
+                f"session=session-{action['task_id']}\n"
+                "pr=16\n"
+                f"start_head={action['head']}\n"
+                f"head={current_head}\n"
+                f"base={BASE}\n"
+                "result=ready"
+            )
         api.comments.append({
             "id": comment_id, "user": {"id": 198982749}, "body": body,
             "created_at": created, "updated_at": created,
@@ -368,7 +383,7 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
 
     api.head_sha = result_head
     api.pull["head"]["sha"] = result_head
-    finish_task(first_fix, result_head, 900)
+    finish_task(first_fix, result_head, 900, transported=True)
     coordinator().run(apply=True)
 
     first_proof = store.action(first_fix["key"])
