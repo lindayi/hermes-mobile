@@ -156,15 +156,15 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
     # Pending issue #39 coordinator dependency candidate bytes; parent review only.
-    'deploy/review_evidence.py': 'fb71b9fcd4cf42699e160108195b3445a1c29dfec0eb29ea8309396c410ed6ef',
+    'deploy/review_evidence.py': '1f37e42fc52c574040b4214bca6f2a1239ed738b02b724d5b7c7823cd34b9df1',
     # Pending PR40 assembly candidates from incoming 80bf9e7. Historical source
     # review lineage: docs/autonomy-policy.md. Not assembled/operational approval;
     # existing pins and the unconditional pending-source-contract hold stay fixed.
     'deploy/task_receipts.py': '8ad9e60ec697de8135679b9110ed5d924057e0d8a59e731c67fceedec6525197',
     'deploy/workflow_events.py': '5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af',
-    'deploy/workflow_lifecycle.py': '83643df2f642b6c949031e067968c0dd5a06e4c3230ab1b7f7bdb02b3be8c626',
-    'deploy/workflow_lifecycle_sources.py': 'a6be88f79862966a6e09f10f9eee2e7f6c8957ededeb1005f435b70759a0e5a6',
-    'deploy/workflow_notifications.py': '4684a5db2229a9491a99af04b6437ff215ffcbd6900d53c653fa7e897055d87d',
+    'deploy/workflow_lifecycle.py': '71be9101223f40511818bde2db9f6bd6b021736f35152e16cb3e1c9c3e2085a3',
+    'deploy/workflow_lifecycle_sources.py': 'dfff5b5ec33b9bd1756a67150827541ea86193b87e6de5b5c3a965f02f19b837',
+    'deploy/workflow_notifications.py': 'f0af01bdc797e0abd0494fa7a1fa304060c734ed8fc2ba1fa2b4515a9a3bcda2',
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
     'backend/model_controls.py': 'a6276a114d770f8a52677ae11a48011b586daf7cd047dd667099e4a6251ccb6b',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',

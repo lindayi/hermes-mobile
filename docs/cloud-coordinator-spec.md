@@ -125,7 +125,12 @@ content predicate as fallback sections: each item must contain nonempty unquoted
 nonhistorical text beyond the known introduction before its literal context is
 retained. Quoted-only matched items are omitted individually, without dropping a
 genuine sibling or its quoted context. A matched section with no eligible items
-is `no-findings`, not a repair request.
+is `no-findings`, not a repair request. Both intro comparisons normalize whitespace,
+including rendered line breaks. Matched-item and fallback live eligibility reuse
+the existing complete-negative/status-only grammar after excluding the known intro,
+preserving sentence/block boundaries even when status sentences lack punctuation.
+Neutral-only content cannot supply a finding; genuine corrections, independent
+siblings and their literal context remain eligible.
 Unsupported top-level disclosures remain ambiguous, not implicitly resolved.
 
 Validation-only requires complete recognized status prose (optionally accompanied
@@ -197,6 +202,17 @@ attempt or approval; independent marked findings and genuine literal context
 remain eligible. Only the helper candidate digest and independent fixture change;
 the coordinator baseline, other pins and unconditional source-contract hold stay
 unchanged. This is not activation or full integration evidence.
+
+The bounded follow-up at `c8bb08d0c47ac1d49a33f0c2cc962ebb9be2d641` addresses
+review `5392848133`, comment `4166553619`, only: whitespace-equivalent introductions
+and complete negative/status-only matched-item and fallback eligibility. Finite
+managed RED/GREEN regressions cover newline/`br` intros, negative/status mixtures,
+unpunctuated status blocks, no dispatch/attempt/approval, and preservation of real
+findings, independent siblings and quoted literal context. No new language grammar,
+Markdown architecture or authority is added. Only the helper candidate digest and
+independent fixture are refreshed; other pins, the coordinator baseline and the
+unconditional source-contract hold remain unchanged. No activation or full
+integration evidence is claimed.
 
 The Copilot request labels all embedded evidence untrusted,
 and the text is never interpreted as shell input. A deterministic marker
@@ -392,6 +408,43 @@ excluded. Export persistence is bounded to 256 events and 1 MiB; plan mode never
 writes it. Stable event IDs preserve polling replay identity, and terminal
 enrollment retirement is committed with event persistence.
 
+Before `_build_plan` can add lifecycle events, apply mode holds the coordinator
+execution lock and prepares state. When the existing notification consumer is
+configured, preparation resolves the sole ready default-profile application
+owner and reads `workflow-notifications.sqlite` through the consumer's existing
+read-only, private-path, size, rollback-journal, and no-sidecar boundary. One
+read transaction validates the adapter schema/binding (version 1 and repository
+ID `1399942965`) and every stored event identity against active lifecycle events
+or retained context. A row authorizes producer retirement only when its
+`event_id`, canonical event digest, recipient owner, `acked` status, and nonempty
+retained `inbox_id` satisfy the consumer-ledger checks. The consumer verifies the
+Inbox record's owner, delivery ID, and Inbox ID before committing the original
+ACK; the producer validates that retained assertion and its consistency, not a
+currently present Inbox row. No two ACKed event IDs may share an `inbox_id`, across
+all active and retained-context rows; any duplicate blocks the whole preparation
+before retirement. Missing and pending rows retain events; malformed, foreign,
+unbound, or detectably inconsistent adapter state blocks preparation. The
+coordinator does not initialize, recover, or write the consumer database.
+
+The unchanged consumer-owned ACK ledger remains authoritative after physical
+Inbox retention, so a valid historical ACK still permits retirement and prevents
+replay. These checks are not tamper-proof: after the Inbox row is removed, a
+unique well-formed substituted Inbox ID or an arbitrary internally consistent
+historical ledger rewrite cannot be distinguished from the trusted retained
+assertion. No new receipt authority or indefinite Inbox retention is implied.
+
+Exact ACKed outcomes move from the active export list into optional
+`lifecycle_context`, which has a closed schema, fixed repository binding, exact
+owner binding, and a bounded set of validated canonical events. It is replay and
+correlation context only, never an ACK source. The existing 256-event lifecycle
+and 1 MiB export limits remain unchanged. Receipt-source replays are filtered
+against the same ACK snapshot before their cap; exact canonical payloads and
+timestamps are preserved when persistent incidents are regenerated. Retained
+merged outcomes continue to anchor later exact `controller_verified` evidence.
+The prepared retirement and scan commit together before export or external
+mutation, followed by a fresh owner binding check immediately before commit.
+Plan mode neither reads ACK state nor changes producer or consumer state.
+
 Before each export, sensitive approval events are filtered against durable
 active enrollment, the exact last observed open head, and still-pending
 `authorize_sensitive_action` authorization. Apply commits the complete scan's
@@ -496,6 +549,15 @@ lists of retired auto-merge and outbox key digests). Pending, sending, uncertain
 and sent fixer claims, every record on the current head, enrollments with their
 command fence and attempt budget, and consumed command IDs are never dropped;
 the oldest command IDs fold into a numeric watermark that still fences replays.
+
+ACK-backed lifecycle retirement does not erase history. The optional
+`lifecycle_context` preserves each retired event's canonical payload and exact
+identity for stable replay and merge-to-deployment correlation; it is validated
+against a closed schema and owner/repository binding. Context is not independent
+ACK authority, is never age-evicted, and remains inside the same 4 MiB total state
+bound. If it fills the state bound, preparation fails before export or external
+writes. This is finite retention, not unlimited history storage or unattended
+activation approval.
 
 ## External policy boundary
 

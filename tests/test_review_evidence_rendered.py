@@ -387,6 +387,120 @@ def test_review5392668833_matched_items_keep_only_live_finding_with_literal_cont
     assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
 
 
+@pytest.mark.parametrize("count", ["0", "1", "unknown"])
+@pytest.mark.parametrize("separator", ["\n", "<br>"])
+def test_review5392848133_wrapped_intro_never_dispatches(tmp_path, count, separator):
+    intro = f"<p>In code that hasn't{separator} changed since last review</p>"
+    section = f"<details><summary>Previously missed ({count})</summary>{intro}</details>"
+    review = review_pair(OVERVIEW_MARKER + "\n" + section, section, state="COMMENTED")
+    assert repair_request(HEAD, 0, [], [], reviews=[review]) is None
+    api = ReviewApi([review])
+    path = tmp_path / "state.json"
+    plan = _managed_cycle(api, path)["pull_requests"][0]
+    assert not plan["repair_requested"] and not plan["review_valid"]
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    saved = StateStore(path).snapshot()
+    assert saved["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in saved["actions"].values())
+
+
+@pytest.mark.parametrize("separator", ["\n", "<br>"])
+def test_review5392848133_wrapped_intro_preserves_matched_siblings(separator):
+    section = (
+        "<details><summary>Previously missed (2)</summary>"
+        f"<p>In code that hasn't{separator} changed since last review</p>"
+        "<details><summary><code>NEVER FORWARD quoted title</code></summary>"
+        "<blockquote>NEVER FORWARD quoted correction.</blockquote></details>"
+        "<details><summary>Live receipt defect</summary>"
+        "<p>A transient receipt consumes the bounded budget.</p>"
+        "<code>KEEP &lt;details&gt;</code></details></details>")
+    review = review_pair(OVERVIEW_MARKER + "\n" + section, section, state="COMMENTED")
+    [finding] = _evidence(repair_request(HEAD, 0, [], [], reviews=[review]))["review_findings"]
+    assert "Live receipt defect" in finding["comment"]
+    assert "KEEP <details>" in finding["comment"]
+    assert "NEVER FORWARD" not in finding["comment"]
+    assert "Previously missed" not in finding["comment"]
+
+
+@pytest.mark.parametrize("state", ["COMMENTED", "CHANGES_REQUESTED"])
+@pytest.mark.parametrize("shape", ["matched", "fallback-zero", "fallback-unknown"])
+@pytest.mark.parametrize("prose", [
+    "No bugs found.",
+    "Exact-head verification remains pending.",
+    "No code defects were found in the reviewed changes. "
+    "The exact-head verification is still pending.",
+])
+def test_review5392848133_status_only_live_content_never_dispatches(tmp_path, state, shape, prose):
+    intro = "<p>In code that hasn't<br> changed since last review</p>"
+    content = f"<p>{prose}</p>"
+    if shape == "matched":
+        content = ("<details><summary><code>NEVER FORWARD quoted title</code></summary>"
+                   + content + "</details>")
+    count = {"matched": "1", "fallback-zero": "0", "fallback-unknown": "unknown"}[shape]
+    section = f"<details><summary>Previously missed ({count})</summary>{intro}{content}</details>"
+    review = review_pair(OVERVIEW_MARKER + "\n" + section, section, state=state)
+    result = parse_body(review["body"], state, body_html=section)
+    assert result["findings"] == []
+    assert "no-findings" in result["classifications"]
+    assert repair_request(HEAD, 0, [], [], reviews=[review]) is None
+    assert not copilot_review_valid(HEAD, [review], [])
+    api = ReviewApi([review])
+    path = tmp_path / "state.json"
+    plan = _managed_cycle(api, path)["pull_requests"][0]
+    assert not plan["repair_requested"] and not plan["review_valid"]
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    saved = StateStore(path).snapshot()
+    assert saved["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in saved["actions"].values())
+    # A status-only section cannot hide an independent genuine section.
+    request = repair_request(HEAD, 0, [], [], reviews=[review | {"body_html": section + HTML_ESCAPED}])
+    [finding] = _evidence(request)["review_findings"]
+    assert "decode <details> only after validation." in finding["comment"]
+    assert "NEVER FORWARD" not in finding["comment"]
+    if shape == "matched":
+        genuine = ("<details><summary>Live receipt defect</summary>"
+                   "<p>A transient receipt consumes the bounded budget.</p>"
+                   "<blockquote>KEEP &lt;details&gt; and No bugs found.</blockquote></details>")
+        siblings = section.replace("Previously missed (1)", "Previously missed (2)")
+        siblings = siblings[:-len("</details>")] + genuine + "</details>"
+        request = repair_request(HEAD, 0, [], [], reviews=[review | {"body_html": siblings}])
+        [finding] = _evidence(request)["review_findings"]
+        assert "Live receipt defect" in finding["comment"]
+        assert "KEEP <details> and No bugs found." in finding["comment"]
+        assert "NEVER FORWARD" not in finding["comment"]
+    # Complete neutral prose must not suppress a correction in the same item/section.
+    mixed = section.replace(f"<p>{prose}</p>", f"<p>{prose} Required correction: preserve "
+                            "<code>&lt;summary&gt;</code> in literal context.</p>")
+    request = repair_request(HEAD, 0, [], [], reviews=[review | {"body_html": mixed}])
+    [finding] = _evidence(request)["review_findings"]
+    assert prose in finding["comment"]
+    assert "Required correction: preserve <summary> in literal context." in finding["comment"]
+
+
+@pytest.mark.parametrize("shape", ["matched", "fallback"])
+def test_review5392848133_status_blocks_keep_existing_sentence_boundaries(tmp_path, shape):
+    content = ("<p>No bugs found</p>"
+               "<p>Exact-head verification remains pending</p>")
+    if shape == "matched":
+        content = "<details><summary><code>Example</code></summary>" + content + "</details>"
+    count = "1" if shape == "matched" else "unknown"
+    section = (f"<details><summary>Previously missed ({count})</summary>"
+               "<p>In code that hasn't\n changed since last review</p>" + content + "</details>")
+    review = review_pair(OVERVIEW_MARKER + "\n" + section, section, state="COMMENTED")
+    assert repair_request(HEAD, 0, [], [], reviews=[review]) is None
+    api = ReviewApi([review])
+    path = tmp_path / "state.json"
+    plan = _managed_cycle(api, path)["pull_requests"][0]
+    assert not plan["repair_requested"] and not plan["review_valid"]
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
+    mixed = section.replace("<p>No bugs found</p>", "<p>No bugs found</p>"
+                            "<p>Required correction: retain <code>&lt;details&gt;</code>.</p>")
+    [finding] = _evidence(repair_request(HEAD, 0, [], [], reviews=[
+        review | {"body_html": mixed}]))["review_findings"]
+    assert "Required correction: retain <details>." in finding["comment"]
+
+
 @pytest.mark.parametrize("count", ["1", "0", "unknown"])
 def test_populated_active_fallback_keeps_live_content_without_history(count):
     rendered = (

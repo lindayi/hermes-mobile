@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 import hashlib
 
-from deploy.workflow_events import MAX_EVENTS, SCHEMA_VERSION, validate_export
+from deploy.workflow_events import MAX_EVENTS, SCHEMA_VERSION, event_digest, validate_export
 
 
 REPOSITORY = "lindayi/hermes-mobile"
@@ -52,6 +52,40 @@ def validate_event(event, *, now=None):
     return event
 
 
+def canonical_event(event, prior, *, now=None):
+    """Keep the first durable payload for an identity, including persistent incidents."""
+    validate_event(event, now=now)
+    if prior is None:
+        return event
+    validate_event(prior, now=now)
+    if prior.get("event_id") != event.get("event_id"):
+        raise ValueError("Lifecycle event identity conflicts with its canonical payload")
+    stable_identity = (
+        prior.get("reason") == event.get("reason")
+        and prior.get("outcome") == event.get("outcome")
+        and prior.get("issue_number") == event.get("issue_number")
+        and prior.get("pr_number") == event.get("pr_number")
+        and prior.get("merge_sha") == event.get("merge_sha")
+        and prior.get("decision") == event.get("decision")
+    )
+    persistent_incident = (
+        prior.get("reason") in {
+            "execution_exhausted", "execution_uncertain", "policy_broken",
+            "sensitive_approval", "conflict_incompatible",
+        }
+        and stable_identity
+        and (
+            prior.get("reason") not in {
+                "sensitive_approval", "conflict_incompatible",
+            }
+            or prior.get("head_sha") == event.get("head_sha")
+        )
+    )
+    if prior != event and not persistent_incident:
+        raise ValueError("Lifecycle event identity conflicts with its immutable payload")
+    return prior
+
+
 def merge_events(existing, additions, *, now=None, limit=MAX_EVENTS):
     if not isinstance(existing, list) or not isinstance(additions, (list, tuple)):
         raise ValueError("Lifecycle events must be a list")
@@ -62,34 +96,52 @@ def merge_events(existing, additions, *, now=None, limit=MAX_EVENTS):
         event_id = event["event_id"]
         prior = known.get(event_id)
         if prior is not None:
-            stable_identity = (
-                prior.get("reason") == event.get("reason")
-                and prior.get("outcome") == event.get("outcome")
-                and prior.get("issue_number") == event.get("issue_number")
-                and prior.get("pr_number") == event.get("pr_number")
-                and prior.get("merge_sha") == event.get("merge_sha")
-                and prior.get("decision") == event.get("decision")
-            )
-            persistent_incident = (
-                prior.get("reason") in {
-                    "execution_exhausted", "execution_uncertain", "policy_broken",
-                    "sensitive_approval", "conflict_incompatible",
-                }
-                and stable_identity
-                and (
-                    prior.get("reason") not in {
-                        "sensitive_approval", "conflict_incompatible",
-                    }
-                    or prior.get("head_sha") == event.get("head_sha")
-                )
-            )
-            if prior != event and not persistent_incident:
-                raise ValueError("Lifecycle event identity conflicts with its immutable payload")
+            canonical_event(event, prior, now=now)
             continue
         known[event_id] = event
         retained.append(event)
         if len(retained) > limit:
             raise ValueError("Lifecycle event capacity reached without safe acknowledgement")
+    return retained
+
+
+def filter_acknowledged_replays(events, *, active=(), context=(), acknowledgements=None,
+                                now=None, limit=MAX_EVENTS):
+    """Canonicalize replays, then remove only exact consumer-ACKed context records."""
+    if not isinstance(events, (list, tuple)):
+        raise ValueError("Lifecycle events must be a sequence")
+    active_by_id = {event["event_id"]: event for event in active}
+    context_by_id = {event["event_id"]: event for event in context}
+    for event in (*active_by_id.values(), *context_by_id.values()):
+        validate_event(event, now=now)
+    for event_id in active_by_id.keys() & context_by_id.keys():
+        if canonical_event(
+                active_by_id[event_id], context_by_id[event_id], now=now
+        ) != active_by_id[event_id]:
+            raise ValueError("Active lifecycle event differs from its retained canonical context")
+    acknowledgements = acknowledgements or {}
+    retained = []
+    for event in events:
+        validate_event(event, now=now)
+        event_id = event["event_id"]
+        prior = active_by_id.get(event_id)
+        if prior is not None:
+            canonical_event(event, prior, now=now)
+            continue
+        prior = context_by_id.get(event_id)
+        if prior is not None:
+            canonical = canonical_event(event, prior, now=now)
+        else:
+            canonical = event
+        ack = acknowledgements.get(event_id)
+        if ack is not None:
+            digest = event_digest(canonical)
+            if ack.get("digest") != digest:
+                raise ValueError("Lifecycle acknowledgement digest does not match its canonical event")
+            if ack.get("status") == "acked" and isinstance(ack.get("inbox_id"), str) \
+                    and ack["inbox_id"]:
+                continue
+        retained = merge_events(retained, [canonical], now=now, limit=limit)
     return retained
 
 

@@ -200,15 +200,53 @@ remains governed by its existing service, not the adapter's 4 MiB limit.
 
 This is a finite capacity boundary, **not infinite history retention**. ACKs are
 never deleted to make room. An existing pending ACK can itself require more pages
-and remain deferred even though it can be read and retried. Operators must monitor
-deferrals and halt new lifecycle admission before the retained export reaches its
-256-record bound. Preserve both producer and consumer state for inspection; do
-not delete/reset the adapter database or age-prune unACKed events. Permanently
-full history needs a separately reviewed cross-source retirement/archive protocol
-that proves which identities can never replay. No such watermark or safe automatic
-history compaction is defined by schema 1; this change does not invent one or
-raise the size limit. A previously oversized database is still rejected and needs
-operator recovery, not automatic destructive truncation.
+and remain deferred even though it can be read and retried. A previously oversized
+database is still rejected and needs operator recovery, not automatic destructive
+truncation.
+
+Issue #41 adds a separate producer-side retirement contract; it does not change
+this consumer, its SQLite schema, Inbox records, or replay ledger. Under the
+coordinator execution lock, the producer reads the existing adapter database
+read-only in one SQLite snapshot. It requires the sole ready default-profile
+application owner, schema version 1, repository ID `1399942965`, and exact
+`event_id`, canonical event digest, owner recipient, `status='acked'`, and
+nonempty retained `inbox_id`. At original ACK creation, the consumer verifies the
+Inbox record's owner, delivery ID, and Inbox ID before committing the ACK. The
+producer validates this retained consumer assertion and detectable consistency
+constraints; it does not require the Inbox row to remain present. An `inbox_id`
+shared by distinct ACKed event IDs anywhere in the snapshot (including
+active/context and context/context pairs) blocks preparation before any retirement.
+The database remains subject to the existing private canonical path, 4 MiB
+main-file, rollback-journal, and no-sidecar rules. The producer never initializes,
+recovers, or modifies it. Missing or pending rows do not authorize retirement;
+malformed, foreign, conflicting, or incomplete rows block the complete coordinator
+preparation before state commit or external writes.
+
+The unchanged consumer-owned ledger remains ACK authority after physical Inbox
+retention: a genuine retained ACK still authorizes retirement and deduplicates
+replay, while absence of an Inbox row never ACKs a pending event. This is not a
+tamper-proof receipt system. Once Inbox evidence is removed, a unique well-formed
+substituted historical Inbox ID or an arbitrary internally consistent ledger
+rewrite is not detectable from the retained assertion alone. The producer does
+not claim comprehensive tamper detection or introduce new authority or indefinite
+Inbox retention.
+
+Only exact ACKed lifecycle events are removed from the producer's active 256-event
+export set. Their canonical payloads remain in a strictly validated, owner- and
+repository-bound lifecycle context in coordinator state; that context preserves
+replay identity and merged-event anchors but is never ACK authority. Source
+collection filters exact ACKed receipt replays before its own 256-event cap and
+uses retained merged anchors to correlate a later exact controller proof.
+Retirement and the prepared scan are committed atomically before export or remote
+writes. A crash before that commit replays the same Inbox delivery; a crash after
+commit rebuilds the export from durable state. Coordinator plan mode reads no ACK
+ledger and writes neither producer nor consumer state.
+
+Producer context remains subject to the coordinator's existing total 4 MiB state
+limit. It is finite, is not age-pruned, and can itself reach capacity; exhaustion
+continues to fail closed. Operators must monitor capacity rather than interpret
+ACK-backed retirement as unlimited history storage or unattended activation
+approval.
 
 ## Deployment evidence paths
 

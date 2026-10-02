@@ -223,9 +223,16 @@ def _text(node, *, exclude_details=False, exclude_history=False, quoted=True, re
 
 
 def _has_live_content(node):
-    return _text(node, exclude_history=True, quoted=False).strip() not in {
-        "", "In code that hasn't changed since last review"
-    }
+    prose = _text(node, exclude_history=True, quoted=False).strip()
+    intro = "In code that hasn't changed since last review"
+    # Match the same whitespace-normalized intro as the item-shape check, but
+    # retain sentence/block boundaries for the existing complete-status grammar.
+    intro_pattern = r"\s+".join(re.escape(word) for word in intro.split())
+    prose = re.sub(r"^" + intro_pattern + r"(?=\s|$)", "", prose).strip()
+    # Reuse the complete neutral-prose grammar, not a new keyword heuristic.
+    # Active disclosure scope still admits genuine prose without a correction label.
+    kind, _ = _summary_disposition(prose, overview=True, state="COMMENTED")
+    return kind not in {"no-findings", "validation-only"}
 
 
 def _disclosures(node):
@@ -381,7 +388,7 @@ def parse_body(body, state, *, body_html=None):
             content = _Element("root", [
                 child for child in node.children if child is not _summary(node)
             ])
-            outside_items = _text(content, exclude_details=True).strip()
+            outside_items = " ".join(_text(content, exclude_details=True).split())
             intro = "In code that hasn't changed since last review"
             only_intro = outside_items in {"", intro}
             if (only_intro and expected == len(children)

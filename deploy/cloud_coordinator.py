@@ -23,10 +23,12 @@ from deploy.workflow_lifecycle import (
     MAX_EVENTS as MAX_LIFECYCLE_EVENTS,
     REASON_OUTCOMES as LIFECYCLE_OUTCOMES,
     build_export as build_lifecycle_export,
+    filter_acknowledged_replays,
     merge_events as merge_lifecycle_events,
     pull_event as build_pull_lifecycle_event,
     validate_event as validate_lifecycle_event,
 )
+from deploy.workflow_events import event_digest
 from deploy.task_receipts import (
     ReceiptError, _expected_body, receipt_instruction, validate_task_receipt,
 )
@@ -60,6 +62,7 @@ LIFECYCLE_FILE_NAME = "workflow-events.json"
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_EVENTS = 4000
 TOMBSTONE_LIMIT = 512
+_LIFECYCLE_OWNER_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 LIFECYCLE_OUTCOMES = {
     "issue_failed": "failed",
     "task_failed": "failed",
@@ -504,6 +507,22 @@ def _lifecycle_event_valid(event):
     except (TypeError, ValueError, KeyError):
         return False
     return True
+
+
+def _lifecycle_context_valid(context):
+    if (not isinstance(context, dict)
+            or set(context) != {"version", "repository_id", "repository", "owner_user_id", "events"}
+            or type(context["version"]) is not int or context["version"] != 1
+            or type(context["repository_id"]) is not int
+            or context["repository_id"] != REPOSITORY_ID
+            or context["repository"] != REPOSITORY
+            or not isinstance(context["owner_user_id"], str)
+            or not _LIFECYCLE_OWNER_ID.fullmatch(context["owner_user_id"])
+            or not isinstance(context["events"], list)
+            or any(not _lifecycle_event_valid(event) for event in context["events"])):
+        return False
+    event_ids = [event["event_id"] for event in context["events"]]
+    return len(event_ids) == len(set(event_ids))
 
 
 def collect_review_threads(api, pull_number):
@@ -2342,10 +2361,10 @@ class Coordinator:
                 item["issue"] for item in plan["pull_requests"] if item.get("terminal")
             ],
             # Keep causal pull events ahead of their derived deployment outcomes.
-            lifecycle_events=[
+            lifecycle_events=plan.get("lifecycle_events", [
                 event for item in plan["pull_requests"]
                 for event in item.get("lifecycle_events", [])
-            ] + plan.get("source_lifecycle_events", []),
+            ] + plan.get("source_lifecycle_events", [])),
             observations=plan.get("observations", []),
             now=plan["now"],
         )
@@ -2449,33 +2468,90 @@ class Coordinator:
         try:
             owner_user_id = self.owner_user_id
             export_directory = None
+            acknowledgements = {}
             if apply:
                 self.store.begin_preparation()
-            plan = self._build_plan(apply=apply)
-            if apply:
                 if self.lifecycle_source_paths is not None:
                     from deploy.workflow_lifecycle_sources import (
-                        LifecycleSourceError, collect_source_events,
-                        resolve_application_binding,
+                        LifecycleSourceError, resolve_application_binding,
+                    )
+                    from deploy.workflow_notifications import (
+                        ADAPTER_STATE_NAME, Blocked, read_lifecycle_acknowledgements,
                     )
                     try:
                         owner_user_id, export_directory = resolve_application_binding(
                             self.lifecycle_source_paths.notifications,
                         )
+                        state = self.store.snapshot()
+                        context = state.get("lifecycle_context") or {}
+                        known_events = [
+                            *state["lifecycle_events"], *context.get("events", []),
+                        ]
+                        acknowledgements = read_lifecycle_acknowledgements(
+                            export_directory / ADAPTER_STATE_NAME, owner_user_id,
+                            known_events,
+                        )
+                        self.store.retire_acknowledged_lifecycle_events(
+                            acknowledgements, owner_user_id,
+                        )
+                    except (LifecycleSourceError, Blocked, OSError, TypeError, ValueError) as error:
+                        raise CoordinatorError(
+                            "Lifecycle ACK or owner evidence is unavailable"
+                        ) from error
+            plan = self._build_plan(apply=apply)
+            if apply:
+                if self.lifecycle_source_paths is not None:
+                    from deploy.workflow_lifecycle_sources import (
+                        LifecycleSourceError, collect_source_events,
+                    )
+                    try:
+                        state = self.store.snapshot()
+                        context = state.get("lifecycle_context") or {}
+                        context_events = context.get("events", [])
                         # Include merges first observed by this complete scan,
-                        # not just durable history. Collection performs no writes.
-                        merged_events = self.store.snapshot()["lifecycle_events"] + [
+                        # durable active history, and retired replay context.
+                        merged_events = [
+                            *state["lifecycle_events"],
+                            *(event for event in context_events
+                              if event.get("reason") == "merged"),
+                        ] + [
                             event for item in plan["pull_requests"]
                             for event in item.get("lifecycle_events", [])
                         ]
                         plan["source_lifecycle_events"] = collect_source_events(
                             merged_events, api=self.api, paths=self.lifecycle_source_paths,
                             now=datetime.fromtimestamp(plan["now"], timezone.utc),
+                            active_events=state["lifecycle_events"],
+                            lifecycle_context=context_events,
+                            acknowledgements=acknowledgements,
                         )
-                    except LifecycleSourceError as error:
+                        plan["lifecycle_events"] = filter_acknowledged_replays(
+                            [
+                                event for item in plan["pull_requests"]
+                                for event in item.get("lifecycle_events", [])
+                            ] + plan["source_lifecycle_events"],
+                            active=state["lifecycle_events"],
+                            context=context_events,
+                            acknowledgements=acknowledgements,
+                            now=datetime.fromtimestamp(plan["now"], timezone.utc),
+                        )
+                    except (LifecycleSourceError, TypeError, ValueError) as error:
                         raise CoordinatorError(
                             "Lifecycle source evidence or owner binding is unavailable"
                         ) from error
+                    try:
+                        current_owner, current_directory = resolve_application_binding(
+                            self.lifecycle_source_paths.notifications,
+                        )
+                    except LifecycleSourceError as error:
+                        raise CoordinatorError(
+                            "Lifecycle owner binding changed before state commit"
+                        ) from error
+                    if (current_owner != owner_user_id
+                            or current_directory != export_directory):
+                        raise CoordinatorError(
+                            "Lifecycle owner binding changed before state commit"
+                        )
                 pull_requests = self._apply(
                     plan, after_commit=lambda: self.store.write_lifecycle_export(
                         now=self.clock(), owner_user_id=owner_user_id,
@@ -2576,6 +2652,15 @@ def _private_regular(path):
     return True
 
 
+def _unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("Coordinator state contains duplicate object keys")
+        value[key] = item
+    return value
+
+
 class StateStore:
     """Atomic owner-only durable state; only identifiers and public action metadata persist."""
 
@@ -2614,8 +2699,10 @@ class StateStore:
         try:
             if self.path.stat().st_size > MAX_STATE_BYTES:
                 raise CoordinatorError("Coordinator state exceeded its safety bound")
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            data = json.loads(
+                self.path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object,
+            )
+        except (OSError, ValueError) as exc:
             raise CoordinatorError("Coordinator state is unreadable") from exc
         if (not isinstance(data, dict) or data.get("version") != 1
                 or not isinstance(data.get("events"), list)
@@ -2636,6 +2723,9 @@ class StateStore:
                 or any(not _lifecycle_event_valid(event)
                        for event in data["lifecycle_events"])):
             raise CoordinatorError("Coordinator lifecycle state has an unsupported format")
+        if ("lifecycle_context" in data
+                and not _lifecycle_context_valid(data["lifecycle_context"])):
+            raise CoordinatorError("Coordinator lifecycle context has an unsupported format")
         return data
 
     def _save(self, data):
@@ -2719,6 +2809,47 @@ class StateStore:
                 data, [event], now=time.time() if now is None else now,
             )
         self._mutate(record)
+
+    def retire_acknowledged_lifecycle_events(self, acknowledgements, owner_user_id):
+        if self._prepared is None or not isinstance(acknowledgements, dict):
+            raise CoordinatorError("Lifecycle retirement requires prepared state and a read-only ACK snapshot")
+        if (not isinstance(owner_user_id, str)
+                or not _LIFECYCLE_OWNER_ID.fullmatch(owner_user_id)):
+            raise CoordinatorError("Lifecycle retirement requires the trusted application owner")
+        context = self._prepared.get("lifecycle_context")
+        if context is not None:
+            if (not _lifecycle_context_valid(context)
+                    or context["owner_user_id"] != owner_user_id):
+                raise CoordinatorError("Lifecycle context owner or repository binding changed")
+            context_events = list(context["events"])
+        else:
+            context_events = []
+        context_by_id = {event["event_id"]: event for event in context_events}
+        retained, retired = [], []
+        for event in self._prepared["lifecycle_events"]:
+            acknowledgement = acknowledgements.get(event["event_id"])
+            if acknowledgement is None or acknowledgement.get("status") != "acked":
+                retained.append(event)
+                continue
+            if (acknowledgement.get("digest") != event_digest(event)
+                    or not isinstance(acknowledgement.get("inbox_id"), str)
+                    or not acknowledgement["inbox_id"]):
+                raise CoordinatorError("Lifecycle acknowledgement does not match its canonical event")
+            if event["event_id"] not in context_by_id:
+                context_events.append(event)
+                context_by_id[event["event_id"]] = event
+            retired.append(event)
+        if retired:
+            context = {
+                "version": 1, "repository_id": REPOSITORY_ID,
+                "repository": REPOSITORY, "owner_user_id": owner_user_id,
+                "events": context_events,
+            }
+            if not _lifecycle_context_valid(context):
+                raise CoordinatorError("Lifecycle replay context is invalid")
+            self._prepared["lifecycle_context"] = context
+            self._prepared["lifecycle_events"] = retained
+        return tuple(retired)
 
     def write_lifecycle_export(self, *, now=None, owner_user_id=None, directory=None):
         now = time.time() if now is None else now
