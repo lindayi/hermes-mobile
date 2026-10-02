@@ -419,8 +419,12 @@ def neutral_reconciliation_request(snapshot, attempts):
         "Preserve both branch intents: retain all existing main behavior at the exact main SHA, "
         "and retain the PR behavior described in the untrusted intent below. Inspect both "
         "branches and their combined changes; do not choose either side wholesale. Merge current "
-        "main into the PR branch, never rebase, and never force-push. Test both intended behaviors "
-        "and their interaction, then leave the PR branch for fresh review and checks. If the "
+        "main into the PR branch, never rebase, and never force-push. For each conflict hunk, "
+        "record its file/hunk identity, classification, decision, and rationale in a PR comment, "
+        "explaining how the resolution preserves both branch intents (or why they are incompatible), "
+        "before returning a `ready` receipt under the existing task receipt contract. "
+        "Test both intended behaviors and their interaction, then leave the PR branch for fresh "
+        "review and checks. If the "
         "product requirements are genuinely incompatible, stop without guessing and report the "
         "fixed result `conflict_incompatible`. If required repository policy is broken or absent, "
         "stop and report `policy_broken`. Do not report either result for an ordinary technical "
@@ -1007,6 +1011,11 @@ class Coordinator:
         return issues, commands, processed, candidates
 
     def _snapshot_pull(self, number, enrollment, main_sha):
+        if not {"pull_id", "pull_node_id", "repository_id"}.issubset(enrollment):
+            raise CoordinatorError(
+                "Unsupported legacy enrollment: missing pull/repository identity; "
+                "automatic migration is not supported; preserve state and stop activation"
+            )
         pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
         head = pull.get("head") if isinstance(pull, dict) else None
         base = pull.get("base") if isinstance(pull, dict) else None
@@ -1659,11 +1668,15 @@ class Coordinator:
             conversation_resolution_required=snapshot["conversation_resolution_required"],
             agent_running=agent_busy or repair is not None or bool(neutral_blocker),
         )
+        merge_key = f"auto-merge:{number}:{head}:{snapshot['main_sha']}"
+        merge_requested = bool(snapshot["pull"].get("auto_merge")) or (
+            actions.get(merge_key, {}).get("status") == "sent"
+        )
         if merge and not snapshot["pull"].get("auto_merge"):
             merge_action = {
                 "kind": "auto-merge", "issue": number, "head": head,
                 "main_sha": snapshot["main_sha"],
-                "key": f"auto-merge:{number}:{head}:{snapshot['main_sha']}",
+                "key": merge_key,
             }
         else:
             merge_action = None
@@ -1683,7 +1696,8 @@ class Coordinator:
                 "review_valid": review_ok, "required_checks_green": checks_ok,
                 "auto_merge_eligible": merge, "reasons": [item[0] for item in reasons],
                 "repair": repair, "status_action": status_action,
-                "merge_action": merge_action, "outcomes": notification_outcomes,
+                "merge_action": merge_action, "auto_merge_requested": merge_requested,
+                "outcomes": notification_outcomes,
                 "lifecycle_events": lifecycle_events}
 
     def _build_plan(self, *, apply):
@@ -1938,6 +1952,7 @@ class Coordinator:
 
     def _enable_auto_merge(self, action, snapshot):
         key = action["key"]
+        self._identity()
         if not self.store.claim_action(key, action):
             existing = self.store.action(key)
             return existing.get("status") if existing else "not-claimed"
@@ -1949,7 +1964,9 @@ class Coordinator:
             self.store.update_action(key, "blocked")
             raise
         if pull is False:
-            self.store.update_action(key, "superseded")
+            # Positive proof: no mutation was attempted by this claim. Legacy
+            # superseded records without this proof remain non-retryable.
+            self.store.update_action(key, "superseded", pre_send=True)
             return "superseded"
         if not isinstance(pull, dict) or not pull.get("node_id"):
             self.store.update_action(key, "blocked")
@@ -1980,7 +1997,7 @@ class Coordinator:
             self.store.update_action(key, "blocked")
             raise
         if pull is False:
-            self.store.update_action(key, "superseded")
+            self.store.update_action(key, "superseded", pre_send=True)
             current_plan["auto_merge_eligible"] = False
             current_plan["merge_action"] = None
             current_plan["reasons"] = list(dict.fromkeys(
@@ -2099,6 +2116,7 @@ class Coordinator:
             merge_action = pr_plan["merge_action"]
             if merge_action and not action:
                 current_plan = self._enable_auto_merge(merge_action, snapshot)
+                pr_plan["auto_merge_requested"] = current_plan == "sent"
                 if isinstance(current_plan, dict):
                     pr_plan.update({
                         "review_valid": current_plan["review_valid"],
@@ -2107,7 +2125,14 @@ class Coordinator:
                         "reasons": current_plan["reasons"],
                         "status_action": current_plan["status_action"],
                         "merge_action": None,
+                        "auto_merge_requested": current_plan.get("auto_merge_requested", False),
                     })
+                elif current_plan != "sent":
+                    pr_plan["auto_merge_eligible"] = False
+                    pr_plan["merge_action"] = None
+                    pr_plan["reasons"] = list(dict.fromkeys(
+                        pr_plan["reasons"] + [f"auto-merge-{current_plan}"],
+                    ))
             self.store.retire(snapshot["issue"], snapshot["head"])
             summaries.append(self._summary(pr_plan))
         return summaries
@@ -2185,7 +2210,7 @@ class Coordinator:
             "auto_merge_eligible": item["auto_merge_eligible"],
             "repair_requested": bool(item["repair"]),
             "status_action": item["status_action"]["state"] if item["status_action"] else None,
-            "auto_merge_requested": bool(item["merge_action"]),
+            "auto_merge_requested": item.get("auto_merge_requested", False),
             "reasons": item["reasons"], "outcomes": len(item["outcomes"]),
         }
 
@@ -2378,7 +2403,20 @@ class StateStore:
     def write_lifecycle_export(self, *, now=None, owner_user_id=None, directory=None):
         now = time.time() if now is None else now
         self._ensure_directory()
-        events = self.snapshot()["lifecycle_events"]
+        state = self.snapshot()
+        events = []
+        for event in state["lifecycle_events"]:
+            if event["reason"] == "sensitive_approval":
+                enrollment = state["enrollments"].get(str(event["pr_number"]), {})
+                if (enrollment.get("active") is not True
+                        or enrollment.get("last_open_seen") is not True
+                        or enrollment.get("last_open_head") != event["head_sha"]
+                        or enrollment.get("sensitive_sha") == event["head_sha"]
+                        or event["decision"] != "authorize_sensitive_action"):
+                    continue
+            # Filter only the exported view; immutable incidents and consumer ACK
+            # identities are history, not permission to request a stale decision.
+            events.append(event)
         export_directory = Path(directory).absolute() if directory is not None else self.directory
         if export_directory != self.directory:
             from deploy.workflow_notifications import Blocked, _owned_private_path
@@ -2554,8 +2592,17 @@ class StateStore:
                         and claimed["generation"] <= tombstone.get("status_generation", 0))):
                 return False
             if existing:
-                if (claimed.get("kind") in {"status", "auto-merge"}
-                        and existing.get("status") == "blocked"):
+                recover_presend = (
+                    claimed.get("kind") == existing.get("kind") == "auto-merge"
+                    and existing.get("status") == "superseded"
+                    and existing.get("pre_send") is True
+                    and all(existing.get(field) == claimed.get(field)
+                            for field in ("key", "issue", "head", "main_sha"))
+                )
+                if (recover_presend or (claimed.get("kind") in {"status", "auto-merge"}
+                                        and existing.get("status") == "blocked")):
+                    # Replace rather than carry pre-send proof into a new sending
+                    # claim: a crash or ambiguous write must never be retried.
                     del data["actions"][key]
                 else:
                     return False

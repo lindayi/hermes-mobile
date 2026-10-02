@@ -22,6 +22,19 @@ head, the owner must separately comment `/hermes authorize-sensitive <40-char-he
 Authorization is recorded only if that SHA is still the pull request's current
 head; it does not carry forward to a later commit.
 
+This is a source/first-activation boundary, not an upgrade path for historical
+coordinator state. Version-1 records remain readable for inspection, but active
+legacy enrollments lacking `pull_id`, `pull_node_id`, or `repository_id` are
+unsupported: pull snapshot collection fails closed with
+`Unsupported legacy enrollment: missing pull/repository identity; automatic migration is not supported; preserve state and stop activation`.
+The coordinator does not backfill identity, replace an active enrollment after a
+new comment, clear approvals, reset cursors/budgets, or discard unresolved claims.
+If such state exists, stop activation and preserve it for separately reviewed
+operator recovery; do not delete/reset state or use re-enrollment as a migration.
+First activation must use the current identity-bound enrollment contract and must
+not proceed on unsupported legacy active enrollments. This change installs or
+enables no coordinator units.
+
 ## Collection and bounded repair
 
 The coordinator captures a precollection watermark, polls issue updates and their
@@ -48,7 +61,12 @@ durable reservation, exact task-ID reconciliation, serialization lock, and three
 attempt budget as ordinary repair tasks. Its bounded prompt identifies both exact
 branch SHAs and the PR's sanitized title/description as untrusted intent; the task
 must preserve both sides, merge main into the PR branch (never rebase or force-push),
-and test the combined behavior. A current-main fence is rechecked before dispatch.
+and test the combined behavior. Before returning a `ready` receipt, the prompt
+requires a PR comment recording each conflict hunk's file/hunk identity,
+classification, decision, and rationale explaining preservation of both branch
+intents (or genuine incompatibility). This is a deliverable under the existing
+task receipt and independent-review contract, not a new receipt schema or an
+automatic semantic approval. A current-main fence is rechecked before dispatch.
 The prompt directs genuinely incompatible requirements or broken required policy
 to a fixed typed result; these stop further repair for that exact head. Waiting or
 uncertain tasks retain the shared lock. Ordinary technical conflicts are repaired
@@ -167,6 +185,18 @@ Raw GitHub text, check logs, commands, credentials, and private runtime data are
 excluded. Export persistence is bounded to 256 events and 1 MiB; plan mode never
 writes it. Stable event IDs preserve polling replay identity, and terminal
 enrollment retirement is committed with event persistence.
+
+Before each export, sensitive approval events are filtered against durable
+active enrollment, the exact last observed open head, and still-pending
+`authorize_sensitive_action` authorization. Apply commits the complete scan's
+head observations, owner commands, and retirements before exporting; an old
+enrollment head is not a fallback for missing current-head observation. Authorized,
+head-superseded, retired, unobserved, or unsupported decisions are omitted from
+the exported view only. Durable incident payloads/IDs/times and all other outcomes
+remain unchanged; consumer ACK history is neither read nor rewritten, and export
+never grants or revokes an approval. If filtering leaves no events, the previous
+export is removed rather than refreshing an obsolete request. This is a polling
+snapshot of observed state, not a live authorization endpoint.
 
 The export is written to the existing state directory selected by application
 configuration, not the coordinator's private state directory. The coordinator
