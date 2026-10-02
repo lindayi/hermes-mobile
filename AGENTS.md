@@ -22,9 +22,10 @@ For behavior changes, preserve existing assertions and demonstrate a real RED te
 
 Use the managed test runner with explicit test paths for focused local checks; choose Python through HERMES_TEST_PYTHON or the repository .venv, never a fixed owner-specific path.
 
-Final PR coverage combines required hosted `source-ci` (all portable Python, JS
-and generated-assets browser shards) with the entire residual host-compatibility
-suite, using the same selected Python:
+Until the owner-verified gate transition is activated, final PR coverage combines
+required hosted `source-ci` (all portable Python, JS and generated-assets browser
+shards) with the entire residual host-compatibility suite, using the same selected
+Python:
 
 ```sh
 HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
@@ -34,8 +35,19 @@ HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
 Run only focused regressions locally during iteration. Do not repeat hosted suites
 on the production server routinely. The explicit host manifest is
 `.github/host-tests.json`; new files default to hosted execution. The full managed
-`all` remains an opt-in diagnostic and the conservative release-stage gate, not
-the ordinary premerge server task.
+`all` remains an opt-in diagnostic and the conservative release-stage gate.
+
+The target routine premerge gate is the complete hosted `source-ci` aggregate
+(including portable Python, JavaScript, generated-assets browser shards and the
+required native suite), issue-link validation, and exact-head `cloud-review`. This
+target is not active because its documentation or validator exists: until the
+parent operator verifies every dependency and actual current-head evidence and
+changes repository protection, the exact pre-cutover contexts `source-ci`,
+`integration-tests`, `agent-review`, and `issue-link` remain authoritative. See
+[`docs/autonomy-policy.md`](docs/autonomy-policy.md). After an authorized cutover,
+the installed/private host-compatibility suite remains required at guarded
+exact-main deployment; never execute untrusted PR code on a production or
+self-hosted runner.
 
 ## Develop and test
 
@@ -83,7 +95,7 @@ records acceptance cases, and reports exact observed test/CI evidence. Use the
 repository issue and pull-request templates. State clearly when a check was not
 run; do not imply an unobserved pass.
 
-A review comment is not an approval or a passing review status; require independent formal COMMENT review for every PR and verify evidence against the exact head SHA.
+A review comment is not an approval or a passing review status; verify every review and test result against the exact head SHA.
 
 Request Copilot review for pull requests when it is available, and request a fresh
 review after follow-up commits. Automatic review/re-review is controlled by GitHub
@@ -92,21 +104,32 @@ has that setting enabled unless verified. A Copilot suggestion is feedback, not 
 instruction: judge it against the code and tests. Authentication, deployment,
 migration, and semantic merge-conflict changes require targeted independent review.
 
+Until the owner-verified transition is activated, require an independent formal
+COMMENT review and the current required checks on each PR. After activation,
+`cloud-review` requires the latest authenticated Copilot reviewer APPROVED review
+on the exact current head, complete pagination, and resolved threads; COMMENTED,
+overview text, or a status alone never qualifies. Sensitive changes still require
+explicit owner authorization for the exact SHA and targeted independent review.
+
 Required checks and protections are authoritative. Do not fabricate reviews,
 approvals, check results, or identities. Review and test evidence applies only to
 the exact head SHA; any new commit invalidates it. Address findings with follow-up
 commits and reply to their actual GitHub threads. Never self-approve, bypass
 protections, or write directly to `main`.
 
-`source-ci`, `integration-tests`, and `agent-review` must pass on the exact head SHA.
-Publish `agent-review` only after verifying the independent review of that head.
-Publish `integration-tests` only after verifying complete final integration under
-the linked development workflow: the entire residual host-compatibility suite and
-the matching hosted `source-ci` aggregate must succeed on the same exact head SHA.
-Record both results and the workflow URL. Never use only a hosted subset or only
-local host tests to claim full coverage. Focused checks or dependency setup alone
-are not final integration. Require resolved review threads and a branch current with freshly
-fetched `origin/main` before GitHub merge. No owner/admin bypass.
+Until the transition is activated, the exact pre-cutover contexts `source-ci`,
+`integration-tests`, `agent-review`, and `issue-link` must pass on the exact head
+SHA. Publish `agent-review` only after verifying the independent review of that
+head. Publish `integration-tests` only after verifying complete final integration
+under the linked development workflow:
+the entire residual host-compatibility suite and the matching hosted `source-ci`
+aggregate must succeed on the same exact head SHA. Record both results and the
+workflow URL. Never use only a hosted subset or only local host tests to claim full
+coverage. Focused checks or dependency setup alone are not final integration.
+After activation, require `source-ci`, `issue-link`, and `cloud-review` on the exact
+head; do not publish retired legacy statuses as substitutes. Require resolved
+review threads and a branch current with freshly fetched `origin/main` before
+GitHub merge. No owner/admin bypass.
 
 Merge and deploy one revision at a time. Merge updated `origin/main` into the PR branch;
 never rebase or force-push reviewed history. Gather both PR intents, the common base,

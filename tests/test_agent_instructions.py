@@ -118,8 +118,8 @@ SYNCED_RULES = (
     'gates.',
     'Never use production credentials, real accounts, real model calls, native production '
     'homes or databases, private evidence uploads, or live enrollment as tests.',
-    'A review comment is not an approval or a passing review status; require independent '
-    'formal COMMENT review for every PR and verify evidence against the exact head SHA.',
+    'A review comment is not an approval or a passing review status; verify every review '
+    'and test result against the exact head SHA.',
     'Merging and deployment are separate; only guarded deployment from verified main is '
     'allowed, and coding agents never access production.',
 )
@@ -167,8 +167,9 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         text = ' '.join((ROOT / path).read_text().split())
         for clause in (
             'docs/git-development-spec.md',
-            '`source-ci`, `integration-tests`, and `agent-review` must pass',
-            'independent formal COMMENT review for every PR',
+            'the exact pre-cutover contexts `source-ci`, `integration-tests`, '
+            '`agent-review`, and `issue-link` must pass',
+            'independent formal COMMENT review',
             'Publish `agent-review` only after verifying the independent review',
             'Publish `integration-tests` only after verifying complete final integration',
             'exact head SHA',
@@ -181,12 +182,12 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
 
     workflow = ' '.join((ROOT / 'docs/development-workflow.md').read_text().split())
     for clause in (
-        'When the documented hosted partition is available',
-        '`scripts/ci_tests.py`',
+        'Until the parent operator verifies the dependencies and exact-head replacement evidence',
+        'scripts/ci_tests.py',
         '`.github/host-tests.json`',
         'complete matching hosted results plus all residual host tests',
         'same exact head SHA',
-        'Otherwise, conservatively use the existing managed `all` suite',
+        'If the documented partition is unavailable, conservatively use the existing managed `all` suite',
         'Final integration is a merge gate, not a full local suite per edit',
         'fresh Linux',
         'Playwright OS dependencies',
@@ -200,13 +201,36 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
     assert 'Full managed integration result, if required' not in template
     for clause in (
         'Mandatory final integration evidence',
-        '`source-ci`, `integration-tests`, and `agent-review`',
-        'independent formal COMMENT review',
+        'before cutover `source-ci`, `integration-tests`, `agent-review`, and `issue-link`',
+        'staging retains those four plus `cloud-review`',
+        'after cutover `source-ci`, `issue-link`, and `cloud-review`',
+        'actual authenticated Copilot `APPROVED` review',
         'resolved review threads',
         'current with freshly fetched `origin/main`',
         'No owner/admin bypass',
     ):
         assert clause in template, clause
+
+
+def test_all_pre_cutover_context_lists_include_issue_link():
+    context_list = '`source-ci`, `integration-tests`, `agent-review`, and `issue-link`'
+    for path in (
+        'AGENTS.md',
+        '.github/copilot-instructions.md',
+        '.github/pull_request_template.md',
+        'docs/development-workflow.md',
+        'docs/git-development-spec.md',
+        'docs/github-policy.md',
+        'README.md',
+    ):
+        text = ' '.join((ROOT / path).read_text().split())
+        assert context_list in text, path
+
+    policy = ' '.join((ROOT / 'docs/autonomy-policy.md').read_text().split())
+    assert (
+        '| `staging` | `source-ci`, `integration-tests`, `agent-review`, '
+        '`issue-link`, `cloud-review` |'
+    ) in policy
 
 
 def test_agent_instructions_use_the_available_hosted_partition_portably():
@@ -225,15 +249,74 @@ def test_agent_instructions_use_the_available_hosted_partition_portably():
         '`.github/host-tests.json`; new files default to hosted execution',
         'Do not repeat hosted suites on the production server routinely',
         'The full managed `all` remains an opt-in diagnostic and the conservative '
-        'release-stage gate, not the ordinary premerge server task',
+        'release-stage gate',
         'the entire residual host-compatibility suite and the matching hosted '
         '`source-ci` aggregate must succeed on the same exact head SHA',
         'Record both results and the workflow URL',
         'Never use only a hosted subset or only local host tests to claim full coverage',
+        'The target routine premerge gate is the complete hosted `source-ci` aggregate',
+        'This target is not active because its documentation or validator exists',
+        'installed/private host-compatibility suite remains required at guarded exact-main deployment',
     ):
         assert clause in text, clause
     assert (ROOT / 'scripts/ci_tests.py').is_file()
     assert (ROOT / '.github/host-tests.json').is_file()
+
+
+def test_gate_transition_is_conditional_and_preserves_exact_head_review():
+    paths = (
+        'AGENTS.md',
+        '.github/copilot-instructions.md',
+        'docs/git-development-spec.md',
+        'docs/development-workflow.md',
+        'docs/autonomy-policy.md',
+        '.github/pull_request_template.md',
+    )
+    for path in paths:
+        text = ' '.join((ROOT / path).read_text().split())
+        assert 'post-cutover' in text or 'After activation' in text or 'after cutover' in text
+        assert 'source-ci' in text and 'issue-link' in text and 'cloud-review' in text
+        assert 'exact' in text and ('head' in text or 'SHA' in text)
+
+    policy = ' '.join((ROOT / 'docs/autonomy-policy.md').read_text().split())
+    for clause in (
+        'The CLI performs no network calls, writes, status publication, settings changes',
+        'does not authenticate the JSON file',
+        'A `COMMENTED` review, body text, empty overview, or a status without the authenticated review is not approval',
+        'private installed-runtime compatibility remains an exact-main guarded deployment gate',
+        'pre-cutover',
+        'post-cutover',
+    ):
+        assert clause in policy, clause
+
+
+def test_additive_staging_policy_documents_bounded_maps_and_ordered_operator_gates():
+    policy = (ROOT / 'docs/autonomy-policy.md').read_text()
+    expected = {
+        'pre-cutover': ('source-ci', 'integration-tests', 'agent-review', 'issue-link'),
+        'staging': ('source-ci', 'integration-tests', 'agent-review', 'issue-link', 'cloud-review'),
+        'post-cutover': ('source-ci', 'issue-link', 'cloud-review'),
+    }
+    for phase, contexts in expected.items():
+        assert f'--phase {phase} /private/path/evidence.json' in policy
+        row = next(line for line in policy.splitlines() if line.startswith(f'| `{phase}` |'))
+        assert tuple(re.findall(r'`([^`]+)`', row.split('|')[2])) == contexts
+    text = ' '.join(policy.split())
+    for clause in (
+        'No arbitrary supersets or unknown contexts',
+        'app_id must be explicitly present as a JSON integer or null',
+        'source-ci may be unbound (null) or already bound to Actions app 15368',
+        'staging and post-cutover require source-ci bound to Actions app 15368',
+        'issue-link remains bound to Actions app 15368 in every phase',
+        'Only pre-cutover permits omission of cloud_review.status',
+        'An explicitly supplied null or malformed status blocks',
+        'creator ID 5164171',
+        'the genuinely merged coordinator',
+        'before retiring either legacy context',
+        'A pre-cutover pass is permission to consider additive staging, not to retire legacy gates',
+        'Do not synthesize a status to bridge this gap',
+    ):
+        assert clause in text, clause
 
 
 def test_parallel_integration_preserves_reviewed_history_and_both_intents():

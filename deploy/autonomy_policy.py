@@ -1,0 +1,390 @@
+"""Read-only validation of the repository's conditional premerge gate transition."""
+
+import re
+from datetime import datetime
+
+REPOSITORY = 'lindayi/hermes-mobile'
+REPOSITORY_ID = 1399942965
+OWNER_ID = 5164171
+COPILOT_REVIEWER_ID = 175728472
+COPILOT_AGENT_ID = 198982749
+WORKFLOW_ID = 372155405
+WORKFLOW_PATH = '.github/workflows/ci.yml'
+REF = 'refs/heads/main'
+SOURCE_CONTROL_ROOTS = frozenset({
+    'deploy/release_artifact.py', 'deploy/self_deploy.py', 'deploy/ci_selection.py',
+    'scripts/ci_tests.py', 'scripts/prepare_native_test_runtime.py', 'scripts/test.py',
+})
+SOURCE_CONTROL_PYTHON_FILES = frozenset({
+    'deploy/assets.py', 'deploy/ci_selection.py', 'deploy/frontend_release.py',
+    'deploy/git_source.py', 'deploy/install_core.py', 'deploy/native_controls_release.py',
+    'deploy/public_http.py', 'deploy/release_artifact.py', 'deploy/self_deploy.py',
+    'deploy/test_workspace.py', 'scripts/ci_tests.py',
+    'scripts/prepare_native_test_runtime.py', 'scripts/test.py',
+})
+HOSTED_JOBS = frozenset({'build', 'checks', 'js', 'python', 'browser', 'native'})
+RUN_JOBS = frozenset({
+    'build', 'checks', 'js', 'python (0)', 'python (1)',
+    'browser (0)', 'browser (1)', 'browser (2)', 'browser (3)',
+    'native', 'source-ci', 'attest',
+})
+REQUIRED_CHECKS = {
+    'pre-cutover': {
+        'source-ci': None, 'integration-tests': None, 'agent-review': None, 'issue-link': 15368,
+    },
+    'staging': {
+        'source-ci': 15368, 'integration-tests': None, 'agent-review': None,
+        'issue-link': 15368, 'cloud-review': None,
+    },
+    'post-cutover': {'source-ci': 15368, 'issue-link': 15368, 'cloud-review': None},
+}
+REQUIRED_FILES = (
+    WORKFLOW_PATH,
+    '.github/native-tests.json',
+    '.github/host-tests.json',
+    '.github/actions/test-environment/action.yml',
+    '.github/actions/native-test-environment/action.yml',
+    '.github/native-runtime.json',
+    'requirements.lock',
+    'package.json',
+    'package-lock.json',
+    'deploy/release_artifact.py',
+    'deploy/self_deploy.py',
+    'deploy/ci_selection.py',
+    'deploy/test_workspace.py',
+    'deploy/assets.py',
+    'deploy/install_core.py',
+    'deploy/frontend_release.py',
+    'deploy/git_source.py',
+    'deploy/native_controls_release.py',
+    'deploy/public_http.py',
+    'scripts/ci_tests.py',
+    'scripts/prepare_native_test_runtime.py',
+    'scripts/test.py',
+    'patches/native-compat.patch',
+    'patches/cron-delivery.patch',
+    'patches/native-compat-baseline.json',
+    'patches/cron-delivery-baseline.json',
+    'deploy/cloud_coordinator.py',
+)
+SOURCE_FINGERPRINTS = {
+    '.github/workflows/ci.yml': '39110e6f940fc59ef3aec9846f07616a86a2e07335d2aaed6c6cd0ab444ff195',
+    '.github/native-tests.json': 'b97ddb088e595197cf65d97b0b4af89f4f83f5c4ad25463c566df7099817209f',
+    '.github/host-tests.json': '8af5fc30188f81ba95d3d7c11ba6801f52795175c2cac7f634424f906947ce5a',
+    '.github/actions/test-environment/action.yml': '638ed56955c8c8202fdd41640abe3be8b8065129e2965b8dc67b69f024017604',
+    '.github/actions/native-test-environment/action.yml': 'b1e5af03a4aa397f585e541805b4a292d1b3529090d54932b8945b6743ecd993',
+    '.github/native-runtime.json': '705351eff7420cf3cbd3f91f3edc605feb304eba86f99e5a94902e89d3fb4d88',
+    'requirements.lock': '1e912f6160c68f3ebb56a51da95af013875d0b4690434fe52fcd3f6b115de095',
+    'package.json': 'a341a3a23a9425728ba38b83e5d7a4ab983c6f951f14667ba3cd69a6e35f13d3',
+    'package-lock.json': '63199915d106fefd775451eb7d4aed9a3c2d04ca6f670ef9f27ba0cd6098218a',
+    'deploy/assets.py': '0b5fee70ac71f61384b6501a40df9b7125c080fffa9930975ec2542553dffcc1',
+    'deploy/frontend_release.py': '7749afb862a515fc673712b11278145adfb3d39ba2d012a34ecea257399eade3',
+    'deploy/git_source.py': 'c69c7c5a45bc3a16ab26996872c258cc352cf2ec56c19d6256595e18ac713d63',
+    'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
+    'deploy/native_controls_release.py': 'a2d00ebe7fa8add88afdeda28599b47e68f2eaab6935a8b2c9eaa46f585a11fe',
+    'deploy/public_http.py': 'dd352b8d0295f242f4a5d31a55eaaec523ef8405601461d4ab5fa8dc6dc302e7',
+    'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
+    'deploy/self_deploy.py': 'c8b9febf5e73c22de2aebbbf6ecb63e08597f58ea7ff5eede979d4be51783550',
+    'deploy/ci_selection.py': '07493f74bc4b932e26342e0d27fee8c3c38601af8211e0a950920935173b2f16',
+    'deploy/test_workspace.py': 'baeb1103608ff15db3903677fa8ec9c80c9c8b9a0246ce18ada27bf7c04a486a',
+    'scripts/ci_tests.py': '6ed905a90720fb17226472a0453fb762395424b8370df474fed4536827b398d6',
+    'scripts/prepare_native_test_runtime.py': '798195e6d9b284bae69cb6e27cf8dc7ad5ffc6dce62939b137fb6c6b370b58a8',
+    'scripts/test.py': 'e6a53a5c0f7ff98f35b2efb2282cd65db65eacc2d94af9b07516ceaaffc4ec7c',
+    'patches/native-compat.patch': '2add04e93a5ea74eeeb407dc9d5556bb38c1454b5c8bf307c3e8490e9b72dd32',
+    'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
+    'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
+    'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
+    'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
+}
+SOURCE_BLOCKERS = {
+    WORKFLOW_PATH: 'hosted-workflow-contract',
+    '.github/native-tests.json': 'installed-host-gate',
+    '.github/host-tests.json': 'installed-host-gate',
+    '.github/actions/test-environment/action.yml': 'hosted-workflow-contract',
+    '.github/actions/native-test-environment/action.yml': 'native-job-contract',
+    '.github/native-runtime.json': 'native-job-contract',
+    'requirements.lock': 'hosted-workflow-contract',
+    'package.json': 'hosted-workflow-contract',
+    'package-lock.json': 'hosted-workflow-contract',
+    'deploy/release_artifact.py': 'release-artifact-provenance',
+    'deploy/self_deploy.py': 'installed-host-gate',
+    'deploy/ci_selection.py': 'installed-host-gate',
+    'deploy/test_workspace.py': 'execution-source-contract',
+    'deploy/assets.py': 'release-artifact-provenance',
+    'deploy/install_core.py': 'native-job-contract',
+    'deploy/frontend_release.py': 'execution-source-contract',
+    'deploy/git_source.py': 'installed-host-gate',
+    'deploy/native_controls_release.py': 'installed-host-gate',
+    'deploy/public_http.py': 'installed-host-gate',
+    'scripts/ci_tests.py': 'installed-host-gate',
+    'scripts/prepare_native_test_runtime.py': 'native-job-contract',
+    'scripts/test.py': 'execution-source-contract',
+    'patches/native-compat.patch': 'native-job-contract',
+    'patches/cron-delivery.patch': 'native-job-contract',
+    'patches/native-compat-baseline.json': 'native-job-contract',
+    'patches/cron-delivery-baseline.json': 'native-job-contract',
+    'deploy/cloud_coordinator.py': 'coordinator-review-contract',
+}
+SOURCE_BASELINES = {
+    'main': 'f84063e9aed55994c4ae4d3eae14fec922e12929',
+    'deploy/cloud_coordinator.py': '403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83',
+}
+SHA_RE = re.compile(r'[0-9a-f]{40}\Z')
+HEX_RE = re.compile(r'[0-9a-f]{64}\Z')
+
+
+def _static_contracts(files, blockers):
+    if set(files) != set(REQUIRED_FILES):
+        if set(REQUIRED_FILES) - set(files):
+            blockers.add('main-source-missing')
+        if set(files) - set(REQUIRED_FILES):
+            blockers.add('main-source-invalid')
+    for name in REQUIRED_FILES:
+        digest = files.get(name)
+        if not isinstance(digest, str) or HEX_RE.fullmatch(digest) is None:
+            blockers.add('main-source-invalid' if name in files else 'main-source-missing')
+        elif digest != SOURCE_FINGERPRINTS[name]:
+            blockers.add(SOURCE_BLOCKERS[name])
+
+
+def _valid_sha(value):
+    return isinstance(value, str) and SHA_RE.fullmatch(value) is not None
+
+
+def _check_identity(evidence, blockers):
+    repository = evidence.get('repository')
+    if (not isinstance(repository, dict) or repository.get('id') != REPOSITORY_ID
+            or repository.get('full_name') != REPOSITORY):
+        blockers.add('repository-identity')
+
+
+def _check_protection(evidence, phase, blockers):
+    policy = evidence.get('protection')
+    expected = REQUIRED_CHECKS[phase]
+    if (not isinstance(policy, dict) or policy.get('repository_id') != REPOSITORY_ID
+            or policy.get('repository') != REPOSITORY or policy.get('branch') != 'main'
+            or policy.get('complete') is not True or policy.get('strict') is not True
+            or policy.get('enforce_admins') is not True
+            or policy.get('required_conversation_resolution') is not True):
+        blockers.add('branch-protection')
+        return
+    checks = policy.get('required_checks')
+    actual = {}
+    if isinstance(checks, list):
+        for check in checks:
+            if (not isinstance(check, dict) or not isinstance(check.get('context'), str)
+                    or 'app_id' not in check
+                    or (check['app_id'] is not None and type(check['app_id']) is not int)):
+                blockers.add('required-check-policy')
+                return
+            context = check['context']
+            if context in actual:
+                blockers.add('required-check-policy')
+                return
+            actual[context] = check.get('app_id')
+    # The only pre-cutover variant is an already Actions-bound source-ci.
+    if actual != expected and not (
+        phase == 'pre-cutover' and actual == expected | {'source-ci': 15368}
+    ):
+        blockers.add('required-check-policy')
+
+
+def _check_source_run(evidence, sha, blockers):
+    source = evidence.get('source_ci')
+    if not isinstance(source, dict):
+        blockers.add('source-ci-evidence')
+        return
+    expected = {
+        'repository': REPOSITORY, 'repository_id': REPOSITORY_ID,
+        'head_repository_id': REPOSITORY_ID, 'workflow_id': WORKFLOW_ID,
+        'workflow_path': WORKFLOW_PATH, 'event': 'push', 'branch': 'main',
+        'head_sha': sha, 'status': 'completed', 'conclusion': 'success',
+    }
+    if any(source.get(key) != value for key, value in expected.items()):
+        blockers.add('source-ci-evidence')
+    run_id, attempt = source.get('run_id'), source.get('run_attempt')
+    if type(run_id) is not int or run_id < 1 or type(attempt) is not int or attempt < 1:
+        blockers.add('source-ci-evidence')
+        return
+    jobs = source.get('jobs')
+    names = [job.get('name') for job in jobs] if isinstance(jobs, list) and all(isinstance(job, dict) for job in jobs) else []
+    if (source.get('jobs_complete') is not True or set(names) != RUN_JOBS or len(names) != len(set(names))
+            or len(jobs or []) != len(RUN_JOBS)):
+        blockers.add('source-ci-jobs')
+    else:
+        ids = []
+        for job in jobs:
+            job_id = job.get('id')
+            ids.append(job_id)
+            if (type(job_id) is not int or job_id < 1 or job.get('run_id') != run_id
+                    or job.get('run_attempt') != attempt or job.get('head_sha') != sha
+                    or job.get('status') != 'completed' or job.get('conclusion') != 'success'):
+                blockers.add('source-ci-jobs')
+                break
+        if len(ids) != len(set(ids)):
+            blockers.add('source-ci-jobs')
+    artifact = source.get('artifact')
+    if not isinstance(artifact, dict):
+        blockers.add('release-artifact-evidence')
+        return
+    if (artifact.get('name') != f'release-{run_id}-{attempt}'
+            or artifact.get('run_id') != run_id or artifact.get('run_attempt') != attempt
+            or artifact.get('head_sha') != sha
+            or artifact.get('repository_id') != REPOSITORY_ID
+            or artifact.get('head_repository_id') != REPOSITORY_ID
+            or artifact.get('expired') is not False
+            or type(artifact.get('size_bytes')) is not int or artifact.get('size_bytes', 0) <= 0
+            or not isinstance(artifact.get('sha256'), str) or HEX_RE.fullmatch(artifact['sha256']) is None):
+        blockers.add('release-artifact-evidence')
+    certificate = artifact.get('attestation')
+    identity = f'https://github.com/{REPOSITORY}/{WORKFLOW_PATH}@{REF}'
+    if (not isinstance(certificate, dict) or certificate.get('verified') is not True
+            or certificate.get('repository') != REPOSITORY
+            or certificate.get('repository_id') != str(REPOSITORY_ID)
+            or certificate.get('source_ref') != REF
+            or certificate.get('source_sha') != sha or certificate.get('signer_sha') != sha
+            or certificate.get('signer_identity') != identity
+            or certificate.get('run_invocation') !=
+            f'https://github.com/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}'
+            or certificate.get('runner_environment') != 'github-hosted'
+            or certificate.get('trigger') != 'push'
+            or certificate.get('issuer') != 'https://token.actions.githubusercontent.com'):
+        blockers.add('release-attestation')
+
+
+def _review_timestamp(submitted_at):
+    """Use the same fail-closed timestamp semantics for both review roles."""
+    try:
+        timestamp = datetime.fromisoformat(submitted_at.replace('Z', '+00:00'))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        return None
+    return timestamp
+
+
+def _check_review(evidence, main_sha, phase, blockers):
+    review = evidence.get('cloud_review')
+    if not isinstance(review, dict):
+        blockers.add('cloud-review-evidence')
+        return
+    head = review.get('head_sha')
+    if (review.get('repository_id') != REPOSITORY_ID or review.get('base_branch') != 'main'
+            or review.get('base_sha') != main_sha or not _valid_sha(head)
+            or review.get('state') != 'open' or review.get('draft') is not False
+            or type(review.get('pull_author_id')) is not int or review['pull_author_id'] < 1
+            or review.get('reviews_complete') is not True
+            or review.get('threads_complete') is not True):
+        blockers.add('cloud-review-evidence')
+        return
+    reviews, threads = review.get('reviews'), review.get('threads')
+    if not isinstance(reviews, list) or not isinstance(threads, list):
+        blockers.add('cloud-review-evidence')
+        return
+    authored = [
+        item for item in reviews
+        if isinstance(item, dict) and isinstance(item.get('user'), dict)
+        and type(item['user'].get('id')) is int
+        and item['user']['id'] == COPILOT_REVIEWER_ID
+    ]
+    ordered = []
+    review_ids = set()
+    malformed_review = False
+    for item in authored:
+        review_id, submitted_at = item.get('id'), item.get('submitted_at')
+        if type(review_id) is not int or review_id < 1 or review_id in review_ids:
+            malformed_review = True
+            continue
+        review_ids.add(review_id)
+        timestamp = _review_timestamp(submitted_at)
+        if timestamp is None:
+            malformed_review = True
+            continue
+        ordered.append((timestamp, review_id, item))
+    if malformed_review:
+        blockers.add('cloud-review-approval')
+    latest = max(ordered, key=lambda record: record[:2], default=(None, None, None))[2]
+    if latest is None or latest.get('state') != 'APPROVED' or latest.get('commit_id') != head:
+        blockers.add('cloud-review-approval')
+    if any(not isinstance(thread, dict) or thread.get('isResolved') is not True
+           or thread.get('comments_complete') is not True for thread in threads):
+        blockers.add('cloud-review-threads')
+    status = review.get('status')
+    if (phase != 'pre-cutover' or 'status' in review) and (
+            not isinstance(status, dict) or status.get('context') != 'cloud-review'
+            or status.get('state') != 'success' or status.get('head_sha') != head
+            or status.get('creator_id') != OWNER_ID):
+        blockers.add('cloud-review-status')
+
+    change = review.get('change')
+    if (not isinstance(change, dict) or change.get('head_sha') != head
+            or change.get('files_complete') is not True
+            or type(change.get('sensitive')) is not bool):
+        blockers.add('change-scope-evidence')
+    elif change['sensitive']:
+        authorization = change.get('owner_authorization')
+        targeted = change.get('targeted_review')
+        if (not isinstance(authorization, dict) or authorization.get('actor_id') != OWNER_ID
+                or authorization.get('head_sha') != head or authorization.get('state') != 'approved'
+                or not isinstance(targeted, dict) or type(targeted.get('reviewer_id')) is not int
+                or targeted['reviewer_id'] < 1
+                or targeted['reviewer_id'] in {
+                    OWNER_ID, review['pull_author_id'], COPILOT_AGENT_ID, COPILOT_REVIEWER_ID,
+                }
+                or targeted.get('head_sha') != head
+                or targeted.get('state') not in ('COMMENTED', 'APPROVED')
+                or type(targeted.get('review_id')) is not int or targeted['review_id'] < 1):
+            blockers.add('sensitive-review-authorization')
+        else:
+            # Resolve by ID across the complete collection before checking its claims;
+            # filtering by reviewer/head/state first could hide conflicting duplicates.
+            matches = [
+                item for item in reviews
+                if isinstance(item, dict) and item.get('id') == targeted['review_id']
+            ]
+            if len(matches) != 1:
+                blockers.add('sensitive-review-authorization')
+            else:
+                record = matches[0]
+                user = record.get('user')
+                if (type(record.get('id')) is not int or not isinstance(user, dict)
+                        or type(user.get('id')) is not int
+                        or user['id'] != targeted['reviewer_id']
+                        or record.get('commit_id') != head
+                        or record.get('state') != targeted['state']
+                        or _review_timestamp(record.get('submitted_at')) is None):
+                    blockers.add('sensitive-review-authorization')
+
+
+def validate_transition(evidence, *, phase):
+    """Validate injected read-only GitHub evidence and main-source contracts; perform no I/O."""
+    blockers = set()
+    if not isinstance(phase, str) or phase not in REQUIRED_CHECKS:
+        return {'ready': False, 'phase': phase, 'blockers': ['invalid-phase']}
+    if not isinstance(evidence, dict):
+        return {'ready': False, 'phase': phase, 'blockers': ['invalid-evidence']}
+    # Source-enforced hold in every phase, never an evidence-supplied opt-out.
+    # Pinned coordinator 403ac3d lacks strict timestamp ordering and targeted
+    # independent review for every sensitive head. Issue #26 activation requires
+    # a reviewed merged replacement, deliberate pin updates, and a source change
+    # to clear this hold; matching the known unsafe fingerprint is insufficient.
+    blockers.add('pending-source-contract')
+    _check_identity(evidence, blockers)
+    main = evidence.get('main')
+    if (not isinstance(main, dict) or main.get('repository_id') != REPOSITORY_ID
+            or main.get('ref') != REF or main.get('current') is not True
+            or not _valid_sha(main.get('sha')) or main.get('snapshot_complete') is not True
+            or not isinstance(main.get('files'), dict)):
+        blockers.add('current-main-snapshot')
+        sha, files = '', {}
+    else:
+        sha, files = main['sha'], main['files']
+    try:
+        _static_contracts(files, blockers)
+        _check_protection(evidence, phase, blockers)
+        if sha:
+            _check_source_run(evidence, sha, blockers)
+            _check_review(evidence, sha, phase, blockers)
+    except (AttributeError, IndexError, KeyError, RecursionError, TypeError, ValueError):
+        blockers.add('malformed-evidence')
+    return {'ready': not blockers, 'phase': phase, 'blockers': sorted(blockers)}
