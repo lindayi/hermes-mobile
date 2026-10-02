@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically consume verified workflow lifecycle outcomes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=1min
+Persistent=true
+Unit=hermes-workflow-notifications.service
+
+[Install]
+WantedBy=timers.target
