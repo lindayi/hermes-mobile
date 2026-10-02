@@ -135,7 +135,7 @@ class GitHub:
                       'head_sha': 'a' * 40, 'status': 'completed', 'conclusion': 'success'}
                      for n, name in enumerate(['build', 'checks', 'js', 'python (0)', 'python (1)',
                                               'browser (0)', 'browser (1)', 'browser (2)',
-                                              'browser (3)', 'source-ci', 'attest'], 100)]
+                                              'browser (3)', 'native', 'source-ci', 'attest'], 100)]
         self.record = {'id': 61, 'name': 'release-51-2', 'expired': False,
             'size_in_bytes': len(self.zip), 'digest': 'sha256:' + hashlib.sha256(self.zip).hexdigest(),
             'workflow_run': {'id': 51, 'head_sha': 'a' * 40, 'head_branch': 'main',
@@ -224,10 +224,14 @@ def test_acquire_rejects_untrusted_run(tmp_path, monkeypatch, field, value):
     assert not any(c[1:3] == ['attestation', 'verify'] for c in fake.calls)
 
 
-@pytest.mark.parametrize('change', ['missing', 'duplicate', 'extra', 'skipped', 'wrong-attempt', 'wrong-sha', 'wrong-run'])
+@pytest.mark.parametrize('change', [
+    'missing', 'missing-native', 'duplicate', 'extra', 'skipped', 'wrong-attempt',
+    'wrong-sha', 'wrong-run'
+])
 def test_acquire_requires_every_job_in_same_attempt(tmp_path, monkeypatch, change):
     fake = GitHub(tmp_path, monkeypatch)
     if change == 'missing': fake.jobs.pop()
+    elif change == 'missing-native': fake.jobs = [job for job in fake.jobs if job['name'] != 'native']
     elif change == 'duplicate': fake.jobs[-1] = fake.jobs[0]
     elif change == 'extra': fake.jobs.append(dict(fake.jobs[0], id=999, name='other'))
     elif change == 'skipped': fake.jobs[0]['conclusion'] = 'skipped'
@@ -318,7 +322,7 @@ def test_workflow_builds_once_browser_consumes_and_main_only_attests():
     root = Path(__file__).resolve().parents[1]
     workflow = yaml.load((root / '.github/workflows/ci.yml').read_text(), Loader=yaml.BaseLoader)
     jobs = workflow['jobs']
-    assert set(jobs['source-ci']['needs']) == {'build', 'checks', 'js', 'python', 'browser'}
+    assert set(jobs['source-ci']['needs']) == {'build', 'checks', 'js', 'python', 'browser', 'native'}
     assert jobs['browser']['needs'] == 'build'
     browser = '\n'.join(s.get('run', '') for s in jobs['browser']['steps'])
     assert 'build_frontend' not in browser and 'release_artifact unpack' in browser

@@ -87,7 +87,12 @@ per-event deferrals when needed (at most the 256 input events). It does not crea
 adapter state, write Inbox/outbox rows, call a sender, or write bytecode. Schema,
 owner, recipient and digest conflicts anywhere in the complete snapshot remain
 whole-batch failures before writes; durable identities are rechecked for the
-complete batch again after taking the apply lock. Deployment proof for every
+complete batch again after taking the apply lock. The same export path is re-read
+and fully validated with post-lock wall time (both file and envelope freshness).
+Its bytes must equal the preflight snapshot, including formatting; a changed
+snapshot blocks for a new invocation/replan rather than processing obsolete events.
+These checks precede state initialization, recovery, reservations and Inbox writes.
+Deployment proof for every
 unACKed event is also re-read with fresh current time under that lock before
 initialization or reservations. Each unACKed deployment is checked again after
 any SQLite reservation-lock wait and immediately before Inbox ingestion: slow
@@ -101,6 +106,20 @@ SQLite inputs are opened read-only only when their header identifies
 rollback-journal mode and no `-wal`, `-shm`, or `-journal` sidecar exists. WAL
 databases and sidecar states fail closed before SQLite is opened, avoiding
 SQLite's permitted WAL shared-memory side effects in a writable directory.
+
+Explicit apply has one narrow exception: an established, private, bound adapter
+may recover its own exact `workflow-notifications.sqlite-journal` under the
+exclusive adapter lock. Plan never recovers it. Both canonical files must be
+regular, single-link, owner-private and bounded; WAL/SHM, master journals,
+unsupported/torn/corrupt journals and unknown/unbound/foreign databases block.
+The adapter validates standalone journal headers, geometry and complete page
+checksums, then lets SQLite roll back an isolated private copy. The recovered
+schema, repository/owner binding, integrity and complete batch identities must
+validate before SQLite may recover the unchanged canonical inputs. Schema/binding
+are checked again afterward, before reservations or Inbox writes. The canonical
+journal is never blindly deleted. Interrupted recovery copies are ignored (not
+promoted or automatically swept), just like interrupted initialization files.
+Auth and notification input databases retain the strict no-sidecar policy.
 
 Only an explicit `--apply` may create the private
 `workflow-notifications.sqlite` and its lock file, after batch security checks
@@ -198,7 +217,14 @@ The adapter reads only these fixed, existing private records:
 * `/home/lindayi/.local/share/hermes-mobile-delivery/state.json`: version 1;
   the matching durable terminal `records["<merge_sha>:<approval_run_id>"]`
   entry must be `deployed` and bind the exact SHA and positive source, approval,
-  and deployment run IDs. Its deployment ID must equal `latest_id`. The volatile
+  and deployment run IDs. The terminal record is either the exact legacy six-key
+  result (`status`, `reason`, `sha`, `approval_run_id`, `source_run_id`,
+  `deployment_id`) or the worker's exact nine-key version-2 result adding
+  integer `version: 2`, `risk: "routine" | "sensitive"`, and `base_sha`.
+  The base must be a lowercase 40-character SHA; only sensitive bootstrap may use
+  null. Unknown or incomplete fields and untyped metadata are rejected. The outer
+  ledger remains version 1. These metadata do not replace any current deployment
+  proof gate. Its deployment ID must equal `latest_id`. The volatile
   `last` poll result may be that terminal record or the producer's exact
   `duplicate` / `Consumed intent: deployed` result; it cannot contradict the
   latest intent. An already-acknowledged event is deduplicated by its durable

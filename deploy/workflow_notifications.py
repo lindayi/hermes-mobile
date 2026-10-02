@@ -126,14 +126,14 @@ def _pairs_no_duplicates(pairs):
     return result
 
 
-def _json_file(path, *, max_bytes):
+def _json_file(path, *, max_bytes, include_bytes=False):
     data, info = _read_private(path, max_bytes=max_bytes)
     try:
         value = json.loads(data, object_pairs_hook=_pairs_no_duplicates,
                            parse_constant=lambda _: (_ for _ in ()).throw(Blocked('Invalid JSON number')))
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, RecursionError) as error:
         raise Blocked('Private JSON evidence is malformed') from error
-    return value, info
+    return (value, info, data) if include_bytes else (value, info)
 
 
 def _fresh(info, now):
@@ -142,10 +142,10 @@ def _fresh(info, now):
         raise Blocked('Private evidence is stale or future-dated')
 
 
-def _assert_readonly_database(path):
+def _assert_readonly_database(path, *, adapter_journal=False):
     path = Path(path)
     before = _owned_private_path(path)
-    for suffix in ('-wal', '-shm', '-journal'):
+    for suffix in (('-wal', '-shm') if adapter_journal else ('-wal', '-shm', '-journal')):
         if os.path.lexists(f'{path}{suffix}'):
             raise Blocked('SQLite sidecars are unsupported in read-only mode')
     flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
@@ -257,8 +257,8 @@ def _unique_state_index(db, table, columns):
     return _has_unique_index(db, table, columns)
 
 
-def _validate_adapter_state(path):
-    with closing(_open_readonly(path)) as db:
+def _validate_adapter_state(path, *, opener=_open_readonly):
+    with closing(opener(path)) as db:
         try:
             for table, expected in _STATE_COLUMNS.items():
                 if not _table_matches(db, table, expected, _STATE_PRIMARY_KEYS[table]):
@@ -287,6 +287,17 @@ def _deployed_evidence(event, paths, now):
                 and record.get('sha') == event['merge_sha']
                 and type(record.get('deployment_id')) is int
                 and record['deployment_id'] == ledger['latest_id']]
+    v2_fields = required | {'version', 'risk', 'base_sha'}
+    if len(terminal) == 1 and set(terminal[0]) == v2_fields:
+        record = terminal[0]
+        if (type(record['version']) is not int or record['version'] != 2
+                or not isinstance(record['risk'], str)
+                or record['risk'] not in ('routine', 'sensitive')
+                or not ((record['base_sha'] is None and record['risk'] == 'sensitive')
+                        or (isinstance(record['base_sha'], str)
+                            and _SHA.fullmatch(record['base_sha'])))):
+            raise Blocked('Trusted deployment ledger has invalid version-2 metadata')
+        required = v2_fields
     if (len(terminal) != 1 or set(terminal[0]) != required
             or not isinstance(terminal[0]['sha'], str)
             or any(type(terminal[0][name]) is not int or terminal[0][name] <= 0
@@ -355,7 +366,22 @@ def _acked_event_ids(state_path, payload, owner):
     return acked
 
 
-def _load(paths, now):
+def _load_export(state_dir, owner, now):
+    if now.tzinfo is None:
+        raise Blocked('Timezone-aware current time is required')
+    payload, info, data = _json_file(state_dir / EVENT_NAME, max_bytes=MAX_EXPORT_BYTES,
+                                     include_bytes=True)
+    _fresh(info, now)
+    try:
+        validate_export(payload, now=now)
+    except (TypeError, ValueError) as error:
+        raise Blocked('Lifecycle export is invalid, stale, or incomplete') from error
+    if payload['owner_user_id'] != owner:
+        raise Blocked('Lifecycle export is not bound to the current owner')
+    return payload, data
+
+
+def _load(paths, now, *, allow_recovery=False):
     if now.tzinfo is None:
         raise Blocked('Timezone-aware current time is required')
     now = now.astimezone(timezone.utc)
@@ -380,36 +406,158 @@ def _load(paths, now):
     inbox_path = state_dir / 'notifications.sqlite'
     owner = _owner(auth_path)
     _validate_notification_schema(inbox_path)
-    export_path = state_dir / EVENT_NAME
-    payload, export_info = _json_file(export_path, max_bytes=MAX_EXPORT_BYTES)
-    _fresh(export_info, now)
-    try:
-        validate_export(payload, now=now)
-    except (TypeError, ValueError) as error:
-        raise Blocked('Lifecycle export is invalid, stale, or incomplete') from error
-    if payload['owner_user_id'] != owner:
-        raise Blocked('Lifecycle export is not bound to the current owner')
+    payload, export_bytes = _load_export(state_dir, owner, now)
     state_path = state_dir / ADAPTER_STATE_NAME
-    if state_path.exists() or state_path.is_symlink():
+    recovery = allow_recovery and os.path.lexists(str(state_path) + '-journal')
+    if recovery:
+        # No SQLite recovery or writes at preflight. Only an established,
+        # privately owned adapter may defer state reads until the apply lock.
+        _recovery_inputs(state_path, owner)
+    elif state_path.exists() or state_path.is_symlink():
         _owned_private_path(state_path, max_bytes=MAX_STATE_BYTES)
         _validate_adapter_state(state_path)
         _check_binding(state_path, owner)
-    acked = _acked_event_ids(state_path, payload, owner)
+    acked = set() if recovery else _acked_event_ids(state_path, payload, owner)
     deferred = {}
     for item in payload['events']:
         if item['event_id'] not in acked:
             # Only deployment proof is event-local. Schema, owner and all
             # durable identity checks above remain whole-batch failures.
             _refresh_deployment(item, paths, now, deferred)
-    return state_dir, owner, auth_path, inbox_path, payload, state_path, deferred
+    return state_dir, owner, auth_path, inbox_path, payload, state_path, deferred, export_bytes
 
 
-def _check_binding(path, owner):
-    with closing(_open_readonly(path)) as db:
+def _check_binding(path, owner, *, opener=_open_readonly):
+    with closing(opener(path)) as db:
         row = db.execute("SELECT version,repository_id,owner_user_id FROM binding WHERE singleton='repository'").fetchone()
     if (row is None or row['version'] != SCHEMA_VERSION
             or row['repository_id'] != REPOSITORY_ID or row['owner_user_id'] != owner):
         raise Blocked('Existing adapter state is bound to a different repository or owner')
+
+
+def _open_unrecovered_adapter(path):
+    # Used only to identify an established adapter before recovery. Immutable
+    # prevents SQLite from touching the journal; event rows are NOT trusted here.
+    _assert_readonly_database(path, adapter_journal=True)
+    try:
+        db = sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True, timeout=2)
+        db.row_factory = sqlite3.Row
+        objects = {(row['type'], row['name']) for row in db.execute(
+            'SELECT type,name FROM sqlite_master')}
+        expected = {('table', 'binding'), ('table', 'events'),
+                    ('index', 'sqlite_autoindex_binding_1'), ('index', 'sqlite_autoindex_events_1')}
+        if objects != expected or db.execute('SELECT count(*) FROM binding').fetchone()[0] != 1:
+            raise Blocked('Recovery requires an established adapter schema and binding')
+        return db
+    except (sqlite3.Error, Blocked) as error:
+        if 'db' in locals():
+            db.close()
+        raise Blocked('Unrecovered adapter identity is unavailable') from error
+
+
+def _validate_rollback_journal(data, database):
+    """Accept bounded standalone hot journals, never master-journal references.
+
+    SQLite intentionally ignores malformed/unsynced journal tails. Check all
+    complete records here so that a corrupt journal cannot silently be accepted
+    as successful recovery. Partial/torn journals require operator inspection.
+    """
+    magic = bytes.fromhex('d9d505f920a163d7')
+    if len(data) < 512 or data[:8] != magic or data[-8:] == magic:
+        raise Blocked('Adapter rollback journal is not a supported standalone hot journal')
+    page_size = int.from_bytes(database[16:18], 'big')
+    page_size = 65536 if page_size == 1 else page_size
+    offset = 0
+    first_pages = None
+    while offset < len(data):
+        header = data[offset:offset + 28]
+        if len(header) != 28:
+            raise Blocked('Adapter rollback journal header is incomplete')
+        count, seed, pages, sector, size = (
+            int.from_bytes(header[n:n + 4], 'big') for n in (8, 12, 16, 20, 24))
+        if (size != page_size or size < 512 or size > 65536 or size & (size - 1)
+                or sector < 512 or sector > 65536 or sector & (sector - 1)
+                or pages < 1 or pages * size > MAX_STATE_BYTES
+                or (first_pages is not None and pages != first_pages)):
+            raise Blocked('Adapter rollback journal geometry is invalid')
+        first_pages = pages
+        unsynced = header[:12] == b'\x00' * 12
+        if not unsynced and (header[:8] != magic or count < 1 or count > pages):
+            raise Blocked('Adapter rollback journal header is invalid')
+        offset += sector
+        if offset > len(data):
+            raise Blocked('Adapter rollback journal sector is incomplete')
+        if unsynced:
+            count, remainder = divmod(len(data) - offset, size + 8)
+            if remainder:
+                raise Blocked('Adapter rollback journal tail is incomplete')
+        for _ in range(count):
+            frame = data[offset:offset + size + 8]
+            number = int.from_bytes(frame[:4], 'big')
+            checksum = (seed + sum(frame[4:4 + size][size - 200:0:-200])) & 0xffffffff
+            if (len(frame) != size + 8 or not 1 <= number <= pages
+                    or int.from_bytes(frame[-4:], 'big') != checksum):
+                raise Blocked('Adapter rollback journal page is invalid')
+            offset += size + 8
+        if unsynced:
+            break
+        if offset == len(data):
+            break
+        aligned = ((offset + sector - 1) // sector) * sector
+        if any(data[offset:aligned]) or aligned >= len(data):
+            raise Blocked('Adapter rollback journal padding is invalid')
+        offset = aligned
+
+
+def _recovery_inputs(path, owner):
+    if path.name != ADAPTER_STATE_NAME:
+        raise Blocked('Recovery is restricted to the canonical adapter database')
+    _assert_readonly_database(path, adapter_journal=True)
+    data, info = _read_private(path, max_bytes=MAX_STATE_BYTES)
+    journal = Path(str(path) + '-journal')
+    journal_data, journal_info = _read_private(journal, max_bytes=2 * MAX_STATE_BYTES + 65536)
+    _validate_rollback_journal(journal_data, data)
+    _validate_adapter_state(path, opener=_open_unrecovered_adapter)
+    _check_binding(path, owner, opener=_open_unrecovered_adapter)
+    return data, journal_data, (info.st_dev, info.st_ino, journal_info.st_dev, journal_info.st_ino)
+
+
+def _recover_adapter_state(path, owner, payload):
+    """Only called under the exclusive apply lock; never discard a journal.
+
+    Validate SQLite's recovered image in an owned disposable copy first. Unknown
+    state and rollback to a foreign binding cannot modify the canonical inputs.
+    SQLite itself performs both rollbacks; no hand-written journal replay.
+    """
+    if not os.path.lexists(str(path) + '-journal'):
+        return
+    before = _recovery_inputs(path, owner)
+    try:
+        with tempfile.TemporaryDirectory(prefix='.workflow-notifications-recovery-', dir=path.parent) as name:
+            copy = Path(name) / ADAPTER_STATE_NAME
+            for target, data in ((copy, before[0]), (Path(str(copy) + '-journal'), before[1])):
+                with target.open('xb') as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    stream.write(data)
+            with closing(sqlite3.connect(copy.as_uri() + '?mode=rw', uri=True, timeout=2)) as db:
+                if db.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                    raise Blocked('Recovered adapter integrity is invalid')
+            _validate_adapter_state(copy)
+            _check_binding(copy, owner)
+            _acked_event_ids(copy, payload, owner)
+            # Recovered schema must also have no extra objects/bindings.
+            with closing(_open_unrecovered_adapter(copy)):
+                pass
+            if _recovery_inputs(path, owner) != before:
+                raise Blocked('Adapter recovery inputs changed')
+            with closing(sqlite3.connect(path.as_uri() + '?mode=rw', uri=True, timeout=2)) as db:
+                if db.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                    raise Blocked('Recovered adapter integrity is invalid')
+        _owned_private_path(path, max_bytes=MAX_STATE_BYTES)
+        _validate_adapter_state(path)
+        _check_binding(path, owner)
+    except (OSError, sqlite3.Error) as error:
+        raise Blocked('Adapter rollback recovery is unavailable') from error
 
 
 def _state_connection(path):
@@ -604,7 +752,7 @@ def _refresh_deployment(item, paths, now, deferred):
         deferred.pop(item['event_id'], None)
 
 
-def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, paths, clock):
+def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, paths, clock, export_bytes):
     lock_path = state_dir / LOCK_NAME
     existed = lock_path.exists() or lock_path.is_symlink()
     if existed:
@@ -632,6 +780,11 @@ def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, 
         now = clock()
         if _owner(auth_path) != owner:
             raise Blocked('Owner binding changed before apply')
+        payload, current_bytes = _load_export(state_dir, owner, now)
+        if current_bytes != export_bytes:
+            raise Blocked('Lifecycle export changed during the apply lock wait; replan required')
+        _validate_notification_schema(inbox_path)
+        _recover_adapter_state(state_path, owner, payload)
         acked = set()
         if state_path.exists() or state_path.is_symlink():
             _owned_private_path(state_path, max_bytes=MAX_STATE_BYTES)
@@ -737,11 +890,11 @@ def process(paths=None, *, apply=False, now=None, clock=None):
     if clock is None:
         clock = (lambda: now) if now is not None else (lambda: datetime.now(timezone.utc))
     now = now or clock()
-    state_dir, owner, auth_path, inbox_path, payload, state_path, deferred = _load(paths, now)
+    state_dir, owner, auth_path, inbox_path, payload, state_path, deferred, export_bytes = _load(paths, now, allow_recovery=apply)
     if not apply:
         return _with_deferred(
             {'status': 'plan', 'events': len(payload['events']), 'writes': False}, deferred)
-    return _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, paths, clock)
+    return _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, paths, clock, export_bytes)
 
 
 def main(argv=None, *, paths=None, now=None):
