@@ -2383,6 +2383,16 @@ class Coordinator:
                 self.api,
                 f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
             )
+            if not copilot_review_valid(
+                    action["head"], final_reviews, current["threads"],
+                    threads_complete=current["threads_complete"]):
+                self.store.update_action(key, "blocked")
+                current_plan["auto_merge_eligible"] = False
+                current_plan["merge_action"] = None
+                current_plan["reasons"] = list(dict.fromkeys(
+                    current_plan["reasons"] + ["review"],
+                ))
+                return current_plan
             if (classify_sensitive_paths(
                     current["files"], complete=current["files_complete"],
                 )

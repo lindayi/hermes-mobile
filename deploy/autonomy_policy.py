@@ -168,7 +168,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/frontend_release.py': '7749afb862a515fc673712b11278145adfb3d39ba2d012a34ecea257399eade3',
     'deploy/git_source.py': 'c69c7c5a45bc3a16ab26996872c258cc352cf2ec56c19d6256595e18ac713d63',
     'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
-    'deploy/native_controls_release.py': 'a2d00ebe7fa8add88afdeda28599b47e68f2eaab6935a8b2c9eaa46f585a11fe',
+    'deploy/native_controls_release.py': 'b3d3c601db4afd9ff003f4df759fcb057c19a83b920206fb2766d1560fd99175',
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': '49d784af17d0807c95b460b2a285254f0a616361c390afa69b3cc0345a56b498',
     'deploy/public_http.py': 'dd352b8d0295f242f4a5d31a55eaaec523ef8405601461d4ab5fa8dc6dc302e7',
@@ -183,13 +183,12 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    'deploy/cloud_coordinator.py': '0810bb4509fca1806ef160cac917570a163084e34a2ac83e037a1b0492d4fa4f',
-    # Pending issue #39 coordinator dependency candidate bytes; parent review only.
+    'deploy/cloud_coordinator.py': '8ceaed2788467afd1ee677643bab3de7f594c5901fd98d8077c4d02b1058b7b1',
+    # Issue #43 launch/authority candidates; final assembled review remains required.
     'deploy/issue_starter.py': '701faa6e15a2717cb3c79f7e93c728bdde326e4f72e451ccd77ec1f8eabdc011',
-    'deploy/review_evidence.py': '6a146ff4fa90c8bd24ffe941391237d2a78ce1d2c51d6e4f55afd0130743b3f5',
-    # Pending PR40 assembly candidates from incoming 80bf9e7. Historical source
-    # review lineage: docs/autonomy-policy.md. Not assembled/operational approval;
-    # existing pins and the unconditional pending-source-contract hold stay fixed.
+    'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
+    # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
+    # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     'deploy/task_receipts.py': '8ad9e60ec697de8135679b9110ed5d924057e0d8a59e731c67fceedec6525197',
     'deploy/workflow_events.py': '5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af',
     'deploy/workflow_lifecycle.py': '71be9101223f40511818bde2db9f6bd6b021736f35152e16cb3e1c9c3e2085a3',
@@ -205,7 +204,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/hermes-mobile-issue-starter.service': '1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69',
     'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
-    'backend/model_controls.py': 'a6276a114d770f8a52677ae11a48011b586daf7cd047dd667099e4a6251ccb6b',
+    'backend/model_controls.py': '206fb5164283c16f46c51da99babe1b5f5e8932f062b4a1ee5bc07affe1f2c34',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
     'backend/runs.py': 'f8ee1d2547a794f277c5dc6b52e491e17ada1bda65acba9f3083eee8522de04e',
@@ -235,8 +234,8 @@ SOURCE_FINGERPRINTS = {
     'backend/task_reminder_presentation.py': '549a29784ef6f778ef55658d5a05961fed3919579faeeba567545004d7e9bcf3',
     'backend/tool_presentation.py': '4cfd8d468f75213d3aee3f8ab3c9f9409bb3b97e50a2aa05492181b49a1b474f',
     'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
-    'backend/native_notifications.py': '0159fbdd02705469853f51be7bb32479ea9e2fa0d6fdbc6789253d3b3c1c85fe',
-    # Pending PR25 candidate bytes, absent from the main baseline; parent review only.
+    'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
+    # Accepted merged PR25 source, absent from the historical b85c098 baseline.
     'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
 }
 SOURCE_BLOCKERS = {
@@ -320,6 +319,8 @@ SOURCE_BLOCKERS = {
     'backend/native_notifications.py': 'execution-source-contract',
     'deploy/native_notification_release.py': 'installed-host-gate',
 }
+# Historical provenance checkpoints, not identities of current candidate bytes.
+# Explicit reviewed per-file refreshes are documented in docs/autonomy-policy.md.
 SOURCE_BASELINES = {
     'main': 'b85c098857e7fb8229f47bd688d703bb677aeb34',
     'deploy/cloud_coordinator.py': '403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83',
@@ -501,10 +502,9 @@ def validate_transition(evidence, *, phase):
     if not isinstance(evidence, dict):
         return {'ready': False, 'phase': phase, 'blockers': ['invalid-evidence']}
     # Source-enforced hold in every phase, never an evidence-supplied opt-out.
-    # Pinned coordinator 403ac3d lacks strict timestamp ordering and targeted
-    # independent review for every sensitive head. Issue #26 activation requires
-    # a reviewed merged replacement, deliberate pin updates, and a source change
-    # to clear this hold; matching the known unsafe fingerprint is insufficient.
+    # Historical coordinator 403ac3d is superseded by issue43 candidate pins.
+    # Final independent assembled-source acceptance and a separately reviewed
+    # source change remain required to clear this hold; matching pins cannot.
     blockers.add('pending-source-contract')
     _check_identity(evidence, blockers)
     main = evidence.get('main')

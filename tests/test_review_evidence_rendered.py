@@ -477,6 +477,59 @@ def test_review5392848133_status_only_live_content_never_dispatches(tmp_path, st
     assert "Required correction: preserve <summary> in literal context." in finding["comment"]
 
 
+@pytest.mark.parametrize("state", ["COMMENTED", "CHANGES_REQUESTED"])
+@pytest.mark.parametrize("shape", ["matched", "fallback-zero", "fallback-unknown"])
+@pytest.mark.parametrize("prose", [
+    "No bugs\nfound.",
+    "Exact-head verification remains\npending.",
+])
+def test_review5393153136_soft_text_newlines_never_dispatch(tmp_path, state, shape, prose):
+    content = f"<p>{prose}</p>"
+    if shape == "matched":
+        content = "<details><summary><code>Example</code></summary>" + content + "</details>"
+    count = {"matched": "1", "fallback-zero": "0", "fallback-unknown": "unknown"}[shape]
+    section = (f"<details><summary>Previously missed ({count})</summary>"
+               "<p>In code that hasn't changed since last review</p>" + content + "</details>")
+    review = review_pair(OVERVIEW_MARKER + "\n" + section, section, state=state)
+    result = parse_body(review["body"], state, body_html=section)
+    assert result["findings"] == []
+    assert "no-findings" in result["classifications"]
+    assert repair_request(HEAD, 0, [], [], reviews=[review]) is None
+    assert not copilot_review_valid(HEAD, [review], [])
+    api = ReviewApi([review])
+    path = tmp_path / "state.json"
+    plan = _managed_cycle(api, path)["pull_requests"][0]
+    assert not plan["repair_requested"] and not plan["review_valid"]
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    saved = StateStore(path).snapshot()
+    assert saved["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in saved["actions"].values())
+    # Independent genuine evidence must survive without an extra status finding.
+    [finding] = _evidence(repair_request(HEAD, 0, [], [], reviews=[
+        review | {"body_html": section + HTML_ESCAPED}]))["review_findings"]
+    assert "decode <details> only after validation." in finding["comment"]
+    if shape == "matched":
+        sibling = ("<details><summary>Live receipt defect</summary>"
+                   "<p>A transient receipt consumes the bounded budget.</p></details>")
+        siblings = section.replace("Previously missed (1)", "Previously missed (2)")
+        siblings = siblings[:-len("</details>")] + sibling + "</details>"
+        [finding] = _evidence(repair_request(HEAD, 0, [], [], reviews=[
+            review | {"body_html": siblings}]))["review_findings"]
+        assert "Live receipt defect" in finding["comment"]
+        assert "Example" not in finding["comment"]
+    # Classification normalization must not alter plain or quoted finding context.
+    literal = "KEEP\n  &lt;details&gt;\tand " + prose
+    mixed = section.replace(f"<p>{prose}</p>", f"<p>{prose} Required correction: retain context.</p>"
+                            + "".join(f"<{tag}>{literal}</{tag}>"
+                                      for tag in ("code", "pre", "blockquote")))
+    [(_, text)] = parse_body(review["body"], state, body_html=mixed)["findings"]
+    assert prose + " Required correction: retain context." in text
+    assert text.count("KEEP\n  <details>\tand " + prose) == 3
+    [finding] = _evidence(repair_request(HEAD, 0, [], [], reviews=[
+        review | {"body_html": mixed}]))["review_findings"]
+    assert "Required correction: retain context." in finding["comment"]
+
+
 @pytest.mark.parametrize("shape", ["matched", "fallback"])
 def test_review5392848133_status_blocks_keep_existing_sentence_boundaries(tmp_path, shape):
     content = ("<p>No bugs found</p>"

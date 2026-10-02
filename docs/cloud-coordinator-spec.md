@@ -142,6 +142,9 @@ is `no-findings`, not a repair request. Both intro comparisons normalize whitesp
 including rendered line breaks. Matched-item and fallback live eligibility reuse
 the existing complete-negative/status-only grammar after excluding the known intro,
 preserving sentence/block boundaries even when status sentences lack punctuation.
+For this eligibility classification only, ordinary unquoted text-node HTML whitespace
+collapses to spaces; source soft newlines are not sentence boundaries. Inserted block
+and `br` boundaries remain separate, and forwarded plain/quoted context stays literal.
 Neutral-only content cannot supply a finding; genuine corrections, independent
 siblings and their literal context remain eligible.
 Unsupported top-level disclosures remain ambiguous, not implicitly resolved.
@@ -226,6 +229,18 @@ Markdown architecture or authority is added. Only the helper candidate digest an
 independent fixture are refreshed; other pins, the coordinator baseline and the
 unconditional source-contract hold remain unchanged. No activation or full
 integration evidence is claimed.
+
+The second same-class status-normalization follow-up at
+`aa3ee4e45d03b24024567ead485c0da9788d41c3` addresses review `5393153136`, comment
+`4166809900`, only: soft text-node newlines in `No bugs\nfound.` and
+`Exact-head verification remains\npending.` must not create matched or fallback
+findings. Finite managed RED/GREEN cases cover both review states, matched and
+zero/unknown-count fallback shapes, no dispatch/attempt/approval, genuine mixed
+corrections and siblings, and exact plain/code/pre/blockquote context. Existing
+unpunctuated block-boundary behavior and section-label quote detection are unchanged.
+Only the helper candidate digest and independent fixture are refreshed; retention
+main, other pins and the unconditional source-contract hold remain unchanged.
+No broader grammar, parser architecture, activation or full integration is included.
 
 The Copilot request labels all embedded evidence untrusted,
 and the text is never interpreted as shell input. A deterministic marker

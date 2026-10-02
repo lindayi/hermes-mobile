@@ -1403,6 +1403,48 @@ def test_owner_can_authorize_a_new_current_head_after_enrollment(tmp_path):
     assert enrollment["sensitive_sha"] == new_head
 
 
+@pytest.mark.parametrize("sensitive", [False, True], ids=["routine", "sensitive"])
+@pytest.mark.parametrize("final_state", ["DISMISSED", "removed", "CHANGES_REQUESTED", "COMMENTED"])
+def test_final_review_read_revoked_copilot_blocks_auto_merge(tmp_path, sensitive, final_state):
+    from deploy.review_evidence import sensitive_review_authorized
+
+    class FinalReviewRace(FakeApi):
+        review_reads = 0
+        final_reviews = None
+
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                self.review_reads += 1
+                if self.review_reads == 4:
+                    if final_state == "removed":
+                        values = [review for review in values
+                                  if review["user"]["id"] != COPILOT_REVIEWER]
+                    else:
+                        for review in values:
+                            if review["user"]["id"] == COPILOT_REVIEWER:
+                                review["state"] = final_state
+                    self.final_reviews = values
+            return values
+
+    # Keep owner-selected evidence valid even for the routine pull: it must never
+    # substitute for the separately mandatory actual Copilot APPROVED review.
+    api = FinalReviewRace(sensitive=sensitive, authorize=True)
+    store = StateStore(tmp_path / "state.json")
+    result = Coordinator(api, store).run(apply=True)
+    assert api.review_reads == 4
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert sensitive_review_authorized(
+        api.final_reviews, HEAD, enrollment["sensitive_authorization"],
+        enrollment["targeted_review"], owner_id=OWNER,
+    )
+    assert not api.graphql_writes
+    assert store.action(f"auto-merge:16:{HEAD}:{BASE}")["status"] == "blocked"
+    assert not result["pull_requests"][0]["auto_merge_eligible"]
+    assert not result["pull_requests"][0]["auto_merge_requested"]
+    assert "review" in result["pull_requests"][0]["reasons"]
+
+
 @pytest.mark.parametrize("invalid_on_read", [2, 3, 4])
 def test_sensitive_owner_review_is_revalidated_at_planning_status_and_merge_fences(
         tmp_path, invalid_on_read):
