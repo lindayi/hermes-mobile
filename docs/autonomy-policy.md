@@ -141,10 +141,24 @@ do not constitute independent review, runtime evidence, or activation permission
 | `deploy/hermes-mobile-issue-starter.service` | `1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69` |
 | `deploy/hermes-mobile-issue-starter.timer` | `848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92` |
 
-This assembly integrates final PR40 main
+Issue #50's receipt-transport candidate overlays only
+`deploy/cloud_coordinator.py` and `deploy/task_receipts.py` in the current source
+inventory. The historical PR40 and issue #43 fixture hashes above remain unchanged:
+
+| Issue #50 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `0935088cb9e3429b83dcc7daa8552cf2c58830e5494549270ec276a076e3193b` |
+| `deploy/task_receipts.py` | `f97dbc809fa107388e1dc1954cff95ea4372cd003228be34e5780378dfbf8bcf` |
+
+These pins identify candidate bytes only. Both files retain the
+`coordinator-review-contract` blocker; refreshing pins does not satisfy independent
+review, clear the source-contract hold, or authorize operational activation.
+
+Before the Issue #50 overlay, this assembly integrated final PR40 main
 `5316f7c75dced1bffafdb545cdd7677e98e855a6`, preserving its parser and previously
-merged retention behavior. Source acceptance and removal of the historical hold
-do not authorize activation.
+merged retention behavior. The Issue #50 transport adjustment is separately pinned
+above and does not change that historical lineage. Source acceptance and removal of
+the historical hold do not authorize activation.
 
 The read-only validator can now report `ready: true` (CLI exit zero) in any selected
 phase **only when every source, run, provenance, review, approval, thread and

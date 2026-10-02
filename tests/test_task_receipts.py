@@ -77,6 +77,50 @@ def v2_binding(result="ready"):
     return task, action, pull, comments
 
 
+def transported_v2_body(nonce=NONCE, session_id=SESSION_ID,
+                        start_head=START_HEAD, head=RESULT_HEAD, result="ready"):
+    return (
+        "\n> Cloud completion report preserved before parent normalization:\n"
+        "> \n"
+        "> This quoted report is not receipt evidence.\n\n"
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={nonce}\n"
+        "pr=16\n"
+        f"session={session_id}\n"
+        f"start_head={start_head}\n"
+        f"base={BASE}\n"
+        f"head={head}\n"
+        f"result={result}"
+    )
+
+
+def test_v2_accepts_observed_quoted_prefix_and_reordered_plain_receipt():
+    task, action, pull, comments = v2_binding()
+    comments[0]["body"] = transported_v2_body()
+
+    proof = validate_task_receipt(task, action, pull, comments, now=NOW)
+
+    assert proof["result"] == "ready"
+    assert proof["head"] == RESULT_HEAD
+    assert proof["base"] == BASE
+    assert proof["body"] == comments[0]["body"]
+
+
+@pytest.mark.parametrize("body", [
+    lambda: "Unquoted completion prose\n\n" + transported_v2_body(),
+    lambda: "\n".join("> " + line for line in transported_v2_body().splitlines()),
+    lambda: "```text\n" + transported_v2_body() + "\n```",
+    lambda: "\n> Hermes-Task-Receipt: v2\n> copied marker\n" + transported_v2_body(),
+    lambda: transported_v2_body() + "\nextra text",
+])
+def test_v2_transport_rejects_prose_quoted_or_ambiguous_receipts(body):
+    task, action, pull, comments = v2_binding()
+    comments[0]["body"] = body()
+
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, comments, now=NOW)
+
+
 @pytest.mark.parametrize("result", ["ready", "conflict_incompatible", "policy_broken"])
 def test_v2_echoes_session_not_task_but_host_still_binds_saved_task(result):
     task, action, pull, comments = v2_binding(result)

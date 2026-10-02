@@ -37,7 +37,7 @@ from deploy.workflow_lifecycle import (
 )
 from deploy.workflow_events import event_digest
 from deploy.task_receipts import (
-    ReceiptError, _expected_body, receipt_instruction, validate_task_receipt,
+    ReceiptError, receipt_body_matches, receipt_instruction, validate_task_receipt,
 )
 
 
@@ -964,7 +964,8 @@ def _valid_receipt_proof(action, comments):
     version = action.get("receipt_version", "v1")
     if (version not in {"v1", "v2"}
             or (version == "v2" and action["receipt_base"] != action.get("main_sha"))
-            or action["receipt_body"] != _expected_body(
+            or not receipt_body_matches(
+                action["receipt_body"],
                 action["receipt_nonce"], action["receipt_task_id"],
                 action["receipt_session_id"], action.get("issue"),
                 action["receipt_start_head"], action["receipt_head"],

@@ -131,10 +131,16 @@ _PENDING_ISSUE43_LAUNCH_FIXTURE = {
     'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
 }
 
+_PENDING_ISSUE50_RECEIPT_FIXTURE = {
+    'deploy/cloud_coordinator.py': '0935088cb9e3429b83dcc7daa8552cf2c58830e5494549270ec276a076e3193b',
+    'deploy/task_receipts.py': 'f97dbc809fa107388e1dc1954cff95ea4372cd003228be34e5780378dfbf8bcf',
+}
+
 
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
-            | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE)
+            | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE
+            | _PENDING_ISSUE50_RECEIPT_FIXTURE)
 
 
 def _source_ci():
@@ -489,6 +495,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending = {'deploy/cloud_coordinator.py', 'deploy/native_notification_release.py',
                'deploy/review_evidence.py'} | set(_PENDING_PR40_LIFECYCLE_FIXTURE)
     pending |= set(_PENDING_ISSUE43_LAUNCH_FIXTURE)
+    pending |= set(_PENDING_ISSUE50_RECEIPT_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
@@ -497,8 +504,12 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in {'deploy/cloud_coordinator.py', 'deploy/review_evidence.py'}
     } == {
-        path: _PENDING_ISSUE43_LAUNCH_FIXTURE[path]
-        for path in ('deploy/cloud_coordinator.py', 'deploy/review_evidence.py')
+        'deploy/cloud_coordinator.py': _PENDING_ISSUE50_RECEIPT_FIXTURE[
+            'deploy/cloud_coordinator.py'
+        ],
+        'deploy/review_evidence.py': _PENDING_ISSUE43_LAUNCH_FIXTURE[
+            'deploy/review_evidence.py'
+        ],
     }
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
@@ -507,7 +518,15 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_PR40_LIFECYCLE_FIXTURE
-    } == _PENDING_PR40_LIFECYCLE_FIXTURE
+        and path not in _PENDING_ISSUE50_RECEIPT_FIXTURE
+    } == {
+        path: digest for path, digest in _PENDING_PR40_LIFECYCLE_FIXTURE.items()
+        if path not in _PENDING_ISSUE50_RECEIPT_FIXTURE
+    }
+    assert {
+        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
+        if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
+    } == _PENDING_ISSUE50_RECEIPT_FIXTURE
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
     assert set(SOURCE_BLOCKERS) == set(REQUIRED_FILES)
     assert len(REQUIRED_FILES) == len(set(REQUIRED_FILES))
@@ -535,13 +554,28 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _PENDING_ISSUE43_LAUNCH_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
-@pytest.mark.parametrize('path', sorted(_PENDING_ISSUE43_LAUNCH_FIXTURE))
+@pytest.mark.parametrize(
+    'path', sorted(set(_PENDING_ISSUE43_LAUNCH_FIXTURE) -
+                   set(_PENDING_ISSUE50_RECEIPT_FIXTURE)),
+)
 def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
     source = Path(__file__).resolve().parents[1] / path
     assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
 
 
-@pytest.mark.parametrize('path', sorted(_PENDING_PR40_LIFECYCLE_FIXTURE))
+@pytest.mark.parametrize('pins', [
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE,
+], ids=['policy', 'independent-fixture'])
+@pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
+def test_issue50_receipt_pin_matches_actual_candidate_bytes(path, pins):
+    source = Path(__file__).resolve().parents[1] / path
+    assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    'path', sorted(set(_PENDING_PR40_LIFECYCLE_FIXTURE) -
+                   set(_PENDING_ISSUE50_RECEIPT_FIXTURE)),
+)
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _PENDING_PR40_LIFECYCLE_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
@@ -578,7 +612,10 @@ def test_pending_lifecycle_actual_byte_mutation_or_missing_source_blocks(phase, 
 
 
 @pytest.mark.parametrize('phase', PHASES)
-@pytest.mark.parametrize('path', sorted(_PENDING_ISSUE43_LAUNCH_FIXTURE))
+@pytest.mark.parametrize(
+    'path', sorted(set(_PENDING_ISSUE43_LAUNCH_FIXTURE) |
+                   set(_PENDING_ISSUE50_RECEIPT_FIXTURE)),
+)
 @pytest.mark.parametrize('change', ['missing', 'malformed', 'mutated'])
 def test_issue43_launch_actual_byte_mutation_or_missing_source_blocks(phase, path, change):
     evidence = _phase_evidence(phase)

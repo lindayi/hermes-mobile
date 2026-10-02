@@ -530,31 +530,40 @@ the separate Task UUID. The read-only cloud probe established session-environmen
 identity, not a source for the Task UUID (and not proof that such a source cannot
 exist).
 
-Post exactly one unchanged authenticated Copilot issue comment, with these exact
-ordered lines, no fences, extra fields, surrounding text or trailing newline:
+Post exactly one unchanged authenticated Copilot issue comment containing one
+contiguous v2 receipt block as its final unquoted lines. The posting transport may
+prepend an unchanged Markdown blockquote and reorder the receipt fields. Only blank
+lines or blockquote lines may precede the block; no fences, unquoted prose, extra
+fields, duplicate fields, or trailing newline are accepted. Quoted or code-formatted
+content is never receipt evidence.
 
 ```text
 Hermes-Task-Receipt: v2
 nonce=<fixed-dispatch-nonce>
-session=<COPILOT_AGENT_SESSION_ID>
 pr=<fixed-pull-number>
+session=<COPILOT_AGENT_SESSION_ID>
 start_head=<fixed-dispatched-head-sha>
-head=<pushed-current-pull-head-sha>
 base=<fixed-dispatch-time-main-sha>
+head=<pushed-current-pull-head-sha>
 result=<ready|conflict_incompatible|policy_broken>
 ```
 
-Choose exactly one closed result value. After pushing and focused checks, the
-coding task must not idle waiting for CI/review: the parent controller handles
-those phases. `ready` is not passing CI, approval, merge or deployment success.
+Each field appears exactly once; field order may vary under the documented transport.
+Choose exactly one closed result value. After pushing and focused checks, the coding
+task must not idle waiting for CI/review: the parent controller handles those phases.
+`ready` is not passing CI, approval, merge or deployment success.
 
 Task identity still comes solely from the durable saved task ID and authenticated
 Task API response, never from a comment. The host validates exact returned task ID,
 `session.task_id`, task/session owner and repository, creator/user, nonce, exact
 PR and branch artifacts, and task/session/comment chronology. Receipt author and
 comment ID must be strict numeric GitHub identities (positive comment ID, no
-float/string/bool coercion). Missing, edited, duplicate, mixed-version, mixed-field,
-copied or otherwise noncanonical receipts fail closed.
+float/string/bool coercion). Missing, edited, duplicate, mixed-version, mixed-field, copied or otherwise
+noncanonical receipts fail closed. For v2 only, the consumer accepts the bounded
+transport above and stores the complete unchanged comment body; restart validation
+requires the remote author, comment ID, exact body, and timestamps to remain
+identical. All receipt identity, result-head, dispatch-base, chronology and immutable
+authorization bindings remain unchanged.
 
 The strict v1 reader remains for existing receipts and proofs: its body includes
 `task=<authenticated-task-id>` immediately after nonce, and its base must match

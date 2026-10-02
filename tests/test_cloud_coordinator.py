@@ -392,6 +392,14 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     assert first_proof["receipt_head"] == result_head
     assert api.fix_attempts == 1  # PR33 awaits a current-head review before another repair.
     assert first_proof["handoff_state"] == "waiting_review"
+    review_requests = [route for route, _ in api.writes
+                       if route.endswith("/requested_reviewers")]
+    assert len(review_requests) == 1
+    coordinator().run(apply=True)
+    assert store.action(first_fix["key"])["handoff_state"] == "waiting_review"
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+    assert api.fix_attempts == 1
     api.review_sha = result_head
     api.review_state = "COMMENTED"
     api.review_submitted_at = "2026-10-01T12:04:01Z"
