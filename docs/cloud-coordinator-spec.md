@@ -45,21 +45,56 @@ latest review yields no body evidence. Only a single latest Copilot review on th
 current head with a positive record ID is read, and only when it is `COMMENTED` or
 `CHANGES_REQUESTED`. From a `ccr-overview-v2` body, each item of a
 `Previously missed (N)` section is forwarded (including under a `Findings: None`
-headline); disclosure boundaries are balanced, and a section whose item structure
-or count cannot be proven is forwarded whole as one item. Section headings allow
-summary attributes; unsupported counts such as `(unknown)` take that whole-section
-fallback. Positive `Open (N)` counts suppress summary fallback because those
-findings are carried by their review threads, not duplicated. `Open (0)` alone
-does not suppress an actionable summary. A `Looks good` disposition with
-`Findings: None`, or an explicit validation-status clause such as `exact-head
-verification remains pending`, yields no summary evidence. Domain words such as
-`pending receipts` alone do not declare validation pending. `CHANGES_REQUESTED`
-prose without structured items (a plain body, or an actionable overview with no
-positive `Open` count and no `Previously missed` items) is forwarded as one summary.
-Each body finding records
-the genuine review ID, head SHA, and submission time; it never carries a thread ID.
-Body text is untrusted evidence: it is never approval, and approval is never
-inferred from prose. At most 64 KiB of a body is parsed.
+headline). One stdlib HTML parser builds bounded disclosure structure, respecting
+nested markup, quoted attributes (including `>`), case, and closing whitespace.
+A bounded lexical step shields Markdown backtick code spans from interpretation
+as HTML (including literal disclosure tags in review explanations). All disclosure
+traversal is iterative. There are no repeated HTML-removal passes. Limits are
+64 Ki characters, 4,096 parser events, 32 nested elements and 256 disclosures;
+exceeding any limit or unclosed/crossed markup yields `ambiguous`, not a truncated
+repair request. An unknown but balanced section is locally ambiguous: it never
+becomes fixer evidence and never erases a separately bounded active section.
+
+The helper explicitly classifies `active`, `resolved`, `history`, `validation-only`,
+`no-findings`, `inline`, and `ambiguous` content. Resolved/history ancestors exclude
+their entire subtree, even a nested active-looking label; they never leak into
+summary evidence. Structurally intact, explicitly labelled `Previously missed`
+sections may still be forwarded whole when the count or child-item shape cannot
+be proven (including unknown counts), rather than dropping known active evidence.
+Unsupported top-level disclosures remain ambiguous, not implicitly resolved.
+
+Validation-only requires complete recognized status prose (optionally accompanied
+by no-code-issues sentences), not the presence of `pending` anywhere. Examples
+include `The exact-head verification remains pending.` and `Exact-head verification
+is still pending.`. Separate required corrections survive validation status or a
+`Looks good`/`Findings: None` headline; domain requests such as `reject pending
+receipts` remain active. Mixed summaries exclude only complete validation-status
+sentences, retaining the correction. Bare `CHANGES_REQUESTED` prose remains an
+explicit request without requiring imperative keywords; explicit validation-only
+and no-issues text is nonactionable. Unstructured overview summaries require
+correction/defect evidence; uncertain overview prose stays blocked without consuming
+a fixer attempt. Positive `Open (N)` counts suppress
+summary duplication because those findings are already represented by threads;
+explicit `Previously missed` sections still forward body-only items.
+`Open (0)` never suppresses an actionable summary. COMMENTED summaries alone do
+not authorize repairs; explicitly active disclosures do.
+
+`body_findings` retains its caller interface. Dispositions remain in the helper's
+internal result; no new review-authority protocol or coordinator lifecycle path
+is introduced. The existing formal review gate continues to require actual
+exact-head APPROVED evidence. Ambiguous body text is
+never passed blindly to a fixer; independent authenticated thread/check evidence
+remains eligible. Each body finding records the genuine review ID, head SHA, and
+submission time; it never carries a thread ID. Body text is untrusted evidence:
+it is never approval, and approval is never inferred from prose.
+
+This scoped issue #39/PR #40 revision starts at
+`ab9137c1d8f20b30c4a09c7c8013d46194a33e2a` and addresses review `5391291258`.
+Acceptance includes real RED/GREEN spaced-close and validation-sentence regressions,
+structural classification/bounds cases, active body-only forwarding, ambiguity
+without repair/approval, and the existing fresh-evidence dispatch fence. Candidate
+helper pins are refreshed without clearing the unconditional source-contract hold.
+No activation, protection, lifecycle redesign, or production change is included.
 
 The Copilot request labels all embedded evidence untrusted,
 and the text is never interpreted as shell input. A deterministic marker

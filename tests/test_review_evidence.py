@@ -241,6 +241,34 @@ def test_attributed_open_does_not_duplicate_resolved_inline_evidence(tmp_path, h
     assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
 
 
+@pytest.mark.parametrize("close", ["</details >", "</DETAILS\t>"])
+def test_structural_resolved_close_never_leaks_into_current_summary(close):
+    body = overview("🟡 Changes recommended", "Required correction: reject stale receipts.",
+                    "None", RESOLVED.replace("</details>", close))
+    request = repair_request(HEAD, 0, [], [], pull_number=16, reviews=[
+        copilot_review(body, state="CHANGES_REQUESTED"),
+    ])
+    [finding] = _evidence(request)["review_findings"]
+    assert "Required correction: reject stale receipts." in finding["comment"]
+    assert "Synthetic resolved finding" not in finding["comment"]
+
+
+@pytest.mark.parametrize("prose", [
+    "Exact-head verification remains pending. No code issues were found.",
+    "The exact-head verification remains pending.",
+    "Exact-head verification is still pending.",
+])
+def test_structural_validation_sentences_never_dispatch(tmp_path, prose):
+    body = overview("🔵 Needs a closer look", prose, "None", RESOLVED)
+    api = ReviewApi([copilot_review(body, state="CHANGES_REQUESTED")])
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert not result["pull_requests"][0]["repair_requested"]
+    assert not result["pull_requests"][0]["review_valid"]
+    assert api.fix_attempts == 0
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
+
+
 def test_empty_previously_missed_zero_remains_no_evidence():
     body = overview("🔵 Needs a closer look", "Synthetic.", "None",
                     section("Previously missed (0)", ""))
