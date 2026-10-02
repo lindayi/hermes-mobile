@@ -10,6 +10,8 @@ import sys
 import pytest
 
 from deploy.autonomy_policy import (
+    AUTONOMY_LAUNCH_ROOTS,
+    AUTONOMY_LAUNCH_UNITS,
     COPILOT_AGENT_ID,
     COPILOT_REVIEWER_ID,
     OWNER_ID,
@@ -121,12 +123,27 @@ _PENDING_PR40_LIFECYCLE_FIXTURE = {
     'deploy/workflow_notifications.py': 'f0af01bdc797e0abd0494fa7a1fa304060c734ed8fc2ba1fa2b4515a9a3bcda2',
 }
 
+_PENDING_ISSUE43_LAUNCH_FIXTURE = {
+    'deploy/cloud_coordinator.py': '0810bb4509fca1806ef160cac917570a163084e34a2ac83e037a1b0492d4fa4f',
+    'deploy/issue_starter.py': '701faa6e15a2717cb3c79f7e93c728bdde326e4f72e451ccd77ec1f8eabdc011',
+    'deploy/review_evidence.py': '6a146ff4fa90c8bd24ffe941391237d2a78ce1d2c51d6e4f55afd0130743b3f5',
+    'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
+    'scripts/issue_starter.py': '09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1',
+    'scripts/workflow_notifications.py': '03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f',
+    'deploy/hermes-mobile-coordinator.service': '672f1e134e2cb5acbcd648eb7e124947af8d7c11143f20cea8e5be5d97c42807',
+    'deploy/hermes-mobile-coordinator.timer': 'ffa239c67b492b5a361b823c754d5f204eb4efaa2c69f7df99df577e12d2a6c1',
+    'deploy/hermes-workflow-notifications.service': '998ee55dc5df990c6004f0f435e073766702e5efbf56aa83e946b6d05e21c000',
+    'deploy/hermes-workflow-notifications.timer': '627463b4dd06eb72f7fecc88a79dad29ec8ab4b5514b29c62c131cdbd2963cc8',
+    'deploy/hermes-mobile-issue-starter.service': '1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69',
+    'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
+}
+
 
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR16_COORDINATOR_FIXTURE
             | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
             | _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE
-            | _PENDING_PR40_LIFECYCLE_FIXTURE)
+            | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE)
 
 
 def _source_ci():
@@ -480,22 +497,22 @@ def test_static_python_closure_accepts_declared_initializer_attributes(tmp_path,
 def test_reviewed_source_fixture_matches_complete_required_contract():
     pending = {'deploy/cloud_coordinator.py', 'deploy/native_notification_release.py',
                'deploy/review_evidence.py'} | set(_PENDING_PR40_LIFECYCLE_FIXTURE)
+    pending |= set(_PENDING_ISSUE43_LAUNCH_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
     } == _MERGED_MAIN_SOURCE_FIXTURE
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
-        if path == 'deploy/cloud_coordinator.py'
-    } == _PENDING_PR16_COORDINATOR_FIXTURE
+        if path in {'deploy/cloud_coordinator.py', 'deploy/review_evidence.py'}
+    } == {
+        path: _PENDING_ISSUE43_LAUNCH_FIXTURE[path]
+        for path in ('deploy/cloud_coordinator.py', 'deploy/review_evidence.py')
+    }
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path == 'deploy/native_notification_release.py'
     } == _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
-    assert {
-        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
-        if path == 'deploy/review_evidence.py'
-    } == _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_PR40_LIFECYCLE_FIXTURE
@@ -505,6 +522,19 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert len(REQUIRED_FILES) == len(set(REQUIRED_FILES))
     assert SOURCE_CONTROL_PYTHON_FILES <= set(REQUIRED_FILES)
     assert SOURCE_CONTROL_ROOTS <= SOURCE_CONTROL_PYTHON_FILES
+    assert AUTONOMY_LAUNCH_ROOTS == {
+        'deploy/issue_starter.py', 'scripts/cloud_coordinator.py',
+        'scripts/issue_starter.py', 'scripts/workflow_notifications.py',
+    }
+    assert AUTONOMY_LAUNCH_UNITS == {
+        'deploy/hermes-mobile-coordinator.service', 'deploy/hermes-mobile-coordinator.timer',
+        'deploy/hermes-workflow-notifications.service',
+        'deploy/hermes-workflow-notifications.timer',
+        'deploy/hermes-mobile-issue-starter.service', 'deploy/hermes-mobile-issue-starter.timer',
+    }
+    assert AUTONOMY_LAUNCH_ROOTS | AUTONOMY_LAUNCH_UNITS <= set(
+        _PENDING_ISSUE43_LAUNCH_FIXTURE,
+    )
     assert SOURCE_BASELINES == {
         'main': 'b85c098857e7fb8229f47bd688d703bb677aeb34',
         'deploy/cloud_coordinator.py': '403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83',
@@ -512,10 +542,10 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
 
 
 @pytest.mark.parametrize('pins', [
-    SOURCE_FINGERPRINTS, _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE,
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE43_LAUNCH_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
-def test_pending_review_evidence_pin_matches_actual_candidate_bytes(pins):
-    path = 'deploy/review_evidence.py'
+@pytest.mark.parametrize('path', sorted(_PENDING_ISSUE43_LAUNCH_FIXTURE))
+def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
     source = Path(__file__).resolve().parents[1] / path
     assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
 
@@ -548,6 +578,33 @@ def test_pending_lifecycle_actual_byte_mutation_or_missing_source_blocks(phase, 
             source + b'\n# unreviewed source mutation\n',
         ).hexdigest()
         blocker = 'coordinator-review-contract'
+    before = copy.deepcopy(evidence)
+    assert validate_transition(evidence, phase=phase) == {
+        'ready': False, 'phase': phase,
+        'blockers': sorted([blocker, 'pending-source-contract']),
+    }
+    assert evidence == before
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('path', sorted(_PENDING_ISSUE43_LAUNCH_FIXTURE))
+@pytest.mark.parametrize('change', ['missing', 'malformed', 'mutated'])
+def test_issue43_launch_actual_byte_mutation_or_missing_source_blocks(phase, path, change):
+    evidence = _phase_evidence(phase)
+    source = (Path(__file__).resolve().parents[1] / path).read_bytes()
+    evidence['main']['files'][path] = hashlib.sha256(source).hexdigest()
+    assert _blockers(evidence, phase) == {'pending-source-contract'}
+    if change == 'missing':
+        evidence['main']['files'].pop(path)
+        blocker = 'main-source-missing'
+    elif change == 'malformed':
+        evidence['main']['files'][path] = 'not-a-sha256'
+        blocker = 'main-source-invalid'
+    else:
+        evidence['main']['files'][path] = hashlib.sha256(
+            source + b'\n# unreviewed launch source mutation\n',
+        ).hexdigest()
+        blocker = SOURCE_BLOCKERS[path]
     before = copy.deepcopy(evidence)
     assert validate_transition(evidence, phase=phase) == {
         'ready': False, 'phase': phase,
@@ -595,6 +652,15 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
     assert closure <= set(REQUIRED_FILES)
     assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in coordinator)
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract' for path in shared)
+    assert not dynamic_imports
+    assert not unresolved_imports
+
+
+def test_launch_roots_have_complete_fixed_closure_and_independent_unit_pins():
+    closure, dynamic_imports, unresolved_imports = _static_python_control_closure(
+        roots=AUTONOMY_LAUNCH_ROOTS,
+    )
+    assert closure <= SOURCE_CONTROL_PYTHON_FILES
     assert not dynamic_imports
     assert not unresolved_imports
 
