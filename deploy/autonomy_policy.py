@@ -1,7 +1,10 @@
 """Read-only validation of the repository's conditional premerge gate transition."""
 
 import re
-from datetime import datetime
+from deploy.review_evidence import (
+    latest_reviews,
+    sensitive_review_authorized,
+)
 
 REPOSITORY = 'lindayi/hermes-mobile'
 REPOSITORY_ID = 1399942965
@@ -11,10 +14,21 @@ COPILOT_AGENT_ID = 198982749
 WORKFLOW_ID = 372155405
 WORKFLOW_PATH = '.github/workflows/ci.yml'
 REF = 'refs/heads/main'
+AUTONOMY_LAUNCH_ROOTS = frozenset({
+    'deploy/issue_starter.py', 'scripts/cloud_coordinator.py',
+    'scripts/issue_starter.py', 'scripts/workflow_notifications.py',
+})
+AUTONOMY_LAUNCH_UNITS = frozenset({
+    'deploy/hermes-mobile-coordinator.service', 'deploy/hermes-mobile-coordinator.timer',
+    'deploy/hermes-mobile-issue-starter.service', 'deploy/hermes-mobile-issue-starter.timer',
+    'deploy/hermes-workflow-notifications.service',
+    'deploy/hermes-workflow-notifications.timer',
+})
 SOURCE_CONTROL_ROOTS = frozenset({
     'deploy/release_artifact.py', 'deploy/self_deploy.py', 'deploy/ci_selection.py',
     'deploy/observe_release.py', 'scripts/ci_tests.py',
     'scripts/prepare_native_test_runtime.py', 'scripts/test.py',
+    *AUTONOMY_LAUNCH_ROOTS,
 })
 SOURCE_CONTROL_PYTHON_FILES = frozenset({
     'backend/app.py', 'backend/auth.py', 'backend/auth_store.py',
@@ -34,6 +48,11 @@ SOURCE_CONTROL_PYTHON_FILES = frozenset({
     'deploy/git_source.py', 'deploy/install_core.py', 'deploy/native_controls_release.py',
     'deploy/native_notification_release.py', 'deploy/native_readiness.py', 'deploy/observe_release.py', 'deploy/public_http.py',
     'deploy/release_artifact.py', 'deploy/self_deploy.py', 'deploy/test_workspace.py',
+    'deploy/cloud_coordinator.py', 'deploy/issue_starter.py', 'deploy/review_evidence.py',
+    'deploy/task_receipts.py', 'deploy/workflow_events.py', 'deploy/workflow_lifecycle.py',
+    'deploy/workflow_lifecycle_sources.py', 'deploy/workflow_notifications.py',
+    'scripts/cloud_coordinator.py', 'scripts/issue_starter.py',
+    'scripts/workflow_notifications.py',
     'scripts/ci_tests.py',
     'scripts/prepare_native_test_runtime.py', 'scripts/test.py',
 })
@@ -84,12 +103,22 @@ REQUIRED_FILES = (
     'patches/native-compat-baseline.json',
     'patches/cron-delivery-baseline.json',
     'deploy/cloud_coordinator.py',
+    'deploy/issue_starter.py',
     'deploy/review_evidence.py',
     'deploy/task_receipts.py',
     'deploy/workflow_events.py',
     'deploy/workflow_lifecycle.py',
     'deploy/workflow_lifecycle_sources.py',
     'deploy/workflow_notifications.py',
+    'scripts/cloud_coordinator.py',
+    'scripts/issue_starter.py',
+    'scripts/workflow_notifications.py',
+    'deploy/hermes-mobile-coordinator.service',
+    'deploy/hermes-mobile-coordinator.timer',
+    'deploy/hermes-mobile-issue-starter.service',
+    'deploy/hermes-mobile-issue-starter.timer',
+    'deploy/hermes-workflow-notifications.service',
+    'deploy/hermes-workflow-notifications.timer',
     'backend/app.py',
     'backend/auth.py',
     'backend/auth_store.py',
@@ -139,7 +168,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/frontend_release.py': '7749afb862a515fc673712b11278145adfb3d39ba2d012a34ecea257399eade3',
     'deploy/git_source.py': 'c69c7c5a45bc3a16ab26996872c258cc352cf2ec56c19d6256595e18ac713d63',
     'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
-    'deploy/native_controls_release.py': 'a2d00ebe7fa8add88afdeda28599b47e68f2eaab6935a8b2c9eaa46f585a11fe',
+    'deploy/native_controls_release.py': 'b3d3c601db4afd9ff003f4df759fcb057c19a83b920206fb2766d1560fd99175',
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': '49d784af17d0807c95b460b2a285254f0a616361c390afa69b3cc0345a56b498',
     'deploy/public_http.py': 'dd352b8d0295f242f4a5d31a55eaaec523ef8405601461d4ab5fa8dc6dc302e7',
@@ -154,19 +183,28 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
-    # Pending issue #39 coordinator dependency candidate bytes; parent review only.
-    'deploy/review_evidence.py': '0480bde8fdd3ce714011ca4604de8ef1f4c500bc2bd82d7801ed2fb4da8955de',
-    # Pending PR40 assembly candidates from incoming 80bf9e7. Historical source
-    # review lineage: docs/autonomy-policy.md. Not assembled/operational approval;
-    # existing pins and the unconditional pending-source-contract hold stay fixed.
+    'deploy/cloud_coordinator.py': '3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c',
+    # Issue #43 launch/authority candidates; final assembled review remains required.
+    'deploy/issue_starter.py': '701faa6e15a2717cb3c79f7e93c728bdde326e4f72e451ccd77ec1f8eabdc011',
+    'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
+    # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
+    # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     'deploy/task_receipts.py': '8ad9e60ec697de8135679b9110ed5d924057e0d8a59e731c67fceedec6525197',
     'deploy/workflow_events.py': '5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af',
     'deploy/workflow_lifecycle.py': '71be9101223f40511818bde2db9f6bd6b021736f35152e16cb3e1c9c3e2085a3',
     'deploy/workflow_lifecycle_sources.py': 'dfff5b5ec33b9bd1756a67150827541ea86193b87e6de5b5c3a965f02f19b837',
     'deploy/workflow_notifications.py': 'f0af01bdc797e0abd0494fa7a1fa304060c734ed8fc2ba1fa2b4515a9a3bcda2',
+    'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
+    'scripts/issue_starter.py': '09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1',
+    'scripts/workflow_notifications.py': '03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f',
+    'deploy/hermes-mobile-coordinator.service': '672f1e134e2cb5acbcd648eb7e124947af8d7c11143f20cea8e5be5d97c42807',
+    'deploy/hermes-mobile-coordinator.timer': 'ffa239c67b492b5a361b823c754d5f204eb4efaa2c69f7df99df577e12d2a6c1',
+    'deploy/hermes-workflow-notifications.service': '998ee55dc5df990c6004f0f435e073766702e5efbf56aa83e946b6d05e21c000',
+    'deploy/hermes-workflow-notifications.timer': '627463b4dd06eb72f7fecc88a79dad29ec8ab4b5514b29c62c131cdbd2963cc8',
+    'deploy/hermes-mobile-issue-starter.service': '1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69',
+    'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
-    'backend/model_controls.py': 'a6276a114d770f8a52677ae11a48011b586daf7cd047dd667099e4a6251ccb6b',
+    'backend/model_controls.py': '206fb5164283c16f46c51da99babe1b5f5e8932f062b4a1ee5bc07affe1f2c34',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
     'backend/runs.py': 'f8ee1d2547a794f277c5dc6b52e491e17ada1bda65acba9f3083eee8522de04e',
@@ -196,8 +234,8 @@ SOURCE_FINGERPRINTS = {
     'backend/task_reminder_presentation.py': '549a29784ef6f778ef55658d5a05961fed3919579faeeba567545004d7e9bcf3',
     'backend/tool_presentation.py': '4cfd8d468f75213d3aee3f8ab3c9f9409bb3b97e50a2aa05492181b49a1b474f',
     'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
-    'backend/native_notifications.py': '0159fbdd02705469853f51be7bb32479ea9e2fa0d6fdbc6789253d3b3c1c85fe',
-    # Pending PR25 candidate bytes, absent from the main baseline; parent review only.
+    'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
+    # Accepted merged PR25 source, absent from the historical b85c098 baseline.
     'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
 }
 SOURCE_BLOCKERS = {
@@ -231,12 +269,22 @@ SOURCE_BLOCKERS = {
     'patches/native-compat-baseline.json': 'native-job-contract',
     'patches/cron-delivery-baseline.json': 'native-job-contract',
     'deploy/cloud_coordinator.py': 'coordinator-review-contract',
+    'deploy/issue_starter.py': 'autonomy-launch-contract',
     'deploy/review_evidence.py': 'coordinator-review-contract',
     'deploy/task_receipts.py': 'coordinator-review-contract',
     'deploy/workflow_events.py': 'coordinator-review-contract',
     'deploy/workflow_lifecycle.py': 'coordinator-review-contract',
     'deploy/workflow_lifecycle_sources.py': 'coordinator-review-contract',
     'deploy/workflow_notifications.py': 'coordinator-review-contract',
+    'scripts/cloud_coordinator.py': 'autonomy-launch-contract',
+    'scripts/issue_starter.py': 'autonomy-launch-contract',
+    'scripts/workflow_notifications.py': 'autonomy-launch-contract',
+    'deploy/hermes-mobile-coordinator.service': 'autonomy-launch-contract',
+    'deploy/hermes-mobile-coordinator.timer': 'autonomy-launch-contract',
+    'deploy/hermes-mobile-issue-starter.service': 'autonomy-launch-contract',
+    'deploy/hermes-mobile-issue-starter.timer': 'autonomy-launch-contract',
+    'deploy/hermes-workflow-notifications.service': 'autonomy-launch-contract',
+    'deploy/hermes-workflow-notifications.timer': 'autonomy-launch-contract',
     'backend/configuration.py': 'execution-source-contract',
     'backend/model_controls.py': 'execution-source-contract',
     'backend/native_api_service.py': 'execution-source-contract',
@@ -271,6 +319,8 @@ SOURCE_BLOCKERS = {
     'backend/native_notifications.py': 'execution-source-contract',
     'deploy/native_notification_release.py': 'installed-host-gate',
 }
+# Historical provenance checkpoints, not identities of current candidate bytes.
+# Explicit reviewed per-file refreshes are documented in docs/autonomy-policy.md.
 SOURCE_BASELINES = {
     'main': 'b85c098857e7fb8229f47bd688d703bb677aeb34',
     'deploy/cloud_coordinator.py': '403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83',
@@ -398,17 +448,6 @@ def _check_source_run(evidence, sha, blockers):
         blockers.add('release-attestation')
 
 
-def _review_timestamp(submitted_at):
-    """Use the same fail-closed timestamp semantics for both review roles."""
-    try:
-        timestamp = datetime.fromisoformat(submitted_at.replace('Z', '+00:00'))
-    except (AttributeError, TypeError, ValueError):
-        return None
-    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-        return None
-    return timestamp
-
-
 def _check_review(evidence, main_sha, phase, blockers):
     review = evidence.get('cloud_review')
     if not isinstance(review, dict):
@@ -427,36 +466,10 @@ def _check_review(evidence, main_sha, phase, blockers):
     if not isinstance(reviews, list) or not isinstance(threads, list):
         blockers.add('cloud-review-evidence')
         return
-    authored = []
-    malformed_review = False
-    for item in reviews:
-        if not isinstance(item, dict):
-            malformed_review = True
-            continue
-        user = item.get('user')
-        if (not isinstance(user, dict) or type(user.get('id')) is not int
-                or user['id'] < 1):
-            malformed_review = True
-            continue
-        if user['id'] == COPILOT_REVIEWER_ID:
-            authored.append(item)
-    ordered = []
-    review_ids = set()
-    for item in authored:
-        review_id, submitted_at = item.get('id'), item.get('submitted_at')
-        if type(review_id) is not int or review_id < 1 or review_id in review_ids:
-            malformed_review = True
-            continue
-        review_ids.add(review_id)
-        timestamp = _review_timestamp(submitted_at)
-        if timestamp is None:
-            malformed_review = True
-            continue
-        ordered.append((timestamp, review_id, item))
-    if malformed_review:
-        blockers.add('cloud-review-approval')
-    latest = max(ordered, key=lambda record: record[:2], default=(None, None, None))[2]
-    if latest is None or latest.get('state') != 'APPROVED' or latest.get('commit_id') != head:
+    latest = latest_reviews(reviews, COPILOT_REVIEWER_ID)
+    if not latest or any(
+            item.get('state') != 'APPROVED' or item.get('commit_id') != head
+            for item in latest):
         blockers.add('cloud-review-approval')
     if any(not isinstance(thread, dict) or thread.get('isResolved') is not True
            or thread.get('comments_complete') is not True for thread in threads):
@@ -476,36 +489,9 @@ def _check_review(evidence, main_sha, phase, blockers):
     elif change['sensitive']:
         authorization = change.get('owner_authorization')
         targeted = change.get('targeted_review')
-        if (not isinstance(authorization, dict) or authorization.get('actor_id') != OWNER_ID
-                or authorization.get('head_sha') != head or authorization.get('state') != 'approved'
-                or not isinstance(targeted, dict) or type(targeted.get('reviewer_id')) is not int
-                or targeted['reviewer_id'] < 1
-                or targeted['reviewer_id'] in {
-                    OWNER_ID, review['pull_author_id'], COPILOT_AGENT_ID, COPILOT_REVIEWER_ID,
-                }
-                or targeted.get('head_sha') != head
-                or targeted.get('state') not in ('COMMENTED', 'APPROVED')
-                or type(targeted.get('review_id')) is not int or targeted['review_id'] < 1):
+        if not sensitive_review_authorized(
+                reviews, head, authorization, targeted, owner_id=OWNER_ID):
             blockers.add('sensitive-review-authorization')
-        else:
-            # Resolve by ID across the complete collection before checking its claims;
-            # filtering by reviewer/head/state first could hide conflicting duplicates.
-            matches = [
-                item for item in reviews
-                if isinstance(item, dict) and item.get('id') == targeted['review_id']
-            ]
-            if len(matches) != 1:
-                blockers.add('sensitive-review-authorization')
-            else:
-                record = matches[0]
-                user = record.get('user')
-                if (type(record.get('id')) is not int or not isinstance(user, dict)
-                        or type(user.get('id')) is not int
-                        or user['id'] != targeted['reviewer_id']
-                        or record.get('commit_id') != head
-                        or record.get('state') != targeted['state']
-                        or _review_timestamp(record.get('submitted_at')) is None):
-                    blockers.add('sensitive-review-authorization')
 
 
 def validate_transition(evidence, *, phase):
@@ -515,12 +501,6 @@ def validate_transition(evidence, *, phase):
         return {'ready': False, 'phase': phase, 'blockers': ['invalid-phase']}
     if not isinstance(evidence, dict):
         return {'ready': False, 'phase': phase, 'blockers': ['invalid-evidence']}
-    # Source-enforced hold in every phase, never an evidence-supplied opt-out.
-    # Pinned coordinator 403ac3d lacks strict timestamp ordering and targeted
-    # independent review for every sensitive head. Issue #26 activation requires
-    # a reviewed merged replacement, deliberate pin updates, and a source change
-    # to clear this hold; matching the known unsafe fingerprint is insufficient.
-    blockers.add('pending-source-contract')
     _check_identity(evidence, blockers)
     main = evidence.get('main')
     if (not isinstance(main, dict) or main.get('repository_id') != REPOSITORY_ID

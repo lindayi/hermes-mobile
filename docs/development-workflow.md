@@ -137,7 +137,9 @@ authenticated Copilot `APPROVED` review on that SHA with complete review/thread
 pagination and resolved threads; a `COMMENTED` review, overview text, or status
 alone is insufficient. Do not publish the retired `agent-review` or
 `integration-tests` contexts as substitutes. Sensitive changes still require
-explicit owner authorization for the exact SHA and targeted independent review.
+explicit owner authorization for the exact SHA, bound to the selected current
+owner-published structured independent-agent review as specified in
+[`autonomy-policy.md`](autonomy-policy.md).
 
 Use follow-up fix commits, reply in actual GitHub threads with the fix SHA and test
 evidence, and check findings before resolving them. Require resolved review threads

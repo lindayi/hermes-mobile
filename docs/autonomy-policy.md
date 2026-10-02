@@ -32,110 +32,142 @@ attestation using the existing exact certificate identity and authenticated
 certificate extensions. A caller assertion or PR overview is not proof.
 
 `main.files` maps every required source path to its SHA-256 digest over the exact
-read-back bytes. The reviewed current-main source baseline for non-coordinator
-inventory paths is `b85c098857e7fb8229f47bd688d703bb677aeb34`. The inventory
-includes the mandatory `issue-link.yml` workflow and the statically traversed local Python dependencies of
-the explicitly listed source-control roots, including `deploy.observe_release`.
-The closure test resolves relative package imports and initializers and rejects
-unresolved local imports and unsupported dynamic imports. This bounded inventory
-does not discover arbitrary subprocess roots or establish complete execution-source
-coverage by itself.
+read-back bytes. `SOURCE_BASELINES` retains historical provenance checkpoints:
+non-coordinator inventory started at `b85c098857e7fb8229f47bd688d703bb677aeb34`,
+and the old PR16 coordinator checkpoint was
+`403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83`. Neither identifier describes all
+current candidate bytes. The explicit refreshes below supersede the corresponding
+historical fingerprints, not the requirement for final independent source acceptance.
+The inventory includes `issue-link.yml` and the statically traversed local Python
+dependencies of the listed roots, including `deploy.observe_release`. Traversal
+resolves relative package imports and initializers and rejects unresolved local or
+unsupported dynamic imports. It does not discover arbitrary subprocess roots or
+establish complete execution-source coverage by itself.
 
-The release controller statically imports `deploy/native_notification_release.py`,
-which imports `backend/native_notifications.py`; both are therefore in the fixed
-inventory. `backend/native_notifications.py` is pinned to its
-`b85c098857e7fb8229f47bd688d703bb677aeb34` bytes like other inventory paths.
-`deploy/native_notification_release.py` is absent from that baseline; its pin and
-separate test fixture are the pending PR25 candidate bytes, awaiting parent review
-against the exact source. They are not independently verified, are not runtime
-evidence, and do not affect the unconditional `pending-source-contract` hold.
+### Retained merged source and deliberate native refreshes
 
-The source-level workflow, import traversal, subprocess-root, and mutation
-regressions recorded in issue #35 are repaired in this revision. That does not
-complete issue #35, certify operational source pins, or permit the
-`pending-source-contract` hold to be cleared or updated. No digest is accepted
-automatically. The current unconditional hold keeps every phase unready regardless
-of the fixed inventory or caller-supplied evidence.
+The release controller imports `deploy/native_notification_release.py`, which
+imports `backend/native_notifications.py`; both remain in the fixed inventory.
+Exactly three historical native pins and their separately literal fixtures are
+refreshed after matching the accepted source-review hashes, merged-preservation
+hashes, and actual bytes from main `5316f7c75dced1bffafdb545cdd7677e98e855a6`.
+No native source is changed and no other historical pin is automatically refreshed.
 
-The coordinator fingerprint remains tied to the published checkpoint
-`403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83` from pending PR16 and has not been
-reconciled to current-main bytes in this bounded repair. This known unsafe baseline
-lacks strict timezone-aware, deterministic review ordering and separate targeted
-independent review enforcement for every sensitive head before status publication
-or auto-merge. Matching its fingerprint does **not** certify the intended
-coordinator contract.
+| Deliberately refreshed path | Current SHA-256 |
+| --- | --- |
+| `deploy/native_controls_release.py` | `b3d3c601db4afd9ff003f4df759fcb057c19a83b920206fb2766d1560fd99175` |
+| `backend/model_controls.py` | `206fb5164283c16f46c51da99babe1b5f5e8932f062b4a1ee5bc07affe1f2c34` |
+| `backend/native_notifications.py` | `230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610` |
 
-The coordinator statically imports `deploy/review_evidence.py` (issue #39), so
-that dependency is an explicit inventory entry under the same
-`coordinator-review-contract` blocker. It is absent from the main baseline; its
-pin and separate test fixture are the pending issue #39 candidate bytes, awaiting
-parent review. They are not independently verified, are not runtime evidence, and
-do not affect the unconditional `pending-source-contract` hold.
+The authorization lineage is `native25-final-runtime-review.json` (SHA-256
+`92642f88cb6c9daa5c381ea31cdd2648aba5aec2d51aa5bed7c0a2160f23448e`),
+which records these exact hashes and accepts the controller flow, together with
+`pr33-prepare-closure-review.json` (SHA-256
+`c7a8a2d8491f46e374493c948e66e9a05a93060e518fb3847af2935fc46ec082`),
+which preserves those incoming merged PR25 bytes. These reports are parent-retained
+source-review lineage, not runtime evidence or portable test inputs.
+`deploy/native_notification_release.py` already matches its retained
+`364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582` pin;
+its `native25-route-bound-review.json` and PR33 merged-preservation lineage is
+accepted source evidence, not a still-unreviewed PR25 candidate or activation approval.
+It was absent only from the historical b85c098 baseline.
 
-The PR40 assembly with incoming PR29/33 parent
-`80bf9e73de3aec689cd68374bc21ad50642ee14e` expands the coordinator's static
-local-import closure from two files to exactly 36. The fixed closure regression
-lists every path explicitly, rejects dynamic/unresolved imports, and requires
-inventory coverage. The original source-control roots and their separate exact
-closure assertion are unchanged. Shared backend dependencies retain their existing
-`execution-source-contract` labels; no existing pin or baseline is refreshed.
+The coordinator's exact 36-file static closure and fixed dependency inventory are
+retained. Shared backend dependencies keep their existing blocker labels. The five
+PR29/PR40/PR42 dependency pins below match the accepted merged bytes in main5316;
+the separate literal fixtures and actual-byte/missing/malformed/mutation checks
+remain in every phase.
 
-Five previously absent dependencies are added as **pending assembly candidates**
-under `coordinator-review-contract`, with separate literal test fixtures and
-actual-byte, missing-source, malformed-digest and byte-mutation checks in every
-phase. Their SHA-256 digests match the incoming parent's exact bytes:
-
-| Pending path | Candidate SHA-256 |
+| Retained merged dependency | SHA-256 |
 | --- | --- |
 | `deploy/task_receipts.py` | `8ad9e60ec697de8135679b9110ed5d924057e0d8a59e731c67fceedec6525197` |
 | `deploy/workflow_events.py` | `5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af` |
-| `deploy/workflow_lifecycle.py` | `83643df2f642b6c949031e067968c0dd5a06e4c3230ab1b7f7bdb02b3be8c626` |
-| `deploy/workflow_lifecycle_sources.py` | `a6be88f79862966a6e09f10f9eee2e7f6c8957ededeb1005f435b70759a0e5a6` |
-| `deploy/workflow_notifications.py` | `4684a5db2229a9491a99af04b6437ff215ffcbd6900d53c653fa7e897055d87d` |
+| `deploy/workflow_lifecycle.py` | `71be9101223f40511818bde2db9f6bd6b021736f35152e16cb3e1c9c3e2085a3` |
+| `deploy/workflow_lifecycle_sources.py` | `dfff5b5ec33b9bd1756a67150827541ea86193b87e6de5b5c3a965f02f19b837` |
+| `deploy/workflow_notifications.py` | `f0af01bdc797e0abd0494fa7a1fa304060c734ed8fc2ba1fa2b4515a9a3bcda2` |
 
-Historical independent source-review lineage (parent-retained workflow reports,
-not runtime evidence or portable test inputs):
+`task_receipts.py` retains `pr29-2b49-assembly-review.json` lineage; the starter
+retains `pr29-producer-identities-review.json` lineage. The lifecycle/event/
+notification hashes are recorded in `pr40-final-status-assembly-review.json`,
+including the accepted PR42 retention assembly. Earlier PR33/PR32 reports remain
+historical lineage, not claims that their superseded hashes are current. All five
+dependencies and all ten launch paths below are byte-identical to main5316.
 
-- `task_receipts.py` matches `pr29-2b49-assembly-review.json`'s source hash,
-  which retains the PR29 receipt and immutable-enrollment review lineage.
-- `workflow_events.py`, `workflow_lifecycle.py` and
-  `workflow_lifecycle_sources.py` match `lifecycle-second-followup-review.json`
-  at `c69670cefc2e0264ad90498ba44a0d225e3f6cca`, and the explicit read-back
-  hashes in `lifecycle-final-integration-review.json`.
-- `workflow_notifications.py` matches the integrated PR32 repair hashes in
-  `notifications-integrated-fix.json` and `lifecycle-final-integration-review.json`.
-  The former binds the bounded independent review transcript
-  `notifications-integrated-independent-review.txt` (SHA-256
-  `1dee539ffa8cd17a1ce8009d68dfefd48a4dbdc2a368835e7e9443e0305dee58`).
+### Issue #43 accepted source prerequisites and remaining operational debt
 
-Those historical reports have bounded scopes and include historical assembly or
-activation blockers; matching a module hash is not an approval of the complete
-PR40 assembly or its control flow. Parent independent **assembly and inventory
-review remains required**. These candidate pins do not certify complete operational
-source coverage, repair issue #35's targeted-review implementation, or refresh the
-old coordinator pin. In particular, exact static coverage of the current candidate
-is not a claim that the old pinned coordinator has this same closure. The
-unconditional hold below is unchanged; no activation is authorized.
+The current coordinator and helper fingerprints below are issue #43 candidates,
+not the old unsafe PR16 checkpoint. The helper combines issue #43 strict review
+identity/owner-published structured evidence with the final PR40 helper
+`0480bde8fdd3ce714011ca4604de8ef1f4c500bc2bd82d7801ed2fb4da8955de`
+soft-text normalization, preserving literal context and structural boundaries.
+`pr40-softline-review.json` covers that retained parser delta, not new authority
+logic. The coordinator also revalidates the separately mandatory actual Copilot
+approval against the final reviews read before auto-merge, in addition to the
+selected sensitive review. Independent final **S1-S5 assembled-source and inventory
+acceptance** is recorded in the parent-retained `pr44-final-review.json`, with the
+assembly and focused/adjacent test evidence in `pr44-final-fix.json`. The accepted
+bytes are preserved at `03dea0e87eeee91f2b88ee97a072b0eaf3fe2d5d`. These reports
+accept source prerequisites, not runtime readiness or this follow-up delta.
 
-The validator therefore adds the explicit `pending-source-contract` blocker in
-**every phase**, even for otherwise complete evidence matching every pinned digest.
-No snapshot can report ready with this source version; the CLI returns nonzero.
-The hold is enforced in source, not by an input flag: caller booleans, matching
-hashes, claimed review success, or a supplied readiness result cannot clear it.
-All other evidence checks still run, preserving their specific blockers. Component
-positive tests require exactly this one known blocker, not readiness; negative
-security assertions retain their own blockers as well. Invalid phase/evidence
-roots remain rejected with their existing diagnostics.
+The three historical native mismatches are reconciled and all 79 fixed source pins
+match the accepted assembly. The separately authorized final source phase removes
+only the historical unconditional `pending-source-contract` blocker. Its own
+exact-head independent review and complete required hosted/residual-host evidence
+remain merge obligations. Authenticated current-main readback and operational
+acceptance remain separate; **issue #35 stays open**. Matching hashes or source
+review reports alone authorize no activation.
 
-The activation follow-up in issue #35 must independently review the actual
-current-main coordinator and its complete control contract, establish strict review
-timestamps/ordering and per-head sensitive review enforcement, deliberately
-reconcile operational source pins and fixtures, and make a separately reviewed
-source change to clear or update this hold. Neither a pin refresh alone nor a caller
-assertion is sufficient; pins never auto-refresh.
-Merging this inactive read-only validator is separate from activation and does not
-change the coordinator, repository protection, services, or existing merge gates.
-The synthetic fixtures exercise evidence components only, not live readiness.
+Issue #43 adds four explicit launch roots to the source-control inventory:
+`scripts/cloud_coordinator.py`, `scripts/workflow_notifications.py`,
+`scripts/issue_starter.py`, and `deploy/issue_starter.py`. Their complete local
+Python import closure is checked against the fixed inventory and rejects unresolved
+or dynamic imports. Three service/timer pairs are separately required and pinned:
+the coordinator, workflow notifications, and issue starter. The pins and an
+independently spelled-out test fixture represent source consistency only; they
+do not constitute independent review, runtime evidence, or activation permission.
+
+| Issue #43 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c` |
+| `deploy/review_evidence.py` | `c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae` |
+| `deploy/issue_starter.py` | `701faa6e15a2717cb3c79f7e93c728bdde326e4f72e451ccd77ec1f8eabdc011` |
+| `scripts/cloud_coordinator.py` | `992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790` |
+| `scripts/workflow_notifications.py` | `03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f` |
+| `scripts/issue_starter.py` | `09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1` |
+| `deploy/hermes-mobile-coordinator.service` | `672f1e134e2cb5acbcd648eb7e124947af8d7c11143f20cea8e5be5d97c42807` |
+| `deploy/hermes-mobile-coordinator.timer` | `ffa239c67b492b5a361b823c754d5f204eb4efaa2c69f7df99df577e12d2a6c1` |
+| `deploy/hermes-workflow-notifications.service` | `998ee55dc5df990c6004f0f435e073766702e5efbf56aa83e946b6d05e21c000` |
+| `deploy/hermes-workflow-notifications.timer` | `627463b4dd06eb72f7fecc88a79dad29ec8ab4b5514b29c62c131cdbd2963cc8` |
+| `deploy/hermes-mobile-issue-starter.service` | `1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69` |
+| `deploy/hermes-mobile-issue-starter.timer` | `848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92` |
+
+This assembly integrates final PR40 main
+`5316f7c75dced1bffafdb545cdd7677e98e855a6`, preserving its parser and previously
+merged retention behavior. Source acceptance and removal of the historical hold
+do not authorize activation.
+
+The read-only validator can now report `ready: true` (CLI exit zero) in any selected
+phase **only when every source, run, provenance, review, approval, thread and
+protection component satisfies that phase's contract**. Every genuine component
+failure retains its specific blocker and a nonzero CLI result. Invalid phase or
+evidence roots retain their existing diagnostics. No source pins, identities,
+exact-head or review-ordering requirements, authority predicates, freshness
+requirements, or protection maps are relaxed. There is no caller override:
+`pending_source_contract`, `source_contract_reviewed`, supplied `ready`/`blockers`,
+or other caller claims cannot bypass a failed component.
+
+Complete synthetic fixtures now expect readiness and an empty blocker list in all
+three phases, including valid sensitive authorization. Negative fixtures continue
+to assert their actual component blockers without filtering them; malicious caller
+flags are tested against broken components. Synthetic readiness proves only the
+source policy behavior, not evidence authenticity or permission to operate.
+
+The activation follow-up in issue #35 must still verify the actual current-main
+coordinator and complete control contract, authenticated API/source provenance and
+actual current-head replacement evidence through the owner-controlled sequence
+below. Neither a pin refresh alone nor a caller assertion is sufficient; pins never
+auto-refresh. Merging this read-only validator is separate from activation and does
+not change the coordinator, repository protection, services, or existing merge gates.
 
 Any fingerprint-set or dependency-inventory update must be independently reviewed
 against the complete source, its local control dependencies, and intended control
@@ -166,26 +198,33 @@ current-main readback. Readiness requires:
   changed-file classification must be complete for that exact head. Evidence binds
   the positive numeric PR-author ID. Every authenticated Copilot review (ID
   `175728472`) must have a positive review ID and a valid timezone-aware timestamp;
-  latest is selected by chronological timestamp, then review ID as a deterministic
-  tie-breaker. Malformed authenticated review records block. The latest review must
-  be an actual `APPROVED` review on the current PR head, and every review thread and
-  page must be complete and resolved. A `COMMENTED` review, body text, empty
-  overview, or a status without the authenticated review is not approval.
+  all review IDs are unique. Malformed review records block. Latest is selected by
+  chronological timestamp; every Copilot review tied at that instant must be an
+  actual `APPROVED` review on the current PR head. Offsets compare as instants, not
+  strings or review-ID order. Every review thread and page must be complete and
+  resolved. A `COMMENTED` review, body text, empty overview, or a status without the
+  authenticated review is not approval.
 
 If the PR under review changes sensitive files, readiness additionally requires
-owner ID `5164171` authorization for that exact head and a separate targeted
-independent review of that head. The targeted reviewer must be a positive numeric
-identity distinct from the owner, PR author, coding-agent identity (`198982749`),
-and mandatory Copilot reviewer (`175728472`). The `targeted_review.review_id` must
-be a positive integer identifying exactly one record in the complete authenticated
-`cloud_review.reviews` collection. Its `user.id`, `commit_id`, and `state` must
-match the claim's `reviewer_id`, exact `head_sha`, and `state` (`COMMENTED` or
-`APPROVED`). The matched record's `submitted_at` must parse as a valid
-timezone-aware timestamp using the same helper as mandatory Copilot reviews;
-missing, naive, or malformed values block with `sensitive-review-authorization`.
-A timestamp supplied only on the claim cannot substitute for that record.
-Missing records, duplicate IDs, or conflicting claims block readiness.
-A later commit invalidates both.
+owner ID `5164171` authorization for that exact head, bound to one owner-published
+independent-agent review in the complete authenticated `cloud_review.reviews`
+collection. The existing command is extended to
+`/hermes authorize-sensitive <head-sha> review <positive-review-id> <body-sha256>`;
+the former head-only command cannot authorize sensitive work. The review must be a
+unique positive review ID authored by the owner, submitted with a valid
+timezone-aware timestamp, in state `COMMENTED`, on the exact head. Its raw UTF-8
+body must match the command's SHA-256 and be a bounded (at most 4096-character)
+JSON object with exactly these fields: `schema` set to
+`hermes-independent-agent-review-v1`, `reviewed_head_sha`, `review_method` set to
+`independent-agent`, `verdict` set to `pass`, and a lowercase 64-character
+`evidence_sha256`. The owner publication is the trust assertion that independent
+review occurred; it does not prove cryptographic or model independence or claim a
+different GitHub identity. The selected record must remain the sole latest owner
+review; a missing, malformed, edited, removed, dismissed, duplicate, stale, negative,
+or conflicting record blocks with `sensitive-review-authorization`. Both the owner
+authorization and selected review are re-read during planning and the fresh status
+and merge fences. A later head clears the authorization; approval is not blanket
+consent for future commits.
 
 ## Policy phases and activation
 
@@ -235,9 +274,10 @@ bridge this gap. The owner-controlled sequence is:
    contract are absent from current main. A PR branch or expected merge is not a
    dependency proof. Once the final merged core (and later PR33 changes) is known,
    deliberately review and replace any changed fingerprint and provenance fixture;
-   never auto-pin candidate evidence or expand a whitelist. This is an issue #26
-   activation follow-up, including the separately reviewed source change required
-   to clear/update `pending-source-contract`, not part of this validator's merge.
+   never auto-pin candidate evidence or expand a whitelist. Issue #43 accepts the
+   assembled source prerequisites and separately authorizes historical hold removal;
+   issue #35 retains operational acceptance. Neither source change establishes the
+   authenticated current-main or runtime evidence required by this sequence.
 2. Collect authenticated current-main source, successful complete hosted results,
    release provenance, retained installed-host gate and genuine complete exact-head
    APPROVED review evidence, including sensitive authorization where required.

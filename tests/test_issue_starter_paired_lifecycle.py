@@ -1,4 +1,7 @@
 """Synthetic regression seams between SHA-bound enrollment and durable lifecycle."""
+import hashlib
+import json
+
 import pytest
 
 from deploy.cloud_coordinator import _authorized_result_heads
@@ -10,8 +13,8 @@ NOW = 1790856660
 RESULT_HEAD = "c" * 40
 
 
-def bound_worker(tmp_path, *, sensitive=False):
-    api = FakeApi(unresolved=True, sensitive=sensitive)
+def bound_worker(tmp_path, *, sensitive=False, authorize=False):
+    api = FakeApi(unresolved=True, sensitive=sensitive, authorize=authorize)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     store = StateStore(tmp_path / "coordinator" / "state.json")
     worker = Coordinator(api, store, clock=lambda: NOW)
@@ -144,22 +147,44 @@ def test_starter_rejects_edited_or_unverifiable_owner_commands(tmp_path, updated
 
 
 def test_bound_result_head_clears_sensitive_authorization(tmp_path):
-    api, store, worker, action = bound_worker(tmp_path, sensitive=True)
-    store.authorize_sensitive(16, HEAD)
+    api, store, worker, action = bound_worker(tmp_path, sensitive=True, authorize=True)
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["sensitive_sha"] == HEAD
+    assert enrollment["sensitive_authorization"]["head_sha"] == HEAD
+    assert enrollment["targeted_review"]["head_sha"] == HEAD
     finish(api, action)
     api.unresolved = False
     result = worker.run(apply=True)["pull_requests"][0]
     assert "sensitive" in result["reasons"]
     assert not result["auto_merge_requested"]
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["sensitive_authorization"] is None
+    assert enrollment["targeted_review"] is None
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    # Publish a new structured owner review for the result head, then select its
+    # exact raw body digest in a fresh authorization command.
+    api.authorize_sha = RESULT_HEAD
+    api.owner_review_id += 1
+    api.owner_review_body = json.dumps({
+        **json.loads(api.owner_review_body), "reviewed_head_sha": RESULT_HEAD,
+    }, separators=(",", ":"))
+    api.owner_review_digest = hashlib.sha256(api.owner_review_body.encode("utf-8")).hexdigest()
     api.comments.append({
-        "id": 10001, "body": f"/hermes authorize-sensitive {RESULT_HEAD}",
+        "id": 10001,
+        "body": (f"/hermes authorize-sensitive {RESULT_HEAD} review "
+                 f"{api.owner_review_id} {api.owner_review_digest}"),
         "user": {"id": OWNER}, "created_at": "2026-10-01T12:11:00Z",
         "updated_at": "2026-10-01T12:11:00Z",
     })
     result = worker.run(apply=True)["pull_requests"][0]
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] == RESULT_HEAD
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["sensitive_authorization"]["head_sha"] == RESULT_HEAD
+    assert enrollment["sensitive_authorization"]["review_id"] == api.owner_review_id
+    assert enrollment["sensitive_authorization"]["body_sha256"] == api.owner_review_digest
+    assert enrollment["targeted_review"]["head_sha"] == RESULT_HEAD
+    assert enrollment["targeted_review"]["review_id"] == api.owner_review_id
     assert result["auto_merge_requested"]
 
 

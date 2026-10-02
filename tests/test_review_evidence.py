@@ -3,6 +3,7 @@
 All review bodies are public synthetic fixtures shaped like actual
 `ccr-overview-v2` reviews; no production data or model execution is used.
 """
+import hashlib
 import json
 
 import pytest
@@ -13,6 +14,12 @@ from deploy.cloud_coordinator import (
     _latest_source_failure,
     copilot_review_valid,
     repair_request,
+)
+from deploy.review_evidence import (
+    INDEPENDENT_REVIEW_SCHEMA,
+    latest_reviews,
+    parse_independent_review_body,
+    sensitive_review_authorized,
 )
 from test_cloud_coordinator import (
     BASE, COPILOT_REVIEWER, HEAD, OWNER, FakeApi, _managed_cycle, enrolled_record, source_run,
@@ -124,6 +131,121 @@ def _task_evidence(api):
 
 def _evidence(request):
     return json.loads(request["body"].split("Untrusted evidence: `", 1)[1].split("`\n\n<!--", 1)[0])
+
+
+def test_latest_review_requires_present_unique_positive_ids():
+    valid = copilot_review(NO_FINDINGS)
+    assert latest_reviews([valid], COPILOT_REVIEWER) == [valid]
+
+    malformed = dict(valid)
+    malformed.pop("id")
+    assert latest_reviews([malformed], COPILOT_REVIEWER) is None
+    assert latest_reviews([valid, dict(valid)], COPILOT_REVIEWER) is None
+
+
+def _independent_review_evidence():
+    report = {
+        "schema": INDEPENDENT_REVIEW_SCHEMA,
+        "reviewed_head_sha": HEAD,
+        "review_method": "independent-agent",
+        "verdict": "pass",
+        "evidence_sha256": "c" * 64,
+    }
+    body = json.dumps(report, separators=(",", ":"))
+    review_id = 64001
+    body_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    review = {
+        "id": review_id, "user": {"id": OWNER}, "commit_id": HEAD,
+        "state": "COMMENTED", "submitted_at": SUBMITTED, "body": body,
+    }
+    authorization = {
+        "actor_id": OWNER, "head_sha": HEAD, "state": "approved",
+        "review_id": review_id, "body_sha256": body_sha256,
+    }
+    targeted = {
+        "review_id": review_id, "reviewer_id": OWNER, "head_sha": HEAD,
+        "state": "COMMENTED", "body_sha256": body_sha256,
+        "evidence_sha256": report["evidence_sha256"],
+    }
+    return report, body, review, authorization, targeted
+
+
+def test_owner_published_independent_review_requires_bounded_structured_positive_body():
+    report, body, review, authorization, targeted = _independent_review_evidence()
+    assert parse_independent_review_body(body, HEAD) == report
+    assert sensitive_review_authorized(
+        [review], HEAD, authorization, targeted, owner_id=OWNER,
+    )
+
+    for invalid_body in (
+        "Independent review passed.",
+        body.replace('"verdict":"pass"', '"verdict":"fail"'),
+        body.replace(HEAD, BASE),
+        body[:-1] + ',"unexpected":true}',
+        '{"schema":"x","schema":"x"}',
+        " " * 4097,
+    ):
+        invalid_review = review | {"body": invalid_body}
+        assert not sensitive_review_authorized(
+            [invalid_review], HEAD, authorization, targeted, owner_id=OWNER,
+        )
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda record: record.update(state="DISMISSED"),
+    lambda record: record.update(commit_id=BASE),
+    lambda record: record.update(user={"id": COPILOT_REVIEWER}),
+    lambda record: record.update(dismissed=True),
+    lambda record: record.update(dismissed_at=SUBMITTED),
+    lambda record: record.update(submitted_at="2026-10-01T12:30:00"),
+    lambda record: record.update(id=True),
+])
+def test_owner_published_independent_review_rejects_invalid_authenticated_record(mutation):
+    _, _, review, authorization, targeted = _independent_review_evidence()
+    mutation(review)
+    assert not sensitive_review_authorized(
+        [review], HEAD, authorization, targeted, owner_id=OWNER,
+    )
+
+
+def test_owner_published_independent_review_rejects_edited_replaced_or_conflicting_records():
+    _, body, review, authorization, targeted = _independent_review_evidence()
+    edited = review | {"body": body + " "}
+    assert not sensitive_review_authorized(
+        [edited], HEAD, authorization, targeted, owner_id=OWNER,
+    )
+    assert not sensitive_review_authorized(
+        [], HEAD, authorization, targeted, owner_id=OWNER,
+    )
+    assert not sensitive_review_authorized(
+        [review, dict(review, state="DISMISSED")],
+        HEAD, authorization, targeted, owner_id=OWNER,
+    )
+    negative_later_review = dict(
+        review, id=review["id"] + 1, state="CHANGES_REQUESTED",
+        submitted_at="2026-10-01T13:30:00Z", body="no",
+    )
+    assert not sensitive_review_authorized(
+        [review, negative_later_review], HEAD, authorization, targeted, owner_id=OWNER,
+    )
+
+
+def test_owner_authorization_must_bind_the_selected_review_and_exact_digest():
+    _, _, review, authorization, targeted = _independent_review_evidence()
+    for changed_authorization in (
+        authorization | {"review_id": review["id"] + 1},
+        authorization | {"body_sha256": "d" * 64},
+        authorization | {"head_sha": BASE},
+        authorization | {"actor_id": COPILOT_REVIEWER},
+        authorization | {"legacy": True},
+    ):
+        assert not sensitive_review_authorized(
+            [review], HEAD, changed_authorization, targeted, owner_id=OWNER,
+        )
+    assert not sensitive_review_authorized(
+        [review], HEAD, authorization,
+        targeted | {"evidence_sha256": "d" * 64}, owner_id=OWNER,
+    )
 
 
 @pytest.mark.parametrize("state", ["COMMENTED", "CHANGES_REQUESTED"])

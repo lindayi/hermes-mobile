@@ -105,9 +105,11 @@ def test_apply_refreshes_approval_export_from_current_scan(tmp_path, authorize):
     old_event = json.loads(export.read_text())["events"][0]
     assert old_event["head_sha"] == HEAD
     if authorize:
+        api.authorize_sha_review = True
         api.comments.append({
             "id": 124, "user": {"id": 5164171},
-            "body": f"/hermes authorize-sensitive {HEAD}",
+            "body": (f"/hermes authorize-sensitive {HEAD} review "
+                     f"{api.owner_review_id} {api.owner_review_digest}"),
             "updated_at": "2026-10-01T12:10:00Z",
         })
     else:

@@ -10,6 +10,8 @@ import sys
 import pytest
 
 from deploy.autonomy_policy import (
+    AUTONOMY_LAUNCH_ROOTS,
+    AUTONOMY_LAUNCH_UNITS,
     COPILOT_AGENT_ID,
     COPILOT_REVIEWER_ID,
     OWNER_ID,
@@ -33,6 +35,8 @@ SHA = 'a' * 40
 ARTIFACT_HASH = 'b' * 64
 IDENTITY = f'https://github.com/{REPOSITORY}/{WORKFLOW_PATH}@{REF}'
 
+# Historical main inventory with exactly three accepted native source refreshes;
+# see docs/autonomy-policy.md. Literals remain independent of policy constants.
 _MERGED_MAIN_SOURCE_FIXTURE = {
     '.github/workflows/ci.yml': '39110e6f940fc59ef3aec9846f07616a86a2e07335d2aaed6c6cd0ab444ff195',
     '.github/workflows/issue-link.yml': '5569875b9fc45d686f857712bc035d75a100fcfc4f3862f48b0d8bd045eca415',
@@ -45,7 +49,7 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'deploy/frontend_release.py': '7749afb862a515fc673712b11278145adfb3d39ba2d012a34ecea257399eade3',
     'deploy/git_source.py': 'c69c7c5a45bc3a16ab26996872c258cc352cf2ec56c19d6256595e18ac713d63',
     'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
-    'deploy/native_controls_release.py': 'a2d00ebe7fa8add88afdeda28599b47e68f2eaab6935a8b2c9eaa46f585a11fe',
+    'deploy/native_controls_release.py': 'b3d3c601db4afd9ff003f4df759fcb057c19a83b920206fb2766d1560fd99175',
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': '49d784af17d0807c95b460b2a285254f0a616361c390afa69b3cc0345a56b498',
     'deploy/public_http.py': 'dd352b8d0295f242f4a5d31a55eaaec523ef8405601461d4ab5fa8dc6dc302e7',
@@ -64,7 +68,7 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/native-compat.patch': '2add04e93a5ea74eeeb407dc9d5556bb38c1454b5c8bf307c3e8490e9b72dd32',
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
-    'backend/model_controls.py': 'a6276a114d770f8a52677ae11a48011b586daf7cd047dd667099e4a6251ccb6b',
+    'backend/model_controls.py': '206fb5164283c16f46c51da99babe1b5f5e8932f062b4a1ee5bc07affe1f2c34',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
     'backend/runs.py': 'f8ee1d2547a794f277c5dc6b52e491e17ada1bda65acba9f3083eee8522de04e',
@@ -94,25 +98,16 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'backend/task_reminder_presentation.py': '549a29784ef6f778ef55658d5a05961fed3919579faeeba567545004d7e9bcf3',
     'backend/tool_presentation.py': '4cfd8d468f75213d3aee3f8ab3c9f9409bb3b97e50a2aa05492181b49a1b474f',
     'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
-    'backend/native_notifications.py': '0159fbdd02705469853f51be7bb32479ea9e2fa0d6fdbc6789253d3b3c1c85fe',
+    'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
 }
-_PENDING_PR16_COORDINATOR_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
-}
-# PR25 candidate bytes awaiting parent review; not present in the main baseline.
+# Accepted merged PR25 bytes; absent only from the historical b85c098 baseline.
 _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
     'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
 }
 
-# Issue #39 coordinator dependency candidate bytes; not present in the main baseline.
-_PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE = {
-    'deploy/review_evidence.py': '0480bde8fdd3ce714011ca4604de8ef1f4c500bc2bd82d7801ed2fb4da8955de',
-}
-
-
-# PR40 assembled dependency candidates, independently spelled out (not copied
-# from policy constants at runtime). Historical source-review lineage is recorded
-# in docs/autonomy-policy.md; assembled inventory review is still pending.
+# Accepted PR29/PR40/PR42 dependency bytes retained from main5316, independently
+# spelled out (not copied from policy constants at runtime). Issue43 source
+# acceptance does not authorize operational activation.
 _PENDING_PR40_LIFECYCLE_FIXTURE = {
     'deploy/task_receipts.py': '8ad9e60ec697de8135679b9110ed5d924057e0d8a59e731c67fceedec6525197',
     'deploy/workflow_events.py': '5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af',
@@ -121,12 +116,25 @@ _PENDING_PR40_LIFECYCLE_FIXTURE = {
     'deploy/workflow_notifications.py': 'f0af01bdc797e0abd0494fa7a1fa304060c734ed8fc2ba1fa2b4515a9a3bcda2',
 }
 
+_PENDING_ISSUE43_LAUNCH_FIXTURE = {
+    'deploy/cloud_coordinator.py': '3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c',
+    'deploy/issue_starter.py': '701faa6e15a2717cb3c79f7e93c728bdde326e4f72e451ccd77ec1f8eabdc011',
+    'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
+    'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
+    'scripts/issue_starter.py': '09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1',
+    'scripts/workflow_notifications.py': '03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f',
+    'deploy/hermes-mobile-coordinator.service': '672f1e134e2cb5acbcd648eb7e124947af8d7c11143f20cea8e5be5d97c42807',
+    'deploy/hermes-mobile-coordinator.timer': 'ffa239c67b492b5a361b823c754d5f204eb4efaa2c69f7df99df577e12d2a6c1',
+    'deploy/hermes-workflow-notifications.service': '998ee55dc5df990c6004f0f435e073766702e5efbf56aa83e946b6d05e21c000',
+    'deploy/hermes-workflow-notifications.timer': '627463b4dd06eb72f7fecc88a79dad29ec8ab4b5514b29c62c131cdbd2963cc8',
+    'deploy/hermes-mobile-issue-starter.service': '1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69',
+    'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
+}
+
 
 def _source_files():
-    return (_MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR16_COORDINATOR_FIXTURE
-            | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
-            | _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE
-            | _PENDING_PR40_LIFECYCLE_FIXTURE)
+    return (_MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
+            | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE)
 
 
 def _source_ci():
@@ -220,14 +228,28 @@ def _sensitive_evidence(phase, state='COMMENTED'):
     evidence = _phase_evidence(phase)
     review = evidence['cloud_review']
     head = review['head_sha']
+    body = json.dumps({
+        'schema': 'hermes-independent-agent-review-v1',
+        'reviewed_head_sha': head,
+        'review_method': 'independent-agent',
+        'verdict': 'pass',
+        'evidence_sha256': 'c' * 64,
+    }, separators=(',', ':'))
+    body_sha256 = hashlib.sha256(body.encode('utf-8')).hexdigest()
     review['change'].update(
         sensitive=True,
-        owner_authorization={'actor_id': OWNER_ID, 'head_sha': head, 'state': 'approved'},
-        targeted_review={'review_id': 2, 'reviewer_id': 76, 'head_sha': head, 'state': state},
+        owner_authorization={
+            'actor_id': OWNER_ID, 'head_sha': head, 'state': 'approved',
+            'review_id': 2, 'body_sha256': body_sha256,
+        },
+        targeted_review={
+            'review_id': 2, 'reviewer_id': OWNER_ID, 'head_sha': head,
+            'state': state, 'body_sha256': body_sha256, 'evidence_sha256': 'c' * 64,
+        },
     )
     review['reviews'].append({
-        'id': 2, 'user': {'id': 76}, 'commit_id': head, 'state': state,
-        'submitted_at': '2026-10-01T22:00:00Z',
+        'id': 2, 'user': {'id': OWNER_ID}, 'commit_id': head, 'state': state,
+        'submitted_at': '2026-10-01T22:00:00Z', 'body': body,
     })
     return evidence
 
@@ -466,22 +488,22 @@ def test_static_python_closure_accepts_declared_initializer_attributes(tmp_path,
 def test_reviewed_source_fixture_matches_complete_required_contract():
     pending = {'deploy/cloud_coordinator.py', 'deploy/native_notification_release.py',
                'deploy/review_evidence.py'} | set(_PENDING_PR40_LIFECYCLE_FIXTURE)
+    pending |= set(_PENDING_ISSUE43_LAUNCH_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
     } == _MERGED_MAIN_SOURCE_FIXTURE
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
-        if path == 'deploy/cloud_coordinator.py'
-    } == _PENDING_PR16_COORDINATOR_FIXTURE
+        if path in {'deploy/cloud_coordinator.py', 'deploy/review_evidence.py'}
+    } == {
+        path: _PENDING_ISSUE43_LAUNCH_FIXTURE[path]
+        for path in ('deploy/cloud_coordinator.py', 'deploy/review_evidence.py')
+    }
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path == 'deploy/native_notification_release.py'
     } == _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
-    assert {
-        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
-        if path == 'deploy/review_evidence.py'
-    } == _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_PR40_LIFECYCLE_FIXTURE
@@ -491,6 +513,19 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert len(REQUIRED_FILES) == len(set(REQUIRED_FILES))
     assert SOURCE_CONTROL_PYTHON_FILES <= set(REQUIRED_FILES)
     assert SOURCE_CONTROL_ROOTS <= SOURCE_CONTROL_PYTHON_FILES
+    assert AUTONOMY_LAUNCH_ROOTS == {
+        'deploy/issue_starter.py', 'scripts/cloud_coordinator.py',
+        'scripts/issue_starter.py', 'scripts/workflow_notifications.py',
+    }
+    assert AUTONOMY_LAUNCH_UNITS == {
+        'deploy/hermes-mobile-coordinator.service', 'deploy/hermes-mobile-coordinator.timer',
+        'deploy/hermes-workflow-notifications.service',
+        'deploy/hermes-workflow-notifications.timer',
+        'deploy/hermes-mobile-issue-starter.service', 'deploy/hermes-mobile-issue-starter.timer',
+    }
+    assert AUTONOMY_LAUNCH_ROOTS | AUTONOMY_LAUNCH_UNITS <= set(
+        _PENDING_ISSUE43_LAUNCH_FIXTURE,
+    )
     assert SOURCE_BASELINES == {
         'main': 'b85c098857e7fb8229f47bd688d703bb677aeb34',
         'deploy/cloud_coordinator.py': '403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83',
@@ -498,10 +533,10 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
 
 
 @pytest.mark.parametrize('pins', [
-    SOURCE_FINGERPRINTS, _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE,
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE43_LAUNCH_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
-def test_pending_review_evidence_pin_matches_actual_candidate_bytes(pins):
-    path = 'deploy/review_evidence.py'
+@pytest.mark.parametrize('path', sorted(_PENDING_ISSUE43_LAUNCH_FIXTURE))
+def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
     source = Path(__file__).resolve().parents[1] / path
     assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
 
@@ -522,7 +557,7 @@ def test_pending_lifecycle_actual_byte_mutation_or_missing_source_blocks(phase, 
     evidence = _phase_evidence(phase)
     source = (Path(__file__).resolve().parents[1] / path).read_bytes()
     evidence['main']['files'][path] = hashlib.sha256(source).hexdigest()
-    assert _blockers(evidence, phase) == {'pending-source-contract'}
+    assert _blockers(evidence, phase) == set()
     if change == 'missing':
         evidence['main']['files'].pop(path)
         blocker = 'main-source-missing'
@@ -537,7 +572,34 @@ def test_pending_lifecycle_actual_byte_mutation_or_missing_source_blocks(phase, 
     before = copy.deepcopy(evidence)
     assert validate_transition(evidence, phase=phase) == {
         'ready': False, 'phase': phase,
-        'blockers': sorted([blocker, 'pending-source-contract']),
+        'blockers': [blocker],
+    }
+    assert evidence == before
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('path', sorted(_PENDING_ISSUE43_LAUNCH_FIXTURE))
+@pytest.mark.parametrize('change', ['missing', 'malformed', 'mutated'])
+def test_issue43_launch_actual_byte_mutation_or_missing_source_blocks(phase, path, change):
+    evidence = _phase_evidence(phase)
+    source = (Path(__file__).resolve().parents[1] / path).read_bytes()
+    evidence['main']['files'][path] = hashlib.sha256(source).hexdigest()
+    assert _blockers(evidence, phase) == set()
+    if change == 'missing':
+        evidence['main']['files'].pop(path)
+        blocker = 'main-source-missing'
+    elif change == 'malformed':
+        evidence['main']['files'][path] = 'not-a-sha256'
+        blocker = 'main-source-invalid'
+    else:
+        evidence['main']['files'][path] = hashlib.sha256(
+            source + b'\n# unreviewed launch source mutation\n',
+        ).hexdigest()
+        blocker = SOURCE_BLOCKERS[path]
+    before = copy.deepcopy(evidence)
+    assert validate_transition(evidence, phase=phase) == {
+        'ready': False, 'phase': phase,
+        'blockers': [blocker],
     }
     assert evidence == before
 
@@ -585,37 +647,67 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
     assert not unresolved_imports
 
 
+def test_launch_roots_have_complete_fixed_closure_and_independent_unit_pins():
+    closure, dynamic_imports, unresolved_imports = _static_python_control_closure(
+        roots=AUTONOMY_LAUNCH_ROOTS,
+    )
+    assert closure <= SOURCE_CONTROL_PYTHON_FILES
+    assert not dynamic_imports
+    assert not unresolved_imports
+
+
 @pytest.mark.parametrize('phase', PHASES)
 @pytest.mark.parametrize('sensitive', [False, True])
 @pytest.mark.parametrize('claimed_ready', [False, True])
-def test_known_pending_source_contract_cannot_be_overridden(phase, sensitive, claimed_ready):
+@pytest.mark.parametrize(('path', 'value', 'blocker'), [
+    (('main', 'files', 'deploy/cloud_coordinator.py'), '0' * 64, 'coordinator-review-contract'),
+    (('main', 'current'), False, 'current-main-snapshot'),
+    (('source_ci', 'conclusion'), 'failure', 'source-ci-evidence'),
+    (('source_ci', 'jobs_complete'), False, 'source-ci-jobs'),
+    (('source_ci', 'artifact', 'expired'), True, 'release-artifact-evidence'),
+    (('source_ci', 'artifact', 'attestation', 'verified'), False, 'release-attestation'),
+    (('cloud_review', 'reviews', 0, 'id'), True, 'cloud-review-approval'),
+    (('cloud_review', 'reviews', 0, 'submitted_at'), '2026-10-01T21:00:00', 'cloud-review-approval'),
+    (('cloud_review', 'reviews', 0, 'state'), 'COMMENTED', 'cloud-review-approval'),
+    (('cloud_review', 'reviews_complete'), False, 'cloud-review-evidence'),
+    (('cloud_review', 'threads', 0, 'isResolved'), False, 'cloud-review-threads'),
+    (('protection', 'strict'), False, 'branch-protection'),
+])
+def test_caller_flags_cannot_override_failed_components(phase, sensitive, claimed_ready, path, value, blocker):
     evidence = _sensitive_evidence(phase) if sensitive else _phase_evidence(phase)
-    # Caller claims cannot certify 403ac3d's weaker timestamps or per-head review.
+    node = evidence
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    # Historical hold flags and a claimed result cannot replace any actual gate.
     evidence.update(pending_source_contract=False, source_contract_reviewed=claimed_ready,
                     ready=claimed_ready, blockers=[])
     evidence['main'].update(source_contract_reviewed=claimed_ready,
                             pending_source_contract=False)
     before = copy.deepcopy(evidence)
 
+    expected = {blocker}
+    if path == ('main', 'current'):
+        expected.add('main-source-missing')
+    if sensitive and path == ('cloud_review', 'reviews', 0, 'id'):
+        expected.add('sensitive-review-authorization')
     assert validate_transition(evidence, phase=phase) == {
-        'ready': False, 'phase': phase, 'blockers': ['pending-source-contract'],
+        'ready': False, 'phase': phase, 'blockers': sorted(expected),
     }
     assert evidence == before
 
 
-def test_complete_synthetic_components_leave_only_pending_source_contract():
-    # 403ac3d is known unsafe: component positives must not imply activation readiness.
-    pre = validate_transition(_evidence(), phase='pre-cutover')
-    assert pre == {'ready': False, 'phase': 'pre-cutover', 'blockers': ['pending-source-contract']}
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('sensitive', [False, True])
+def test_complete_synthetic_components_report_source_policy_ready(phase, sensitive):
+    # A complete synthetic snapshot is not authenticated operational authorization.
+    evidence = _sensitive_evidence(phase) if sensitive else _phase_evidence(phase)
+    before = copy.deepcopy(evidence)
 
-    post_evidence = _evidence()
-    post_evidence['protection']['required_checks'] = [
-        {'context': 'source-ci', 'app_id': 15368},
-        {'context': 'issue-link', 'app_id': 15368},
-        {'context': 'cloud-review', 'app_id': None},
-    ]
-    post = validate_transition(post_evidence, phase='post-cutover')
-    assert post == {'ready': False, 'phase': 'post-cutover', 'blockers': ['pending-source-contract']}
+    assert validate_transition(evidence, phase=phase) == {
+        'ready': True, 'phase': phase, 'blockers': [],
+    }
+    assert evidence == before
 
 
 @pytest.mark.parametrize('source_app', [None, 15368])
@@ -634,7 +726,7 @@ def test_pre_cutover_preserves_actual_four_checks_without_bootstrap_deadlock(sou
     before = copy.deepcopy(evidence)
 
     assert validate_transition(evidence, phase='pre-cutover') == {
-        'ready': False, 'phase': 'pre-cutover', 'blockers': ['pending-source-contract'],
+        'ready': True, 'phase': 'pre-cutover', 'blockers': [],
     }
     assert evidence == before
 
@@ -646,7 +738,7 @@ def test_missing_pending_pr16_source_cannot_satisfy_current_main_contract():
     report = validate_transition(evidence, phase='pre-cutover')
 
     assert report['ready'] is False
-    assert report['blockers'] == ['main-source-missing', 'pending-source-contract']
+    assert report['blockers'] == ['main-source-missing']
     assert SOURCE_BASELINES['deploy/cloud_coordinator.py'] != SOURCE_BASELINES['main']
 
 
@@ -876,12 +968,12 @@ def test_mutating_each_executable_dependency_blocks(path):
     'deploy/backup.py', 'deploy/native_readiness.py', 'deploy/observe_release.py',
     'deploy/review_evidence.py',
 ])
-def test_new_source_inventory_mutations_keep_the_hold_and_specific_blocker(path):
+def test_new_source_inventory_mutations_keep_the_specific_blocker(path):
     evidence = _evidence()
     _changed_source(evidence, path, 'unreviewed source mutation')
 
     assert _blockers(evidence) == {
-        'pending-source-contract', SOURCE_BLOCKERS[path],
+        SOURCE_BLOCKERS[path],
     }
 
 
@@ -910,7 +1002,7 @@ def test_additive_staging_synthetic_positive_and_no_input_mutation(phase):
     evidence = _phase_evidence(phase)
     before = copy.deepcopy(evidence)
     assert validate_transition(evidence, phase=phase) == {
-        'ready': False, 'phase': phase, 'blockers': ['pending-source-contract'],
+        'ready': True, 'phase': phase, 'blockers': [],
     }
     assert evidence == before
 
@@ -922,11 +1014,11 @@ def test_additive_staging_requires_every_context_and_no_unknown_superset(phase):
     for removed in checks:
         changed = copy.deepcopy(evidence)
         changed['protection']['required_checks'].remove(removed)
-        assert _blockers(changed, phase) == {'pending-source-contract', 'required-check-policy'}, removed['context']
+        assert _blockers(changed, phase) == {'required-check-policy'}, removed['context']
     for added in ({'context': 'unknown', 'app_id': None}, checks[0]):
         changed = copy.deepcopy(evidence)
         changed['protection']['required_checks'].append(added)
-        assert _blockers(changed, phase) == {'pending-source-contract', 'required-check-policy'}
+        assert _blockers(changed, phase) == {'required-check-policy'}
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -939,10 +1031,10 @@ def test_additive_staging_requires_exact_app_bindings(phase):
         for app in bad_apps:
             changed = copy.deepcopy(evidence)
             changed['protection']['required_checks'][index]['app_id'] = app
-            assert _blockers(changed, phase) == {'pending-source-contract', 'required-check-policy'}, (check, app)
+            assert _blockers(changed, phase) == {'required-check-policy'}, (check, app)
         changed = copy.deepcopy(evidence)
         changed['protection']['required_checks'][index].pop('app_id')
-        assert _blockers(changed, phase) == {'pending-source-contract', 'required-check-policy'}, check
+        assert _blockers(changed, phase) == {'required-check-policy'}, check
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -990,7 +1082,7 @@ def test_additive_staging_never_substitutes_status_for_review_or_source(phase, p
 def test_additive_staging_missing_merged_coordinator_blocks(phase):
     evidence = _phase_evidence(phase)
     evidence['main']['files'].pop('deploy/cloud_coordinator.py')
-    assert _blockers(evidence, phase) == {'main-source-missing', 'pending-source-contract'}
+    assert _blockers(evidence, phase) == {'main-source-missing'}
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -999,32 +1091,37 @@ def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(p
     review = evidence['cloud_review']
     review['reviews'].append(dict(review['reviews'][0], state='COMMENTED',
                                   submitted_at='2026-10-01T22:00:00Z'))
-    assert _blockers(evidence, phase) == {'cloud-review-approval', 'pending-source-contract'}
+    assert _blockers(evidence, phase) == {'cloud-review-approval'}
     review['reviews'].pop()
     evidence = _sensitive_evidence(phase)
-    assert _blockers(evidence, phase) == {'pending-source-contract'}
+    assert _blockers(evidence, phase) == set()
     for record, field, value in (
         ('owner_authorization', 'actor_id', 1),
         ('owner_authorization', 'head_sha', 'd' * 40),
         ('owner_authorization', 'state', 'pending'),
-        ('targeted_review', 'reviewer_id', OWNER_ID),
+        ('targeted_review', 'reviewer_id', 76),
         ('targeted_review', 'head_sha', 'd' * 40),
         ('targeted_review', 'state', 'DISMISSED'),
     ):
         changed = copy.deepcopy(evidence)
         changed['cloud_review']['change'][record][field] = value
-        assert _blockers(changed, phase) == {'pending-source-contract', 'sensitive-review-authorization'}
+        assert _blockers(changed, phase) == {'sensitive-review-authorization'}
 
 
 @pytest.mark.parametrize('phase', PHASES)
-@pytest.mark.parametrize('state', ['COMMENTED', 'APPROVED'])
-def test_sensitive_targeted_review_matches_authenticated_record(phase, state):
-    evidence = _sensitive_evidence(phase, state)
+def test_sensitive_owner_published_independent_review_matches_authenticated_record(phase):
+    evidence = _sensitive_evidence(phase)
     before = copy.deepcopy(evidence)
     assert validate_transition(evidence, phase=phase) == {
-        'ready': False, 'phase': phase, 'blockers': ['pending-source-contract'],
+        'ready': True, 'phase': phase, 'blockers': [],
     }
     assert evidence == before
+
+
+@pytest.mark.parametrize('phase', PHASES)
+def test_sensitive_owner_review_must_be_a_formal_comment_not_approval(phase):
+    evidence = _sensitive_evidence(phase, 'APPROVED')
+    assert 'sensitive-review-authorization' in _blockers(evidence, phase)
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -1050,16 +1147,20 @@ def test_sensitive_targeted_review_matches_authenticated_record(phase, state):
 def test_sensitive_targeted_review_rejects_unbound_claim(phase, mutate):
     evidence = _sensitive_evidence(phase)
     mutate(evidence['cloud_review'])
-    expected = {'pending-source-contract', 'sensitive-review-authorization'}
+    expected = {'sensitive-review-authorization'}
     reviewer = evidence['cloud_review']['reviews'][-1].get('user')
     if (not isinstance(reviewer, dict) or type(reviewer.get('id')) is not int
             or reviewer['id'] < 1):
+        expected.add('cloud-review-approval')
+    review_ids = [record.get('id') for record in evidence['cloud_review']['reviews']
+                  if isinstance(record, dict)]
+    if len(review_ids) != len(set(review_ids)):
         expected.add('cloud-review-approval')
     assert _blockers(evidence, phase) == expected
 
 
 @pytest.mark.parametrize('phase', PHASES)
-@pytest.mark.parametrize('state', ['COMMENTED', 'APPROVED'])
+@pytest.mark.parametrize('state', ['COMMENTED'])
 @pytest.mark.parametrize('timestamp', [
     None, '', 'not-a-date', '2026-10-01T22:00:00',
     '2026-02-30T22:00:00Z', '2026-10-01T22:00:00+25:00', 123, {},
@@ -1076,7 +1177,7 @@ def test_targeted_review_timestamp_must_be_valid_and_timezone_aware(phase, state
     before = copy.deepcopy(evidence)
 
     assert _blockers(evidence, phase) == {
-        'pending-source-contract', 'sensitive-review-authorization',
+        'sensitive-review-authorization',
     }
     assert evidence == before
 
@@ -1086,7 +1187,7 @@ def test_targeted_review_timestamp_must_be_valid_and_timezone_aware(phase, state
 def test_targeted_review_timestamp_accepts_valid_aware_record(phase, timestamp):
     evidence = _sensitive_evidence(phase)
     evidence['cloud_review']['reviews'][-1]['submitted_at'] = timestamp
-    assert _blockers(evidence, phase) == {'pending-source-contract'}
+    assert _blockers(evidence, phase) == set()
 
 
 @pytest.mark.parametrize('review_id', [None, 0, -1, True, 2.0, '2'])
@@ -1102,11 +1203,11 @@ def test_sensitive_targeted_review_requires_positive_integer_id(review_id):
 def test_sensitive_targeted_review_requires_complete_collection(phase):
     evidence = _sensitive_evidence(phase)
     evidence['cloud_review']['reviews_complete'] = False
-    assert _blockers(evidence, phase) == {'cloud-review-evidence', 'pending-source-contract'}
+    assert _blockers(evidence, phase) == {'cloud-review-evidence'}
 
 
 @pytest.mark.parametrize('reviewer_id', [
-    OWNER_ID, COPILOT_AGENT_ID, COPILOT_REVIEWER_ID, 77, 0, -1, True, '76', 76.0,
+    OWNER_ID, COPILOT_AGENT_ID, COPILOT_REVIEWER_ID, 77, 0, -1, True, '5164171', 5164171.0,
 ])
 def test_sensitive_targeted_reviewer_must_be_positive_and_independent(reviewer_id):
     evidence = _sensitive_evidence('pre-cutover', 'APPROVED')
@@ -1114,7 +1215,7 @@ def test_sensitive_targeted_reviewer_must_be_positive_and_independent(reviewer_i
     review['pull_author_id'] = 77
     review['change']['targeted_review']['reviewer_id'] = reviewer_id
     review['reviews'][-1]['user']['id'] = reviewer_id
-    expected = {'pending-source-contract', 'sensitive-review-authorization'}
+    expected = {'sensitive-review-authorization'}
     if type(reviewer_id) is not int or reviewer_id < 1:
         expected.add('cloud-review-approval')
     assert _blockers(evidence) == expected
@@ -1160,7 +1261,7 @@ def test_every_review_author_is_validated_before_copilot_filtering(malformed):
     evidence = _evidence()
     evidence['cloud_review']['reviews'].append(malformed)
 
-    assert _blockers(evidence) == {'cloud-review-approval', 'pending-source-contract'}
+    assert _blockers(evidence) == {'cloud-review-approval'}
 
 
 def test_well_formed_non_copilot_review_is_validated_then_filtered():
@@ -1171,10 +1272,10 @@ def test_well_formed_non_copilot_review_is_validated_then_filtered():
         'submitted_at': '2026-10-01T22:00:00Z',
     })
 
-    assert _blockers(evidence) == {'pending-source-contract'}
+    assert _blockers(evidence) == set()
 
 
-def test_review_order_uses_timestamp_then_positive_review_id():
+def test_tied_latest_reviews_require_every_copilot_review_to_approve():
     evidence = _evidence()
     review = evidence['cloud_review']
     review['reviews'].append({
@@ -1186,14 +1287,17 @@ def test_review_order_uses_timestamp_then_positive_review_id():
     review['reviews'][0]['state'] = 'COMMENTED'
     review['reviews'][1]['state'] = 'APPROVED'
     review['reviews'].reverse()
-    assert _blockers(evidence) == {'pending-source-contract'}
+    assert _blockers(evidence) == {'cloud-review-approval'}
+    for record in review['reviews']:
+        record['state'] = 'APPROVED'
+    assert _blockers(evidence) == set()
 
 
 @pytest.mark.parametrize('phase', PHASES)
 def test_additive_staging_status_omission_only_before_staging(phase):
     evidence = _phase_evidence(phase)
     evidence['cloud_review'].pop('status', None)
-    assert _blockers(evidence, phase) == {'pending-source-contract'} | (
+    assert _blockers(evidence, phase) == (
         set() if phase == 'pre-cutover' else {'cloud-review-status'}
     )
 
@@ -1209,7 +1313,7 @@ def test_additive_staging_status_omission_only_before_staging(phase):
 def test_additive_staging_supplied_status_must_be_fixed_creator_exact_head_success(phase, status):
     evidence = _phase_evidence(phase)
     evidence['cloud_review']['status'] = status
-    assert _blockers(evidence, phase) == {'cloud-review-status', 'pending-source-contract'}
+    assert _blockers(evidence, phase) == {'cloud-review-status'}
 
 
 def test_additive_staging_rejects_other_phase_maps():
@@ -1242,15 +1346,15 @@ def test_cli_phase_selection_is_read_only_and_never_bootstraps_status(tmp_path, 
     path = tmp_path / 'evidence.json'
     raw = json.dumps(evidence)
     path.write_text(raw)
-    expected_blockers = ['pending-source-contract']
+    expected_blockers = []
     if phase != 'pre-cutover' and not published_status:
         expected_blockers.insert(0, 'cloud-review-status')
 
     result = cli_main(['--phase', phase, str(path)])
 
-    assert result == 1
+    assert result == int(bool(expected_blockers))
     assert json.loads(capsys.readouterr().out) == {
-        'ready': False, 'phase': phase, 'blockers': expected_blockers,
+        'ready': not expected_blockers, 'phase': phase, 'blockers': expected_blockers,
     }
     assert path.read_text() == raw
     assert list(tmp_path.iterdir()) == [path]

@@ -215,8 +215,10 @@ def test_pull_collection_requires_numeric_identity(tmp_path, stage, field, kind)
             with pytest.raises(CoordinatorError, match="identity"):
                 coordinator._snapshot_pull(16, enrolled_record(), BASE)
     else:
+        api.authorize_sha_review = True
         api.comments = [{"id": 124, "user": {"id": OWNER_ID},
-                         "body": f"/hermes authorize-sensitive {api.head_sha}"}]
+                         "body": (f"/hermes authorize-sensitive {api.head_sha} review "
+                                  f"{api.owner_review_id} {api.owner_review_digest}")}]
         _, commands, _, candidates = coordinator._scan_enrollments(store.snapshot())
         assert bool(candidates["16"].get("sensitive_sha")) is (kind == "valid")
         assert bool(commands[0][1].get("validated")) is (kind == "valid")

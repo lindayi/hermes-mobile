@@ -26,10 +26,30 @@ comment is consumed without enrollment, even when its body names the current
 head. Only a genuinely new immutable command can authorize that head. The legacy
 bare command retains its historical timestamp compatibility.
 A stale or mismatched command is consumed without enrollment.
-For a sensitive head, the owner must separately comment
-`/hermes authorize-sensitive <40-char-head-sha>`. Authorization is recorded only
-if that SHA is still the pull request's current head; it does not carry forward to
-a later commit.
+For a sensitive head, the owner must separately publish a formal `COMMENTED`
+independent-agent review, then comment
+`/hermes authorize-sensitive <head-sha> review <positive-review-id> <body-sha256>`.
+The selected complete authenticated review must be the latest owner review on that
+exact head, have a unique positive ID and timezone-aware submission time, and contain
+at most 4096 characters of JSON with exactly `schema`,
+`reviewed_head_sha`, `review_method`, `verdict`, and `evidence_sha256`. The schema is
+`hermes-independent-agent-review-v1`; the method is `independent-agent`, the verdict
+is `pass`, and the evidence digest is lowercase SHA-256. The command's digest is over
+the exact raw UTF-8 review body. The owner's publication is the trust assertion of
+independent execution, not proof of cryptographic/model independence or a distinct
+GitHub identity. Arbitrary prose/status, self-assessment, and another account do not
+qualify. The previous head-only command remains recognized as no authorization.
+Planning and fresh status/merge fences re-read and revalidate the selected review,
+body digest, author, state, timestamp, ID uniqueness, and head. Removal, edit,
+dismissal, a later negative owner review, or a head change invalidates authorization;
+it is not blanket consent for future commits. Complete scan validation clears all
+three persisted fields (`sensitive_sha`, `sensitive_authorization`, `targeted_review`)
+atomically with commands, observations and lifecycle events before export. This
+also invalidates readable head-only authorization without selected-review proof;
+it does not migrate unsupported legacy enrollment identities. Plan mode only
+projects the change. Incomplete collection, preparation or scan-commit failure
+preserves prior durable state, export and consumer ACKs and performs no external
+write. Revocation itself consumes no repair attempt and never authorizes merge.
 
 This is a source/first-activation boundary, not an upgrade path for historical
 coordinator state. Version-1 records remain readable for inspection, but active
@@ -315,11 +335,11 @@ The `cloud-review` gate accepts only a latest `APPROVED` review authored by the
 authenticated Copilot review identity (GitHub ID `175728472`) on the exact current
 head SHA, plus fully paginated review threads that are all resolved. A `COMMENTED`
 review, arbitrary comment, stale approval, author assertion, or truncated thread
-list does not pass. Every review record must be an object whose user ID is a positive integer
-(not a boolean or string), and any present record ID must be a unique positive
-integer; these are validated across the complete collection before author
-filtering, so a malformed later record cannot be skipped to reuse an earlier
-approval. All authenticated reviews must have valid timezone-aware
+list does not pass. Every review record must be an object with positive integer
+user and review IDs (not booleans or strings), and review IDs must be unique.
+These are validated across the complete collection before author filtering, so a
+malformed later record cannot be skipped to reuse an earlier approval. All
+authenticated reviews must have valid timezone-aware
 submission times. Missing, malformed, or naive timestamps fail closed; this
 includes an unsubmitted `PENDING` review, for which GitHub omits `submitted_at`.
 Times are compared as instants, not strings. Every review tied at the latest
@@ -471,6 +491,20 @@ remain unchanged; consumer ACK history is neither read nor rewritten, and export
 never grants or revokes an approval. If filtering leaves no events, the previous
 export is removed rather than refreshing an obsolete request. This is a polling
 snapshot of observed state, not a live authorization endpoint.
+
+Each enrollment has an optional bounded `sensitive_generation` (absent means zero,
+maximum `2**31 - 1`). Invalidating a persisted grant advances it exactly once in
+the same scan commit; repeated invalid polls/restarts do not advance it. It feeds
+the existing lifecycle `incident` identity, so a renewed approval request reaches
+the unchanged consumer even if the prior request was ACKed and retired. A new
+owner command may select the same restored review ID/body, but revoking that new
+grant advances the generation again. Export includes only the current enrollment,
+head and generation's approval request, excluding older unACKed requests without
+rewriting canonical events or ACK history. A fresh valid selected review/command
+suppresses the current request. Head changes clear old-head authority and use the
+head-bound event identity; new enrollment commands reset the generation under
+their distinct enrollment identity. Invalid or exhausted generation fails closed.
+No event schema, consumer protocol, credential or notification framework changes.
 
 The export is written to the existing state directory selected by application
 configuration, not the coordinator's private state directory. The coordinator
