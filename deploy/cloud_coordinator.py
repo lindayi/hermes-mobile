@@ -138,7 +138,8 @@ def enrollment_from_comment(issue, pull, comment):
     if (not isinstance(issue, dict) or not issue.get("pull_request")
             or not isinstance(pull, dict) or not isinstance(user, dict)
             or type(user.get("id")) is not int or user["id"] != OWNER_ID
-            or type(issue.get("number")) is not int
+            or type(issue.get("number")) is not int or issue["number"] <= 0
+            or type(pull.get("number")) is not int
             or pull.get("number") != issue["number"]
             or pull.get("state") != "open" or pull.get("merged") is not False):
         return None
@@ -147,8 +148,8 @@ def enrollment_from_comment(issue, pull, comment):
         return None
     head_repo, base_repo = head.get("repo"), base.get("repo")
     head_sha, base_sha = head.get("sha"), base.get("sha")
-    if (not isinstance(head_repo, dict) or head_repo.get("id") != REPOSITORY_ID
-            or not isinstance(base_repo, dict) or base_repo.get("id") != REPOSITORY_ID
+    if (not _github_identity(head_repo, REPOSITORY_ID)
+            or not _github_identity(base_repo, REPOSITORY_ID)
             or base.get("ref") != MAIN_BRANCH or not _is_sha(head_sha) or not _is_sha(base_sha)):
         return None
     if authorized_head is not None and authorized_head != head_sha:
@@ -852,7 +853,7 @@ def _task_scoped(task, snapshot):
         return False
     for field, expected in (("creator", OWNER_ID), ("repository", REPOSITORY_ID)):
         value = task.get(field)
-        if value is not None and (not isinstance(value, dict) or value.get("id") != expected):
+        if value is not None and not _github_identity(value, expected):
             return False
     head = snapshot["pull"]["head"]["ref"]
     matched = False
@@ -865,7 +866,7 @@ def _task_scoped(task, snapshot):
                 return False
             matched = True
         elif artifact.get("type") == "pull" and snapshot["pull"].get("id") is not None:
-            if not isinstance(data, dict) or data.get("id") != snapshot["pull"]["id"]:
+            if not _github_identity(data, snapshot["pull"]["id"]):
                 return False
             matched = True
     return matched or any(
@@ -1019,8 +1020,20 @@ def _status_owned(statuses, context, actor_id):
 
 
 def _github_identity(value, expected):
-    return (isinstance(value, dict) and type(value.get("id")) is int
+    return (type(expected) is int and expected > 0
+            and isinstance(value, dict) and type(value.get("id")) is int
             and value["id"] == expected)
+
+
+def _pull_identity(pull, binding):
+    """Match live REST numeric IDs without bool/float equality aliases."""
+    return (_github_identity(pull, binding.get("pull_id"))
+            and type(binding.get("issue")) is int and binding["issue"] > 0
+            and type(pull.get("number")) is int
+            and pull["number"] == binding["issue"]
+            and isinstance(binding.get("pull_node_id"), str)
+            and bool(binding["pull_node_id"])
+            and pull.get("node_id") == binding["pull_node_id"])
 
 
 def _mergeability_unknown(pull):
@@ -1054,10 +1067,10 @@ class Coordinator:
 
     def _identity(self):
         repository = self.api.get(f"repos/{REPOSITORY}")
-        if not isinstance(repository, dict) or repository.get("id") != REPOSITORY_ID:
+        if not _github_identity(repository, REPOSITORY_ID):
             raise CoordinatorError("Authenticated repository identity did not match")
         user = self.api.get("user")
-        if not isinstance(user, dict) or user.get("id") != OWNER_ID:
+        if not _github_identity(user, OWNER_ID):
             raise CoordinatorError("Authenticated GitHub account is not the repository owner")
 
     def _issues(self, cursor):
@@ -1135,13 +1148,13 @@ class Coordinator:
             if not enrollment:
                 continue
             pull = self.api.get(f"repos/{REPOSITORY}/pulls/{item['issue']}")
-            head, base = pull.get("head"), pull.get("base")
-            if (isinstance(head, dict) and head.get("sha") == item["head"]
-                    and isinstance(head.get("repo"), dict)
-                    and head["repo"].get("id") == REPOSITORY_ID
+            head = pull.get("head") if isinstance(pull, dict) else None
+            base = pull.get("base") if isinstance(pull, dict) else None
+            if (_pull_identity(pull, enrollment)
+                    and isinstance(head, dict) and head.get("sha") == item["head"]
+                    and _github_identity(head.get("repo"), REPOSITORY_ID)
                     and isinstance(base, dict) and base.get("ref") == MAIN_BRANCH
-                    and isinstance(base.get("repo"), dict)
-                    and base["repo"].get("id") == REPOSITORY_ID):
+                    and _github_identity(base.get("repo"), REPOSITORY_ID)):
                 enrollment["sensitive_sha"] = item["head"]
                 item["validated"] = True
         return issues, commands, processed, candidates
@@ -1162,18 +1175,10 @@ class Coordinator:
         head_repo, base_repo = head.get("repo"), base.get("repo")
         if (
             type(number) is not int or enrollment.get("issue") != number
-            or pull.get("number") != number
-            or type(pull.get("id")) is not int
-            or pull.get("id") <= 0
-            or pull.get("id") != enrollment.get("pull_id")
-            or not isinstance(pull.get("node_id"), str)
-            or not pull.get("node_id")
-            or pull.get("node_id") != enrollment.get("pull_node_id")
+            or not _pull_identity(pull, enrollment)
             or enrollment.get("repository_id") != REPOSITORY_ID
-            or not isinstance(head_repo, dict)
-            or head_repo.get("id") != REPOSITORY_ID
-            or not isinstance(base_repo, dict)
-            or base_repo.get("id") != REPOSITORY_ID
+            or not _github_identity(head_repo, REPOSITORY_ID)
+            or not _github_identity(base_repo, REPOSITORY_ID)
             or base.get("ref") != MAIN_BRANCH
             or not _is_sha(base.get("sha"))
         ):
@@ -1314,6 +1319,11 @@ class Coordinator:
                     busy = True
                     continue
                 if (not isinstance(task, dict) or task.get("id") != task_id
+                        or not all(_github_identity(task.get(field), expected)
+                                   for field, expected in (
+                                       ("creator", OWNER_ID), ("owner", OWNER_ID),
+                                       ("repository", REPOSITORY_ID),
+                                   ))
                         or not _task_scoped(task, snapshot)):
                     if apply:
                         self._record_receipt_wait(key, action)
@@ -1474,10 +1484,7 @@ class Coordinator:
         if completed > now:
             return self._handoff_wait(key, action, snapshot)
         current = self._fence_pull(action.get("issue"), head, base)
-        if (not isinstance(current, dict)
-                or current.get("number") != action.get("issue")
-                or current.get("id") != action.get("pull_id")
-                or current.get("node_id") != action.get("pull_node_id")):
+        if not _pull_identity(current, action):
             return self._handoff_wait(key, action, snapshot)
 
         if (snapshot["enrollment"].get("authorized_head") is not None
@@ -1609,8 +1616,7 @@ class Coordinator:
 
         # Re-fence immediately before the notification-producing reviewer request.
         current = self._fence_pull(action["issue"], head, base)
-        if (not isinstance(current, dict) or current.get("id") != action["pull_id"]
-                or current.get("node_id") != action["pull_node_id"]
+        if (not _pull_identity(current, action)
                 or (snapshot["enrollment"].get("authorized_head") is not None
                     and not self._authorized_dispatch_head(
                         action["issue"], head, base, receipt_action=action,
@@ -1634,10 +1640,14 @@ class Coordinator:
             )
         response_reviewers = response.get("requested_reviewers") \
             if isinstance(response, dict) else None
-        if (not isinstance(response, dict)
-                or response.get("number") != action["issue"]
-                or response.get("id") != action["pull_id"]
-                or response.get("node_id") != action["pull_node_id"]
+        if (not _pull_identity(response, action)
+                or not all(isinstance(response.get(field), dict)
+                           and _github_identity(response[field].get("repo"), REPOSITORY_ID)
+                           for field in ("head", "base"))
+                or response["head"].get("sha") != head
+                or response["head"].get("ref") != action["head_ref"]
+                or response["base"].get("sha") != base
+                or response["base"].get("ref") != "main"
                 or not isinstance(response_reviewers, list)
                 or not any(_github_identity(item, COPILOT_REVIEWER_ID)
                            for item in response_reviewers)):
@@ -1959,13 +1969,14 @@ class Coordinator:
         base = pull.get("base") if isinstance(pull, dict) else None
         actual = pull.get("head") if isinstance(pull, dict) else None
         if (not isinstance(pull, dict) or pull.get("state") != "open"
+                or type(number) is not int or number <= 0
+                or type(pull.get("number")) is not int or pull["number"] != number
+                or type(pull.get("id")) is not int or pull["id"] <= 0
                 or pull.get("merged") is not False
                 or not isinstance(base, dict) or not isinstance(actual, dict)
                 or actual.get("sha") != head or base.get("ref") != MAIN_BRANCH
-                or not isinstance(actual.get("repo"), dict)
-                or actual["repo"].get("id") != REPOSITORY_ID
-                or not isinstance(base.get("repo"), dict)
-                or base["repo"].get("id") != REPOSITORY_ID):
+                or not _github_identity(actual.get("repo"), REPOSITORY_ID)
+                or not _github_identity(base.get("repo"), REPOSITORY_ID)):
             return False
         if main_sha is not None:
             current_main = self.api.get(f"repos/{REPOSITORY}/commits/{MAIN_BRANCH}")
@@ -2001,10 +2012,7 @@ class Coordinator:
             return "superseded"
         if current.get("draft") is not False:
             return "draft"
-        if (type(action.get("pull_id")) is not int
-                or current.get("number") != action["issue"]
-                or current.get("id") != action.get("pull_id")
-                or current.get("node_id") != action.get("pull_node_id")):
+        if not _pull_identity(current, action):
             return "superseded"
         if (not self._authorized_dispatch_head(
                     action["issue"], action["head"],
@@ -2058,7 +2066,7 @@ class Coordinator:
         tasks = _rest_list(self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
                            collection="tasks")
         current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
-        if not current or current["head"].get("ref") != branch:
+        if not _pull_identity(current, action) or current["head"].get("ref") != branch:
             return "superseded"
         if not self._authorized_dispatch_head(
                 action["issue"], action["head"],
@@ -2268,8 +2276,7 @@ class Coordinator:
             ))
             return current_plan
         if (not _pull_merge_eligible(pull, action.get("main_sha"))
-                or pull.get("number") != action["issue"] or not pull.get("node_id")
-                or pull["node_id"] != current["pull"].get("node_id")):
+                or not _pull_identity(pull, current["enrollment"])):
             self.store.update_action(key, "blocked")
             current_plan["auto_merge_eligible"] = False
             current_plan["merge_action"] = None
