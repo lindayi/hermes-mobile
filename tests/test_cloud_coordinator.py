@@ -140,7 +140,7 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
             "id": session_id, "task_id": fix["task_id"], "state": "completed",
             "user": {"id": OWNER}, "owner": {"id": OWNER},
             "repository": {"id": 1399942965}, "head_ref": "topic",
-            "base_ref": "main", "prompt": receipt_instruction(fix["dispatch_nonce"]),
+            "base_ref": "main", "prompt": receipt_instruction(fix["dispatch_nonce"], pull_number=16, start_head=HEAD, base_sha=BASE),
             "created_at": "2026-10-01T12:01:00Z",
             "completed_at": "2026-10-01T12:04:00Z",
         }],
@@ -164,6 +164,7 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
         "updated_at": "2026-10-01T12:04:00Z",
     })
     api.unresolved = False
+    api.review_submitted_at = "2026-10-01T12:04:01Z"
 
     Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
 
@@ -178,7 +179,7 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
     assert store.snapshot()["enrollments"]["16"]["authorized_head"] == HEAD
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
     assert api.fix_attempts == 1
-    assert "Hermes-Task-Receipt: v1" in fix["body"]
+    assert "Hermes-Task-Receipt: v2" in fix["body"]
     api.comments[-1]["updated_at"] = "2026-10-01T12:04:01Z"
 
     result = Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
@@ -211,6 +212,10 @@ def test_sha_bound_enrollment_rejects_unproven_or_unrelated_result_heads(tmp_pat
 
 def test_blocker_receipt_never_authorizes_a_result_head():
     result_head = "c" * 40
+    body = (
+        "Hermes-Task-Receipt: v1\nnonce=nonce\ntask=task-1\nsession=session-1\n"
+        f"pr=16\nstart_head={HEAD}\nhead={result_head}\nbase={BASE}\nresult=policy_broken"
+    )
     proof = {
         "issue": 16, "kind": "fix", "status": "completed",
         "task_id": "task-1", "dispatch_nonce": "nonce",
@@ -219,11 +224,11 @@ def test_blocker_receipt_never_authorizes_a_result_head():
         "receipt_task_id": "task-1", "receipt_session_id": "session-1",
         "receipt_nonce": "nonce", "receipt_start_head": HEAD,
         "receipt_head": result_head, "receipt_base": BASE,
-        "receipt_body": "exact receipt", "receipt_created_at": "2026-10-01T12:04:00Z",
+        "receipt_body": body, "receipt_created_at": "2026-10-01T12:04:00Z",
     }
     comments = [{
         "id": 900, "user": {"id": 198982749},
-        "body": "exact receipt", "created_at": "2026-10-01T12:04:00Z",
+        "body": body, "created_at": "2026-10-01T12:04:00Z",
         "updated_at": "2026-10-01T12:04:00Z",
     }]
 
@@ -267,7 +272,7 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
                 "repository": {"id": 1399942965},
                 "head_ref": "topic",
                 "base_ref": "main",
-                "prompt": receipt_instruction(action["dispatch_nonce"]),
+                "prompt": receipt_instruction(action["dispatch_nonce"], pull_number=16, start_head=HEAD, base_sha=BASE),
                 "created_at": "2026-10-01T12:01:00Z",
                 "completed_at": created,
             }],
@@ -301,6 +306,7 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     assert first_proof["handoff_state"] == "waiting_review"
     api.review_sha = result_head
     api.review_state = "COMMENTED"
+    api.review_submitted_at = "2026-10-01T12:04:01Z"
     coordinator().run(apply=True)
     assert store.action(first_fix["key"]) is None
     durable = store.snapshot()["enrollments"]["16"]["receipt_proofs"][0]
@@ -321,6 +327,7 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
 
     api.review_sha = result_head
     api.review_state = "APPROVED"
+    api.review_submitted_at = "2026-10-01T12:04:02Z"
     result = coordinator().run(apply=True)
 
     assert api.graphql_writes[-1][1]["expectedHeadOid"] == result_head
@@ -887,6 +894,7 @@ class FakeApi:
         self.tasks = {}
         self.requested_reviewers = []
         self.review_state = "APPROVED"
+        self.review_submitted_at = "2026-10-01T12:00:00Z"
         self.graphql_writes = []
         self.pull = valid_pr() | {
             "node_id": "PR_node_16", "auto_merge": None,
@@ -974,7 +982,7 @@ class FakeApi:
         if route.endswith("/pulls/16/reviews?per_page=100"):
             return [{
                 "state": self.review_state, "commit_id": self.review_sha or self.head_sha,
-                "submitted_at": "2026-10-01T12:00:00Z",
+                "submitted_at": self.review_submitted_at,
                 "user": {"id": COPILOT_REVIEWER},
             }]
         if f"/commits/{self.head_sha}/check-runs?" in route:
@@ -1529,6 +1537,7 @@ def test_completed_comment_review_on_new_head_releases_handoff_for_repair(tmp_pa
     api.pull["head"]["sha"] = result_head
     api.review_state = "COMMENTED"
     api.complete_task(action["task_id"], action, head_sha=result_head)
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
 
     coordinator.run(apply=True)
 
@@ -1549,6 +1558,7 @@ def test_approved_review_on_exact_result_head_releases_handoff_for_repair(tmp_pa
     api.head_sha = result_head
     api.pull["head"]["sha"] = result_head
     api.complete_task(action["task_id"], action, head_sha=result_head)
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
 
     coordinator.run(apply=True)
 
@@ -1571,6 +1581,7 @@ def test_running_last_allowed_task_is_not_reported_as_exhausted(tmp_path):
             if item["kind"] == "fix" and item.get("status") == "sent"
         )
         api.complete_task(action["task_id"], action)
+        api.review_submitted_at = "2026-10-01T12:06:00Z"
     coordinator.run(apply=True)
     assert api.fix_attempts == 3
 
@@ -2033,7 +2044,7 @@ def test_normalized_source_identity_survives_snapshot_and_final_dispatch(tmp_pat
     assert api.workflow_reads >= 3  # snapshot, plan, final dispatch
     prompt = next(body["prompt"] for route, body in api.writes if route.endswith("/tasks"))
     assert prompt.startswith(planned["body"] + "\n\n")
-    assert "Hermes-Task-Receipt: v1" in prompt
+    assert "Hermes-Task-Receipt: v2" in prompt
     evidence = json.loads(prompt.split("Untrusted evidence: `", 1)[1].split("`\n\n<!--", 1)[0])
     assert evidence == {"review_findings": [], "failed_source_checks": [expected]}
     assert result["pull_requests"][0]["repair_requested"]
@@ -2082,6 +2093,74 @@ def test_cloud_review_success_status_is_not_published_from_stale_threads(tmp_pat
     Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
     assert api.thread_reads >= 2
     assert not any(route.endswith("/statuses/" + HEAD) for route, _ in api.writes)
+
+
+UNCOMPUTED_MERGEABILITY = [
+    {"mergeable": None, "mergeable_state": "unknown"},
+    {"mergeable": None, "mergeable_state": "clean"},
+    {"mergeable": True, "mergeable_state": "unknown"},
+    {"mergeable": False, "mergeable_state": "unknown"},
+    {"mergeable": False, "mergeable_state": "clean"},
+    {"mergeable": None, "mergeable_state": "dirty"},
+    {"mergeable": None, "mergeable_state": "behind"},
+    {},
+]
+
+
+@pytest.mark.parametrize("mergeability", UNCOMPUTED_MERGEABILITY)
+@pytest.mark.parametrize("attempts", [0, REPAIR_LIMIT])
+@pytest.mark.parametrize("repair_evidence", [False, True])
+def test_uncomputed_mergeability_defers_without_repair_budget_or_noise(
+        tmp_path, mergeability, attempts, repair_evidence):
+    api = FakeApi(unresolved=repair_evidence, source_failure=repair_evidence)
+    api.pull.pop("mergeable")
+    api.pull.pop("mergeable_state")
+    api.pull.update(mergeability)
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    store._mutate(lambda data: data["enrollments"]["16"].update(attempts=attempts))
+    coordinator = Coordinator(api, store)
+
+    plan = coordinator.run(apply=False)["pull_requests"][0]
+    result = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert api.fix_attempts == 0
+    for summary in (plan, result):
+        assert not summary["repair_requested"]
+        assert not summary["auto_merge_eligible"]
+        assert "mergeability-unknown" in summary["reasons"]
+        assert not {"conflict", "behind", "budget"}.intersection(summary["reasons"])
+        assert summary["outcomes"] == 0
+    state = store.snapshot()
+    assert state["enrollments"]["16"]["attempts"] == attempts
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
+    assert not state["lifecycle_events"]
+    assert not any(route.endswith(("/tasks", "/comments")) for route, _ in api.writes)
+    assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("mergeable, mergeable_state", [
+    (True, "clean"), (False, "dirty"), (True, "behind"),
+])
+def test_computed_mergeability_resumes_expected_task_on_next_poll(
+        tmp_path, mergeable, mergeable_state):
+    api = FakeApi(unresolved=True)
+    api.pull.update(mergeable=None, mergeable_state="unknown")
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    first = coordinator.run(apply=True)["pull_requests"][0]
+    assert not first["repair_requested"]
+    assert api.fix_attempts == 0
+
+    api.pull.update(mergeable=mergeable, mergeable_state=mergeable_state)
+    second = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert second["repair_requested"]
+    assert "mergeability-unknown" not in second["reasons"]
+    task = next(body for route, body in api.writes if route.endswith("/tasks"))
+    assert ("Neutral reconciliation" in task["prompt"]) == (mergeable_state != "clean")
+    assert api.fix_attempts == 1
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
 
 
 def test_conflicts_are_sent_to_neutral_reconciler_not_ordinary_fixer(tmp_path):
@@ -2427,6 +2506,7 @@ def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
             action = next(item for item in store.actions().values()
                           if item.get("task_id") == task_id)
             api.complete_task(task_id, action)
+            api.review_submitted_at = "2026-10-01T12:06:00Z"
     old_fix = next(action for action in store.actions().values()
                    if action.get("task_id") == "task-3")
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
@@ -2471,11 +2551,163 @@ def test_task_api_identity_reconciles_across_head_changes(tmp_path):
     api.head_sha = "c" * 40
     api.pull["head"]["sha"] = api.head_sha
     api.complete_task("task-1", fix)
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
     coordinator.run(apply=True)
     assert api.fix_attempts == 2
     second = next(item for item in store.actions().values()
                   if item.get("kind") == "fix" and item.get("task_id") == "task-2")
     assert second["head"] == api.head_sha
+
+
+@pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
+def test_same_head_handoff_rejects_pre_task_review(tmp_path, review_state):
+    # No unresolved threads: APPROVED also exercises the early review_ok shortcut.
+    api = FakeApi(source_failure=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_state = review_state
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+    assert "agent" in summary["reasons"]
+    assert summary["auto_merge_eligible"] is False
+    assert api.fix_attempts == 1
+    assert not any("enablePullRequestAutoMerge" in query for query, _ in api.graphql_writes)
+
+
+@pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
+@pytest.mark.parametrize("restart", [False, True])
+def test_post_task_review_completes_handoff_with_durable_session_proof(
+        tmp_path, review_state, restart):
+    api = FakeApi(source_failure=True)
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    # Mutable task updates and the local observation happen AFTER the fresh review.
+    api.tasks[fix["task_id"]]["updated_at"] = "2026-10-01T12:10:00Z"
+    api.source_failure = False
+    api.review_state = review_state
+    if restart:
+        coordinator.run(apply=True)
+        saved = store.action(fix["key"])
+        assert saved["handoff_state"] == "waiting_review"
+        assert saved["receipt_completed_at"] == "2026-10-01T12:05:30Z"
+        assert saved["receipt_session_id"] == "session-task-1"
+        assert saved["receipt_comment_id"] == 9001
+        # Restart cannot reconstruct chronology from a now-absent task response.
+        api.tasks.clear()
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+    # An earlier-looking wall clock is strictly later as an aware instant.
+    api.review_submitted_at = "2026-10-01T08:05:31-04:00"
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert StateStore(path).action(fix["key"])["handoff_state"] == "done"
+    assert "agent" not in summary["reasons"]
+    assert summary["review_valid"] is (review_state == "APPROVED")
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == int(restart)
+    assert api.fix_attempts == 1
+
+
+@pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
+@pytest.mark.parametrize("submitted_at", [
+    None, 123, "invalid", "2026-10-01T12:06:00",
+    "2026-10-01T12:05:15Z",  # After receipt, but before session completion.
+    "2026-10-01T12:05:30Z",  # Ties do not establish post-task chronology.
+    "2026-10-01T13:05:29+01:00",  # Later wall clock, earlier instant.
+    "2026-10-01T12:11:01Z",  # Future to the independently supplied clock.
+])
+def test_post_task_review_rejects_unproven_submission_time(
+        tmp_path, review_state, submitted_at):
+    api = FakeApi(source_failure=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_state = review_state
+    api.review_submitted_at = submitted_at
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert "agent" in summary["reasons"]
+    assert summary["auto_merge_eligible"] is False
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+    assert api.fix_attempts == 1
+
+
+@pytest.mark.parametrize("review_patch", [
+    {"commit_id": "c" * 40},
+    {"user": {"id": OWNER}},
+    {"user": {"id": str(COPILOT_REVIEWER)}},
+    {"user": {"id": float(COPILOT_REVIEWER)}},
+])
+def test_post_task_review_still_requires_exact_head_and_authenticated_identity(
+        tmp_path, review_patch):
+    class ReviewApi(FakeApi):
+        def get_all(self, route, *, collection=None):
+            rows = super().get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                return [row | review_patch for row in rows]
+            return rows
+
+    api = ReviewApi(source_failure=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert "agent" in summary["reasons"]
+    assert summary["auto_merge_eligible"] is False
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+
+
+@pytest.mark.parametrize("completed_at", [
+    None, "invalid", "2026-10-01T12:05:30", "2026-10-01T12:11:01Z",
+])
+def test_post_task_review_cannot_replace_invalid_persisted_completion_proof(
+        tmp_path, completed_at):
+    api = FakeApi(source_failure=True)
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    coordinator.run(apply=True)
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    store.update_action(fix["key"], "completed", receipt_completed_at=completed_at)
+    api.tasks.clear()
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    writes, graphql_writes = list(api.writes), list(api.graphql_writes)
+
+    summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    assert StateStore(path).action(fix["key"])["handoff_state"] != "done"
+    assert "agent" in summary["pull_requests"][0]["reasons"]
+    assert api.writes == writes and api.graphql_writes == graphql_writes
 
 
 def test_task_handoff_requests_ready_review_once_and_fails_closed_after_wait(tmp_path):
@@ -2726,6 +2958,7 @@ def test_task_dispatch_is_bounded_to_three_after_verified_completion(tmp_path):
         action = next(item for item in store.actions().values()
                       if item.get("task_id") == task_id)
         api.complete_task(task_id, action)
+        api.review_submitted_at = "2026-10-01T12:06:00Z"
     result = coordinator.run(apply=True)
     assert api.fix_attempts == 3
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
@@ -3632,12 +3865,47 @@ def test_repair_dispatch_rechecks_planned_main_and_base_without_claim(tmp_path, 
     assert not any(action["kind"] == "fix" for action in state["actions"].values())
 
 
+@pytest.mark.parametrize("mergeability", UNCOMPUTED_MERGEABILITY)
+@pytest.mark.parametrize("initial_state", ["clean", "dirty", "behind"])
+@pytest.mark.parametrize("fence_read", [3, 4], ids=["dispatch", "final-dispatch"])
+def test_uncomputed_mergeability_at_dispatch_never_claims_or_posts(
+        tmp_path, mergeability, initial_state, fence_read):
+    class BecomesUnknown(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/pulls/16") and self.pull_reads >= fence_read:
+                value = {key: item for key, item in value.items()
+                         if key not in {"mergeable", "mergeable_state"}}
+                return value | mergeability
+            return value
+
+    api = BecomesUnknown(unresolved=True)
+    api.pull.update(mergeable=initial_state != "dirty", mergeable_state=initial_state)
+    path = tmp_path / "state.json"
+
+    result = _managed_cycle(api, path)
+
+    assert api.pull_reads >= fence_read
+    assert api.fix_attempts == 0
+    summary = result["pull_requests"][0]
+    assert not summary["repair_requested"]
+    assert "mergeability-unknown" in summary["reasons"]
+    assert not {"conflict", "behind", "budget"}.intersection(summary["reasons"])
+    assert not summary["auto_merge_requested"]
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
+    assert not state["lifecycle_events"]
+    assert not any(route.endswith(("/tasks", "/comments")) for route, _ in api.writes)
+    assert not api.graphql_writes
+
+
 @pytest.mark.parametrize("mergeable, mergeable_state, reason", [
     (True, "behind", "behind"),
     (True, "dirty", "conflict"),
-    (True, "unknown", "conflict"),
-    (False, "clean", "conflict"),
-    (None, "clean", "conflict"),
+    (True, "unknown", "mergeability-unknown"),
+    (False, "clean", "mergeability-unknown"),
+    (None, "clean", "mergeability-unknown"),
 ])
 def test_dispatch_rechecks_reconciliation_after_planning(tmp_path, mergeable, mergeable_state, reason):
     class BecomesUnmergeable(FakeApi):

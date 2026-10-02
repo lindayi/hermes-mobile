@@ -110,8 +110,16 @@ enrollment without replacing its initial `authorized_head`; it retains unresolve
 task claims, durable receipt proofs and the repair budget, and clears sensitive
 authorization. Coordinator-dispatched fixer continuation requires an
 unchanged exact task/session/nonce receipt with result `ready`, chained from the
-immutable initial head. A receipt does not carry sensitive authorization, review
-approval, or check success to a new head.
+immutable initial head. The default [v2 receipt contract](cloud-coordinator-spec.md)
+echoes the exposed `COPILOT_AGENT_SESSION_ID` plus the fixed dispatch nonce,
+PR/start head/dispatch-time main and result head; only the parent authenticated
+Task API binds the saved task UUID. Strict v1 receipts remain readable. Missing
+session environment is a blocker, not grounds to guess IDs or grant credentials.
+The child finishes after pushing/focused checks rather than waiting for parent-run
+CI/review. A receipt does not carry sensitive authorization, review approval, or
+check success to a new head. Recorded base provenance survives unrelated main
+advance, including before first receipt observation or after compaction/restart;
+behind proven heads still require bounded neutral reconciliation and fresh gates.
 
 The owner's legacy exact `/hermes enroll` remains broad/manual coordinator
 authorization. The starter never emits it or accepts it as proof of its own
@@ -147,5 +155,10 @@ restart, and replay. There is no absent-consumer skip or external source overrid
 
 ```sh
 HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
-  python3 scripts/test.py python -- tests/test_issue_starter.py tests/test_cloud_coordinator.py tests/test_task_receipts.py
+  python3 scripts/test.py python -- \
+    tests/test_issue_starter.py tests/test_issue_starter_unit.py \
+    tests/test_issue_starter_handoff.py tests/test_issue_starter_paired_lifecycle.py \
+    tests/test_cloud_coordinator.py tests/test_cloud_coordinator_latest_review.py \
+    tests/test_cloud_coordinator_presend.py tests/test_task_receipts.py \
+    tests/test_task_receipts_lifecycle.py tests/test_workflow_lifecycle_sources.py
 ```

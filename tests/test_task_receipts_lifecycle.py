@@ -60,8 +60,8 @@ def parse(comments, *, complete=True, nonce=NONCE, task_id=TASK_ID, session_id=S
 
 def test_receipt_is_full_exact_and_bound_to_task_session_pr_and_heads():
     assert parse([receipt()])["result"] == "ready"
-    assert "nonce=" in receipt_instruction(NONCE)
-    assert "task=" in receipt_instruction(NONCE)
+    assert "nonce=" in receipt_instruction(NONCE, pull_number=16, start_head=HEAD, base_sha=BASE)
+    assert "session=<COPILOT_AGENT_SESSION_ID>" in receipt_instruction(NONCE, pull_number=16, start_head=HEAD, base_sha=BASE)
 
 
 @pytest.mark.parametrize("comment_id", [None, True, 0, -1, "777"])
@@ -161,7 +161,7 @@ def completed_task_binding():
         "sessions": [{
             "id": SESSION_ID, "task_id": TASK_ID, "state": "completed",
             "user": owner, "owner": owner, "repository": repository,
-            "head_ref": "topic", "base_ref": "main", "prompt": receipt_instruction(NONCE),
+            "head_ref": "topic", "base_ref": "main", "prompt": receipt_instruction(NONCE, pull_number=16, start_head=HEAD, base_sha=BASE),
             "created_at": "2026-10-01T12:01:00Z",
             "completed_at": "2026-10-01T12:05:30Z",
         }],
@@ -182,11 +182,25 @@ def test_completed_task_rejects_blank_or_nonstring_identity(completed_task_bindi
         session["id"] = invalid
     else:
         action["dispatch_nonce"] = invalid
-        session["prompt"] = receipt_instruction(invalid)
+        session["prompt"] = receipt_instruction(invalid, pull_number=16, start_head=HEAD, base_sha=BASE)
     expected = {"nonce": NONCE, "task_id": TASK_ID, "session_id": SESSION_ID}
     body = receipt_body().replace(expected[field], str(invalid))
     with pytest.raises(ReceiptError):
         validate_task_receipt(task, action, pull, [receipt(body=body)], now=NOW)
+
+
+@pytest.mark.parametrize("completed_at", [
+    None, "invalid", "2026-10-01T12:05:30",
+    "2026-10-01T12:00:30Z", "2026-10-01T12:04:59Z", "2026-10-01T12:06:01Z",
+])
+def test_completed_task_rejects_unproven_completion_chronology(
+        completed_task_binding, completed_at):
+    task, action, pull = completed_task_binding
+    task["sessions"][0]["completed_at"] = completed_at
+    # A recent mutable task timestamp cannot substitute for session chronology.
+    task["updated_at"] = "2026-10-01T12:07:00Z"
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, [receipt()], now=NOW)
 
 
 def test_completed_task_accepts_complete_exact_returned_identities(completed_task_binding):
@@ -201,6 +215,7 @@ def test_completed_task_accepts_complete_exact_returned_identities(completed_tas
         "result": "ready", "comment_id": 777,
         "created_at": "2026-10-01T12:05:00Z", "body": body,
         "task_id": task_id, "session_id": session_id, "nonce": NONCE,
+        "completed_at": "2026-10-01T12:05:30Z",
         "start_head": HEAD, "head": HEAD, "base": BASE,
     }
     for identity in (task_id, session_id):

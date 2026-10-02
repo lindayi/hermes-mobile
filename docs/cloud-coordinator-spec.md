@@ -112,8 +112,15 @@ Unidentifiable nonterminal repository tasks conservatively block new dispatch
 until GitHub exposes enough branch, session, or PR evidence to scope them.
 Only a positively pre-send superseded reservation can advance to a distinct
 bounded attempt on unchanged head/base; sent or uncertain reservations are never
-retried. Conflicted, unmergeable, or `behind` pull requests receive the neutral
-reconciliation task described above, not an ordinary repair task.
+retried. Only confirmed `dirty` or `behind` pull requests receive the neutral
+reconciliation task described above, not an ordinary repair task. Uncomputed or
+unknown mergeability (including `mergeable: null`, missing fields, or a negative
+mergeability result without an explicit `dirty`/`behind` state) defers both task
+kinds. It claims/posts no task, consumes no attempt, and produces no budget
+exhaustion notice or lifecycle event. Planning and both dispatch fences enforce
+this boundary; a dispatch-time deferral clears `repair_requested` and reports
+`mergeability-unknown` rather than a stale conflict/behind reason. A later poll
+may resume ordinary repair or confirmed neutral reconciliation once computed.
 Immediately before claiming a repair, the coordinator re-reads its bounded
 thread/check evidence and fences the planned head, branch, main SHA, base binding,
 mergeability and active tasks. Changed or incomplete evidence suppresses that
@@ -136,8 +143,18 @@ and revocation, and the final merge recheck. If the authenticated reviewer
 identity differs, the check fails closed and requires policy review rather than
 inferring approval.
 For task handoff, an authenticated submitted review on the exact result head
-completes the review request even if unresolved threads keep this gate false; those
-threads then remain eligible for the next bounded repair.
+completes the review request only when its timezone-aware submission instant is
+strictly after the independently validated task session completion and no later
+than the current clock. This also applies when the task leaves the head unchanged;
+an earlier approval cannot shortcut the handoff. The validated completion time,
+session ID and receipt comment ID are persisted with the receipt head/base and
+dispatch claim for restart. The authentic session completion is retained as
+`receipt_session_completed_at` in both the action and the SHA-bound enrollment's
+`receipt_proofs` projection before compaction, alongside the supported
+`receipt_completed_at` metadata. Observation time or mutable task update time is
+not a substitute. Missing or invalid completion proof fails closed. A fresh submitted
+review completes handoff even if unresolved threads keep the approval gate false;
+those threads then remain eligible for the next bounded repair.
 Handoff planning only reads and records verified receipt/handoff state; the
 ready-for-review mutation and Copilot review request run only after that cycle's
 scan commit succeeds, and then re-fence the exact result head. A failed scan
@@ -239,12 +256,59 @@ existing exact merged event when the current delivery ledger, successful
 controller status, current release, and git provenance validate for that merge
 SHA. A merge alone is never treated as a deployment.
 
-Task receipts bind the exact task, session, dispatch nonce, authenticated receipt
-comment, PR, dispatched head, resulting head, and current main base. The paired PR29
-consumer uses this PR33 lifecycle receipt to prove result-head continuation as
-described above, without inheriting review/check or sensitive authorization. The exact
-receipt comment must have a positive numeric GitHub ID; no authorization is
-inherited when its head or base proof differs.
+Task receipt v2 is the default generated dispatch contract. The host supplies
+literal nonce, PR number, start head and **dispatch-time main SHA** in the prompt;
+the child copies those values, reads `COPILOT_AGENT_SESSION_ID` from its exposed
+environment, and reports the pushed result head. Missing session environment is an
+honest blocker: never guess an ID, emit a ready receipt, obtain extra credentials,
+or request an owner-comment handshake. The child is not asked to discover or echo
+the separate Task UUID. The read-only cloud probe established session-environment
+identity, not a source for the Task UUID (and not proof that such a source cannot
+exist).
+
+Post exactly one unchanged authenticated Copilot issue comment, with these exact
+ordered lines, no fences, extra fields, surrounding text or trailing newline:
+
+```text
+Hermes-Task-Receipt: v2
+nonce=<fixed-dispatch-nonce>
+session=<COPILOT_AGENT_SESSION_ID>
+pr=<fixed-pull-number>
+start_head=<fixed-dispatched-head-sha>
+head=<pushed-current-pull-head-sha>
+base=<fixed-dispatch-time-main-sha>
+result=<ready|conflict_incompatible|policy_broken>
+```
+
+Choose exactly one closed result value. After pushing and focused checks, the
+coding task must not idle waiting for CI/review: the parent controller handles
+those phases. `ready` is not passing CI, approval, merge or deployment success.
+
+Task identity still comes solely from the durable saved task ID and authenticated
+Task API response, never from a comment. The host validates exact returned task ID,
+`session.task_id`, task/session owner and repository, creator/user, nonce, exact
+PR and branch artifacts, and task/session/comment chronology. Receipt author and
+comment ID must be strict numeric GitHub identities (positive comment ID, no
+float/string/bool coercion). Missing, edited, duplicate, mixed-version, mixed-field,
+copied or otherwise noncanonical receipts fail closed.
+
+The strict v1 reader remains for existing receipts and proofs: its body includes
+`task=<authenticated-task-id>` immediately after nonce, and its base must match
+main at initial receipt validation. No historical dispatch binding is invented.
+For v2, base instead must equal trusted `action.main_sha`, even when main advances
+before the first receipt poll. The receipt version and authentic dispatch main
+are retained with the proof before compaction. Revalidation requires canonical
+body/metadata consistency, v2 dispatch-base equality and exactly one unchanged
+remote receipt for that authenticated author/nonce.
+
+The paired PR29 consumer uses this receipt to prove result-head continuation
+without inheriting review/check or sensitive authorization. Proven HEAD authority
+survives unrelated main advances; the recorded base remains provenance, not a
+fresh eligibility predicate. Handoff mutations fence against freshly scanned and
+live current main, not historical receipt base. A behind authorized result head
+must take bounded neutral reconciliation, never merge behind. Repository/base/ref,
+strict up-to-date policy, mergeability, exact head and pre-send main fences remain
+required; fresh review/check evidence is still required for the repaired head.
 
 The owner mobile Inbox consumer is a separate adapter and must validate this
 producer's exact event schema and bind the export to the actual ready application

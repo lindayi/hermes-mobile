@@ -25,7 +25,9 @@ from deploy.workflow_lifecycle import (
     pull_event as build_pull_lifecycle_event,
     validate_event as validate_lifecycle_event,
 )
-from deploy.task_receipts import ReceiptError, receipt_instruction, validate_task_receipt
+from deploy.task_receipts import (
+    ReceiptError, _expected_body, receipt_instruction, validate_task_receipt,
+)
 
 
 REPOSITORY = "lindayi/hermes-mobile"
@@ -904,19 +906,38 @@ def _valid_receipt_proof(action, comments):
             or not isinstance(action.get("receipt_created_at"), str)
             or not isinstance(comments, list)):
         return False
-    return any(
-        isinstance(comment, dict)
-        and comment.get("id") == action["receipt_comment_id"]
-        and isinstance(comment.get("user"), dict)
-        and comment["user"].get("id") == COPILOT_AGENT_ID
-        and comment.get("body") == action["receipt_body"]
+    version = action.get("receipt_version", "v1")
+    if (version not in {"v1", "v2"}
+            or (version == "v2" and action["receipt_base"] != action.get("main_sha"))
+            or action["receipt_body"] != _expected_body(
+                action["receipt_nonce"], action["receipt_task_id"],
+                action["receipt_session_id"], action.get("issue"),
+                action["receipt_start_head"], action["receipt_head"],
+                action["receipt_base"], action["receipt_result"], version=version,
+            )):
+        return False
+    candidates = [
+        comment for comment in comments
+        if isinstance(comment, dict)
+        and _github_identity(comment.get("user"), COPILOT_AGENT_ID)
+        and isinstance(comment.get("body"), str)
+        and action["receipt_nonce"] in comment["body"]
+    ]
+    if len(candidates) != 1:
+        return False
+    comment = candidates[0]
+    return (
+        type(comment.get("id")) is int
+        and comment["id"] == action["receipt_comment_id"]
+        and comment["body"] == action["receipt_body"]
         and comment.get("created_at") == action["receipt_created_at"]
         and comment.get("updated_at") == action["receipt_created_at"]
-        for comment in comments
     )
 
 
 def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
+    # base_sha is retained for callers, but current-main eligibility is enforced
+    # by live dispatch/merge fences, never by revoking recorded HEAD provenance.
     initial = enrollment.get("authorized_head")
     if initial is None:
         return None, set(), set()
@@ -930,7 +951,6 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
         action for action in [*enrollment.get("receipt_proofs", []), *actions.values()]
         if isinstance(action, dict) and action.get("issue") == issue
         and _valid_receipt_proof(action, comments)
-        and action.get("receipt_base") == base_sha
     ]
     while True:
         changed = False
@@ -1002,11 +1022,18 @@ def _github_identity(value, expected):
             and value["id"] == expected)
 
 
+def _mergeability_unknown(pull):
+    state = pull.get("mergeable_state")
+    return (pull.get("mergeable") is None or state in {None, "unknown"}
+            or (pull.get("mergeable") is not True and state not in {"dirty", "behind"}))
+
+
 def _reconciliation_reasons(pull):
     """Use the same neutral-reconciler boundary when planning and dispatching."""
+    if _mergeability_unknown(pull):
+        return []
     reasons = []
-    if (pull.get("mergeable") is not True
-            or pull.get("mergeable_state") in {"dirty", "unknown"}):
+    if pull.get("mergeable_state") == "dirty":
         reasons.append(("conflict", "A neutral conflict reconciler must be assigned; this coordinator will not start a fixer."))
     if pull.get("mergeable_state") == "behind":
         reasons.append(("behind", "The pull request is behind main; a neutral reconciler must update it, and this coordinator will not start a fixer."))
@@ -1336,6 +1363,7 @@ class Coordinator:
                         if receipt:
                             if apply:
                                 fields = {
+                                    "receipt_version": receipt.get("version", "v1"),
                                     "receipt_result": receipt["result"],
                                     "receipt_comment_id": receipt["comment_id"],
                                     "receipt_created_at": receipt["created_at"],
@@ -1346,6 +1374,8 @@ class Coordinator:
                                     "receipt_start_head": receipt["start_head"],
                                     "receipt_head": receipt["head"],
                                     "receipt_base": receipt["base"],
+                                    "receipt_completed_at": receipt["completed_at"],
+                                    "receipt_session_completed_at": receipt["completed_at"],
                                 }
                                 if receipt["result"] == "ready":
                                     fields["handoff_state"] = "pending"
@@ -1432,7 +1462,16 @@ class Coordinator:
         mutation; those steps run only after the scan commit succeeds.
         """
         head = action.get("receipt_head")
-        base = action.get("receipt_base")
+        # Receipt base records dispatch provenance, not current-main eligibility.
+        # Fence handoff mutations against the fresh scan base (and live main).
+        base = snapshot["main_sha"]
+        completed_at = action.get("receipt_completed_at")
+        if not _valid_timestamp(completed_at):
+            return self._handoff_wait(key, action, snapshot)
+        completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        now = datetime.fromtimestamp(self.clock(), timezone.utc)
+        if completed > now:
+            return self._handoff_wait(key, action, snapshot)
         current = self._fence_pull(action.get("issue"), head, base)
         if (not isinstance(current, dict)
                 or current.get("number") != action.get("issue")
@@ -1506,16 +1545,6 @@ class Coordinator:
         else:
             return self._handoff_wait(key, action, snapshot)
 
-        review_ok = copilot_review_valid(
-            head, snapshot["reviews"], snapshot["threads"],
-            threads_complete=snapshot["threads_complete"],
-        )
-        if review_ok:
-            self.store.update_action(
-                key, "completed", handoff_state="done", handoff_waits=0,
-            )
-            return False
-
         route = f"repos/{REPOSITORY}/pulls/{action['issue']}/requested_reviewers"
         try:
             requested = self.api.get(route)
@@ -1536,6 +1565,10 @@ class Coordinator:
             and review.get("commit_id") == head
             and review.get("state") in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
             and _github_identity(review.get("user"), COPILOT_REVIEWER_ID)
+            and _valid_timestamp(review.get("submitted_at"))
+            and completed < datetime.fromisoformat(
+                review["submitted_at"].replace("Z", "+00:00")
+            ) <= now
         ]
         has_submitted_review = bool(submitted_reviews)
         if has_submitted_review:
@@ -1760,10 +1793,10 @@ class Coordinator:
             snapshot["neutral_blocker_attempt"] = neutral_blocker.get("attempt")
         reconciliation = _reconciliation_reasons(snapshot["pull"])
         needs_reconciliation = bool(reconciliation)
-        conflict = bool(reconciliation)
+        mergeability_unknown = _mergeability_unknown(snapshot["pull"])
         repair = None
         attempts = snapshot["enrollment"].get("attempts", 0)
-        if (snapshot["scoped"] and not neutral_blocker
+        if (snapshot["scoped"] and not neutral_blocker and not mergeability_unknown
                 and snapshot["pull"].get("draft") is not True):
             if needs_reconciliation:
                 repair = neutral_reconciliation_request(snapshot, attempts)
@@ -1786,6 +1819,8 @@ class Coordinator:
         if not snapshot["scoped"]:
             reasons.append(("scope", "The pull request is not based on the current same-repository main branch."))
         reasons.extend(reconciliation)
+        if mergeability_unknown:
+            reasons.append(("mergeability-unknown", "GitHub mergeability is not yet confirmed; repair is deferred."))
         if neutral_blocker and neutral_blocker["blocker"] == "conflict_incompatible":
             reasons.append((
                 "conflict-incompatible",
@@ -1811,7 +1846,7 @@ class Coordinator:
         if agent_busy:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
         budget_needed = (
-            snapshot["scoped"] and not agent_busy
+            snapshot["scoped"] and not agent_busy and not mergeability_unknown
             and snapshot["pull"].get("draft") is not True and not neutral_blocker
             and (needs_reconciliation or repair_request(
                 head, 0, snapshot["threads"], snapshot["check_runs"],
@@ -1981,6 +2016,8 @@ class Coordinator:
                          or not isinstance(current.get("node_id"), str)
                          or not current["node_id"]))):
             return "superseded"
+        if _mergeability_unknown(current):
+            return "mergeability-unknown"
         reconciliation = _reconciliation_reasons(current)
         neutral = action.get("task_type") == "neutral"
         if neutral and not reconciliation:
@@ -2027,6 +2064,8 @@ class Coordinator:
                 current.get("base", {}).get("sha"),
         ):
             return "superseded"
+        if _mergeability_unknown(current):
+            return "mergeability-unknown"
         reconciliation = _reconciliation_reasons(current)
         if neutral and not reconciliation:
             return "superseded"
@@ -2333,8 +2372,12 @@ class Coordinator:
             action = pr_plan["repair"]
             if action:
                 result = self._dispatch_task(action)
-                if result in {"agent-running", "superseded", "conflict", "behind", "draft"}:
+                if result in {"agent-running", "superseded", "conflict", "behind", "draft",
+                              "mergeability-unknown"}:
                     pr_plan["repair"] = None
+                    if result == "mergeability-unknown":
+                        pr_plan["reasons"] = [reason for reason in pr_plan["reasons"]
+                                              if reason not in {"conflict", "behind"}]
                     if result != "superseded":
                         reason = "agent" if result == "agent-running" else result
                         pr_plan["reasons"] = list(dict.fromkeys(
@@ -2861,9 +2904,11 @@ class StateStore:
                 claimed["dispatch_nonce"] = nonce
                 claimed["owner_id"] = OWNER_ID
                 claimed["repository_id"] = REPOSITORY_ID
-                claimed["body"] = (
-                    f"{claimed.get('body', '')}\n\n{receipt_instruction(nonce)}"
+                instruction = receipt_instruction(
+                    nonce, pull_number=claimed.get("issue"),
+                    start_head=claimed.get("head"), base_sha=claimed.get("main_sha"),
                 )
+                claimed["body"] = f"{claimed.get('body', '')}\n\n{instruction}"
             data["actions"][key] = {**claimed, "status": "sending",
                                     "created_at": time.time()}
             return True
@@ -2903,9 +2948,15 @@ class StateStore:
                     "issue", "kind", "status", "head", "task_id", "dispatch_nonce",
                     "receipt_result", "receipt_comment_id", "receipt_created_at",
                     "receipt_body", "receipt_task_id", "receipt_session_id",
+                    "receipt_completed_at", "receipt_session_completed_at",
                     "receipt_nonce", "receipt_start_head", "receipt_head", "receipt_base",
                 }
                 proof = {field: action[field] for field in proof_fields}
+                # Old v1 proofs have no dispatch-main/version projection; do not
+                # invent historical bindings while preserving new v2 provenance.
+                for field in ("receipt_version", "main_sha"):
+                    if field in action:
+                        proof[field] = action[field]
                 proofs = enrollment.setdefault("receipt_proofs", [])
                 if proof not in proofs:
                     proofs.append(proof)
