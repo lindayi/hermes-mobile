@@ -14,13 +14,17 @@ The CLI's default invocation is a read-only plan. A write cycle requires both
 owner ID `5164171` and the repository API identity matches the fixed repository
 ID. It ignores issue bodies, labels, links, and comments from other authors.
 
-An issue or pull request is enrolled only by the exact comment `/hermes enroll`
-from that owner. The issue must identify a pull request whose head and base both
-belong to this repository and whose base branch is `main`. Existing pull requests
-are not enrolled by their age, label, author, or open state. For a sensitive
-head, the owner must separately comment `/hermes authorize-sensitive <40-char-head-sha>`.
-Authorization is recorded only if that SHA is still the pull request's current
-head; it does not carry forward to a later commit.
+An issue or pull request is enrolled by the exact comment `/hermes enroll` from
+that owner. The issue must identify a pull request whose head and base both belong
+to this repository and whose base branch is `main`. Existing pull requests are not
+enrolled by their age, label, author, or open state. The issue starter instead hands
+off with `/hermes enroll <40-lowercase-hex-head-sha>`; the consumer requires the
+value to match the current pull request head and stores it as immutable
+`authorized_head`. A stale or mismatched command is consumed without enrollment.
+For a sensitive head, the owner must separately comment
+`/hermes authorize-sensitive <40-char-head-sha>`. Authorization is recorded only
+if that SHA is still the pull request's current head; it does not carry forward to
+a later commit.
 
 ## Collection and bounded repair
 
@@ -50,8 +54,17 @@ attempt-derived request keys cannot collide; re-enrollment resets that counter
 only when no unresolved fixer claim remains. A fresh enrollment is authorization,
 not evidence that an earlier task stopped. No second
 `@copilot` dispatch comment is posted. Queued, in-progress, waiting-for-user,
-idle and unknown task states do not release the fixer lock. Completion only
-releases the fixer lock; it is not review or CI success.
+idle and unknown task states do not release the fixer lock. For SHA-bound starter
+enrollments, a completed coordinator-dispatched task releases the lock only with
+the exact task/session/nonce receipt defined in `deploy/task_receipts.py`. Its
+unchanged, authenticated `ready` receipt may extend authorization from a previously
+authorized head to that exact result head. The initial `authorized_head` never
+changes; each later result head needs its own receipt rooted in an already
+authorized head. Missing, edited, copied, stale, mismatched, or blocker receipts
+do not authorize continuation. Sensitive authorization remains bound to its
+original SHA, and review/check evidence must be independently fresh for each result
+head. A receipt is not review or CI success. Bare manual enrollments retain their
+existing coordinator behavior.
 Unidentifiable nonterminal repository tasks conservatively block new dispatch
 until GitHub exposes enough branch, session, or PR evidence to scope them.
 Conflicted, unmergeable, or `behind` pull requests are not sent to a fixer;

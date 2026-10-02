@@ -103,15 +103,18 @@ the SHA to match the current PR head, and persists the bound head. A mismatch is
 consumed without enrollment and cannot authorize a later head or be replayed.
 Bound enrollment cannot inherit authority on a subsequent push; an explicit
 new owner command is needed. A new owner command retains unresolved task claims
-and the repair budget. This deliberately does not infer that a later fixer commit
-was authorized merely because a task completed.
+and the repair budget. Coordinator-dispatched fixer continuation requires an
+unchanged exact task/session/nonce receipt with result `ready`, chained from the
+immutable initial head. A receipt does not carry sensitive authorization, review
+approval, or check success to a new head.
 
 The owner's legacy exact `/hermes enroll` remains broad/manual coordinator
 authorization. The starter never emits it or accepts it as proof of its own
 SHA-bound handoff. Because both clients use the same owner identity, historical
 bare comments cannot be distinguished from manual authorization by GitHub author
 ID: review/reconcile any legacy starter comments before activation. Install the
-paired consumer before enabling this producer; no fallback to bare commands.
+paired consumer before enabling this producer; it accepts only the SHA-bound
+command for this handoff, with no fallback to bare commands.
 The starter does not import the coordinator at runtime. A task completion is not
 a passing test, review, required check, approval, merge, or deployment. Existing
 coordinator and repository protections remain authoritative.
@@ -132,13 +135,12 @@ installed or enabled here. A parent operator must review this code and perform
 a read-only live API probe before any activation. No authenticated live probe,
 task dispatch, enrollment, service installation, settings change, or production
 action is performed by this implementation task. Tests use only synthetic
-GitHub API fixtures through the managed test runner. The handoff integration test
-imports the actual in-checkout coordinator; there is no absent-consumer skip or
-external source override. After current-main assembly, the SHA-bound consumer
-and authenticated fixer-result continuation remain explicit integration blockers:
-these tests must pass before merge, not merely the producer-only suite.
+GitHub API fixtures through the managed test runner. The producer-to-consumer test
+runs the actual in-checkout starter and coordinator enrollment scan. Coordinator
+tests also exercise fixer receipts across result heads, fresh review/check evidence,
+restart, and replay. There is no absent-consumer skip or external source override.
 
 ```sh
 HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
-  python3 scripts/test.py python -- tests/test_issue_starter.py tests/test_issue_starter_handoff.py
+  python3 scripts/test.py python -- tests/test_issue_starter.py tests/test_cloud_coordinator.py tests/test_task_receipts.py
 ```
