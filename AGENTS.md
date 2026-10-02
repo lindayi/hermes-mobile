@@ -95,6 +95,10 @@ records acceptance cases, and reports exact observed test/CI evidence. Use the
 repository issue and pull-request templates. State clearly when a check was not
 run; do not imply an unobserved pass.
 
+Write PR descriptions as plain paragraphs using the repository template; include a literal Closes #N and all required evidence, with no Markdown markup in the body.
+
+For task handoff, a literal Closes #N is a readability convention; verify linkage from authenticated GitHub closing-issue references, never PR body text.
+
 A review comment is not an approval or a passing review status; verify every review and test result against the exact head SHA.
 
 Request Copilot review for pull requests when it is available, and request a fresh
@@ -157,6 +161,12 @@ Only the canonical, clean, freshly verified `origin/main` may be deployed throug
 the guarded deployment path. Preserve its drain, lock, native fingerprint, and
 rollback protections. Never restart active sessions or use candidate operators to
 bypass Git provenance. Record the deployed commit.
+
+Native-controls maintenance normally uses `--hosted-run-id` with the independently
+verified exact-main artifact; the scheduler-bound run ID and source SHA must match
+at the worker, and the managed installed-runtime host partition still runs. Never
+fall back to the full local suite when hosted evidence is missing;
+`--local-full-checks` is an explicit diagnostic mode only.
 
 Never edit immutable deployed releases. Older source copies are migration inputs,
 not deployment sources. Port unfinished legacy work as a diff against its own verified

@@ -7,6 +7,11 @@ import re
 COPILOT_AGENT_ID = 198982749
 RECEIPT_RESULTS = {"ready", "conflict_incompatible", "policy_broken"}
 SHA_RE = re.compile(r"[0-9a-f]{40}")
+V2_RECEIPT_HEADER = "Hermes-Task-Receipt: v2"
+V2_RECEIPT_FIELDS = {"nonce", "session", "pr", "start_head", "head", "base", "result"}
+# Whole-comment limits leave room for a short quoted report and eight-line receipt.
+V2_TRANSPORT_MAX_BYTES = 8192
+V2_TRANSPORT_MAX_LINES = 64
 
 
 class ReceiptError(ValueError):
@@ -16,8 +21,13 @@ class ReceiptError(ValueError):
 def receipt_instruction(nonce, *, pull_number, start_head, base_sha):
     return (
         "After pushing your result and running focused checks, post exactly one "
-        "issue comment on this PR, using the exact ordered fields below, with no "
-        "additional text, code fences or trailing newline. "
+        "issue comment on this PR. Put the exact receipt fields below in one "
+        "contiguous, unquoted final block, with no extra fields or unquoted prose. "
+        "The posting transport may prepend an unchanged Markdown blockquote, "
+        "separated from the receipt by an ASCII blank line (empty or only spaces/tabs), "
+        "or reorder fields; do not quote or fence the receipt itself, and include each "
+        "field exactly once. Keep the entire comment within "
+        f"{V2_TRANSPORT_MAX_BYTES} UTF-8 bytes and {V2_TRANSPORT_MAX_LINES} LF-delimited lines. "
         "Copy nonce, pr, start_head and base exactly: base is the fixed dispatch-time "
         "main SHA, not main at completion. Read your session ID from the exposed "
         "COPILOT_AGENT_SESSION_ID environment variable; if it is missing, report an "
@@ -28,13 +38,13 @@ def receipt_instruction(nonce, *, pull_number, start_head, base_sha):
         "Do not wait for CI or review after pushing and focused checks; the parent "
         "controller handles CI/review. A ready receipt is not passing CI and does "
         "not claim review, merge, or deployment success.\n\n"
-        "Hermes-Task-Receipt: v2\n"
+        f"{V2_RECEIPT_HEADER}\n"
         f"nonce={nonce}\n"
-        "session=<COPILOT_AGENT_SESSION_ID>\n"
         f"pr={pull_number}\n"
+        "session=<COPILOT_AGENT_SESSION_ID>\n"
         f"start_head={start_head}\n"
-        "head=<current-pull-head-sha>\n"
         f"base={base_sha}\n"
+        "head=<current-pull-head-sha>\n"
         "result=ready|conflict_incompatible|policy_broken"
     )
 
@@ -77,6 +87,74 @@ def _expected_body(nonce, task_id, session_id, pull_number, start_head,
     )
 
 
+def _is_blockquote(line):
+    return re.match(r"^ {0,3}>", line) is not None
+
+
+def _v2_fields(body):
+    # Bound allocation before encoding, then bound scans and splitting by bytes.
+    if not isinstance(body, str) or len(body) > V2_TRANSPORT_MAX_BYTES:
+        raise ReceiptError("Task receipt exceeds the transport byte budget")
+    try:
+        byte_count = len(body.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ReceiptError("Task receipt is not valid UTF-8") from error
+    if byte_count > V2_TRANSPORT_MAX_BYTES:
+        raise ReceiptError("Task receipt exceeds the transport byte budget")
+    if body.count("\n") >= V2_TRANSPORT_MAX_LINES:
+        raise ReceiptError("Task receipt exceeds the transport line budget")
+    if ("\r" in body or body.endswith("\n")
+            or body.count(V2_RECEIPT_HEADER) != 1):
+        raise ReceiptError("Task receipt transport is ambiguous or noncanonical")
+    lines = body.split("\n")
+    positions = [index for index, line in enumerate(lines) if line == V2_RECEIPT_HEADER]
+    if len(positions) != 1:
+        raise ReceiptError("Task receipt header is not an unquoted standalone line")
+    position = positions[0]
+    if any(line.strip(" \t") and not _is_blockquote(line) for line in lines[:position]):
+        raise ReceiptError("Task receipt has untrusted text before its block")
+    # Without an ASCII blank line, raw receipt lines can be lazy quote content.
+    if position and lines[position - 1].strip(" \t"):
+        raise ReceiptError("Task receipt is not separated from its quoted prefix")
+    block = lines[position:position + 1 + len(V2_RECEIPT_FIELDS)]
+    if len(block) != 1 + len(V2_RECEIPT_FIELDS):
+        raise ReceiptError("Task receipt fields are incomplete")
+    fields = {}
+    for line in block[1:]:
+        key, separator, value = line.partition("=")
+        if (not separator or key not in V2_RECEIPT_FIELDS or not value
+                or key in fields):
+            raise ReceiptError("Task receipt fields are malformed or ambiguous")
+        fields[key] = value
+    if set(fields) != V2_RECEIPT_FIELDS or position + len(block) != len(lines):
+        raise ReceiptError("Task receipt fields or surrounding text do not match")
+    return fields
+
+
+def receipt_body_matches(body, nonce, task_id, session_id, pull_number,
+                         start_head, head_sha, base_sha, result, *, version):
+    if version == "v1":
+        return body == _expected_body(
+            nonce, task_id, session_id, pull_number, start_head, head_sha,
+            base_sha, result, version=version,
+        )
+    if version != "v2":
+        return False
+    try:
+        fields = _v2_fields(body)
+    except ReceiptError:
+        return False
+    return fields == {
+        "nonce": nonce,
+        "session": session_id,
+        "pr": str(pull_number),
+        "start_head": start_head,
+        "head": head_sha,
+        "base": base_sha,
+        "result": result,
+    }
+
+
 def find_receipt(comments, *, complete, nonce, task_id, session_id,
                  pull_number, start_head, head_sha, base_sha,
                  task_created_at, session_created_at, session_completed_at,
@@ -110,14 +188,14 @@ def find_receipt(comments, *, complete, nonce, task_id, session_id,
         created = _time(comment.get("created_at"))
         if not session_time <= created <= completed_time or created > now:
             raise ReceiptError("Task receipt is outside the documented session interval")
-        version = "v2" if body.startswith("Hermes-Task-Receipt: v2\n") else "v1"
+        version = "v2" if V2_RECEIPT_HEADER in body else "v1"
         receipt_base = dispatch_base_sha if version == "v2" else base_sha
         if not isinstance(receipt_base, str) or SHA_RE.fullmatch(receipt_base) is None:
             raise ReceiptError("Receipt dispatch base is missing")
         matches = [
             result for result in RECEIPT_RESULTS
-            if body == _expected_body(
-                nonce, task_id, session_id, pull_number,
+            if receipt_body_matches(
+                body, nonce, task_id, session_id, pull_number,
                 start_head, head_sha, receipt_base, result, version=version,
             )
         ]

@@ -78,6 +78,7 @@ def test_preswitch_abort_rechecks_after_public_verifier(tmp_path, changed):
         release.deploy(paths, idle_timeout=0, **args)
     receipt = json.loads((paths.state / 'status.json').read_text())
     assert receipt == dict(status='rollback_failed', release=receipt['release'],
+                          git_sha=None, validation_mode='local-full-checks',
                           error='Native idle wait timed out', rollback_error=(
                               'Pre-mutation gate ownership changed' if changed == 'foreign-gate'
                               else 'Symlinked deployment paths are not allowed' if changed == 'dangling-native-dropin'
@@ -101,6 +102,7 @@ def test_preswitch_abort_requires_exactly_one_gate_deletion(tmp_path):
         release.deploy(paths, idle_timeout=0, **args)
     receipt = json.loads((paths.state / 'status.json').read_text())
     assert receipt == dict(status='rollback_failed', release=receipt['release'],
+                          git_sha=None, validation_mode='local-full-checks',
                           error='Native idle wait timed out',
                           rollback_error='Owned pre-mutation gate was not cleared')
     with journal.connect() as db:
@@ -225,6 +227,7 @@ def fixture(tmp_path):
     args = dict(checks=lambda stage: events.append(('checks', stage)), verify=verify,
                 native=Native(), native_dropin=native_dropin, run=run,
                 bootstrap_dedicated_native=True,
+                local_full_checks=True,
                 handoff=lambda stage: True,
                 probe=receipt_probe,
                 rollback_verify=rollback_verify)
@@ -486,13 +489,14 @@ def test_cli_schedules_worker_and_durable_observer(tmp_path, monkeypatch):
     _, paths = deploy_fixture(tmp_path)
     calls = []
     monkeypatch.setattr(release.os, 'geteuid', lambda: 1000)
-    assert release.main(['--schedule', '--bootstrap-dedicated-native'], paths=paths,
+    assert release.main(['--schedule', '--local-full-checks', '--bootstrap-dedicated-native'], paths=paths,
                         run=lambda cmd, **kw: calls.append(cmd)) == 0
     assert len(calls) == 2
     assert all(c[:2] == ['systemd-run', '--user'] for c in calls)
     assert 'deploy.observe_release' in calls[0]
     assert '--native' in calls[0] and '--watch-worker' in calls[0]
-    assert '--worker' in calls[1] and '--bootstrap-dedicated-native' in calls[1]
+    assert '--worker' in calls[1] and '--local-full-checks' in calls[1]
+    assert '--bootstrap-dedicated-native' in calls[1]
     assert '--on-active=5s' in calls[1]
     observer_timeout = int(calls[0][calls[0].index('--timeout') + 1])
     def runtime(command):
@@ -501,6 +505,260 @@ def test_cli_schedules_worker_and_durable_observer(tmp_path, monkeypatch):
     assert runtime(calls[1]) >= 5400  # full checks + two 1800s drain windows + rollback
     assert observer_timeout > runtime(calls[1]) + 5
     assert runtime(calls[0]) > observer_timeout
+
+
+def test_hosted_cli_schedules_worker_with_immutable_run_id(tmp_path, monkeypatch):
+    _, paths = deploy_fixture(tmp_path)
+    calls = []
+    from deploy import git_source
+    source_sha = 'e' * 40
+    monkeypatch.setattr(git_source, 'preflight', lambda *a, **kw: source_sha)
+    monkeypatch.setattr(release.os, 'geteuid', lambda: 1000)
+    assert release.main(['--schedule', '--hosted-run-id', '765'], paths=paths,
+                        run=lambda cmd, **kw: calls.append(cmd)) == 0
+    worker = calls[1]
+    assert worker[worker.index('--hosted-run-id') + 1] == '765'
+    assert worker[worker.index('--expected-source-sha') + 1] == source_sha
+    assert '--local-full-checks' not in worker
+
+
+def test_native_cli_requires_validation_mode_before_scheduling(tmp_path, monkeypatch, capsys):
+    _, paths = deploy_fixture(tmp_path)
+    calls = []
+    monkeypatch.setattr(release.os, 'geteuid', lambda: 1000)
+    for args in (['--schedule'], ['--schedule', '--hosted-run-id', '0'],
+                 ['--schedule', '--hosted-run-id', '765', '--hosted-run-id', '766'],
+                 ['--schedule', '--hosted-run-id', '765', '--local-full-checks'],
+                 ['--worker', '--hosted-run-id', '765'],
+                 ['--worker', '--local-full-checks', '--expected-source-sha', 'a' * 40,
+                  '--expected-source-sha', 'b' * 40]):
+        with pytest.raises(SystemExit):
+            release.main(args, paths=paths, run=lambda cmd, **kw: calls.append(cmd))
+    assert not calls
+    with pytest.raises(SystemExit) as result:
+        release.main(['--help'])
+    assert result.value.code == 0
+    help_text = capsys.readouterr().out
+    assert '--hosted-run-id' in help_text and '--local-full-checks' in help_text
+
+
+def test_native_controller_requires_explicit_validation_mode(tmp_path, monkeypatch):
+    paths, old, journal, dropin, events, args = fixture(tmp_path)
+    from deploy import git_source
+    monkeypatch.setattr(git_source, 'preflight',
+                        lambda *a, **kw: pytest.fail('mode must be selected before source access'))
+    args.pop('local_full_checks', None)
+    with pytest.raises(ValueError, match='validation mode'):
+        release.deploy(paths, **args)
+    assert not events
+    assert (paths.state / 'current').resolve() == old
+    with journal.connect() as db:
+        assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
+
+
+@pytest.mark.parametrize('mode', [
+    {}, {'hosted_run_id': 0}, {'hosted_run_id': '765'},
+    {'hosted_run_id': 765, 'local_full_checks': True},
+    {'local_full_checks': False}, {'local_full_checks': 1},
+])
+def test_native_controller_rejects_ambiguous_or_malformed_modes_before_source_access(
+        tmp_path, monkeypatch, mode):
+    paths, old, journal, dropin, events, args = fixture(tmp_path)
+    from deploy import git_source
+    monkeypatch.setattr(git_source, 'preflight',
+                        lambda *a, **kw: pytest.fail('mode must be validated before source access'))
+    args.pop('local_full_checks')
+    args.update(mode)
+    with pytest.raises(ValueError, match='validation mode'):
+        release.deploy(paths, **args)
+    assert not events
+    assert (paths.state / 'current').resolve() == old
+    with journal.connect() as db:
+        assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
+
+
+def test_native_controller_rejects_source_changed_since_scheduler_before_gate(
+        tmp_path, monkeypatch):
+    paths, old, journal, dropin, events, args = fixture(tmp_path)
+    from deploy import git_source
+    args.pop('local_full_checks')
+    args.update(hosted_run_id=765, expected_source_sha='a' * 40)
+    monkeypatch.setattr(git_source, 'preflight', lambda *a, **kw: 'b' * 40)
+    with pytest.raises(RuntimeError, match='scheduled source SHA'):
+        release.deploy(paths, **args)
+    assert not events
+    assert (paths.state / 'current').resolve() == old
+    with journal.connect() as db:
+        assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
+
+
+def test_native_hosted_controller_stages_verified_assets_and_runs_host_checks_once(
+        tmp_path, monkeypatch):
+    import hashlib
+    from deploy import frontend_release, git_source, release_artifact
+
+    paths, old, journal, dropin, events, args = fixture(tmp_path)
+    args.pop('local_full_checks')
+    sha = 'a' * 40
+    args['expected_source_sha'] = sha
+    public_bytes = b'<h1>exact hosted assets</h1>'
+    lifecycle = []
+    monkeypatch.setattr(git_source, 'preflight', lambda *a, **kw: sha)
+    monkeypatch.setattr(git_source, 'verify_stage', lambda *a, **kw: None)
+    stage_release = bridge.stage_release
+
+    def stage(source, destination, *, git_sha=None):
+        lifecycle.append(('stage', git_sha))
+        return stage_release(source, destination, git_sha=git_sha)
+
+    def acquire(source, run_id, destination, *, run):
+        lifecycle.append(('verified-bundle', run_id))
+        public = destination / 'public'
+        public.mkdir(parents=True)
+        (public / 'index.html').write_bytes(public_bytes)
+        return release_artifact.VerifiedBundle(
+            sha, run_id, 3, 81, 'b' * 64, release_artifact.source_mapping(source),
+            {'index.html': hashlib.sha256(public_bytes).hexdigest()}, public)
+
+    def host_checks(check_paths, staged, *, run):
+        lifecycle.append(('host-checks', staged))
+
+    monkeypatch.setattr(bridge, 'stage_release', stage)
+    monkeypatch.setattr(release_artifact, 'acquire_verified_bundle', acquire)
+    monkeypatch.setattr(bridge, 'run_host_checks', host_checks)
+    monkeypatch.setattr(frontend_release, 'build_frontend',
+                        lambda *a, **kw: pytest.fail('hosted assets must not be rebuilt'))
+    args['checks'] = lambda *_: pytest.fail('hosted mode must not run the full local suite')
+
+    staged = release.deploy(paths, hosted_run_id=765, **args)
+
+    assert lifecycle[0:2] == [('stage', sha), ('verified-bundle', 765)]
+    assert [item[0] for item in lifecycle].count('host-checks') == 1
+    assert (staged / 'public/index.html').read_bytes() == public_bytes
+    assert (paths.webroot / 'index.html').read_bytes() == public_bytes
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status == {
+        'status': 'succeeded', 'release': staged.name, 'git_sha': sha,
+        'validation_mode': 'hosted-artifact',
+        'hosted_run_id': 765, 'hosted_run_attempt': 3, 'artifact_id': 81,
+        'bundle_sha256': 'b' * 64,
+    }
+    assert ('capture', old) in events
+    assert [event[0] for event in events].count('command') == 3
+    from deploy.observe_release import classify
+    from deploy.pull_delivery import installed_basis
+    assert installed_basis(paths.state) == sha
+    expected = bridge.fingerprints(staged, (*bridge.SOURCE_TREES, *bridge.SOURCE_FILES, 'public'))
+    assert classify(paths, 0, expected, verify=lambda *a: None) == 'succeeded'
+
+
+@pytest.mark.parametrize('mismatch', ['source-sha', 'run-id', 'source-map', 'public-map'])
+def test_native_hosted_bundle_mismatch_fails_before_admission_or_restart(
+        tmp_path, monkeypatch, mismatch):
+    import dataclasses
+    from deploy import git_source, release_artifact
+
+    paths, old, journal, dropin, events, args = fixture(tmp_path)
+    args.pop('local_full_checks')
+    args['expected_source_sha'] = 'a' * 40
+    monkeypatch.setattr(git_source, 'preflight', lambda *a, **kw: 'a' * 40)
+    monkeypatch.setattr(git_source, 'verify_stage', lambda *a, **kw: None)
+    def acquire(source, run_id, destination, *, run):
+        public = destination / 'public'
+        public.mkdir(parents=True)
+        (public / 'index.html').write_text('hosted')
+        evidence = release_artifact.VerifiedBundle(
+            'a' * 40, run_id, 1, 81, 'b' * 64,
+            release_artifact.source_mapping(source), {'index.html': 'c' * 64}, public)
+        if mismatch == 'source-sha':
+            return dataclasses.replace(evidence, source_sha='d' * 40)
+        if mismatch == 'run-id':
+            return dataclasses.replace(evidence, run_id=run_id + 1)
+        if mismatch == 'source-map':
+            return dataclasses.replace(evidence, source_files={})
+        return dataclasses.replace(evidence, public_files={'index.html': 'd' * 64})
+
+    monkeypatch.setattr(release_artifact, 'acquire_verified_bundle', acquire)
+    with pytest.raises(RuntimeError, match='[Vv]erified'):
+        release.deploy(paths, hosted_run_id=765, **args)
+    assert (paths.state / 'current').resolve() == old
+    assert (paths.webroot / 'index.html').read_text() == '<h1>old</h1>'
+    assert not any(event[0] in ('capture', 'command') for event in events)
+    with journal.connect() as db:
+        assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
+
+
+def test_native_host_check_failure_records_verified_evidence_without_activation(
+        tmp_path, monkeypatch):
+    import hashlib
+    from deploy import git_source, release_artifact
+
+    paths, old, journal, dropin, events, args = fixture(tmp_path)
+    args.pop('local_full_checks')
+    sha = 'a' * 40
+    args['expected_source_sha'] = sha
+    public_bytes = b'<h1>verified</h1>'
+    monkeypatch.setattr(git_source, 'preflight', lambda *a, **kw: sha)
+    monkeypatch.setattr(git_source, 'verify_stage', lambda *a, **kw: None)
+
+    def acquire(source, run_id, destination, *, run):
+        public = destination / 'public'
+        public.mkdir(parents=True)
+        (public / 'index.html').write_bytes(public_bytes)
+        return release_artifact.VerifiedBundle(
+            sha, run_id, 2, 82, 'c' * 64, release_artifact.source_mapping(source),
+            {'index.html': hashlib.sha256(public_bytes).hexdigest()}, public)
+
+    def fail_host_checks(*a, **kw):
+        events.append(('host-checks',))
+        raise RuntimeError('host compatibility failed')
+
+    monkeypatch.setattr(release_artifact, 'acquire_verified_bundle', acquire)
+    monkeypatch.setattr(bridge, 'run_host_checks', fail_host_checks)
+    with pytest.raises(RuntimeError, match='host compatibility failed'):
+        release.deploy(paths, hosted_run_id=765, **args)
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status == {
+        'status': 'failed', 'release': status['release'], 'git_sha': sha,
+        'validation_mode': 'hosted-artifact', 'hosted_run_id': 765,
+        'hosted_run_attempt': 2, 'artifact_id': 82, 'bundle_sha256': 'c' * 64,
+        'error': 'host compatibility failed',
+    }
+    assert events == [('host-checks',)]
+    assert (paths.state / 'current').resolve() == old
+    assert (paths.webroot / 'index.html').read_text() == '<h1>old</h1>'
+    with journal.connect() as db:
+        assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
+
+
+def test_native_missing_hosted_bundle_never_falls_back_to_local_checks(tmp_path, monkeypatch):
+    from deploy import frontend_release, git_source, release_artifact
+
+    paths, old, journal, dropin, events, args = fixture(tmp_path)
+    args.pop('local_full_checks')
+    sha = 'a' * 40
+    args['expected_source_sha'] = sha
+    monkeypatch.setattr(git_source, 'preflight', lambda *a, **kw: sha)
+    monkeypatch.setattr(git_source, 'verify_stage', lambda *a, **kw: None)
+    def fail_acquire(*a, **kw):
+        raise RuntimeError('artifact expired')
+    monkeypatch.setattr(release_artifact, 'acquire_verified_bundle', fail_acquire)
+    monkeypatch.setattr(frontend_release, 'build_frontend',
+                        lambda *a, **kw: pytest.fail('missing artifact must not trigger a local build'))
+    monkeypatch.setattr(bridge, 'run_host_checks',
+                        lambda *a, **kw: pytest.fail('missing artifact must not reach host checks'))
+    args['checks'] = lambda *_: pytest.fail('missing artifact must not run local suite=all')
+    with pytest.raises(RuntimeError, match='artifact expired'):
+        release.deploy(paths, hosted_run_id=765, **args)
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status == {
+        'status': 'failed', 'release': status['release'], 'git_sha': sha,
+        'validation_mode': 'hosted-artifact', 'error': 'artifact expired',
+    }
+    assert not events
+    assert (paths.state / 'current').resolve() == old
+    with journal.connect() as db:
+        assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
 
 
 def test_delegate_worker_contract_dependency_is_pinned():
@@ -513,7 +771,7 @@ def test_worker_requires_separate_invocation(tmp_path, monkeypatch):
     _, paths = deploy_fixture(tmp_path)
     monkeypatch.delenv('INVOCATION_ID', raising=False)
     with pytest.raises(RuntimeError, match='separate'):
-        release.main(['--worker'], paths=paths)
+        release.main(['--worker', '--local-full-checks'], paths=paths)
 
 
 

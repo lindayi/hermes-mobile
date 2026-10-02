@@ -18,7 +18,8 @@ def test_cli_receipt_failure_no_notification_by_default(tmp_path, monkeypatch, c
     monkeypatch.setattr(observer, 'notify_owner', lambda *a: pytest.fail('unexpected notification'))
     assert observer.main(['--since-ns', '100', '--expected', str(expected), '--unit', 'release-test'], paths=paths) == 1
     receipt = json.loads(capsys.readouterr().out)
-    assert receipt == {'unit': 'release-test', 'status': 'failed', 'notification': 'disabled'}
+    assert receipt == {'unit': 'release-test', 'status': 'failed', 'notification': 'disabled',
+                       'phase': 'deployment_status', 'reason': 'deployment_failed'}
     with pytest.raises(SystemExit):
         observer.main(['--since-ns', '100', '--expected', str(expected), '--unit', '../bad'], paths=paths)
 
@@ -121,7 +122,7 @@ def test_worker_termination_without_terminal_status_is_failure(tmp_path, termina
     def sleep(seconds):
         now[0] += seconds
     assert observe(paths, 100, {}, timeout=10, clock=lambda: now[0], sleep=sleep,
-                   worker_state=lambda: next(states)) == 'failed'
+                   worker_state=lambda: next(states)) == 'verification_failed'
     assert now == [2.0]
 
 
@@ -200,8 +201,11 @@ def test_cli_worker_tracking_is_opt_in(tmp_path, monkeypatch, capsys, watch):
             '--unit', 'hermes-native-controls-test', '--timeout', '5640']
     assert observer.main(args + (['--watch-worker'] if watch else []), paths=paths) == 1
     assert json.loads(capsys.readouterr().out) == dict(
-        unit='hermes-native-controls-test', status='failed' if watch else 'timeout',
-        notification='disabled')
+        unit='hermes-native-controls-test',
+        status='verification_failed' if watch else 'timeout',
+        notification='disabled',
+        phase='worker_status' if watch else 'observer',
+        reason='terminal_status_missing' if watch else 'timeout')
     assert probes == (['hermes-native-controls-test'] if watch else [])
 
 
@@ -232,7 +236,7 @@ def test_delayed_worker_start_then_collection_is_not_default_success(tmp_path):
         now[0] += seconds
     assert observe(paths, 100, {}, timeout=10,
                    worker_state=lambda: read_worker_state('release-test', run=run),
-                   clock=lambda: now[0], sleep=sleep) == 'failed'
+                   clock=lambda: now[0], sleep=sleep) == 'verification_failed'
     assert now == [6.0]
 
 
@@ -304,21 +308,25 @@ def owner_fixture(tmp_path):
     return config, auth
 
 
-def test_owner_notification_silent_scoped_and_deduplicated(tmp_path):
+@pytest.mark.parametrize('outcome,expected,excluded', [
+    ('failed', 'did not complete successfully', 'could not be verified'),
+    ('verification_failed', 'could not be verified', 'did not complete successfully'),
+])
+def test_owner_notification_silent_scoped_and_deduplicated(tmp_path,outcome,expected,excluded):
     from deploy.observe_release import notify_owner
     config, auth = owner_fixture(tmp_path)
     before = auth.read_bytes()
-    first = notify_owner('hermes-mobile-deploy-test', 'failed', config_path=config)
-    assert notify_owner('hermes-mobile-deploy-test', 'failed', config_path=config) == first
+    first = notify_owner('hermes-mobile-deploy-test', outcome, config_path=config)
+    assert notify_owner('hermes-mobile-deploy-test', outcome, config_path=config) == first
     assert auth.read_bytes() == before
     with sqlite3.connect(tmp_path / 'notifications.sqlite') as db:
         assert db.execute('SELECT user_id,session_id FROM inbox').fetchall() == [('owner', None)]
         assert db.execute('SELECT count(*) FROM outbox').fetchone() == (0,)
         body = db.execute('SELECT body FROM inbox').fetchone()[0]
         assert 'secret' not in body
-        assert 'could not be verified' in body
-        assert 'may already be running' in body
-        assert 'did not complete successfully' not in body
+        assert expected in body
+        assert excluded not in body
+        assert ('may already be running' in body) is (outcome == 'verification_failed')
 
 
 @pytest.mark.parametrize('bad', ['missing', 'public', 'symlink', 'ambiguous', 'state_alias'])
@@ -366,7 +374,7 @@ def release(tmp_path):
     return paths, stage, {'backend/app.py': hashlib.sha256(b'tested').hexdigest()}
 
 
-@pytest.mark.parametrize('bad', ['hash', 'gate', 'pointer', 'id', 'verify', 'empty', None])
+@pytest.mark.parametrize('bad', ['hash', 'gate', 'pointer', 'id', 'stage', 'verify', 'empty', None])
 def test_success_requires_every_proof(tmp_path, bad):
     from deploy.observe_release import classify
     paths, stage, expected = release(tmp_path)
@@ -386,8 +394,18 @@ def test_success_requires_every_proof(tmp_path, bad):
         (paths.state / 'current').unlink()
     if bad == 'id':
         status(paths, {'status': 'succeeded', 'release': '../escape'})
+    if bad == 'stage':
+        (stage / 'backend/app.py').unlink()
+        (stage / 'backend').rmdir()
+        stage.rmdir()
     before = {p: p.read_bytes() for p in tmp_path.rglob('*') if p.is_file()}
-    assert classify(paths, 100, expected, verify=verify) == ('failed' if bad else 'succeeded')
+    diagnostics = {}
+    assert classify(paths, 100, expected, verify=verify, diagnostics=diagnostics) == (
+        'verification_failed' if bad else 'succeeded')
+    assert diagnostics == (
+        {'phase': 'release_checks', 'reason': 'verification_failed'} if bad == 'verify'
+        else {'phase': 'release_proofs', 'reason': 'verification_failed'} if bad
+        else {'phase': 'status_recheck', 'reason': 'verified'})
     assert before == {p: p.read_bytes() for p in tmp_path.rglob('*') if p.is_file()}
     if not bad:
         assert calls == [(paths, stage, True)]
@@ -398,5 +416,8 @@ def test_fresh_failure_without_release_and_stale_ignored(tmp_path):
     paths = replace(Paths(), state=tmp_path)
     for outcome in ('failed', 'rolled_back', 'rollback_failed'):
         status(paths, {'status': outcome, 'error': 'secret'})
-        assert classify(paths, 100, {}, verify=lambda *a: pytest.fail('verify')) == 'failed'
+        diagnostics = {}
+        assert classify(paths, 100, {}, verify=lambda *a: pytest.fail('verify'),
+                        diagnostics=diagnostics) == 'failed'
+        assert diagnostics == {'phase': 'deployment_status', 'reason': 'deployment_failed'}
         assert classify(paths, 101, {}, verify=lambda *a: pytest.fail('verify')) is None

@@ -19,6 +19,10 @@ Merging and deployment are separate; only guarded deployment from verified main 
 
 Prefer small complete changes within the approved issue scope. Preserve existing behavior and assertions outside the requested change. Report exact observed verification; never claim a test, review, or check passed unless it did.
 
+Write PR descriptions as plain paragraphs using the repository template; include a literal Closes #N and all required evidence, with no Markdown markup in the body.
+
+For task handoff, a literal Closes #N is a readability convention; verify linkage from authenticated GitHub closing-issue references, never PR body text.
+
 The autonomous gate transition is conditional, not active by documentation alone.
 Until the parent operator verifies dependencies and actual current-head evidence and
 changes repository protection, require the exact pre-cutover contexts `source-ci`,
@@ -32,3 +36,8 @@ Installed/private host compatibility remains a guarded exact-main deployment gat
 See [`docs/autonomy-policy.md`](../docs/autonomy-policy.md). Coding agents and the
 read-only validator never change settings, publish statuses, activate services, or
 execute untrusted PR code on the host.
+
+Native-controls maintenance normally requires the scheduler-bound run ID/source
+SHA, an independently verified exact-main hosted artifact, and the managed
+installed-runtime host checks. Never fall back to a full local suite when hosted
+evidence is missing; `--local-full-checks` is an explicit diagnostic mode only.

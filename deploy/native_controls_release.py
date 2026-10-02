@@ -32,6 +32,13 @@ NATIVE_DEPENDENCIES = {
     Path('/usr/local/lib/hermes-agent/tools/delegate_tool.py'): '9559ddd8d407cf8d321b8751c714a9f221dd8bd7f09cd016274c5b830940f385',
 }
 TERMINAL = {'completed', 'failed', 'cancelled'}
+
+
+def _full_sha(value):
+    return (type(value) is str and len(value) == 40
+            and all(char in '0123456789abcdef' for char in value))
+
+
 APPROVED_CONTROL_HASHES = {
     'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
     'backend/native_run_controls.py': '6e3a8796028925ea771bf90b2b97ba1fd7a47cbbd979a71e9be7fb525c129b16',
@@ -147,7 +154,8 @@ def require_controls_capabilities(caps, *, session_delete_version, notification_
 def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
            run=subprocess.run, sleep=time.sleep, idle_timeout=1800,
            bootstrap_dedicated_native=False, probe=None, handoff=None,
-           rollback_verify=None):
+           rollback_verify=None, hosted_run_id=None, local_full_checks=False,
+           expected_source_sha=None):
     """One lock and one candidate, with owner-gated verified rollback.
 
     Notification candidates require synchronous callbacks:
@@ -160,10 +168,19 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
     Capture (when supplied), handoff, probe and rollback verification must return
     literal True only after completing their proof; no-op/truthy values fail closed.
     """
+    if (type(local_full_checks) is not bool
+            or (hosted_run_id is None) == (not local_full_checks)
+            or (hosted_run_id is not None
+                and (type(hosted_run_id) is not int or hosted_run_id <= 0))
+            or (expected_source_sha is not None and not _full_sha(expected_source_sha))
+            or (hosted_run_id is not None and expected_source_sha is None)
+            or (local_full_checks and not callable(checks))):
+        raise ValueError('Select exactly one valid native validation mode')
     from .git_source import preflight
-    preflight(paths, service_run=run, extra_paths=(native_dropin,))
+    git_sha = preflight(paths, service_run=run, extra_paths=(native_dropin,))
+    if expected_source_sha is not None and git_sha != expected_source_sha:
+        raise RuntimeError('Source no longer matches scheduled source SHA')
     from .assets import checked_path, publish_assets, restore_assets, _assets
-    from .frontend_release import build_frontend
     from backend.runs import RunJournal, RunConflict
     for path in (paths.source, paths.state, paths.webroot, paths.database, paths.dropin,
                  native_dropin, *(paths.state / n for n in
@@ -190,11 +207,17 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
         if prior.get('status') == 'rollback_failed':
             raise RuntimeError('Failed rollback requires operator recovery; gate remains closed')
         release_id = uuid.uuid4().hex
+        hosted_status = {}
+        validation_mode = 'hosted-artifact' if hosted_run_id is not None else 'local-full-checks'
         def report(state, **extra):
-            bridge.atomic_write(status, json.dumps(dict(status=state, release=release_id, **extra)))
+            record = dict(status=state, release=release_id, git_sha=git_sha,
+                          validation_mode=validation_mode, **hosted_status)
+            record.update(extra)
+            bridge.atomic_write(status, json.dumps(record))
         report('running')
         try:
-            stage = bridge.stage_release(paths.source, paths.state / 'releases' / release_id)
+            stage = bridge.stage_release(paths.source, paths.state / 'releases' / release_id,
+                                         git_sha=git_sha)
             candidate_hashes = approved_controls(stage)
             if 'backend/native_notifications.py' in candidate_hashes and not callable(probe):
                 raise RuntimeError('Notification release requires operator delivery receipt verification')
@@ -211,10 +234,24 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
             for name in ('backend/native_controls_service.py', 'backend/native_run_controls.py'):
                 if not (stage / name).is_file():
                     raise RuntimeError('Native controls candidate incomplete')
-            build_frontend(stage / 'frontend', stage / 'public')
+            if hosted_run_id is None:
+                from .frontend_release import build_frontend
+                build_frontend(stage / 'frontend', stage / 'public')
+            else:
+                import tempfile
+                from .release_artifact import acquire_verified_bundle
+                with tempfile.TemporaryDirectory(prefix='verified-', dir=paths.state) as temporary:
+                    evidence = acquire_verified_bundle(
+                        paths.source, hosted_run_id, Path(temporary) / 'bundle', run=run)
+                    hosted_status = bridge.stage_verified_bundle(
+                        stage, evidence, git_sha, hosted_run_id)
+                report('running')
             names = (*bridge.SOURCE_TREES, *bridge.SOURCE_FILES, 'public')
             frozen = bridge.fingerprints(stage, names)
-            checks(stage)
+            if hosted_run_id is None:
+                checks(stage)
+            else:
+                bridge.run_host_checks(paths, stage, run=run)
             if bridge.fingerprints(stage, names) != frozen:
                 raise RuntimeError('Staged source changed during checks')
             # Strict existing public verifier BEFORE admission or service mutation.
@@ -365,6 +402,12 @@ def require_native_quiescence(evidence):
     except (KeyError, TypeError, ValueError):
         raise RuntimeError('Unknown native readiness counts') from None
     return all(v == 0 for v in values)
+
+
+OPERATIONAL_UNSAFE_WORK = (
+    'shutdown_agents', 'stopping_runs', 'cancellation_uncertain',
+    'session_deletion_workers', 'notification_lifecycle_uncertain',
+)
 
 
 class NativeProbe:
@@ -553,7 +596,35 @@ class NativeProbe:
             idle = status in TERMINAL and idle
         return idle
 
-    def verify_unchanged(self, root, *, baseline):
+    @staticmethod
+    def _require_operational_activity(health):
+        work = health['native_maintenance']['work']
+        notifications = health['native_maintenance']['notifications']
+        if notifications['unpreserved'] != 0:
+            raise RuntimeError('Native notifications are not fully preserved')
+        if any(work[name] != 0 for name in OPERATIONAL_UNSAFE_WORK):
+            raise RuntimeError('Native lifecycle is not safe for observation')
+
+    def verify_operational(self, root):
+        """Verify a healthy running release without requiring maintenance idle."""
+        pid = self.attest(root)
+        source_hashes = approved_controls(root)
+        started = self._start_ticks(pid)
+        health = self.request('/health/detailed')
+        if (health.get('status') != 'ok' or type(health.get('pid')) is not int
+                or health['pid'] != pid):
+            raise RuntimeError('Native operational health or PID mismatch')
+        self._ready(health, root=root)
+        self._require_operational_activity(health)
+        caps = self.request('/v1/capabilities')
+        require_controls_capabilities(
+            caps, session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
+            notification_version=int('backend/native_notifications.py' in source_hashes))
+        self.verify_unchanged(root, baseline=dict(
+            root=str(root), legacy=False, caps=caps, source_hashes=source_hashes,
+            pid=pid, start_ticks=started), operational=True)
+
+    def verify_unchanged(self, root, *, baseline, operational=False):
         """Abort before restart: identity/health/auth, not a drain of live work."""
         from urllib.error import HTTPError
         pid = self.attest(root, legacy=baseline['legacy'])
@@ -582,6 +653,8 @@ class NativeProbe:
         require_native_quiescence(health)  # Validate typed known evidence, permit busy.
         if not baseline['legacy']:
             self._ready(health, baseline=baseline)  # Validate schema/source, permit busy.
+            if operational:
+                self._require_operational_activity(health)
         if json.dumps(self.request('/v1/capabilities'), sort_keys=True, allow_nan=False) != json.dumps(
                 baseline['caps'], sort_keys=True, allow_nan=False):
             raise RuntimeError('Unchanged native capabilities differ')
@@ -650,11 +723,30 @@ def main(argv=None, *, paths=None, run=subprocess.run):
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument('--schedule', action='store_true')
     modes.add_argument('--worker', action='store_true')
+    validation = parser.add_mutually_exclusive_group(required=True)
+    validation.add_argument('--hosted-run-id', type=int, action='append',
+                            help='Verify and deploy the exact current-main hosted release bundle')
+    validation.add_argument('--local-full-checks', action='store_true',
+                            help='Explicit diagnostic mode: rebuild assets and run the complete local suite')
+    parser.add_argument('--expected-source-sha', action='append',
+                        help='Worker-only source SHA captured by the scheduler')
     parser.add_argument('--bootstrap-dedicated-native', action='store_true',
                         help='Authorized exclusive-bridge-ingress maintenance bootstrap')
     parser.add_argument('--legacy-restart-approval', type=Path,
                         help='Private PID/count/backup-bound explicit notice-loss approval')
     args = parser.parse_args(argv)
+    if args.hosted_run_id is not None:
+        if len(args.hosted_run_id) != 1 or args.hosted_run_id[0] <= 0:
+            parser.error('--hosted-run-id must be supplied once as a positive integer')
+        args.hosted_run_id = args.hosted_run_id[0]
+    if args.expected_source_sha is not None:
+        if len(args.expected_source_sha) != 1 or not _full_sha(args.expected_source_sha[0]):
+            parser.error('--expected-source-sha must be supplied once as a full lowercase Git SHA')
+        args.expected_source_sha = args.expected_source_sha[0]
+    if args.schedule and args.expected_source_sha is not None:
+        parser.error('--expected-source-sha is captured by --schedule, not supplied')
+    if args.worker and args.hosted_run_id is not None and args.expected_source_sha is None:
+        parser.error('Hosted workers require the source SHA captured by --schedule')
     if args.legacy_restart_approval and not args.bootstrap_dedicated_native:
         parser.error('Legacy notice-loss approval requires explicit bootstrap')
     paths = paths or bridge.Paths()
@@ -662,7 +754,9 @@ def main(argv=None, *, paths=None, run=subprocess.run):
         raise RuntimeError('Run as application owner, never root')
     if args.schedule:
         from .git_source import preflight
-        preflight(paths, service_run=run)
+        expected_source_sha = preflight(paths, service_run=run)
+        if args.hosted_run_id is not None and not _full_sha(expected_source_sha):
+            raise RuntimeError('Hosted scheduling requires a verified full source SHA')
         from .assets import checked_path
         checked_path(paths.state)
         paths.state.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -681,6 +775,10 @@ def main(argv=None, *, paths=None, run=subprocess.run):
              '--expected', str(expected), '--unit', unit, '--timeout', '5640', '--watch-worker', '--native', '--notify-owner'], check=True)
         run([*common, '--unit=' + unit, '--on-active=5s', '--property=RuntimeMaxSec=5400',
              python, '-m', 'deploy.native_controls_release', '--worker',
+             *(('--hosted-run-id', str(args.hosted_run_id)) if args.hosted_run_id is not None
+               else ('--local-full-checks',)),
+             *(('--expected-source-sha', expected_source_sha)
+               if _full_sha(expected_source_sha) else ()),
              *(['--bootstrap-dedicated-native'] if args.bootstrap_dedicated_native else []),
              *(['--legacy-restart-approval', str(args.legacy_restart_approval)] if args.legacy_restart_approval else [])], check=True)
         print('Scheduled ' + unit + '; journalctl --user -f -u ' + unit + '.service; observer: ' + unit + '-observer')
@@ -699,7 +797,9 @@ def main(argv=None, *, paths=None, run=subprocess.run):
                verify=lambda stage, backend, **kw: bridge.verify_release(paths, stage, backend, run=run, **kw),
                native=native, run=run, bootstrap_dedicated_native=args.bootstrap_dedicated_native,
                handoff=notifications, probe=notifications.probe,
-               rollback_verify=notifications.verify_rollback)
+               rollback_verify=notifications.verify_rollback,
+               hosted_run_id=args.hosted_run_id, local_full_checks=args.local_full_checks,
+               expected_source_sha=args.expected_source_sha)
     return 0
 
 

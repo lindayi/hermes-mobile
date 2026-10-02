@@ -37,7 +37,7 @@ from deploy.workflow_lifecycle import (
 )
 from deploy.workflow_events import event_digest
 from deploy.task_receipts import (
-    ReceiptError, _expected_body, receipt_instruction, validate_task_receipt,
+    ReceiptError, receipt_body_matches, receipt_instruction, validate_task_receipt,
 )
 
 
@@ -137,15 +137,21 @@ def _valid_timestamp(value):
     return parsed.tzinfo is not None
 
 
-def enrollment_from_comment(issue, pull, comment):
+def enrollment_from_comment(issue, pull, comment, *, api=None):
     """Return a minimal enrollment record only for an exact owner command."""
     user = comment.get("user") if isinstance(comment, dict) else None
     body = comment.get("body") if isinstance(comment, dict) else None
     authorized_head = None
+    starter = None
+    if isinstance(body, str):
+        starter = re.fullmatch(
+            r"/hermes enroll ([0-9a-f]{40}) issue ([1-9][0-9]{0,9}) "
+            r"body-sha256 ([0-9a-f]{64})", body,
+        )
     if body != "/hermes enroll":
         if not isinstance(body, str):
             return None
-        match = re.fullmatch(r"/hermes enroll ([0-9a-f]{40})", body)
+        match = starter or re.fullmatch(r"/hermes enroll ([0-9a-f]{40})", body)
         if (not match or not _valid_timestamp(comment.get("created_at"))
                 or comment.get("updated_at") != comment["created_at"]):
             return None
@@ -173,6 +179,15 @@ def enrollment_from_comment(issue, pull, comment):
     if (type(pull_id) is not int or pull_id <= 0
             or not isinstance(pull_node_id, str) or not pull_node_id):
         return None
+    if starter:
+        from deploy.pull_handoff_binding import _pull_body_digest, _closing_issue_linked
+
+        if (api is None or int(starter.group(2)) > 2**31 - 1
+                or type(comment.get("id")) is not int or comment["id"] <= 0
+                or pull.get("draft") is not False
+                or _pull_body_digest(pull) != starter.group(3)
+                or not _closing_issue_linked(api, pull, int(starter.group(2)))):
+            return None
     enrollment = {
         "issue": issue["number"], "comment": comment.get("id"),
         "head": head_sha, "base": base_sha, "pull_id": pull_id,
@@ -180,7 +195,29 @@ def enrollment_from_comment(issue, pull, comment):
     }
     if authorized_head is not None:
         enrollment["authorized_head"] = authorized_head
+    if starter:
+        enrollment["starter_admission"] = {
+            "version": 1, "issue_number": int(starter.group(2)),
+            "head_sha": authorized_head, "body_sha256": starter.group(3),
+            "comment_id": comment["id"], "comment_created_at": comment["created_at"],
+        }
     return enrollment
+
+
+def _valid_starter_admission(value):
+    """Strict optional historical provenance; never compare to a later PR body/head."""
+    return (
+        isinstance(value, dict)
+        and set(value) == {"version", "issue_number", "head_sha", "body_sha256",
+                          "comment_id", "comment_created_at"}
+        and type(value["version"]) is int and value["version"] == 1
+        and type(value["issue_number"]) is int and 1 <= value["issue_number"] <= 2**31 - 1
+        and _is_sha(value["head_sha"])
+        and isinstance(value["body_sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", value["body_sha256"]) is not None
+        and type(value["comment_id"]) is int and value["comment_id"] > 0
+        and _valid_timestamp(value["comment_created_at"])
+    )
 
 
 def _renewed_bound_enrollment(prior, incoming):
@@ -470,7 +507,10 @@ def neutral_reconciliation_request(snapshot, attempts):
         "pull_request_description": _bounded_evidence(pull.get("body", ""))[:1600],
     }
     encoded_intent = json.dumps(intent, ensure_ascii=True, separators=(",", ":"))
-    key = f"{snapshot['issue']}:{head}:{main_sha}:{attempts + 1}:{encoded_intent}"
+    key = (
+        f"{snapshot['issue']}:{head}:{main_sha}:{base['sha']}:"
+        f"{attempts + 1}:{encoded_intent}"
+    )
     marker = f"{FIX_MARKER_PREFIX}{hashlib.sha256(key.encode()).hexdigest()[:20]}"
     body = (
         f"Neutral reconciliation for PR #{snapshot['issue']} at exact PR head `{head}`. "
@@ -495,6 +535,7 @@ def neutral_reconciliation_request(snapshot, attempts):
         "marker": marker, "body": body, "head": head, "attempt": attempts + 1,
         "issue": snapshot["issue"], "kind": "fix", "task_type": "neutral",
         "head_ref": branch, "main_sha": main_sha,
+        "recorded_base_sha": base["sha"],
     }
 
 
@@ -964,7 +1005,8 @@ def _valid_receipt_proof(action, comments):
     version = action.get("receipt_version", "v1")
     if (version not in {"v1", "v2"}
             or (version == "v2" and action["receipt_base"] != action.get("main_sha"))
-            or action["receipt_body"] != _expected_body(
+            or not receipt_body_matches(
+                action["receipt_body"],
                 action["receipt_nonce"], action["receipt_task_id"],
                 action["receipt_session_id"], action.get("issue"),
                 action["receipt_start_head"], action["receipt_head"],
@@ -1134,7 +1176,7 @@ class Coordinator:
             route += "&" + urlencode({"since": since.isoformat().replace("+00:00", "Z")})
         return _rest_list(self.api, route)
 
-    def _scan_enrollments(self, state):
+    def _scan_enrollments(self, state, *, admission_checks=None):
         commands, processed = [], []
         cursor = state.get("cursor")
         issues = self._issues(cursor)
@@ -1160,13 +1202,13 @@ class Coordinator:
                 body = comment.get("body")
                 if (body == "/hermes enroll"
                         or isinstance(body, str) and re.fullmatch(
-                            r"/hermes enroll [0-9a-f]{40}", body,
+                            r"/hermes enroll [0-9a-f]{40}(?: issue [^\n]*)?", body,
                         )):
                     processed.append(key)
                     if not issue.get("pull_request"):
                         continue
                     pull = self.api.get(f"repos/{REPOSITORY}/pulls/{issue['number']}")
-                    enrollment = enrollment_from_comment(issue, pull, comment)
+                    enrollment = enrollment_from_comment(issue, pull, comment, api=self.api)
                     if enrollment:
                         enrollment["last_open_seen"] = True
                         enrollment["last_open_head"] = enrollment["head"]
@@ -1186,17 +1228,22 @@ class Coordinator:
                     str(enrollment["issue"]),
                 )
                 renewed = _renewed_bound_enrollment(prior, enrollment)
+                effective = False
                 if renewed is not None:
+                    effective = True
                     candidates[str(enrollment["issue"])] = renewed
                 elif (not prior or (not prior.get("active")
                                   and isinstance(prior.get("comment"), int)
                                   and isinstance(enrollment.get("comment"), int)
                                   and enrollment["comment"] > prior["comment"])):
+                    effective = True
                     candidates[str(enrollment["issue"])] = {
                         **enrollment, "attempts": 0, "sensitive_sha": None,
                         "sensitive_authorization": None, "targeted_review": None,
                         "active": True,
                     }
+                if effective and "starter_admission" in enrollment and admission_checks is not None:
+                    admission_checks.append(deepcopy(enrollment))
         for action, item in commands:
             if action != "authorize":
                 continue
@@ -1235,7 +1282,48 @@ class Coordinator:
                 item["validated"] = True
         return issues, commands, processed, candidates
 
-    def _snapshot_pull(self, number, enrollment, main_sha):
+    def _compare_proves_ancestry(self, base_sha, tip_sha, *, allow_identical=False):
+        if not _is_sha(base_sha) or not _is_sha(tip_sha):
+            return False
+        try:
+            comparison = self.api.get(
+                f"repos/{REPOSITORY}/compare/{base_sha}...{tip_sha}",
+            )
+        except CoordinatorError:
+            return False
+        if not isinstance(comparison, dict):
+            return False
+        base_commit = comparison.get("base_commit")
+        merge_base = comparison.get("merge_base_commit")
+        ahead_by = comparison.get("ahead_by")
+        behind_by = comparison.get("behind_by")
+        if (not isinstance(base_commit, dict) or base_commit.get("sha") != base_sha
+                or not isinstance(merge_base, dict) or merge_base.get("sha") != base_sha
+                or type(ahead_by) is not int or ahead_by < 0
+                or type(behind_by) is not int or behind_by != 0):
+            return False
+        if base_sha == tip_sha:
+            return (
+                allow_identical and comparison.get("status") == "identical"
+                and ahead_by == 0
+            )
+        return comparison.get("status") == "ahead" and ahead_by > 0
+
+    def _historical_base_is_behind(self, pull, main_sha, head_sha):
+        base = pull.get("base") if isinstance(pull, dict) else None
+        if (not isinstance(base, dict) or pull.get("mergeable") is not True
+                or pull.get("mergeable_state") != "behind"
+                or base.get("ref") != MAIN_BRANCH
+                or not _github_identity(base.get("repo"), REPOSITORY_ID)
+                or not _is_sha(base.get("sha")) or base["sha"] == main_sha
+                or not self._compare_proves_ancestry(base["sha"], main_sha)
+                or not self._compare_proves_ancestry(
+                    base["sha"], head_sha, allow_identical=True,
+                )):
+            return False
+        return True
+
+    def _snapshot_pull(self, number, enrollment, main_sha, actions=None):
         if not {"pull_id", "pull_node_id", "repository_id"}.issubset(enrollment):
             raise CoordinatorError(
                 "Unsupported legacy enrollment: missing pull/repository identity; "
@@ -1281,6 +1369,39 @@ class Coordinator:
             and _is_sha(head.get("sha"))
         )
         sha = head.get("sha")
+        actions = self.store.actions() if actions is None else actions
+        has_ready_handoff = (
+            enrollment.get("authorized_head") is not None
+            and any(
+                isinstance(action, dict)
+                and action.get("kind") == "fix"
+                and action.get("issue") == number
+                and action.get("status") == "completed"
+                and (
+                    action.get("handoff_state") in HANDOFF_ACTIVE_STATES
+                    or (action.get("handoff_state") == "failed"
+                        and action.get("blocker") == "review_handoff_exhausted")
+                )
+                and action.get("receipt_result") == "ready"
+                and action.get("receipt_head") == sha
+                and action.get("receipt_base") == base.get("sha")
+                for action in actions.values()
+            )
+        )
+        has_neutral_claim = any(
+            isinstance(action, dict)
+            and action.get("kind") == "fix"
+            and action.get("task_type") == "neutral"
+            and action.get("issue") == number
+            and action.get("status") in {"sending", "uncertain", "sent"}
+            and action.get("head") == sha
+            and action.get("recorded_base_sha") == base.get("sha")
+            for action in actions.values()
+        )
+        historical_base = (
+            not scoped and (has_ready_handoff or has_neutral_claim)
+            and self._historical_base_is_behind(pull, main_sha, sha)
+        )
         files = _rest_list(
             self.api, f"repos/{REPOSITORY}/pulls/{number}/files?per_page=100",
         )
@@ -1312,7 +1433,8 @@ class Coordinator:
         )
         return {
             "issue": number, "enrollment": enrollment, "pull": pull, "head": sha,
-            "main_sha": main_sha, "scoped": scoped, "files": files,
+            "main_sha": main_sha, "scoped": scoped,
+            "historical_base": historical_base, "files": files,
             "files_complete": len(files) < 300, "reviews": reviews,
             "threads": threads, "threads_complete": threads_complete,
             "required": required, "policy_complete": policy_complete,
@@ -1325,11 +1447,92 @@ class Coordinator:
             "status": latest_status, "status_owned": status_is_owned,
         }
 
+    def _verified_stale_ready_handoff(self, action, snapshot):
+        pull = snapshot["pull"]
+        enrollment = snapshot["enrollment"]
+        base = pull.get("base") if isinstance(pull, dict) else None
+        comments = snapshot["comments"]
+        if (
+            not snapshot.get("historical_base")
+            or enrollment.get("authorized_head") is None
+            or (
+                action.get("handoff_state") not in {"pending", "waiting_review"}
+                and not (
+                    action.get("handoff_state") == "failed"
+                    and action.get("blocker") == "review_handoff_exhausted"
+                )
+            )
+            or action.get("ready_state") in {"sending", "ready_uncertain"}
+            or action.get("review_request_state") in {"sending", "uncertain"}
+            or action.get("receipt_result") != "ready"
+            or action.get("receipt_head") != snapshot["head"]
+            or not isinstance(base, dict)
+            or base.get("sha") != action.get("main_sha")
+            or action.get("receipt_base") != base.get("sha")
+            or not _pull_identity(pull, action)
+            or not _valid_receipt_proof(action, comments)
+        ):
+            return False
+        initial, authorized, blocked = _authorized_result_heads(
+            action["issue"], enrollment, self.store.actions(), comments,
+            base.get("sha"),
+        )
+        if (initial != enrollment.get("authorized_head")
+                or snapshot["head"] not in authorized
+                or snapshot["head"] in blocked):
+            return False
+        task_id = action.get("task_id")
+        if not isinstance(task_id, str) or not task_id or len(task_id) > 128:
+            return False
+        try:
+            task = self.api.get(
+                f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}",
+            )
+            receipt = validate_task_receipt(
+                task, action, pull, comments,
+                now=datetime.fromtimestamp(self.clock(), timezone.utc),
+            )
+        except (CoordinatorError, ReceiptError, TypeError, ValueError):
+            return False
+        return bool(
+            _task_terminal(task)
+            and task.get("state") == "completed"
+            and _task_scoped(task, snapshot)
+            and isinstance(receipt, dict)
+            and receipt.get("result") == "ready"
+            and receipt.get("comment_id") == action.get("receipt_comment_id")
+            and receipt.get("created_at") == action.get("receipt_created_at")
+            and receipt.get("body") == action.get("receipt_body")
+            and receipt.get("task_id") == action.get("receipt_task_id")
+            and receipt.get("session_id") == action.get("receipt_session_id")
+            and receipt.get("nonce") == action.get("receipt_nonce")
+            and receipt.get("start_head") == action.get("receipt_start_head")
+            and receipt.get("head") == action.get("receipt_head")
+            and receipt.get("base") == action.get("receipt_base")
+            and receipt.get("completed_at") == action.get("receipt_completed_at")
+        )
+
     def _reconcile_actions(self, snapshot, actions, *, apply, handoffs=None):
         # Reconciliation never performs handoff mutations; it only collects them.
         handoffs = [] if handoffs is None else handoffs
         number = snapshot["issue"]
         busy = False
+        if apply:
+            # Recover ambiguous ownership before advancing any predecessor,
+            # regardless of the detached scan snapshot's iteration order.
+            for key, action in actions.items():
+                if (action.get("issue") == number and action.get("kind") == "fix"
+                        and action.get("status") in {"sending", "uncertain"}
+                        and (action.get("status") == "sending"
+                             or not action.get("lifecycle_event_id"))):
+                    event = self._record_uncertain_task(action)
+                    self.store.update_action_with_lifecycle(
+                        key, "uncertain", event, now=self.clock(),
+                        blocker="execution_uncertain",
+                    )
+            # Recovery can supersede a handoff in prepared state. Never write
+            # its stale waiting_review scan record back over that transition.
+            actions = self.store.actions()
         for key, action in actions.items():
             if action.get("issue") != number:
                 continue
@@ -1355,9 +1558,14 @@ class Coordinator:
                 continue
             if action.get("kind") != "fix":
                 continue
-            if (status == "completed"
-                    and action.get("handoff_state") in HANDOFF_ACTIVE_STATES):
-                if apply:
+            if (status == "completed" and (
+                    action.get("handoff_state") in HANDOFF_ACTIVE_STATES
+                    or action.get("handoff_state") == "failed"
+            )):
+                if self._verified_stale_ready_handoff(action, snapshot):
+                    snapshot.setdefault("stale_handoff_keys", []).append(key)
+                    continue
+                if action.get("handoff_state") in HANDOFF_ACTIVE_STATES and apply:
                     busy = self._advance_task_handoff(
                         key, action, snapshot, deferred=handoffs,
                     ) or busy
@@ -1368,14 +1576,6 @@ class Coordinator:
                 busy = True
                 continue
             if status in {"sending", "uncertain"}:
-                if apply and (
-                    status == "sending" or not action.get("lifecycle_event_id")
-                ):
-                    event = self._record_uncertain_task(action)
-                    self.store.update_action_with_lifecycle(
-                        key, "uncertain", event, now=self.clock(),
-                        blocker="execution_uncertain",
-                    )
                 busy = True
                 continue
             if status == "sent":
@@ -1889,10 +2089,15 @@ class Coordinator:
             snapshot["neutral_blocker_attempt"] = neutral_blocker.get("attempt")
         reconciliation = _reconciliation_reasons(snapshot["pull"])
         needs_reconciliation = bool(reconciliation)
+        repair_scoped = (
+            snapshot["scoped"]
+            or (snapshot.get("historical_base")
+                and bool(snapshot.get("stale_handoff_keys")))
+        )
         mergeability_unknown = _mergeability_unknown(snapshot["pull"])
         repair = None
         attempts = snapshot["enrollment"].get("attempts", 0)
-        if (snapshot["scoped"] and not neutral_blocker and not mergeability_unknown
+        if (repair_scoped and not neutral_blocker and not mergeability_unknown
                 and snapshot["pull"].get("draft") is not True):
             if needs_reconciliation:
                 repair = neutral_reconciliation_request(snapshot, attempts)
@@ -1913,7 +2118,7 @@ class Coordinator:
         else:
             repair = None
         reasons = []
-        if not snapshot["scoped"]:
+        if not snapshot["scoped"] and not snapshot.get("historical_base"):
             reasons.append(("scope", "The pull request is not based on the current same-repository main branch."))
         reasons.extend(reconciliation)
         if mergeability_unknown:
@@ -1943,7 +2148,7 @@ class Coordinator:
         if agent_busy:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
         budget_needed = (
-            snapshot["scoped"] and not agent_busy and not mergeability_unknown
+            repair_scoped and not agent_busy and not mergeability_unknown
             and snapshot["pull"].get("draft") is not True and not neutral_blocker
             and (needs_reconciliation or repair_request(
                 head, 0, snapshot["threads"], snapshot["check_runs"],
@@ -2007,7 +2212,7 @@ class Coordinator:
         notification_outcomes, lifecycle_events = self._notification_outcomes(
             snapshot, reasons,
         )
-        if (snapshot["scoped"] and not agent_busy
+        if (repair_scoped and not agent_busy
                 and snapshot["pull"].get("draft") is not True
                 and attempts >= REPAIR_LIMIT and needs_reconciliation and not neutral_blocker
                 and neutral_reconciliation_request(snapshot, 0)):
@@ -2032,10 +2237,15 @@ class Coordinator:
         main_sha = main.get("sha") if isinstance(main, dict) else None
         if not _is_sha(main_sha):
             raise CoordinatorError("Current main commit was unavailable")
-        issues, commands, processed, enrollments = self._scan_enrollments(state)
+        admission_checks = []
+        issues, commands, processed, enrollments = self._scan_enrollments(
+            state, admission_checks=admission_checks,
+        )
         scans, sensitive_revocations = [], []
         for key, enrollment in enrollments.items():
-            snapshot = self._snapshot_pull(int(key), enrollment, main_sha)
+            snapshot = self._snapshot_pull(
+                int(key), enrollment, main_sha, actions=state["actions"],
+            )
             if (not snapshot.get("terminal") and enrollment.get("sensitive_sha")
                     and (enrollment["sensitive_sha"] != snapshot["head"]
                          or not sensitive_review_authorized(
@@ -2064,12 +2274,14 @@ class Coordinator:
         ]
         return {
             "cursor": cursor, "processed": processed, "commands": commands,
+            "starter_admissions": admission_checks,
             "enrollments": enrollments, "snapshots": scans, "pull_requests": plans,
             "observations": observations, "sensitive_revocations": sensitive_revocations,
             "now": self.clock(),
         }
 
-    def _fence_pull(self, number, head, main_sha=None):
+    def _fence_pull(self, number, head, main_sha=None, *,
+                    allow_historical_behind=False, expected_base_sha=None):
         pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
         base = pull.get("base") if isinstance(pull, dict) else None
         actual = pull.get("head") if isinstance(pull, dict) else None
@@ -2083,10 +2295,17 @@ class Coordinator:
                 or not _github_identity(actual.get("repo"), REPOSITORY_ID)
                 or not _github_identity(base.get("repo"), REPOSITORY_ID)):
             return False
+        if expected_base_sha is not None and base.get("sha") != expected_base_sha:
+            return False
         if main_sha is not None:
             current_main = self.api.get(f"repos/{REPOSITORY}/commits/{MAIN_BRANCH}")
-            if (not isinstance(current_main, dict) or current_main.get("sha") != main_sha
-                    or base.get("sha") != main_sha):
+            if not isinstance(current_main, dict) or current_main.get("sha") != main_sha:
+                return False
+            if (base.get("sha") != main_sha
+                    and (not allow_historical_behind
+                         or not self._historical_base_is_behind(
+                             pull, main_sha, head,
+                         ))):
                 return False
         return pull
 
@@ -2110,9 +2329,16 @@ class Coordinator:
 
     def _dispatch_task(self, action):
         key = action["key"]
+        neutral = action.get("task_type") == "neutral"
         if not _is_sha(action.get("main_sha")):
             return "superseded"
-        current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
+        current = self._fence_pull(
+            action["issue"], action["head"], action["main_sha"],
+            allow_historical_behind=neutral,
+            expected_base_sha=(
+                action.get("recorded_base_sha") if neutral else None
+            ),
+        )
         if not current:
             return "superseded"
         if current.get("draft") is not False:
@@ -2133,7 +2359,6 @@ class Coordinator:
         if _mergeability_unknown(current):
             return "mergeability-unknown"
         reconciliation = _reconciliation_reasons(current)
-        neutral = action.get("task_type") == "neutral"
         if neutral and not reconciliation:
             return "superseded"
         if not neutral and reconciliation:
@@ -2173,7 +2398,13 @@ class Coordinator:
             return "superseded"
         tasks = _rest_list(self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
                            collection="tasks")
-        current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
+        current = self._fence_pull(
+            action["issue"], action["head"], action["main_sha"],
+            allow_historical_behind=neutral,
+            expected_base_sha=(
+                action.get("recorded_base_sha") if neutral else None
+            ),
+        )
         if not _pull_identity(current, action) or current["head"].get("ref") != branch:
             return "superseded"
         if not self._authorized_dispatch_head(
@@ -2230,11 +2461,7 @@ class Coordinator:
                 task_created_at=response["created_at"],
             )
             return "uncertain"
-        self.store.update_action(
-            key, "sent", task_id=task_id,
-            task_created_at=response["created_at"],
-            owner_id=OWNER_ID, repository_id=REPOSITORY_ID,
-        )
+        self.store.accept_task(key, task_id, response["created_at"])
         return "sent"
 
     def _publish_status(self, action, snapshot, actor_id):
@@ -2462,7 +2689,30 @@ class Coordinator:
         self.store.update_action(key, "sent")
         return "sent"
 
+    def _fence_starter_admissions(self, admissions):
+        """Reprove effective new admissions after all preparation, before any commit.
+
+        This is admission-only provenance, not a lifetime body/linkage pin.
+        A failure discards the whole prepared scan via run's finally block.
+        """
+        for expected in admissions:
+            number = expected["issue"]
+            comments = _all_review_comments(self.api, number, None)
+            matches = [comment for comment in comments
+                       if isinstance(comment, dict) and comment.get("id") == expected["comment"]]
+            if len(matches) != 1:
+                raise CoordinatorError("Starter admission command changed before state commit")
+            pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
+            current = enrollment_from_comment(
+                {"number": number, "pull_request": True}, pull, matches[0], api=self.api,
+            )
+            if (current is None or any(current.get(key) != value
+                                       for key, value in expected.items()
+                                       if key not in {"last_open_seen", "last_open_head"})):
+                raise CoordinatorError("Starter admission binding changed before state commit")
+
     def _apply(self, plan, *, after_commit=None):
+        self._fence_starter_admissions(plan.get("starter_admissions", ()))
         self.store.commit_scan(
             plan["cursor"], plan["processed"], commands=plan["commands"],
             retirements=[
@@ -2733,7 +2983,7 @@ def _retirable_action(action, current_head, inactive):
     """Only positively terminal records may be retired; unresolved claims stay."""
     status = action.get("status")
     if action.get("kind") == "fix":
-        if action.get("handoff_state") not in {None, "done", "failed"}:
+        if action.get("handoff_state") not in {None, "done", "failed", "superseded"}:
             return False
         action_head = (
             action.get("receipt_head")
@@ -2831,6 +3081,10 @@ class StateStore:
                or not 0 <= item.get("sensitive_generation", 0) <= 2**31 - 1
                for item in data["enrollments"].values()):
             raise CoordinatorError("Sensitive authorization episode is invalid")
+        if any("starter_admission" in item
+               and not _valid_starter_admission(item["starter_admission"])
+               for item in data["enrollments"].values()):
+            raise CoordinatorError("Starter admission provenance is invalid")
         data.setdefault("lifecycle_events", [])
         if (not isinstance(data["lifecycle_events"], list)
                 or len(data["lifecycle_events"]) > MAX_LIFECYCLE_EVENTS
@@ -3118,9 +3372,17 @@ class StateStore:
                         # Mirror the terminal action deletion above for retired keys.
                         if key in data["retired"]:
                             data["retired"][key]["actions"] = []
-                    data["enrollments"][key] = {
+                    enrollment = {
                         **item, "attempts": attempts, "sensitive_sha": None, "active": True,
                     }
+                    previous = data["enrollments"].get(key, {})
+                    if "receipt_proofs" in previous:
+                        if not isinstance(previous["receipt_proofs"], list):
+                            raise CoordinatorError("Stored task receipt proofs are invalid")
+                        enrollment["receipt_proofs"] = deepcopy(
+                            previous["receipt_proofs"],
+                        )
+                    data["enrollments"][key] = enrollment
             for action, item in commands:
                 if action == "authorize" and item.get("validated") is True:
                     enrollment = data["enrollments"].get(str(item.get("issue")))
@@ -3243,6 +3505,44 @@ class StateStore:
                 action.update(fields)
         self._mutate(update)
 
+    @staticmethod
+    def _supersede_neutral_predecessors(data, action):
+        for previous in data["actions"].values():
+            if (
+                previous.get("kind") == "fix"
+                and previous.get("issue") == action.get("issue")
+                and previous.get("pull_id") == action.get("pull_id")
+                and previous.get("pull_node_id") == action.get("pull_node_id")
+                and previous.get("repository_id") == REPOSITORY_ID
+                and previous.get("status") == "completed"
+                and previous.get("receipt_result") == "ready"
+                and previous.get("receipt_head") == action.get("head")
+                and previous.get("receipt_base") == action.get("recorded_base_sha")
+                and (
+                    previous.get("handoff_state") in HANDOFF_ACTIVE_STATES
+                    or (previous.get("handoff_state") == "failed"
+                        and previous.get("blocker") == "review_handoff_exhausted")
+                )
+            ):
+                previous["handoff_state"] = "superseded"
+
+    def accept_task(self, key, task_id, task_created_at):
+        def accept(data):
+            action = data["actions"].get(key)
+            if (not isinstance(action, dict) or action.get("status") != "sending"
+                    or action.get("kind") != "fix"
+                    or not isinstance(task_id, str) or not task_id or len(task_id) > 128
+                    or not _valid_timestamp(task_created_at)):
+                raise CoordinatorError("Task claim could not be accepted atomically")
+            action.update(
+                status="sent", task_id=task_id,
+                task_created_at=task_created_at,
+                owner_id=OWNER_ID, repository_id=REPOSITORY_ID,
+            )
+            if action.get("task_type") == "neutral":
+                self._supersede_neutral_predecessors(data, action)
+        self._mutate(accept)
+
     def update_action_with_lifecycle(self, key, status, event, *, now=None, **fields):
         def update(data):
             action = data["actions"].get(key)
@@ -3254,6 +3554,9 @@ class StateStore:
                 )
             action["status"] = status
             action.update(fields)
+            if (status == "uncertain" and action.get("kind") == "fix"
+                    and action.get("task_type") == "neutral"):
+                self._supersede_neutral_predecessors(data, action)
             enrollment = data["enrollments"].get(str(action.get("issue")), {})
             if (enrollment.get("authorized_head") is not None
                     and status == "completed" and fields.get("receipt_result")):

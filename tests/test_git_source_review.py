@@ -194,7 +194,7 @@ def test_native_schedule_non_git_default_commands_rejected_before_side_effects(t
     monkeypatch.setattr(subprocess, 'Popen', forbidden_popen)
     kwargs = {'run': subprocess.run} if explicit else {}
     with pytest.raises(RuntimeError, match='Git source'):
-        native_release.main(['--schedule'], paths=paths, **kwargs)
+        native_release.main(['--schedule', '--local-full-checks'], paths=paths, **kwargs)
     assert commands == []
     assert not paths.state.exists()
     assert not paths.dropin.exists()

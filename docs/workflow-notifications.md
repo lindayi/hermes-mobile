@@ -302,14 +302,54 @@ verified `deployed` outcome.
 `deploy/hermes-workflow-notifications.service` is a fixed local `--apply`
 entrypoint with no command, network, or user-selection inputs. Its timer is
 provided as `deploy/hermes-workflow-notifications.timer`. Neither template is
-installed, enabled, or started by this change. The service has a private
-network namespace because ingestion only writes local SQLite records; the
-existing push sender remains a separate component.
+installed, enabled, or started by this change. Ingestion only writes local SQLite
+records; the existing push sender remains a separate component.
 
-The #30 exporter is not present in this branch. Before any operator installs
-or activates these templates, the parent must independently verify the schema
-parity and read-only producer/owner/path binding against the exact reviewed
-head. Until then, the fixed export is absent and the adapter remains unavailable.
+### Issue #58 user-unit security contract
+
+Baseline `06374370a0e8dd2ae0b76516fb2f1c24611620b1` configures
+`PrivateDevices=yes`, which fails before application entry with
+`218/CAPABILITIES` on the target user manager. Issue #58 records the owner's
+approval of the following bounded security tradeoff, not equivalent isolation:
+
+* Remove only `PrivateDevices=yes`; add `RestrictAddressFamilies=AF_UNIX`,
+  `SystemCallArchitectures=native`, and `SystemCallFilter=~@raw-io`.
+* Preserve `NoNewPrivileges=yes`, `PrivateTmp=yes`, `ProtectSystem=strict`,
+  `ProtectHome=read-only`, `UMask=0077`, the existing writable path, and the fixed
+  working directory, environment and command. Retain `PrivateNetwork=yes` as
+  best effort: the target user manager falls back without a network namespace.
+* The address-family filter restricts new `socket()` calls on supported systems;
+  the native-architecture restriction guards against alternate-ABI bypasses. It
+  does not restrict inherited/passed sockets or AF_UNIX-mediated access, and is
+  not equivalent to network-namespace isolation or a complete no-network boundary.
+* The raw-I/O syscall filter retains that part of `PrivateDevices` protection,
+  but does **not** provide a private `/dev`, `DevicePolicy=closed`, or the removed
+  capability bounding-set restrictions. Device-node access remains subject to
+  ordinary host permissions. Configuration retention is not proof of effective
+  filesystem/mount isolation on an unprivileged user manager.
+
+Synthetic acceptance reads the source unit without starting it, checks the exact
+replacement and all retained settings, and checks the deliberate source pin and
+independent literal fixture against actual bytes. Missing, malformed or mutated
+unit-source evidence must still block policy readiness. These tests do not prove
+kernel enforcement, application compatibility, or Inbox/ACK delivery.
+
+Source merge requires independent exact-head review and protected gates. It is
+separate from operator authorization and installed-service qualification. Only
+after approved source is merged may the operator qualify a bounded real service
+cycle, Inbox/ACK behavior, duplicate suppression and restart behavior before timer
+enablement. Push eligibility is distinct from physical push receipt. Preserve the
+failed-unit evidence and workflow history; do not fabricate events or rewrite
+receipts. This source change does not alter installed services, timers, production
+state, host privileges, or unrelated coordinator/starter policy. If exact
+device/network namespace isolation is required, leave notifications disabled
+pending a separately approved supported host configuration; do not relax host
+policy as a workaround.
+
+Before any operator installs or activates these templates, the parent must
+independently verify schema parity and read-only producer/owner/path binding
+against the exact reviewed head. Source presence alone does not establish that
+the fixed export is available or that the installed adapter is qualified.
 
 All tests use isolated synthetic files and SQLite databases. They do not probe
 live notification devices, use production credentials, or access production

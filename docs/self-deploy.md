@@ -86,6 +86,7 @@ release command above.
 ```sh
 cd /home/lindayi/projects/hermes-mobile-git && .venv/bin/python -m deploy.self_deploy --status
 journalctl --user -u hermes-mobile-deploy-UNIT_ID.service
+journalctl --user -u hermes-mobile-deploy-UNIT_ID-observer.service
 ```
 
 Use the actual unique unit printed by the scheduling command. `--status` is a
@@ -95,6 +96,9 @@ admission gate before concluding it is healthy. Test/staging errors are reported
 as `failed`, a successful rollback as `rolled_back`, and rollback verification
 failure as `rollback_failed`. A scheduling command succeeding is not a completed
 release; report final success only after worker status/logs confirm it.
+The separate observer journal reports `failed` only for an explicit terminal
+deployment failure; `verification_failed` means that success could not be proven.
+Its phase/reason fields are fixed allowlisted diagnostics, never raw exceptions.
 
 ## Versioned public assets
 

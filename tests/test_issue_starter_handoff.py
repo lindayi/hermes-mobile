@@ -1,10 +1,12 @@
 """Exercise actual starter output through the paired coordinator source scanner."""
+from copy import deepcopy
+
 import pytest
 
 from deploy import cloud_coordinator
 
 from test_issue_starter import (
-    FakeApi, REPOSITORY, completed_task, issue_comment, make_coordinator,
+    enrollment_command, FakeApi, REPOSITORY, completed_task, issue_comment, make_coordinator,
     pull_request, start_task,
 )
 
@@ -25,18 +27,23 @@ def test_real_starter_command_is_sha_bound_at_consumer_scan(tmp_path, consumer, 
     api = PushApi(pulls=[pull_request()])
     start_task(tmp_path, api)
     api.task_detail = completed_task()
-    assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == 1
+    assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == (
+        0 if race == "before_post" else 1
+    )
     emitted = next(c for c in api.comments if c["id"] == 9101)
-    assert emitted["body"] == "/hermes enroll " + "a" * 40
+    assert emitted["body"] == enrollment_command()
     if race in {"after_post", "edited_comment"}:
         api.pulls[0]["head"]["sha"] = "c" * 40
     if race == "edited_comment":
         # The producer accepted A, but the same owner comment ID now names B.
-        emitted["body"] = "/hermes enroll " + "c" * 40
+        emitted["body"] = enrollment_command(head="c" * 40)
         emitted["updated_at"] = "2026-10-01T21:01:00Z"
         assert emitted["created_at"] != emitted["updated_at"]
 
     class ScanApi:
+        def graphql(self, query, variables):
+            return api.graphql(query, variables)
+
         def get_all(self, route, *, collection=None):
             if route.startswith(f"repos/{REPOSITORY}/issues?"):
                 return [{"number": 41, "pull_request": {"url": "pull/41"}}]
@@ -77,10 +84,92 @@ def test_real_starter_command_is_sha_bound_at_consumer_scan(tmp_path, consumer, 
         assert candidates["41"]["authorized_head"] == "c" * 40
 
 
+@pytest.mark.parametrize("base_sha", [{}, {"sha": None}, {"sha": "not-a-sha"}, {"sha": "B" * 40}],
+                         ids=["missing", "null", "malformed", "uppercase"])
+@pytest.mark.parametrize("stage", ["initial", "final_reread", "after_post"])
+def test_invalid_base_sha_never_completes_starter_handoff(tmp_path, base_sha, stage):
+    class InvalidBaseApi(FakeApi):
+        def invalidate_base(self):
+            self.pulls[0]["base"].pop("sha", None)
+            self.pulls[0]["base"].update(base_sha)
+
+        def get(self, route):
+            # REST reads are separate snapshots, not aliases of mutable fixtures.
+            return deepcopy(super().get(route))
+
+        def post(self, route, body):
+            response = super().post(route, body)
+            if ((stage == "final_reread" and route == "graphql"
+                 and "closingIssuesReferences" in body["query"])
+                    or (stage == "after_post" and route.endswith("/issues/41/comments"))):
+                self.invalidate_base()
+            return response
+
+    api = InvalidBaseApi(pulls=[pull_request()])
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    if stage == "initial":
+        api.invalidate_base()
+    starter = make_coordinator(tmp_path, api)
+    assert starter.run(apply=True)["handed_off"] == 0
+    saved = starter.store.snapshot()["commands"]["28:9001"]
+    assert saved["phase"] != "handed_off"
+    assert saved.get("enrollment_state") != "done"
+    assert len([r for r, _ in api.posts if r.endswith("/issues/41/comments")]) == (
+        1 if stage == "after_post" else 0
+    )
+    if stage == "final_reread":
+        assert api.pull_detail_reads == 2
+        assert any("closingIssuesReferences" in c["query"] for c in api.graphql_calls)
+    if stage != "after_post":
+        assert not any("markPullRequestReadyForReview" in c["query"] for c in api.graphql_calls)
+    # Restart may publish a blocker receipt, but cannot retry task/enrollment/readiness.
+    handoff_writes = [p for p in api.posts if not p[0].endswith("/issues/28/comments")]
+    ready_writes = [c for c in api.graphql_calls if "markPullRequestReadyForReview" in c["query"]]
+    assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == 0
+    assert [p for p in api.posts if not p[0].endswith("/issues/28/comments")] == handoff_writes
+    assert [c for c in api.graphql_calls if "markPullRequestReadyForReview" in c["query"]] == ready_writes
+
+
+@pytest.mark.parametrize("base_sha", [{}, {"sha": None}, {"sha": "not-a-sha"}, {"sha": "B" * 40}],
+                         ids=["missing", "null", "malformed", "uppercase"])
+def test_consumer_rejects_actual_starter_command_with_invalid_base_sha(tmp_path, consumer, base_sha):
+    api = FakeApi(pulls=[pull_request()])
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == 1
+    emitted = next(c for c in api.comments if c["id"] == 9101)
+    api.pulls[0]["base"].pop("sha")
+    api.pulls[0]["base"].update(base_sha)
+
+    class ScanApi:
+        def graphql(self, query, variables):
+            return api.graphql(query, variables)
+
+        def get_all(self, route, *, collection=None):
+            if route.startswith(f"repos/{REPOSITORY}/issues?"):
+                return [{"number": 41, "pull_request": {"url": "pull/41"}}]
+            if route.startswith(f"repos/{REPOSITORY}/issues/41/comments?"):
+                return [emitted]
+            raise AssertionError(route)
+
+        def get(self, route):
+            assert route == f"repos/{REPOSITORY}/pulls/41"
+            return deepcopy(api.pulls[0])
+
+    store = consumer.StateStore(tmp_path / "consumer" / "state.json")
+    worker = consumer.Coordinator(ScanApi(), store)
+    _, commands, processed, candidates = worker._scan_enrollments(store.snapshot())
+    assert commands == [] and candidates == {}
+    assert processed == [str(emitted["id"])]
+    store.commit_scan("2026-10-01T22:00:00Z", processed, commands=commands)
+    assert store.snapshot()["enrollments"] == {}
+
+
 @pytest.mark.parametrize("outcome", ["response", "lost", "crash"])
 @pytest.mark.parametrize("visible", [True, False])
 def test_consumed_historical_enrollment_requires_fresh_handoff(tmp_path, consumer, outcome, visible):
-    historical = issue_comment(comment_id=9100, body="/hermes enroll " + "a" * 40)
+    historical = issue_comment(comment_id=9100, body=enrollment_command())
 
     class EnrollmentApi(FakeApi):
         def get(self, route):
@@ -106,6 +195,9 @@ def test_consumed_historical_enrollment_requires_fresh_handoff(tmp_path, consume
     api.comments.append(historical)
 
     class ScanApi:
+        def graphql(self, query, variables):
+            return api.graphql(query, variables)
+
         def get_all(self, route, *, collection=None):
             if route.startswith(f"repos/{REPOSITORY}/issues?"):
                 return [{"number": 41, "pull_request": {"url": "pull/41"}}]
@@ -168,7 +260,7 @@ def test_consumed_historical_enrollment_requires_fresh_handoff(tmp_path, consume
 
 @pytest.mark.parametrize("comment_id", [9099, 9100])
 def test_historical_post_response_is_not_fresh_enrollment_proof(tmp_path, comment_id):
-    historical = issue_comment(comment_id=comment_id, body="/hermes enroll " + "a" * 40)
+    historical = issue_comment(comment_id=comment_id, body=enrollment_command())
 
     class HistoricalResponseApi(FakeApi):
         def post(self, route, body):
@@ -200,7 +292,7 @@ def test_legacy_bare_comment_is_not_starter_handoff_proof(tmp_path):
     api.task_detail = completed_task()
     assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == 1
     assert [body["body"] for route, body in api.posts
-            if route.endswith("/issues/41/comments")] == ["/hermes enroll " + "a" * 40]
+            if route.endswith("/issues/41/comments")] == [enrollment_command()]
 
 
 @pytest.mark.parametrize("change", ["title", "body", "renamed", "body_edit"])
@@ -238,7 +330,7 @@ def test_uncertain_comment_cannot_reconcile_using_wrong_proof(tmp_path, proof):
     if proof == "bare":
         posted["body"] = "/hermes enroll"
     elif proof == "different_sha":
-        posted["body"] = "/hermes enroll " + "c" * 40
+        posted["body"] = enrollment_command(head="c" * 40)
     else:
         posted["user"] = {"id": 99}
     for _ in range(3):

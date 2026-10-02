@@ -124,9 +124,22 @@ status modes. The ID selects CI evidence, **not approval**: the pull worker must
 independently verify the environment-approved intent before invoking it. There
 is no production enablement in this artifact implementation.
 
-Keep the no-ID path for explicit conservative full-local validation. Native,
-installed-dependency and initial-bootstrap changes still require operator
-maintenance, not hosted artifacts as a bypass.
+Keep the no-ID path for explicit conservative full-local validation. Native
+controls maintenance also remains operator-authorized, but its normal schedule and
+worker path now requires `--hosted-run-id ID`: the scheduler binds that immutable
+run ID to its fresh source SHA, and the worker refuses a changed source before
+staging or admission. It independently acquires the same exact-main attested
+bundle, stages its exact source/public maps through the shared release-stage
+verifier, and runs the complete installed-runtime host partition once. It never
+rebuilds generated assets or runs the full portable suite on the server in hosted
+mode. Missing or invalid hosted evidence blocks maintenance; it does not fall back
+to local checks. `--local-full-checks` is a separate explicit diagnostic opt-in for
+conservative full-local validation, not routine deployment.
+
+Native status records bind the staged release `git_sha` and validation mode. Only
+after successful bundle verification do hosted records also include the exact
+source run ID/attempt, artifact ID, and bundle digest. These are local controller
+evidence, not a GitHub deployment approval or deployment status.
 
 ## Verification and rollout limits
 

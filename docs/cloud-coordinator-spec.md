@@ -17,15 +17,50 @@ ID. It ignores issue bodies, labels, links, and comments from other authors.
 An issue or pull request is enrolled by the exact comment `/hermes enroll` from
 that owner. The issue must identify a pull request whose head and base both belong
 to this repository and whose base branch is `main`. Existing pull requests are not
-enrolled by their age, label, author, or open state. The issue starter instead hands
-off with `/hermes enroll <40-lowercase-hex-head-sha>`; the consumer requires the
-value to match the current pull request head and stores it as immutable
-`authorized_head`. SHA-bound commands also require a valid timezone-aware
+enrolled by their age, label, author, or open state. The explicit manual form
+`/hermes enroll <40-lowercase-hex-head-sha>` also remains supported; the consumer
+requires the value to match the current pull request head and stores it as
+immutable `authorized_head`. The paired issue starter instead emits exactly
+`/hermes enroll <40lowerhex> issue <N> body-sha256 <64lowerhex>` from its reserved
+head, originating issue and raw UTF-8 PR body digest. `N` is canonical positive
+decimal bounded by 2147483647; digests are lowercase and malformed extended forms
+never downgrade to a manual prefix. SHA-bound commands require a valid timezone-aware
 `created_at` and an identical explicit `updated_at`; an edited or unverifiable
 comment is consumed without enrollment, even when its body names the current
 head. Only a genuinely new immutable command can authorize that head. The legacy
 bare command retains its historical timestamp compatibility.
 A stale or mismatched command is consumed without enrollment.
+
+Extended starter admission additionally requires a strict positive integer comment
+ID and owner ID, an explicitly non-draft open same-repository PR, matching current
+head/body, and exactly one canonical originating-issue closing edge. The shared
+leaf `deploy/pull_handoff_binding.py` verifies complete bounded GraphQL pages
+(20 pages, 100 nodes/page, 60000 body characters), anchored to REST repository
+node identity and the same PR/head/ref/base/body snapshot, then rereads REST.
+Description text and injected linkage flags never confer authority. Without the
+authenticated API verifier, the extended parser cannot admit a PR.
+
+After all prepared planning and lifecycle source reads, immediately before
+`commit_scan`, every effective new extended admission/renewal repeats the unchanged
+command identity/body/timestamp and live binding proof. A late mismatch or
+incomplete read aborts the entire preparation: no cursor/events, enrollment,
+receipts, retirement/export, or external write commits. Compact optional
+`starter_admission` metadata contains exactly version 1, `issue_number`,
+`head_sha`, `body_sha256`, `comment_id`, and `comment_created_at`; present metadata
+is strictly validated on state load. Enrollment `issue` still denotes the PR.
+Absence remains valid for supported identity-bound legacy enrollment; identity-less
+legacy active state remains fail-closed.
+
+This fence is admission-only. Later body reports or changed canonical linkage do
+not revoke a durably admitted PR; PR45 receipt-result heads, restart/compaction,
+manual renewal and existing repair budgets retain their original contracts.
+Provenance does not replace immutable `authorized_head` or sensitive-head gates.
+GitHub reads, durable local commit and remote mutations are not a single atomic
+transaction. Acceptance records the final coherent admission snapshot; edits after
+that read remain a remote race, not a claim of permanent body immutability.
+Legacy SHA-only starter output cannot be distinguished from manual authority:
+review in-flight old commands and deploy both sides together before activation.
+
 For a sensitive head, the owner must separately publish a formal `COMMENTED`
 independent-agent review, then comment
 `/hermes authorize-sensitive <head-sha> review <positive-review-id> <body-sha256>`.
@@ -302,6 +337,40 @@ Deferred ready/review handoffs recheck it after the scan commit; a new observed 
 head clears stale sensitive authorization. A typed blocker remains `task-result-blocked`,
 not an unrelated push. A receipt is not review or CI success. Bare manual enrollments
 retain PR33 lifecycle and receipt handoff behavior.
+
+If main advances while a completed SHA-bound `ready` receipt is awaiting its review
+handoff, including a handoff blocked only by its bounded review-wait limit, a stale
+PR base may be used only for the bounded neutral reconciliation path. The live PR
+must still be the enrolled same-repository pull request on `main`,
+with `mergeable: true`, `mergeable_state: behind`, and the exact unchanged receipt
+result head. The coordinator reads the authenticated compare endpoint for the
+recorded base against both current main and that result head. It requires the real
+compare fields `status`, `ahead_by`, `behind_by`, `base_commit.sha`, and
+`merge_base_commit.sha`, with the recorded base as both base and merge base,
+non-boolean nonnegative counts, zero `behind_by`, and `ahead` (or `identical` only
+for equal input SHAs); `ahead` requires unequal input SHAs. Missing, malformed,
+unknown, diverged, or inconsistent compare evidence fails closed. Before releasing
+the old handoff lock, the coordinator re-fetches the exact task by its durable ID
+and revalidates its terminal state, identity, session, nonce, and complete unchanged
+remote receipt. The recorded dispatch base and immutable initial authorization are
+never rewritten. Only a positively authorized result head can use this exception,
+and the neutral task consumes the existing combined three-attempt budget. Once that
+neutral task is positively accepted, its task ID and the superseded predecessor
+handoff are committed in one StateStore mutation. An ambiguous neutral POST instead
+leaves an uncertain claim as the lock and atomically supersedes the predecessor.
+Restart recovery resolves pending sending/uncertain ownership before advancing any
+predecessor, irrespective of action iteration order, then reads the updated prepared
+state rather than replaying stale scan records. This also holds when the accepted
+remote task advanced the PR head before its acceptance metadata was persisted:
+no predecessor wait is charged and neither claim nor predecessor can trigger a
+duplicate POST or a false `execution_exhausted` lifecycle event. Superseded completed
+handoffs are terminal for retirement,
+while their validated receipt proofs remain in the enrollment across compaction and
+re-enrollment. Replay does not dispatch an accepted task twice. Historical-base
+scope is not current-main eligibility: stale PRs receive no status action or merge
+eligibility, and exact current-main, fresh review/check, status, and merge fences
+remain mandatory after reconciliation.
+
 Polling a claimed task requires positive integer creator, owner, and repository
 identities matching the fixed owner/repository before any terminal failure can
 release the lock or emit `task_failed`. Missing or malformed identity evidence
@@ -530,31 +599,52 @@ the separate Task UUID. The read-only cloud probe established session-environmen
 identity, not a source for the Task UUID (and not proof that such a source cannot
 exist).
 
-Post exactly one unchanged authenticated Copilot issue comment, with these exact
-ordered lines, no fences, extra fields, surrounding text or trailing newline:
+Post exactly one unchanged authenticated Copilot issue comment containing one
+contiguous v2 receipt block as its final unquoted lines. The posting transport may
+prepend an unchanged Markdown blockquote and reorder the receipt fields. Only ASCII
+blank lines (empty or containing only spaces/tabs) or blockquote lines may precede
+the block. A quoted prefix must end with an ASCII blank line immediately before
+the receipt header: without it, raw lines can be lazy continuation inside the
+quote. NBSP, controls and other Unicode whitespace are not blank separators.
+No fences, unquoted prose, extra fields, duplicate fields, or trailing newline
+are accepted. Quoted or code-formatted content is never receipt evidence.
+
+The entire unchanged v2 comment is limited to **8192 UTF-8 bytes and 64 LF-delimited
+lines**, inclusive of the quoted prefix, blank lines, header and seven fields.
+These finite limits leave room for a short quoted report and the eight-line receipt
+without admitting arbitrarily large stored proofs. Reject character lengths over
+8192 before encoding, reject malformed Unicode, then enforce the byte limit before
+counting or splitting; enforce the line limit before splitting. The same limits
+apply at first acceptance and persisted-proof revalidation. Plain v2 remains valid
+within these limits; the exact-body v1 contract is unchanged.
 
 ```text
 Hermes-Task-Receipt: v2
 nonce=<fixed-dispatch-nonce>
-session=<COPILOT_AGENT_SESSION_ID>
 pr=<fixed-pull-number>
+session=<COPILOT_AGENT_SESSION_ID>
 start_head=<fixed-dispatched-head-sha>
-head=<pushed-current-pull-head-sha>
 base=<fixed-dispatch-time-main-sha>
+head=<pushed-current-pull-head-sha>
 result=<ready|conflict_incompatible|policy_broken>
 ```
 
-Choose exactly one closed result value. After pushing and focused checks, the
-coding task must not idle waiting for CI/review: the parent controller handles
-those phases. `ready` is not passing CI, approval, merge or deployment success.
+Each field appears exactly once; field order may vary under the documented transport.
+Choose exactly one closed result value. After pushing and focused checks, the coding
+task must not idle waiting for CI/review: the parent controller handles those phases.
+`ready` is not passing CI, approval, merge or deployment success.
 
 Task identity still comes solely from the durable saved task ID and authenticated
 Task API response, never from a comment. The host validates exact returned task ID,
 `session.task_id`, task/session owner and repository, creator/user, nonce, exact
 PR and branch artifacts, and task/session/comment chronology. Receipt author and
 comment ID must be strict numeric GitHub identities (positive comment ID, no
-float/string/bool coercion). Missing, edited, duplicate, mixed-version, mixed-field,
-copied or otherwise noncanonical receipts fail closed.
+float/string/bool coercion). Missing, edited, duplicate, mixed-version, mixed-field, copied or otherwise
+noncanonical receipts fail closed. For v2 only, the consumer accepts the bounded
+transport above and stores the complete unchanged comment body; restart validation
+requires the remote author, comment ID, exact body, and timestamps to remain
+identical. All receipt identity, result-head, dispatch-base, chronology and immutable
+authorization bindings remain unchanged.
 
 The strict v1 reader remains for existing receipts and proofs: its body includes
 `task=<authenticated-task-id>` immediately after nonce, and its base must match

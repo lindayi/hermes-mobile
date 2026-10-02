@@ -53,11 +53,21 @@ refreshed after matching the accepted source-review hashes, merged-preservation
 hashes, and actual bytes from main `5316f7c75dced1bffafdb545cdd7677e98e855a6`.
 No native source is changed and no other historical pin is automatically refreshed.
 
-| Deliberately refreshed path | Current SHA-256 |
+| Historical native refresh path | SHA-256 at main5316 |
 | --- | --- |
 | `deploy/native_controls_release.py` | `b3d3c601db4afd9ff003f4df759fcb057c19a83b920206fb2766d1560fd99175` |
 | `backend/model_controls.py` | `206fb5164283c16f46c51da99babe1b5f5e8932f062b4a1ee5bc07affe1f2c34` |
 | `backend/native_notifications.py` | `230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610` |
+
+Issue #46's post-release observer change deliberately updates only the runtime
+inventory and independent test fixture for its two source files. These candidate
+pins describe the exact proposed bytes, not a historical main revision, independent
+review acceptance, or permission to activate the observer contract.
+
+| Issue #46 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/native_controls_release.py` | `0887a6ad4fa0bb5c1351089cc6c53fc8ff7be4c609f42d956d3a51642256dba5` |
+| `deploy/observe_release.py` | `bf01500fb253f7d41ce49d375bba63a9e4d80569eb376a6aeae50f56cf71923f` |
 
 The authorization lineage is `native25-final-runtime-review.json` (SHA-256
 `92642f88cb6c9daa5c381ea31cdd2648aba5aec2d51aa5bed7c0a2160f23448e`),
@@ -72,8 +82,68 @@ its `native25-route-bound-review.json` and PR33 merged-preservation lineage is
 accepted source evidence, not a still-unreviewed PR25 candidate or activation approval.
 It was absent only from the historical b85c098 baseline.
 
-The coordinator's exact 36-file static closure and fixed dependency inventory are
-retained. Shared backend dependencies keep their existing blocker labels. The five
+### Issue #52 native hosted-artifact candidate
+
+The proposed native hosted-artifact release change updates the current source
+inventory for the two release controllers below. The policy fixture keeps their
+historical merged-main bytes separate from these exact candidate hashes and checks
+the candidate against the source bytes. These are issue #52 candidate pins only;
+they do not assert independent review, merge, deployment, or gate activation.
+
+| Issue #52 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/native_controls_release.py` | `0887a6ad4fa0bb5c1351089cc6c53fc8ff7be4c609f42d956d3a51642256dba5` |
+| `deploy/self_deploy.py` | `592cc957ad79a1f020a02ec1ca72b53d68bbbd49a8800c16af8cdead13d45469` |
+
+The native-controller hash in both candidate tables and independent fixtures is
+the integrated issue #46 + #52 source: operational busy observation remains
+separate from idle-required maintenance with verified hosted artifacts. It replaces
+the separate PR47 and PR53 controller candidate hashes, not historical-main pins.
+The observer, self-deploy, and issue #48 starter/unit pins retain their accepted
+source bytes. This local assembly does not authorize activation or deployment.
+
+PR57 extends the assembled starter/consumer authority contract with the exact
+head/issue/body-digest command and a final prepared-scan admission fence. Its new
+`deploy/pull_handoff_binding.py` leaf is explicitly required, independently pinned,
+and mapped to `coordinator-review-contract`; missing, malformed and mutated bytes
+remain blocking. The PR57-only candidate at
+`2447f7960141ecdc24ad445deb0e93f858818691` supplied the following pins. Its
+coordinator digest predates the final PR55 restart-ordering integration; the
+combined overlay below supersedes that digest, not this historical provenance.
+PR58 notification-unit bytes and pins are unchanged.
+
+| Historical PR57 paired admission path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `ce40eadc705bf3887b7f6a7bf9f35f3a9c73241baf473fa83a65316bda5eac6a` |
+| `deploy/issue_starter.py` | `c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9` |
+| `deploy/pull_handoff_binding.py` | `e4cf47de3e1b7846da92796781f05437e8225773ddf13debcfc489b58aa50550` |
+
+The final combined source overlay retains PR55's `_reconcile_actions` from
+`181455bcb978e8fd9073ebccb90aea64f995efc4` and PR57's admission routines from
+`2447f7960141ecdc24ad445deb0e93f858818691`. Its coordinator SHA-256 is derived
+from the combined actual bytes, not either parent's digest. The shared helper
+subsequently omits an absent first-page cursor so both production API adapters
+request the same connection: the coordinator's CLI transport otherwise sends the
+literal string `None`, while the starter's JSON transport sends null. It also
+requires a valid lowercase 40-hex base SHA on the initial and final REST snapshots,
+matching the paired consumer's admission contract. All other linkage checks and
+pagination bounds remain unchanged:
+
+| Final PR55 + PR57 + PR58 assembly overlay | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `4a94bd43f7d350cb8aaee08650726893e6775872e8af20f3a0c8f7f61127345d` |
+| `deploy/pull_handoff_binding.py` | `3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b` |
+
+The runtime source pins and independent literal fixtures explicitly use these
+combined/current digests. The starter pin above and issue #58 unit pin below are
+unchanged. All other pins and historical baseline hashes are retained. Matching
+bytes and focused synthetic tests are consistency evidence only: final exact-head
+independent review and integration gates remain required, with no activation,
+deployment, installed-service qualification, or operational approval implied.
+
+The coordinator's exact 37-file static closure includes the PR57 shared canonical
+handoff proof leaf; the fixed 80-file dependency inventory remains explicit. Shared backend
+dependencies keep their existing blocker labels. The five
 PR29/PR40/PR42 dependency pins below match the accepted merged bytes in main5316;
 the separate literal fixtures and actual-byte/missing/malformed/mutation checks
 remain in every phase.
@@ -91,11 +161,13 @@ retains `pr29-producer-identities-review.json` lineage. The lifecycle/event/
 notification hashes are recorded in `pr40-final-status-assembly-review.json`,
 including the accepted PR42 retention assembly. Earlier PR33/PR32 reports remain
 historical lineage, not claims that their superseded hashes are current. All five
-dependencies and all ten launch paths below are byte-identical to main5316.
+dependency hashes above describe main5316, not all current assembly bytes. The
+receipt overlay and the retained issue #48 starter/unit changes supersede only
+their corresponding historical hashes; the other dependency/launch bytes remain.
 
 ### Issue #43 accepted source prerequisites and remaining operational debt
 
-The current coordinator and helper fingerprints below are issue #43 candidates,
+The historical coordinator and helper fingerprints below are issue #43 candidates,
 not the old unsafe PR16 checkpoint. The helper combines issue #43 strict review
 identity/owner-published structured evidence with the final PR40 helper
 `0480bde8fdd3ce714011ca4604de8ef1f4c500bc2bd82d7801ed2fb4da8955de`
@@ -126,7 +198,7 @@ the coordinator, workflow notifications, and issue starter. The pins and an
 independently spelled-out test fixture represent source consistency only; they
 do not constitute independent review, runtime evidence, or activation permission.
 
-| Issue #43 candidate path | SHA-256 |
+| Historical issue #43 candidate path | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c` |
 | `deploy/review_evidence.py` | `c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae` |
@@ -141,10 +213,72 @@ do not constitute independent review, runtime evidence, or activation permission
 | `deploy/hermes-mobile-issue-starter.service` | `1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69` |
 | `deploy/hermes-mobile-issue-starter.timer` | `848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92` |
 
-This assembly integrates final PR40 main
+Issue #58 deliberately refreshes only the notification service pin and its
+independent literal launch fixture; the historical issue #43 hash above is retained:
+
+| Issue #58 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/hermes-workflow-notifications.service` | `934effd6540b6a6ed026fcdac2dda6ebf176792e583c6738dc7b72dc737f199e` |
+
+This replaces unsupported `PrivateDevices` with UNIX-only address-family,
+native-architecture and raw-I/O syscall restrictions, retaining the other unit
+settings. It does not recreate private device or network namespaces; see the
+[security contract and activation boundary](workflow-notifications.md#issue-58-user-unit-security-contract).
+The `autonomy-launch-contract` blocker and all review/approval gates remain
+unchanged. This source pin proves neither installed-service qualification nor
+permission to enable the timer.
+
+The issue #48 starter and supported-user-unit changes retained from PR49 have
+these current assembly pins, also independently literal in the launch fixture:
+
+| Retained issue #48 path | SHA-256 |
+| --- | --- |
+| `deploy/issue_starter.py` | `49debd3c1da5252ea67322a0febb9eb5b56d0ac1a830f3718e4d07377993b517` |
+| `deploy/hermes-mobile-coordinator.service` | `49d6ebb6e24b4c0a06af3d10e6e2cce11dd6af7ee8056c99268058c2f6f2cab3` |
+
+Issue #56 updates the starter's current source candidate pin to
+`c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9`. This is
+source consistency only, not independent review, runtime evidence, or activation
+permission.
+
+Issue #50's historical receipt-transport candidate overlaid only
+`deploy/cloud_coordinator.py` and `deploy/task_receipts.py` in the source inventory.
+The historical PR40 and issue #43 table hashes above remain unchanged:
+
+| Historical issue #50 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `0935088cb9e3429b83dcc7daa8552cf2c58830e5494549270ec276a076e3193b` |
+| `deploy/task_receipts.py` | `60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb` |
+
+PR55 (issue #54) now overlays only the coordinator entry from that historical
+candidate; `deploy/task_receipts.py` retains the Issue #50 bytes above. This
+restart-ordering follow-up starts at `00f47230596fd68649088823268b8b76ac2dc884`
+(coordinator SHA-256 `a3d011e97862aa76b07fb88ae40b5307db77d3cd9f46bf170a2cf5b78ec3b7d8`).
+Review 5396963413 reproduced pending neutral recovery resurrecting a superseded
+predecessor after remote head advancement. The follow-up resolves ownership before
+handoff advancement and reads the updated prepared state. It preserves the prior
+retirement, atomic task acceptance, receipt-proof and compare-evidence fixes.
+
+| Historical PR55-only restart-ordering candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `b089cf168c2d384b56855c0979853f0d692ec9564d6787bef6424b930d3b0e3e` |
+
+At the PR55-only candidate, the policy pin and independent fixture spelled out
+this digest explicitly. The final combined overlay above now supersedes only that
+coordinator pin; no validator predicate or historical baseline is changed.
+Focused synthetic RED/GREEN evidence is not independent source acceptance; the
+combined bytes still require exact-head independent review and final integration
+evidence.
+
+These pins identify candidate bytes only. Both files retain the
+`coordinator-review-contract` blocker; refreshing pins does not satisfy independent
+review, clear the source-contract hold, or authorize operational activation.
+
+Before the Issue #50 overlay, this assembly integrated final PR40 main
 `5316f7c75dced1bffafdb545cdd7677e98e855a6`, preserving its parser and previously
-merged retention behavior. Source acceptance and removal of the historical hold
-do not authorize activation.
+merged retention behavior. The Issue #50 transport adjustment is separately pinned
+above and does not change that historical lineage. Source acceptance and removal of
+the historical hold do not authorize activation.
 
 The read-only validator can now report `ready: true` (CLI exit zero) in any selected
 phase **only when every source, run, provenance, review, approval, thread and
