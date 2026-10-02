@@ -4,6 +4,8 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -25,7 +27,7 @@ from deploy.autonomy_policy import (
     WORKFLOW_PATH,
     validate_transition,
 )
-from scripts.autonomy_policy import main as cli_main
+from scripts.autonomy_policy import MAX_EVIDENCE, main as cli_main
 
 SHA = 'a' * 40
 ARTIFACT_HASH = 'b' * 64
@@ -152,6 +154,22 @@ def _phase_evidence(phase):
                 check for check in evidence['protection']['required_checks']
                 if check['context'] not in ('integration-tests', 'agent-review')
             ]
+    return evidence
+
+
+def _sensitive_evidence(phase, state='COMMENTED'):
+    evidence = _phase_evidence(phase)
+    review = evidence['cloud_review']
+    head = review['head_sha']
+    review['change'].update(
+        sensitive=True,
+        owner_authorization={'actor_id': OWNER_ID, 'head_sha': head, 'state': 'approved'},
+        targeted_review={'review_id': 2, 'reviewer_id': 76, 'head_sha': head, 'state': state},
+    )
+    review['reviews'].append({
+        'id': 2, 'user': {'id': 76}, 'commit_id': head, 'state': state,
+        'submitted_at': '2026-10-01T22:00:00Z',
+    })
     return evidence
 
 
@@ -615,12 +633,7 @@ def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(p
                                   submitted_at='2026-10-01T22:00:00Z'))
     assert _blockers(evidence, phase) == {'cloud-review-approval'}
     review['reviews'].pop()
-    head = review['head_sha']
-    review['change'].update(
-        sensitive=True,
-        owner_authorization={'actor_id': OWNER_ID, 'head_sha': head, 'state': 'approved'},
-        targeted_review={'reviewer_id': 76, 'head_sha': head, 'state': 'COMMENTED'},
-    )
+    evidence = _sensitive_evidence(phase)
     assert _blockers(evidence, phase) == set()
     for record, field, value in (
         ('owner_authorization', 'actor_id', 1),
@@ -635,19 +648,68 @@ def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(p
         assert _blockers(changed, phase) == {'sensitive-review-authorization'}
 
 
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('state', ['COMMENTED', 'APPROVED'])
+def test_sensitive_targeted_review_matches_authenticated_record(phase, state):
+    evidence = _sensitive_evidence(phase, state)
+    before = copy.deepcopy(evidence)
+    assert validate_transition(evidence, phase=phase) == {
+        'ready': True, 'phase': phase, 'blockers': [],
+    }
+    assert evidence == before
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('mutate', [
+    pytest.param(lambda review: review['reviews'].pop(), id='absent-record'),
+    pytest.param(lambda review: review['change'].pop('targeted_review'), id='absent-claim'),
+    pytest.param(lambda review: review['change']['targeted_review'].pop('review_id'), id='absent-id'),
+    pytest.param(lambda review: review['change']['targeted_review'].update(review_id=3), id='wrong-id'),
+    pytest.param(lambda review: review['reviews'][-1].update(id=3), id='record-id-mismatch'),
+    pytest.param(lambda review: review['reviews'][-1]['user'].update(id=77), id='wrong-reviewer'),
+    pytest.param(lambda review: review['reviews'][-1]['user'].update(id='76'), id='untyped-reviewer'),
+    pytest.param(lambda review: review['reviews'][-1].pop('user'), id='missing-reviewer'),
+    pytest.param(lambda review: review['reviews'][-1].update(commit_id='d' * 40), id='stale-record'),
+    pytest.param(lambda review: review['change']['targeted_review'].update(head_sha='d' * 40), id='stale-claim'),
+    pytest.param(lambda review: review['reviews'][-1].update(state='APPROVED'), id='state-mismatch'),
+    pytest.param(lambda review: review['reviews'][-1].update(state='DISMISSED'), id='dismissed-record'),
+    pytest.param(lambda review: review['reviews'][-1].update(state='CHANGES_REQUESTED'), id='changes-requested'),
+    pytest.param(lambda review: review['reviews'].append(copy.deepcopy(review['reviews'][-1])), id='duplicate-id'),
+    pytest.param(lambda review: review['reviews'].append(dict(review['reviews'][-1], user={'id': 77})), id='conflicting-reviewer'),
+    pytest.param(lambda review: review['reviews'].append(dict(review['reviews'][-1], state='DISMISSED')), id='conflicting-state'),
+    pytest.param(lambda review: review['reviews'].append(dict(review['reviews'][-1], commit_id='d' * 40)), id='conflicting-head'),
+])
+def test_sensitive_targeted_review_rejects_unbound_claim(phase, mutate):
+    evidence = _sensitive_evidence(phase)
+    mutate(evidence['cloud_review'])
+    assert _blockers(evidence, phase) == {'sensitive-review-authorization'}
+
+
+@pytest.mark.parametrize('review_id', [None, 0, -1, True, 2.0, '2'])
+def test_sensitive_targeted_review_requires_positive_integer_id(review_id):
+    evidence = _sensitive_evidence('pre-cutover')
+    review = evidence['cloud_review']
+    review['change']['targeted_review']['review_id'] = review_id
+    review['reviews'][-1]['id'] = review_id
+    assert 'sensitive-review-authorization' in _blockers(evidence)
+
+
+@pytest.mark.parametrize('phase', PHASES)
+def test_sensitive_targeted_review_requires_complete_collection(phase):
+    evidence = _sensitive_evidence(phase)
+    evidence['cloud_review']['reviews_complete'] = False
+    assert _blockers(evidence, phase) == {'cloud-review-evidence'}
+
+
 @pytest.mark.parametrize('reviewer_id', [
-    OWNER_ID, COPILOT_AGENT_ID, COPILOT_REVIEWER_ID, 0, -1,
+    OWNER_ID, COPILOT_AGENT_ID, COPILOT_REVIEWER_ID, 77, 0, -1, True, '76', 76.0,
 ])
 def test_sensitive_targeted_reviewer_must_be_positive_and_independent(reviewer_id):
-    evidence = _evidence()
+    evidence = _sensitive_evidence('pre-cutover', 'APPROVED')
     review = evidence['cloud_review']
-    review['change'].update(
-        sensitive=True,
-        owner_authorization={'actor_id': OWNER_ID, 'head_sha': review['head_sha'], 'state': 'approved'},
-        targeted_review={
-            'reviewer_id': reviewer_id, 'head_sha': review['head_sha'], 'state': 'COMMENTED',
-        },
-    )
+    review['pull_author_id'] = 77
+    review['change']['targeted_review']['reviewer_id'] = reviewer_id
+    review['reviews'][-1]['user']['id'] = reviewer_id
     assert _blockers(evidence) == {'sensitive-review-authorization'}
 
 
@@ -765,6 +827,30 @@ def test_cli_only_reads_evidence_and_returns_blocked_for_missing_fields(tmp_path
     assert result == 1
     assert report['ready'] is False
     assert path.read_text() == '{}'
+
+
+@pytest.mark.parametrize('phase', PHASES)
+def test_cli_rejects_bounded_deeply_nested_json(tmp_path, phase):
+    path = tmp_path / 'evidence.json'
+    raw = '[' * 10000 + '0' + ']' * 10000
+    assert len(raw.encode()) < MAX_EVIDENCE
+    path.write_text(raw)
+    script = Path(__file__).resolve().parents[1] / 'scripts' / 'autonomy_policy.py'
+
+    result = subprocess.run(
+        [sys.executable, str(script), '--phase', phase, str(path)],
+        capture_output=True, text=True, timeout=10,
+    )
+
+    assert 'maximum recursion depth exceeded' in result.stderr
+    assert result.returncode == 1
+    assert 'Traceback' not in result.stderr
+    assert 'Autonomy policy evidence rejected:' in result.stderr
+    assert json.loads(result.stdout) == {
+        'ready': False, 'phase': phase, 'blockers': ['invalid-evidence'],
+    }
+    assert path.read_text() == raw
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_cli_rejects_duplicate_evidence_keys(tmp_path, capsys):

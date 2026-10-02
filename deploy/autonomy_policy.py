@@ -325,8 +325,27 @@ def _check_review(evidence, main_sha, phase, blockers):
                     OWNER_ID, review['pull_author_id'], COPILOT_AGENT_ID, COPILOT_REVIEWER_ID,
                 }
                 or targeted.get('head_sha') != head
-                or targeted.get('state') not in ('COMMENTED', 'APPROVED')):
+                or targeted.get('state') not in ('COMMENTED', 'APPROVED')
+                or type(targeted.get('review_id')) is not int or targeted['review_id'] < 1):
             blockers.add('sensitive-review-authorization')
+        else:
+            # Resolve by ID across the complete collection before checking its claims;
+            # filtering by reviewer/head/state first could hide conflicting duplicates.
+            matches = [
+                item for item in reviews
+                if isinstance(item, dict) and item.get('id') == targeted['review_id']
+            ]
+            if len(matches) != 1:
+                blockers.add('sensitive-review-authorization')
+            else:
+                record = matches[0]
+                user = record.get('user')
+                if (type(record.get('id')) is not int or not isinstance(user, dict)
+                        or type(user.get('id')) is not int
+                        or user['id'] != targeted['reviewer_id']
+                        or record.get('commit_id') != head
+                        or record.get('state') != targeted['state']):
+                    blockers.add('sensitive-review-authorization')
 
 
 def validate_transition(evidence, *, phase):

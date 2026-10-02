@@ -92,7 +92,12 @@ If the PR under review changes sensitive files, readiness additionally requires
 owner ID `5164171` authorization for that exact head and a separate targeted
 independent review of that head. The targeted reviewer must be a positive numeric
 identity distinct from the owner, PR author, coding-agent identity (`198982749`),
-and mandatory Copilot reviewer (`175728472`). A later commit invalidates both.
+and mandatory Copilot reviewer (`175728472`). The `targeted_review.review_id` must
+be a positive integer identifying exactly one record in the complete authenticated
+`cloud_review.reviews` collection. Its `user.id`, `commit_id`, and `state` must
+match the claim's `reviewer_id`, exact `head_sha`, and `state` (`COMMENTED` or
+`APPROVED`). Missing records, duplicate IDs, or conflicting claims block readiness.
+A later commit invalidates both.
 
 ## Policy phases and activation
 

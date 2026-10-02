@@ -44,7 +44,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         report = validate_transition(_read_evidence(args.evidence), phase=args.phase)
-    except (OSError, ValueError, json.JSONDecodeError) as error:
+    except (OSError, ValueError, json.JSONDecodeError, RecursionError) as error:
         report = {'ready': False, 'phase': args.phase, 'blockers': ['invalid-evidence']}
         print(f'Autonomy policy evidence rejected: {error}', file=sys.stderr)
     print(json.dumps(report, sort_keys=True))
