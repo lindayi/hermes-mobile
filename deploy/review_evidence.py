@@ -6,17 +6,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import hashlib
 from html import unescape
 from html.parser import HTMLParser
+import json
 import re
 
 OVERVIEW_MARKER = "<!-- ccr-overview-v2 -->"
 MAX_BODY_CHARS = 64 * 1024
+MAX_INDEPENDENT_REVIEW_CHARS = 4096
 MAX_BODY_FINDINGS = 8
 MAX_PARSE_EVENTS = 4096
 MAX_PARSE_DEPTH = 32
 MAX_DISCLOSURES = 256
 FINDING_KINDS = frozenset({"previously-missed", "changes-requested"})
+INDEPENDENT_REVIEW_SCHEMA = "hermes-independent-agent-review-v1"
+_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def positive_id(value):
@@ -28,9 +34,98 @@ def review_timestamp(value):
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+    except (OverflowError, ValueError):
         return None
     return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate-json-key")
+        result[key] = value
+    return result
+
+
+def parse_independent_review_body(body, head_sha):
+    """Parse the small, explicit owner-published independent-review assertion."""
+    if (not isinstance(body, str) or not body or len(body) > MAX_INDEPENDENT_REVIEW_CHARS
+            or not isinstance(head_sha, str) or _SHA_RE.fullmatch(head_sha) is None):
+        return None
+    try:
+        report = json.loads(body, object_pairs_hook=_unique_object)
+    except (RecursionError, ValueError):
+        return None
+    if (not isinstance(report, dict)
+            or set(report) != {
+                "schema", "reviewed_head_sha", "review_method", "verdict", "evidence_sha256",
+            }
+            or report.get("schema") != INDEPENDENT_REVIEW_SCHEMA
+            or report.get("reviewed_head_sha") != head_sha
+            or report.get("review_method") != "independent-agent"
+            or report.get("verdict") != "pass"
+            or not isinstance(report.get("evidence_sha256"), str)
+            or _DIGEST_RE.fullmatch(report["evidence_sha256"]) is None):
+        return None
+    return report
+
+
+def selected_independent_agent_review(reviews, head_sha, review_id, body_sha256, *, owner_id):
+    """Return the exact latest owner-published positive COMMENT review, if valid."""
+    if (not positive_id(owner_id) or not isinstance(head_sha, str)
+            or _SHA_RE.fullmatch(head_sha) is None
+            or not positive_id(review_id) or not isinstance(body_sha256, str)
+            or _DIGEST_RE.fullmatch(body_sha256) is None):
+        return None
+    latest = latest_reviews(reviews, owner_id)
+    if not latest or len(latest) != 1:
+        return None
+    review = latest[0]
+    body = review.get("body")
+    if (review.get("id") != review_id or review.get("state") != "COMMENTED"
+            or review.get("commit_id") != head_sha or not isinstance(body, str)
+            or len(body) > MAX_INDEPENDENT_REVIEW_CHARS
+            or review.get("dismissed") is True
+            or review.get("dismissed_at") not in (None, "")):
+        return None
+    actual_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    if actual_digest != body_sha256:
+        return None
+    report = parse_independent_review_body(body, head_sha)
+    if report is None:
+        return None
+    return {
+        "review_id": review_id,
+        "reviewer_id": owner_id,
+        "head_sha": head_sha,
+        "state": "COMMENTED",
+        "body_sha256": body_sha256,
+        "evidence_sha256": report["evidence_sha256"],
+    }
+
+
+def sensitive_review_authorized(
+        reviews, head_sha, owner_authorization, targeted_review, *, owner_id):
+    """Bind owner approval to one complete, current, structured review record."""
+    if (not isinstance(owner_authorization, dict)
+            or set(owner_authorization) != {
+                "actor_id", "head_sha", "state", "review_id", "body_sha256",
+            }
+            or owner_authorization.get("actor_id") != owner_id
+            or owner_authorization.get("head_sha") != head_sha
+            or owner_authorization.get("state") != "approved"
+            or not isinstance(targeted_review, dict)
+            or set(targeted_review) != {
+                "review_id", "reviewer_id", "head_sha", "state", "body_sha256",
+                "evidence_sha256",
+            }):
+        return False
+    expected = selected_independent_agent_review(
+        reviews, head_sha, owner_authorization.get("review_id"),
+        owner_authorization.get("body_sha256"), owner_id=owner_id,
+    )
+    return expected is not None and targeted_review == expected
 
 
 def latest_reviews(reviews, reviewer_id):
@@ -48,10 +143,9 @@ def latest_reviews(reviews, reviewer_id):
         user = review.get("user")
         if not isinstance(user, dict) or not positive_id(user.get("id")):
             return None
-        if "id" in review:
-            if not positive_id(review["id"]) or review["id"] in record_ids:
-                return None
-            record_ids.add(review["id"])
+        if not positive_id(review.get("id")) or review["id"] in record_ids:
+            return None
+        record_ids.add(review["id"])
         if user["id"] == reviewer_id:
             authored.append(review)
     stamps = [review_timestamp(review.get("submitted_at")) for review in authored]

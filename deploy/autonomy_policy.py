@@ -1,7 +1,10 @@
 """Read-only validation of the repository's conditional premerge gate transition."""
 
 import re
-from datetime import datetime
+from deploy.review_evidence import (
+    latest_reviews,
+    sensitive_review_authorized,
+)
 
 REPOSITORY = 'lindayi/hermes-mobile'
 REPOSITORY_ID = 1399942965
@@ -398,17 +401,6 @@ def _check_source_run(evidence, sha, blockers):
         blockers.add('release-attestation')
 
 
-def _review_timestamp(submitted_at):
-    """Use the same fail-closed timestamp semantics for both review roles."""
-    try:
-        timestamp = datetime.fromisoformat(submitted_at.replace('Z', '+00:00'))
-    except (AttributeError, TypeError, ValueError):
-        return None
-    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-        return None
-    return timestamp
-
-
 def _check_review(evidence, main_sha, phase, blockers):
     review = evidence.get('cloud_review')
     if not isinstance(review, dict):
@@ -427,36 +419,10 @@ def _check_review(evidence, main_sha, phase, blockers):
     if not isinstance(reviews, list) or not isinstance(threads, list):
         blockers.add('cloud-review-evidence')
         return
-    authored = []
-    malformed_review = False
-    for item in reviews:
-        if not isinstance(item, dict):
-            malformed_review = True
-            continue
-        user = item.get('user')
-        if (not isinstance(user, dict) or type(user.get('id')) is not int
-                or user['id'] < 1):
-            malformed_review = True
-            continue
-        if user['id'] == COPILOT_REVIEWER_ID:
-            authored.append(item)
-    ordered = []
-    review_ids = set()
-    for item in authored:
-        review_id, submitted_at = item.get('id'), item.get('submitted_at')
-        if type(review_id) is not int or review_id < 1 or review_id in review_ids:
-            malformed_review = True
-            continue
-        review_ids.add(review_id)
-        timestamp = _review_timestamp(submitted_at)
-        if timestamp is None:
-            malformed_review = True
-            continue
-        ordered.append((timestamp, review_id, item))
-    if malformed_review:
-        blockers.add('cloud-review-approval')
-    latest = max(ordered, key=lambda record: record[:2], default=(None, None, None))[2]
-    if latest is None or latest.get('state') != 'APPROVED' or latest.get('commit_id') != head:
+    latest = latest_reviews(reviews, COPILOT_REVIEWER_ID)
+    if not latest or any(
+            item.get('state') != 'APPROVED' or item.get('commit_id') != head
+            for item in latest):
         blockers.add('cloud-review-approval')
     if any(not isinstance(thread, dict) or thread.get('isResolved') is not True
            or thread.get('comments_complete') is not True for thread in threads):
@@ -476,36 +442,9 @@ def _check_review(evidence, main_sha, phase, blockers):
     elif change['sensitive']:
         authorization = change.get('owner_authorization')
         targeted = change.get('targeted_review')
-        if (not isinstance(authorization, dict) or authorization.get('actor_id') != OWNER_ID
-                or authorization.get('head_sha') != head or authorization.get('state') != 'approved'
-                or not isinstance(targeted, dict) or type(targeted.get('reviewer_id')) is not int
-                or targeted['reviewer_id'] < 1
-                or targeted['reviewer_id'] in {
-                    OWNER_ID, review['pull_author_id'], COPILOT_AGENT_ID, COPILOT_REVIEWER_ID,
-                }
-                or targeted.get('head_sha') != head
-                or targeted.get('state') not in ('COMMENTED', 'APPROVED')
-                or type(targeted.get('review_id')) is not int or targeted['review_id'] < 1):
+        if not sensitive_review_authorized(
+                reviews, head, authorization, targeted, owner_id=OWNER_ID):
             blockers.add('sensitive-review-authorization')
-        else:
-            # Resolve by ID across the complete collection before checking its claims;
-            # filtering by reviewer/head/state first could hide conflicting duplicates.
-            matches = [
-                item for item in reviews
-                if isinstance(item, dict) and item.get('id') == targeted['review_id']
-            ]
-            if len(matches) != 1:
-                blockers.add('sensitive-review-authorization')
-            else:
-                record = matches[0]
-                user = record.get('user')
-                if (type(record.get('id')) is not int or not isinstance(user, dict)
-                        or type(user.get('id')) is not int
-                        or user['id'] != targeted['reviewer_id']
-                        or record.get('commit_id') != head
-                        or record.get('state') != targeted['state']
-                        or _review_timestamp(record.get('submitted_at')) is None):
-                    blockers.add('sensitive-review-authorization')
 
 
 def validate_transition(evidence, *, phase):

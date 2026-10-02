@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import datetime, timezone
 import os
@@ -25,6 +26,7 @@ from deploy.cloud_coordinator import (
     enrollment_from_comment,
     required_checks_pass,
     repair_request,
+    _is_owner_sensitive_command,
 )
 from deploy.cloud_coordinator import _authorized_result_heads
 
@@ -926,6 +928,8 @@ class FakeApi:
         self.race = race
         self.fail = fail
         self.sensitive = sensitive
+        self.authorize_sha_review = authorize
+        self.authorize_sha = authorize_sha
         self.source_failure = source_failure
         self.pending_required = False
         self.unresolved = unresolved
@@ -966,6 +970,17 @@ class FakeApi:
         self.requested_reviewers = []
         self.review_state = "APPROVED"
         self.review_submitted_at = "2026-10-01T12:00:00Z"
+        self.owner_review_id = 64001
+        self.owner_review_body = json.dumps({
+            "schema": "hermes-independent-agent-review-v1",
+            "reviewed_head_sha": authorize_sha,
+            "review_method": "independent-agent",
+            "verdict": "pass",
+            "evidence_sha256": "c" * 64,
+        }, separators=(",", ":"))
+        self.owner_review_digest = hashlib.sha256(
+            self.owner_review_body.encode("utf-8"),
+        ).hexdigest()
         self.graphql_writes = []
         self.pull = valid_pr() | {
             "node_id": "PR_node_16", "auto_merge": None,
@@ -983,7 +998,10 @@ class FakeApi:
         if authorize:
             self.comments.append({
                 "id": 124, "user": {"id": OWNER},
-                "body": f"/hermes authorize-sensitive {authorize_sha}",
+                "body": (
+                    f"/hermes authorize-sensitive {authorize_sha} review "
+                    f"{self.owner_review_id} {self.owner_review_digest}"
+                ),
                 "updated_at": "2026-10-01T11:30:00Z",
             })
 
@@ -1052,11 +1070,19 @@ class FakeApi:
                 return [{"filename": "backend/auth.py"}]
             return [{"filename": "frontend/styles.css"}]
         if route.endswith("/pulls/16/reviews?per_page=100"):
-            return [{
-                "state": self.review_state, "commit_id": self.review_sha or self.head_sha,
+            reviews = [{
+                "id": 63001, "state": self.review_state,
+                "commit_id": self.review_sha or self.head_sha,
                 "submitted_at": self.review_submitted_at,
                 "user": {"id": COPILOT_REVIEWER},
             }]
+            if self.authorize_sha_review:
+                reviews.append({
+                    "id": self.owner_review_id, "state": "COMMENTED",
+                    "commit_id": self.authorize_sha, "submitted_at": "2026-10-01T11:00:00Z",
+                    "body": self.owner_review_body, "user": {"id": OWNER},
+                })
+            return reviews
         if f"/commits/{self.head_sha}/check-runs?" in route:
             if self.pending_required:
                 return [{
@@ -1341,6 +1367,23 @@ def test_sensitive_change_needs_owner_authorization_for_the_exact_current_sha(tm
     Coordinator(allowed, allowed_store).run(apply=True)
     assert allowed.graphql_writes
     assert allowed_store.snapshot()["enrollments"]["16"]["sensitive_sha"] == HEAD
+
+
+def test_sensitive_authorization_command_selects_review_and_body_digest():
+    review_id, body_sha256 = 64001, "c" * 64
+    comment = {
+        "user": {"id": OWNER},
+        "body": f"/hermes authorize-sensitive {HEAD} review {review_id} {body_sha256}",
+    }
+    assert _is_owner_sensitive_command(comment) == {
+        "head": HEAD, "review_id": review_id, "body_sha256": body_sha256,
+    }
+    assert _is_owner_sensitive_command(comment | {
+        "body": f"/hermes authorize-sensitive {HEAD}",
+    }) is None
+    assert _is_owner_sensitive_command(comment | {
+        "user": {"id": COPILOT_REVIEWER},
+    }) is None
 
 
 def test_owner_can_authorize_a_new_current_head_after_enrollment(tmp_path):

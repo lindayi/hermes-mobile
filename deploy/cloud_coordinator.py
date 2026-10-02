@@ -18,7 +18,14 @@ import sys
 import time
 from urllib.parse import quote, unquote, urlencode
 
-from deploy.review_evidence import FINDING_KINDS, body_findings, latest_reviews
+from deploy.review_evidence import (
+    FINDING_KINDS,
+    body_findings,
+    latest_reviews,
+    positive_id,
+    selected_independent_agent_review,
+    sensitive_review_authorized,
+)
 from deploy.workflow_lifecycle import (
     MAX_EVENTS as MAX_LIFECYCLE_EVENTS,
     REASON_OUTCOMES as LIFECYCLE_OUTCOMES,
@@ -192,6 +199,7 @@ def _renewed_bound_enrollment(prior, incoming):
         **prior, **incoming, "authorized_head": prior["authorized_head"],
         "owner_authorized_head": incoming["head"],
         "attempts": prior.get("attempts", 0), "sensitive_sha": None,
+        "sensitive_authorization": None, "targeted_review": None,
     }
 
 
@@ -676,8 +684,17 @@ def _is_owner_sensitive_command(comment):
     if (not isinstance(user, dict) or type(user.get("id")) is not int
             or user["id"] != OWNER_ID or not isinstance(body, str)):
         return None
-    match = re.fullmatch(r"/hermes authorize-sensitive ([0-9a-f]{40})", body.strip())
-    return match.group(1) if match else None
+    match = re.fullmatch(
+        r"/hermes authorize-sensitive ([0-9a-f]{40}) review ([1-9][0-9]{0,18}) "
+        r"([0-9a-f]{64})",
+        body.strip(),
+    )
+    if not match:
+        return None
+    review_id = int(match.group(2))
+    if not positive_id(review_id):
+        return None
+    return {"head": match.group(1), "review_id": review_id, "body_sha256": match.group(3)}
 
 
 def _rest_list(api, route, collection=None):
@@ -1155,10 +1172,10 @@ class Coordinator:
                         enrollment["last_open_head"] = enrollment["head"]
                         commands.append(("enroll", enrollment))
                 else:
-                    authorized_sha = _is_owner_sensitive_command(comment)
-                    if authorized_sha:
+                    authorization = _is_owner_sensitive_command(comment)
+                    if authorization:
                         commands.append(("authorize", {
-                            "issue": issue["number"], "comment": key, "head": authorized_sha,
+                            "issue": issue["number"], "comment": key, **authorization,
                         }))
                         processed.append(key)
         candidates = {key: dict(value) for key, value in state["enrollments"].items()
@@ -1176,7 +1193,9 @@ class Coordinator:
                                   and isinstance(enrollment.get("comment"), int)
                                   and enrollment["comment"] > prior["comment"])):
                     candidates[str(enrollment["issue"])] = {
-                        **enrollment, "attempts": 0, "sensitive_sha": None, "active": True,
+                        **enrollment, "attempts": 0, "sensitive_sha": None,
+                        "sensitive_authorization": None, "targeted_review": None,
+                        "active": True,
                     }
         for action, item in commands:
             if action != "authorize":
@@ -1192,7 +1211,27 @@ class Coordinator:
                     and _github_identity(head.get("repo"), REPOSITORY_ID)
                     and isinstance(base, dict) and base.get("ref") == MAIN_BRANCH
                     and _github_identity(base.get("repo"), REPOSITORY_ID)):
+                reviews = _rest_list(
+                    self.api,
+                    f"repos/{REPOSITORY}/pulls/{item['issue']}/reviews?per_page=100",
+                )
+                owner_authorization = {
+                    "actor_id": OWNER_ID, "head_sha": item["head"], "state": "approved",
+                    "review_id": item["review_id"], "body_sha256": item["body_sha256"],
+                }
+                targeted_review = selected_independent_agent_review(
+                    reviews, item["head"], item["review_id"], item["body_sha256"],
+                    owner_id=OWNER_ID,
+                )
+                if not targeted_review or not sensitive_review_authorized(
+                        reviews, item["head"], owner_authorization, targeted_review,
+                        owner_id=OWNER_ID):
+                    continue
                 enrollment["sensitive_sha"] = item["head"]
+                enrollment["sensitive_authorization"] = owner_authorization
+                enrollment["targeted_review"] = targeted_review
+                item["owner_authorization"] = owner_authorization
+                item["targeted_review"] = targeted_review
                 item["validated"] = True
         return issues, commands, processed, candidates
 
@@ -1785,7 +1824,15 @@ class Coordinator:
         sensitive = classify_sensitive_paths(
             snapshot["files"], complete=snapshot["files_complete"],
         )
-        authorized = not sensitive or snapshot["enrollment"].get("sensitive_sha") == head
+        authorized = not sensitive or (
+            snapshot["enrollment"].get("sensitive_sha") == head
+            and sensitive_review_authorized(
+                snapshot["reviews"], head,
+                snapshot["enrollment"].get("sensitive_authorization"),
+                snapshot["enrollment"].get("targeted_review"),
+                owner_id=OWNER_ID,
+            )
+        )
         required = snapshot["required"]
         review_context_required = any(
             item.get("context") == "cloud-review" for item in required
@@ -2226,7 +2273,15 @@ class Coordinator:
                             threads_complete=threads_complete,
                         )
                         or (sensitive
-                            and snapshot["enrollment"].get("sensitive_sha") != action["head"])):
+                            and (
+                                snapshot["enrollment"].get("sensitive_sha") != action["head"]
+                                or not sensitive_review_authorized(
+                                    reviews, action["head"],
+                                    snapshot["enrollment"].get("sensitive_authorization"),
+                                    snapshot["enrollment"].get("targeted_review"),
+                                    owner_id=OWNER_ID,
+                                )
+                            ))):
                     self.store.update_action(key, "blocked")
                     return "blocked"
             current_statuses = _rest_list(
@@ -3004,15 +3059,18 @@ class StateStore:
                     if (enrollment and enrollment.get("active")
                             and _is_sha(item.get("head"))):
                         enrollment["sensitive_sha"] = item["head"]
+                        enrollment["sensitive_authorization"] = item["owner_authorization"]
+                        enrollment["targeted_review"] = item["targeted_review"]
             self._add_lifecycle_events(
                 data, lifecycle_events, now=time.time() if now is None else now,
             )
             for issue, head in observations:
                 enrollment = data["enrollments"].get(str(issue))
                 if enrollment and enrollment.get("active") and _is_sha(head):
-                    if (enrollment.get("authorized_head") is not None
-                            and enrollment.get("sensitive_sha") != head):
+                    if enrollment.get("sensitive_sha") != head:
                         enrollment["sensitive_sha"] = None
+                        enrollment["sensitive_authorization"] = None
+                        enrollment["targeted_review"] = None
                     enrollment["last_open_seen"] = True
                     enrollment["last_open_head"] = head
             for issue in retirements:
@@ -3030,6 +3088,7 @@ class StateStore:
                 return False
             data["enrollments"][key] = {
                 **enrollment, "attempts": 0, "sensitive_sha": None,
+                "sensitive_authorization": None, "targeted_review": None,
                 "active": True,
             }
             return True

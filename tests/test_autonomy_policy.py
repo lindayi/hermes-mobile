@@ -220,14 +220,28 @@ def _sensitive_evidence(phase, state='COMMENTED'):
     evidence = _phase_evidence(phase)
     review = evidence['cloud_review']
     head = review['head_sha']
+    body = json.dumps({
+        'schema': 'hermes-independent-agent-review-v1',
+        'reviewed_head_sha': head,
+        'review_method': 'independent-agent',
+        'verdict': 'pass',
+        'evidence_sha256': 'c' * 64,
+    }, separators=(',', ':'))
+    body_sha256 = hashlib.sha256(body.encode('utf-8')).hexdigest()
     review['change'].update(
         sensitive=True,
-        owner_authorization={'actor_id': OWNER_ID, 'head_sha': head, 'state': 'approved'},
-        targeted_review={'review_id': 2, 'reviewer_id': 76, 'head_sha': head, 'state': state},
+        owner_authorization={
+            'actor_id': OWNER_ID, 'head_sha': head, 'state': 'approved',
+            'review_id': 2, 'body_sha256': body_sha256,
+        },
+        targeted_review={
+            'review_id': 2, 'reviewer_id': OWNER_ID, 'head_sha': head,
+            'state': state, 'body_sha256': body_sha256, 'evidence_sha256': 'c' * 64,
+        },
     )
     review['reviews'].append({
-        'id': 2, 'user': {'id': 76}, 'commit_id': head, 'state': state,
-        'submitted_at': '2026-10-01T22:00:00Z',
+        'id': 2, 'user': {'id': OWNER_ID}, 'commit_id': head, 'state': state,
+        'submitted_at': '2026-10-01T22:00:00Z', 'body': body,
     })
     return evidence
 
@@ -1007,7 +1021,7 @@ def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(p
         ('owner_authorization', 'actor_id', 1),
         ('owner_authorization', 'head_sha', 'd' * 40),
         ('owner_authorization', 'state', 'pending'),
-        ('targeted_review', 'reviewer_id', OWNER_ID),
+        ('targeted_review', 'reviewer_id', 76),
         ('targeted_review', 'head_sha', 'd' * 40),
         ('targeted_review', 'state', 'DISMISSED'),
     ):
@@ -1017,14 +1031,19 @@ def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(p
 
 
 @pytest.mark.parametrize('phase', PHASES)
-@pytest.mark.parametrize('state', ['COMMENTED', 'APPROVED'])
-def test_sensitive_targeted_review_matches_authenticated_record(phase, state):
-    evidence = _sensitive_evidence(phase, state)
+def test_sensitive_owner_published_independent_review_matches_authenticated_record(phase):
+    evidence = _sensitive_evidence(phase)
     before = copy.deepcopy(evidence)
     assert validate_transition(evidence, phase=phase) == {
         'ready': False, 'phase': phase, 'blockers': ['pending-source-contract'],
     }
     assert evidence == before
+
+
+@pytest.mark.parametrize('phase', PHASES)
+def test_sensitive_owner_review_must_be_a_formal_comment_not_approval(phase):
+    evidence = _sensitive_evidence(phase, 'APPROVED')
+    assert 'sensitive-review-authorization' in _blockers(evidence, phase)
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -1055,11 +1074,15 @@ def test_sensitive_targeted_review_rejects_unbound_claim(phase, mutate):
     if (not isinstance(reviewer, dict) or type(reviewer.get('id')) is not int
             or reviewer['id'] < 1):
         expected.add('cloud-review-approval')
+    review_ids = [record.get('id') for record in evidence['cloud_review']['reviews']
+                  if isinstance(record, dict)]
+    if len(review_ids) != len(set(review_ids)):
+        expected.add('cloud-review-approval')
     assert _blockers(evidence, phase) == expected
 
 
 @pytest.mark.parametrize('phase', PHASES)
-@pytest.mark.parametrize('state', ['COMMENTED', 'APPROVED'])
+@pytest.mark.parametrize('state', ['COMMENTED'])
 @pytest.mark.parametrize('timestamp', [
     None, '', 'not-a-date', '2026-10-01T22:00:00',
     '2026-02-30T22:00:00Z', '2026-10-01T22:00:00+25:00', 123, {},
@@ -1106,7 +1129,7 @@ def test_sensitive_targeted_review_requires_complete_collection(phase):
 
 
 @pytest.mark.parametrize('reviewer_id', [
-    OWNER_ID, COPILOT_AGENT_ID, COPILOT_REVIEWER_ID, 77, 0, -1, True, '76', 76.0,
+    OWNER_ID, COPILOT_AGENT_ID, COPILOT_REVIEWER_ID, 77, 0, -1, True, '5164171', 5164171.0,
 ])
 def test_sensitive_targeted_reviewer_must_be_positive_and_independent(reviewer_id):
     evidence = _sensitive_evidence('pre-cutover', 'APPROVED')
