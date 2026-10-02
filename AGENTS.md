@@ -97,6 +97,8 @@ run; do not imply an unobserved pass.
 
 Write PR descriptions as plain paragraphs using the repository template; include a literal Closes #N and all required evidence, with no Markdown markup in the body.
 
+For task handoff, a literal Closes #N is a readability convention; verify linkage from authenticated GitHub closing-issue references, never PR body text.
+
 A review comment is not an approval or a passing review status; verify every review and test result against the exact head SHA.
 
 Request Copilot review for pull requests when it is available, and request a fresh
