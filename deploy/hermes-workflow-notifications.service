@@ -1,0 +1,16 @@
+[Unit]
+Description=Record verified workflow outcomes in the Hermes owner Inbox
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/lindayi/projects/hermes-mobile-git
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/lindayi/.local/share/hermes-mobile-live
+ExecStart=/home/lindayi/projects/hermes-mobile-git/.venv/bin/python /home/lindayi/projects/hermes-mobile-git/scripts/workflow_notifications.py --apply
