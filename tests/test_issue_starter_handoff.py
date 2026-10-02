@@ -4,7 +4,8 @@ import pytest
 from deploy import cloud_coordinator
 
 from test_issue_starter import (
-    FakeApi, REPOSITORY, completed_task, make_coordinator, pull_request, start_task,
+    FakeApi, REPOSITORY, completed_task, issue_comment, make_coordinator,
+    pull_request, start_task,
 )
 
 
@@ -57,6 +58,121 @@ def test_real_starter_command_is_sha_bound_at_consumer_scan(tmp_path, consumer, 
     _, replay, processed_again, _ = worker._scan_enrollments(store.snapshot())
     assert replay == []
     assert processed_again == []
+
+
+@pytest.mark.parametrize("outcome", ["response", "lost", "crash"])
+@pytest.mark.parametrize("visible", [True, False])
+def test_consumed_historical_enrollment_requires_fresh_handoff(tmp_path, consumer, outcome, visible):
+    historical = issue_comment(comment_id=9100, body="/hermes enroll " + "a" * 40)
+
+    class EnrollmentApi(FakeApi):
+        def get(self, route):
+            comments = super().get(route)
+            if route.startswith(f"repos/{REPOSITORY}/issues/41/comments?"):
+                return [c for c in comments if c["id"] != 9101 or visible]
+            return comments
+
+        def post(self, route, body):
+            if route.endswith("/issues/41/comments"):
+                saved = make_coordinator(tmp_path, self).store.snapshot()["commands"]["28:9001"]
+                assert saved["enrollment_state"] == "started"
+                assert saved["comment_high_water"] == historical["id"]
+            response = super().post(route, body)
+            if route.endswith("/issues/41/comments"):
+                if outcome == "lost":
+                    raise TimeoutError("synthetic response loss")
+                if outcome == "crash":
+                    raise KeyboardInterrupt("synthetic crash after POST")
+            return response
+
+    api = EnrollmentApi(pulls=[pull_request(head_sha="c" * 40)])
+    api.comments.append(historical)
+
+    class ScanApi:
+        def get_all(self, route, *, collection=None):
+            if route.startswith(f"repos/{REPOSITORY}/issues?"):
+                return [{"number": 41, "pull_request": {"url": "pull/41"}}]
+            if route.startswith(f"repos/{REPOSITORY}/issues/41/comments?"):
+                return [c for c in api.comments if c["body"].startswith("/hermes enroll ")]
+            raise AssertionError(route)
+
+        def get(self, route):
+            assert route == f"repos/{REPOSITORY}/pulls/41"
+            return api.pulls[0]
+
+    store = consumer.StateStore(tmp_path / "consumer" / "state.json")
+
+    def scan():
+        worker = consumer.Coordinator(ScanApi(), consumer.StateStore(store.path))
+        _, commands, processed, candidates = worker._scan_enrollments(store.snapshot())
+        store.commit_scan("2026-10-01T22:00:00Z", processed, commands=commands)
+        return commands, processed, candidates
+
+    # The real consumer permanently consumes the old exact command on another head.
+    assert scan() == ([], [str(historical["id"])], {})
+    api.pulls[0]["head"]["sha"] = "a" * 40
+    assert scan() == ([], [], {})
+    assert store.snapshot()["enrollments"] == {}
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    starter = make_coordinator(tmp_path, api)
+    if outcome == "crash":
+        with pytest.raises(KeyboardInterrupt, match="synthetic crash"):
+            starter.run(apply=True)
+    else:
+        assert starter.run(apply=True)["handed_off"] == (outcome == "response")
+    assert len([r for r, _ in api.posts if r.endswith("/issues/41/comments")]) == 1
+    saved = starter.store.snapshot()["commands"]["28:9001"]
+    assert saved["comment_high_water"] == historical["id"]
+    assert saved["enrollment_state"] == {
+        "response": "done", "lost": "uncertain", "crash": "started",
+    }[outcome]
+
+    # Restart may reconcile only the fresh comment, not historical proof or a retry.
+    expected = outcome == "response" or visible
+    for _ in range(3):
+        make_coordinator(tmp_path, api).run(apply=True)
+        saved = starter.store.snapshot()["commands"]["28:9001"]
+        assert (saved["phase"] == "handed_off") is expected
+        assert (saved["enrollment_state"] == "done") is expected
+    assert len([r for r, _ in api.posts if r.endswith("/issues/41/comments")]) == 1
+    assert len([r for r, _ in api.posts if r.endswith("/tasks")]) == 1
+    assert len([c for c in api.graphql_calls if "markPullRequestReadyForReview" in c["query"]]) == 1
+
+    # Only the actual fresh producer output can now enroll the consumer.
+    commands, processed, candidates = scan()
+    assert processed == ["9101"]
+    assert len(commands) == 1 and candidates["41"]["head"] == "a" * 40
+    enrollment = store.snapshot()["enrollments"]["41"]
+    assert enrollment["authorized_head"] == "a" * 40
+    assert enrollment["sensitive_sha"] is None
+    assert scan()[1] == []
+
+
+@pytest.mark.parametrize("comment_id", [9099, 9100])
+def test_historical_post_response_is_not_fresh_enrollment_proof(tmp_path, comment_id):
+    historical = issue_comment(comment_id=comment_id, body="/hermes enroll " + "a" * 40)
+
+    class HistoricalResponseApi(FakeApi):
+        def post(self, route, body):
+            if route.endswith("/issues/41/comments"):
+                self.posts.append((route, body))
+                return historical
+            return super().post(route, body)
+
+    api = HistoricalResponseApi(pulls=[pull_request(draft=False)])
+    api.comments.append(historical)
+    if comment_id < 9100:
+        api.comments.append(issue_comment(comment_id=9100, body="Unrelated comment"))
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    for _ in range(3):
+        starter = make_coordinator(tmp_path, api)
+        assert starter.run(apply=True)["handed_off"] == 0
+        saved = starter.store.snapshot()["commands"]["28:9001"]
+        assert saved["comment_high_water"] == 9100
+        assert saved["enrollment_state"] == "uncertain"
+    assert len([r for r, _ in api.posts if r.endswith("/issues/41/comments")]) == 1
 
 
 def test_legacy_bare_comment_is_not_starter_handoff_proof(tmp_path):

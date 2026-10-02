@@ -104,7 +104,12 @@ mutation boundary can therefore mark a newer head ready. Fresh post-mutation
 reads block enrollment on a detected change; uncertain writes are not retried.
 
 Only after that proof, the worker posts exactly `/hermes enroll <40lowerhex>`,
-using the reserved verified head SHA and owner-authenticated API client. The
+using the reserved verified head SHA and owner-authenticated API client. Before
+posting, it captures the PR comment high-water ID and reserves a fresh enrollment,
+even if an exact historical command exists: that command may already have been
+consumed on a different head. Only an exact, immutable owner comment with a positive
+ID above this boundary can confirm the POST response or reconcile a started/uncertain
+send; an uncertain send is never reposted. The
 paired cloud coordinator recognizes this command in its complete scan, requires
 the SHA to match the current PR head, and persists the bound head. A mismatch is
 consumed without enrollment and cannot authorize a later head or be replayed.
@@ -163,7 +168,9 @@ HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
     tests/test_issue_starter.py tests/test_issue_starter_unit.py \
     tests/test_issue_starter_comment_proofs.py \
     tests/test_issue_starter_handoff.py tests/test_issue_starter_paired_lifecycle.py \
-    tests/test_cloud_coordinator.py tests/test_cloud_coordinator_latest_review.py \
+    tests/test_cloud_coordinator.py tests/test_cloud_coordinator_unit.py \
+    tests/test_cloud_coordinator_latest_review.py \
     tests/test_cloud_coordinator_presend.py tests/test_task_receipts.py \
-    tests/test_task_receipts_lifecycle.py tests/test_workflow_lifecycle_sources.py
+    tests/test_task_receipts_lifecycle.py tests/test_workflow_lifecycle_sources.py \
+    tests/test_workflow_notifications_integrated.py
 ```

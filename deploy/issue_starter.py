@@ -1091,14 +1091,6 @@ class Coordinator:
             self.api, f"repos/{REPOSITORY}/issues/{pull_number}/comments",
         )
 
-    def _owner_enrollment_comment(self, comments, head_sha):
-        return next(
-            (comment for comment in comments if _verified_owner_comment(
-                comment, f"/hermes enroll {head_sha}", now=self.clock(),
-            )),
-            None,
-        )
-
     def _advance(self, key, record):
         try:
             self._fresh_issue(record)
@@ -1176,7 +1168,8 @@ class Coordinator:
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
             comments = self._pr_comments(pull["number"])
-            existing = self._owner_enrollment_comment(comments, pull["head"]["sha"])
+            # Historical commands may already be consumed on another head. Reserve
+            # our own POST; only later comments can reconcile an uncertain send.
             self.store.update(key, {
                 "phase": "handoff_reserved",
                 "pull_number": pull["number"],
@@ -1184,7 +1177,7 @@ class Coordinator:
                 "head_sha": pull["head"]["sha"],
                 "branch": pull["head"]["ref"],
                 "ready_state": "done" if pull.get("draft") is False else "reserved",
-                "enrollment_state": "done" if existing else "reserved",
+                "enrollment_state": "reserved",
                 "comment_high_water": max(
                     (item.get("id", 0) for item in comments
                      if isinstance(item, dict) and type(item.get("id")) is int),
@@ -1353,20 +1346,7 @@ class Coordinator:
                     "handed_off": 0, "blocked": 1}
         comments = self._pr_comments(record["pull_number"])
         enrollment_body = f"/hermes enroll {record['head_sha']}"
-        existing = self._owner_enrollment_comment(comments, record["head_sha"])
         enrollment_state = record.get("enrollment_state")
-        if existing:
-            self.store.update(key, {
-                "phase": "handed_off",
-                "enrollment_state": "done",
-                "receipt": self._receipt(
-                    "completed", record, pull_number=record["pull_number"],
-                ),
-            })
-            updated = self.store.snapshot()["commands"][key]
-            self._publish_receipt(key, updated)
-            return {"planned": 0, "pending": 0, "dispatched": 0,
-                    "handed_off": 1, "blocked": 0}
         if enrollment_state == "reserved":
             self.store.update(key, {
                 "phase": "handoff_comment_started",
@@ -1386,9 +1366,9 @@ class Coordinator:
                 })
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
-            if not _verified_owner_comment(
+            if (not _verified_owner_comment(
                 response, enrollment_body, now=self.clock(),
-            ):
+            ) or response["id"] <= record.get("comment_high_water", 0)):
                 self.store.update(key, {
                     "phase": "handoff_uncertain",
                     "enrollment_state": "uncertain",
