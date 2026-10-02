@@ -532,10 +532,22 @@ exist).
 
 Post exactly one unchanged authenticated Copilot issue comment containing one
 contiguous v2 receipt block as its final unquoted lines. The posting transport may
-prepend an unchanged Markdown blockquote and reorder the receipt fields. Only blank
-lines or blockquote lines may precede the block; no fences, unquoted prose, extra
-fields, duplicate fields, or trailing newline are accepted. Quoted or code-formatted
-content is never receipt evidence.
+prepend an unchanged Markdown blockquote and reorder the receipt fields. Only ASCII
+blank lines (empty or containing only spaces/tabs) or blockquote lines may precede
+the block. A quoted prefix must end with an ASCII blank line immediately before
+the receipt header: without it, raw lines can be lazy continuation inside the
+quote. NBSP, controls and other Unicode whitespace are not blank separators.
+No fences, unquoted prose, extra fields, duplicate fields, or trailing newline
+are accepted. Quoted or code-formatted content is never receipt evidence.
+
+The entire unchanged v2 comment is limited to **8192 UTF-8 bytes and 64 LF-delimited
+lines**, inclusive of the quoted prefix, blank lines, header and seven fields.
+These finite limits leave room for a short quoted report and the eight-line receipt
+without admitting arbitrarily large stored proofs. Reject character lengths over
+8192 before encoding, reject malformed Unicode, then enforce the byte limit before
+counting or splitting; enforce the line limit before splitting. The same limits
+apply at first acceptance and persisted-proof revalidation. Plain v2 remains valid
+within these limits; the exact-body v1 contract is unchanged.
 
 ```text
 Hermes-Task-Receipt: v2

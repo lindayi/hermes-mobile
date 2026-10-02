@@ -94,6 +94,104 @@ def transported_v2_body(nonce=NONCE, session_id=SESSION_ID,
     )
 
 
+@pytest.fixture(params=["first-acceptance", "persisted-proof"])
+def check_v2_transport(request):
+    def check(body, *, accepted):
+        task, action, pull, comments = v2_binding()
+        if request.param == "first-acceptance":
+            comments[0]["body"] = body
+            if accepted:
+                proof = validate_task_receipt(task, action, pull, comments, now=NOW)
+                assert proof["body"] == body
+            else:
+                with pytest.raises(ReceiptError):
+                    validate_task_receipt(task, action, pull, comments, now=NOW)
+        else:
+            import json
+            from deploy.cloud_coordinator import _valid_receipt_proof
+
+            # Start with genuine accepted synthetic metadata, then model an old
+            # persisted body and identical remote comment: equality is not enough.
+            proof = validate_task_receipt(task, action, pull, comments, now=NOW)
+            action.update(status="completed", **{
+                f"receipt_{key}": value for key, value in proof.items()
+            })
+            assert _valid_receipt_proof(action, comments)
+            action["receipt_body"] = comments[0]["body"] = body
+            action, comments = json.loads(json.dumps([action, comments]))
+            assert _valid_receipt_proof(action, comments) is accepted
+    return check
+
+
+@pytest.mark.parametrize("prefix,accepted", [
+    ("> quoted example\n", False),
+    ("\n> quoted example\n", False),
+    ("> quoted example\n> \n", False),
+    ("> quoted example\n\u00a0\n", False),
+    ("> quoted example\n\v\n", False),
+    ("> quoted example\n\f\n", False),
+    ("> quoted example\n\x1c\n", False),
+    ("> quoted example\n\u2028\n", False),
+    ("> quoted example\n\u00a0\n\n", False),
+    ("> quoted example\n\n", True),
+    ("> quoted example\n \t \n", True),
+    ("", True),
+])
+def test_v2_transport_ascii_quote_boundary(check_v2_transport, prefix, accepted):
+    plain = transported_v2_body().split("\n\n", 1)[1]
+    check_v2_transport(prefix + plain, accepted=accepted)
+
+
+@pytest.mark.parametrize("size", [8191, 8192, 8193])
+@pytest.mark.parametrize("character", ["x", "\u00e9", "\U0001f680"])
+def test_v2_transport_utf8_byte_budget(check_v2_transport, size, character):
+    plain = transported_v2_body().split("\n\n", 1)[1]
+    framing = "> \n\n" + plain
+    count, remainder = divmod(size - len(framing.encode("utf-8")),
+                              len(character.encode("utf-8")))
+    body = "> " + character * count + "x" * remainder + "\n\n" + plain
+    assert len(body.encode("utf-8")) == size
+    check_v2_transport(body, accepted=size <= 8192)
+
+
+@pytest.mark.parametrize("line_count", [63, 64, 65])
+def test_v2_transport_line_budget(check_v2_transport, line_count):
+    plain = transported_v2_body().split("\n\n", 1)[1]
+    body = "> quoted\n" * (line_count - 9) + "\n" + plain
+    assert len(body.split("\n")) == line_count
+    check_v2_transport(body, accepted=line_count <= 64)
+
+
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
+def test_v2_transport_rejects_malformed_unicode(check_v2_transport, surrogate):
+    check_v2_transport("> " + surrogate + "\n" + transported_v2_body(), accepted=False)
+
+
+def test_v2_transport_caps_before_encoding_counting_or_splitting():
+    from deploy.task_receipts import _v2_fields
+
+    class Unscanned(str):
+        def count(self, *args, **kwargs):
+            pytest.fail("oversized transport must be rejected before count")
+
+        def split(self, *args, **kwargs):
+            pytest.fail("oversized transport must be rejected before split")
+
+    class Unencoded(Unscanned):
+        def encode(self, *args, **kwargs):
+            pytest.fail("character cap must precede UTF-8 encoding")
+
+    for body in (Unencoded("x" * 8193), Unscanned("\U0001f680" * 2049)):
+        with pytest.raises(ReceiptError):
+            _v2_fields(body)
+
+
+def test_v2_transport_instruction_documents_boundary_and_budget():
+    instruction = receipt_instruction(NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE)
+    assert "ASCII blank line (empty or only spaces/tabs)" in instruction
+    assert "8192 UTF-8 bytes and 64 LF-delimited lines" in instruction
+
+
 def test_v2_accepts_observed_quoted_prefix_and_reordered_plain_receipt():
     task, action, pull, comments = v2_binding()
     comments[0]["body"] = transported_v2_body()

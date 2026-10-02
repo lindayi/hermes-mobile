@@ -148,7 +148,7 @@ inventory. The historical PR40 and issue #43 fixture hashes above remain unchang
 | Issue #50 candidate path | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `0935088cb9e3429b83dcc7daa8552cf2c58830e5494549270ec276a076e3193b` |
-| `deploy/task_receipts.py` | `f97dbc809fa107388e1dc1954cff95ea4372cd003228be34e5780378dfbf8bcf` |
+| `deploy/task_receipts.py` | `60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb` |
 
 These pins identify candidate bytes only. Both files retain the
 `coordinator-review-contract` blocker; refreshing pins does not satisfy independent

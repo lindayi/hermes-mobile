@@ -9,6 +9,9 @@ RECEIPT_RESULTS = {"ready", "conflict_incompatible", "policy_broken"}
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 V2_RECEIPT_HEADER = "Hermes-Task-Receipt: v2"
 V2_RECEIPT_FIELDS = {"nonce", "session", "pr", "start_head", "head", "base", "result"}
+# Whole-comment limits leave room for a short quoted report and eight-line receipt.
+V2_TRANSPORT_MAX_BYTES = 8192
+V2_TRANSPORT_MAX_LINES = 64
 
 
 class ReceiptError(ValueError):
@@ -20,9 +23,11 @@ def receipt_instruction(nonce, *, pull_number, start_head, base_sha):
         "After pushing your result and running focused checks, post exactly one "
         "issue comment on this PR. Put the exact receipt fields below in one "
         "contiguous, unquoted final block, with no extra fields or unquoted prose. "
-        "The posting transport may prepend an unchanged Markdown blockquote or "
-        "reorder fields; do not quote or fence the receipt itself, and include each "
-        "field exactly once. "
+        "The posting transport may prepend an unchanged Markdown blockquote, "
+        "separated from the receipt by an ASCII blank line (empty or only spaces/tabs), "
+        "or reorder fields; do not quote or fence the receipt itself, and include each "
+        "field exactly once. Keep the entire comment within "
+        f"{V2_TRANSPORT_MAX_BYTES} UTF-8 bytes and {V2_TRANSPORT_MAX_LINES} LF-delimited lines. "
         "Copy nonce, pr, start_head and base exactly: base is the fixed dispatch-time "
         "main SHA, not main at completion. Read your session ID from the exposed "
         "COPILOT_AGENT_SESSION_ID environment variable; if it is missing, report an "
@@ -87,7 +92,18 @@ def _is_blockquote(line):
 
 
 def _v2_fields(body):
-    if (not isinstance(body, str) or "\r" in body or body.endswith("\n")
+    # Bound allocation before encoding, then bound scans and splitting by bytes.
+    if not isinstance(body, str) or len(body) > V2_TRANSPORT_MAX_BYTES:
+        raise ReceiptError("Task receipt exceeds the transport byte budget")
+    try:
+        byte_count = len(body.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ReceiptError("Task receipt is not valid UTF-8") from error
+    if byte_count > V2_TRANSPORT_MAX_BYTES:
+        raise ReceiptError("Task receipt exceeds the transport byte budget")
+    if body.count("\n") >= V2_TRANSPORT_MAX_LINES:
+        raise ReceiptError("Task receipt exceeds the transport line budget")
+    if ("\r" in body or body.endswith("\n")
             or body.count(V2_RECEIPT_HEADER) != 1):
         raise ReceiptError("Task receipt transport is ambiguous or noncanonical")
     lines = body.split("\n")
@@ -95,8 +111,11 @@ def _v2_fields(body):
     if len(positions) != 1:
         raise ReceiptError("Task receipt header is not an unquoted standalone line")
     position = positions[0]
-    if any(line.strip() and not _is_blockquote(line) for line in lines[:position]):
+    if any(line.strip(" \t") and not _is_blockquote(line) for line in lines[:position]):
         raise ReceiptError("Task receipt has untrusted text before its block")
+    # Without an ASCII blank line, raw receipt lines can be lazy quote content.
+    if position and lines[position - 1].strip(" \t"):
+        raise ReceiptError("Task receipt is not separated from its quoted prefix")
     block = lines[position:position + 1 + len(V2_RECEIPT_FIELDS)]
     if len(block) != 1 + len(V2_RECEIPT_FIELDS):
         raise ReceiptError("Task receipt fields are incomplete")
