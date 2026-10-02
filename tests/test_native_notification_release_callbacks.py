@@ -379,7 +379,8 @@ def test_empty_backlog_requires_and_accepts_positive_bound_status(tmp_path):
     _, _, native, paths, callbacks, baseline, _, candidate, _ = setup_release(tmp_path, with_event=False)
     capture_and_handoff(paths, callbacks, baseline, candidate)
     activate(native, paths, candidate)
-    assert probe_under_owned_lock(paths, callbacks, candidate) == {'status': 'verified', 'owned_count': 0}
+    assert probe_under_owned_lock(paths, callbacks, candidate) is True
+    assert sum(row['route'] == 'owned' for row in callbacks.handoff_records.values()) == 0
 
 
 def test_probe_requires_existing_owned_delivery_and_ack_chain(tmp_path):
@@ -387,7 +388,8 @@ def test_probe_requires_existing_owned_delivery_and_ack_chain(tmp_path):
     capture_and_handoff(paths, callbacks, baseline, candidate)
     create_owned_ack(app, outbox, event, callbacks.scope)
     activate(native, paths, candidate)
-    assert probe_under_owned_lock(paths, callbacks, candidate) == {'status': 'verified', 'owned_count': 1}
+    assert probe_under_owned_lock(paths, callbacks, candidate) is True
+    assert sum(row['route'] == 'owned' for row in callbacks.handoff_records.values()) == 1
 
 
 def test_probe_retries_a_transient_status_snapshot_race(tmp_path):
@@ -420,8 +422,8 @@ def test_probe_retries_a_transient_status_snapshot_race(tmp_path):
     clock = Clock()
     callbacks.clock = clock
     callbacks.sleep = clock.sleep
-    assert probe_under_owned_lock(paths, callbacks, candidate) == {
-        'status': 'verified', 'owned_count': 1}
+    assert probe_under_owned_lock(paths, callbacks, candidate) is True
+    assert sum(row['route'] == 'owned' for row in callbacks.handoff_records.values()) == 1
 
 
 def test_probe_does_not_reopen_with_missing_owned_ack(tmp_path):
@@ -441,6 +443,224 @@ def test_legacy_source_without_notification_attestation_is_a_blocker(tmp_path):
     baseline['source_hashes'] = dict(release.PREVIOUS_CONTROL_HASHES)
     with pytest.raises(RuntimeError, match='unsupported'):
         under_owned_lock(paths, lambda: callbacks.capture(baseline))
+
+
+@pytest.mark.parametrize('phase', ['capture', 'handoff', 'probe'])
+@pytest.mark.parametrize('result', [None, False, 0, 1, {}, {'status': 'verified'}])
+def test_controller_requires_literal_true_from_each_proof(tmp_path, monkeypatch, phase, result):
+    _, _, native, paths, callbacks, args, old, _ = setup_controller_release(tmp_path, monkeypatch)
+    calls = []
+
+    def proof(*values):
+        calls.append(phase)
+        return result  # Deliberately no proof: even truthy values must fail closed.
+
+    if phase == 'capture':
+        callbacks.capture = proof
+    elif phase == 'handoff':
+        callbacks.handoff = proof
+    else:
+        args['probe'] = proof
+    with pytest.raises(RuntimeError, match='did not verify|did not pass'):
+        release.deploy(paths, idle_timeout=0, **args)
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert calls == [phase]
+    assert status['status'] == 'rolled_back'  # Separate real rollback proof succeeded.
+    assert (paths.state / 'current').resolve() == old
+    assert native.pid == (127 if phase == 'probe' else 123)
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
+
+
+def test_real_proofs_return_literal_true_without_database_writes(tmp_path, monkeypatch):
+    app, outbox, native, paths, callbacks, baseline, old, candidate, event = setup_release(tmp_path)
+    scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+    create_owned_ack(app, outbox, event, scope)
+    monkeypatch.setattr(NotificationOutbox, 'claim', lambda *a, **kw: pytest.fail('claimed'))
+    monkeypatch.setattr(NotificationOutbox, 'import_records', lambda *a, **kw: pytest.fail('imported'))
+    databases = (callbacks.home / 'state.db', callbacks.auth, callbacks.runs,
+                 callbacks.inbox, callbacks.outbox)
+    before = {str(path): path.read_bytes() for path in databases}
+
+    def prove(callback):
+        result = []
+        under_owned_lock(paths, lambda: result.append(callback()))
+        assert result == [True] and result[0] is True
+        assert {str(path): path.read_bytes() for path in databases} == before
+
+    prove(lambda: callbacks.capture(baseline))
+    prove(lambda: callbacks.handoff(candidate))
+    activate(native, paths, candidate)
+    prove(lambda: callbacks.probe(candidate))
+    (paths.state / 'current').unlink()
+    (paths.state / 'current').symlink_to(old)
+    native.active_root = old
+    native.pid, native.started = 321, 654  # Rollback is a new listener, not the baseline PID.
+    prove(lambda: callbacks.verify_rollback(old, baseline))
+
+
+def prepare_proof_phase(tmp_path, phase):
+    app, outbox, native, paths, callbacks, baseline, old, candidate, event = setup_release(tmp_path)
+    # Exercise the actual source-selected NativeProbe readiness implementation,
+    # while keeping process and HTTP observation boundaries entirely synthetic.
+    native._ready = lambda health, *, baseline=None, root=None: release.NativeProbe._ready(
+        native, health, baseline={**baseline, 'legacy': False} if baseline else None, root=root)
+    scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+    create_owned_ack(app, outbox, event, scope)
+    if phase == 'capture':
+        action = lambda: callbacks.capture(baseline)
+    else:
+        under_owned_lock(paths, lambda: callbacks.capture(baseline))
+        if phase == 'handoff':
+            action = lambda: callbacks.handoff(candidate)
+        else:
+            under_owned_lock(paths, lambda: callbacks.handoff(candidate))
+            if phase == 'probe':
+                activate(native, paths, candidate)
+                action = lambda: callbacks.probe(candidate)
+            else:
+                if phase == 'rollback-restarted':
+                    native.pid, native.started = 321, 654
+                action = lambda: callbacks.verify_rollback(old, baseline)
+    return native, paths, callbacks, action
+
+
+@pytest.mark.parametrize('phase', ['capture', 'handoff', 'probe', 'rollback', 'rollback-restarted'])
+@pytest.mark.parametrize('window', ['snapshot-status', 'health', 'final-status'])
+@pytest.mark.parametrize('reuse_pid', [False, True])
+def test_each_proof_rejects_restart_between_identity_and_reads(tmp_path, phase, window, reuse_pid):
+    native, paths, callbacks, action = prepare_proof_phase(tmp_path, phase)
+    original = native.request
+    statuses = 0
+    fired = []
+
+    def request(path):
+        nonlocal statuses
+        if path == '/v1/mobile/notifications/status':
+            statuses += 1
+        trigger = (path == '/health/detailed' if window == 'health' else
+                   path == '/v1/mobile/notifications/status' and
+                   statuses == (1 if window == 'snapshot-status' else 2))
+        if trigger and not fired:
+            if not reuse_pid:
+                native.pid += 1
+            native.started += 1
+            fired.append(True)
+        return original(path)
+
+    native.request = request
+    with pytest.raises(RuntimeError, match='identity|readiness'):
+        under_owned_lock(paths, action)
+    assert fired == [True]
+
+
+@pytest.mark.parametrize('phase', ['capture', 'handoff', 'probe', 'rollback', 'rollback-restarted'])
+@pytest.mark.parametrize('field', ['pid', 'start_ticks'])
+def test_health_cannot_choose_its_own_expected_identity(tmp_path, phase, field):
+    native, paths, callbacks, action = prepare_proof_phase(tmp_path, phase)
+    original = native.request
+
+    def request(path):
+        value = original(path)
+        if path == '/health/detailed':
+            value['native_maintenance'][field] += 1
+            if field == 'pid':
+                value['pid'] += 1
+        return value
+
+    native.request = request
+    with pytest.raises(RuntimeError, match='identity|readiness'):
+        under_owned_lock(paths, action)
+
+
+def test_handoff_does_not_prove_success_when_readiness_is_busy(tmp_path):
+    native, paths, callbacks, action = prepare_proof_phase(tmp_path, 'handoff')
+    original = native.request
+
+    def request(path):
+        value = original(path)
+        if path == '/health/detailed':
+            value['native_maintenance']['work']['active_run_tasks'] = 1
+        return value
+
+    native.request = request
+    with pytest.raises(RuntimeError, match='not idle'):
+        under_owned_lock(paths, action)
+    assert callbacks.handoff_records is None
+
+
+@pytest.mark.parametrize('phase', ['capture', 'handoff', 'probe', 'rollback'])
+@pytest.mark.parametrize('source_state', ['', 'unknown', 'foreign-retained', b'accepted', 1.5])
+def test_owned_source_state_is_closed_and_route_bound(tmp_path, phase, source_state):
+    native, paths, callbacks, action = prepare_proof_phase(tmp_path, phase)
+    with native.outbox.transaction() as db:
+        db.execute('UPDATE notification_outbox SET source_state=?', (source_state,))
+    with pytest.raises(RuntimeError, match='unknown or inconsistent'):
+        under_owned_lock(paths, action)
+
+
+@pytest.mark.parametrize('source_state', ['busy', 'conflict', 'incomplete', 'uncertain'])
+def test_delivered_record_rejects_unresolved_source_state(tmp_path, source_state):
+    native, paths, callbacks, action = prepare_proof_phase(tmp_path, 'probe')
+    with native.outbox.transaction() as db:
+        db.execute('UPDATE notification_outbox SET source_state=?', (source_state,))
+    with pytest.raises(RuntimeError, match='unknown or inconsistent'):
+        under_owned_lock(paths, action)
+
+
+@pytest.mark.parametrize('source_state', [
+    'unexamined', 'accepted', 'missing', 'dropped', 'delivered',
+    'busy', 'conflict', 'incomplete', 'uncertain', 'queue-only',
+])
+@pytest.mark.parametrize('delivered', [False, True])
+def test_source_attested_owned_states_keep_valid_positive_proofs(tmp_path, source_state, delivered):
+    app, outbox, native, paths, callbacks, baseline, old, candidate, event = setup_release(tmp_path)
+    if source_state == 'queue-only':
+        # Actual non-delegation producer, not an invented source marker.
+        event = dict(type='completion', session_id='process-1', started_at=1,
+                     session_key=event['session_key'], task_id='chat', output='Synthetic result')
+        with outbox.transaction() as db:
+            db.execute('DELETE FROM notification_outbox')
+        outbox.capture(event, route='owned')
+    if delivered:
+        scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+        create_owned_ack(app, outbox, event, scope)
+    with outbox.transaction() as db:
+        db.execute('UPDATE notification_outbox SET source_state=?', (source_state,))
+    if delivered and source_state in ('busy', 'conflict', 'incomplete', 'uncertain'):
+        with pytest.raises(RuntimeError, match='unknown or inconsistent'):
+            under_owned_lock(paths, lambda: callbacks.capture(baseline))
+        return
+    results = []
+    under_owned_lock(paths, lambda: results.append(callbacks.capture(baseline)))
+    under_owned_lock(paths, lambda: results.append(callbacks.handoff(candidate)))
+    if delivered:
+        activate(native, paths, candidate)
+        results.append(probe_under_owned_lock(paths, callbacks, candidate))
+    else:
+        under_owned_lock(paths, lambda: results.append(callbacks.verify_rollback(old, baseline)))
+    assert results == [True, True, True] and all(value is True for value in results)
+
+
+@pytest.mark.parametrize('state,source_state', [
+    ('foreign', 'foreign-retained'), ('foreign', 'unexamined'),
+    ('foreign', 'accepted'), ('foreign', 'unknown'), ('foreign', b'foreign-retained'),
+    ('pending', 'foreign-retained'), ('delivered', 'foreign-retained'),
+])
+def test_foreign_route_state_combinations_are_fail_closed(tmp_path, state, source_state):
+    app, outbox, native, paths, callbacks, baseline, _, candidate, event = setup_release(tmp_path, with_event=False)
+    foreign = {**event, 'platform': 'telegram'}
+    assert OwnerRoute(callbacks.home, paths.state)(foreign) == 'foreign'
+    outbox.capture(foreign, {'summary': 'Synthetic foreign result'}, route='foreign')
+    with outbox.transaction() as db:
+        db.execute('UPDATE notification_outbox SET state=?,source_state=?', (state, source_state))
+    if (state, source_state) == ('foreign', 'foreign-retained'):
+        capture_and_handoff(paths, callbacks, baseline, candidate)
+        activate(native, paths, candidate)
+        assert probe_under_owned_lock(paths, callbacks, candidate) is True
+    else:
+        with pytest.raises(RuntimeError, match='unknown or inconsistent'):
+            under_owned_lock(paths, lambda: callbacks.capture(baseline))
 
 
 def test_outbox_path_must_match_the_native_private_config(tmp_path):

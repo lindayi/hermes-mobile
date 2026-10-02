@@ -14,8 +14,34 @@ and its matching owner-scoped bridge receipt, inbox row, and acknowledged flag.
 It also requires zero quarantined/unknown records, conflicts, active notification
 workers, shutdown publications, or unpreserved native notifications. The empty
 backlog case is accepted only when the bound outbox is positively empty and the
-authenticated native status/readiness evidence agrees. Callback failures raise
-while the release controller still owns its lock and admission gate.
+authenticated native status/readiness evidence agrees. Capture, handoff, probe,
+and rollback proof callbacks must return the singleton `True` only after all
+checks pass. `None`, `False`, numeric or truthy status values are not proof.
+Callback failures raise while the release controller still owns its lock and
+admission gate; handoff also rejects valid-but-busy readiness.
+
+Each proof binds health PID and start ticks to the identity independently attested
+before its reads, then re-attests after its health/status reads. Capture and
+handoff use the original baseline identity; activation uses the new listener;
+rollback uses the currently attested restored listener (which may have restarted
+and must not be confused with the original baseline PID). PID reuse with different
+start ticks is an identity change, not continuity.
+
+The source-state vocabulary comes from the attested `NotificationOutbox` default
+and `NotificationCapture.transfer`/`claim` in `backend/native_notifications.py`:
+
+- Owned `pending` records allow `unexamined`, `accepted`, `missing`, `queue-only`,
+  `dropped`, `delivered`, `busy`, `conflict`, `incomplete`, and `uncertain`.
+- Owned `delivered` records allow the first six states, but reject the unresolved
+  `busy`, `conflict`, `incomplete`, and `uncertain` markers. A known source state
+  alone is never delivery proof: the independent receipt/ACK chain is mandatory.
+- Foreign records must have state `foreign` and source state `foreign-retained`.
+  Unknown/malformed states and mismatched owner/foreign combinations fail closed.
+
+`unexamined` is the durable outbox default, not a claim of SDK acceptance.
+Recognized pending records can be captured and retained without manufacturing
+source transitions or delivery; a successful activation still requires their
+existing delivery receipts.
 
 Before either abort path reopens admission, the controller requires a separate
 read-only rollback proof against the captured source, database identities, durable

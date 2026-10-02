@@ -171,7 +171,14 @@ class NativeNotificationCallbacks:
                     or not isinstance(row['source_state'], str)):
                 raise ValueError()
             if route == 'owned':
-                if row['state'] not in ('pending', 'delivered'):
+                # Closed vocabulary from the attested NotificationOutbox default,
+                # NotificationCapture.transfer and claim eligibility. Unexamined
+                # is a durable outbox default, not proof of SDK acceptance. ACK
+                # evidence remains a separate requirement for delivered records.
+                retained = ('unexamined', 'accepted', 'missing', 'queue-only', 'dropped', 'delivered')
+                unresolved = ('busy', 'conflict', 'incomplete', 'uncertain')
+                allowed = {'pending': retained + unresolved, 'delivered': retained}
+                if row['source_state'] not in allowed.get(row['state'], ()):
                     raise ValueError()
                 envelope = dict(event_id=row['event_id'], payload_sha256=row['payload_sha256'],
                                 lease_token=row['lease_token'] or 'synthetic-read-only-proof',
@@ -271,9 +278,15 @@ class NativeNotificationCallbacks:
         if status['foreign_retained'] != foreign_retained:
             raise _EvidenceChanged()
 
-    def _require_health(self, *, baseline=None, root=None, require_idle, snapshot=None):
+    def _require_health(self, *, identity, baseline=None, root=None, require_idle, snapshot=None):
         try:
+            pid, started = identity
             health = self.native.request('/health/detailed')
+            observed = (health['pid'], health['native_maintenance']['pid'],
+                        health['native_maintenance']['start_ticks'])
+            if (any(type(value) is not int or value <= 0 for value in (*identity, *observed))
+                    or observed != (pid, pid, started)):
+                raise ValueError()
             idle = self.native._ready(health, baseline=baseline, root=root)
             evidence = health['native_maintenance']
             notices = evidence['notifications']
@@ -297,6 +310,14 @@ class NativeNotificationCallbacks:
                     or status['active_workers'] != work['notification_workers']
                     or status['shutdown_publications'] != notices['shutdown_publications']):
                 raise _EvidenceChanged()
+            # Health cannot choose its own expected process. Bracket all HTTP
+            # reads with the phase's independently attested PID/start identity.
+            observed_pid = self.native.attest(Path(baseline['root'] if baseline is not None else root))
+            if type(observed_pid) is not int or observed_pid != pid:
+                raise ValueError()
+            observed_start = self.native._start_ticks(pid)
+            if type(observed_start) is not int or observed_start != started:
+                raise ValueError()
             if require_idle and not idle:
                 return False
             return True
@@ -385,7 +406,8 @@ class NativeNotificationCallbacks:
         if not pointer.is_symlink():
             raise RuntimeError('Native notification bridge baseline is unavailable')
         snapshot = self._snapshot(include_receipts=True)
-        self._require_health(baseline=baseline, require_idle=False, snapshot=snapshot)
+        self._require_health(identity=(baseline['pid'], baseline['start_ticks']),
+                             baseline=baseline, require_idle=False, snapshot=snapshot)
         self.baseline = dict(baseline)
         self.owner_id, self.scope = snapshot['owner'], snapshot['scope']
         self._require_delivered_receipts(snapshot)
@@ -393,6 +415,7 @@ class NativeNotificationCallbacks:
         self.initial_records = self._fingerprints(snapshot['records'])
         self.initial_receipts = self._receipt_fingerprints(snapshot)
         self.bridge_root = pointer.resolve(strict=True)
+        return True
 
     def handoff(self, stage):
         if self.baseline is None or self.handoff_records is not None:
@@ -412,8 +435,11 @@ class NativeNotificationCallbacks:
         self._require_delivered_receipts(snapshot)
         if snapshot['identities'] != self.identities:
             raise RuntimeError('Native notification database binding changed')
-        self._require_health(baseline=self.baseline, require_idle=True, snapshot=snapshot)
+        if not self._require_health(identity=(self.baseline['pid'], self.baseline['start_ticks']),
+                                    baseline=self.baseline, require_idle=True, snapshot=snapshot):
+            raise RuntimeError('Native notification handoff is not idle')
         self.handoff_records = self._fingerprints(snapshot['records'])
+        return True
 
     def _receipts_complete(self, snapshot):
         from backend.background_delivery import BackgroundDeliveryService
@@ -478,13 +504,13 @@ class NativeNotificationCallbacks:
                 self._preserved(self.handoff_records, self._fingerprints(snapshot['records']), exact=True)
                 self._preserved_receipts(self.initial_receipts, snapshot)
                 self._preserved_receipts(self.handoff_receipts, snapshot)
-                ready = self._require_health(root=stage, require_idle=True, snapshot=snapshot)
+                ready = self._require_health(identity=(pid, started), root=stage,
+                                             require_idle=True, snapshot=snapshot)
             except _EvidenceChanged:
                 ready = False
                 snapshot = None
             if ready and self._receipts_complete(snapshot):
-                return {'status': 'verified', 'owned_count': sum(
-                    record['route'] == 'owned' for record in snapshot['records'].values())}
+                return True
             remaining = deadline - self.clock()
             if remaining <= 0:
                 raise RuntimeError('Native notification receipt verification timed out')
@@ -516,5 +542,6 @@ class NativeNotificationCallbacks:
         if self.handoff_receipts is not None:
             self._preserved_receipts(self.handoff_receipts, snapshot)
         self._require_delivered_receipts(snapshot)
-        self._require_health(baseline=self.baseline, require_idle=False, snapshot=snapshot)
+        self._require_health(identity=(pid, started), baseline=self.baseline,
+                             require_idle=False, snapshot=snapshot)
         return True

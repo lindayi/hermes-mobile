@@ -144,8 +144,8 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
     rollback_verify(old, baseline) proves captured notification evidence before
     either abort path reopens admission.
     All callbacks run under the same deployment lock and owned admission gate.
-    Handoff/probe must raise on incomplete work; explicit False is also a failure.
-    Rollback verification must return literal True to reopen admission.
+    Capture (when supplied), handoff, probe and rollback verification must return
+    literal True only after completing their proof; no-op/truthy values fail closed.
     """
     from .git_source import preflight
     preflight(paths, service_run=run, extra_paths=(native_dropin,))
@@ -241,7 +241,8 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
             if prepare_handoff is not None:
                 if not callable(prepare_handoff):
                     raise RuntimeError('Invalid native notification handoff preparation')
-                prepare_handoff(baseline)
+                if prepare_handoff(baseline) is not True:
+                    raise RuntimeError('Native notification capture did not verify')
             bridge.wait_idle(journal, timeout=idle_timeout, sleep=sleep)
             with closing(journal.connect()) as db:
                 required_ids = tuple(dict.fromkeys(
@@ -253,7 +254,7 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
                     raise RuntimeError('Native idle wait timed out')
                 sleep(1)
             if handoff is not None:
-                if handoff(stage) is False:
+                if handoff(stage) is not True:
                     raise RuntimeError('Native notification handoff did not verify')
             if bridge.fingerprints(stage, names) != frozen:
                 raise RuntimeError('Staged source changed after checks')
@@ -276,7 +277,7 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
                 # Notification candidates require this operator-supplied proof:
                 # drain the old backlog to real web receipts before reopening
                 # deletion/admission. Native readiness proves retention only.
-                if probe(stage) is False:
+                if probe(stage) is not True:
                     raise RuntimeError('Native notification receipt verification did not pass')
             if bridge.fingerprints(stage, names) != frozen:
                 raise RuntimeError('Staged source changed during activation')

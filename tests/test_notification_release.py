@@ -173,9 +173,11 @@ def test_notification_baseline_capture_runs_under_owned_gate_before_drain(releas
                 assert [tuple(row) for row in db.execute(
                     'SELECT singleton,owner FROM deployment_gate')] == [(1, baseline['gate_owner'])]
             events.append(('notification-capture', old))
+            return True
 
         def __call__(self, stage):
             events.append(('handoff', stage))
+            return True
 
     native = args['native']
     original_idle = native.idle
@@ -185,7 +187,7 @@ def test_notification_baseline_capture_runs_under_owned_gate_before_drain(releas
         return original_idle(*a, **kw)
 
     native.idle = idle
-    args.update(handoff=Handoff(), probe=lambda stage: None)
+    args.update(handoff=Handoff(), probe=lambda stage: True)
     release.deploy(paths, **args)
     assert events.index(('notification-capture', old)) < events.index(('idle', old))
     handoff_index = next(i for i, event in enumerate(events) if event[0] == 'handoff')
@@ -261,6 +263,7 @@ def test_handoff_runs_once_after_drain_under_owned_gate_before_publication(relea
         with pytest.raises(RunConflict):
             journal.submit('owner', 'default', 'handoff-blocked', 'blocked', 'handoff-blocked')
         events.append(('handoff', stage))
+        return True
     args['handoff'] = handoff
     original_publish = assets.publish_assets
     def publish(*a):
@@ -287,6 +290,7 @@ def test_new_native_activity_after_handoff_aborts_before_publication(release_tra
     observed = []
     def handoff(stage):
         observed.append(stage)
+        return True
     def idle(observed_journal, baseline, *, required_ids=()):
         events.append(('idle', old))
         if not observed:
@@ -389,6 +393,7 @@ def test_handoff_source_mutation_is_rejected_immediately_before_idle_recheck(rel
     def handoff(stage):
         observed.append(stage)
         (stage / 'backend/native_notifications.py').write_bytes(b'tampered')
+        return True
     def idle(*a, **kw):
         assert not observed, 'Fingerprint check must precede post-handoff idle check'
         return True
@@ -455,6 +460,7 @@ def test_receipt_verification_runs_after_bridge_activation_under_owned_gate(rele
         observed.append(stage)
         if failed:
             raise RuntimeError('real receipt proof unavailable')
+        return True
     args['probe'] = receipts
     if failed:
         with pytest.raises(RuntimeError, match='real receipt proof unavailable'):
