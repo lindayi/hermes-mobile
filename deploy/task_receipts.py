@@ -124,7 +124,14 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     pull_head = pull.get("head") if isinstance(pull, dict) else None
     pull_base = pull.get("base") if isinstance(pull, dict) else None
     if (not _nonblank_string(nonce) or not _nonblank_string(task_id)
-            or not isinstance(pull_head, dict) or not isinstance(pull_base, dict)):
+            or not isinstance(pull_head, dict) or not isinstance(pull_base, dict)
+            or type(action.get("pull_id")) is not int
+            or not _nonblank_string(action.get("pull_node_id"))
+            or type(action.get("issue")) is not int
+            or not _identity(pull, action["pull_id"])
+            or pull.get("node_id") != action["pull_node_id"]
+            or type(pull.get("number")) is not int
+            or pull.get("number") != action["issue"]):
         raise ReceiptError("Receipt claim or pull identity is incomplete")
     if (not isinstance(task, dict) or task.get("id") != task_id
             or task.get("created_at") != created_at
@@ -136,7 +143,7 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     artifacts = task.get("artifacts")
     if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 20:
         raise ReceiptError("Task artifacts are unavailable or incomplete")
-    branches = []
+    branches, pulls = [], []
     for artifact in artifacts:
         if (not isinstance(artifact, dict) or artifact.get("provider") != "github"
                 or artifact.get("type") not in {"pull", "branch"}
@@ -148,12 +155,14 @@ def validate_task_receipt(task, action, pull, comments, *, now):
                     or data.get("base_ref") != "main"):
                 raise ReceiptError("Task branch artifact does not match the dispatch")
             branches.append(data)
-        elif (not _identity(data, action.get("pull_id"))
-              or (data.get("global_id") is not None
-                  and data.get("global_id") != action.get("pull_node_id"))):
-            raise ReceiptError("Task pull artifact does not match the enrolled pull request")
-    if len(branches) != 1:
-        raise ReceiptError("Task must identify exactly one dispatched branch")
+        else:
+            if (not _identity(data, action["pull_id"])
+                    or (data.get("global_id") is not None
+                        and data.get("global_id") != action["pull_node_id"])):
+                raise ReceiptError("Task pull artifact does not match the enrolled pull request")
+            pulls.append(data)
+    if len(branches) != 1 or len(pulls) != 1:
+        raise ReceiptError("Task must identify exactly one dispatched pull request and branch")
 
     sessions = task.get("sessions")
     if not isinstance(sessions, list) or not 1 <= len(sessions) <= 100:

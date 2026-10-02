@@ -180,7 +180,7 @@ def completed_task_binding():
         "task_created_at": "2026-10-01T12:00:00Z",
         "owner_id": owner["id"], "repository_id": repository["id"],
         "pull_id": 160000016, "pull_node_id": "PR_node_16",
-        "head_ref": "topic", "head": HEAD,
+        "issue": 16, "head_ref": "topic", "head": HEAD,
     }
     task = {
         "id": TASK_ID, "state": "completed", "creator": owner, "owner": owner,
@@ -200,8 +200,64 @@ def completed_task_binding():
             "completed_at": "2026-10-01T12:05:30Z",
         }],
     }
-    pull = {"number": 16, "head": {"sha": HEAD}, "base": {"sha": BASE}}
+    pull = {"id": action["pull_id"], "node_id": action["pull_node_id"],
+            "number": 16, "head": {"sha": HEAD}, "base": {"sha": BASE}}
     return task, action, pull
+
+
+@pytest.mark.parametrize("artifact_type", ["pull", "branch"])
+@pytest.mark.parametrize("change", ["missing", "duplicate", "conflicting", "conflicting_duplicate"])
+def test_completed_task_requires_exactly_one_matching_artifact(
+        completed_task_binding, artifact_type, change):
+    from copy import deepcopy
+    task, action, pull = completed_task_binding
+    artifact = next(item for item in task["artifacts"] if item["type"] == artifact_type)
+    if change == "missing":
+        task["artifacts"].remove(artifact)
+    elif change == "duplicate":
+        task["artifacts"].append(deepcopy(artifact))
+    else:
+        if change == "conflicting_duplicate":
+            artifact = deepcopy(artifact)
+            task["artifacts"].append(artifact)
+        key, value = ("id", 160000017) if artifact_type == "pull" else ("head_ref", "other")
+        artifact["data"][key] = value
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, [receipt()], now=NOW)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("id", None), ("id", 160000017), ("id", 160000016.0),
+    ("id", "160000016"), ("id", True),
+    ("node_id", None), ("node_id", "PR_node_other"),
+    ("number", None), ("number", 17), ("number", 16.0),
+])
+def test_completed_task_rejects_actual_pull_mismatch(completed_task_binding, field, value):
+    task, action, pull = completed_task_binding
+    if value is None:
+        pull.pop(field)
+    else:
+        pull[field] = value
+    # Even a receipt agreeing with the supplied pull cannot override the durable action.
+    body = receipt_body().replace("pr=16\n", f"pr={pull.get('number')}\n")
+    with pytest.raises(ReceiptError, match="Receipt claim or pull identity is incomplete"):
+        validate_task_receipt(task, action, pull, [receipt(body=body)], now=NOW)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("pull_id", None), ("pull_id", 160000016.0),
+    ("pull_node_id", None), ("pull_node_id", ""),
+    ("issue", None), ("issue", 16.0),
+])
+def test_completed_task_requires_durable_pull_identity(completed_task_binding, field, value):
+    task, action, pull = completed_task_binding
+    action[field] = value
+    # Do not let equally missing or numerically aliased metadata establish identity.
+    pull[{"pull_id": "id", "pull_node_id": "node_id", "issue": "number"}[field]] = value
+    if field in {"pull_id", "pull_node_id"}:
+        task["artifacts"][1]["data"]["id" if field == "pull_id" else "global_id"] = value
+    with pytest.raises(ReceiptError, match="Receipt claim or pull identity is incomplete"):
+        validate_task_receipt(task, action, pull, [receipt()], now=NOW)
 
 
 @pytest.mark.parametrize("field", ["task_id", "session_id", "nonce"])
