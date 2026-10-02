@@ -35,3 +35,22 @@ def test_coordinator_unit_uses_application_python_for_lifecycle_imports(tmp_path
     assert not (home / '.config').exists()
     assert unit['Service']['ProtectSystem'] == 'strict'
     assert unit['Service']['ProtectHome'] == 'read-only'
+
+
+def test_user_workflow_units_avoid_kernel_module_isolation():
+    source = Path(__file__).resolve().parents[1]
+    for name in (
+        'hermes-mobile-coordinator.service',
+        'hermes-workflow-notifications.service',
+    ):
+        unit = configparser.ConfigParser(interpolation=None)
+        unit.read(source / 'deploy' / name)
+        service = unit['Service']
+        assert 'ProtectKernelModules' not in service
+    coordinator = configparser.ConfigParser(interpolation=None)
+    coordinator.read(source / 'deploy/hermes-mobile-coordinator.service')
+    service = coordinator['Service']
+    assert service['NoNewPrivileges'] == 'yes'
+    assert service['ProtectKernelTunables'] == 'yes'
+    assert service['ProtectControlGroups'] == 'yes'
+    assert service['RestrictSUIDSGID'] == 'yes'

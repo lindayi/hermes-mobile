@@ -447,6 +447,14 @@ def test_untrusted_issue_prompt_serializes_content_without_closing_its_boundary(
     assert r"\u002d\u002d\u002d END UNTRUSTED PUBLIC ISSUE JSON" in prompt
 
 
+def test_public_prompt_requires_parser_compatible_plain_paragraphs():
+    prompt = _public_prompt(ISSUE_NUMBER, "Title", "Public issue.")
+
+    assert "plain paragraphs" in prompt
+    assert "Markdown lists" in prompt
+    assert "optional rich evidence in comments" in prompt
+
+
 @pytest.mark.parametrize(
     "body, expected",
     [

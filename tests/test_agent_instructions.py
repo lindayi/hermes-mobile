@@ -7,6 +7,8 @@ import subprocess
 import pytest
 import yaml
 
+from deploy.issue_starter import _contains_closing_reference
+
 
 def _node():
     node = os.environ.get('HERMES_TEST_NODE') or shutil.which('node')
@@ -142,6 +144,24 @@ def test_agent_instructions_are_portable_and_copilot_rules_stay_synced():
     assert '.github/host-tests.json' in workflow
     assert 'copilot-setup-steps.yml' in workflow
     assert 'repository setting' in workflow
+
+
+def test_pull_request_template_is_accepted_by_the_starter_parser():
+    template = (ROOT / '.github/pull_request_template.md').read_text()
+    body = template.replace('NUMBER', '48')
+
+    assert _contains_closing_reference(body, 48)
+    for field in (
+        'Baseline main commit:',
+        'Acceptance cases:',
+        'RED command and observed failure:',
+        'GREEN command and observed result:',
+        'Exact tested head SHA:',
+        'Rollout effect:',
+        'Merge state:',
+        'Deployment state:',
+    ):
+        assert field in body
 
 
 def test_product_preferences_remain_explicit_in_canonical_instructions():
