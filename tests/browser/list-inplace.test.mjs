@@ -39,6 +39,7 @@ test('New chat button sends only the New chat placeholder and leaves untitled na
   const create=h.calls.find(call=>call.path==='/sessions' && call.options.method==='POST');
   assert.deepEqual(create.options.body,{title:'New chat'});
   assert.equal(h.doc.querySelector('.conversation-head h1').textContent,'Untitled conversation');
+  assert.equal(h.doc.querySelector('.messages .empty h2').textContent,'New chat');
   assert.ok(h.calls.some(call=>call.path==='/sessions/native-untitled'),'untitled creation reads native metadata instead of treating the placeholder as a saved title');
  }finally{h.close();}
 });

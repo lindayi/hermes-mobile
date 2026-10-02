@@ -148,9 +148,11 @@ def test_new_chat_leaves_native_title_available_for_auto_naming_and_repeat_creat
     with TestClient(create_app(Settings(state_dir=tmp_path/'state',profiles={'default':home},bootstrap_secret=BOOTSTRAP),gateway_client=g),base_url=ORIGIN) as c:
         c.headers['Origin']=ORIGIN;enroll(c)
         created=[c.post(BASE+'/sessions',json={'title':'New chat'}) for _ in range(2)]
-        assert [response.status_code for response in created]==[200,200]
+        named=c.post(BASE+'/sessions',json={'title':'Explicit title'})
+        assert [response.status_code for response in created+[named]]==[200,200,200]
         assert [response.json() for response in created]==[{'id':'native-1'},{'id':'native-2'}]
-        assert requests==[{},{}]
+        assert named.json()=={'id':'native-3','title':'Explicit title'}
+        assert requests==[{}, {}, {'title':'Explicit title'}]
         with sqlite3.connect(home/'state.db') as db:
             assert db.execute('SELECT title FROM sessions WHERE id=?',('native-1',)).fetchone()==(None,)
             db.execute('UPDATE sessions SET title=? WHERE id=?',('Automatically titled fixture','native-1'))

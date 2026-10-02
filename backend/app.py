@@ -595,6 +595,8 @@ def create_app(settings=None, *, gateway_client=None):
         title=session.get('title')
         if isinstance(title,str) and title.strip():
             response['title']=title
+        elif body.title!='New chat':
+            response['title']=body.title
         return response
 
     @app.patch(BASE+'/sessions/{sid}')
