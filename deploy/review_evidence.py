@@ -372,17 +372,24 @@ def parse_body(body, state, *, body_html=None):
             children = list(_disclosures(node))
             count = re.search(r"\((\d{1,3})\)$", label)
             expected = int(count[1]) if count else None
-            outside_items = _text(_Element("root", [
+            content = _Element("root", [
                 child for child in node.children if child is not _summary(node)
-            ]), exclude_details=True).strip()
-            only_intro = outside_items in {"", "In code that hasn't changed since last review"}
+            ])
+            outside_items = _text(content, exclude_details=True).strip()
+            intro = "In code that hasn't changed since last review"
+            only_intro = outside_items in {"", intro}
             if (only_intro and expected == len(children)
                     and all(_summary(child) is not None for child in children)):
                 texts = [_text(child, exclude_history=True).strip() for child in children]
             else:
-                # The explicit active section is sound; only its item count/shape
-                # is uncertain. Quote it whole without inventing separate items.
-                texts = [_text(node, exclude_history=True).strip()]
+                # Count/shape uncertainty may preserve a populated active section,
+                # but its label, intro and history cannot themselves be a finding.
+                live = _text(content, exclude_history=True, quoted=False).strip()
+                if live in {"", intro}:
+                    texts = []
+                    result["classifications"][-1] = "no-findings"
+                else:
+                    texts = [_text(node, exclude_history=True).strip()]
             result["findings"].extend(("previously-missed", text) for text in texts if text)
 
     summary_root = _summary_content(parser.root, overview)

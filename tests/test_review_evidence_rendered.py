@@ -175,13 +175,46 @@ def test_overview_framing_cannot_swallow_explicit_correction(label, value, break
     assert "Required correction: reject pending receipts." in finding["comment"]
 
 
-@pytest.mark.parametrize("change", ["html-edit", "missing", "malformed"])
+@pytest.mark.parametrize("literal", ["details", "summary"])
+def test_body_plaintext_literal_survives_final_request_with_redaction_and_caps(literal):
+    rendered = HTML_ESCAPED.replace("&lt;details&gt;", f"&lt;{literal}&gt;").replace(
+        "only after validation.",
+        "only after validation. https://example.invalid/private token: synthetic-value-123 "
+        "@someone " + "x" * 1200)
+    review = review_pair(RAW_ESCAPED, rendered, state="COMMENTED")
+    threads = [{"id": "thread-literal", "isResolved": False, "comments": [{
+        "body": "decode <details> and <summary> https://example.invalid/private "
+                "token: synthetic-value-123 @someone " + "x" * 1200}]}]
+    request = repair_request(HEAD, 0, threads, [], reviews=[review])
+    thread, body = _evidence(request)["review_findings"]
+    assert f"decode <{literal}> only after validation." in body["comment"]
+    assert f"decode <{literal}> only after validation." in request["body"]
+    assert "<details>" not in thread["comment"] and "<summary>" not in thread["comment"]
+    for finding in (thread, body):
+        assert len(finding["comment"]) == 1000
+        assert "[link removed]" in finding["comment"]
+        assert "[credential redacted]" in finding["comment"]
+        assert "＠someone" in finding["comment"]
+    for unsafe in ("example.invalid", "synthetic-value-123", "@someone"):
+        assert unsafe not in request["body"]
+
+
+def test_body_plaintext_literal_edit_changes_final_request_and_marker():
+    requests = [repair_request(HEAD, 0, [], [], reviews=[review_pair(
+        RAW_ESCAPED, HTML_ESCAPED.replace("&lt;details&gt;", f"&lt;{literal}&gt;"),
+        state="COMMENTED")]) for literal in ("details", "summary")]
+    assert requests[0]["body"] != requests[1]["body"]
+    assert requests[0]["marker"] != requests[1]["marker"]
+
+
+@pytest.mark.parametrize("change", ["html-edit", "literal-edit", "missing", "malformed"])
 def test_changed_rendered_evidence_before_dispatch_never_consumes_attempt(tmp_path, change):
     class Changed(ReviewApi):
         def get_all(self, route, *, collection=None):
             if route.endswith("/reviews?per_page=100") and self.review_reads:
                 rendered = {
                     "html-edit": HTML_ESCAPED.replace("only after validation", "before dispatch"),
+                    "literal-edit": HTML_ESCAPED.replace("&lt;details&gt;", "&lt;summary&gt;"),
                     "missing": None, "malformed": "<details",
                 }[change]
                 self.reviews = [review_pair(RAW_ESCAPED, rendered, state="COMMENTED")]
@@ -194,6 +227,61 @@ def test_changed_rendered_evidence_before_dispatch_never_consumes_attempt(tmp_pa
     assert not plan["repair_requested"] and api.fix_attempts == 0
     assert not api.graphql_writes
     assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
+
+
+@pytest.mark.parametrize("count", ["1", "0", "unknown"])
+@pytest.mark.parametrize("shape", ["empty", "intro-only", "resolved-only", "history-only", "intro-history"])
+def test_empty_active_fallback_never_dispatches_or_hides_real_finding(tmp_path, count, shape):
+    intro = "<p>In code that hasn't changed since last review</p>"
+    history = ("<details><summary>History (1)</summary>"
+               "<details><summary>Previously missed (1)</summary>"
+               "<p>NEVER FORWARD obsolete correction.</p></details></details>")
+    content = {
+        "empty": "", "intro-only": intro, "history-only": history,
+        "resolved-only": history.replace("History (1)", "Resolved since last review (1)"),
+        "intro-history": intro + history,
+    }[shape]
+    section = f"<details><summary>Previously missed ({count})</summary>{content}</details>"
+    rendered = ("<h2>Copilot review overview</h2><p>No bugs found.</p>"
+                "<p><strong>Findings:</strong> None</p>" + section)
+    review = review_pair(OVERVIEW_MARKER + "\n\nNo bugs found.", rendered, state="COMMENTED")
+    result = parse_body(review["body"], review["state"], body_html=rendered)
+    assert result["findings"] == []
+    assert result["ambiguous"] or "no-findings" in result["classifications"]
+    assert repair_request(HEAD, 0, [], [], reviews=[review]) is None
+    assert not copilot_review_valid(HEAD, [review], [])
+    api = ReviewApi([review])
+    path = tmp_path / "state.json"
+    plan = _managed_cycle(api, path)["pull_requests"][0]
+    assert not plan["repair_requested"] and not plan["review_valid"]
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
+    # Local uncertainty must not invent an extra finding or erase a genuine one.
+    request = repair_request(HEAD, 0, [], [], reviews=[review | {
+        "body_html": HTML_ESCAPED + section}])
+    [finding] = _evidence(request)["review_findings"]
+    assert "decode <details> only after validation." in finding["comment"]
+    assert "Previously missed" not in finding["comment"]
+    assert "NEVER FORWARD" not in finding["comment"]
+
+
+@pytest.mark.parametrize("count", ["1", "0", "unknown"])
+def test_populated_active_fallback_keeps_live_content_without_history(count):
+    rendered = (
+        f"<details><summary>Previously missed ({count})</summary>"
+        "<p>In code that hasn't changed since last review</p>"
+        "<details><summary>History (1)</summary>NEVER FORWARD obsolete correction.</details>"
+        "<p>Required correction: retain this live fallback.</p></details>")
+    review = review_pair(OVERVIEW_MARKER + "\n\nSynthetic active section.", rendered,
+                         state="COMMENTED")
+    request = repair_request(HEAD, 0, [], [], reviews=[review])
+    [finding] = _evidence(request)["review_findings"]
+    assert f"Previously missed ({count})" in finding["comment"]
+    assert "Required correction: retain this live fallback." in finding["comment"]
+    assert "NEVER FORWARD" not in finding["comment"]
+    assert not copilot_review_valid(HEAD, [review], [])
 
 
 def test_adapter_requests_full_media_on_every_paginated_review_and_detail():

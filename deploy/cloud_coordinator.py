@@ -369,9 +369,10 @@ def eligible_for_auto_merge(pull, *, current_main_sha, required_checks, check_ru
     )
 
 
-def _bounded_evidence(text):
+def _bounded_evidence(text, *, plaintext=False):
     text = re.sub(r"https?://\S+", "[link removed]", str(text))
-    text = re.sub(r"<[^>]*>", " ", text)
+    if not plaintext:
+        text = re.sub(r"<[^>]*>", " ", text)
     text = CREDENTIAL_RE.sub("[credential redacted]", text)
     text = text.replace("@", "＠")
     text = "".join(char for char in text if char in "\n\t" or ord(char) >= 32)
@@ -410,7 +411,8 @@ def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0,
             findings.append({
                 "review": item["review"], "head": head_sha,
                 "submitted_at": item["submitted_at"], "kind": item["kind"],
-                "comment": _bounded_evidence(item["text"]),
+                # The rendered-body parser already decoded this as literal text.
+                "comment": _bounded_evidence(item["text"], plaintext=True),
             })
     failures = []
     if (isinstance(source_failure, dict)

@@ -64,7 +64,12 @@ authenticated exact-head Copilot review, and completed failed/timed-out
 `Source checks` workflow runs are eligible repair evidence. It sends at most
 eight findings in one combined budget (threads first, then body findings, with one
 slot reserved for a workflow failure), clips each finding to 1,000 characters,
-removes links, and never fetches check logs.
+removes links, and never fetches check logs. Body findings are already decoded
+plaintext: the coordinator preserves literal angle-bracket text such as
+`<details>` and `<summary>` in repair evidence, with the same credential/link
+redaction and character/item caps. Thread and PR-intent sanitization is unchanged.
+A literal edit within the retained evidence changes the final request and its
+deterministic marker, so the existing fresh-evidence fence suppresses stale dispatch.
 
 Body-only findings are read by `deploy/review_evidence.py` from the complete
 review collection. Every record, author, and present record ID is validated
@@ -106,6 +111,12 @@ their entire subtree, even a nested active-looking label; they never leak into
 summary evidence. Structurally intact, explicitly labelled `Previously missed`
 sections may still be forwarded whole when the count or child-item shape cannot
 be proven (including unknown counts), rather than dropping known active evidence.
+This fallback requires live nonhistorical content beyond the outer summary and
+the known `In code that hasn't changed since last review` introduction. Empty,
+intro-only and history-only sections never emit their label as a finding, even
+with a positive or unknown count; they consume no repair attempt and confer no
+approval. Populated fallback sections and independently genuine findings remain
+eligible under the existing review gates.
 Unsupported top-level disclosures remain ambiguous, not implicitly resolved.
 
 Validation-only requires complete recognized status prose (optionally accompanied
@@ -156,6 +167,15 @@ structural classification/bounds cases, active body-only forwarding, ambiguity
 without repair/approval, and the existing fresh-evidence dispatch fence. Candidate
 helper pins are refreshed without clearing the unconditional source-contract hold.
 No activation, protection, lifecycle redesign, or production change is included.
+
+The bounded follow-up at `0f34afa7f6aeead6af73016464d342099d86b991` addresses
+review `5392482450`, comments `4166255676` and `4166255756`, only: decoded literal
+preservation through the request/marker/dispatch fence, and nonempty live fallback
+content. Finite RED/GREEN cases cover literal edits and sanitization plus empty,
+intro-only, resolved/history-only and populated sections with counts 1, 0 and
+unknown. Only the helper's pending digest and independent fixture are refreshed;
+the coordinator baseline, other pins and unconditional source-contract hold stay
+unchanged.
 
 The Copilot request labels all embedded evidence untrusted,
 and the text is never interpreted as shell input. A deterministic marker
