@@ -27,8 +27,18 @@ from preservation fingerprints, but final ACK evidence still requires the receip
 token to match the delivered outbox row.
 The append-only outbox retains delivered history, so every snapshot reads all
 records in bounded rowid pages inside one read-only transaction and requires the
-page total to equal the table count; there is no record cap or truncation. Each
-record is routed once per snapshot, after the outbox read transaction ends.
+page total to equal the table count; there is no record cap or truncation. Pages
+are copied into a private scratch proof rather than resident dictionaries: an
+unnamed SQLite temporary database (`sqlite3.connect('')`) that SQLite creates
+with private permissions, keeps unlinked, spills to disk beyond a fixed page
+cache, and deletes on close or process exit. The worker owns one scratch proof
+for exactly one deploy, including rollback verification, and closes it on every
+exit path; any later use fails closed. Each record is routed once per snapshot,
+in pages, after the outbox read transaction ends, with a bounded per-snapshot
+route cache that is cleared rather than grown. Receipts are paged inside one
+Inbox read transaction, and preservation, monotonic delivery, and receipt
+comparisons are SQL joins between scratch snapshots. A snapshot that fails is
+discarded; scratch errors raise and leave the owned gate closed.
 Delivery is monotonic: a record proven `delivered` must remain `delivered` with
 the same `receipt_id` in every later handoff, probe, and rollback proof, while a
 `pending` record may advance to `delivered`.
@@ -67,8 +77,15 @@ existing delivery receipts.
 Capture runs before drain, so a legitimate append may race the native status
 reads. Capture retries only that evidence change, a bounded number of times, and
 re-proves gate ownership and baseline PID/start ticks before each retry; identity
-or other evidence failures are not retried. Exhausted retries fail closed with the
-stable diagnostic `Native notification evidence changed during observation`.
+or other evidence failures are not retried. Native ACK marks an outbox record
+`delivered` before the bridge sets the receipt's `acknowledged` flag, so capture
+also retries, under the same bound and rechecks, a delivered record whose receipt
+is otherwise positively bound (owner, profile, inbox row, session lineage, token,
+and `receipt_id`) and only awaits that flag. Missing, malformed, wrong-owner,
+wrong-session, or wrong-token receipts remain immediate failures. Exhausted
+retries fail closed with the stable diagnostic `Native notification evidence
+changed during observation` or `Owned notification receipt acknowledgement is
+still pending`; no baseline is recorded and the gate stays closed.
 Rollback before handoff accepts positively validated records appended by the
 undrained old listener; after handoff the record set must match exactly.
 

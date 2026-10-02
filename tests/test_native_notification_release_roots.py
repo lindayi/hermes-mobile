@@ -53,9 +53,14 @@ def worker(tmp_path, monkeypatch):
     observed = []
 
     def deploy(paths, **kwargs):
-        observed.append(kwargs['handoff'])
+        callbacks = kwargs['handoff']
+        observed.append(callbacks)
         # Redirect the OS-native dropin default too; run the real transaction.
-        return real_deploy(paths, native_dropin=args['native_dropin'], **kwargs)
+        result = real_deploy(paths, native_dropin=args['native_dropin'], **kwargs)
+        # The worker owns the scratch proof only for this deploy; read it here.
+        observed.append((bool(callbacks.initial_records), bool(callbacks.handoff_records),
+                         bool(callbacks.initial_receipts)))
+        return result
 
     monkeypatch.setattr(release, 'deploy', deploy)
     return paths, args, native, old, observed
@@ -76,15 +81,17 @@ def test_worker_default_two_root_layout_reaches_real_proofs(worker, monkeypatch,
         monkeypatch.setattr(release.bridge, 'Paths', defaults)
     assert release.main(['--worker'], run=args['run'],
                         **({} if default_paths else {'paths': paths})) == 0
-    assert len(observed) == 1
-    callbacks = observed[0]
+    assert len(observed) == 2
+    callbacks, (initial_records, handoff_records, initial_receipts) = observed
     assert callbacks.runs == paths.database
     assert callbacks.auth == paths.database.parent / 'auth.sqlite'
     assert callbacks.inbox == paths.database.parent / 'notifications.sqlite'
     assert callbacks.outbox == paths.database.parent / 'native-notifications.sqlite'
     assert callbacks.bridge_root == old
-    assert callbacks.initial_records and callbacks.handoff_records
-    assert callbacks.initial_receipts
+    assert initial_records and handoff_records
+    assert initial_receipts
+    with pytest.raises(RuntimeError, match='scratch is closed'):
+        len(callbacks.initial_records)
     assert json.loads((paths.state / 'status.json').read_text())['status'] == 'succeeded'
     assert (paths.state / 'current').resolve() == native.active_root != old
     assert (paths.state / 'deploy.lock').is_file()

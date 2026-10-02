@@ -692,12 +692,14 @@ def main(argv=None, *, paths=None, run=subprocess.run):
     native = NativeProbe(paths.source, run=run, legacy_notice_approval=approval)
     from backend.native_api_service import OWNER_HOME
     from .native_notification_release import NativeNotificationCallbacks
-    notifications = NativeNotificationCallbacks(paths, native, home=OWNER_HOME)
-    deploy(paths, checks=lambda stage: bridge.run_checks(paths, stage, run=run),
-           verify=lambda stage, backend, **kw: bridge.verify_release(paths, stage, backend, run=run, **kw),
-           native=native, run=run, bootstrap_dedicated_native=args.bootstrap_dedicated_native,
-           handoff=notifications, probe=notifications.probe,
-           rollback_verify=notifications.verify_rollback)
+    # The private scratch proof lives exactly as long as this deploy, including
+    # its rollback verification, and is deleted on every exit path.
+    with NativeNotificationCallbacks(paths, native, home=OWNER_HOME) as notifications:
+        deploy(paths, checks=lambda stage: bridge.run_checks(paths, stage, run=run),
+               verify=lambda stage, backend, **kw: bridge.verify_release(paths, stage, backend, run=run, **kw),
+               native=native, run=run, bootstrap_dedicated_native=args.bootstrap_dedicated_native,
+               handoff=notifications, probe=notifications.probe,
+               rollback_verify=notifications.verify_rollback)
     return 0
 
 

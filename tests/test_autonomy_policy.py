@@ -94,14 +94,20 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'backend/task_reminder_presentation.py': '549a29784ef6f778ef55658d5a05961fed3919579faeeba567545004d7e9bcf3',
     'backend/tool_presentation.py': '4cfd8d468f75213d3aee3f8ab3c9f9409bb3b97e50a2aa05492181b49a1b474f',
     'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
+    'backend/native_notifications.py': '0159fbdd02705469853f51be7bb32479ea9e2fa0d6fdbc6789253d3b3c1c85fe',
 }
 _PENDING_PR16_COORDINATOR_FIXTURE = {
     'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
 }
+# PR25 candidate bytes awaiting parent review; not present in the main baseline.
+_PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
+    'deploy/native_notification_release.py': '7f324db4bf04c84675106e918f55483d8ad399665feb60339d781867f5742d50',
+}
 
 
 def _source_files():
-    return _MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR16_COORDINATOR_FIXTURE
+    return (_MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR16_COORDINATOR_FIXTURE
+            | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE)
 
 
 def _source_ci():
@@ -439,14 +445,19 @@ def test_static_python_closure_accepts_declared_initializer_attributes(tmp_path,
 
 
 def test_reviewed_source_fixture_matches_complete_required_contract():
+    pending = {'deploy/cloud_coordinator.py', 'deploy/native_notification_release.py'}
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
-        if path != 'deploy/cloud_coordinator.py'
+        if path not in pending
     } == _MERGED_MAIN_SOURCE_FIXTURE
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path == 'deploy/cloud_coordinator.py'
     } == _PENDING_PR16_COORDINATOR_FIXTURE
+    assert {
+        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
+        if path == 'deploy/native_notification_release.py'
+    } == _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
     assert SOURCE_CONTROL_PYTHON_FILES <= set(REQUIRED_FILES)
     assert SOURCE_CONTROL_ROOTS <= SOURCE_CONTROL_PYTHON_FILES
@@ -718,6 +729,7 @@ def test_unreviewed_coordinator_source_changes_block():
     'deploy/git_source.py',
     'deploy/install_core.py',
     'deploy/native_controls_release.py',
+    'deploy/native_notification_release.py',
     'deploy/public_http.py',
     'deploy/test_workspace.py',
     'scripts/test.py',
@@ -742,6 +754,7 @@ def test_mutating_each_executable_dependency_blocks(path):
     'backend/configuration.py', 'backend/context_compression_presentation.py',
     'backend/delivery.py', 'backend/hermes_client.py', 'backend/jobs.py',
     'backend/model_controls.py', 'backend/native_api_service.py', 'backend/native_catalog.py',
+    'backend/native_notifications.py',
     'backend/notification_policy.py', 'backend/notifications.py',
     'backend/operational_notifications.py', 'backend/orchestration.py',
     'backend/profiles.py', 'backend/public_commentary.py', 'backend/request_notifications.py',

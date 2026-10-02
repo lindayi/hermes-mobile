@@ -1048,3 +1048,201 @@ def test_retained_history_beyond_former_cap_does_not_deadlock_release(tmp_path, 
     assert len(callbacks.handoff_records) == 10002
     with sqlite3.connect(paths.database) as db:
         assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
+
+
+def test_snapshot_proof_keeps_resident_structures_bounded_across_owned_pages(
+        tmp_path, monkeypatch):
+    from collections.abc import Mapping
+    from contextlib import contextmanager
+    from deploy import native_notification_release as callbacks_module
+
+    app, outbox, _, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch)
+    scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+    owned = ['deleg_1'] + ['deleg_%d' % index for index in range(2, 10)]
+    for delegation_id in owned[1:]:
+        append_owned_record(outbox, event, delegation_id)
+        create_owned_ack(app, outbox, {**event, 'delegation_id': delegation_id}, scope)
+    foreign_rows = []
+    for index in range(4):
+        foreign = {**event, 'delegation_id': 'foreign_%d' % index, 'platform': 'telegram'}
+        encoded = json.dumps(foreign, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        foreign_rows.append(('async:' + foreign['delegation_id'], encoded,
+                             hashlib.sha256(encoded.encode()).hexdigest()))
+    with outbox.transaction() as db:
+        db.executemany('''INSERT INTO notification_outbox(event_id,event_json,payload_sha256,
+            route,state,historical,provenance,source_state)
+            VALUES(?,?,?,'foreign','foreign',0,'publisher','foreign-retained')''', foreign_rows)
+    total = len(owned) + 4
+    monkeypatch.setattr(callbacks_module, 'PAGE_SIZE', 2)
+    batches, reads = [], []
+    original_resolve = callbacks_module._resolve_routes
+    original_readonly = callbacks_module._readonly
+
+    def resolve(events, home, state):
+        batches.append(len(events))
+        return original_resolve(events, home, state)
+
+    class Cursor:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def fetchall(self):
+            rows = self.cursor.fetchall()
+            reads.append(len(rows))
+            return rows
+
+        def fetchone(self):
+            reads.append(1)
+            return self.cursor.fetchone()
+
+        def __iter__(self):
+            return iter(self.fetchall())
+
+    class Database:
+        def __init__(self, db):
+            self.db = db
+
+        def execute(self, *values):
+            return Cursor(self.db.execute(*values))
+
+    @contextmanager
+    def readonly(path):
+        with original_readonly(path) as db:
+            yield Database(db)
+
+    monkeypatch.setattr(callbacks_module, '_resolve_routes', resolve)
+    monkeypatch.setattr(callbacks_module, '_readonly', readonly)
+    snapshot = callbacks._snapshot(include_receipts=True)
+    assert not isinstance(snapshot['records'], dict)
+    assert len(snapshot['records']) == total and len(snapshot['receipts']) == len(owned)
+    assert sorted(batches) == [1] + [2] * 6
+    assert reads and max(reads) <= 2
+
+    batches.clear(), reads.clear()
+    release.deploy(paths, idle_timeout=0, **args)
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'succeeded'
+    assert batches and max(batches) <= 2
+    assert reads and max(reads) <= 2
+    # Complete retained history remains proven, but only through the scratch proof.
+    for view in (callbacks.initial_records, callbacks.handoff_records,
+                 callbacks.initial_receipts, callbacks.handoff_receipts,
+                 callbacks.initial_deliveries, callbacks.handoff_deliveries):
+        assert isinstance(view, Mapping) and not isinstance(view, dict)
+    assert len(callbacks.initial_records) == len(callbacks.handoff_records) == total
+    assert set(callbacks.handoff_deliveries) == {'async:' + name for name in owned}
+    assert {key: value['acknowledged'] for key, value in callbacks.initial_receipts.items()} == {
+        'async:' + name: 1 for name in owned}
+
+    def containers(value, seen):
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, (dict, list, tuple, set, frozenset)):
+            yield value
+            for item in (value.values() if isinstance(value, dict) else value):
+                yield from containers(item, seen)
+
+    resident = list(containers(vars(callbacks), set()))
+    assert resident and all(len(value) < total for value in resident if value is not vars(callbacks))
+
+
+def test_scratch_proof_is_private_unnamed_and_explicitly_closed(tmp_path):
+    _, _, _, paths, callbacks, baseline, _, candidate, _ = setup_release(tmp_path)
+    with callbacks:
+        under_owned_lock(paths, lambda: callbacks.capture(baseline))
+        assert [tuple(row)[1:] for row in callbacks._proof.db.execute(
+            'PRAGMA database_list')] == [('main', '')]
+        assert len(callbacks.initial_records) == 1
+    with pytest.raises(RuntimeError, match='scratch is closed'):
+        len(callbacks.initial_records)
+    with pytest.raises(RuntimeError, match='scratch is closed'):
+        under_owned_lock(paths, lambda: callbacks.handoff(candidate))
+    callbacks.close()
+
+
+def deliver_before_bridge_ack(app, outbox, event, scope):
+    item, receipt_id = create_unacked_owned_receipt(app, outbox, event, scope)
+    # Native /ack completes before the bridge marks its receipt acknowledged.
+    outbox.ack(event_id=item['event_id'], payload_sha256=item['payload_sha256'],
+               lease_token=item['lease_token'], receipt_id=receipt_id)
+    return item
+
+
+def test_controller_capture_retries_native_ack_before_bridge_receipt_ack(
+        tmp_path, monkeypatch):
+    app, outbox, _, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch, delivered=False)
+    scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+    item = deliver_before_bridge_ack(app, outbox, event, scope)
+    sleeps = []
+
+    def bridge_acknowledges(_):
+        sleeps.append(True)
+        app.notifications.background_acknowledged(scope, item['event_id'], item['lease_token'])
+
+    callbacks.sleep = bridge_acknowledges
+    release.deploy(paths, idle_timeout=0, **args)
+
+    assert sleeps == [True]
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'succeeded'
+    assert callbacks.initial_receipts[item['event_id']]['acknowledged'] == 1
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
+
+
+def test_controller_capture_ack_retry_exhaustion_keeps_gate_closed(tmp_path, monkeypatch):
+    from deploy.native_notification_release import CAPTURE_ATTEMPTS
+    app, outbox, _, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch, delivered=False)
+    scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+    deliver_before_bridge_ack(app, outbox, event, scope)
+    sleeps = []
+    callbacks.sleep = sleeps.append
+
+    with pytest.raises(RuntimeError, match='admission gate remains closed'):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status['status'] == 'rollback_failed'
+    assert status['error'] == 'Owned notification receipt acknowledgement is still pending'
+    assert len(sleeps) == CAPTURE_ATTEMPTS - 1
+    assert callbacks.baseline is None
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT owner FROM deployment_gate').fetchone() == (status['release'],)
+
+
+@pytest.mark.parametrize(('kind', 'expected_error'), [
+    ('session', 'Owned notification receipt is inconsistent'),
+    ('token', 'Owned notification receipt is inconsistent'),
+    ('owner', 'Owned notification receipt is unavailable'),
+])
+def test_controller_capture_never_retries_malformed_pending_ack(
+        tmp_path, monkeypatch, kind, expected_error):
+    app, outbox, _, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch, delivered=False)
+    scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+    item = deliver_before_bridge_ack(app, outbox, event, scope)
+    with app.notifications._db() as db:
+        if kind == 'session':
+            db.execute('''UPDATE inbox SET session_id='another-session'
+                WHERE id=(SELECT inbox_id FROM background_receipts WHERE event_id=?)''',
+                       (item['event_id'],))
+        elif kind == 'token':
+            db.execute("UPDATE background_receipts SET lease_token='other-token' WHERE event_id=?",
+                       (item['event_id'],))
+        else:
+            db.execute("UPDATE background_receipts SET user_id='intruder' WHERE event_id=?",
+                       (item['event_id'],))
+    sleeps = []
+    callbacks.sleep = sleeps.append
+
+    with pytest.raises(RuntimeError, match='admission gate remains closed'):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status['status'] == 'rollback_failed'
+    assert status['error'] == expected_error
+    assert sleeps == []
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT owner FROM deployment_gate').fetchone() == (status['release'],)

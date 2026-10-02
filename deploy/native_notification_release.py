@@ -1,5 +1,7 @@
 """Read-only preservation and receipt checks for guarded native releases."""
+from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager
+import contextvars
 import fcntl
 import hashlib
 import json
@@ -13,6 +15,9 @@ import time
 # Retained outbox history is append-only; read it in bounded pages, never truncated.
 PAGE_SIZE = 500
 CAPTURE_ATTEMPTS = 5
+# Per-snapshot owner-route results reused across pages; evicted, never grown.
+ROUTE_CACHE_KEYS = 512
+SCRATCH_CACHE_KIB = 1024
 STATUS_KEYS = ('pending', 'delivered', 'quarantined', 'foreign', 'conflicts',
                'foreign_retained', 'active_workers', 'shutdown_publications')
 
@@ -20,6 +25,102 @@ STATUS_KEYS = ('pending', 'delivered', 'quarantined', 'foreign', 'conflicts',
 class _EvidenceChanged(RuntimeError):
     def __init__(self, message='Native notification evidence changed during observation'):
         super().__init__(message)
+
+
+class _Pending(_EvidenceChanged):
+    def __init__(self):
+        super().__init__('Owned notification receipt acknowledgement is still pending')
+
+
+_ROUTES = contextvars.ContextVar('native_notification_routes', default=None)
+_RECORD_FIELDS = ('event_hash', 'result_hash', 'payload_sha256', 'route', 'state', 'historical',
+                  'provenance_hash', 'source_state', 'receipt_id', 'lease_token', 'session_id')
+_FINGERPRINT_FIELDS = ('event_hash', 'result_hash', 'payload_sha256', 'route',
+                       'historical', 'provenance_hash')
+_RAW_FIELDS = ('event_id', 'event_json', 'result_json', 'payload_sha256', 'route', 'state',
+               'historical', 'provenance', 'source_state', 'receipt_id', 'lease_token')
+_RECEIPT_FIELDS = ('event_id', 'scope', 'digest', 'user_id', 'origin', 'inbox_id',
+                   'event_json', 'joined_inbox_id', 'delivery_id',
+                   'inbox_user_id', 'title', 'body', 'session_id')
+
+
+class _ScratchProof:
+    """Private disk-backed proof for one release worker; deleted when closed.
+
+    SQLite's empty filename creates an unnamed 0600 temporary database that is
+    unlinked immediately and removed on close or process exit. Only bounded pages
+    and a bounded page cache are resident; untyped columns preserve storage types.
+    """
+
+    def __init__(self):
+        try:
+            db = sqlite3.connect('', isolation_level=None)
+            db.row_factory = sqlite3.Row
+            if [tuple(row)[1:] for row in db.execute('PRAGMA database_list')] != [('main', '')]:
+                raise ValueError()
+            db.execute(f'PRAGMA cache_size=-{int(SCRATCH_CACHE_KIB)}')
+            db.execute('PRAGMA temp_store=FILE')
+            db.executescript('''
+                CREATE TABLE raw(snap, event_id, event_json, result_json, payload_sha256, route,
+                    state, historical, provenance, source_state, receipt_id, lease_token,
+                    PRIMARY KEY(snap, event_id));
+                CREATE TABLE records(snap, event_id, event_hash, result_hash, payload_sha256,
+                    route, state, historical, provenance_hash, source_state, receipt_id,
+                    lease_token, session_id, receipt_check, PRIMARY KEY(snap, event_id));
+                CREATE TABLE receipts(snap, event_id, binding, acknowledged,
+                    PRIMARY KEY(snap, event_id));''')
+        except (sqlite3.Error, ValueError):
+            raise RuntimeError('Native notification proof scratch is unavailable') from None
+        self.db, self.serial = db, 0
+
+    def execute(self, sql, values=()):
+        if self.db is None:
+            raise RuntimeError('Native notification proof scratch is closed')
+        return self.db.execute(sql, values)
+
+    def exists(self, sql, values):
+        return self.execute(sql + ' LIMIT 1', values).fetchone() is not None
+
+    def discard(self, snap):
+        if self.db is not None and snap is not None:
+            for table in ('raw', 'records', 'receipts'):
+                self.db.execute(f'DELETE FROM {table} WHERE snap=?', (snap,))
+
+    def close(self):
+        db, self.db = self.db, None
+        if db is not None:
+            db.close()
+
+
+class _ProofView(Mapping):
+    """Read-only per-key view of one scratch snapshot; iteration is paged."""
+
+    def __init__(self, proof, table, snap, fields, *, where='', scalar=False):
+        self.proof, self.table, self.snap = proof, table, snap
+        self.fields, self.where, self.scalar = fields, where, scalar
+
+    def __getitem__(self, key):
+        row = self.proof.execute(
+            f'SELECT {",".join(self.fields)} FROM {self.table} '
+            f'WHERE snap=? AND event_id=? {self.where}', (self.snap, key)).fetchone()
+        if row is None:
+            raise KeyError(key)
+        return row[0] if self.scalar else dict(zip(self.fields, row))
+
+    def __iter__(self):
+        after = -1
+        while True:
+            page = self.proof.execute(
+                f'SELECT rowid,event_id FROM {self.table} WHERE snap=? AND rowid>? {self.where} '
+                'ORDER BY rowid LIMIT ?', (self.snap, after, PAGE_SIZE)).fetchall()
+            if not page:
+                return
+            after = page[-1][0]
+            yield from (row[1] for row in page)
+
+    def __len__(self):
+        return self.proof.execute(f'SELECT COUNT(*) FROM {self.table} WHERE snap=? {self.where}',
+                                  (self.snap,)).fetchone()[0]
 
 
 def _canonical(value):
@@ -43,32 +144,16 @@ def _readonly(path):
         db.close()
 
 
-def _resolve_routes(events, home, state):
-    """Route one outbox snapshot against shared per-database read snapshots."""
-    from backend.native_notifications import readonly
+class _RouteSession:
+    """One coherent set of owner-route read snapshots shared by every page."""
 
-    routes = [None] * len(events)
-    keys = set()
-    for index, event in enumerate(events):
-        kind = event.get('type')
-        if kind not in ('async_delegation', 'completion', 'watch_match'):
-            routes[index] = ('quarantined', None)
-        elif kind == 'async_delegation' and not event.get('delegation_id'):
-            routes[index] = ('quarantined', None)
-        elif (event.get('platform') not in (None, '', 'api', 'api_server')
-                or any(event.get(key) for key in
-                       ('scope_id', 'chat_id', 'chat_type', 'thread_id', 'user_id'))):
-            routes[index] = ('foreign', None)
-        else:
-            key = event.get('session_key')
-            if isinstance(key, str) and ':' in key:
-                routes[index] = ('foreign', None)
-            elif isinstance(key, str):
-                keys.add(key)
-            else:
-                routes[index] = ('quarantined', None)
+    def __init__(self, stack, home, state):
+        from backend.native_notifications import readonly
 
-    with ExitStack() as stack:
+        self.stack, self.readonly = stack, readonly
+        self.binding = (Path(home), Path(state))
+        self.runs = self.native = None
+        self.cache = {}
         auth = stack.enter_context(readonly(Path(state) / 'auth.sqlite'))
         owners = auth.execute(
             "SELECT id FROM users WHERE role='owner' AND profile='default' AND status='ready'"
@@ -76,16 +161,22 @@ def _resolve_routes(events, home, state):
         if (len(owners) != 1 or not isinstance(owners[0]['id'], str)
                 or not owners[0]['id']):
             raise ValueError('default owner is unavailable')
-        owner_id = owners[0]['id']
-        if not keys:
-            return owner_id, routes
+        self.owner_id = owners[0]['id']
 
-        runs = stack.enter_context(readonly(Path(state) / 'runs.sqlite'))
-        native = stack.enter_context(readonly(Path(home) / 'state.db'))
+    def _resolve_keys(self, keys):
+        """Resolve session keys to (root, chain, tip, deleted) or None, in batches."""
+        result = {key: self.cache[key] for key in keys if key in self.cache}
+        missing = sorted(keys - set(result))
+        if not missing:
+            return result
+        if self.runs is None:
+            home, state = self.binding
+            self.runs = self.stack.enter_context(self.readonly(state / 'runs.sqlite'))
+            self.native = self.stack.enter_context(self.readonly(home / 'state.db'))
+        runs, native = self.runs, self.native
         run_rows = {}
-        sorted_keys = sorted(keys)
-        for offset in range(0, len(sorted_keys), 400):
-            page = sorted_keys[offset:offset + 400]
+        for offset in range(0, len(missing), 400):
+            page = missing[offset:offset + 400]
             placeholders = ','.join('?' for _ in page)
             found = runs.execute(
                 f'''SELECT upstream_id,session_id,user_id FROM runs
@@ -139,7 +230,7 @@ def _resolve_routes(events, home, state):
                     return None
                 chain.add(current)
                 if row['end_reason'] != 'compression':
-                    return chain, current
+                    return frozenset(chain), current
                 if current not in children:
                     children[current] = [child['id'] for child in native.execute(
                         '''SELECT id FROM sessions WHERE parent_session_id=?
@@ -176,21 +267,59 @@ def _resolve_routes(events, home, state):
                 f'''SELECT session_id FROM session_deletions
                     WHERE user_id=? AND profile='default'
                     AND session_id IN ({placeholders})''',
-                [owner_id, *page]).fetchall())
+                [self.owner_id, *page]).fetchall())
 
+        resolved_keys = {}
+        for key in missing:
+            matches = run_rows.get(key, ())
+            resolved = None
+            if len(matches) == 1 and matches[0]['user_id'] == self.owner_id:
+                root = matches[0]['session_id']
+                found = lineages.get(root)
+                if found is not None:
+                    chain, tip = found
+                    resolved = (root, chain, tip, any(name in deleted for name in chain))
+            resolved_keys[key] = resolved
+        if len(self.cache) + len(resolved_keys) > ROUTE_CACHE_KEYS:
+            self.cache.clear()
+        if len(resolved_keys) <= ROUTE_CACHE_KEYS:
+            self.cache.update(resolved_keys)
+        result.update(resolved_keys)
+        return result
+
+    def route(self, events):
+        routes = [None] * len(events)
+        keys = set()
+        for index, event in enumerate(events):
+            kind = event.get('type')
+            if kind not in ('async_delegation', 'completion', 'watch_match'):
+                routes[index] = ('quarantined', None)
+            elif kind == 'async_delegation' and not event.get('delegation_id'):
+                routes[index] = ('quarantined', None)
+            elif (event.get('platform') not in (None, '', 'api', 'api_server')
+                    or any(event.get(key) for key in
+                           ('scope_id', 'chat_id', 'chat_type', 'thread_id', 'user_id'))):
+                routes[index] = ('foreign', None)
+            else:
+                key = event.get('session_key')
+                if isinstance(key, str) and ':' in key:
+                    routes[index] = ('foreign', None)
+                elif isinstance(key, str):
+                    keys.add(key)
+                else:
+                    routes[index] = ('quarantined', None)
+        if not keys:
+            return routes
+
+        resolved_keys = self._resolve_keys(keys)
         for index, event in enumerate(events):
             if routes[index] is not None:
                 continue
-            matches = run_rows.get(event['session_key'], ())
-            if len(matches) != 1 or matches[0]['user_id'] != owner_id:
-                routes[index] = ('quarantined', None)
-                continue
-            root = matches[0]['session_id']
-            resolved = lineages.get(root)
+            resolved = resolved_keys[event['session_key']]
             if resolved is None:
                 routes[index] = ('quarantined', None)
                 continue
-            chain, tip = resolved
+            root, chain, tip, deleted = resolved
             origin = (event.get('task_id') if event['type'] in
                       ('completion', 'watch_match') else event.get('origin_session_id'))
             if (event['type'] in ('completion', 'watch_match')
@@ -199,11 +328,21 @@ def _resolve_routes(events, home, state):
             elif (not origin or origin not in chain or root not in chain
                   or any(event.get(name) and event[name] not in chain
                          for name in ('origin_ui_session_id', 'parent_session_id'))
-                  or any(session_id in deleted for session_id in chain)):
+                  or deleted):
                 routes[index] = ('quarantined', None)
             else:
                 routes[index] = ('owned', tip)
-    return owner_id, routes
+        return routes
+
+
+def _resolve_routes(events, home, state):
+    """Route one page against the snapshot's shared per-database read snapshots."""
+    session = _ROUTES.get()
+    if session is not None and session.binding == (Path(home), Path(state)):
+        return session.owner_id, session.route(events)
+    with ExitStack() as stack:
+        session = _RouteSession(stack, home, state)
+        return session.owner_id, session.route(events)
 
 
 class NativeNotificationCallbacks:
@@ -246,6 +385,17 @@ class NativeNotificationCallbacks:
         self.scope = None
         self.identities = None
         self.bridge_root = None
+        self._proof = _ScratchProof()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def close(self):
+        """End the worker-owned scratch proof; later phases fail closed."""
+        self._proof.close()
 
     def __call__(self, stage):
         return self.handoff(stage)
@@ -389,79 +539,194 @@ class NativeNotificationCallbacks:
             raise RuntimeError('Native notification record is unknown or inconsistent') from None
 
     def _snapshot(self, *, expected_owner=None, include_receipts=False):
+        """Stream one complete snapshot into the scratch proof in bounded pages.
+
+        The outbox is copied in one count-checked read transaction and closed before
+        routing. Pages are routed against one coherent set of route read snapshots,
+        then owner receipts are paged in one Inbox read transaction.
+        """
+        proof = self._proof
         identities = self._file_identities()
         scope = json.dumps(['default', str(self.home)], separators=(',', ':'))
+        proof.serial += 1
+        snap = proof.serial
+        proof.execute('BEGIN')
         try:
-            with _readonly(self.outbox) as db:
-                binding = [row['home'] for row in db.execute('SELECT home FROM notification_binding')]
-                conflicts = db.execute('SELECT COUNT(*) FROM notification_conflicts').fetchone()[0]
-                total = db.execute('SELECT COUNT(*) FROM notification_outbox').fetchone()[0]
-                rows, after = [], -(2 ** 63)
-                while True:
-                    page = db.execute('''SELECT rowid,event_id,event_json,result_json,
-                        payload_sha256,route,state,historical,provenance,source_state,receipt_id,
-                        lease_token FROM notification_outbox WHERE rowid>?
-                        ORDER BY rowid LIMIT ?''', (after, PAGE_SIZE)).fetchall()
-                    if not page:
-                        break
-                    rows.extend(dict(row) for row in page)
-                    after = page[-1]['rowid']
-            if binding != [str(self.home)] or type(conflicts) is not int or conflicts != 0:
-                raise ValueError()
-            if type(total) is not int or len(rows) != total:
-                raise ValueError()
-            pending, events, event_ids = [], [], set()
-            for row in rows:
-                if (not isinstance(row['event_id'], str) or not row['event_id']
-                        or row['event_id'] in event_ids):
+            try:
+                with _readonly(self.outbox) as db:
+                    binding = [row['home'] for row in
+                               db.execute('SELECT home FROM notification_binding').fetchall()]
+                    conflicts = db.execute(
+                        'SELECT COUNT(*) FROM notification_conflicts').fetchone()[0]
+                    total = db.execute('SELECT COUNT(*) FROM notification_outbox').fetchone()[0]
+                    if (binding != [str(self.home)] or type(conflicts) is not int
+                            or conflicts != 0 or type(total) is not int):
+                        raise ValueError()
+                    copied, after = 0, -(2 ** 63)
+                    while True:
+                        page = db.execute('''SELECT rowid,event_id,event_json,result_json,
+                            payload_sha256,route,state,historical,provenance,source_state,
+                            receipt_id,lease_token FROM notification_outbox WHERE rowid>?
+                            ORDER BY rowid LIMIT ?''', (after, PAGE_SIZE)).fetchall()
+                        if not page:
+                            break
+                        for row in page:
+                            if not isinstance(row['event_id'], str) or not row['event_id']:
+                                raise ValueError()
+                        proof.db.executemany(
+                            f'INSERT INTO raw VALUES(?,{",".join("?" for _ in _RAW_FIELDS)})',
+                            [(snap, *(row[name] for name in _RAW_FIELDS)) for row in page])
+                        copied += len(page)
+                        after = page[-1]['rowid']
+                if copied != total:
                     raise ValueError()
-                event_ids.add(row['event_id'])
+                with ExitStack() as stack:
+                    routes = _RouteSession(stack, self.home, self.state)
+                    owner = routes.owner_id
+                    if expected_owner is not None and owner != expected_owner:
+                        raise RuntimeError('Native notification owner changed')
+                    token = _ROUTES.set(routes)
+                    try:
+                        self._route_pages(snap, owner)
+                    finally:
+                        _ROUTES.reset(token)
+                if include_receipts:
+                    self._receipt_pages(snap, owner, scope)
+                proof.execute('DELETE FROM raw WHERE snap=?', (snap,))
+                counts = {key: 0 for key in ('pending', 'delivered', 'quarantined', 'foreign')}
+                for state, count in proof.execute(
+                        'SELECT state,COUNT(*) FROM records WHERE snap=? GROUP BY state',
+                        (snap,)).fetchall():
+                    counts[state] += count
+                foreign_retained = proof.execute(
+                    """SELECT COUNT(*) FROM records WHERE snap=? AND route='foreign'
+                       AND source_state='foreign-retained'""", (snap,)).fetchone()[0]
+                proof.execute('COMMIT')
+                native_status = self.native.request('/v1/mobile/notifications/status')
+                self._validate_status(native_status, counts, foreign_retained, conflicts)
+            except (OSError, sqlite3.Error, KeyError, TypeError, ValueError,
+                    json.JSONDecodeError):
+                raise RuntimeError('Native notification preservation evidence unavailable') from None
+            if identities != self._file_identities():
+                raise RuntimeError('Native notification database binding changed')
+        except BaseException:
+            if proof.db is not None:
+                if proof.db.in_transaction:
+                    proof.db.execute('ROLLBACK')
+                proof.discard(snap)
+            raise
+        return dict(id=snap, owner=owner, scope=scope, status=native_status,
+                    identities=identities, records=self._records_view(snap),
+                    receipts=_ProofView(proof, 'receipts', snap, ('binding', 'acknowledged')))
+
+    def _records_view(self, snap, fields=_RECORD_FIELDS, **kwargs):
+        return _ProofView(self._proof, 'records', snap, fields, **kwargs)
+
+    def _route_pages(self, snap, owner):
+        proof, after = self._proof, -1
+        while True:
+            page = proof.execute(
+                f'SELECT rowid,{",".join(_RAW_FIELDS)} FROM raw WHERE snap=? AND rowid>? '
+                'ORDER BY rowid LIMIT ?', (snap, after, PAGE_SIZE)).fetchall()
+            if not page:
+                return
+            after = page[-1]['rowid']
+            events = []
+            for row in page:
                 event = json.loads(row['event_json'])
                 if not isinstance(event, dict):
                     raise ValueError()
-                pending.append((row, event))
                 events.append(event)
-            owner, routes = _resolve_routes(events, self.home, self.state)
-            if expected_owner is not None and owner != expected_owner:
-                raise RuntimeError('Native notification owner changed')
-            records = {}
-            for (row, event), (route, session_id) in zip(pending, routes):
-                records[row['event_id']] = self._record(row, route, session_id, event)
-            receipt_rows = []
-            if include_receipts:
-                with _readonly(self.inbox) as db:
-                    receipt_rows = [dict(row) for row in db.execute('''SELECT
-                        r.event_id,r.scope,r.digest,r.user_id,r.origin,r.inbox_id,r.event_json,
-                        r.lease_token,r.acknowledged,i.id AS joined_inbox_id,i.delivery_id,
-                        i.user_id AS inbox_user_id,i.title,i.body,i.session_id
-                        FROM background_receipts r LEFT JOIN inbox i ON i.id=r.inbox_id
-                        WHERE r.scope=? AND r.user_id=?''', (scope, owner))]
-            receipts = {}
-            for row in receipt_rows:
-                if row['event_id'] in receipts:
-                    raise ValueError()
-                receipts[row['event_id']] = row
-            native_status = self.native.request('/v1/mobile/notifications/status')
-            self._validate_status(native_status, records, conflicts)
-        except (OSError, sqlite3.Error, KeyError, TypeError, ValueError, json.JSONDecodeError):
-            raise RuntimeError('Native notification preservation evidence unavailable') from None
-        if identities != self._file_identities():
-            raise RuntimeError('Native notification database binding changed')
-        return dict(owner=owner, scope=scope, records=records, receipts=receipts,
-                    status=native_status, identities=identities)
+            routed_owner, routes = _resolve_routes(events, self.home, self.state)
+            if routed_owner != owner or len(routes) != len(page):
+                raise ValueError()
+            values = []
+            for row, event, (route, session_id) in zip(page, events, routes):
+                record = self._record(row, route, session_id, event)
+                bound = route == 'owned' and record['state'] == 'delivered'
+                values.append((snap, row['event_id'], *(record[name] for name in _RECORD_FIELDS),
+                               'missing' if bound else None))
+            proof.db.executemany(
+                f'INSERT INTO records VALUES(?,?,{",".join("?" for _ in _RECORD_FIELDS)},?)',
+                values)
+
+    def _receipt_pages(self, snap, owner, scope):
+        from backend.background_delivery import BackgroundDeliveryService
+
+        proof = self._proof
+        with _readonly(self.inbox) as db:
+            total = db.execute(
+                'SELECT COUNT(*) FROM background_receipts WHERE scope=? AND user_id=?',
+                (scope, owner)).fetchone()[0]
+            copied, after = 0, -(2 ** 63)
+            while True:
+                page = db.execute('''SELECT r.rowid AS receipt_rowid,
+                    r.event_id,r.scope,r.digest,r.user_id,r.origin,r.inbox_id,r.event_json,
+                    r.lease_token,r.acknowledged,i.id AS joined_inbox_id,i.delivery_id,
+                    i.user_id AS inbox_user_id,i.title,i.body,i.session_id
+                    FROM background_receipts r LEFT JOIN inbox i ON i.id=r.inbox_id
+                    WHERE r.scope=? AND r.user_id=? AND r.rowid>?
+                    ORDER BY r.rowid LIMIT ?''', (scope, owner, after, PAGE_SIZE)).fetchall()
+                if not page:
+                    break
+                copied += len(page)
+                after = page[-1]['receipt_rowid']
+                for receipt in page:
+                    acknowledged = receipt['acknowledged']
+                    if type(acknowledged) is not int or acknowledged not in (0, 1):
+                        raise RuntimeError('Owned notification acknowledgement is unknown')
+                proof.db.executemany('INSERT INTO receipts VALUES(?,?,?,?)', [
+                    (snap, receipt['event_id'],
+                     _sha(_canonical({name: receipt[name] for name in _RECEIPT_FIELDS})),
+                     receipt['acknowledged']) for receipt in page])
+                keys = [receipt['event_id'] for receipt in page]
+                placeholders = ','.join('?' for _ in keys)
+                delivered = {row['event_id']: row for row in proof.execute(
+                    f"""SELECT r.event_id,r.payload_sha256,r.lease_token,r.receipt_id,
+                        r.session_id,w.event_json FROM records r JOIN raw w
+                        ON w.snap=r.snap AND w.event_id=r.event_id
+                        WHERE r.snap=? AND r.route='owned' AND r.state='delivered'
+                        AND r.event_id IN ({placeholders})""", (snap, *keys)).fetchall()}
+                checks = []
+                for receipt in page:
+                    event_id = receipt['event_id']
+                    record = delivered.get(event_id)
+                    if record is None:
+                        continue
+                    try:
+                        event = json.loads(record['event_json'])
+                        valid = (
+                            receipt['scope'] == scope
+                            and receipt['user_id'] == owner
+                            and receipt['digest'] == record['payload_sha256']
+                            and _canonical(json.loads(receipt['event_json'])) == _canonical(event)
+                            and receipt['origin'] == BackgroundDeliveryService._origin(event)
+                            and receipt['lease_token'] == record['lease_token']
+                            and receipt['inbox_id'] == record['receipt_id']
+                            and receipt['joined_inbox_id'] == receipt['inbox_id']
+                            and receipt['inbox_user_id'] == owner
+                            and receipt['delivery_id'] == 'native-event:v1:' + json.dumps(
+                                [scope, event_id])
+                            and receipt['title'] == 'Background result'
+                            and receipt['body'] == BackgroundDeliveryService._body(event)
+                            and receipt['session_id'] == record['session_id'])
+                    except (KeyError, TypeError, ValueError):
+                        valid = False
+                    # Only a fully bound receipt can be merely awaiting its bridge ACK.
+                    checks.append(('inconsistent' if not valid else
+                                   'acknowledged' if receipt['acknowledged'] == 1
+                                   else 'unacknowledged', snap, event_id))
+                proof.db.executemany(
+                    'UPDATE records SET receipt_check=? WHERE snap=? AND event_id=?', checks)
+            if type(total) is not int or copied != total:
+                raise ValueError()
 
     @staticmethod
-    def _validate_status(status, records, conflicts):
+    def _validate_status(status, counts, foreign_retained, conflicts):
         if not isinstance(status, dict) or set(status) != set(STATUS_KEYS):
             raise ValueError()
         if any(type(status[key]) is not int or status[key] < 0 for key in STATUS_KEYS):
             raise ValueError()
-        counts = {key: 0 for key in ('pending', 'delivered', 'quarantined', 'foreign')}
-        foreign_retained = 0
-        for record in records.values():
-            counts[record['state']] += 1
-            foreign_retained += int(
-                record['route'] == 'foreign' and record['source_state'] == 'foreign-retained')
         if any(status[key] != counts[key] for key in counts):
             raise _EvidenceChanged()
         if (status['conflicts'] != conflicts or status['conflicts'] != 0
@@ -518,78 +783,64 @@ class NativeNotificationCallbacks:
         except (OSError, KeyError, TypeError, ValueError, RuntimeError):
             raise RuntimeError('Native notification readiness evidence unavailable') from None
 
-    @staticmethod
-    def _fingerprints(records):
-        fields = ('event_hash', 'result_hash', 'payload_sha256', 'route',
-                  'historical', 'provenance_hash')
-        return {key: {field: record[field] for field in fields}
-                for key, record in records.items()}
-
-    @staticmethod
-    def _preserved(before, after, *, exact=False):
-        if exact and set(before) != set(after):
+    def _preserved(self, before, after, *, exact=False):
+        exists = self._proof.exists
+        if exact and (
+                exists('''SELECT 1 FROM records a WHERE a.snap=? AND NOT EXISTS(SELECT 1
+                    FROM records b WHERE b.snap=? AND b.event_id=a.event_id)''', (before, after))
+                or exists('''SELECT 1 FROM records a WHERE a.snap=? AND NOT EXISTS(SELECT 1
+                    FROM records b WHERE b.snap=? AND b.event_id=a.event_id)''', (after, before))):
             raise RuntimeError('Native notification records changed after handoff')
-        for key, old in before.items():
-            new = after.get(key)
-            if (new is None or any(old[field] != new[field] for field in
-                    ('event_hash', 'payload_sha256', 'route', 'historical', 'provenance_hash'))
-                    or old['result_hash'] is not None and old['result_hash'] != new['result_hash']):
-                raise RuntimeError('Durable native notification record was not preserved')
-        if exact and any(before[key]['result_hash'] != value['result_hash']
-                         for key, value in after.items()):
+        if exists('''SELECT 1 FROM records a LEFT JOIN records b
+                ON b.snap=? AND b.event_id=a.event_id WHERE a.snap=? AND (b.event_id IS NULL
+                OR a.event_hash IS NOT b.event_hash OR a.payload_sha256 IS NOT b.payload_sha256
+                OR a.route IS NOT b.route OR a.historical IS NOT b.historical
+                OR a.provenance_hash IS NOT b.provenance_hash
+                OR (a.result_hash IS NOT NULL AND a.result_hash IS NOT b.result_hash))''',
+                  (after, before)):
+            raise RuntimeError('Durable native notification record was not preserved')
+        if exact and exists('''SELECT 1 FROM records a JOIN records b
+                ON b.snap=? AND b.event_id=a.event_id WHERE a.snap=?
+                AND a.result_hash IS NOT b.result_hash''', (after, before)):
             raise RuntimeError('Durable native notification record changed after handoff')
 
-    @staticmethod
-    def _deliveries(records):
-        return {key: record['receipt_id'] for key, record in records.items()
-                if record['state'] == 'delivered'}
-
-    @staticmethod
-    def _preserved_deliveries(before, records):
+    def _preserved_deliveries(self, before, after):
         # Delivery is monotonic: pending may become delivered, never the reverse,
         # and an established receipt binding cannot be erased or replaced.
-        for key, receipt_id in before.items():
-            record = records.get(key)
-            if record is None or record['state'] != 'delivered' or record['receipt_id'] != receipt_id:
-                raise RuntimeError('Delivered native notification record was not preserved')
+        if self._proof.exists('''SELECT 1 FROM records a LEFT JOIN records b
+                ON b.snap=? AND b.event_id=a.event_id WHERE a.snap=? AND a.state='delivered'
+                AND (b.event_id IS NULL OR b.state IS NOT 'delivered'
+                     OR b.receipt_id IS NOT a.receipt_id)''', (after, before)):
+            raise RuntimeError('Delivered native notification record was not preserved')
 
-    @staticmethod
-    def _receipt_fingerprints(snapshot):
-        fields = ('event_id', 'scope', 'digest', 'user_id', 'origin', 'inbox_id',
-                  'event_json', 'joined_inbox_id', 'delivery_id',
-                  'inbox_user_id', 'title', 'body', 'session_id')
-        result = {}
-        for key, receipt in snapshot['receipts'].items():
-            acknowledged = receipt['acknowledged']
-            if type(acknowledged) is not int or acknowledged not in (0, 1):
-                raise RuntimeError('Owned notification acknowledgement is unknown')
-            result[key] = dict(
-                binding=_sha(_canonical({field: receipt[field] for field in fields})),
-                acknowledged=acknowledged)
-        return result
+    def _preserved_receipts(self, before, after):
+        if self._proof.exists('''SELECT 1 FROM receipts a LEFT JOIN receipts b
+                ON b.snap=? AND b.event_id=a.event_id WHERE a.snap=? AND (b.event_id IS NULL
+                OR b.binding IS NOT a.binding OR b.acknowledged < a.acknowledged)''',
+                              (after, before)):
+            raise RuntimeError('Owned notification receipt was not preserved')
 
-    @staticmethod
-    def _preserved_receipts(before, snapshot):
-        after = snapshot['receipts']
-        for key, captured in before.items():
-            receipt = after.get(key)
-            if receipt is None:
-                raise RuntimeError('Owned notification receipt was not preserved')
-            current = NativeNotificationCallbacks._receipt_fingerprints(
-                dict(receipts={key: receipt}))[key]
-            if (current['binding'] != captured['binding']
-                    or current['acknowledged'] < captured['acknowledged']):
-                raise RuntimeError('Owned notification receipt was not preserved')
+    def _receipt_problem(self, snapshot):
+        exists, snap = self._proof.exists, snapshot['id']
+        for check in ('inconsistent', 'missing', 'unacknowledged'):
+            if exists('''SELECT 1 FROM records WHERE snap=? AND route='owned'
+                    AND state='delivered' AND receipt_check IS ?''', (snap, check)):
+                return check
+        return None
 
-    def _require_delivered_receipts(self, snapshot):
-        for event_id, record in snapshot['records'].items():
-            if record['route'] != 'owned' or record['state'] != 'delivered':
-                continue
-            focused = dict(snapshot, records={event_id: record},
-                           receipts={event_id: snapshot['receipts'][event_id]}
-                           if event_id in snapshot['receipts'] else {})
-            if not self._receipts_complete(focused):
-                raise RuntimeError('Owned notification receipt is unavailable')
+    def _require_delivered_receipts(self, snapshot, *, retry_pending=False):
+        problem = self._receipt_problem(snapshot)
+        if problem == 'inconsistent':
+            raise RuntimeError('Owned notification receipt is inconsistent')
+        if problem == 'unacknowledged' and retry_pending:
+            # Native /ack marks delivered before the bridge records acknowledged=1.
+            raise _Pending()
+        if problem is not None:
+            raise RuntimeError('Owned notification receipt is unavailable')
+
+    def _discard(self, snapshot):
+        if snapshot is not None:
+            self._proof.discard(snapshot['id'])
 
     def capture(self, baseline):
         if self.baseline is not None:
@@ -611,8 +862,9 @@ class NativeNotificationCallbacks:
         pointer = self.controller / 'current'
         if not pointer.is_symlink():
             raise RuntimeError('Native notification bridge baseline is unavailable')
-        # Capture precedes drain: legitimate appends may race the native status
-        # reads. Retry only that churn, re-proving gate and identity each time.
+        # Capture precedes drain: legitimate appends and a positively bound native
+        # ACK awaiting its bridge receipt ACK may race these reads. Retry only that
+        # churn, re-proving gate and identity each time; exhaustion fails closed.
         for attempt in range(CAPTURE_ATTEMPTS):
             if attempt:
                 self.sleep(self.poll_interval)
@@ -620,21 +872,28 @@ class NativeNotificationCallbacks:
                 if (self.native.attest(root) != baseline['pid']
                         or self.native._start_ticks(baseline['pid']) != baseline['start_ticks']):
                     raise RuntimeError('Native notification process identity changed')
+            snapshot = None
             try:
                 snapshot = self._snapshot(include_receipts=True)
                 self._require_health(identity=(baseline['pid'], baseline['start_ticks']),
                                      baseline=baseline, require_idle=False, snapshot=snapshot)
+                self._require_delivered_receipts(snapshot, retry_pending=True)
                 break
             except _EvidenceChanged:
+                self._discard(snapshot)
                 if attempt + 1 == CAPTURE_ATTEMPTS:
                     raise
+            except BaseException:
+                self._discard(snapshot)
+                raise
         self.baseline = dict(baseline)
         self.owner_id, self.scope = snapshot['owner'], snapshot['scope']
-        self._require_delivered_receipts(snapshot)
         self.identities = snapshot['identities']
-        self.initial_records = self._fingerprints(snapshot['records'])
-        self.initial_deliveries = self._deliveries(snapshot['records'])
-        self.initial_receipts = self._receipt_fingerprints(snapshot)
+        snap = snapshot['id']
+        self.initial_records = self._records_view(snap, _FINGERPRINT_FIELDS)
+        self.initial_deliveries = self._records_view(
+            snap, ('receipt_id',), where="AND state='delivered'", scalar=True)
+        self.initial_receipts = snapshot['receipts']
         self.bridge_root = pointer.resolve(strict=True)
         return True
 
@@ -650,56 +909,29 @@ class NativeNotificationCallbacks:
                 or self.native._start_ticks(self.baseline['pid']) != self.baseline['start_ticks']):
             raise RuntimeError('Native notification process identity changed before handoff')
         snapshot = self._snapshot(expected_owner=self.owner_id, include_receipts=True)
-        self.handoff_receipts = self._receipt_fingerprints(snapshot)
-        self._preserved(self.initial_records, snapshot['records'])
-        self._preserved_deliveries(self.initial_deliveries, snapshot['records'])
-        self._preserved_receipts(self.initial_receipts, snapshot)
+        snap, initial = snapshot['id'], self.initial_records.snap
+        # Retained for rollback even if handoff fails: these receipts were observed.
+        self.handoff_receipts = snapshot['receipts']
+        self._preserved(initial, snap)
+        self._preserved_deliveries(initial, snap)
+        self._preserved_receipts(initial, snap)
         self._require_delivered_receipts(snapshot)
         if snapshot['identities'] != self.identities:
             raise RuntimeError('Native notification database binding changed')
         if not self._require_health(identity=(self.baseline['pid'], self.baseline['start_ticks']),
                                     baseline=self.baseline, require_idle=True, snapshot=snapshot):
             raise RuntimeError('Native notification handoff is not idle')
-        self.handoff_records = self._fingerprints(snapshot['records'])
-        self.handoff_deliveries = self._deliveries(snapshot['records'])
+        self.handoff_records = self._records_view(snap, _FINGERPRINT_FIELDS)
+        self.handoff_deliveries = self._records_view(
+            snap, ('receipt_id',), where="AND state='delivered'", scalar=True)
         return True
 
     def _receipts_complete(self, snapshot):
-        from backend.background_delivery import BackgroundDeliveryService
-
-        for event_id, record in snapshot['records'].items():
-            if record['route'] == 'foreign':
-                continue
-            if record['state'] != 'delivered':
-                return False
-            receipt = snapshot['receipts'].get(event_id)
-            if receipt is None:
-                return False
-            event = record['event']
-            try:
-                valid = (
-                    receipt['scope'] == self.scope
-                    and receipt['user_id'] == self.owner_id
-                    and receipt['digest'] == record['payload_sha256']
-                    and _canonical(json.loads(receipt['event_json'])) == _canonical(event)
-                    and receipt['origin'] == BackgroundDeliveryService._origin(event)
-                    and receipt['lease_token'] == record['lease_token']
-                    and receipt['inbox_id'] == record['receipt_id']
-                    and receipt['joined_inbox_id'] == receipt['inbox_id']
-                    and receipt['inbox_user_id'] == self.owner_id
-                    and receipt['delivery_id'] == 'native-event:v1:' + json.dumps([self.scope, event_id])
-                    and receipt['title'] == 'Background result'
-                    and receipt['body'] == BackgroundDeliveryService._body(event)
-                    and receipt['session_id'] == record['session_id'])
-            except (KeyError, TypeError, ValueError):
-                raise RuntimeError('Owned notification receipt is inconsistent') from None
-            if not valid:
-                raise RuntimeError('Owned notification receipt is inconsistent')
-            if type(receipt['acknowledged']) is not int or receipt['acknowledged'] not in (0, 1):
-                raise RuntimeError('Owned notification acknowledgement is unknown')
-            if receipt['acknowledged'] != 1:
-                return False
-        return True
+        if self._receipt_problem(snapshot) == 'inconsistent':
+            raise RuntimeError('Owned notification receipt is inconsistent')
+        return not self._proof.exists('''SELECT 1 FROM records WHERE snap=? AND route!='foreign'
+            AND (state IS NOT 'delivered' OR receipt_check IS NOT 'acknowledged')''',
+                                      (snapshot['id'],))
 
     def probe(self, stage):
         if self.baseline is None or self.handoff_records is None:
@@ -720,21 +952,25 @@ class NativeNotificationCallbacks:
             if (self.native.attest(Path(stage)) != pid
                     or self.native._start_ticks(pid) != started):
                 raise RuntimeError('Native notification activation identity changed')
+            snapshot = None
             try:
-                snapshot = self._snapshot(expected_owner=self.owner_id, include_receipts=True)
-                if snapshot['identities'] != self.identities:
-                    raise RuntimeError('Native notification database binding changed')
-                self._preserved(self.handoff_records, self._fingerprints(snapshot['records']), exact=True)
-                self._preserved_deliveries(self.handoff_deliveries, snapshot['records'])
-                self._preserved_receipts(self.initial_receipts, snapshot)
-                self._preserved_receipts(self.handoff_receipts, snapshot)
-                ready = self._require_health(identity=(pid, started), root=stage,
-                                             require_idle=True, snapshot=snapshot)
-            except _EvidenceChanged:
-                ready = False
-                snapshot = None
-            if ready and self._receipts_complete(snapshot):
-                return True
+                try:
+                    snapshot = self._snapshot(expected_owner=self.owner_id, include_receipts=True)
+                    if snapshot['identities'] != self.identities:
+                        raise RuntimeError('Native notification database binding changed')
+                    snap = snapshot['id']
+                    self._preserved(self.handoff_records.snap, snap, exact=True)
+                    self._preserved_deliveries(self.handoff_deliveries.snap, snap)
+                    self._preserved_receipts(self.initial_receipts.snap, snap)
+                    self._preserved_receipts(self.handoff_receipts.snap, snap)
+                    ready = self._require_health(identity=(pid, started), root=stage,
+                                                 require_idle=True, snapshot=snapshot)
+                except _EvidenceChanged:
+                    ready = False
+                if ready and self._receipts_complete(snapshot):
+                    return True
+            finally:
+                self._discard(snapshot)
             remaining = deadline - self.clock()
             if remaining <= 0:
                 raise RuntimeError('Native notification receipt verification timed out')
@@ -759,19 +995,23 @@ class NativeNotificationCallbacks:
         if type(pid) is not int or pid <= 0 or type(started) is not int or started <= 0:
             raise RuntimeError('Native notification rollback process identity is unknown')
         snapshot = self._snapshot(expected_owner=self.owner_id, include_receipts=True)
-        if snapshot['identities'] != self.identities:
-            raise RuntimeError('Native notification database binding changed')
-        handed_off = self.handoff_records is not None
-        expected = self.handoff_records if handed_off else self.initial_records
-        # Before handoff the old listener was not yet drained and may append.
-        self._preserved(expected, self._fingerprints(snapshot['records']), exact=handed_off)
-        self._preserved_deliveries(self.initial_deliveries, snapshot['records'])
-        if handed_off:
-            self._preserved_deliveries(self.handoff_deliveries, snapshot['records'])
-        self._preserved_receipts(self.initial_receipts, snapshot)
-        if self.handoff_receipts is not None:
-            self._preserved_receipts(self.handoff_receipts, snapshot)
-        self._require_delivered_receipts(snapshot)
-        self._require_health(identity=(pid, started), baseline=self.baseline,
-                             require_idle=False, snapshot=snapshot)
+        try:
+            snap = snapshot['id']
+            if snapshot['identities'] != self.identities:
+                raise RuntimeError('Native notification database binding changed')
+            handed_off = self.handoff_records is not None
+            expected = self.handoff_records if handed_off else self.initial_records
+            # Before handoff the old listener was not yet drained and may append.
+            self._preserved(expected.snap, snap, exact=handed_off)
+            self._preserved_deliveries(self.initial_deliveries.snap, snap)
+            if handed_off:
+                self._preserved_deliveries(self.handoff_deliveries.snap, snap)
+            self._preserved_receipts(self.initial_receipts.snap, snap)
+            if self.handoff_receipts is not None:
+                self._preserved_receipts(self.handoff_receipts.snap, snap)
+            self._require_delivered_receipts(snapshot)
+            self._require_health(identity=(pid, started), baseline=self.baseline,
+                                 require_idle=False, snapshot=snapshot)
+        finally:
+            self._discard(snapshot)
         return True
