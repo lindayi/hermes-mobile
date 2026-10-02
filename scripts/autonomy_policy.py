@@ -26,7 +26,8 @@ def _unique_object(pairs):
 
 
 def _read_evidence(path):
-    flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    flags = (os.O_RDONLY | os.O_NONBLOCK | getattr(os, 'O_CLOEXEC', 0)
+             | getattr(os, 'O_NOFOLLOW', 0))
     descriptor = os.open(Path(path), flags)
     with os.fdopen(descriptor, 'rb') as source:
         if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
