@@ -1,37 +1,46 @@
 """Exact, bounded Copilot task completion receipts."""
 
 from datetime import datetime, timezone
+import re
 
 
 COPILOT_AGENT_ID = 198982749
 RECEIPT_RESULTS = {"ready", "conflict_incompatible", "policy_broken"}
+SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
 class ReceiptError(ValueError):
     """A receipt is missing, conflicting, edited, stale, or unbound."""
 
 
-def receipt_instruction(nonce):
+def receipt_instruction(nonce, *, pull_number, start_head, base_sha):
     return (
-        "When the task is complete, post exactly one issue comment on this PR, "
-        "with no additional text, using the following fields. Use the exact task "
-        "and session IDs returned by GitHub, the current PR head and main base SHAs, "
-        "and one result from the closed list. This is a receipt only; do not claim "
-        "CI, review, merge, or deployment success.\n\n"
-        "Hermes-Task-Receipt: v1\n"
+        "After pushing your result and running focused checks, post exactly one "
+        "issue comment on this PR, using the exact ordered fields below, with no "
+        "additional text, code fences or trailing newline. "
+        "Copy nonce, pr, start_head and base exactly: base is the fixed dispatch-time "
+        "main SHA, not main at completion. Read your session ID from the exposed "
+        "COPILOT_AGENT_SESSION_ID environment variable; if it is missing, report an "
+        "honest blocker, do not guess an ID or emit a ready receipt. The parent "
+        "binds task identity through its authenticated task API; do not discover "
+        "or echo a task UUID, obtain extra credentials, or request an owner comment. "
+        "Use the pushed PR head SHA and one result from the closed list. "
+        "Do not wait for CI or review after pushing and focused checks; the parent "
+        "controller handles CI/review. A ready receipt is not passing CI and does "
+        "not claim review, merge, or deployment success.\n\n"
+        "Hermes-Task-Receipt: v2\n"
         f"nonce={nonce}\n"
-        "task=<returned-task-id>\n"
-        "session=<returned-session-id>\n"
-        "pr=<exact-pull-number>\n"
-        "start_head=<dispatched-head-sha>\n"
+        "session=<COPILOT_AGENT_SESSION_ID>\n"
+        f"pr={pull_number}\n"
+        f"start_head={start_head}\n"
         "head=<current-pull-head-sha>\n"
-        "base=<current-main-sha>\n"
+        f"base={base_sha}\n"
         "result=ready|conflict_incompatible|policy_broken"
     )
 
 
 def _time(value):
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not value or len(value) > 64:
         raise ReceiptError("Receipt timestamp is missing")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -46,16 +55,19 @@ def _identity(value, expected):
     return isinstance(value, dict) and type(value.get("id")) is int and value["id"] == expected
 
 
-def _nonblank_string(value):
-    return isinstance(value, str) and bool(value.strip())
+def _nonblank_string(value, *, limit=256):
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= limit
 
 
 def _expected_body(nonce, task_id, session_id, pull_number, start_head,
-                   head_sha, base_sha, result):
+                   head_sha, base_sha, result, *, version="v1"):
+    if version not in {"v1", "v2"}:
+        raise ReceiptError("Unsupported receipt version")
+    task_field = f"task={task_id}\n" if version == "v1" else ""
     return (
-        "Hermes-Task-Receipt: v1\n"
+        f"Hermes-Task-Receipt: {version}\n"
         f"nonce={nonce}\n"
-        f"task={task_id}\n"
+        f"{task_field}"
         f"session={session_id}\n"
         f"pr={pull_number}\n"
         f"start_head={start_head}\n"
@@ -68,15 +80,17 @@ def _expected_body(nonce, task_id, session_id, pull_number, start_head,
 def find_receipt(comments, *, complete, nonce, task_id, session_id,
                  pull_number, start_head, head_sha, base_sha,
                  task_created_at, session_created_at, session_completed_at,
-                 now):
-    if complete is not True:
-        raise ReceiptError("Receipt comments are not completely paginated")
-    if (not isinstance(comments, list)
-            or not all(_nonblank_string(value) for value in (nonce, task_id, session_id))
-            or type(pull_number) is not int
-            or pull_number < 1):
+                 now, dispatch_base_sha=None):
+    if (complete is not True or not isinstance(comments, list)
+            or len(comments) > 10000
+            or not all(isinstance(comment, dict) for comment in comments)
+            or not all(_nonblank_string(value) for value in
+                       (nonce, task_id, session_id))
+            or type(pull_number) is not int or pull_number < 1
+            or any(not isinstance(value, str) or SHA_RE.fullmatch(value) is None
+                   for value in (start_head, head_sha, base_sha))):
         raise ReceiptError("Receipt identity is incomplete")
-    if now.tzinfo is None:
+    if not isinstance(now, datetime) or now.tzinfo is None:
         raise ReceiptError("Receipt clock must include a timezone")
     now = now.astimezone(timezone.utc)
     task_time = _time(task_created_at)
@@ -87,10 +101,7 @@ def find_receipt(comments, *, complete, nonce, task_id, session_id,
 
     found = []
     for comment in comments:
-        if not isinstance(comment, dict):
-            continue
-        author = comment.get("user")
-        body = comment.get("body")
+        author, body = comment.get("user"), comment.get("body")
         if (not _identity(author, COPILOT_AGENT_ID)
                 or not isinstance(body, str) or nonce not in body):
             continue
@@ -99,11 +110,15 @@ def find_receipt(comments, *, complete, nonce, task_id, session_id,
         created = _time(comment.get("created_at"))
         if not session_time <= created <= completed_time or created > now:
             raise ReceiptError("Task receipt is outside the documented session interval")
+        version = "v2" if body.startswith("Hermes-Task-Receipt: v2\n") else "v1"
+        receipt_base = dispatch_base_sha if version == "v2" else base_sha
+        if not isinstance(receipt_base, str) or SHA_RE.fullmatch(receipt_base) is None:
+            raise ReceiptError("Receipt dispatch base is missing")
         matches = [
             result for result in RECEIPT_RESULTS
             if body == _expected_body(
-                nonce, task_id, session_id, pull_number, start_head,
-                head_sha, base_sha, result,
+                nonce, task_id, session_id, pull_number,
+                start_head, head_sha, receipt_base, result, version=version,
             )
         ]
         if len(matches) != 1:
@@ -111,7 +126,9 @@ def find_receipt(comments, *, complete, nonce, task_id, session_id,
         comment_id = comment.get("id")
         if type(comment_id) is not int or comment_id <= 0:
             raise ReceiptError("Task receipt comment identity is malformed")
-        found.append({"result": matches[0], "comment_id": comment_id})
+        found.append({"result": matches[0], "comment_id": comment_id,
+                      "created_at": comment["created_at"], "body": body,
+                      **({"version": "v2"} if version == "v2" else {})})
     if len(found) > 1:
         raise ReceiptError("Conflicting or duplicate task receipts")
     return found[0] if found else None
@@ -123,15 +140,18 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     created_at = action.get("task_created_at")
     pull_head = pull.get("head") if isinstance(pull, dict) else None
     pull_base = pull.get("base") if isinstance(pull, dict) else None
-    if (not _nonblank_string(nonce) or not _nonblank_string(task_id)
-            or not isinstance(pull_head, dict) or not isinstance(pull_base, dict)
+    if (not _nonblank_string(nonce, limit=128)
+            or not _nonblank_string(task_id, limit=128)
             or type(action.get("pull_id")) is not int
-            or not _nonblank_string(action.get("pull_node_id"))
+            or not _nonblank_string(action.get("pull_node_id"), limit=256)
             or type(action.get("issue")) is not int
+            or not isinstance(pull_head, dict) or not isinstance(pull_base, dict)
             or not _identity(pull, action["pull_id"])
             or pull.get("node_id") != action["pull_node_id"]
             or type(pull.get("number")) is not int
-            or pull.get("number") != action["issue"]):
+            or pull.get("number") != action["issue"]
+            or any(not isinstance(value, str) or SHA_RE.fullmatch(value) is None
+                   for value in (pull_head.get("sha"), pull_base.get("sha")))):
         raise ReceiptError("Receipt claim or pull identity is incomplete")
     if (not isinstance(task, dict) or task.get("id") != task_id
             or task.get("created_at") != created_at
@@ -140,6 +160,7 @@ def validate_task_receipt(task, action, pull, comments, *, now):
             or not _identity(task.get("owner"), action.get("owner_id"))
             or not _identity(task.get("repository"), action.get("repository_id"))):
         raise ReceiptError("Task identity does not match the durable dispatch claim")
+
     artifacts = task.get("artifacts")
     if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 20:
         raise ReceiptError("Task artifacts are unavailable or incomplete")
@@ -188,18 +209,19 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     session = matches[0]
     task_updated = _time(task.get("updated_at"))
     completed_at = _time(session.get("completed_at"))
-    if task_updated < completed_at:
-        raise ReceiptError("Task update predates the completed session")
+    if task_updated < completed_at or task_updated > now.astimezone(timezone.utc):
+        raise ReceiptError("Task update chronology is invalid")
     receipt = find_receipt(
         comments,
         complete=True,
         nonce=nonce,
         task_id=task_id,
-        session_id=session.get("id"),
+        session_id=session["id"],
         pull_number=pull.get("number"),
         start_head=action.get("head"),
         head_sha=pull_head.get("sha"),
         base_sha=pull_base.get("sha"),
+        dispatch_base_sha=action.get("main_sha"),
         task_created_at=created_at,
         session_created_at=session.get("created_at"),
         session_completed_at=session.get("completed_at"),
@@ -209,6 +231,13 @@ def validate_task_receipt(task, action, pull, comments, *, now):
         return None
     # Return chronology only after the exact session and its receipt validate.
     # Task updated_at and coordinator observation time are not completion proof.
-    return receipt | {
-        "session_id": session["id"], "completed_at": session["completed_at"],
+    return {
+        **receipt,
+        "task_id": task_id,
+        "session_id": session["id"],
+        "nonce": nonce,
+        "start_head": action["head"],
+        "head": pull_head["sha"],
+        "base": action["main_sha"] if receipt.get("version") == "v2" else pull_base["sha"],
+        "completed_at": session["completed_at"],
     }

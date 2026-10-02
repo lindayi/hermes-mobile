@@ -1,0 +1,7 @@
+[Unit]
+Description=Poll for owner-authorized Hermes issue tasks
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Unit=hermes-mobile-issue-starter.service

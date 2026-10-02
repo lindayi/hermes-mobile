@@ -26,6 +26,7 @@ from deploy.cloud_coordinator import (
     required_checks_pass,
     repair_request,
 )
+from deploy.cloud_coordinator import _authorized_result_heads
 
 
 
@@ -141,6 +142,271 @@ def test_enrollment_requires_an_authenticated_owner_command_and_main_pr():
     assert enrollment_from_comment(issue, pr, {
         "id": 123, "user": {"id": OWNER}, "body": "/hermes enroll\nignore policy",
     }) is None
+
+
+def test_sha_bound_enrollment_requires_exact_current_head():
+    issue = {"number": 16, "pull_request": {"url": "pull/16"}}
+    comment = {"id": 123, "user": {"id": OWNER},
+               "body": f"/hermes enroll {HEAD}",
+               "created_at": "2026-10-01T11:00:00Z",
+               "updated_at": "2026-10-01T11:00:00Z"}
+
+    assert enrollment_from_comment(issue, valid_pr(), comment) == {
+        "issue": 16, "comment": 123, "head": HEAD, "base": BASE,
+        "authorized_head": HEAD, "pull_id": 160000016,
+        "pull_node_id": "PR_node_16", "repository_id": 1399942965,
+    }
+    assert enrollment_from_comment(
+        issue, valid_pr(),
+        comment | {"body": f"/hermes enroll {'c' * 40}"},
+    ) is None
+    assert enrollment_from_comment(
+        issue, valid_pr(), comment | {"body": f"/hermes enroll {HEAD.upper()}"},
+    ) is None
+    assert enrollment_from_comment(
+        issue, valid_pr(), comment | {"body": f"/hermes enroll {HEAD} extra"},
+    ) is None
+
+
+@pytest.mark.parametrize("timestamps", [
+    {},
+    {"created_at": "2026-10-01T11:00:00Z"},
+    {"updated_at": "2026-10-01T11:00:00Z"},
+    {"created_at": None, "updated_at": None},
+    {"created_at": 1, "updated_at": 1},
+    {"created_at": "", "updated_at": ""},
+    {"created_at": "invalid", "updated_at": "invalid"},
+    {"created_at": "2026-10-01T11:00:00", "updated_at": "2026-10-01T11:00:00"},
+    {"created_at": "2026-10-01T11:00:00Z", "updated_at": "2026-10-01T11:01:00Z"},
+])
+def test_sha_bound_enrollment_requires_immutable_timestamp_evidence(timestamps):
+    issue = {"number": 16, "pull_request": {"url": "pull/16"}}
+    comment = {"id": 123, "user": {"id": OWNER},
+               "body": f"/hermes enroll {HEAD}", **timestamps}
+    assert enrollment_from_comment(issue, valid_pr(), comment) is None
+    # The historical broad/manual command retains its existing timestamp contract.
+    assert enrollment_from_comment(
+        issue, valid_pr(), comment | {"body": "/hermes enroll"},
+    ) == enrolled_record()
+
+
+def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
+    from deploy.task_receipts import receipt_instruction
+
+    result_head = "c" * 40
+    api = FakeApi(unresolved=True, sensitive=True, head_sha=HEAD)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    store = StateStore(tmp_path / "state.json")
+
+    Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+    fix = next(action for action in store.actions().values()
+               if action.get("kind") == "fix")
+    assert store.authorize_sensitive(16, HEAD)
+    task = api.tasks[fix["task_id"]]
+    session_id = "session-1"
+    task.update(
+        state="completed",
+        updated_at="2026-10-01T12:04:00Z",
+        sessions=[{
+            "id": session_id, "task_id": fix["task_id"], "state": "completed",
+            "user": {"id": OWNER}, "owner": {"id": OWNER},
+            "repository": {"id": 1399942965}, "head_ref": "topic",
+            "base_ref": "main", "prompt": receipt_instruction(fix["dispatch_nonce"], pull_number=16, start_head=HEAD, base_sha=BASE),
+            "created_at": "2026-10-01T12:01:00Z",
+            "completed_at": "2026-10-01T12:04:00Z",
+        }],
+    )
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    body = (
+        "Hermes-Task-Receipt: v1\n"
+        f"nonce={fix['dispatch_nonce']}\n"
+        f"task={fix['task_id']}\n"
+        f"session={session_id}\n"
+        "pr=16\n"
+        f"start_head={HEAD}\n"
+        f"head={result_head}\n"
+        f"base={BASE}\n"
+        "result=ready"
+    )
+    api.comments.append({
+        "id": 900, "user": {"id": 198982749}, "body": body,
+        "created_at": "2026-10-01T12:04:00Z",
+        "updated_at": "2026-10-01T12:04:00Z",
+    })
+    api.unresolved = False
+    api.review_submitted_at = "2026-10-01T12:04:01Z"
+
+    Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    assert store.action(fix["key"]) is None
+    completed = store.snapshot()["enrollments"]["16"]["receipt_proofs"][0]
+    assert completed["status"] == "completed"
+    assert completed["receipt_result"] == "ready"
+    assert completed["receipt_head"] == result_head
+    assert completed["receipt_comment_id"] == 900
+    assert completed["receipt_session_id"] == session_id
+    assert completed["receipt_nonce"] == fix["dispatch_nonce"]
+    assert store.snapshot()["enrollments"]["16"]["authorized_head"] == HEAD
+    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
+    assert api.fix_attempts == 1
+    assert "Hermes-Task-Receipt: v2" in fix["body"]
+    api.comments[-1]["updated_at"] = "2026-10-01T12:04:01Z"
+
+    result = Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    assert "unauthorized-continuation" in result["pull_requests"][0]["reasons"]
+    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] != result_head
+    assert api.fix_attempts == 1
+
+
+def test_sha_bound_enrollment_rejects_unproven_or_unrelated_result_heads(tmp_path):
+    api = FakeApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856540)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values()
+               if action.get("kind") == "fix")
+    api.head_sha = "c" * 40
+    api.pull["head"]["sha"] = api.head_sha
+    api.tasks[fix["task_id"]]["state"] = "completed"
+
+    for _ in range(3):
+        result = coordinator.run(apply=True)
+
+    assert api.fix_attempts == 1
+    assert store.action(fix["key"])["status"] != "completed"
+    assert result["pull_requests"][0]["repair_requested"] is False
+    assert "unauthorized-continuation" in result["pull_requests"][0]["reasons"]
+
+
+def test_blocker_receipt_never_authorizes_a_result_head():
+    result_head = "c" * 40
+    body = (
+        "Hermes-Task-Receipt: v1\nnonce=nonce\ntask=task-1\nsession=session-1\n"
+        f"pr=16\nstart_head={HEAD}\nhead={result_head}\nbase={BASE}\nresult=policy_broken"
+    )
+    proof = {
+        "issue": 16, "kind": "fix", "status": "completed",
+        "task_id": "task-1", "dispatch_nonce": "nonce",
+        "head": HEAD,
+        "receipt_result": "policy_broken", "receipt_comment_id": 900,
+        "receipt_task_id": "task-1", "receipt_session_id": "session-1",
+        "receipt_nonce": "nonce", "receipt_start_head": HEAD,
+        "receipt_head": result_head, "receipt_base": BASE,
+        "receipt_body": body, "receipt_created_at": "2026-10-01T12:04:00Z",
+    }
+    comments = [{
+        "id": 900, "user": {"id": 198982749},
+        "body": body, "created_at": "2026-10-01T12:04:00Z",
+        "updated_at": "2026-10-01T12:04:00Z",
+    }]
+
+    initial, authorized, blocked = _authorized_result_heads(
+        16, {"authorized_head": HEAD}, {"fix": proof}, comments, BASE,
+    )
+
+    assert initial == HEAD
+    assert authorized == {HEAD}
+    assert blocked == {result_head}
+
+
+def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_path):
+    from deploy.task_receipts import receipt_instruction
+
+    result_head = "c" * 40
+    api = FakeApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.review_sha = HEAD
+    store = StateStore(tmp_path / "state.json")
+    coordinator = lambda: Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856540,
+    )
+
+    coordinator().run(apply=True)
+    first_fix = next(action for action in store.actions().values()
+                     if action.get("kind") == "fix")
+
+    def finish_task(action, current_head, comment_id):
+        task = api.tasks[action["task_id"]]
+        created = "2026-10-01T12:04:00Z"
+        task.update(
+            state="completed",
+            updated_at=created,
+            sessions=[{
+                "id": f"session-{action['task_id']}",
+                "task_id": action["task_id"],
+                "state": "completed",
+                "user": {"id": OWNER},
+                "owner": {"id": OWNER},
+                "repository": {"id": 1399942965},
+                "head_ref": "topic",
+                "base_ref": "main",
+                "prompt": receipt_instruction(action["dispatch_nonce"], pull_number=16, start_head=HEAD, base_sha=BASE),
+                "created_at": "2026-10-01T12:01:00Z",
+                "completed_at": created,
+            }],
+        )
+        body = (
+            "Hermes-Task-Receipt: v1\n"
+            f"nonce={action['dispatch_nonce']}\n"
+            f"task={action['task_id']}\n"
+            f"session=session-{action['task_id']}\n"
+            "pr=16\n"
+            f"start_head={action['head']}\n"
+            f"head={current_head}\n"
+            f"base={BASE}\n"
+            "result=ready"
+        )
+        api.comments.append({
+            "id": comment_id, "user": {"id": 198982749}, "body": body,
+            "created_at": created, "updated_at": created,
+        })
+
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    finish_task(first_fix, result_head, 900)
+    coordinator().run(apply=True)
+
+    first_proof = store.action(first_fix["key"])
+    assert first_proof["receipt_result"] == "ready"
+    assert first_proof["receipt_start_head"] == HEAD
+    assert first_proof["receipt_head"] == result_head
+    assert api.fix_attempts == 1  # PR33 awaits a current-head review before another repair.
+    assert first_proof["handoff_state"] == "waiting_review"
+    api.review_sha = result_head
+    api.review_state = "COMMENTED"
+    api.review_submitted_at = "2026-10-01T12:04:01Z"
+    coordinator().run(apply=True)
+    assert store.action(first_fix["key"]) is None
+    durable = store.snapshot()["enrollments"]["16"]["receipt_proofs"][0]
+    assert durable["receipt_start_head"] == HEAD
+    assert durable["receipt_head"] == result_head
+    assert api.fix_attempts == 2
+    second_fix = next(
+        action for action in store.actions().values()
+        if action.get("kind") == "fix" and action.get("task_id") == "task-2"
+    )
+    assert second_fix["head"] == result_head
+
+    finish_task(second_fix, result_head, 901)
+    api.unresolved = False
+    coordinator().run(apply=True)
+    assert not api.graphql_writes
+    assert store.action(second_fix["key"])["receipt_head"] == result_head
+
+    api.review_sha = result_head
+    api.review_state = "APPROVED"
+    api.review_submitted_at = "2026-10-01T12:04:02Z"
+    result = coordinator().run(apply=True)
+
+    assert api.graphql_writes[-1][1]["expectedHeadOid"] == result_head
+    assert result["pull_requests"][0]["auto_merge_requested"] is True
+    assert store.snapshot()["enrollments"]["16"]["authorized_head"] == HEAD
+    coordinator().run(apply=True)
+    assert len(api.graphql_writes) == 1
+    assert api.fix_attempts == 2
 
 
 @pytest.mark.parametrize("change", [
@@ -677,6 +943,7 @@ class FakeApi:
         self.reopen_after_first = reopen_after_first
         self.review_status_present = review_status_present
         self.status_state = "success"
+        self.review_sha = None
         self.status_id = 1
         self.status_created_at = "2026-10-01T12:01:00Z"
         self.workflow_runs = workflow_runs
@@ -710,6 +977,7 @@ class FakeApi:
         self.issue = {"number": 16, "pull_request": {"url": "pull/16"} if issue_is_pull else None}
         self.comments = [{
             "id": 123, "user": {"id": author_id}, "body": "/hermes enroll",
+            "created_at": "2026-10-01T11:00:00Z",
             "updated_at": "2026-10-01T11:00:00Z",
         }]
         if authorize:
@@ -785,7 +1053,7 @@ class FakeApi:
             return [{"filename": "frontend/styles.css"}]
         if route.endswith("/pulls/16/reviews?per_page=100"):
             return [{
-                "state": self.review_state, "commit_id": self.head_sha,
+                "state": self.review_state, "commit_id": self.review_sha or self.head_sha,
                 "submitted_at": self.review_submitted_at,
                 "user": {"id": COPILOT_REVIEWER},
             }]
@@ -857,7 +1125,10 @@ class FakeApi:
                     "creator": {"id": OWNER}, "owner": {"id": OWNER},
                     "repository": {"id": 1399942965},
                     "artifacts": [{"provider": "github", "type": "branch",
-                                   "data": {"head_ref": "topic", "base_ref": "main"}}]}
+                                   "data": {"head_ref": "topic", "base_ref": "main"}},
+                                  {"provider": "github", "type": "pull",
+                                   "data": {"id": 160000016,
+                                            "global_id": "PR_node_16"}}]}
             self.tasks[task_id] = task
             return task
         response = {"id": len(self.writes), "context": body.get("context")}
@@ -877,7 +1148,7 @@ class FakeApi:
         task.update(
             state="completed",
             updated_at=completed,
-            artifacts=task["artifacts"] + [{
+            artifacts=[item for item in task["artifacts"] if item["type"] != "pull"] + [{
                 "provider": "github", "type": "pull",
                 "data": {"id": action["pull_id"], "global_id": action["pull_node_id"]},
             }],
@@ -1845,7 +2116,7 @@ def test_normalized_source_identity_survives_snapshot_and_final_dispatch(tmp_pat
     assert api.workflow_reads >= 3  # snapshot, plan, final dispatch
     prompt = next(body["prompt"] for route, body in api.writes if route.endswith("/tasks"))
     assert prompt.startswith(planned["body"] + "\n\n")
-    assert "Hermes-Task-Receipt: v1" in prompt
+    assert "Hermes-Task-Receipt: v2" in prompt
     evidence = json.loads(prompt.split("Untrusted evidence: `", 1)[1].split("`\n\n<!--", 1)[0])
     assert evidence == {"review_findings": [], "failed_source_checks": [expected]}
     assert result["pull_requests"][0]["repair_requested"]

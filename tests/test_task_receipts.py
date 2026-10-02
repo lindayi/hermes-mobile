@@ -2,16 +2,15 @@ from datetime import datetime, timezone
 
 import pytest
 
-from deploy.task_receipts import (
-    ReceiptError, find_receipt, receipt_instruction, validate_task_receipt,
-)
+from deploy.task_receipts import ReceiptError, receipt_instruction, validate_task_receipt
 
 
 NOW = datetime.fromisoformat("2026-10-01T12:06:00+00:00")
 NONCE = "sQb2j8J_Wac6hJ5sU1ZWVwO4GdI1xC7r8sVZgg"
 TASK_ID = "task-123"
 SESSION_ID = "session-456"
-HEAD = "a" * 40
+START_HEAD = "a" * 40
+RESULT_HEAD = "c" * 40
 BASE = "b" * 40
 
 
@@ -22,165 +21,21 @@ def receipt_body(result="ready"):
         f"task={TASK_ID}\n"
         f"session={SESSION_ID}\n"
         "pr=16\n"
-        f"start_head={HEAD}\n"
-        f"head={HEAD}\n"
+        f"start_head={START_HEAD}\n"
+        f"head={RESULT_HEAD}\n"
         f"base={BASE}\n"
         f"result={result}"
     )
 
 
-def receipt(*, author_id=198982749, body=None, created="2026-10-01T12:05:00Z",
-            updated=None):
-    return {
-        "id": 777,
-        "user": {"id": author_id},
-        "body": receipt_body() if body is None else body,
-        "created_at": created,
-        "updated_at": created if updated is None else updated,
-    }
-
-
-def parse(comments, *, complete=True, nonce=NONCE, task_id=TASK_ID, session_id=SESSION_ID):
-    return find_receipt(
-        comments,
-        complete=complete,
-        nonce=nonce,
-        task_id=task_id,
-        session_id=session_id,
-        pull_number=16,
-        start_head=HEAD,
-        head_sha=HEAD,
-        base_sha=BASE,
-        task_created_at="2026-10-01T12:00:00Z",
-        session_created_at="2026-10-01T12:01:00Z",
-        session_completed_at="2026-10-01T12:05:30Z",
-        now=NOW,
-    )
-
-
-def test_receipt_is_full_exact_and_bound_to_task_session_pr_and_heads():
-    assert parse([receipt()])["result"] == "ready"
-    assert "nonce=" in receipt_instruction(NONCE)
-    assert "task=" in receipt_instruction(NONCE)
-
-
-@pytest.mark.parametrize("field", [
-    "comment_author", "comment_id", "task_creator", "task_owner", "task_repository",
-    "session_user", "session_owner", "session_repository", "artifact_pull", "pull_number",
-])
-@pytest.mark.parametrize("kind", ["float", "string", "bool", "null"])
-def test_receipt_numeric_identities_require_exact_integers(completed_task_binding, field, kind):
-    import json
-    # JSON round-trip separates fixture aliases so each identity is tested alone.
-    task, action, pull = json.loads(json.dumps(completed_task_binding))
-    comment = receipt()
-    targets = {
-        "comment_author": (comment["user"], "id"),
-        "comment_id": (comment, "id"),
-        "task_creator": (task["creator"], "id"),
-        "task_owner": (task["owner"], "id"),
-        "task_repository": (task["repository"], "id"),
-        "session_user": (task["sessions"][0]["user"], "id"),
-        "session_owner": (task["sessions"][0]["owner"], "id"),
-        "session_repository": (task["sessions"][0]["repository"], "id"),
-        "artifact_pull": (task["artifacts"][1]["data"], "id"),
-        "pull_number": (pull, "number"),
-    }
-    target, key = targets[field]
-    target[key] = {"float": float(target[key]), "string": str(target[key]),
-                   "bool": True, "null": None}[kind]
-    if field == "comment_author":
-        assert validate_task_receipt(task, action, pull, [comment], now=NOW) is None
-        # An unauthenticated copy cannot poison an otherwise valid receipt.
-        assert validate_task_receipt(task, action, pull, [comment, receipt()], now=NOW)
-    else:
-        with pytest.raises(ReceiptError):
-            validate_task_receipt(task, action, pull, [comment], now=NOW)
-
-
-@pytest.mark.parametrize("comment_id", [None, True, 0, -1, "777"])
-def test_receipt_requires_a_positive_numeric_comment_identity(comment_id):
-    item = receipt()
-    item["id"] = comment_id
-
-    with pytest.raises(ReceiptError):
-        parse([item])
-
-
-@pytest.mark.parametrize("field,value", [
-    ("task", "other-task"),
-    ("session", "other-session"),
-    ("pr", "17"),
-    ("start_head", "c" * 40),
-    ("head", "c" * 40),
-    ("base", "c" * 40),
-])
-def test_receipt_rejects_a_mismatched_binding(field, value):
-    body = receipt_body().replace(
-        f"{field}=" + {
-            "task": TASK_ID,
-            "session": SESSION_ID,
-            "pr": "16",
-            "start_head": HEAD,
-            "head": HEAD,
-            "base": BASE,
-        }[field],
-        f"{field}={value}",
-    )
-    with pytest.raises(ReceiptError):
-        parse([receipt(body=body)])
-
-
-def test_receipt_ignores_other_authors_and_rejects_copied_or_edited_receipts():
-    assert parse([receipt(author_id=123)]) is None
-    copied = "quoted receipt:\n" + receipt_body()
-    with pytest.raises(ReceiptError):
-        parse([receipt(body=copied)])
-    with pytest.raises(ReceiptError):
-        parse([receipt(updated="2026-10-01T12:05:10Z")])
-
-
-@pytest.mark.parametrize("kwargs", [
-    {"created": "2026-10-01T11:59:59Z"},
-    {"created": "2026-10-01T12:05:31Z"},
-    {"created": "2026-10-01T12:06:01Z"},
-])
-def test_receipt_must_be_within_documented_task_session_and_current_times(kwargs):
-    with pytest.raises(ReceiptError):
-        parse([receipt(**kwargs)])
-
-
-def test_incomplete_pages_or_conflicting_receipts_never_yield_success():
-    with pytest.raises(ReceiptError):
-        parse([receipt()], complete=False)
-    with pytest.raises(ReceiptError):
-        parse([receipt(), receipt(body=receipt_body("policy_broken"))])
-
-
-def test_only_closed_result_codes_are_accepted():
-    with pytest.raises(ReceiptError):
-        parse([receipt(body=receipt_body("success"))])
-
-
-@pytest.mark.parametrize("field", ["nonce", "task_id", "session_id"])
-@pytest.mark.parametrize("invalid", ["", " \t\n", None, 123, True, {}, []])
-def test_receipt_rejects_blank_or_nonstring_identity(field, invalid):
-    expected = {"nonce": NONCE, "task_id": TASK_ID, "session_id": SESSION_ID}
-    body = receipt_body().replace(expected[field], str(invalid))
-    with pytest.raises(ReceiptError, match="identity is incomplete"):
-        parse([receipt(body=body)], **{field: invalid})
-
-
-@pytest.fixture
-def completed_task_binding():
+def binding():
     owner = {"id": 5164171}
     repository = {"id": 1399942965}
     action = {
-        "task_id": TASK_ID, "dispatch_nonce": NONCE,
-        "task_created_at": "2026-10-01T12:00:00Z",
-        "owner_id": owner["id"], "repository_id": repository["id"],
-        "pull_id": 160000016, "pull_node_id": "PR_node_16",
-        "issue": 16, "head_ref": "topic", "head": HEAD,
+        "issue": 16, "task_id": TASK_ID, "task_created_at": "2026-10-01T12:00:00Z",
+        "dispatch_nonce": NONCE, "owner_id": owner["id"],
+        "repository_id": repository["id"], "pull_id": 160000016,
+        "pull_node_id": "PR_node_16", "head_ref": "topic", "head": START_HEAD,
     }
     task = {
         "id": TASK_ID, "state": "completed", "creator": owner, "owner": owner,
@@ -195,117 +50,179 @@ def completed_task_binding():
         "sessions": [{
             "id": SESSION_ID, "task_id": TASK_ID, "state": "completed",
             "user": owner, "owner": owner, "repository": repository,
-            "head_ref": "topic", "base_ref": "main", "prompt": receipt_instruction(NONCE),
+            "head_ref": "topic", "base_ref": "main",
+            "prompt": receipt_instruction(NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE),
             "created_at": "2026-10-01T12:01:00Z",
-            "completed_at": "2026-10-01T12:05:30Z",
+            "completed_at": "2026-10-01T12:05:00Z",
         }],
     }
-    pull = {"id": action["pull_id"], "node_id": action["pull_node_id"],
-            "number": 16, "head": {"sha": HEAD}, "base": {"sha": BASE}}
-    return task, action, pull
-
-
-@pytest.mark.parametrize("artifact_type", ["pull", "branch"])
-@pytest.mark.parametrize("change", ["missing", "duplicate", "conflicting", "conflicting_duplicate"])
-def test_completed_task_requires_exactly_one_matching_artifact(
-        completed_task_binding, artifact_type, change):
-    from copy import deepcopy
-    task, action, pull = completed_task_binding
-    artifact = next(item for item in task["artifacts"] if item["type"] == artifact_type)
-    if change == "missing":
-        task["artifacts"].remove(artifact)
-    elif change == "duplicate":
-        task["artifacts"].append(deepcopy(artifact))
-    else:
-        if change == "conflicting_duplicate":
-            artifact = deepcopy(artifact)
-            task["artifacts"].append(artifact)
-        key, value = ("id", 160000017) if artifact_type == "pull" else ("head_ref", "other")
-        artifact["data"][key] = value
-    with pytest.raises(ReceiptError):
-        validate_task_receipt(task, action, pull, [receipt()], now=NOW)
-
-
-@pytest.mark.parametrize("field,value", [
-    ("id", None), ("id", 160000017), ("id", 160000016.0),
-    ("id", "160000016"), ("id", True),
-    ("node_id", None), ("node_id", "PR_node_other"),
-    ("number", None), ("number", 17), ("number", 16.0),
-])
-def test_completed_task_rejects_actual_pull_mismatch(completed_task_binding, field, value):
-    task, action, pull = completed_task_binding
-    if value is None:
-        pull.pop(field)
-    else:
-        pull[field] = value
-    # Even a receipt agreeing with the supplied pull cannot override the durable action.
-    body = receipt_body().replace("pr=16\n", f"pr={pull.get('number')}\n")
-    with pytest.raises(ReceiptError, match="Receipt claim or pull identity is incomplete"):
-        validate_task_receipt(task, action, pull, [receipt(body=body)], now=NOW)
-
-
-@pytest.mark.parametrize("field,value", [
-    ("pull_id", None), ("pull_id", 160000016.0),
-    ("pull_node_id", None), ("pull_node_id", ""),
-    ("issue", None), ("issue", 16.0),
-])
-def test_completed_task_requires_durable_pull_identity(completed_task_binding, field, value):
-    task, action, pull = completed_task_binding
-    action[field] = value
-    # Do not let equally missing or numerically aliased metadata establish identity.
-    pull[{"pull_id": "id", "pull_node_id": "node_id", "issue": "number"}[field]] = value
-    if field in {"pull_id", "pull_node_id"}:
-        task["artifacts"][1]["data"]["id" if field == "pull_id" else "global_id"] = value
-    with pytest.raises(ReceiptError, match="Receipt claim or pull identity is incomplete"):
-        validate_task_receipt(task, action, pull, [receipt()], now=NOW)
-
-
-@pytest.mark.parametrize("field", ["task_id", "session_id", "nonce"])
-@pytest.mark.parametrize("invalid", ["", " \t\n", None, 123, True, {}, []])
-def test_completed_task_rejects_blank_or_nonstring_identity(completed_task_binding, field, invalid):
-    task, action, pull = completed_task_binding
-    session = task["sessions"][0]
-    if field == "task_id":
-        task["id"] = action["task_id"] = session["task_id"] = invalid
-    elif field == "session_id":
-        session["id"] = invalid
-    else:
-        action["dispatch_nonce"] = invalid
-        session["prompt"] = receipt_instruction(invalid)
-    expected = {"nonce": NONCE, "task_id": TASK_ID, "session_id": SESSION_ID}
-    body = receipt_body().replace(expected[field], str(invalid))
-    with pytest.raises(ReceiptError):
-        validate_task_receipt(task, action, pull, [receipt(body=body)], now=NOW)
-
-
-@pytest.mark.parametrize("completed_at", [
-    None, "invalid", "2026-10-01T12:05:30",
-    "2026-10-01T12:00:30Z", "2026-10-01T12:04:59Z", "2026-10-01T12:06:01Z",
-])
-def test_completed_task_rejects_unproven_completion_chronology(
-        completed_task_binding, completed_at):
-    task, action, pull = completed_task_binding
-    task["sessions"][0]["completed_at"] = completed_at
-    # A recent mutable task timestamp cannot substitute for session chronology.
-    task["updated_at"] = "2026-10-01T12:07:00Z"
-    with pytest.raises(ReceiptError):
-        validate_task_receipt(task, action, pull, [receipt()], now=NOW)
-
-
-def test_completed_task_accepts_complete_exact_returned_identities(completed_task_binding):
-    task, action, pull = completed_task_binding
-    # IDs are opaque: retain the entire returned value, without normalization.
-    task_id = "task_01234567-89ab-cdef-0123-456789abcdef"
-    session_id = "session_abcdef01-2345-6789-abcd-ef0123456789"
-    task["id"] = action["task_id"] = task["sessions"][0]["task_id"] = task_id
-    task["sessions"][0]["id"] = session_id
-    body = receipt_body().replace(TASK_ID, task_id).replace(SESSION_ID, session_id)
-    assert validate_task_receipt(task, action, pull, [receipt(body=body)], now=NOW) == {
-        "result": "ready", "comment_id": 777,
-        "session_id": session_id, "completed_at": "2026-10-01T12:05:30Z",
+    pull = {
+        "number": 16, "id": action["pull_id"], "node_id": action["pull_node_id"],
+        "head": {"sha": RESULT_HEAD}, "base": {"sha": BASE},
     }
-    for identity in (task_id, session_id):
+    comments = [{
+        "id": 777, "user": {"id": 198982749}, "body": receipt_body(),
+        "created_at": "2026-10-01T12:05:00Z",
+        "updated_at": "2026-10-01T12:05:00Z",
+    }]
+    return task, action, pull, comments
+
+
+def v2_binding(result="ready"):
+    task, action, pull, comments = binding()
+    action["main_sha"] = BASE
+    comments[0]["body"] = receipt_body(result).replace(
+        "Hermes-Task-Receipt: v1", "Hermes-Task-Receipt: v2",
+    ).replace(f"task={TASK_ID}\n", "")
+    return task, action, pull, comments
+
+
+@pytest.mark.parametrize("result", ["ready", "conflict_incompatible", "policy_broken"])
+def test_v2_echoes_session_not_task_but_host_still_binds_saved_task(result):
+    task, action, pull, comments = v2_binding(result)
+    proof = validate_task_receipt(task, action, pull, comments, now=NOW)
+    assert proof["result"] == result
+    assert proof["version"] == "v2"
+    assert proof["task_id"] == TASK_ID
+    assert proof["session_id"] == SESSION_ID
+    assert proof["base"] == action["main_sha"]
+    assert "task=" not in proof["body"]
+    for identity in (task, task["sessions"][0]):
+        field = "id" if identity is task else "task_id"
+        identity[field] = "unrelated-task"
         with pytest.raises(ReceiptError):
-            validate_task_receipt(
-                task, action, pull, [receipt(body=body.replace(identity, identity[:-1]))], now=NOW,
-            )
+            validate_task_receipt(task, action, pull, comments, now=NOW)
+        identity[field] = TASK_ID
+
+
+@pytest.mark.parametrize("change", [
+    "missing_dispatch_base", "wrong_dispatch_base", "wrong_base", "current_not_dispatch_base",
+    "session", "nonce", "pr", "start_head", "head", "result", "mixed_shape",
+    "duplicate_field", "duplicate_comment", "mixed_versions", "edited", "trailing_text",
+    "before_session", "after_session", "wrong_session_owner", "wrong_session_repository",
+])
+def test_v2_rejects_unbound_ambiguous_edited_or_out_of_interval_receipts(change):
+    task, action, pull, comments = v2_binding()
+    pull["base"]["sha"] = "d" * 40
+    if change == "missing_dispatch_base":
+        del action["main_sha"]
+    elif change == "wrong_dispatch_base":
+        action["main_sha"] = "e" * 40
+    elif change in {"wrong_base", "current_not_dispatch_base"}:
+        value = "e" * 40 if change == "wrong_base" else pull["base"]["sha"]
+        comments[0]["body"] = comments[0]["body"].replace(f"base={BASE}", f"base={value}")
+    elif change in {"session", "nonce", "pr", "start_head", "head", "result"}:
+        field_value = {"session": SESSION_ID, "nonce": NONCE, "pr": "16",
+                       "start_head": START_HEAD, "head": RESULT_HEAD, "result": "ready"}
+        comments[0]["body"] = comments[0]["body"].replace(
+            f"{change}={field_value[change]}", f"{change}=wrong",
+        )
+    elif change == "mixed_shape":
+        comments[0]["body"] = comments[0]["body"].replace("session=", f"task={TASK_ID}\nsession=")
+    elif change == "duplicate_field":
+        comments[0]["body"] += f"\nnonce={NONCE}"
+    elif change in {"duplicate_comment", "mixed_versions"}:
+        comments.append(dict(comments[0], id=778))
+        if change == "mixed_versions":
+            comments[-1]["body"] = receipt_body().replace(f"base={BASE}", f"base={pull['base']['sha']}")
+    elif change == "edited":
+        comments[0]["updated_at"] = "2026-10-01T12:05:01Z"
+    elif change == "trailing_text":
+        comments[0]["body"] += "\n"
+    elif change in {"before_session", "after_session"}:
+        timestamp = "2026-10-01T12:00:30Z" if change == "before_session" else "2026-10-01T12:05:01Z"
+        comments[0].update(created_at=timestamp, updated_at=timestamp)
+    else:
+        field = "owner" if change == "wrong_session_owner" else "repository"
+        task["sessions"][0][field] = {"id": 42}
+    if change == "nonce":
+        assert validate_task_receipt(task, action, pull, comments, now=NOW) is None
+    else:
+        with pytest.raises(ReceiptError):
+            validate_task_receipt(task, action, pull, comments, now=NOW)
+
+
+def test_v2_first_observation_uses_dispatch_base_while_v1_keeps_initial_semantics():
+    task, action, pull, comments = v2_binding()
+    pull["base"]["sha"] = "d" * 40
+    assert validate_task_receipt(task, action, pull, comments, now=NOW)["base"] == BASE
+    comments[0]["body"] = receipt_body()
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, comments, now=NOW)
+    # Legacy v1 used main at initial validation, even if different at dispatch.
+    comments[0]["body"] = receipt_body().replace(f"base={BASE}", f"base={pull['base']['sha']}")
+    assert validate_task_receipt(task, action, pull, comments, now=NOW)["base"] == pull["base"]["sha"]
+
+
+@pytest.mark.parametrize("author_id", [198982749.0, "198982749", True])
+def test_v2_fresh_receipt_requires_strict_numeric_author(author_id):
+    task, action, pull, comments = v2_binding()
+    comments[0]["user"]["id"] = author_id
+    assert validate_task_receipt(task, action, pull, comments, now=NOW) is None
+
+
+def test_receipt_binds_task_session_nonce_pr_and_result_head():
+    task, action, pull, comments = binding()
+
+    proof = validate_task_receipt(task, action, pull, comments, now=NOW)
+
+    assert proof == {
+        "result": "ready", "comment_id": 777,
+        "created_at": "2026-10-01T12:05:00Z", "body": receipt_body(),
+        "task_id": TASK_ID, "session_id": SESSION_ID, "nonce": NONCE,
+        "completed_at": "2026-10-01T12:05:00Z",
+        "start_head": START_HEAD, "head": RESULT_HEAD, "base": BASE,
+    }
+
+
+@pytest.mark.parametrize(("change", "expected"), [
+    (lambda task, action, pull, comments: comments[0].update(
+        updated_at="2026-10-01T12:05:01Z",
+    ), "error"),
+    (lambda task, action, pull, comments: comments[0].update(user={"id": 42}), None),
+    (lambda task, action, pull, comments: comments[0].update(id=True), "error"),
+    (lambda task, action, pull, comments: task["sessions"][0].update(id=""), "error"),
+    (lambda task, action, pull, comments: task["sessions"][0].update(
+        prompt=receipt_instruction("different-nonce", pull_number=16, start_head=START_HEAD, base_sha=BASE),
+    ), "error"),
+    (lambda task, action, pull, comments: pull["head"].update(sha="d" * 40), "error"),
+    (lambda task, action, pull, comments: comments[0].update(
+        body=receipt_body("policy_broken"),
+    ), "policy_broken"),
+])
+def test_receipt_handles_edited_wrong_identity_and_typed_result(change, expected):
+    task, action, pull, comments = binding()
+    change(task, action, pull, comments)
+
+    if expected == "error":
+        with pytest.raises(ReceiptError):
+            validate_task_receipt(task, action, pull, comments, now=NOW)
+    else:
+        proof = validate_task_receipt(task, action, pull, comments, now=NOW)
+        if expected is None:
+            assert proof is None
+        else:
+            assert proof["result"] == expected
+
+
+def test_missing_or_conflicting_receipts_do_not_prove_task_completion():
+    task, action, pull, comments = binding()
+    assert validate_task_receipt(task, action, pull, [], now=NOW) is None
+
+    comments.append(comments[0] | {
+        "id": 778, "body": receipt_body("policy_broken"),
+    })
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, comments, now=NOW)
+
+
+def test_receipt_rejects_incomplete_task_session_and_artifact_evidence():
+    task, action, pull, comments = binding()
+    task["sessions"] = []
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, comments, now=NOW)
+
+    task, action, pull, comments = binding()
+    task["artifacts"].pop()
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, comments, now=NOW)

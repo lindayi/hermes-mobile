@@ -14,21 +14,33 @@ The CLI's default invocation is a read-only plan. A write cycle requires both
 owner ID `5164171` and the repository API identity matches the fixed repository
 ID. It ignores issue bodies, labels, links, and comments from other authors.
 
-An issue or pull request is enrolled only by the exact comment `/hermes enroll`
-from that owner. The issue must identify a pull request whose head and base both
-belong to this repository and whose base branch is `main`. Existing pull requests
-are not enrolled by their age, label, author, or open state. For a sensitive
-head, the owner must separately comment `/hermes authorize-sensitive <40-char-head-sha>`.
-Authorization is recorded only if that SHA is still the pull request's current
-head; it does not carry forward to a later commit.
+An issue or pull request is enrolled by the exact comment `/hermes enroll` from
+that owner. The issue must identify a pull request whose head and base both belong
+to this repository and whose base branch is `main`. Existing pull requests are not
+enrolled by their age, label, author, or open state. The issue starter instead hands
+off with `/hermes enroll <40-lowercase-hex-head-sha>`; the consumer requires the
+value to match the current pull request head and stores it as immutable
+`authorized_head`. SHA-bound commands also require a valid timezone-aware
+`created_at` and an identical explicit `updated_at`; an edited or unverifiable
+comment is consumed without enrollment, even when its body names the current
+head. Only a genuinely new immutable command can authorize that head. The legacy
+bare command retains its historical timestamp compatibility.
+A stale or mismatched command is consumed without enrollment.
+For a sensitive head, the owner must separately comment
+`/hermes authorize-sensitive <40-char-head-sha>`. Authorization is recorded only
+if that SHA is still the pull request's current head; it does not carry forward to
+a later commit.
 
 This is a source/first-activation boundary, not an upgrade path for historical
 coordinator state. Version-1 records remain readable for inspection, but active
 legacy enrollments lacking `pull_id`, `pull_node_id`, or `repository_id` are
 unsupported: pull snapshot collection fails closed with
 `Unsupported legacy enrollment: missing pull/repository identity; automatic migration is not supported; preserve state and stop activation`.
-The coordinator does not backfill identity, replace an active enrollment after a
-new comment, clear approvals, reset cursors/budgets, or discard unresolved claims.
+The coordinator does not backfill legacy identity, reset cursors/budgets, or discard
+unresolved claims. A newer exact-SHA command may renew an already identity-bound,
+SHA-bound active enrollment: it preserves the initial `authorized_head`, receipt
+proofs, unresolved claims and attempt budget, records the new owner-authorized head,
+and clears sensitive authorization. It cannot migrate a legacy enrollment.
 If such state exists, stop activation and preserve it for separately reviewed
 operator recovery; do not delete/reset state or use re-enrollment as a migration.
 First activation must use the current identity-bound enrollment contract and must
@@ -85,8 +97,22 @@ attempt-derived request keys cannot collide; re-enrollment resets that counter
 only when no unresolved fixer claim remains. A fresh enrollment is authorization,
 not evidence that an earlier task stopped. No second
 `@copilot` dispatch comment is posted. Queued, in-progress, waiting-for-user,
-idle and unknown task states do not release the fixer lock. Completion only
-releases the fixer lock; it is not review or CI success.
+idle and unknown task states do not release the fixer lock. For SHA-bound starter
+enrollments, a completed coordinator-dispatched task releases the lock only with
+the exact task/session/nonce receipt defined in `deploy/task_receipts.py`. Its
+unchanged, authenticated `ready` receipt may extend authorization from a previously
+authorized head to that exact result head. The initial `authorized_head` never
+changes; each later result head needs its own receipt rooted in an already
+authorized head. Missing, edited, copied, stale, mismatched, or blocker receipts
+do not authorize continuation. Sensitive authorization remains bound to its
+original SHA, and review/check evidence must be independently fresh for each result
+head. Validated task/session/nonce and unchanged-comment proof is persisted with
+completion in the enrollment before lifecycle compaction can retire its action.
+Restart and final dispatch revalidate the retained proof against the remote comment.
+Deferred ready/review handoffs recheck it after the scan commit; a new observed bound
+head clears stale sensitive authorization. A typed blocker remains `task-result-blocked`,
+not an unrelated push. A receipt is not review or CI success. Bare manual enrollments
+retain PR33 lifecycle and receipt handoff behavior.
 Polling a claimed task requires positive integer creator, owner, and repository
 identities matching the fixed owner/repository before any terminal failure can
 release the lock or emit `task_failed`. Missing or malformed identity evidence
@@ -135,8 +161,11 @@ strictly after the independently validated task session completion and no later
 than the current clock. This also applies when the task leaves the head unchanged;
 an earlier approval cannot shortcut the handoff. The validated completion time,
 session ID and receipt comment ID are persisted with the receipt head/base and
-dispatch claim for restart; observation time or mutable task update time is not a
-substitute. Missing or invalid completion proof fails closed. A fresh submitted
+dispatch claim for restart. The authentic session completion is retained as
+`receipt_session_completed_at` in both the action and the SHA-bound enrollment's
+`receipt_proofs` projection before compaction, alongside the supported
+`receipt_completed_at` metadata. Observation time or mutable task update time is
+not a substitute. Missing or invalid completion proof fails closed. A fresh submitted
 review completes handoff even if unresolved threads keep the approval gate false;
 those threads then remain eligible for the next bounded repair.
 Preparation stages verified receipt/handoff state in memory. Controller evidence
@@ -247,12 +276,59 @@ existing exact merged event when the current delivery ledger, successful
 controller status, current release, and git provenance validate for that merge
 SHA. A merge alone is never treated as a deployment.
 
-Task receipts bind the exact task, session, dispatch nonce, authenticated receipt
-comment, PR, dispatched head, resulting head, and current main base. SHA-continuation
-for issue-starter commands is not part of this change; PR29 must build on this
-receipt identity without carrying authorization to a different head. The exact
-receipt comment must have a positive numeric GitHub ID; no authorization is
-inherited when its head or base proof differs.
+Task receipt v2 is the default generated dispatch contract. The host supplies
+literal nonce, PR number, start head and **dispatch-time main SHA** in the prompt;
+the child copies those values, reads `COPILOT_AGENT_SESSION_ID` from its exposed
+environment, and reports the pushed result head. Missing session environment is an
+honest blocker: never guess an ID, emit a ready receipt, obtain extra credentials,
+or request an owner-comment handshake. The child is not asked to discover or echo
+the separate Task UUID. The read-only cloud probe established session-environment
+identity, not a source for the Task UUID (and not proof that such a source cannot
+exist).
+
+Post exactly one unchanged authenticated Copilot issue comment, with these exact
+ordered lines, no fences, extra fields, surrounding text or trailing newline:
+
+```text
+Hermes-Task-Receipt: v2
+nonce=<fixed-dispatch-nonce>
+session=<COPILOT_AGENT_SESSION_ID>
+pr=<fixed-pull-number>
+start_head=<fixed-dispatched-head-sha>
+head=<pushed-current-pull-head-sha>
+base=<fixed-dispatch-time-main-sha>
+result=<ready|conflict_incompatible|policy_broken>
+```
+
+Choose exactly one closed result value. After pushing and focused checks, the
+coding task must not idle waiting for CI/review: the parent controller handles
+those phases. `ready` is not passing CI, approval, merge or deployment success.
+
+Task identity still comes solely from the durable saved task ID and authenticated
+Task API response, never from a comment. The host validates exact returned task ID,
+`session.task_id`, task/session owner and repository, creator/user, nonce, exact
+PR and branch artifacts, and task/session/comment chronology. Receipt author and
+comment ID must be strict numeric GitHub identities (positive comment ID, no
+float/string/bool coercion). Missing, edited, duplicate, mixed-version, mixed-field,
+copied or otherwise noncanonical receipts fail closed.
+
+The strict v1 reader remains for existing receipts and proofs: its body includes
+`task=<authenticated-task-id>` immediately after nonce, and its base must match
+main at initial receipt validation. No historical dispatch binding is invented.
+For v2, base instead must equal trusted `action.main_sha`, even when main advances
+before the first receipt poll. The receipt version and authentic dispatch main
+are retained with the proof before compaction. Revalidation requires canonical
+body/metadata consistency, v2 dispatch-base equality and exactly one unchanged
+remote receipt for that authenticated author/nonce.
+
+The paired PR29 consumer uses this receipt to prove result-head continuation
+without inheriting review/check or sensitive authorization. Proven HEAD authority
+survives unrelated main advances; the recorded base remains provenance, not a
+fresh eligibility predicate. Handoff mutations fence against freshly scanned and
+live current main, not historical receipt base. A behind authorized result head
+must take bounded neutral reconciliation, never merge behind. Repository/base/ref,
+strict up-to-date policy, mergeability, exact head and pre-send main fences remain
+required; fresh review/check evidence is still required for the repaired head.
 
 The owner mobile Inbox consumer is a separate adapter and must validate this
 producer's exact event schema and bind the export to the actual ready application

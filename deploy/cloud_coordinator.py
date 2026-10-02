@@ -26,7 +26,9 @@ from deploy.workflow_lifecycle import (
     pull_event as build_pull_lifecycle_event,
     validate_event as validate_lifecycle_event,
 )
-from deploy.task_receipts import ReceiptError, receipt_instruction, validate_task_receipt
+from deploy.task_receipts import (
+    ReceiptError, _expected_body, receipt_instruction, validate_task_receipt,
+)
 
 
 REPOSITORY = "lindayi/hermes-mobile"
@@ -127,11 +129,19 @@ def _valid_timestamp(value):
 def enrollment_from_comment(issue, pull, comment):
     """Return a minimal enrollment record only for an exact owner command."""
     user = comment.get("user") if isinstance(comment, dict) else None
+    body = comment.get("body") if isinstance(comment, dict) else None
+    authorized_head = None
+    if body != "/hermes enroll":
+        if not isinstance(body, str):
+            return None
+        match = re.fullmatch(r"/hermes enroll ([0-9a-f]{40})", body)
+        if (not match or not _valid_timestamp(comment.get("created_at"))
+                or comment.get("updated_at") != comment["created_at"]):
+            return None
+        authorized_head = match.group(1)
     if (not isinstance(issue, dict) or not issue.get("pull_request")
             or not isinstance(pull, dict) or not isinstance(user, dict)
             or type(user.get("id")) is not int or user["id"] != OWNER_ID
-            or not isinstance(comment.get("body"), str)
-            or comment["body"].strip() != "/hermes enroll"
             or type(issue.get("number")) is not int or issue["number"] <= 0
             or type(pull.get("number")) is not int
             or pull.get("number") != issue["number"]
@@ -146,14 +156,38 @@ def enrollment_from_comment(issue, pull, comment):
             or not _github_identity(base_repo, REPOSITORY_ID)
             or base.get("ref") != MAIN_BRANCH or not _is_sha(head_sha) or not _is_sha(base_sha)):
         return None
+    if authorized_head is not None and authorized_head != head_sha:
+        return None
     pull_id, pull_node_id = pull.get("id"), pull.get("node_id")
     if (type(pull_id) is not int or pull_id <= 0
             or not isinstance(pull_node_id, str) or not pull_node_id):
         return None
-    return {
+    enrollment = {
         "issue": issue["number"], "comment": comment.get("id"),
         "head": head_sha, "base": base_sha, "pull_id": pull_id,
         "pull_node_id": pull_node_id, "repository_id": REPOSITORY_ID,
+    }
+    if authorized_head is not None:
+        enrollment["authorized_head"] = authorized_head
+    return enrollment
+
+
+def _renewed_bound_enrollment(prior, incoming):
+    """A new exact-head command extends a current enrollment, not its budget."""
+    if (not isinstance(prior, dict) or prior.get("active") is not True
+            or not _is_sha(prior.get("authorized_head"))
+            or not _is_sha(incoming.get("authorized_head"))
+            or incoming["authorized_head"] != incoming.get("head")
+            or type(prior.get("comment")) is not int
+            or type(incoming.get("comment")) is not int
+            or incoming["comment"] <= prior["comment"]
+            or not all(field in prior and prior[field] == incoming.get(field)
+                       for field in ("issue", "pull_id", "pull_node_id", "repository_id"))):
+        return None
+    return {
+        **prior, **incoming, "authorized_head": prior["authorized_head"],
+        "owner_authorized_head": incoming["head"],
+        "attempts": prior.get("attempts", 0), "sensitive_sha": None,
     }
 
 
@@ -857,6 +891,90 @@ def _task_terminal(task):
             ))))
 
 
+def _valid_receipt_proof(action, comments):
+    if (not isinstance(action, dict) or action.get("status") != "completed"
+            or action.get("receipt_result") not in {
+                "ready", "conflict_incompatible", "policy_broken",
+            }
+            or type(action.get("receipt_comment_id")) is not int
+            or action["receipt_comment_id"] <= 0
+            or not isinstance(action.get("receipt_task_id"), str)
+            or action["receipt_task_id"] != action.get("task_id")
+            or not isinstance(action.get("receipt_session_id"), str)
+            or not action["receipt_session_id"].strip()
+            or not isinstance(action.get("receipt_nonce"), str)
+            or not action["receipt_nonce"].strip()
+            or action["receipt_nonce"] != action.get("dispatch_nonce")
+            or action.get("receipt_start_head") != action.get("head")
+            or not _is_sha(action.get("receipt_start_head"))
+            or not _is_sha(action.get("receipt_head"))
+            or not _is_sha(action.get("receipt_base"))
+            or not isinstance(action.get("receipt_body"), str)
+            or not isinstance(action.get("receipt_created_at"), str)
+            or not isinstance(comments, list)):
+        return False
+    version = action.get("receipt_version", "v1")
+    if (version not in {"v1", "v2"}
+            or (version == "v2" and action["receipt_base"] != action.get("main_sha"))
+            or action["receipt_body"] != _expected_body(
+                action["receipt_nonce"], action["receipt_task_id"],
+                action["receipt_session_id"], action.get("issue"),
+                action["receipt_start_head"], action["receipt_head"],
+                action["receipt_base"], action["receipt_result"], version=version,
+            )):
+        return False
+    candidates = [
+        comment for comment in comments
+        if isinstance(comment, dict)
+        and _github_identity(comment.get("user"), COPILOT_AGENT_ID)
+        and isinstance(comment.get("body"), str)
+        and action["receipt_nonce"] in comment["body"]
+    ]
+    if len(candidates) != 1:
+        return False
+    comment = candidates[0]
+    return (
+        type(comment.get("id")) is int
+        and comment["id"] == action["receipt_comment_id"]
+        and comment["body"] == action["receipt_body"]
+        and comment.get("created_at") == action["receipt_created_at"]
+        and comment.get("updated_at") == action["receipt_created_at"]
+    )
+
+
+def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
+    # base_sha is retained for callers, but current-main eligibility is enforced
+    # by live dispatch/merge fences, never by revoking recorded HEAD provenance.
+    initial = enrollment.get("authorized_head")
+    if initial is None:
+        return None, set(), set()
+    if not _is_sha(initial):
+        return initial, set(), set()
+    authorized = {initial}
+    if _is_sha(enrollment.get("owner_authorized_head")):
+        authorized.add(enrollment["owner_authorized_head"])
+    blocked = set()
+    candidates = [
+        action for action in [*enrollment.get("receipt_proofs", []), *actions.values()]
+        if isinstance(action, dict) and action.get("issue") == issue
+        and _valid_receipt_proof(action, comments)
+    ]
+    while True:
+        changed = False
+        for action in candidates:
+            if action.get("receipt_start_head") not in authorized:
+                continue
+            result_head = action["receipt_head"]
+            if action["receipt_result"] == "ready":
+                if result_head not in authorized:
+                    authorized.add(result_head)
+                    changed = True
+            else:
+                blocked.add(result_head)
+        if not changed:
+            return initial, authorized, blocked
+
+
 def _other_task_active(tasks, snapshot):
     head = snapshot["pull"]["head"]["ref"]
     for task in tasks:
@@ -992,7 +1110,10 @@ class Coordinator:
                 if not isinstance(user, dict) or user.get("id") != OWNER_ID:
                     continue
                 body = comment.get("body")
-                if body == "/hermes enroll":
+                if (body == "/hermes enroll"
+                        or isinstance(body, str) and re.fullmatch(
+                            r"/hermes enroll [0-9a-f]{40}", body,
+                        )):
                     processed.append(key)
                     if not issue.get("pull_request"):
                         continue
@@ -1013,8 +1134,13 @@ class Coordinator:
                       if value.get("active")}
         for action, enrollment in commands:
             if action == "enroll":
-                prior = state["enrollments"].get(str(enrollment["issue"]))
-                if (not prior or (not prior.get("active")
+                prior = candidates.get(str(enrollment["issue"])) or state["enrollments"].get(
+                    str(enrollment["issue"]),
+                )
+                renewed = _renewed_bound_enrollment(prior, enrollment)
+                if renewed is not None:
+                    candidates[str(enrollment["issue"])] = renewed
+                elif (not prior or (not prior.get("active")
                                   and isinstance(prior.get("comment"), int)
                                   and isinstance(enrollment.get("comment"), int)
                                   and enrollment["comment"] > prior["comment"])):
@@ -1209,6 +1335,16 @@ class Coordinator:
                         self._record_receipt_wait(key, action)
                     busy = True
                     continue
+                if (snapshot["enrollment"].get("authorized_head") is not None
+                        and (task.get("created_at") != action.get("task_created_at")
+                             or not isinstance(task.get("creator"), dict)
+                             or task["creator"].get("id") != OWNER_ID
+                             or not isinstance(task.get("owner"), dict)
+                             or task["owner"].get("id") != OWNER_ID
+                             or not isinstance(task.get("repository"), dict)
+                             or task["repository"].get("id") != REPOSITORY_ID)):
+                    busy = True
+                    continue
                 if _task_terminal(task):
                     if task.get("state") in {"failed", "timed_out", "cancelled"}:
                         if apply:
@@ -1223,6 +1359,17 @@ class Coordinator:
                                 blocker="task_failed",
                             )
                     else:
+                        if snapshot["enrollment"].get("authorized_head") is not None:
+                            _, authorized_heads, _ = _authorized_result_heads(
+                                number, snapshot["enrollment"], self.store.actions(),
+                                snapshot["comments"],
+                                snapshot["pull"].get("base", {}).get("sha"),
+                            )
+                            if action.get("head") not in authorized_heads:
+                                if apply:
+                                    self._record_receipt_wait(key, action)
+                                busy = True
+                                continue
                         try:
                             receipt = validate_task_receipt(
                                 task, action, snapshot["pull"], snapshot["comments"],
@@ -1233,12 +1380,19 @@ class Coordinator:
                         if receipt:
                             if apply:
                                 fields = {
+                                    "receipt_version": receipt.get("version", "v1"),
                                     "receipt_result": receipt["result"],
-                                    "receipt_head": snapshot["head"],
-                                    "receipt_base": snapshot["pull"]["base"]["sha"],
                                     "receipt_comment_id": receipt["comment_id"],
+                                    "receipt_created_at": receipt["created_at"],
+                                    "receipt_body": receipt["body"],
+                                    "receipt_task_id": receipt["task_id"],
                                     "receipt_session_id": receipt["session_id"],
+                                    "receipt_nonce": receipt["nonce"],
+                                    "receipt_start_head": receipt["start_head"],
+                                    "receipt_head": receipt["head"],
+                                    "receipt_base": receipt["base"],
                                     "receipt_completed_at": receipt["completed_at"],
+                                    "receipt_session_completed_at": receipt["completed_at"],
                                 }
                                 if receipt["result"] == "ready":
                                     fields["handoff_state"] = "pending"
@@ -1325,7 +1479,8 @@ class Coordinator:
         mutation; those steps run only after the scan commit succeeds.
         """
         head = action.get("receipt_head")
-        # Receipt base is provenance; handoff uses the fresh scan and live main.
+        # Receipt base records dispatch provenance, not current-main eligibility.
+        # Fence handoff mutations against the fresh scan base (and live main).
         base = snapshot["main_sha"]
         completed_at = action.get("receipt_completed_at")
         if not _valid_timestamp(completed_at):
@@ -1338,6 +1493,11 @@ class Coordinator:
         if not _pull_identity(current, action):
             return self._handoff_wait(key, action, snapshot)
 
+        if (snapshot["enrollment"].get("authorized_head") is not None
+                and not self._authorized_dispatch_head(
+                    action["issue"], head, base, receipt_action=action,
+                )):
+            return self._handoff_wait(key, action, snapshot)
         ready_state = action.get("ready_state")
         if current.get("draft") is True:
             if ready_state in {"sending", "ready_uncertain"}:
@@ -1462,7 +1622,11 @@ class Coordinator:
 
         # Re-fence immediately before the notification-producing reviewer request.
         current = self._fence_pull(action["issue"], head, base)
-        if not _pull_identity(current, action):
+        if (not _pull_identity(current, action)
+                or (snapshot["enrollment"].get("authorized_head") is not None
+                    and not self._authorized_dispatch_head(
+                        action["issue"], head, base, receipt_action=action,
+                    ))):
             return self._handoff_wait(key, action, snapshot)
         self.store.update_action(
             key, "completed", handoff_state="pending",
@@ -1605,6 +1769,36 @@ class Coordinator:
         )
         if apply:
             actions = self.store.actions()
+        enrollment = dict(snapshot["enrollment"])
+        enrollment["receipt_proofs"] = self.store.snapshot()["enrollments"].get(
+            str(number), {},
+        ).get("receipt_proofs", [])
+        authorized_head, authorized_heads, blocked_heads = _authorized_result_heads(
+            number, enrollment, self.store.actions(),
+            snapshot["comments"], snapshot["pull"].get("base", {}).get("sha"),
+        )
+        if head in blocked_heads:
+            # A proved typed blocker is meaningful evidence, not an unrelated push.
+            outcome = self._outcome(
+                snapshot, "task-result-blocked",
+                "The task reported incompatible requirements or broken policy; owner attention is required.",
+            )
+            return {
+                "issue": number, "head": head, "sensitive": sensitive,
+                "terminal": False, "review_valid": review_ok,
+                "required_checks_green": checks_ok, "auto_merge_eligible": False,
+                "reasons": ["task-result-blocked"], "repair": None,
+                "status_action": None, "merge_action": None, "outcomes": [outcome],
+            }
+        if authorized_head is not None and (
+                not _is_sha(authorized_head) or head not in authorized_heads):
+            return {
+                "issue": number, "head": head, "sensitive": sensitive,
+                "terminal": False, "review_valid": review_ok,
+                "required_checks_green": checks_ok, "auto_merge_eligible": False,
+                "reasons": ["unauthorized-continuation"], "repair": None,
+                "status_action": None, "merge_action": None, "outcomes": [],
+            }
         neutral_blocker = next((
             action for action in actions.values()
             if action.get("kind") == "fix" and action.get("issue") == number
@@ -1797,6 +1991,24 @@ class Coordinator:
                 return False
         return pull
 
+    def _authorized_dispatch_head(self, issue, head, base_sha=None, *, receipt_action=None):
+        enrollment = self.store.snapshot()["enrollments"].get(str(issue))
+        if not enrollment or not enrollment.get("active"):
+            return False
+        if enrollment.get("authorized_head") is None:
+            return True
+        try:
+            comments = _all_review_comments(self.api, issue, None)
+        except CoordinatorError:
+            return False
+        if receipt_action is not None and not _valid_receipt_proof(receipt_action, comments):
+            return False
+        base = base_sha or enrollment.get("base")
+        _, authorized, blocked = _authorized_result_heads(
+            issue, enrollment, self.store.actions(), comments, base,
+        )
+        return head in authorized and head not in blocked
+
     def _dispatch_task(self, action):
         key = action["key"]
         if not _is_sha(action.get("main_sha")):
@@ -1807,6 +2019,17 @@ class Coordinator:
         if current.get("draft") is not False:
             return "draft"
         if not _pull_identity(current, action):
+            return "superseded"
+        if (not self._authorized_dispatch_head(
+                    action["issue"], action["head"],
+                    current.get("base", {}).get("sha"),
+                )
+                or (self.store.snapshot()["enrollments"].get(
+                    str(action["issue"]), {},
+                ).get("authorized_head") is not None
+                    and (type(current.get("id")) is not int
+                         or not isinstance(current.get("node_id"), str)
+                         or not current["node_id"]))):
             return "superseded"
         if _mergeability_unknown(current):
             return "mergeability-unknown"
@@ -1850,6 +2073,11 @@ class Coordinator:
                            collection="tasks")
         current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
         if not _pull_identity(current, action) or current["head"].get("ref") != branch:
+            return "superseded"
+        if not self._authorized_dispatch_head(
+                action["issue"], action["head"],
+                current.get("base", {}).get("sha"),
+        ):
             return "superseded"
         if _mergeability_unknown(current):
             return "mergeability-unknown"
@@ -2583,8 +2811,15 @@ class StateStore:
                 if action != "enroll":
                     continue
                 key = str(item.get("issue"))
+                renewed = _renewed_bound_enrollment(data["enrollments"].get(key), item)
+                if renewed is not None:
+                    data["enrollments"][key] = renewed
+                    continue
                 if (type(item.get("issue")) is int and _is_sha(item.get("head"))
                         and _is_sha(item.get("base"))
+                        and (item.get("authorized_head") is None
+                             or (item.get("authorized_head") == item.get("head")
+                                 and _is_sha(item.get("authorized_head"))))
                         and (key not in data["enrollments"]
                              or (not data["enrollments"][key].get("active")
                                  and isinstance(item.get("comment"), int)
@@ -2627,6 +2862,9 @@ class StateStore:
             for issue, head in observations:
                 enrollment = data["enrollments"].get(str(issue))
                 if enrollment and enrollment.get("active") and _is_sha(head):
+                    if (enrollment.get("authorized_head") is not None
+                            and enrollment.get("sensitive_sha") != head):
+                        enrollment["sensitive_sha"] = None
                     enrollment["last_open_seen"] = True
                     enrollment["last_open_head"] = head
             for issue in retirements:
@@ -2698,9 +2936,13 @@ class StateStore:
                 claimed["attempt"] = enrollment["attempts"]
                 nonce = secrets.token_urlsafe(32)
                 claimed["dispatch_nonce"] = nonce
-                claimed["body"] = (
-                    f"{claimed.get('body', '')}\n\n{receipt_instruction(nonce)}"
+                claimed["owner_id"] = OWNER_ID
+                claimed["repository_id"] = REPOSITORY_ID
+                instruction = receipt_instruction(
+                    nonce, pull_number=claimed.get("issue"),
+                    start_head=claimed.get("head"), base_sha=claimed.get("main_sha"),
                 )
+                claimed["body"] = f"{claimed.get('body', '')}\n\n{instruction}"
             data["actions"][key] = {**claimed, "status": "sending",
                                     "created_at": time.time()}
             return True
@@ -2731,6 +2973,27 @@ class StateStore:
                 )
             action["status"] = status
             action.update(fields)
+            enrollment = data["enrollments"].get(str(action.get("issue")), {})
+            if (enrollment.get("authorized_head") is not None
+                    and status == "completed" and fields.get("receipt_result")):
+                # Persist the validated proof in the same write as completion,
+                # independently of the action that lifecycle compaction retires.
+                proof_fields = {
+                    "issue", "kind", "status", "head", "task_id", "dispatch_nonce",
+                    "receipt_result", "receipt_comment_id", "receipt_created_at",
+                    "receipt_body", "receipt_task_id", "receipt_session_id",
+                    "receipt_completed_at", "receipt_session_completed_at",
+                    "receipt_nonce", "receipt_start_head", "receipt_head", "receipt_base",
+                }
+                proof = {field: action[field] for field in proof_fields}
+                # Old v1 proofs have no dispatch-main/version projection; do not
+                # invent historical bindings while preserving new v2 provenance.
+                for field in ("receipt_version", "main_sha"):
+                    if field in action:
+                        proof[field] = action[field]
+                proofs = enrollment.setdefault("receipt_proofs", [])
+                if proof not in proofs:
+                    proofs.append(proof)
             if event is not None:
                 action["lifecycle_event_id"] = event["event_id"]
         self._mutate(update)
