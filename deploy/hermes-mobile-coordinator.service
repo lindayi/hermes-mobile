@@ -5,7 +5,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=%h/projects/hermes-mobile-git
-ExecStart=/usr/bin/python3 %h/projects/hermes-mobile-git/scripts/cloud_coordinator.py --once --apply --state %S/hermes-mobile-coordinator/state.json
+ExecStart=%h/projects/hermes-mobile-git/.venv/bin/python %h/projects/hermes-mobile-git/scripts/cloud_coordinator.py --once --apply --state %S/hermes-mobile-coordinator/state.json
 Environment=GH_PROMPT_DISABLED=1
 UMask=0077
 StateDirectory=hermes-mobile-coordinator
@@ -13,7 +13,7 @@ StateDirectoryMode=0700
 ProtectSystem=strict
 ProtectHome=read-only
 ReadOnlyPaths=%h/projects/hermes-mobile-git
-ReadWritePaths=%S/hermes-mobile-coordinator
+ReadWritePaths=%S/hermes-mobile-coordinator %h/.local/share/hermes-mobile-live
 PrivateTmp=yes
 NoNewPrivileges=yes
 ProtectKernelTunables=yes

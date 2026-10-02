@@ -15,7 +15,7 @@ from deploy.cloud_coordinator import (
     repair_request,
 )
 from test_cloud_coordinator import (
-    BASE, COPILOT_REVIEWER, HEAD, OWNER, FakeApi, _managed_cycle, source_run,
+    BASE, COPILOT_REVIEWER, HEAD, OWNER, FakeApi, _managed_cycle, enrolled_record, source_run,
 )
 
 PICTURE = (
@@ -497,7 +497,7 @@ def test_exhausted_budget_reports_body_only_findings_without_dispatch(tmp_path):
     api = ReviewApi([copilot_review(BODY_ONLY)])
     path = tmp_path / "state.json"
     store = StateStore(path)
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     store.record_event("123")
     data = store.snapshot()
     data["enrollments"]["16"]["attempts"] = 3
