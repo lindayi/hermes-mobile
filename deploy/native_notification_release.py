@@ -45,15 +45,27 @@ class NativeNotificationCallbacks:
 
     def __init__(self, paths, native, *, home, clock=time.monotonic, sleep=time.sleep,
                  receipt_timeout=1800, poll_interval=1):
+        from .assets import checked_path
+
         self.native = native
         self.home = Path(home).resolve()
-        self.state = Path(paths.state).resolve()
-        self.runs = Path(paths.database).resolve()
+        # The controller owns the release pointer/lock, not the application's
+        # databases. Validate supplied paths before resolving away any aliases.
+        try:
+            self.controller = checked_path(paths.state)
+            self.runs = checked_path(paths.database)
+        except (OSError, ValueError):
+            raise RuntimeError('Native notification journal binding mismatch') from None
+        self.state = self.runs.parent
         self.outbox = self.state / 'native-notifications.sqlite'
         self.inbox = self.state / 'notifications.sqlite'
         self.auth = self.state / 'auth.sqlite'
         if self.runs != self.state / 'runs.sqlite':
             raise RuntimeError('Native notification journal binding mismatch')
+        # No default live root and no arbitrary caller-selected journal: the
+        # exact parent must also be bound by the native probe's private config.
+        # Do this before any gate/database reads or deployment side effects.
+        self._require_native_state_dir()
         self.clock, self.sleep = clock, sleep
         self.receipt_timeout, self.poll_interval = receipt_timeout, poll_interval
         self.baseline = None
@@ -88,7 +100,7 @@ class NativeNotificationCallbacks:
 
     def _require_controller_gate(self, owner):
         try:
-            with (self.state / 'deploy.lock').open('r+') as lock:
+            with (self.controller / 'deploy.lock').open('r+') as lock:
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
@@ -402,7 +414,7 @@ class NativeNotificationCallbacks:
                 or self.native._start_ticks(baseline['pid']) != baseline['start_ticks']):
             raise RuntimeError('Native notification process identity changed')
         self._require_native_state_dir()
-        pointer = self.state / 'current'
+        pointer = self.controller / 'current'
         if not pointer.is_symlink():
             raise RuntimeError('Native notification bridge baseline is unavailable')
         snapshot = self._snapshot(include_receipts=True)
@@ -422,7 +434,7 @@ class NativeNotificationCallbacks:
             raise RuntimeError('Native notification handoff is not prepared')
         self._require_controller_gate(self.baseline['gate_owner'])
         self._source(stage, candidate=True)
-        pointer = self.state / 'current'
+        pointer = self.controller / 'current'
         if not pointer.is_symlink() or pointer.resolve(strict=True) != self.bridge_root:
             raise RuntimeError('Native notification bridge baseline changed')
         if (self.native.attest(Path(self.baseline['root'])) != self.baseline['pid']
@@ -482,7 +494,7 @@ class NativeNotificationCallbacks:
         if self.baseline is None or self.handoff_records is None:
             raise RuntimeError('Native notification handoff evidence is unavailable')
         self._require_controller_gate(self.baseline['gate_owner'])
-        pointer = self.state / 'current'
+        pointer = self.controller / 'current'
         if not pointer.is_symlink() or pointer.resolve(strict=True) != Path(stage).resolve():
             raise RuntimeError('Native notification candidate is not active')
         self._source(stage, candidate=True)
@@ -525,7 +537,7 @@ class NativeNotificationCallbacks:
             raise RuntimeError('Native notification rollback baseline is unavailable')
         self._require_controller_gate(self.baseline['gate_owner'])
         self._require_native_state_dir()
-        pointer = self.state / 'current'
+        pointer = self.controller / 'current'
         if not pointer.is_symlink() or pointer.resolve(strict=True) != self.bridge_root:
             raise RuntimeError('Native notification rollback bridge binding changed')
         self._source(root, self.baseline['source_hashes'])

@@ -2,7 +2,6 @@
 import fcntl
 import hashlib
 import json
-from dataclasses import replace
 from pathlib import Path
 import shutil
 import sqlite3
@@ -152,7 +151,7 @@ def create_unacked_owned_receipt(app, outbox, event, scope):
     return item, receipt_id
 
 
-def setup_controller_release(tmp_path, monkeypatch, *, delivered=True):
+def setup_controller_release(tmp_path, monkeypatch, *, delivered=True, wire_callbacks=True):
     from backend import model_controls
     from test_native_controls_release import fixture as controller_fixture
 
@@ -173,21 +172,23 @@ def setup_controller_release(tmp_path, monkeypatch, *, delivered=True):
         target = old / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(paths.source / name, target)
-    app = Fixture(paths.state)
-    paths = replace(paths, database=app.journal.path)
+    # Preserve the controller fixture's distinct live journal root.
+    state = paths.database.parent
+    app = Fixture(state)
+    assert paths.database == app.journal.path
 
-    with sqlite3.connect(paths.state / 'auth.sqlite') as db:
+    with sqlite3.connect(state / 'auth.sqlite') as db:
         db.execute('CREATE TABLE users(id TEXT, role TEXT, profile TEXT, status TEXT)')
         db.execute("INSERT INTO users VALUES('owner','owner','default','ready')")
-    (paths.state / 'auth.sqlite').chmod(0o600)
-    outbox_path = paths.state / 'native-notifications.sqlite'
+    (state / 'auth.sqlite').chmod(0o600)
+    outbox_path = state / 'native-notifications.sqlite'
     outbox = NotificationOutbox(outbox_path)
     home = app.catalog.profiles['default']
-    NotificationCapture(outbox, home, OwnerRoute(home, paths.state))
+    NotificationCapture(outbox, home, OwnerRoute(home, state))
     event = app.items[0]['event']
     outbox.capture(event, {'summary': 'Synthetic result'}, route='owned')
     for path in (home / 'state.db', paths.database,
-                 paths.state / 'notifications.sqlite', outbox_path):
+                 state / 'notifications.sqlite', outbox_path):
         path.chmod(0o600)
 
     controller_native = args['native']
@@ -202,7 +203,7 @@ def setup_controller_release(tmp_path, monkeypatch, *, delivered=True):
     native.idle = controller_native.idle
     native.verify = controller_native.verify
     native.verify_unchanged = controller_native.verify_unchanged
-    native.config_bytes = json.dumps({'state_dir': str(paths.state)}).encode()
+    native.config_bytes = json.dumps({'state_dir': str(state)}).encode()
     base_run = args['run']
 
     def run(command, **kwargs):
@@ -213,16 +214,16 @@ def setup_controller_release(tmp_path, monkeypatch, *, delivered=True):
             native.started += 1
 
     args['run'] = run
-    callbacks = NativeNotificationCallbacks(
-        SimpleNamespace(state=paths.state, database=paths.database), native,
-        home=home, receipt_timeout=0)
+    callbacks = None
     args['native'] = native
-    args['rollback_verify'] = callbacks.verify_rollback
+    if wire_callbacks:
+        callbacks = NativeNotificationCallbacks(paths, native, home=home, receipt_timeout=0)
+        args['rollback_verify'] = callbacks.verify_rollback
+        args['handoff'] = callbacks
+        args['probe'] = callbacks.probe
     if delivered:
-        scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+        scope = json.dumps(['default', str(home.resolve())], separators=(',', ':'))
         create_owned_ack(app, outbox, event, scope)
-    args['handoff'] = callbacks
-    args['probe'] = callbacks.probe
     return app, outbox, native, paths, callbacks, args, old, event
 
 

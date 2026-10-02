@@ -8,6 +8,15 @@ previously durable outbox record remains bound to the attested native source,
 private outbox, ready owner, and current owner route. Newly retained records are
 accepted only when their payload identity and owner route are positively proven.
 
+Controller and application state are separate: `Paths.state` owns `deploy.lock`
+and `current` (normally `hermes-mobile-deploy`), while the exact `runs.sqlite`
+parent owns auth, Inbox, and native outbox databases (normally
+`hermes-mobile-live`). The journal parent must match the native probe's private
+`state_dir` configuration before deployment starts; there is no default-root
+fallback. Symlinked/traversing controller or journal paths are rejected before
+normalization. All callback phases retain controller lock/pointer ownership and
+use the bound live journal for the admission gate.
+
 After activation, the probe checks the same outbox and source bindings and waits
 for each applicable owned record to have the existing native `delivered` state
 and its matching owner-scoped bridge receipt, inbox row, and acknowledged flag.
