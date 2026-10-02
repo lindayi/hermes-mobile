@@ -194,16 +194,23 @@ def _section_kind(node):
 
 
 def _text(node, *, exclude_details=False, exclude_history=False, quoted=True, render_quote=None,
-          literal=False):
+          literal=False, normalize_whitespace=False):
     # Iterative even though parser depth is capped: hostile nesting never drives
     # Python recursion. Inline markup preserves word boundaries as authored.
+    boundary = object()
     pieces, pending = [], [node]
     while pending:
         current = pending.pop()
         if current is None:
             continue
+        if current is boundary:
+            pieces.append("\n")
+            continue
         if isinstance(current, str):
-            pieces.append(current)
+            # Collapse only authored text-node whitespace for classification;
+            # structural boundaries and forwarded literal context stay intact.
+            pieces.append(re.sub(r"[ \t\r\n\f]+", " ", current)
+                          if normalize_whitespace and not literal else current)
             continue
         if not literal and current.tag in {"code", "pre", "blockquote"}:
             text = _text(current, literal=True)
@@ -217,13 +224,13 @@ def _text(node, *, exclude_details=False, exclude_history=False, quoted=True, re
         if current.tag in {"summary", "details", "p", "div", "li", "br", "hr",
                            "h1", "h2", "h3", "h4", "pre", "blockquote"}:
             pieces.append("\n")
-            pending.append("\n")
+            pending.append(boundary)
         pending.extend(reversed(current.children))
     return "".join(pieces)
 
 
 def _has_live_content(node):
-    prose = _text(node, exclude_history=True, quoted=False).strip()
+    prose = _text(node, exclude_history=True, quoted=False, normalize_whitespace=True).strip()
     intro = "In code that hasn't changed since last review"
     # Match the same whitespace-normalized intro as the item-shape check, but
     # retain sentence/block boundaries for the existing complete-status grammar.
