@@ -507,19 +507,60 @@ def _review_thread_complete(threads_complete, threads):
     return _complete_resolved_threads(threads, complete=threads_complete)
 
 
+def _branch_rules(api):
+    """Read bounded REST pages; only a short, well-formed page proves completion."""
+    rules = []
+    for page in range(1, MAX_PAGES + 1):
+        values = api.get(
+            f"repos/{REPOSITORY}/rules/branches/{MAIN_BRANCH}?per_page=100&page={page}"
+        )
+        if (not isinstance(values, list) or len(values) > 100
+                or any(not isinstance(rule, dict)
+                       or not isinstance(rule.get("type"), str) or not rule["type"]
+                       for rule in values)):
+            raise ApiError("GitHub branch rules pagination was malformed")
+        rules.extend(values)
+        if len(values) < 100:
+            return rules
+    raise ApiError("GitHub branch rules pagination exceeded the safety bound")
+
+
 def _required_checks(api):
     required, available = [], False
+    malformed = False
     up_to_date_required = False
     conversation_resolution_required = False
+
+    def add_checks(checks):
+        nonlocal malformed
+        if not isinstance(checks, list):
+            malformed = True
+            return
+        for check in checks:
+            normalized = _required_contexts([check])
+            if (not normalized or not normalized[0]["context"].strip()
+                    or (normalized[0]["app_id"] is not None
+                        and (type(normalized[0]["app_id"]) is not int
+                             or normalized[0]["app_id"] <= 0))):
+                malformed = True
+            else:
+                required.extend(normalized)
+
     protection_root_route = f"repos/{REPOSITORY}/branches/{MAIN_BRANCH}/protection"
     try:
         protection_root = api.get(protection_root_route)
         if isinstance(protection_root, dict):
             available = True
             conversation = protection_root.get("required_conversation_resolution")
+            if conversation is not None and (
+                    not isinstance(conversation, dict)
+                    or type(conversation.get("enabled")) is not bool):
+                malformed = True
             conversation_resolution_required = (
                 isinstance(conversation, dict) and conversation.get("enabled") is True
             )
+        else:
+            malformed = True
     except ApiError as exc:
         if exc.status != 404:
             raise
@@ -527,42 +568,43 @@ def _required_checks(api):
     try:
         protection = api.get(protection_route)
         if isinstance(protection, dict):
-            required.extend(protection.get("checks") or protection.get("contexts") or [])
+            add_checks(protection.get("checks", []))
+            add_checks(protection.get("contexts", []))
+            if (type(protection.get("strict")) is not bool
+                    or not {"checks", "contexts"}.intersection(protection)):
+                malformed = True
             up_to_date_required = protection.get("strict") is True
             available = True
+        else:
+            malformed = True
     except ApiError as exc:
         if exc.status != 404:
             raise
-    rules_route = f"repos/{REPOSITORY}/rules/branches/{MAIN_BRANCH}"
-    malformed = False
-    try:
-        rules = api.get(rules_route)
-        if isinstance(rules, list):
-            available = True
-            for rule in rules:
-                if isinstance(rule, dict) and rule.get("type") == "pull_request":
-                    params = rule.get("parameters")
-                    resolution = (params.get("required_review_thread_resolution")
-                                  if isinstance(params, dict) else None)
-                    if type(resolution) is not bool:
-                        malformed = True
-                    elif resolution:
-                        conversation_resolution_required = True
-                    continue
-                if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
-                    continue
-                params = rule.get("parameters")
-                if isinstance(params, dict):
-                    required.extend(params.get("required_status_checks") or [])
-                    up_to_date_required = (
-                        up_to_date_required
-                        or params.get("strict_required_status_checks_policy") is True
-                    )
-    except ApiError as exc:
-        if exc.status != 404:
-            raise
+    rules = _branch_rules(api)
+    available = True
+    for rule in rules:
+        if rule.get("type") == "pull_request":
+            params = rule.get("parameters")
+            resolution = (params.get("required_review_thread_resolution")
+                          if isinstance(params, dict) else None)
+            if type(resolution) is not bool:
+                malformed = True
+            elif resolution:
+                conversation_resolution_required = True
+            continue
+        if rule.get("type") != "required_status_checks":
+            continue
+        params = rule.get("parameters")
+        if (not isinstance(params, dict)
+                or type(params.get("strict_required_status_checks_policy")) is not bool):
+            malformed = True
+            continue
+        add_checks(params.get("required_status_checks"))
+        up_to_date_required = (
+            up_to_date_required or params["strict_required_status_checks_policy"]
+        )
     if malformed:
-        # A malformed pull-request rule leaves the merge policy unproven.
+        # Never authorize with the valid subset of an unreadable policy.
         available = False
         conversation_resolution_required = False
     unique = {}
@@ -617,9 +659,17 @@ def _latest_source_failure(runs, head_sha, branch, pull_number):
     }
 
 
-def _contains_marker(comments, marker):
-    return any(isinstance(comment, dict) and isinstance(comment.get("body"), str)
-               and marker in comment["body"] for comment in comments)
+def _contains_marker(comments, marker, *, expected_body):
+    # _identity requires OWNER_ID for every cycle and every coordinator write.
+    # A copied marker, or an edited body retaining it, is not publication proof.
+    if (not isinstance(marker, str) or not marker
+            or not isinstance(expected_body, str) or marker not in expected_body):
+        return False
+    return any(isinstance(comment, dict)
+               and isinstance(comment.get("user"), dict)
+               and type(comment["user"].get("id")) is int
+               and comment["user"]["id"] == OWNER_ID
+               and comment.get("body") == expected_body for comment in comments)
 
 
 def _task_scoped(task, snapshot):
@@ -969,6 +1019,7 @@ class Coordinator:
             repair["issue"] = number
             repair["kind"] = "fix"
             repair["head_ref"] = snapshot["pull"]["head"]["ref"]
+            repair["main_sha"] = snapshot["main_sha"]
             repair["key"] = f"fix:{number}:{repair['marker']}"
         else:
             repair = None
@@ -1091,7 +1142,9 @@ class Coordinator:
 
     def _dispatch_task(self, action):
         key = action["key"]
-        current = self._fence_pull(action["issue"], action["head"])
+        if not _is_sha(action.get("main_sha")):
+            return "superseded"
+        current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
         if not current:
             return "superseded"
         reconciliation = _reconciliation_reasons(current)
@@ -1104,8 +1157,32 @@ class Coordinator:
                and item.get("status") in {"sending", "uncertain", "sent"}
                for item in self.store.actions().values()):
             return "agent-running"
+        threads, complete = collect_review_threads(self.api, action["issue"])
+        if not complete:
+            return "superseded"
+        check_runs = _rest_list(
+            self.api,
+            f"repos/{REPOSITORY}/commits/{action['head']}/check-runs?filter=latest&per_page=100",
+            collection="check_runs",
+        )
+        workflows, _ = _workflow_runs(self.api, branch, action["issue"])
+        source_failure = _latest_source_failure(workflows, action["head"], branch, action["issue"])
+        if source_failure:
+            check_runs.append(source_failure)
+        fresh = repair_request(
+            action["head"], action["attempt"] - 1, threads, check_runs, pull_number=action["issue"],
+        )
+        if not fresh or fresh["marker"] != action["marker"] or fresh["body"] != action["body"]:
+            # Do not claim stale evidence, nor substitute a new repair/merge in this cycle.
+            return "superseded"
         tasks = _rest_list(self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
                            collection="tasks")
+        current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
+        if not current or current["head"].get("ref") != branch:
+            return "superseded"
+        reconciliation = _reconciliation_reasons(current)
+        if reconciliation:
+            return reconciliation[0][0]
         if _other_task_active(tasks, {"pull": current}):
             return "agent-running"
         claimed = self.store.claim_action(key, action)
@@ -1319,7 +1396,9 @@ class Coordinator:
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") not in {"sending", "uncertain"}):
                     continue
-                found = _contains_marker(comments, entry.get("marker", ""))
+                found = _contains_marker(
+                    comments, entry.get("marker"), expected_body=entry.get("body"),
+                )
                 self.store.update_outbox(key, "sent" if found else "uncertain")
             for key, entry in self.store.snapshot()["outbox"].items():
                 if (entry.get("issue") != snapshot["issue"]
@@ -1329,8 +1408,8 @@ class Coordinator:
                     self.store.update_outbox(key, "superseded")
                     continue
                 marker = entry.get("marker")
-                if isinstance(marker, str) and marker and _contains_marker(comments, marker):
-                    # The public comment already exists; never post it twice.
+                if _contains_marker(comments, marker, expected_body=entry.get("body")):
+                    # The authenticated, unaltered comment exists; do not duplicate it.
                     self.store.update_outbox(key, "sent")
                     continue
                 self.store.update_outbox(key, "sending")
@@ -1342,9 +1421,10 @@ class Coordinator:
                 except CoordinatorError:
                     self.store.update_outbox(key, "uncertain")
                     continue
-                self.store.update_outbox(
-                    key, "sent" if isinstance(response, dict) and response.get("id") else "uncertain",
-                )
+                proven = (isinstance(response, dict)
+                          and type(response.get("id")) is int and response["id"] > 0
+                          and _contains_marker([response], marker, expected_body=entry["body"]))
+                self.store.update_outbox(key, "sent" if proven else "uncertain")
             action = pr_plan["repair"]
             if action:
                 result = self._dispatch_task(action)

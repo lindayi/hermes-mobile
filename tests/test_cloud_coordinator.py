@@ -444,8 +444,11 @@ class FakeApi:
                 "contexts": ["integration-tests", "cloud-review"],
                 "strict": self.strict_protection,
             }
-        if route.endswith("/rules/branches/main"):
-            return self.rules
+        if urlparse(route).path.endswith("/rules/branches/main"):
+            query = parse_qs(urlparse(route).query)
+            page = int(query.get("page", [1])[0])
+            size = int(query.get("per_page", [30])[0])
+            return self.rules[(page - 1) * size:page * size]
         raise AssertionError(f"Unexpected API read: {route}")
 
     def get_all(self, route, *, collection=None):
@@ -550,6 +553,8 @@ class FakeApi:
         response = {"id": len(self.writes), "context": body.get("context")}
         if body.get("context") == "cloud-review":
             response.update(state=body["state"], creator={"id": OWNER})
+        if route.endswith("/comments"):
+            response.update(user={"id": OWNER}, body=body["body"])
         return response
 
     def graphql_write(self, query, variables):
@@ -1149,6 +1154,197 @@ def test_units_are_templates_only_and_apply_is_explicit():
     assert "WantedBy=timers.target" in timer
 
 
+@pytest.mark.parametrize("status", ["pending", "sending", "uncertain"])
+@pytest.mark.parametrize("proof", ["owner", "stranger", "missing-user", "missing-id", "string-id", "edited"])
+def test_outbox_reconciliation_requires_owner_and_exact_published_body(tmp_path, status, proof):
+    api = FakeApi(sensitive=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    plan = coordinator._build_plan(apply=False)
+    key, entry = next((key, entry) for key, entry in plan["pull_requests"][0]["outcomes"]
+                      if key.endswith(":sensitive"))
+    assert store.add_outbox(key, entry)
+    store.update_outbox(key, status)
+    comment = {"id": 200, "user": {"id": OWNER}, "body": entry["body"],
+               "created_at": "2026-10-01T12:00:00Z", "updated_at": "2026-10-01T12:00:00Z"}
+    if proof == "stranger":
+        comment["user"]["id"] = 1
+    elif proof == "missing-user":
+        del comment["user"]
+    elif proof == "missing-id":
+        comment["user"] = {}
+    elif proof == "string-id":
+        comment["user"]["id"] = str(OWNER)
+    elif proof == "edited":
+        comment.update(body=f"Changed notification <!-- {entry['marker']} -->",
+                       updated_at="2026-10-01T12:01:00Z")
+    api.comments.append(comment)
+    coordinator.run(apply=True)
+    posted = [body for route, body in api.writes
+              if route.endswith("/comments") and body["body"] == entry["body"]]
+    observed = store.snapshot()["outbox"][key]["status"]
+    if proof == "owner":
+        assert observed == "sent" and not posted
+    elif status == "pending":
+        assert observed == "sent" and len(posted) == 1
+    else:
+        assert observed == "uncertain" and not posted
+
+
+@pytest.mark.parametrize("proof", ["stranger", "missing-user", "edited", "missing-id"])
+def test_outbox_write_response_requires_same_owner_publication_proof(tmp_path, proof):
+    class UnprovenComment(FakeApi):
+        def write(self, route, body):
+            response = super().write(route, body)
+            if route.endswith("/comments"):
+                response = {"id": 200, "user": {"id": OWNER}, "body": body["body"]}
+                if proof == "stranger":
+                    response["user"]["id"] = 1
+                elif proof == "missing-user":
+                    del response["user"]
+                elif proof == "missing-id":
+                    del response["id"]
+                else:
+                    response["body"] = "changed " + body["body"]
+            return response
+
+    api = UnprovenComment(sensitive=True)
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path)).run(apply=True)
+    assert {entry["status"] for entry in StateStore(path).snapshot()["outbox"].values()} == {"uncertain"}
+    count = len([route for route, _ in api.writes if route.endswith("/comments")])
+    Coordinator(api, StateStore(path)).run(apply=True)
+    assert len([route for route, _ in api.writes if route.endswith("/comments")]) == count
+
+
+def test_branch_rules_pagination_keeps_later_required_checks(tmp_path):
+    class PagedRules(FakeApi):
+        def __init__(self):
+            super().__init__(rules=[{"type": "deletion"}] * 100 + [{
+                "type": "required_status_checks", "parameters": {
+                    "required_status_checks": [{"context": "later-page-check", "integration_id": 17}],
+                    "strict_required_status_checks_policy": True,
+                },
+            }])
+            self.rule_routes = []
+
+        def get(self, route):
+            if "/rules/branches/main" in route:
+                self.rule_routes.append(route)
+            return super().get(route)
+
+    api = PagedRules()
+    result = Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
+    assert not result["pull_requests"][0]["required_checks_green"]
+    assert not api.graphql_writes
+    assert api.rule_routes == [
+        "repos/lindayi/hermes-mobile/rules/branches/main?per_page=100&page=1",
+        "repos/lindayi/hermes-mobile/rules/branches/main?per_page=100&page=2",
+    ]
+
+
+@pytest.mark.parametrize("bad_page", [None, {}, [None], [{}], [{"type": 1}],
+                                           [{"type": "deletion"}] * 101, 404, 429, 503])
+def test_branch_rules_bad_later_page_aborts_scan_without_writes(tmp_path, bad_page):
+    class BrokenRules(FakeApi):
+        def get(self, route):
+            if "/rules/branches/main" in route:
+                page = parse_qs(urlparse(route).query).get("page", ["1"])[0]
+                if page == "1":
+                    return [{"type": "deletion"}] * 100
+                if type(bad_page) is int:
+                    raise ApiError("rules page failed", status=bad_page)
+                return bad_page
+            return super().get(route)
+
+    api = BrokenRules()
+    store = StateStore(tmp_path / "state.json")
+    with pytest.raises(ApiError):
+        Coordinator(api, store).run(apply=True)
+    assert store.snapshot()["cursor"] is None
+    assert not api.writes and not api.graphql_writes
+
+
+def test_branch_rules_full_page_at_bound_never_proves_completion(tmp_path, monkeypatch):
+    import deploy.cloud_coordinator as module
+    monkeypatch.setattr(module, "MAX_PAGES", 2)
+    api = FakeApi(rules=[{"type": "deletion"}] * 200)
+    store = StateStore(tmp_path / "state.json")
+    with pytest.raises(ApiError, match="safety bound"):
+        Coordinator(api, store).run(apply=True)
+    assert store.snapshot()["cursor"] is None
+    assert not api.writes and not api.graphql_writes
+
+
+@pytest.mark.parametrize("params", [
+    None, {}, {"required_status_checks": []},
+    {"required_status_checks": "ignored", "strict_required_status_checks_policy": True},
+    {"required_status_checks": [None], "strict_required_status_checks_policy": True},
+    {"required_status_checks": [{"context": ""}], "strict_required_status_checks_policy": True},
+    {"required_status_checks": [{"context": "x", "integration_id": {}}],
+     "strict_required_status_checks_policy": True},
+    {"required_status_checks": [{"context": "x"}], "strict_required_status_checks_policy": "true"},
+])
+def test_malformed_required_status_rule_never_passes_partial_policy(tmp_path, params):
+    api = FakeApi(rules=[{"type": "required_status_checks", "parameters": params}])
+    result = Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
+    assert not result["pull_requests"][0]["required_checks_green"]
+    assert not api.graphql_writes
+    assert not any("/statuses/" in route for route, _ in api.writes)
+
+
+@pytest.mark.parametrize("endpoint, payload", [
+    ("protection", None),
+    ("protection", {"required_conversation_resolution": "true"}),
+    ("protection", {"required_conversation_resolution": {"enabled": "true"}}),
+    ("required_status_checks", None),
+    ("required_status_checks", {"contexts": ["cloud-review"], "strict": "true"}),
+    ("required_status_checks", {"contexts": "cloud-review", "strict": True}),
+    ("required_status_checks", {"strict": True}),
+])
+def test_malformed_classic_policy_cannot_be_hidden_by_valid_rules(tmp_path, endpoint, payload):
+    class MalformedClassic(FakeApi):
+        def get(self, route):
+            if route.endswith("/" + endpoint):
+                return payload
+            return super().get(route)
+
+    api = MalformedClassic(rules=[
+        {"type": "required_status_checks", "parameters": {
+            "required_status_checks": [{"context": "cloud-review"}],
+            "strict_required_status_checks_policy": True,
+        }},
+        {"type": "pull_request", "parameters": {"required_review_thread_resolution": True}},
+    ])
+    result = Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
+    assert not result["pull_requests"][0]["required_checks_green"]
+    assert not api.graphql_writes
+    assert not any("/statuses/" in route for route, _ in api.writes)
+
+
+def test_required_policy_preserves_classic_and_multiple_ruleset_sources():
+    from deploy.cloud_coordinator import _required_checks
+
+    class MultipleSources(FakeApi):
+        def get(self, route):
+            if route.endswith("/protection/required_status_checks"):
+                return {"contexts": ["legacy"], "checks": [{"context": "bound", "app_id": 7}],
+                        "strict": True}
+            return super().get(route)
+
+    api = MultipleSources(rules=[
+        {"type": "required_status_checks", "parameters": {
+            "required_status_checks": [{"context": "bound", "integration_id": app}],
+            "strict_required_status_checks_policy": False,
+        }} for app in (8, 9)
+    ] + [{"type": "pull_request", "parameters": {"required_review_thread_resolution": False}}])
+    required, complete, strict, conversations = _required_checks(api)
+    assert complete and strict and conversations
+    assert {(item["context"], item["app_id"]) for item in required} == {
+        ("legacy", None), ("bound", 7), ("bound", 8), ("bound", 9),
+    }
+
+
 def test_ruleset_pull_request_thread_resolution_satisfies_conversation_policy(tmp_path):
     api = FakeApi(conversation_resolution=False, rules=[
         {"type": "pull_request", "parameters": {
@@ -1565,6 +1761,139 @@ def test_reenrollment_keeps_generation_boundary_when_resetting_terminal_status(t
     assert store.status_generation_floor(16) == 7
     assert not store.claim_action("stale-status", action)
     assert store.claim_action("new-status", action | {"generation": 8})
+
+
+@pytest.mark.parametrize("failure", ["incomplete-threads", "thread-error", "checks-error", "workflows-error"])
+def test_failed_fresh_repair_collection_never_claims_or_dispatches(tmp_path, failure):
+    class IncompleteFreshEvidence(FakeApi):
+        def graphql(self, query, variables):
+            if self.thread_reads and failure == "thread-error":
+                raise ApiError("fresh threads unavailable", status=429)
+            response = super().graphql(query, variables)
+            if self.thread_reads > 1 and failure == "incomplete-threads":
+                response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0][
+                    "comments"]["pageInfo"] = {"hasNextPage": True, "endCursor": "next"}
+            return response
+
+        def get_all(self, route, *, collection=None):
+            if self.thread_reads > 1 and (
+                    (failure == "checks-error" and "/check-runs?" in route)
+                    or (failure == "workflows-error" and "/actions/runs?" in route)):
+                raise ApiError("fresh checks unavailable", status=503)
+            return super().get_all(route, collection=collection)
+
+    api = IncompleteFreshEvidence(unresolved=True)
+    path = tmp_path / "state.json"
+    if failure == "incomplete-threads":
+        assert not _managed_cycle(api, path)["pull_requests"][0]["repair_requested"]
+    else:
+        with pytest.raises(ApiError):
+            _managed_cycle(api, path)
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
+
+
+@pytest.mark.parametrize("race", ["main", "base", "behind", "conflict", "head", "branch", "agent"])
+def test_repair_fences_changes_during_fresh_evidence_collection(tmp_path, race):
+    class LateRace(FakeApi):
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if "/actions/runs?" in route and self.workflow_reads > 1:
+                if race == "main":
+                    self.advance_main = True
+                elif race == "base":
+                    self.pull["base"]["sha"] = "d" * 40
+                elif race == "behind":
+                    self.pull["mergeable_state"] = "behind"
+                elif race == "conflict":
+                    self.pull["mergeable"] = False
+                elif race == "head":
+                    self.pull["head"]["sha"] = "c" * 40
+                elif race == "branch":
+                    self.pull["head"]["ref"] = "other-topic"
+                else:
+                    self.active_agent = True
+            return values
+
+    api = LateRace(unresolved=True)
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert api.workflow_reads > 1
+    assert api.fix_attempts == 0
+    assert not result["pull_requests"][0]["repair_requested"]
+    assert not api.graphql_writes
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
+
+
+@pytest.mark.parametrize("change", [
+    "resolved", "edited", "replacement-evidence", "source-green", "source-replaced", "checks-green",
+])
+def test_fresh_repair_evidence_supersedes_plan_without_replacement_or_budget(tmp_path, change):
+    class ChangedEvidence(FakeApi):
+        def graphql(self, query, variables):
+            if self.thread_reads:
+                if change in {"resolved", "replacement-evidence"}:
+                    self.unresolved = False
+                if change == "replacement-evidence":
+                    self.source_failure = True
+            response = super().graphql(query, variables)
+            if self.thread_reads > 1 and change == "edited":
+                response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0][
+                    "comments"]["nodes"][0]["body"] = "Different finding"
+            return response
+
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if "/actions/runs?" in route and self.workflow_reads > 1:
+                if change == "source-green":
+                    return [run | {"conclusion": "success"} for run in values]
+                if change == "source-replaced":
+                    return [run | {"id": 568, "run_number": 50} for run in values]
+            if "/check-runs?" in route and change == "checks-green":
+                return values + [{"id": 567, "name": "Source checks", "head_sha": HEAD,
+                                  "status": "completed", "app": {"name": "GitHub Actions"},
+                                  "conclusion": "failure" if self.thread_reads == 1 else "success"}]
+            return values
+
+    api = ChangedEvidence(unresolved=change in {"resolved", "edited", "replacement-evidence"},
+                          source_failure=change in {"source-green", "source-replaced"})
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert api.fix_attempts == 0
+    assert not result["pull_requests"][0]["repair_requested"]
+    assert not api.graphql_writes, "A suppressed repair must not fall back to auto-merge"
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
+
+
+@pytest.mark.parametrize("race", ["main", "base", "both", "missing-main"])
+def test_repair_dispatch_rechecks_planned_main_and_base_without_claim(tmp_path, race):
+    class MovesAfterPlanning(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/commits/main") and self.main_reads > 1:
+                if race == "missing-main":
+                    return {}
+                if race in {"main", "both"}:
+                    return {"sha": "d" * 40}
+            if route.endswith("/pulls/16") and self.pull_reads > 2 and race in {"base", "both"}:
+                return value | {"base": value["base"] | {"sha": "d" * 40}}
+            return value
+
+    api = MovesAfterPlanning(unresolved=True)
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert api.fix_attempts == 0
+    assert not result["pull_requests"][0]["repair_requested"]
+    assert not api.graphql_writes
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
 
 
 @pytest.mark.parametrize("mergeable, mergeable_state, reason", [

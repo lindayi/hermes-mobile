@@ -56,6 +56,11 @@ Unidentifiable nonterminal repository tasks conservatively block new dispatch
 until GitHub exposes enough branch, session, or PR evidence to scope them.
 Conflicted, unmergeable, or `behind` pull requests are not sent to a fixer;
 they are reported as needing a separately assigned neutral reconciler.
+Immediately before claiming a repair, the coordinator re-reads its bounded
+thread/check evidence and fences the planned head, branch, main SHA, base binding,
+mergeability and active tasks. Changed or incomplete evidence suppresses that
+planned request without consuming an attempt; it does not substitute another
+repair or fall back to auto-merge in the same cycle.
 
 ## Review, checks, and merge
 
@@ -89,7 +94,12 @@ reconciled against a newer owned status on that same SHA, not assumed successful
 from a previous matching state. A later change in review evidence may revoke
 and restore success on the same SHA. All configured
 required checks must independently report success; skipped, cancelled, missing,
-pending, failed, or incomplete checks are not green.
+pending, failed, or incomplete checks are not green. Branch rules are collected
+with explicit `per_page=100` and `page` pagination, bounded to 100 pages; only a
+short final page proves completion. Errors (including an unavailable rules
+endpoint), malformed pages/policy fields, or exhaustion of the bound fail closed.
+The policy retains the union of classic and all ruleset requirements, including
+separate app bindings for the same check context.
 
 Auto-merge is requested through GitHub's protected `enablePullRequestAutoMerge`
 operation only when the same-repository main base is current, the PR is not a
@@ -114,8 +124,12 @@ GitHub's pull-request state proves auto-merge was enabled.
 The durable outbox posts deduplicated, fixed-text outcome/blocker comments on
 public PRs. It carries no logs, credentials, arbitrary issue text, or private
 runtime data. The owner mobile Inbox is not implemented by this adapter.
-Before posting, an existing marker in the fully read PR comments is treated as
-proof the outcome was already published.
+Before posting, an existing marker in the fully read PR comments proves
+publication only when the numeric author ID matches the authenticated owner used
+for writes and the body exactly matches the planned notification. Copied markers
+from other users, missing identity metadata, and edited notification bodies do
+not count. POST responses require the same owner/body proof plus a comment ID;
+unproven responses stay uncertain and are never automatically retried.
 
 ## Bounded state
 
