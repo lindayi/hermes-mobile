@@ -106,7 +106,7 @@ _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
 
 # Issue #39 coordinator dependency candidate bytes; not present in the main baseline.
 _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE = {
-    'deploy/review_evidence.py': '908a88498c8e4bd52da4706c0b1e52dfdd3ef85a960a67e03d57eb7df15d84f6',
+    'deploy/review_evidence.py': 'd910b0b847862e9fc6317aa3bb5ed55bc0904a0587845ad839a5c22e36fb8c7d',
 }
 
 

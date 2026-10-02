@@ -226,6 +226,28 @@ def test_changes_requested_overview_without_open_or_missed_items_forwards_summar
     ]) is None
 
 
+@pytest.mark.parametrize("heading", [
+    '<summary class="finding"><strong>Open (1)</strong></summary>',
+    '<summary><strong>Open (1)</strong></summary >',
+    '<summary class="finding"><strong>Open (1)</strong></summary >',
+])
+def test_attributed_open_does_not_duplicate_resolved_inline_evidence(tmp_path, heading):
+    body = OPEN_ONLY.replace('<summary><strong>Open (1)</strong></summary>', heading)
+    api = ReviewApi([copilot_review(body, state="CHANGES_REQUESTED")])
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert not result["pull_requests"][0]["repair_requested"]
+    assert api.fix_attempts == 0
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
+
+
+def test_empty_previously_missed_zero_remains_no_evidence():
+    body = overview("🔵 Needs a closer look", "Synthetic.", "None",
+                    section("Previously missed (0)", ""))
+    assert repair_request(HEAD, 0, [], [], pull_number=16,
+                          reviews=[copilot_review(body)]) is None
+
+
 def test_open_zero_does_not_suppress_actionable_changes_requested_summary():
     prose = "Required correction: reject stale receipts."
     body = overview("🟡 Changes recommended", prose, "None", section("Open (0)", ""))
@@ -352,6 +374,7 @@ def test_unproven_previously_missed_section_is_forwarded_whole_not_dropped():
 @pytest.mark.parametrize("heading", [
     '<summary class="finding"><strong>Previously missed (1)</strong></summary>',
     '<summary><strong>Previously missed (unknown)</strong></summary>',
+    '<summary><strong>Previously missed (0)</strong></summary>',
 ])
 def test_previously_missed_heading_attributes_or_unproven_count_preserves_finding(heading):
     missed = "<details>" + heading + missed_item(

@@ -19,7 +19,7 @@ _MISSED_RE = re.compile(
     re.IGNORECASE,
 )
 _OPEN_RE = re.compile(
-    r"<summary>\s*<strong>\s*Open\s*\((\d{1,3})\)\s*</strong>\s*</summary>", re.IGNORECASE,
+    r"<summary\b[^>]*>\s*<strong>\s*Open\s*\((\d{1,3})\)\s*</strong>\s*</summary\s*>", re.IGNORECASE,
 )
 _DETAILS_TOKEN_RE = re.compile(r"<details\b[^>]*>|</details\s*>", re.IGNORECASE)
 _SUMMARY_RE = re.compile(
@@ -111,8 +111,6 @@ def _previously_missed(body):
     for match in _MISSED_RE.finditer(body):
         count = re.fullmatch(r"\s*\((\d{1,3})\)\s*", match.group(1))
         expected = int(count.group(1)) if count else None
-        if expected == 0:
-            continue
         parent = _enclosing_details(body, match.start())
         section = _matching_details(body, parent) if parent is not None else None
         parsed, malformed = [], section is None or expected is None
