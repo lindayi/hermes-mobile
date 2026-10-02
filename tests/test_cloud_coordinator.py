@@ -1849,6 +1849,74 @@ def test_cloud_review_success_status_is_not_published_from_stale_threads(tmp_pat
     assert not any(route.endswith("/statuses/" + HEAD) for route, _ in api.writes)
 
 
+UNCOMPUTED_MERGEABILITY = [
+    {"mergeable": None, "mergeable_state": "unknown"},
+    {"mergeable": None, "mergeable_state": "clean"},
+    {"mergeable": True, "mergeable_state": "unknown"},
+    {"mergeable": False, "mergeable_state": "unknown"},
+    {"mergeable": False, "mergeable_state": "clean"},
+    {"mergeable": None, "mergeable_state": "dirty"},
+    {"mergeable": None, "mergeable_state": "behind"},
+    {},
+]
+
+
+@pytest.mark.parametrize("mergeability", UNCOMPUTED_MERGEABILITY)
+@pytest.mark.parametrize("attempts", [0, REPAIR_LIMIT])
+@pytest.mark.parametrize("repair_evidence", [False, True])
+def test_uncomputed_mergeability_defers_without_repair_budget_or_noise(
+        tmp_path, mergeability, attempts, repair_evidence):
+    api = FakeApi(unresolved=repair_evidence, source_failure=repair_evidence)
+    api.pull.pop("mergeable")
+    api.pull.pop("mergeable_state")
+    api.pull.update(mergeability)
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    store._mutate(lambda data: data["enrollments"]["16"].update(attempts=attempts))
+    coordinator = Coordinator(api, store)
+
+    plan = coordinator.run(apply=False)["pull_requests"][0]
+    result = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert api.fix_attempts == 0
+    for summary in (plan, result):
+        assert not summary["repair_requested"]
+        assert not summary["auto_merge_eligible"]
+        assert "mergeability-unknown" in summary["reasons"]
+        assert not {"conflict", "behind", "budget"}.intersection(summary["reasons"])
+        assert summary["outcomes"] == 0
+    state = store.snapshot()
+    assert state["enrollments"]["16"]["attempts"] == attempts
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
+    assert not state["lifecycle_events"]
+    assert not any(route.endswith(("/tasks", "/comments")) for route, _ in api.writes)
+    assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("mergeable, mergeable_state", [
+    (True, "clean"), (False, "dirty"), (True, "behind"),
+])
+def test_computed_mergeability_resumes_expected_task_on_next_poll(
+        tmp_path, mergeable, mergeable_state):
+    api = FakeApi(unresolved=True)
+    api.pull.update(mergeable=None, mergeable_state="unknown")
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    first = coordinator.run(apply=True)["pull_requests"][0]
+    assert not first["repair_requested"]
+    assert api.fix_attempts == 0
+
+    api.pull.update(mergeable=mergeable, mergeable_state=mergeable_state)
+    second = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert second["repair_requested"]
+    assert "mergeability-unknown" not in second["reasons"]
+    task = next(body for route, body in api.writes if route.endswith("/tasks"))
+    assert ("Neutral reconciliation" in task["prompt"]) == (mergeable_state != "clean")
+    assert api.fix_attempts == 1
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+
+
 def test_conflicts_are_sent_to_neutral_reconciler_not_ordinary_fixer(tmp_path):
     api = FakeApi(source_failure=True, unresolved=True)
     api.pull = api.pull | {"mergeable": False, "mergeable_state": "dirty"}
@@ -3551,12 +3619,47 @@ def test_repair_dispatch_rechecks_planned_main_and_base_without_claim(tmp_path, 
     assert not any(action["kind"] == "fix" for action in state["actions"].values())
 
 
+@pytest.mark.parametrize("mergeability", UNCOMPUTED_MERGEABILITY)
+@pytest.mark.parametrize("initial_state", ["clean", "dirty", "behind"])
+@pytest.mark.parametrize("fence_read", [3, 4], ids=["dispatch", "final-dispatch"])
+def test_uncomputed_mergeability_at_dispatch_never_claims_or_posts(
+        tmp_path, mergeability, initial_state, fence_read):
+    class BecomesUnknown(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/pulls/16") and self.pull_reads >= fence_read:
+                value = {key: item for key, item in value.items()
+                         if key not in {"mergeable", "mergeable_state"}}
+                return value | mergeability
+            return value
+
+    api = BecomesUnknown(unresolved=True)
+    api.pull.update(mergeable=initial_state != "dirty", mergeable_state=initial_state)
+    path = tmp_path / "state.json"
+
+    result = _managed_cycle(api, path)
+
+    assert api.pull_reads >= fence_read
+    assert api.fix_attempts == 0
+    summary = result["pull_requests"][0]
+    assert not summary["repair_requested"]
+    assert "mergeability-unknown" in summary["reasons"]
+    assert not {"conflict", "behind", "budget"}.intersection(summary["reasons"])
+    assert not summary["auto_merge_requested"]
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
+    assert not state["lifecycle_events"]
+    assert not any(route.endswith(("/tasks", "/comments")) for route, _ in api.writes)
+    assert not api.graphql_writes
+
+
 @pytest.mark.parametrize("mergeable, mergeable_state, reason", [
     (True, "behind", "behind"),
     (True, "dirty", "conflict"),
-    (True, "unknown", "conflict"),
-    (False, "clean", "conflict"),
-    (None, "clean", "conflict"),
+    (True, "unknown", "mergeability-unknown"),
+    (False, "clean", "mergeability-unknown"),
+    (None, "clean", "mergeability-unknown"),
 ])
 def test_dispatch_rechecks_reconciliation_after_planning(tmp_path, mergeable, mergeable_state, reason):
     class BecomesUnmergeable(FakeApi):

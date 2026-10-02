@@ -905,11 +905,18 @@ def _github_identity(value, expected):
             and value["id"] == expected)
 
 
+def _mergeability_unknown(pull):
+    state = pull.get("mergeable_state")
+    return (pull.get("mergeable") is None or state in {None, "unknown"}
+            or (pull.get("mergeable") is not True and state not in {"dirty", "behind"}))
+
+
 def _reconciliation_reasons(pull):
     """Use the same neutral-reconciler boundary when planning and dispatching."""
+    if _mergeability_unknown(pull):
+        return []
     reasons = []
-    if (pull.get("mergeable") is not True
-            or pull.get("mergeable_state") in {"dirty", "unknown"}):
+    if pull.get("mergeable_state") == "dirty":
         reasons.append(("conflict", "A neutral conflict reconciler must be assigned; this coordinator will not start a fixer."))
     if pull.get("mergeable_state") == "behind":
         reasons.append(("behind", "The pull request is behind main; a neutral reconciler must update it, and this coordinator will not start a fixer."))
@@ -1592,10 +1599,10 @@ class Coordinator:
             snapshot["neutral_blocker_attempt"] = neutral_blocker.get("attempt")
         reconciliation = _reconciliation_reasons(snapshot["pull"])
         needs_reconciliation = bool(reconciliation)
-        conflict = bool(reconciliation)
+        mergeability_unknown = _mergeability_unknown(snapshot["pull"])
         repair = None
         attempts = snapshot["enrollment"].get("attempts", 0)
-        if (snapshot["scoped"] and not neutral_blocker
+        if (snapshot["scoped"] and not neutral_blocker and not mergeability_unknown
                 and snapshot["pull"].get("draft") is not True):
             if needs_reconciliation:
                 repair = neutral_reconciliation_request(snapshot, attempts)
@@ -1618,6 +1625,8 @@ class Coordinator:
         if not snapshot["scoped"]:
             reasons.append(("scope", "The pull request is not based on the current same-repository main branch."))
         reasons.extend(reconciliation)
+        if mergeability_unknown:
+            reasons.append(("mergeability-unknown", "GitHub mergeability is not yet confirmed; repair is deferred."))
         if neutral_blocker and neutral_blocker["blocker"] == "conflict_incompatible":
             reasons.append((
                 "conflict-incompatible",
@@ -1643,7 +1652,7 @@ class Coordinator:
         if agent_busy:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
         budget_needed = (
-            snapshot["scoped"] and not agent_busy
+            snapshot["scoped"] and not agent_busy and not mergeability_unknown
             and snapshot["pull"].get("draft") is not True and not neutral_blocker
             and (needs_reconciliation or repair_request(
                 head, 0, snapshot["threads"], snapshot["check_runs"],
@@ -1784,6 +1793,8 @@ class Coordinator:
                 or current.get("id") != action.get("pull_id")
                 or current.get("node_id") != action.get("pull_node_id")):
             return "superseded"
+        if _mergeability_unknown(current):
+            return "mergeability-unknown"
         reconciliation = _reconciliation_reasons(current)
         neutral = action.get("task_type") == "neutral"
         if neutral and not reconciliation:
@@ -1825,6 +1836,8 @@ class Coordinator:
         current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
         if not current or current["head"].get("ref") != branch:
             return "superseded"
+        if _mergeability_unknown(current):
+            return "mergeability-unknown"
         reconciliation = _reconciliation_reasons(current)
         if neutral and not reconciliation:
             return "superseded"
@@ -2131,8 +2144,12 @@ class Coordinator:
             action = pr_plan["repair"]
             if action:
                 result = self._dispatch_task(action)
-                if result in {"agent-running", "superseded", "conflict", "behind", "draft"}:
+                if result in {"agent-running", "superseded", "conflict", "behind", "draft",
+                              "mergeability-unknown"}:
                     pr_plan["repair"] = None
+                    if result == "mergeability-unknown":
+                        pr_plan["reasons"] = [reason for reason in pr_plan["reasons"]
+                                              if reason not in {"conflict", "behind"}]
                     if result != "superseded":
                         reason = "agent" if result == "agent-running" else result
                         pr_plan["reasons"] = list(dict.fromkeys(

@@ -91,8 +91,15 @@ Unidentifiable nonterminal repository tasks conservatively block new dispatch
 until GitHub exposes enough branch, session, or PR evidence to scope them.
 Only a positively pre-send superseded reservation can advance to a distinct
 bounded attempt on unchanged head/base; sent or uncertain reservations are never
-retried. Conflicted, unmergeable, or `behind` pull requests receive the neutral
-reconciliation task described above, not an ordinary repair task.
+retried. Only confirmed `dirty` or `behind` pull requests receive the neutral
+reconciliation task described above, not an ordinary repair task. Uncomputed or
+unknown mergeability (including `mergeable: null`, missing fields, or a negative
+mergeability result without an explicit `dirty`/`behind` state) defers both task
+kinds. It claims/posts no task, consumes no attempt, and produces no budget
+exhaustion notice or lifecycle event. Planning and both dispatch fences enforce
+this boundary; a dispatch-time deferral clears `repair_requested` and reports
+`mergeability-unknown` rather than a stale conflict/behind reason. A later poll
+may resume ordinary repair or confirmed neutral reconciliation once computed.
 Immediately before claiming a repair, the coordinator re-reads its bounded
 thread/check evidence and fences the planned head, branch, main SHA, base binding,
 mergeability and active tasks. Changed or incomplete evidence suppresses that
