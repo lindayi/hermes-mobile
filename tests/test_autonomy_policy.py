@@ -127,7 +127,9 @@ _PENDING_PR40_LIFECYCLE_FIXTURE = {
 
 _PENDING_ISSUE43_LAUNCH_FIXTURE = {
     'deploy/cloud_coordinator.py': '3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c',
-    'deploy/issue_starter.py': 'c47d5a305375a20003bdf0e76e17b91ef5cbae8678e7459ebe8756f6d82bb3fb',
+    # PR57 paired admission fence and corrected shared canonical proof.
+    'deploy/issue_starter.py': 'c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9',
+    'deploy/pull_handoff_binding.py': 'e4cf47de3e1b7846da92796781f05437e8225773ddf13debcfc489b58aa50550',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
     'scripts/issue_starter.py': '09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1',
@@ -147,7 +149,7 @@ _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE = {
 }
 
 _PENDING_ISSUE50_RECEIPT_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'b089cf168c2d384b56855c0979853f0d692ec9564d6787bef6424b930d3b0e3e',
+    'deploy/cloud_coordinator.py': '4a94bd43f7d350cb8aaee08650726893e6775872e8af20f3a0c8f7f61127345d',
     'deploy/task_receipts.py': '60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb',
 }
 
@@ -712,12 +714,13 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
     }
     coordinator = {
         'deploy/cloud_coordinator.py', 'deploy/review_evidence.py',
+        'deploy/pull_handoff_binding.py',
         'deploy/task_receipts.py', 'deploy/workflow_events.py',
         'deploy/workflow_lifecycle.py', 'deploy/workflow_lifecycle_sources.py',
         'deploy/workflow_notifications.py',
     }
     assert closure == shared | coordinator
-    assert len(closure) == 36
+    assert len(closure) == 37
     assert closure <= set(REQUIRED_FILES)
     assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in coordinator)
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract' for path in shared)

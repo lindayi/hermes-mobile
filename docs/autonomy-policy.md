@@ -102,8 +102,41 @@ the separate PR47 and PR53 controller candidate hashes, not historical-main pins
 The observer, self-deploy, and issue #48 starter/unit pins retain their accepted
 source bytes. This local assembly does not authorize activation or deployment.
 
-The coordinator's exact 36-file static closure and fixed dependency inventory are
-retained. Shared backend dependencies keep their existing blocker labels. The five
+PR57 extends the assembled starter/consumer authority contract with the exact
+head/issue/body-digest command and a final prepared-scan admission fence. Its new
+`deploy/pull_handoff_binding.py` leaf is explicitly required, independently pinned,
+and mapped to `coordinator-review-contract`; missing, malformed and mutated bytes
+remain blocking. The PR57-only candidate at
+`2447f7960141ecdc24ad445deb0e93f858818691` supplied the following pins. Its
+coordinator digest predates the final PR55 restart-ordering integration; the
+combined overlay below supersedes that digest, not this historical provenance.
+PR58 notification-unit bytes and pins are unchanged.
+
+| Historical PR57 paired admission path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `ce40eadc705bf3887b7f6a7bf9f35f3a9c73241baf473fa83a65316bda5eac6a` |
+| `deploy/issue_starter.py` | `c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9` |
+| `deploy/pull_handoff_binding.py` | `e4cf47de3e1b7846da92796781f05437e8225773ddf13debcfc489b58aa50550` |
+
+The final combined source overlay retains PR55's `_reconcile_actions` from
+`181455bcb978e8fd9073ebccb90aea64f995efc4` and PR57's admission routines and
+shared helper from `2447f7960141ecdc24ad445deb0e93f858818691`. Its coordinator
+SHA-256 is derived from the combined actual bytes, not either parent's digest:
+
+| Final PR55 + PR57 + PR58 assembly overlay | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `4a94bd43f7d350cb8aaee08650726893e6775872e8af20f3a0c8f7f61127345d` |
+
+The runtime source pin and independent literal fixture explicitly use this
+combined digest. The starter/helper pins above and issue #58 unit pin below are
+unchanged. All other pins and historical baseline hashes are retained. Matching
+bytes and focused synthetic tests are consistency evidence only: final exact-head
+independent review and integration gates remain required, with no activation,
+deployment, installed-service qualification, or operational approval implied.
+
+The coordinator's exact 37-file static closure includes the PR57 shared canonical
+handoff proof leaf; the fixed 80-file dependency inventory remains explicit. Shared backend
+dependencies keep their existing blocker labels. The five
 PR29/PR40/PR42 dependency pins below match the accepted merged bytes in main5316;
 the separate literal fixtures and actual-byte/missing/malformed/mutation checks
 remain in every phase.
@@ -219,14 +252,16 @@ predecessor after remote head advancement. The follow-up resolves ownership befo
 handoff advancement and reads the updated prepared state. It preserves the prior
 retirement, atomic task acceptance, receipt-proof and compare-evidence fixes.
 
-| Current PR55 restart-ordering candidate path | SHA-256 |
+| Historical PR55-only restart-ordering candidate path | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `b089cf168c2d384b56855c0979853f0d692ec9564d6787bef6424b930d3b0e3e` |
 
-The policy pin and independent fixture spell out this candidate digest explicitly;
-no validator predicate or historical baseline is changed. Focused synthetic
-RED/GREEN evidence is not independent source acceptance: these corrected bytes
-still require exact-head independent review and final integration evidence.
+At the PR55-only candidate, the policy pin and independent fixture spelled out
+this digest explicitly. The final combined overlay above now supersedes only that
+coordinator pin; no validator predicate or historical baseline is changed.
+Focused synthetic RED/GREEN evidence is not independent source acceptance; the
+combined bytes still require exact-head independent review and final integration
+evidence.
 
 These pins identify candidate bytes only. Both files retain the
 `coordinator-review-contract` blocker; refreshing pins does not satisfy independent

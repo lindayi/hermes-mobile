@@ -4,7 +4,7 @@ import pytest
 from deploy import cloud_coordinator
 
 from test_issue_starter import (
-    FakeApi, REPOSITORY, completed_task, issue_comment, make_coordinator,
+    enrollment_command, FakeApi, REPOSITORY, completed_task, issue_comment, make_coordinator,
     pull_request, start_task,
 )
 
@@ -29,16 +29,19 @@ def test_real_starter_command_is_sha_bound_at_consumer_scan(tmp_path, consumer, 
         0 if race == "before_post" else 1
     )
     emitted = next(c for c in api.comments if c["id"] == 9101)
-    assert emitted["body"] == "/hermes enroll " + "a" * 40
+    assert emitted["body"] == enrollment_command()
     if race in {"after_post", "edited_comment"}:
         api.pulls[0]["head"]["sha"] = "c" * 40
     if race == "edited_comment":
         # The producer accepted A, but the same owner comment ID now names B.
-        emitted["body"] = "/hermes enroll " + "c" * 40
+        emitted["body"] = enrollment_command(head="c" * 40)
         emitted["updated_at"] = "2026-10-01T21:01:00Z"
         assert emitted["created_at"] != emitted["updated_at"]
 
     class ScanApi:
+        def graphql(self, query, variables):
+            return api.graphql(query, variables)
+
         def get_all(self, route, *, collection=None):
             if route.startswith(f"repos/{REPOSITORY}/issues?"):
                 return [{"number": 41, "pull_request": {"url": "pull/41"}}]
@@ -82,7 +85,7 @@ def test_real_starter_command_is_sha_bound_at_consumer_scan(tmp_path, consumer, 
 @pytest.mark.parametrize("outcome", ["response", "lost", "crash"])
 @pytest.mark.parametrize("visible", [True, False])
 def test_consumed_historical_enrollment_requires_fresh_handoff(tmp_path, consumer, outcome, visible):
-    historical = issue_comment(comment_id=9100, body="/hermes enroll " + "a" * 40)
+    historical = issue_comment(comment_id=9100, body=enrollment_command())
 
     class EnrollmentApi(FakeApi):
         def get(self, route):
@@ -108,6 +111,9 @@ def test_consumed_historical_enrollment_requires_fresh_handoff(tmp_path, consume
     api.comments.append(historical)
 
     class ScanApi:
+        def graphql(self, query, variables):
+            return api.graphql(query, variables)
+
         def get_all(self, route, *, collection=None):
             if route.startswith(f"repos/{REPOSITORY}/issues?"):
                 return [{"number": 41, "pull_request": {"url": "pull/41"}}]
@@ -170,7 +176,7 @@ def test_consumed_historical_enrollment_requires_fresh_handoff(tmp_path, consume
 
 @pytest.mark.parametrize("comment_id", [9099, 9100])
 def test_historical_post_response_is_not_fresh_enrollment_proof(tmp_path, comment_id):
-    historical = issue_comment(comment_id=comment_id, body="/hermes enroll " + "a" * 40)
+    historical = issue_comment(comment_id=comment_id, body=enrollment_command())
 
     class HistoricalResponseApi(FakeApi):
         def post(self, route, body):
@@ -202,7 +208,7 @@ def test_legacy_bare_comment_is_not_starter_handoff_proof(tmp_path):
     api.task_detail = completed_task()
     assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == 1
     assert [body["body"] for route, body in api.posts
-            if route.endswith("/issues/41/comments")] == ["/hermes enroll " + "a" * 40]
+            if route.endswith("/issues/41/comments")] == [enrollment_command()]
 
 
 @pytest.mark.parametrize("change", ["title", "body", "renamed", "body_edit"])
@@ -240,7 +246,7 @@ def test_uncertain_comment_cannot_reconcile_using_wrong_proof(tmp_path, proof):
     if proof == "bare":
         posted["body"] = "/hermes enroll"
     elif proof == "different_sha":
-        posted["body"] = "/hermes enroll " + "c" * 40
+        posted["body"] = enrollment_command(head="c" * 40)
     else:
         posted["user"] = {"id": 99}
     for _ in range(3):

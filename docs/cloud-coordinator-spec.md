@@ -17,15 +17,50 @@ ID. It ignores issue bodies, labels, links, and comments from other authors.
 An issue or pull request is enrolled by the exact comment `/hermes enroll` from
 that owner. The issue must identify a pull request whose head and base both belong
 to this repository and whose base branch is `main`. Existing pull requests are not
-enrolled by their age, label, author, or open state. The issue starter instead hands
-off with `/hermes enroll <40-lowercase-hex-head-sha>`; the consumer requires the
-value to match the current pull request head and stores it as immutable
-`authorized_head`. SHA-bound commands also require a valid timezone-aware
+enrolled by their age, label, author, or open state. The explicit manual form
+`/hermes enroll <40-lowercase-hex-head-sha>` also remains supported; the consumer
+requires the value to match the current pull request head and stores it as
+immutable `authorized_head`. The paired issue starter instead emits exactly
+`/hermes enroll <40lowerhex> issue <N> body-sha256 <64lowerhex>` from its reserved
+head, originating issue and raw UTF-8 PR body digest. `N` is canonical positive
+decimal bounded by 2147483647; digests are lowercase and malformed extended forms
+never downgrade to a manual prefix. SHA-bound commands require a valid timezone-aware
 `created_at` and an identical explicit `updated_at`; an edited or unverifiable
 comment is consumed without enrollment, even when its body names the current
 head. Only a genuinely new immutable command can authorize that head. The legacy
 bare command retains its historical timestamp compatibility.
 A stale or mismatched command is consumed without enrollment.
+
+Extended starter admission additionally requires a strict positive integer comment
+ID and owner ID, an explicitly non-draft open same-repository PR, matching current
+head/body, and exactly one canonical originating-issue closing edge. The shared
+leaf `deploy/pull_handoff_binding.py` verifies complete bounded GraphQL pages
+(20 pages, 100 nodes/page, 60000 body characters), anchored to REST repository
+node identity and the same PR/head/ref/base/body snapshot, then rereads REST.
+Description text and injected linkage flags never confer authority. Without the
+authenticated API verifier, the extended parser cannot admit a PR.
+
+After all prepared planning and lifecycle source reads, immediately before
+`commit_scan`, every effective new extended admission/renewal repeats the unchanged
+command identity/body/timestamp and live binding proof. A late mismatch or
+incomplete read aborts the entire preparation: no cursor/events, enrollment,
+receipts, retirement/export, or external write commits. Compact optional
+`starter_admission` metadata contains exactly version 1, `issue_number`,
+`head_sha`, `body_sha256`, `comment_id`, and `comment_created_at`; present metadata
+is strictly validated on state load. Enrollment `issue` still denotes the PR.
+Absence remains valid for supported identity-bound legacy enrollment; identity-less
+legacy active state remains fail-closed.
+
+This fence is admission-only. Later body reports or changed canonical linkage do
+not revoke a durably admitted PR; PR45 receipt-result heads, restart/compaction,
+manual renewal and existing repair budgets retain their original contracts.
+Provenance does not replace immutable `authorized_head` or sensitive-head gates.
+GitHub reads, durable local commit and remote mutations are not a single atomic
+transaction. Acceptance records the final coherent admission snapshot; edits after
+that read remain a remote race, not a claim of permanent body immutability.
+Legacy SHA-only starter output cannot be distinguished from manual authority:
+review in-flight old commands and deploy both sides together before activation.
+
 For a sensitive head, the owner must separately publish a formal `COMMENTED`
 independent-agent review, then comment
 `/hermes authorize-sensitive <head-sha> review <positive-review-id> <body-sha256>`.

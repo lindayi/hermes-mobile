@@ -137,15 +137,21 @@ def _valid_timestamp(value):
     return parsed.tzinfo is not None
 
 
-def enrollment_from_comment(issue, pull, comment):
+def enrollment_from_comment(issue, pull, comment, *, api=None):
     """Return a minimal enrollment record only for an exact owner command."""
     user = comment.get("user") if isinstance(comment, dict) else None
     body = comment.get("body") if isinstance(comment, dict) else None
     authorized_head = None
+    starter = None
+    if isinstance(body, str):
+        starter = re.fullmatch(
+            r"/hermes enroll ([0-9a-f]{40}) issue ([1-9][0-9]{0,9}) "
+            r"body-sha256 ([0-9a-f]{64})", body,
+        )
     if body != "/hermes enroll":
         if not isinstance(body, str):
             return None
-        match = re.fullmatch(r"/hermes enroll ([0-9a-f]{40})", body)
+        match = starter or re.fullmatch(r"/hermes enroll ([0-9a-f]{40})", body)
         if (not match or not _valid_timestamp(comment.get("created_at"))
                 or comment.get("updated_at") != comment["created_at"]):
             return None
@@ -173,6 +179,15 @@ def enrollment_from_comment(issue, pull, comment):
     if (type(pull_id) is not int or pull_id <= 0
             or not isinstance(pull_node_id, str) or not pull_node_id):
         return None
+    if starter:
+        from deploy.pull_handoff_binding import _pull_body_digest, _closing_issue_linked
+
+        if (api is None or int(starter.group(2)) > 2**31 - 1
+                or type(comment.get("id")) is not int or comment["id"] <= 0
+                or pull.get("draft") is not False
+                or _pull_body_digest(pull) != starter.group(3)
+                or not _closing_issue_linked(api, pull, int(starter.group(2)))):
+            return None
     enrollment = {
         "issue": issue["number"], "comment": comment.get("id"),
         "head": head_sha, "base": base_sha, "pull_id": pull_id,
@@ -180,7 +195,29 @@ def enrollment_from_comment(issue, pull, comment):
     }
     if authorized_head is not None:
         enrollment["authorized_head"] = authorized_head
+    if starter:
+        enrollment["starter_admission"] = {
+            "version": 1, "issue_number": int(starter.group(2)),
+            "head_sha": authorized_head, "body_sha256": starter.group(3),
+            "comment_id": comment["id"], "comment_created_at": comment["created_at"],
+        }
     return enrollment
+
+
+def _valid_starter_admission(value):
+    """Strict optional historical provenance; never compare to a later PR body/head."""
+    return (
+        isinstance(value, dict)
+        and set(value) == {"version", "issue_number", "head_sha", "body_sha256",
+                          "comment_id", "comment_created_at"}
+        and type(value["version"]) is int and value["version"] == 1
+        and type(value["issue_number"]) is int and 1 <= value["issue_number"] <= 2**31 - 1
+        and _is_sha(value["head_sha"])
+        and isinstance(value["body_sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", value["body_sha256"]) is not None
+        and type(value["comment_id"]) is int and value["comment_id"] > 0
+        and _valid_timestamp(value["comment_created_at"])
+    )
 
 
 def _renewed_bound_enrollment(prior, incoming):
@@ -1139,7 +1176,7 @@ class Coordinator:
             route += "&" + urlencode({"since": since.isoformat().replace("+00:00", "Z")})
         return _rest_list(self.api, route)
 
-    def _scan_enrollments(self, state):
+    def _scan_enrollments(self, state, *, admission_checks=None):
         commands, processed = [], []
         cursor = state.get("cursor")
         issues = self._issues(cursor)
@@ -1165,13 +1202,13 @@ class Coordinator:
                 body = comment.get("body")
                 if (body == "/hermes enroll"
                         or isinstance(body, str) and re.fullmatch(
-                            r"/hermes enroll [0-9a-f]{40}", body,
+                            r"/hermes enroll [0-9a-f]{40}(?: issue [^\n]*)?", body,
                         )):
                     processed.append(key)
                     if not issue.get("pull_request"):
                         continue
                     pull = self.api.get(f"repos/{REPOSITORY}/pulls/{issue['number']}")
-                    enrollment = enrollment_from_comment(issue, pull, comment)
+                    enrollment = enrollment_from_comment(issue, pull, comment, api=self.api)
                     if enrollment:
                         enrollment["last_open_seen"] = True
                         enrollment["last_open_head"] = enrollment["head"]
@@ -1191,17 +1228,22 @@ class Coordinator:
                     str(enrollment["issue"]),
                 )
                 renewed = _renewed_bound_enrollment(prior, enrollment)
+                effective = False
                 if renewed is not None:
+                    effective = True
                     candidates[str(enrollment["issue"])] = renewed
                 elif (not prior or (not prior.get("active")
                                   and isinstance(prior.get("comment"), int)
                                   and isinstance(enrollment.get("comment"), int)
                                   and enrollment["comment"] > prior["comment"])):
+                    effective = True
                     candidates[str(enrollment["issue"])] = {
                         **enrollment, "attempts": 0, "sensitive_sha": None,
                         "sensitive_authorization": None, "targeted_review": None,
                         "active": True,
                     }
+                if effective and "starter_admission" in enrollment and admission_checks is not None:
+                    admission_checks.append(deepcopy(enrollment))
         for action, item in commands:
             if action != "authorize":
                 continue
@@ -2195,7 +2237,10 @@ class Coordinator:
         main_sha = main.get("sha") if isinstance(main, dict) else None
         if not _is_sha(main_sha):
             raise CoordinatorError("Current main commit was unavailable")
-        issues, commands, processed, enrollments = self._scan_enrollments(state)
+        admission_checks = []
+        issues, commands, processed, enrollments = self._scan_enrollments(
+            state, admission_checks=admission_checks,
+        )
         scans, sensitive_revocations = [], []
         for key, enrollment in enrollments.items():
             snapshot = self._snapshot_pull(
@@ -2229,6 +2274,7 @@ class Coordinator:
         ]
         return {
             "cursor": cursor, "processed": processed, "commands": commands,
+            "starter_admissions": admission_checks,
             "enrollments": enrollments, "snapshots": scans, "pull_requests": plans,
             "observations": observations, "sensitive_revocations": sensitive_revocations,
             "now": self.clock(),
@@ -2643,7 +2689,30 @@ class Coordinator:
         self.store.update_action(key, "sent")
         return "sent"
 
+    def _fence_starter_admissions(self, admissions):
+        """Reprove effective new admissions after all preparation, before any commit.
+
+        This is admission-only provenance, not a lifetime body/linkage pin.
+        A failure discards the whole prepared scan via run's finally block.
+        """
+        for expected in admissions:
+            number = expected["issue"]
+            comments = _all_review_comments(self.api, number, None)
+            matches = [comment for comment in comments
+                       if isinstance(comment, dict) and comment.get("id") == expected["comment"]]
+            if len(matches) != 1:
+                raise CoordinatorError("Starter admission command changed before state commit")
+            pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
+            current = enrollment_from_comment(
+                {"number": number, "pull_request": True}, pull, matches[0], api=self.api,
+            )
+            if (current is None or any(current.get(key) != value
+                                       for key, value in expected.items()
+                                       if key not in {"last_open_seen", "last_open_head"})):
+                raise CoordinatorError("Starter admission binding changed before state commit")
+
     def _apply(self, plan, *, after_commit=None):
+        self._fence_starter_admissions(plan.get("starter_admissions", ()))
         self.store.commit_scan(
             plan["cursor"], plan["processed"], commands=plan["commands"],
             retirements=[
@@ -3012,6 +3081,10 @@ class StateStore:
                or not 0 <= item.get("sensitive_generation", 0) <= 2**31 - 1
                for item in data["enrollments"].values()):
             raise CoordinatorError("Sensitive authorization episode is invalid")
+        if any("starter_admission" in item
+               and not _valid_starter_admission(item["starter_admission"])
+               for item in data["enrollments"].values()):
+            raise CoordinatorError("Starter admission provenance is invalid")
         data.setdefault("lifecycle_events", [])
         if (not isinstance(data["lifecycle_events"], list)
                 or len(data["lifecycle_events"]) > MAX_LIFECYCLE_EVENTS

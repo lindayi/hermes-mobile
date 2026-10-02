@@ -49,6 +49,7 @@ SOURCE_CONTROL_PYTHON_FILES = frozenset({
     'deploy/native_notification_release.py', 'deploy/native_readiness.py', 'deploy/observe_release.py', 'deploy/public_http.py',
     'deploy/release_artifact.py', 'deploy/self_deploy.py', 'deploy/test_workspace.py',
     'deploy/cloud_coordinator.py', 'deploy/issue_starter.py', 'deploy/review_evidence.py',
+    'deploy/pull_handoff_binding.py',
     'deploy/task_receipts.py', 'deploy/workflow_events.py', 'deploy/workflow_lifecycle.py',
     'deploy/workflow_lifecycle_sources.py', 'deploy/workflow_notifications.py',
     'scripts/cloud_coordinator.py', 'scripts/issue_starter.py',
@@ -104,6 +105,7 @@ REQUIRED_FILES = (
     'patches/cron-delivery-baseline.json',
     'deploy/cloud_coordinator.py',
     'deploy/issue_starter.py',
+    'deploy/pull_handoff_binding.py',
     'deploy/review_evidence.py',
     'deploy/task_receipts.py',
     'deploy/workflow_events.py',
@@ -183,9 +185,11 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    'deploy/cloud_coordinator.py': 'b089cf168c2d384b56855c0979853f0d692ec9564d6787bef6424b930d3b0e3e',
+    'deploy/cloud_coordinator.py': '4a94bd43f7d350cb8aaee08650726893e6775872e8af20f3a0c8f7f61127345d',
     # Issue #43 launch/authority candidates; final assembled review remains required.
-    'deploy/issue_starter.py': 'c47d5a305375a20003bdf0e76e17b91ef5cbae8678e7459ebe8756f6d82bb3fb',
+    # PR57 paired admission fence and corrected shared canonical proof.
+    'deploy/issue_starter.py': 'c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9',
+    'deploy/pull_handoff_binding.py': 'e4cf47de3e1b7846da92796781f05437e8225773ddf13debcfc489b58aa50550',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
@@ -271,6 +275,7 @@ SOURCE_BLOCKERS = {
     'patches/cron-delivery-baseline.json': 'native-job-contract',
     'deploy/cloud_coordinator.py': 'coordinator-review-contract',
     'deploy/issue_starter.py': 'autonomy-launch-contract',
+    'deploy/pull_handoff_binding.py': 'coordinator-review-contract',
     'deploy/review_evidence.py': 'coordinator-review-contract',
     'deploy/task_receipts.py': 'coordinator-review-contract',
     'deploy/workflow_events.py': 'coordinator-review-contract',
