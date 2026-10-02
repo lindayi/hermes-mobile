@@ -1213,6 +1213,9 @@ class Coordinator:
                                     "receipt_result": receipt["result"],
                                     "receipt_head": snapshot["head"],
                                     "receipt_base": snapshot["pull"]["base"]["sha"],
+                                    "receipt_comment_id": receipt["comment_id"],
+                                    "receipt_session_id": receipt["session_id"],
+                                    "receipt_completed_at": receipt["completed_at"],
                                 }
                                 if receipt["result"] == "ready":
                                     fields["handoff_state"] = "pending"
@@ -1300,6 +1303,13 @@ class Coordinator:
         """
         head = action.get("receipt_head")
         base = action.get("receipt_base")
+        completed_at = action.get("receipt_completed_at")
+        if not _valid_timestamp(completed_at):
+            return self._handoff_wait(key, action, snapshot)
+        completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        now = datetime.fromtimestamp(self.clock(), timezone.utc)
+        if completed > now:
+            return self._handoff_wait(key, action, snapshot)
         current = self._fence_pull(action.get("issue"), head, base)
         if (not isinstance(current, dict)
                 or current.get("number") != action.get("issue")
@@ -1368,16 +1378,6 @@ class Coordinator:
         else:
             return self._handoff_wait(key, action, snapshot)
 
-        review_ok = copilot_review_valid(
-            head, snapshot["reviews"], snapshot["threads"],
-            threads_complete=snapshot["threads_complete"],
-        )
-        if review_ok:
-            self.store.update_action(
-                key, "completed", handoff_state="done", handoff_waits=0,
-            )
-            return False
-
         route = f"repos/{REPOSITORY}/pulls/{action['issue']}/requested_reviewers"
         try:
             requested = self.api.get(route)
@@ -1398,6 +1398,10 @@ class Coordinator:
             and review.get("commit_id") == head
             and review.get("state") in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
             and _github_identity(review.get("user"), COPILOT_REVIEWER_ID)
+            and _valid_timestamp(review.get("submitted_at"))
+            and completed < datetime.fromisoformat(
+                review["submitted_at"].replace("Z", "+00:00")
+            ) <= now
         ]
         has_submitted_review = bool(submitted_reviews)
         if has_submitted_review:

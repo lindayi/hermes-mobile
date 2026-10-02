@@ -115,8 +115,15 @@ and revocation, and the final merge recheck. If the authenticated reviewer
 identity differs, the check fails closed and requires policy review rather than
 inferring approval.
 For task handoff, an authenticated submitted review on the exact result head
-completes the review request even if unresolved threads keep this gate false; those
-threads then remain eligible for the next bounded repair.
+completes the review request only when its timezone-aware submission instant is
+strictly after the independently validated task session completion and no later
+than the current clock. This also applies when the task leaves the head unchanged;
+an earlier approval cannot shortcut the handoff. The validated completion time,
+session ID and receipt comment ID are persisted with the receipt head/base and
+dispatch claim for restart; observation time or mutable task update time is not a
+substitute. Missing or invalid completion proof fails closed. A fresh submitted
+review completes handoff even if unresolved threads keep the approval gate false;
+those threads then remain eligible for the next bounded repair.
 Handoff planning only reads and records verified receipt/handoff state; the
 ready-for-review mutation and Copilot review request run only after that cycle's
 scan commit succeeds, and then re-fence the exact result head. A failed scan

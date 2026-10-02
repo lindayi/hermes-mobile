@@ -188,6 +188,20 @@ def test_completed_task_rejects_blank_or_nonstring_identity(completed_task_bindi
         validate_task_receipt(task, action, pull, [receipt(body=body)], now=NOW)
 
 
+@pytest.mark.parametrize("completed_at", [
+    None, "invalid", "2026-10-01T12:05:30",
+    "2026-10-01T12:00:30Z", "2026-10-01T12:04:59Z", "2026-10-01T12:06:01Z",
+])
+def test_completed_task_rejects_unproven_completion_chronology(
+        completed_task_binding, completed_at):
+    task, action, pull = completed_task_binding
+    task["sessions"][0]["completed_at"] = completed_at
+    # A recent mutable task timestamp cannot substitute for session chronology.
+    task["updated_at"] = "2026-10-01T12:07:00Z"
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, [receipt()], now=NOW)
+
+
 def test_completed_task_accepts_complete_exact_returned_identities(completed_task_binding):
     task, action, pull = completed_task_binding
     # IDs are opaque: retain the entire returned value, without normalization.
@@ -198,6 +212,7 @@ def test_completed_task_accepts_complete_exact_returned_identities(completed_tas
     body = receipt_body().replace(TASK_ID, task_id).replace(SESSION_ID, session_id)
     assert validate_task_receipt(task, action, pull, [receipt(body=body)], now=NOW) == {
         "result": "ready", "comment_id": 777,
+        "session_id": session_id, "completed_at": "2026-10-01T12:05:30Z",
     }
     for identity in (task_id, session_id):
         with pytest.raises(ReceiptError):

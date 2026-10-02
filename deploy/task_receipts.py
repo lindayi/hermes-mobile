@@ -198,4 +198,8 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     )
     if receipt is None:
         return None
-    return receipt
+    # Return chronology only after the exact session and its receipt validate.
+    # Task updated_at and coordinator observation time are not completion proof.
+    return receipt | {
+        "session_id": session["id"], "completed_at": session["completed_at"],
+    }

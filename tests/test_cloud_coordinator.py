@@ -651,6 +651,7 @@ class FakeApi:
         self.tasks = {}
         self.requested_reviewers = []
         self.review_state = "APPROVED"
+        self.review_submitted_at = "2026-10-01T12:00:00Z"
         self.graphql_writes = []
         self.pull = valid_pr() | {
             "node_id": "PR_node_16", "auto_merge": None,
@@ -738,7 +739,7 @@ class FakeApi:
         if route.endswith("/pulls/16/reviews?per_page=100"):
             return [{
                 "state": self.review_state, "commit_id": self.head_sha,
-                "submitted_at": "2026-10-01T12:00:00Z",
+                "submitted_at": self.review_submitted_at,
                 "user": {"id": COPILOT_REVIEWER},
             }]
         if f"/commits/{self.head_sha}/check-runs?" in route:
@@ -1290,6 +1291,7 @@ def test_completed_comment_review_on_new_head_releases_handoff_for_repair(tmp_pa
     api.pull["head"]["sha"] = result_head
     api.review_state = "COMMENTED"
     api.complete_task(action["task_id"], action, head_sha=result_head)
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
 
     coordinator.run(apply=True)
 
@@ -1310,6 +1312,7 @@ def test_approved_review_on_exact_result_head_releases_handoff_for_repair(tmp_pa
     api.head_sha = result_head
     api.pull["head"]["sha"] = result_head
     api.complete_task(action["task_id"], action, head_sha=result_head)
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
 
     coordinator.run(apply=True)
 
@@ -1332,6 +1335,7 @@ def test_running_last_allowed_task_is_not_reported_as_exhausted(tmp_path):
             if item["kind"] == "fix" and item.get("status") == "sent"
         )
         api.complete_task(action["task_id"], action)
+        api.review_submitted_at = "2026-10-01T12:06:00Z"
     coordinator.run(apply=True)
     assert api.fix_attempts == 3
 
@@ -2188,6 +2192,7 @@ def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
             action = next(item for item in store.actions().values()
                           if item.get("task_id") == task_id)
             api.complete_task(task_id, action)
+            api.review_submitted_at = "2026-10-01T12:06:00Z"
     old_fix = next(action for action in store.actions().values()
                    if action.get("task_id") == "task-3")
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
@@ -2232,11 +2237,163 @@ def test_task_api_identity_reconciles_across_head_changes(tmp_path):
     api.head_sha = "c" * 40
     api.pull["head"]["sha"] = api.head_sha
     api.complete_task("task-1", fix)
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
     coordinator.run(apply=True)
     assert api.fix_attempts == 2
     second = next(item for item in store.actions().values()
                   if item.get("kind") == "fix" and item.get("task_id") == "task-2")
     assert second["head"] == api.head_sha
+
+
+@pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
+def test_same_head_handoff_rejects_pre_task_review(tmp_path, review_state):
+    # No unresolved threads: APPROVED also exercises the early review_ok shortcut.
+    api = FakeApi(source_failure=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_state = review_state
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+    assert "agent" in summary["reasons"]
+    assert summary["auto_merge_eligible"] is False
+    assert api.fix_attempts == 1
+    assert not any("enablePullRequestAutoMerge" in query for query, _ in api.graphql_writes)
+
+
+@pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
+@pytest.mark.parametrize("restart", [False, True])
+def test_post_task_review_completes_handoff_with_durable_session_proof(
+        tmp_path, review_state, restart):
+    api = FakeApi(source_failure=True)
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    # Mutable task updates and the local observation happen AFTER the fresh review.
+    api.tasks[fix["task_id"]]["updated_at"] = "2026-10-01T12:10:00Z"
+    api.source_failure = False
+    api.review_state = review_state
+    if restart:
+        coordinator.run(apply=True)
+        saved = store.action(fix["key"])
+        assert saved["handoff_state"] == "waiting_review"
+        assert saved["receipt_completed_at"] == "2026-10-01T12:05:30Z"
+        assert saved["receipt_session_id"] == "session-task-1"
+        assert saved["receipt_comment_id"] == 9001
+        # Restart cannot reconstruct chronology from a now-absent task response.
+        api.tasks.clear()
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+    # An earlier-looking wall clock is strictly later as an aware instant.
+    api.review_submitted_at = "2026-10-01T08:05:31-04:00"
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert StateStore(path).action(fix["key"])["handoff_state"] == "done"
+    assert "agent" not in summary["reasons"]
+    assert summary["review_valid"] is (review_state == "APPROVED")
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == int(restart)
+    assert api.fix_attempts == 1
+
+
+@pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
+@pytest.mark.parametrize("submitted_at", [
+    None, 123, "invalid", "2026-10-01T12:06:00",
+    "2026-10-01T12:05:15Z",  # After receipt, but before session completion.
+    "2026-10-01T12:05:30Z",  # Ties do not establish post-task chronology.
+    "2026-10-01T13:05:29+01:00",  # Later wall clock, earlier instant.
+    "2026-10-01T12:11:01Z",  # Future to the independently supplied clock.
+])
+def test_post_task_review_rejects_unproven_submission_time(
+        tmp_path, review_state, submitted_at):
+    api = FakeApi(source_failure=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_state = review_state
+    api.review_submitted_at = submitted_at
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert "agent" in summary["reasons"]
+    assert summary["auto_merge_eligible"] is False
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+    assert api.fix_attempts == 1
+
+
+@pytest.mark.parametrize("review_patch", [
+    {"commit_id": "c" * 40},
+    {"user": {"id": OWNER}},
+    {"user": {"id": str(COPILOT_REVIEWER)}},
+    {"user": {"id": float(COPILOT_REVIEWER)}},
+])
+def test_post_task_review_still_requires_exact_head_and_authenticated_identity(
+        tmp_path, review_patch):
+    class ReviewApi(FakeApi):
+        def get_all(self, route, *, collection=None):
+            rows = super().get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                return [row | review_patch for row in rows]
+            return rows
+
+    api = ReviewApi(source_failure=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert "agent" in summary["reasons"]
+    assert summary["auto_merge_eligible"] is False
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+
+
+@pytest.mark.parametrize("completed_at", [
+    None, "invalid", "2026-10-01T12:05:30", "2026-10-01T12:11:01Z",
+])
+def test_post_task_review_cannot_replace_invalid_persisted_completion_proof(
+        tmp_path, completed_at):
+    api = FakeApi(source_failure=True)
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    coordinator.run(apply=True)
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    store.update_action(fix["key"], "completed", receipt_completed_at=completed_at)
+    api.tasks.clear()
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    writes, graphql_writes = list(api.writes), list(api.graphql_writes)
+
+    summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    assert StateStore(path).action(fix["key"])["handoff_state"] != "done"
+    assert "agent" in summary["pull_requests"][0]["reasons"]
+    assert api.writes == writes and api.graphql_writes == graphql_writes
 
 
 def test_task_handoff_requests_ready_review_once_and_fails_closed_after_wait(tmp_path):
@@ -2487,6 +2644,7 @@ def test_task_dispatch_is_bounded_to_three_after_verified_completion(tmp_path):
         action = next(item for item in store.actions().values()
                       if item.get("task_id") == task_id)
         api.complete_task(task_id, action)
+        api.review_submitted_at = "2026-10-01T12:06:00Z"
     result = coordinator.run(apply=True)
     assert api.fix_attempts == 3
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
