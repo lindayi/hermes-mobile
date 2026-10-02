@@ -22,15 +22,15 @@ production workflow and delivery timer stay disabled until the operator cutover.
 
 ## Routine allowlist (initial, deliberately small)
 
-Source of truth: `deploy/release_policy.py` (host) and its exact mirror in the
-`Classify release` job of `.github/workflows/production.yml` (cloud). Parity is
-tested by executing the actual workflow script against the same table.
+Source of truth: `deploy/release_policy.py` (host) and its exact policy mirrors in
+all three jobs of `.github/workflows/production.yml` (cloud). Parity is tested by
+executing the actual classifier and both promotion scripts.
 
 | Routine | Pattern |
 |---|---|
 | Presentation-only frontend files (exact audited list, not a pattern) | `frontend/styles.css`, `frontend/viewport.mjs`, `frontend/session-swipe.mjs`, `frontend/disclosure-reachability.mjs`, `frontend/icons/{apple-touch-icon,icon-192,icon-512}.png` |
 | Tests | `tests/test_<name>.py`, `tests/browser/<name>.{spec,test}.mjs`, `tests/browser/<name>_fixture.py`, `tests/fixtures/<name>.json` |
-| Non-operational docs | `docs/<name>.md` whose name has no operational/security keyword |
+| Non-operational docs (exact audited list, not a pattern) | `docs/keyboard-viewport-spec.md`, `docs/sticky-activity-spacing-spec.md`, `docs/touch-fold-contract.md` |
 
 Always sensitive, with no broad fallback:
 
@@ -52,14 +52,10 @@ Always sensitive, with no broad fallback:
   account management are split into explicitly sensitive modules.
 - Test infrastructure outside the patterns above (probes, bridges, conftest,
   shared browser harness modules).
-- Docs whose name contains operational/security keywords (for example
-  `deploy`, `delivery`, `release`, `artifact`, `auth`, `security`, `policy`,
-  `git`, `ci`, `workflow`, `migration`, `backup`, `native`, `runtime`,
-  `operator`, `install`, `development`, `hygiene`, `agent`, `routine`,
-  `implementation`, `family`, `job`, `notification`, `operations`,
-  `operational`; the full list is in
-  `release_policy.DOC_SENSITIVE`), docs in subdirectories, and instruction files.
-  The substring match is intentionally over-broad.
+- Every other doc, including every **new** doc regardless of name or benign-looking
+  content, docs in subdirectories, and instruction files. `DOCS_ROUTINE` is an
+  exact positive list, not a keyword denylist. A doc joins only through a reviewed
+  change to the host policy and all three cloud scripts (itself sensitive).
 - Non-canonical paths (absolute, `.`/`..` or hidden segments, backslashes,
   empty segments, non-ASCII, longer than 200 characters).
 - Unsupported change states: copies, type changes, unmerged/unknown states, a
@@ -71,6 +67,38 @@ Always sensitive, with no broad fallback:
 Additions and deletions are classified by their path; renames are classified by
 both from and to paths. Routine tests are still executed by the controller on
 the host; the owner accepted that reviewed, merged test code is routine.
+
+### Documentation audit / intentional fail-closed adjustment (PR #18)
+
+The former filename heuristic was not fail-closed: `session-telemetry-contract.md`
+defines an authenticated, owned loaded-profile/session endpoint but contains none
+of its denied name fragments. The current-doc audit found the same class in
+`chat-snapshot-contract.md`, `model-controls-contract.md`,
+`guidance-history-contract.md`, `inbox-cleanup-contract.md`,
+`session-delete-contract.md` and `steering-bridge-contract.md` (ownership, endpoint
+authorization, CSRF or durable state contracts), and in `public-commentary-contract.md`
+and `tool-summary-presentation.md` (private-content exclusion/redaction).
+`technical-ui-spec.md` includes release recovery and profile-bound telemetry;
+`test-cases.md` includes authentication/security acceptance requirements.
+
+Even the old routine test examples are not purely cosmetic: `ux.md` specifies
+WebAuthn, CSRF, secret storage and private-cache rules; `chat-header-spec.md`
+defines authenticated rename and account/run response fencing;
+`activity-inbox-spec.md` defines authenticated/CSRF mutations and owned durable
+cleanup. They now intentionally test **sensitive**, not routine. The routine
+mixed-diff fixture instead uses `touch-fold-contract.md`; all parser, mode,
+provenance and owner-approval assertions are retained.
+
+The three retained presentation docs were read in full: viewport geometry and
+lifecycle, CSS-only sticky spacing, and touch/fold/toolbar geometry respectively.
+They preserve existing security/action behavior, not define endpoint authorization,
+credential handling, operational configuration or deployment procedures. Explicit
+auditing also admits `sticky-activity-spacing-spec.md`, previously rejected only
+because `spacing` contains `ci`. All other current and future docs default sensitive;
+adding more deny words or inspecting change text is not a safe substitute for review.
+This adjusts **release classification only**, not endpoint authentication itself.
+Sensitive changes still require actual owner approval, and all Git/base/tree/mode
+provenance, guarded-controller and bootstrap checks remain unchanged.
 
 ## Deployed-base evidence
 
@@ -198,6 +226,13 @@ Native, dependency and migration maintenance are never routine.
 1b. Real Git chmod changes in either direction on an allowlisted test, plus
     symlink additions and regular-file-to-symlink changes, → sensitive on both
     host and cloud; the promotion job recomputes the same mode-aware result.
+1c. Telemetry-contract changes and new unknown docs, including benign-content
+    `endpoint-map.md`, `egress-routing.md` and `quickstart.md`, → sensitive for
+    modifications, additions, deletions and renames in either direction with a
+    routine doc. Real Git inventories and all three executed cloud scripts agree;
+    routine promotion refuses, sensitive promotion needs actual owner approval.
+    The audited docs still support modifications/additions/deletions and renames
+    between routine paths.
 2. Any backend/deploy/patch/lock/.github/script/instruction/unknown path, a
    rename from such a path, a symlink/executable mode, >250 files, an empty or
    truncated diff → sensitive.

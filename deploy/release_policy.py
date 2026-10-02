@@ -27,16 +27,11 @@ TESTS = (re.compile(r'tests/test_[a-z0-9_]+\.py'),
          re.compile(r'tests/browser/[a-z0-9][a-z0-9-]*\.(?:spec|test)\.mjs'),
          re.compile(r'tests/browser/[a-z0-9_]+_fixture\.py'),
          re.compile(r'tests/fixtures/[a-z0-9][a-z0-9-]*\.json'))
-DOC = re.compile(r'docs/([a-z0-9][a-z0-9-]*)\.md')
-# Substring match on the doc name: deliberately over-broad (fail closed).
-DOC_SENSITIVE = ('account', 'admin', 'agent', 'artifact', 'attestation', 'auth', 'backup', 'bootstrap',
-                 'ci', 'credential', 'cron', 'delivery', 'deploy', 'development', 'family', 'git',
-                 'hosted', 'hygiene', 'implementation', 'install', 'instruction', 'invite', 'job',
-                 'member', 'migration', 'native', 'notification', 'operational', 'operations', 'operator',
-                 'passkey', 'permission',
-                 'policy', 'privacy', 'production', 'push', 'recovery', 'release', 'restore', 'rollback',
-                 'routine', 'runtime', 'scheduler', 'secret', 'security', 'signing', 'token',
-                 'webauthn', 'workflow')
+# Exact audited non-operational docs. Unknown docs are sensitive even when their
+# names/content look harmless: endpoint/ownership contracts need not say "auth".
+DOCS_ROUTINE = frozenset({
+    'docs/keyboard-viewport-spec.md', 'docs/sticky-activity-spacing-spec.md',
+    'docs/touch-fold-contract.md'})
 MODES = frozenset({'000000', '100644'})
 STATUSES = frozenset({'A', 'D', 'M', 'R'})
 RAW = re.compile(r':([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40}|[0-9a-f]{64}) ([0-9a-f]{40}|[0-9a-f]{64}) '
@@ -64,8 +59,7 @@ def path_is_routine(path):
         return False
     if path in FRONTEND_ROUTINE or any(pattern.fullmatch(path) for pattern in TESTS):
         return True
-    match = DOC.fullmatch(path)
-    return bool(match) and not any(word in match.group(1) for word in DOC_SENSITIVE)
+    return path in DOCS_ROUTINE
 
 
 def _change_reason(item):

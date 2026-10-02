@@ -112,20 +112,12 @@ jobs:
               'frontend/icons/apple-touch-icon.png', 'frontend/icons/icon-192.png', 'frontend/icons/icon-512.png']);
             const TESTS = [/^tests\/test_[a-z0-9_]+\.py$/, /^tests\/browser\/[a-z0-9][a-z0-9-]*\.(?:spec|test)\.mjs$/,
               /^tests\/browser\/[a-z0-9_]+_fixture\.py$/, /^tests\/fixtures\/[a-z0-9][a-z0-9-]*\.json$/];
-            const DOC = /^docs\/([a-z0-9][a-z0-9-]*)\.md$/;
-            const DOC_SENSITIVE = ['account', 'admin', 'agent', 'artifact', 'attestation', 'auth', 'backup',
-              'bootstrap', 'ci', 'credential', 'cron', 'delivery', 'deploy', 'development', 'family', 'git',
-              'hosted', 'hygiene', 'implementation', 'install', 'instruction', 'invite', 'job', 'member',
-              'migration', 'native', 'notification', 'operational', 'operations', 'operator', 'passkey',
-              'permission', 'policy', 'privacy',
-              'production', 'push', 'recovery', 'release', 'restore', 'rollback', 'routine', 'runtime',
-              'scheduler', 'secret', 'security', 'signing', 'token', 'webauthn', 'workflow'];
-            const routinePath = path => {
-              if (!exactString(path, CANONICAL) || path.length > MAX_PATH) return false;
-              if (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => exactString(path, pattern))) return true;
-              const match = DOC.exec(path);
-              return Boolean(match) && !DOC_SENSITIVE.some(word => match[1].includes(word));
-            };
+            // Exact audited non-operational docs; unknown names/content never imply routine.
+            const DOCS_ROUTINE = new Set(['docs/keyboard-viewport-spec.md',
+              'docs/sticky-activity-spacing-spec.md', 'docs/touch-fold-contract.md']);
+            const routinePath = path => exactString(path, CANONICAL) && path.length <= MAX_PATH &&
+              (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => exactString(path, pattern)) ||
+               DOCS_ROUTINE.has(path));
             const STATUS = new Set(['A', 'D', 'M', 'R']);
             const classify = files => {
               if (!Array.isArray(files)) return ['sensitive', ['malformed diff inventory']];
@@ -288,18 +280,12 @@ jobs:
               'frontend/icons/apple-touch-icon.png', 'frontend/icons/icon-192.png', 'frontend/icons/icon-512.png']);
             const TESTS = [/^tests\/test_[a-z0-9_]+\.py$/, /^tests\/browser\/[a-z0-9][a-z0-9-]*\.(?:spec|test)\.mjs$/,
               /^tests\/browser\/[a-z0-9_]+_fixture\.py$/, /^tests\/fixtures\/[a-z0-9][a-z0-9-]*\.json$/];
-            const DOC = /^docs\/([a-z0-9][a-z0-9-]*)\.md$/;
-            const DOC_SENSITIVE = ['account', 'admin', 'agent', 'artifact', 'attestation', 'auth', 'backup',
-              'bootstrap', 'ci', 'credential', 'cron', 'delivery', 'deploy', 'development', 'family', 'git',
-              'hosted', 'hygiene', 'implementation', 'install', 'instruction', 'invite', 'job', 'member',
-              'migration', 'native', 'notification', 'operational', 'operations', 'operator', 'passkey',
-              'permission', 'policy', 'privacy', 'production', 'push', 'recovery', 'release', 'restore',
-              'rollback', 'routine', 'runtime', 'scheduler', 'secret', 'security', 'signing', 'token',
-              'webauthn', 'workflow'];
+            // Exact audited non-operational docs; unknown names/content never imply routine.
+            const DOCS_ROUTINE = new Set(['docs/keyboard-viewport-spec.md',
+              'docs/sticky-activity-spacing-spec.md', 'docs/touch-fold-contract.md']);
             const routinePath = path => exactString(path, CANONICAL) && path.length <= MAX_PATH &&
               (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => exactString(path, pattern)) ||
-               (() => { const match = DOC.exec(path); return Boolean(match) &&
-                 !DOC_SENSITIVE.some(word => match[1].includes(word)); })());
+               DOCS_ROUTINE.has(path));
             const classifyChanges = changes => {
               if (!Array.isArray(changes) || changes.length === 0 || changes.length > MAX_FILES) return 'sensitive';
               for (const file of changes) {
@@ -467,18 +453,12 @@ jobs:
               'frontend/icons/apple-touch-icon.png', 'frontend/icons/icon-192.png', 'frontend/icons/icon-512.png']);
             const TESTS = [/^tests\/test_[a-z0-9_]+\.py$/, /^tests\/browser\/[a-z0-9][a-z0-9-]*\.(?:spec|test)\.mjs$/,
               /^tests\/browser\/[a-z0-9_]+_fixture\.py$/, /^tests\/fixtures\/[a-z0-9][a-z0-9-]*\.json$/];
-            const DOC = /^docs\/([a-z0-9][a-z0-9-]*)\.md$/;
-            const DOC_SENSITIVE = ['account', 'admin', 'agent', 'artifact', 'attestation', 'auth', 'backup',
-              'bootstrap', 'ci', 'credential', 'cron', 'delivery', 'deploy', 'development', 'family', 'git',
-              'hosted', 'hygiene', 'implementation', 'install', 'instruction', 'invite', 'job', 'member',
-              'migration', 'native', 'notification', 'operational', 'operations', 'operator', 'passkey',
-              'permission', 'policy', 'privacy', 'production', 'push', 'recovery', 'release', 'restore',
-              'rollback', 'routine', 'runtime', 'scheduler', 'secret', 'security', 'signing', 'token',
-              'webauthn', 'workflow'];
+            // Exact audited non-operational docs; unknown names/content never imply routine.
+            const DOCS_ROUTINE = new Set(['docs/keyboard-viewport-spec.md',
+              'docs/sticky-activity-spacing-spec.md', 'docs/touch-fold-contract.md']);
             const routinePath = path => exactString(path, CANONICAL) && path.length <= MAX_PATH &&
               (FRONTEND_ROUTINE.has(path) || TESTS.some(pattern => exactString(path, pattern)) ||
-               (() => { const match = DOC.exec(path); return Boolean(match) &&
-                 !DOC_SENSITIVE.some(word => match[1].includes(word)); })());
+               DOCS_ROUTINE.has(path));
             const classifyChanges = changes => {
               if (!Array.isArray(changes) || changes.length === 0 || changes.length > MAX_FILES) return 'sensitive';
               for (const file of changes) {

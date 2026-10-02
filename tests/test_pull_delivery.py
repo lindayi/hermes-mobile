@@ -1495,6 +1495,108 @@ def test_real_git_colon_paths_remain_sensitive_and_owner_approved(tmp_path, monk
         assert [e[2]['state'] for e in effects if e[0] == 'post'] == ['in_progress', 'success']
 
 
+@pytest.mark.parametrize('consumer', ['host', 'classify', 'promote-routine', 'promote-sensitive'])
+@pytest.mark.parametrize('operation', ['modify', 'add', 'delete', 'rename_from', 'rename_to'])
+@pytest.mark.parametrize('path,expected', [
+    ('docs/session-telemetry-contract.md', 'sensitive'),
+    ('docs/endpoint-map.md', 'sensitive'),
+    ('docs/egress-routing.md', 'sensitive'),
+    ('docs/quickstart.md', 'sensitive'),
+    ('docs/keyboard-viewport-spec.md', 'routine'),
+    ('docs/sticky-activity-spacing-spec.md', 'routine'),
+    ('docs/touch-fold-contract.md', 'routine'),
+])
+def test_real_git_docs_require_positive_allowlist_on_host_and_all_cloud_jobs(
+        tmp_path, consumer, operation, path, expected):
+    """Actual docs + benign unknown docs; both rename sides and all three JS scripts."""
+    import subprocess
+    from pathlib import Path
+    from deploy import release_policy
+
+    repo = tmp_path / 'docs-repo'
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@invalid',
+                               '-c', 'commit.gpgsign=false', *args],
+                              check=True, capture_output=True, text=True, timeout=60).stdout
+
+    harmless = 'docs/touch-fold-contract.md' if path != 'docs/touch-fold-contract.md' else 'docs/keyboard-viewport-spec.md'
+    old = None if operation == 'add' else harmless if operation == 'rename_to' else path
+    new = None if operation == 'delete' else harmless if operation == 'rename_from' else path
+    source = Path(__file__).resolve().parents[1] / path
+    # Unknown operational and innocent names have deliberately harmless content:
+    # no keyword/content sniffing may turn an unreviewed path into routine.
+    text = source.read_text() if source.exists() else '# Notes\n\nAdjust paragraph spacing.\n'
+    if path == 'docs/session-telemetry-contract.md':
+        assert 'ready authenticated user, own loaded profile' in text
+
+    git('init', '-q', '-b', 'main')
+    if old:
+        (repo / old).parent.mkdir(parents=True, exist_ok=True)
+        (repo / old).write_text(text)
+    git('add', '-A')
+    git('commit', '-q', '--allow-empty', '-m', 'base')
+    base = git('rev-parse', 'HEAD').strip()
+    if new:
+        (repo / new).parent.mkdir(parents=True, exist_ok=True)
+    if operation == 'modify':
+        (repo / new).write_text(text + '\nUpdated notes.\n')
+    elif operation == 'add':
+        (repo / new).write_text(text)
+    elif operation == 'delete':
+        (repo / old).unlink()
+    else:
+        (repo / old).rename(repo / new)
+    git('add', '-A')
+    git('commit', '-q', '-m', 'change')
+    sha = git('rev-parse', 'HEAD').strip()
+
+    if consumer == 'host':
+        changes = module().release_changes(repo, base, sha)
+        assert changes and release_policy.classify(changes).risk == expected
+        renamed = release_policy.parse_git_raw(git('diff', '--raw', '-z', '--no-abbrev', '-M', base, sha))
+        assert release_policy.classify(renamed).risk == expected
+        if operation.startswith('rename'):
+            assert renamed == [release_policy.Change('R', new, old, '100644', '100644')]
+        return
+
+    def entries(revision):
+        result = []
+        for record in git('ls-tree', '-r', '-z', revision).split('\0'):
+            if record:
+                header, name = record.split('\t', 1)
+                mode, kind, oid = header.split()
+                result.append({'path': name, 'mode': mode, 'type': kind, 'sha': oid})
+        return result
+
+    status = {'modify': 'modified', 'add': 'added', 'delete': 'removed'}.get(operation, 'renamed')
+    files = [{'filename': new or old, 'status': status,
+              **({'previous_filename': old} if status == 'renamed' else {})}]
+    api = promote_api(expected, base=base, sha=sha, files=files,
+                      base_entries=entries(base), head_entries=entries(sha))
+    if consumer == 'classify':
+        output = run_script(consumer, api, sha=sha)
+        assert 'error' not in output and not output['writes'], output
+        assert output['outputs'] == {'risk': expected, 'base_sha': base}
+        return
+
+    risk = consumer.removeprefix('promote-')
+    env = {'RELEASE_RISK': risk, 'CLASSIFIED_RISK': risk, 'BASE_SHA': base}
+    output = run_script(consumer, api, sha=sha, env=env)
+    if risk != expected:
+        assert output.get('error') and not output['writes'], output
+    else:
+        assert 'error' not in output and len(output['writes']) == 2, output
+        assert output['writes'][0]['payload'] == {
+            'version': 2, 'source_run_id': 10, 'approval_run_id': 20, 'base_sha': base}
+        assert output['writes'][1]['state'] == 'queued'
+    if risk == 'sensitive':
+        api[PREFIX + '/actions/runs/20/approvals'] = []
+        unapproved = run_script(consumer, api, sha=sha, env=env)
+        assert unapproved.get('error') and not unapproved['writes'], unapproved
+
+
 def replace_once(name, old, new):
     def edit(frontend):
         path = frontend / name

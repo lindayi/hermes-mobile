@@ -97,28 +97,62 @@ test('session deletion controls and confirmation fit narrow light/dark screens',
  }finally{await browser.close();server.closeAllConnections();await new Promise(r=>server.close(r));}
 });
 
+// DOM visibility is not an acknowledgement that Node has dispatched page.route.
+// Signal only after finishStatus is installed; never wait for the held response.
+function statusRouteReadiness(){
+ let ready;const promise=new Promise(resolve=>{ready=resolve;});
+ return {ready,async wait(timeout=5000){
+  let timer;
+  try{await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(`Status route did not install finishStatus within ${timeout}ms`)),timeout);})]);}
+  finally{clearTimeout(timer);}
+ }};
+}
+test('status route readiness rejects missing dispatch on its deadline and clears its timer',async t=>{
+ let deadline;const timer={};const cleared=[];
+ t.mock.method(globalThis,'setTimeout',(callback,ms)=>{assert.equal(ms,5000);deadline=callback;return timer;});
+ t.mock.method(globalThis,'clearTimeout',value=>cleared.push(value));
+ const status=statusRouteReadiness();
+ const waiting=assert.rejects(status.wait(),/Status route did not install finishStatus within 5000ms/);
+ assert.equal(typeof deadline,'function','missing dispatch arms a bounded deadline');
+ deadline();await waiting;
+ assert.deepEqual(cleared,[timer],'timeout cleans its timer');
+});
+test('status route readiness shares a one-shot signal and clears successful wait timers',async t=>{
+ const timers=new Set();
+ t.mock.method(globalThis,'setTimeout',callback=>{const timer={callback};timers.add(timer);return timer;});
+ t.mock.method(globalThis,'clearTimeout',timer=>timers.delete(timer));
+ const status=statusRouteReadiness();let ready=false;
+ const first=status.wait().then(()=>{ready=true;}),second=status.wait();
+ await Promise.resolve();assert.equal(ready,false,'waiting must not imply dispatch');assert.equal(timers.size,2);
+ status.ready();await Promise.all([first,second]);assert.equal(timers.size,0,'success clears all waiting deadlines');
+ status.ready();await status.wait();assert.equal(timers.size,0,'readiness remains resolved for later waiters');
+});
+
 // Every API response below is synthetic. No authenticated service is contacted.
-async function recoveryFixture({pending=false,slowMessages=false,longId=false}={}){
+async function recoveryFixture({pending=false,slowMessages=false,longId=false,statusDispatch=null}={}){
  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
  const page=await browser.newPage({viewport:{width:320,height:568},serviceWorkers:'block',reducedMotion:'reduce'});page.setDefaultTimeout(5000);
  const id=longId?'root/'+ 'a'.repeat(240)+'<img>':'session /1';
+ const statusRoute=statusRouteReadiness();
  const state={pending,deleted:false,calls:[],errors:[],finishDelete:null,finishStatus:null,finishMessages:null};page.on('pageerror',e=>state.errors.push(e.message));
  await page.route('**/*',async route=>{
   const req=route.request(),url=new URL(req.url()),p=url.pathname.replace('/hermes/app-api','');
+  // Regression-only gate models dispatch lag without a sleep or a response replay.
+  if(statusDispatch&&p.endsWith('/deletion'))await statusDispatch;
   const json=(body,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
   if(url.pathname.startsWith('/hermes/app-api/')){
    state.calls.push({path:p,query:url.search,method:req.method(),body:req.postData()});
    if(p==='/auth/me')return json({user:{id:'owner',role:'owner',status:'ready'},csrf_token:'synthetic'});
    if(p==='/sessions')return json({deletion_available:!pending,items:state.pending||state.deleted?[]:[{id,title:'Saved chat',run_status:'idle',source:'cli'}],total:state.pending?61:state.deleted?0:1,...(state.pending?{pending_deletions:[{id,status:'unconfirmed'}]}:{})});
    if(req.method()==='DELETE')return new Promise(resolve=>{state.finishDelete=async()=>{state.deleted=true;await json({id,deleted:true});resolve();};});
-   if(p.endsWith('/deletion'))return new Promise(resolve=>{state.finishStatus=async(status=200,body={id,deleted:true})=>{if(status===200&&body.id===id&&body.deleted===true){state.pending=false;state.deleted=true;}if(status===409)state.pending=false;await json(status===200?body:{detail:'Synthetic receipt unavailable or refused'},status);resolve();};});
+   if(p.endsWith('/deletion'))return new Promise(resolve=>{state.finishStatus=async(status=200,body={id,deleted:true})=>{if(status===200&&body.id===id&&body.deleted===true){state.pending=false;state.deleted=true;}if(status===409)state.pending=false;await json(status===200?body:{detail:'Synthetic receipt unavailable or refused'},status);resolve();};statusRoute.ready();});
    if(p.endsWith('/messages')){const body={items:[{role:'assistant',content:'Synthetic exact-target transcript'}]};if(slowMessages)return new Promise(resolve=>{state.finishMessages=async()=>{await json(body);resolve();};});return json(body);}
    return json({items:[]});
   }
   const rel=url.pathname.replace(/^\/hermes\//,'')||'index.html';try{return route.fulfill({status:200,contentType:({html:'text/html',css:'text/css',mjs:'text/javascript',js:'text/javascript',svg:'image/svg+xml'})[rel.split('.').pop()]||'application/octet-stream',body:await readFile(dir+rel)});}catch{return route.fulfill({status:404,body:''});}
  });
  await page.goto('https://session-delete-fixture.invalid/hermes/');await page.getByRole('heading',{name:'Sessions',exact:true}).waitFor();
- return {page,state,id,async close(){await browser.close();},async begin(){await page.getByRole('button',{name:'Saved chat',exact:true}).press('Shift+F10');await page.getByRole('button',{name:'Delete conversation: Saved chat',exact:true}).click();await page.getByRole('button',{name:'Delete conversation',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.session-delete')?.disabled);assert.ok(state.finishDelete);}};
+ return {page,state,id,waitForStatusRoute:statusRoute.wait,async close(){await browser.close();},async begin(){await page.getByRole('button',{name:'Saved chat',exact:true}).press('Shift+F10');await page.getByRole('button',{name:'Delete conversation: Saved chat',exact:true}).click();await page.getByRole('button',{name:'Delete conversation',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.session-delete')?.disabled);assert.ok(state.finishDelete);}};
 }
 for(const mode of ['reopened','slow-messages','fresh-list'])test(`Chromium verified receipt reconciles ${mode} exact identity`,{timeout:20000},async()=>{
  const h=await recoveryFixture({slowMessages:mode==='slow-messages'});const {page,state}=h;try{
@@ -132,24 +166,30 @@ for(const mode of ['reopened','slow-messages','fresh-list'])test(`Chromium verif
   assert.equal(await page.locator('.messages').count(),0);assert.equal(await page.getByRole('button',{name:'Saved chat',exact:true}).count(),0);assert.equal(await page.evaluate(()=>sessionStorage.getItem('hermes:owner:draft:session /1')),null);assert.equal(state.calls.filter(c=>c.method==='DELETE').length,1);assert.deepEqual(state.errors,[]);
  }finally{await h.close();}
 });
-for(const outcome of [200,409,503,'wrong-id'])test(`Chromium pending recovery ${outcome} uses only GET and preserves honest state`,{timeout:20000},async()=>{
- const h=await recoveryFixture({pending:true});const {page,state,id}=h;try{
+for(const delayedDispatch of [false,true])for(const outcome of [200,409,503,'wrong-id'])test(`Chromium pending recovery ${outcome} uses only GET and preserves honest state${delayedDispatch?' with delayed status dispatch':''}`,{timeout:20000},async()=>{
+ let releaseStatusDispatch,dispatchTurn;const statusDispatch=delayedDispatch?new Promise(resolve=>{releaseStatusDispatch=resolve;}):null;
+ const h=await recoveryFixture({pending:true,statusDispatch});const {page,state,id}=h;try{
   await page.evaluate(()=>sessionStorage.setItem('hermes:owner:draft:session /1','keep until verified'));
   await page.getByRole('button',{name:'Filter conversations',exact:true}).click();await page.getByRole('button',{name:'All',exact:true}).click();await page.getByRole('button',{name:'Check status',exact:true}).waitFor();await page.getByRole('button',{name:'Next',exact:true}).click();await page.getByRole('button',{name:'Check status',exact:true}).waitFor();
   assert.ok(state.calls.some(c=>c.path==='/sessions'&&c.query.includes('offset=30')&&c.query.includes('kind=all')));
-  await page.getByRole('button',{name:'Check status',exact:true}).click();await page.getByRole('button',{name:'Checking status…',exact:true}).waitFor();assert.ok(state.finishStatus);
+  await page.getByRole('button',{name:'Check status',exact:true}).click();await page.getByRole('button',{name:'Checking status…',exact:true}).waitFor();
+  if(delayedDispatch){assert.equal(state.finishStatus,null,'visible checking UI precedes fixture dispatch');assert.equal(await page.getByRole('button',{name:'Checking status…',exact:true}).isDisabled(),true);dispatchTurn=setImmediate(releaseStatusDispatch);}
+  await h.waitForStatusRoute();assert.ok(state.finishStatus);
   if(outcome==='wrong-id')await state.finishStatus(200,{id:'neighbor',deleted:true});else await state.finishStatus(outcome);
   if(outcome===200){await page.getByText('Conversation deleted.',{exact:true}).waitFor();assert.equal(await page.locator('.pending-deletion').count(),0);}else if(outcome===409){await page.getByRole('button',{name:'Saved chat',exact:true}).waitFor();assert.match(await page.locator('.notice').textContent(),/not deleted/);}else await page.getByRole('button',{name:'Check status',exact:true}).waitFor();
   assert.equal(await page.evaluate(()=>sessionStorage.getItem('hermes:owner:draft:session /1')),outcome===200?null:'keep until verified');assert.equal(state.calls.filter(c=>c.method==='DELETE').length,0);assert.deepEqual(state.calls.filter(c=>c.path.endsWith('/deletion')).map(c=>[c.path,c.method]),[[`/sessions/${encodeURIComponent(id)}/deletion`,'GET']]);assert.deepEqual(state.errors,[]);
- }finally{await h.close();}
+ }finally{clearImmediate(dispatchTurn);releaseStatusDispatch?.();await h.close();}
 });
-test('Chromium pending recovery card wraps exact long IDs at 320px in both themes',{timeout:20000},async()=>{
- const h=await recoveryFixture({pending:true,longId:true});const {page}=h;try{
+for(const delayedDispatch of [false,true])test(`Chromium pending recovery card wraps exact long IDs at 320px in both themes${delayedDispatch?' with delayed status dispatch':''}`,{timeout:20000},async()=>{
+ let releaseStatusDispatch,dispatchTurn;const statusDispatch=delayedDispatch?new Promise(resolve=>{releaseStatusDispatch=resolve;}):null;
+ const h=await recoveryFixture({pending:true,longId:true,statusDispatch});const {page}=h;try{
   for(const theme of ['light','dark']){await page.evaluate(value=>document.documentElement.dataset.theme=value,theme);const check=page.getByRole('button',{name:'Check status',exact:true});await check.waitFor();const b=await check.boundingBox();assert.ok(b.width>=44&&b.height>=44);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'pending exact ID never causes horizontal overflow');assert.equal(await page.locator('.pending-deletion img').count(),0);assert.equal(await page.locator('.pending-deletion-id').evaluate(el=>el.scrollWidth<=el.clientWidth),true,'exact ID wraps inside its card rather than being clipped by the shell');}
   await page.getByRole('button',{name:'Check status',exact:true}).click();
-  await page.getByRole('button',{name:'Checking status…',exact:true}).waitFor();assert.ok(h.state.finishStatus);await h.state.finishStatus(503);
+  await page.getByRole('button',{name:'Checking status…',exact:true}).waitFor();
+  if(delayedDispatch){assert.equal(h.state.finishStatus,null,'visible checking UI precedes fixture dispatch');assert.equal(await page.getByRole('button',{name:'Checking status…',exact:true}).isDisabled(),true);dispatchTurn=setImmediate(releaseStatusDispatch);}
+  await h.waitForStatusRoute();assert.ok(h.state.finishStatus);await h.state.finishStatus(503);
   await page.getByRole('button',{name:'Check status',exact:true}).waitFor();
   await page.getByRole('button',{name:'Check status',exact:true}).scrollIntoViewIfNeeded();
   await page.screenshot({path:fileURLToPath(artifactURL('session-delete-ui-recovery.png'))});
- }finally{await h.close();}
+ }finally{clearImmediate(dispatchTurn);releaseStatusDispatch?.();await h.close();}
 });

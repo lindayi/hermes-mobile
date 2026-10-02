@@ -22,14 +22,28 @@ FRONTEND_ROUTINE = [
     'frontend/icons/icon-192.png', 'frontend/icons/icon-512.png',
 ]
 
-ROUTINE_PATHS = FRONTEND_ROUTINE + [
+# Positively audited layout/gesture docs, not names presumed safe by missing keywords.
+DOCS_ROUTINE = [
+    'docs/keyboard-viewport-spec.md', 'docs/sticky-activity-spacing-spec.md',
+    'docs/touch-fold-contract.md',
+]
+
+ROUTINE_PATHS = FRONTEND_ROUTINE + DOCS_ROUTINE + [
     'tests/test_activity_event_times.py', 'tests/browser/chat-header.spec.mjs',
     'tests/browser/activity-card.test.mjs', 'tests/browser/latest_tools_fixture.py',
     'tests/fixtures/legacy-session-stage-scope.json',
-    'docs/chat-header-spec.md', 'docs/ux.md', 'docs/activity-inbox-spec.md',
 ]
 
 SENSITIVE_PATHS = [
+    # PR18: these former routine fixtures contain auth/CSRF/storage/ownership contracts.
+    'docs/chat-header-spec.md', 'docs/ux.md', 'docs/activity-inbox-spec.md',
+    'docs/session-telemetry-contract.md', 'docs/chat-snapshot-contract.md',
+    'docs/model-controls-contract.md', 'docs/guidance-history-contract.md',
+    'docs/inbox-cleanup-contract.md', 'docs/session-delete-contract.md',
+    'docs/steering-bridge-contract.md', 'docs/public-commentary-contract.md',
+    'docs/technical-ui-spec.md', 'docs/tool-summary-presentation.md', 'docs/test-cases.md',
+    # New operational names and innocuous names fail closed, even with benign contents.
+    'docs/endpoint-map.md', 'docs/egress-routing.md', 'docs/quickstart.md',
     'backend/app.py', 'hermes-plugin/mobile_delivery/__init__.py', 'patches/native-compat.patch',
     'deploy/pull_delivery.py', 'deploy/release_policy.py', 'scripts/test.py', 'spikes/probe_admission.py',
     '.github/workflows/production.yml', '.github/host-tests.json', 'AGENTS.md', 'README.md',
@@ -89,7 +103,7 @@ def change(status, path, previous=None, old='100644', new='100644'):
 def test_routine_only_when_every_change_is_routine():
     m = module()
     changes = [change('M', 'frontend/styles.css'), change('A', 'tests/test_new.py', old='000000'),
-               change('D', 'docs/ux.md', new='000000')]
+               change('D', 'docs/touch-fold-contract.md', new='000000')]
     result = m.classify(changes)
     assert result.risk == m.ROUTINE and result.reasons == ()
 
@@ -187,15 +201,23 @@ def test_current_docs_and_frontend_classification_is_conservative():
                  'guarded-delivery-spec.md', 'verified-release-artifacts.md', 'auth-endpoints.md',
                  'implementation-contract.md', 'family-jobs.md', 'family-runtime.md', 'test-hygiene.md'):
         assert name not in docs
-    assert 'ux.md' in docs
+    # Supersedes the keyword heuristic: ux.md itself specifies WebAuthn/CSRF,
+    # secret storage and private-cache boundaries, not just cosmetic UX.
+    assert 'ux.md' not in docs
+    assert docs == {path.removeprefix('docs/') for path in DOCS_ROUTINE}
     for path in docs_root.rglob('*.md'):
         relative = path.relative_to(docs_root.parent).as_posix()
         if path.parent != docs_root:
             assert not m.path_is_routine(relative)
-        if any(word in path.stem for word in m.DOC_SENSITIVE):
+        if relative not in DOCS_ROUTINE:
             assert not m.path_is_routine(relative)
         else:
             assert m.path_is_routine(relative)
     assert m.path_is_routine('docs/development-workflow.md') is False
     assert m.path_is_routine('docs/operations.md') is False
     assert m.path_is_routine('docs/operational.md') is False
+
+
+def test_docs_routine_set_is_the_exact_audited_list():
+    assert module().DOCS_ROUTINE == frozenset(DOCS_ROUTINE)
+    assert not hasattr(module(), 'DOC_SENSITIVE')  # No ever-growing keyword denylist.
