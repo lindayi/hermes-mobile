@@ -1,7 +1,9 @@
 import json
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 from urllib.parse import parse_qs, urlparse
@@ -10,9 +12,11 @@ import pytest
 
 from deploy.cloud_coordinator import (
     ApiError,
-    Coordinator,
+    Coordinator as CloudCoordinator,
     CoordinatorError,
     GhApi,
+    MAX_HANDOFF_POLLS,
+    REPAIR_LIMIT,
     StateStore,
     classify_sensitive_paths,
     collect_review_threads,
@@ -22,6 +26,53 @@ from deploy.cloud_coordinator import (
     required_checks_pass,
     repair_request,
 )
+
+
+
+@pytest.mark.parametrize("hazard", [None, "head", "main", "repo"])
+def test_accepted_receipt_handoff_uses_fresh_scanned_main(tmp_path, monkeypatch, hazard):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(a for a in store.actions().values() if a["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.review_state = "PENDING"
+    coordinator.run(apply=True)
+    assert store.action(fix["key"])["receipt_base"] == BASE
+    api.advance_main = True
+    api.pull["base"]["sha"] = "d" * 40
+    api.pull["mergeable_state"] = "behind"
+    api.review_state = "COMMENTED"
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    from copy import deepcopy
+    original_get = api.get
+    pull_reads = 0
+    def get(route):
+        nonlocal pull_reads
+        value = original_get(route)
+        if route.endswith("/pulls/16"):
+            pull_reads += 1
+            if pull_reads > 1:
+                value = deepcopy(value)
+                if hazard == "head":
+                    value["head"]["sha"] = "c" * 40
+                elif hazard == "main":
+                    value["base"]["sha"] = "e" * 40
+                elif hazard == "repo":
+                    value["head"]["repo"]["id"] = 9
+        return value
+    monkeypatch.setattr(api, "get", get)
+    graphql = list(api.graphql_writes)
+    coordinator.run(apply=True)
+    action = store.action(fix["key"])
+    if hazard is None:
+        assert action["handoff_state"] == "done"
+        assert api.fix_attempts == 2
+        assert action["receipt_base"] == BASE
+    else:
+        assert api.fix_attempts == 1
+        assert api.graphql_writes == graphql
 
 
 def test_auto_merge_requires_strict_current_base_and_conversation_resolution(tmp_path):
@@ -35,14 +86,22 @@ def test_auto_merge_requires_strict_current_base_and_conversation_resolution(tmp
 
 
 OWNER = 5164171
+APP_OWNER_ID = "synthetic-mobile-owner"
 COPILOT_REVIEWER = 175728472
 HEAD = "a" * 40
 BASE = "b" * 40
 
 
+def Coordinator(api, store, **kwargs):
+    kwargs.setdefault("owner_user_id", APP_OWNER_ID)
+    return CloudCoordinator(api, store, **kwargs)
+
+
 def valid_pr(**changes):
     pr = {
         "number": 16,
+        "id": 160000016,
+        "node_id": "PR_node_16",
         "state": "open",
         "merged": False,
         "draft": False,
@@ -55,12 +114,26 @@ def valid_pr(**changes):
     return pr
 
 
+def enrolled_record(**changes):
+    enrollment = {
+        "issue": 16, "comment": 123, "head": HEAD, "base": BASE,
+        "pull_id": 160000016, "pull_node_id": "PR_node_16",
+        "repository_id": 1399942965,
+    }
+    enrollment.update(changes)
+    return enrollment
+
+
 def test_enrollment_requires_an_authenticated_owner_command_and_main_pr():
     issue = {"number": 16, "pull_request": {"url": "pull/16"}}
     pr = valid_pr()
     assert enrollment_from_comment(issue, pr, {
         "id": 123, "user": {"id": OWNER}, "body": "/hermes enroll",
-    }) == {"issue": 16, "comment": 123, "head": HEAD, "base": BASE}
+    }) == {
+        "issue": 16, "comment": 123, "head": HEAD, "base": BASE,
+        "pull_id": 160000016, "pull_node_id": "PR_node_16",
+        "repository_id": 1399942965,
+    }
     for author in ({"id": 1}, {"id": str(OWNER)}, None):
         assert enrollment_from_comment(issue, pr, {
             "id": 123, "user": author, "body": "/hermes enroll",
@@ -435,7 +508,7 @@ def test_state_survives_restart_and_does_not_replay_or_retry_ambiguous_writes(tm
 
 def test_three_repair_attempts_are_the_hard_limit(tmp_path):
     store = StateStore(tmp_path / "state.json")
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     for attempt in range(3):
         assert store.claim_action(f"fix:{attempt}", {
             "kind": "fix", "issue": 16, "status": "sending",
@@ -588,6 +661,7 @@ class FakeApi:
         self.fail = fail
         self.sensitive = sensitive
         self.source_failure = source_failure
+        self.pending_required = False
         self.unresolved = unresolved
         self.fail_fix = fail_fix
         self.uncertain_merge = uncertain_merge
@@ -622,10 +696,15 @@ class FakeApi:
         self.writes = []
         self.fix_attempts = 0
         self.tasks = {}
+        self.requested_reviewers = []
+        self.review_state = "APPROVED"
+        self.review_submitted_at = "2026-10-01T12:00:00Z"
         self.graphql_writes = []
         self.pull = valid_pr() | {
             "node_id": "PR_node_16", "auto_merge": None,
             "state": pull_state, "merged": merged,
+            "merge_commit_sha": "e" * 40,
+            "merged_at": "2026-10-01T12:00:00Z",
             "head": {"sha": head_sha, "ref": "topic", "repo": {"id": 1399942965}},
         }
         self.issue = {"number": 16, "pull_request": {"url": "pull/16"} if issue_is_pull else None}
@@ -662,6 +741,8 @@ class FakeApi:
                 return self.pull | {"head": {"sha": "c" * 40, "ref": "topic",
                                              "repo": {"id": 1399942965}}}
             return self.pull
+        if route == "repos/lindayi/hermes-mobile/pulls/16/requested_reviewers":
+            return {"users": list(self.requested_reviewers), "teams": []}
         if route.endswith("/branches/main/protection/required_status_checks"):
             return {
                 "contexts": ["integration-tests", "cloud-review"],
@@ -704,11 +785,16 @@ class FakeApi:
             return [{"filename": "frontend/styles.css"}]
         if route.endswith("/pulls/16/reviews?per_page=100"):
             return [{
-                "state": "APPROVED", "commit_id": self.head_sha,
-                "submitted_at": "2026-10-01T12:00:00Z",
+                "state": self.review_state, "commit_id": self.head_sha,
+                "submitted_at": self.review_submitted_at,
                 "user": {"id": COPILOT_REVIEWER},
             }]
         if f"/commits/{self.head_sha}/check-runs?" in route:
+            if self.pending_required:
+                return [{
+                    "name": "integration-tests", "status": "in_progress",
+                    "conclusion": None,
+                }]
             return [{
                 "name": "integration-tests", "status": "completed",
                 "conclusion": "success",
@@ -757,13 +843,19 @@ class FakeApi:
 
     def write(self, route, body):
         self.writes.append((route, body))
+        if route == "repos/lindayi/hermes-mobile/pulls/16/requested_reviewers":
+            self.requested_reviewers = [{"id": COPILOT_REVIEWER}]
+            return self.pull | {"requested_reviewers": self.requested_reviewers}
         if route == "agents/repos/lindayi/hermes-mobile/tasks":
             self.fix_attempts += 1
             if self.fail_fix:
                 raise ApiError("response lost", status=503)
             task_id = f"task-{self.fix_attempts}"
-            task = {"id": task_id, "state": "queued", "created_at": "2026-10-01T12:00:00Z",
-                    "creator": {"id": OWNER}, "repository": {"id": 1399942965},
+            task = {"id": task_id, "state": "queued",
+                    "created_at": "2026-10-01T12:00:00Z",
+                    "updated_at": "2026-10-01T12:00:00Z",
+                    "creator": {"id": OWNER}, "owner": {"id": OWNER},
+                    "repository": {"id": 1399942965},
                     "artifacts": [{"provider": "github", "type": "branch",
                                    "data": {"head_ref": "topic", "base_ref": "main"}}]}
             self.tasks[task_id] = task
@@ -775,8 +867,60 @@ class FakeApi:
             response.update(user={"id": OWNER}, body=body["body"])
         return response
 
+    def complete_task(self, task_id, action, *, result="ready", head_sha=None):
+        task = self.tasks[task_id]
+        session_id = f"session-{task_id}"
+        created = "2026-10-01T12:00:00Z"
+        session_created = "2026-10-01T12:01:00Z"
+        comment_created = "2026-10-01T12:05:00Z"
+        completed = "2026-10-01T12:05:30Z"
+        task.update(
+            state="completed",
+            updated_at=completed,
+            artifacts=task["artifacts"] + [{
+                "provider": "github", "type": "pull",
+                "data": {"id": action["pull_id"], "global_id": action["pull_node_id"]},
+            }],
+            sessions=[{
+                "id": session_id, "task_id": task_id, "state": "completed",
+                "user": {"id": OWNER}, "owner": {"id": OWNER},
+                "repository": {"id": 1399942965},
+                "created_at": session_created, "completed_at": completed,
+                "prompt": action["body"], "head_ref": action["head_ref"],
+                "base_ref": "main",
+            }],
+        )
+        current_head = head_sha or self.head_sha
+        nonce = action["dispatch_nonce"]
+        body = (
+            "Hermes-Task-Receipt: v1\n"
+            f"nonce={nonce}\n"
+            f"task={task_id}\n"
+            f"session={session_id}\n"
+            "pr=16\n"
+            f"start_head={action['head']}\n"
+            f"head={current_head}\n"
+            f"base={BASE}\n"
+            f"result={result}"
+        )
+        self.comments.append({
+            "id": 9000 + self.fix_attempts,
+            "user": {"id": 198982749},
+            "body": body,
+            "created_at": comment_created,
+            "updated_at": comment_created,
+        })
+
     def graphql_write(self, query, variables):
         self.graphql_writes.append((query, variables))
+        if "markPullRequestReadyForReview" in query:
+            self.pull["draft"] = False
+            return {"data": {"markPullRequestReadyForReview": {
+                "clientMutationId": variables["clientMutationId"],
+                "pullRequest": {
+                    "id": "PR_node_16", "isDraft": False, "headRefOid": self.head_sha,
+                },
+            }}}
         self.pull["auto_merge"] = {"enabledAt": "2026-10-01T12:02:00Z"}
         if self.uncertain_merge:
             raise ApiError("response lost", status=503)
@@ -836,7 +980,9 @@ def test_final_merge_get_rechecks_pull_eligibility_and_identity(tmp_path, change
     store = StateStore(tmp_path / "state.json")
     action = {"kind": "auto-merge", "issue": 16, "head": HEAD, "main_sha": BASE,
               "key": f"auto-merge:16:{HEAD}:{BASE}"}
-    result = Coordinator(api, store)._enable_auto_merge(action, {"enrollment": {}})
+    result = Coordinator(api, store)._enable_auto_merge(
+        action, {"enrollment": enrolled_record()},
+    )
     assert api.pull_reads == 3  # Race occurs only after the complete fresh plan.
     assert not api.writes and not api.graphql_writes
     assert not result["auto_merge_eligible"] and result["merge_action"] is None
@@ -932,7 +1078,7 @@ def test_owner_can_authorize_a_new_current_head_after_enrollment(tmp_path):
         sensitive=True, authorize=True, authorize_sha=new_head, head_sha=new_head,
     )
     store = StateStore(tmp_path / "state.json")
-    store.enroll({"issue": 16, "comment": 122, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record(comment=122))
     store.record_event("123")
     Coordinator(api, store).run(apply=True)
     enrollment = store.snapshot()["enrollments"]["16"]
@@ -944,7 +1090,7 @@ def test_owner_can_authorize_a_new_current_head_after_enrollment(tmp_path):
 def test_terminal_enrollment_requires_fresh_owner_command_after_reopen(tmp_path, merged):
     api = FakeApi()
     store = StateStore(tmp_path / "state.json")
-    coordinator = Coordinator(api, store, clock=lambda: 1790856540)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
     coordinator.run(apply=True)
     api.pull["state"] = "closed"
     api.pull["merged"] = merged
@@ -961,6 +1107,384 @@ def test_terminal_enrollment_requires_fresh_owner_command_after_reopen(tmp_path,
     coordinator.run(apply=True)
     assert store.snapshot()["enrollments"]["16"]["active"] is True
     assert store.snapshot()["enrollments"]["16"]["comment"] == 126
+
+
+def test_terminal_lifecycle_outcome_is_exported_before_enrollment_retirement(tmp_path):
+    api = FakeApi()
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+
+    coordinator.run(apply=True)
+    assert not (tmp_path / "workflow-events.json").exists()
+    api.pull.update(
+        state="closed", merged=True, closed_at="2026-10-01T12:10:00Z",
+        merged_at="2026-10-01T12:10:00Z", merge_commit_sha="e" * 40,
+    )
+    coordinator.run(apply=True)
+
+    exported = json.loads((tmp_path / "workflow-events.json").read_text())
+    assert exported["repository_id"] == 1399942965
+    assert exported["repository"] == "lindayi/hermes-mobile"
+    assert exported["owner_user_id"] == APP_OWNER_ID
+    assert len(exported["events"]) == 1
+    event = exported["events"][0]
+    assert event == {
+        "event_id": event["event_id"],
+        "outcome": "merged",
+        "reason": "merged",
+        "issue_number": 16,
+        "pr_number": 16,
+        "head_sha": HEAD,
+        "merge_sha": "e" * 40,
+        "decision": None,
+        "occurred_at": "2026-10-01T12:10:00Z",
+    }
+    assert store.snapshot()["lifecycle_events"] == [event]
+    assert store.snapshot()["enrollments"]["16"]["active"] is False
+    info = (tmp_path / "workflow-events.json").stat()
+    assert info.st_mode & 0o777 == 0o600 and info.st_nlink == 1
+    coordinator.run(apply=True)
+    assert json.loads((tmp_path / "workflow-events.json").read_text())["events"] == [event]
+
+
+def test_coordinator_exports_to_configured_app_owner_not_github_owner(tmp_path):
+    from deploy.workflow_lifecycle_sources import LifecycleSourcePaths
+    from deploy.workflow_notifications import Paths as NotificationPaths
+
+    root = tmp_path / "app"
+    state_dir = root / "state"
+    state_dir.mkdir(mode=0o700, parents=True)
+    root.chmod(0o700)
+    config = root / "config.json"
+    config.write_text(json.dumps({"state_dir": str(state_dir)}))
+    config.chmod(0o600)
+    with sqlite3.connect(state_dir / "auth.sqlite") as db:
+        db.execute("CREATE TABLE users(id TEXT,role TEXT,status TEXT,profile TEXT)")
+        db.execute(
+            "INSERT INTO users VALUES(?,?,?,?)",
+            (APP_OWNER_ID, "owner", "ready", "default"),
+        )
+    (state_dir / "auth.sqlite").chmod(0o600)
+    source_paths = LifecycleSourcePaths(
+        notifications=NotificationPaths(
+            config=config,
+            delivery_state=root / "delivery" / "state.json",
+            controller_state=root / "controller",
+        ),
+        starter_state=root / "starter" / "state.json",
+    )
+    api = FakeApi(strict_protection=False)
+    store = StateStore(tmp_path / "coordinator" / "state.json")
+
+    CloudCoordinator(
+        api, store, clock=lambda: 1790856540,
+        lifecycle_source_paths=source_paths,
+    ).run(apply=True)
+
+    exported = json.loads((state_dir / "workflow-events.json").read_text())
+    assert exported["owner_user_id"] == APP_OWNER_ID
+    assert exported["owner_user_id"] != str(OWNER)
+    assert not (tmp_path / "coordinator" / "workflow-events.json").exists()
+
+
+def test_terminal_event_survives_crash_before_export_write(tmp_path, monkeypatch):
+    api = FakeApi()
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    api.pull.update(
+        state="closed", merged=True, closed_at="2026-10-01T12:10:00Z",
+        merged_at="2026-10-01T12:10:00Z", merge_commit_sha="e" * 40,
+    )
+
+    def crash_before_export(**_kwargs):
+        raise SystemExit("simulated export crash")
+
+    monkeypatch.setattr(store, "write_lifecycle_export", crash_before_export)
+    with pytest.raises(SystemExit, match="simulated export crash"):
+        coordinator.run(apply=True)
+    assert store.snapshot()["enrollments"]["16"]["active"] is False
+    assert len(store.snapshot()["lifecycle_events"]) == 1
+    assert not (tmp_path / "workflow-events.json").exists()
+
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert len(json.loads((tmp_path / "workflow-events.json").read_text())["events"]) == 1
+
+
+def test_terminal_historical_baseline_is_not_exported(tmp_path):
+    api = FakeApi(pull_state="closed", merged=True)
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+
+    Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    assert store.snapshot()["enrollments"]["16"]["active"] is False
+    assert store.snapshot()["lifecycle_events"] == []
+    assert not (tmp_path / "workflow-events.json").exists()
+
+
+def test_terminal_transition_after_enrollment_command_is_not_lost(tmp_path):
+    class CloseAfterEnrollment(FakeApi):
+        def get(self, route):
+            if route == "repos/lindayi/hermes-mobile/pulls/16" and self.pull_reads == 1:
+                self.pull_reads += 1
+                self.pull.update(
+                    state="closed", merged=False,
+                    closed_at="2026-10-01T12:10:00Z",
+                )
+                return self.pull
+            return super().get(route)
+
+    api = CloseAfterEnrollment()
+    store = StateStore(tmp_path / "state.json")
+
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+
+    event = json.loads((tmp_path / "workflow-events.json").read_text())["events"][0]
+    assert event["reason"] == "closed_without_merge"
+    assert store.snapshot()["enrollments"]["16"]["active"] is False
+
+
+def test_policy_incident_event_is_deduplicated_across_head_updates(tmp_path):
+    api = FakeApi()
+    api.strict_protection = False
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856540)
+    coordinator.run(apply=True)
+    first_events = store.snapshot()["lifecycle_events"]
+    assert len(first_events) == 1
+    first_id = first_events[0]["event_id"]
+
+    api.head_sha = "c" * 40
+    api.pull["head"]["sha"] = api.head_sha
+    coordinator.run(apply=True)
+
+    assert len(store.snapshot()["lifecycle_events"]) == 1
+    assert store.snapshot()["lifecycle_events"][0]["event_id"] == first_id
+
+
+@pytest.mark.parametrize("reason", ["sensitive_approval", "conflict_incompatible"])
+def test_repeated_incident_keeps_its_original_timestamp(tmp_path, reason):
+    from deploy.cloud_coordinator import _lifecycle_event
+
+    store = StateStore(tmp_path / "state.json")
+    snapshot = {
+        "issue": 16, "head": HEAD,
+        "enrollment": {"comment": 123},
+    }
+    first = _lifecycle_event(
+        snapshot, reason, occurred_at="2026-10-01T12:00:00Z", incident="same",
+        decision="authorize_sensitive_action" if reason == "sensitive_approval" else None,
+    )
+    repeated = _lifecycle_event(
+        snapshot, reason, occurred_at="2026-10-01T12:01:00Z", incident="same",
+        decision="authorize_sensitive_action" if reason == "sensitive_approval" else None,
+    )
+
+    store.record_lifecycle(first, now=1790856540)
+    store.record_lifecycle(repeated, now=1790856600)
+    assert store.snapshot()["lifecycle_events"] == [first]
+    assert store.snapshot()["lifecycle_events"][0]["occurred_at"] == "2026-10-01T12:00:00Z"
+    unrelated = _lifecycle_event(
+        snapshot, "execution_uncertain", occurred_at="2026-10-01T12:02:00Z",
+        incident="fresh",
+    )
+    store.record_lifecycle(unrelated, now=1790856720)
+    assert store.snapshot()["lifecycle_events"] == [first, unrelated]
+
+
+@pytest.mark.parametrize("result", ["conflict_incompatible", "policy_broken"])
+def test_new_head_receipt_blocker_vetoes_that_result_head(tmp_path, result):
+    api = FakeApi(unresolved=True)
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    action = next(item for item in store.actions().values() if item["kind"] == "fix")
+    result_head = "c" * 40
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.complete_task(action["task_id"], action, result=result, head_sha=result_head)
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    blocker = next(
+        event for event in store.snapshot()["lifecycle_events"]
+        if event["reason"] == result
+    )
+    blocked_action = next(
+        item for item in store.actions().values()
+        if item.get("blocker") == result
+    )
+    assert blocker["head_sha"] == result_head
+    assert blocked_action["head"] == HEAD
+    assert blocked_action["receipt_head"] == result_head
+    assert summary["auto_merge_eligible"] is False
+    assert not any("enablePullRequestAutoMerge" in query for query, _ in api.graphql_writes)
+
+
+def test_completed_comment_review_on_new_head_releases_handoff_for_repair(tmp_path):
+    api = FakeApi(unresolved=True)
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    action = next(item for item in store.actions().values() if item["kind"] == "fix")
+    result_head = "c" * 40
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.review_state = "COMMENTED"
+    api.complete_task(action["task_id"], action, head_sha=result_head)
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+
+    coordinator.run(apply=True)
+
+    assert api.fix_attempts == 2
+    assert any(item.get("attempt") == 2 for item in store.actions().values())
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+
+
+def test_approved_review_on_exact_result_head_releases_handoff_for_repair(tmp_path):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    initial = coordinator.run(apply=True)
+    assert initial["pull_requests"][0]["repair_requested"], initial
+    action = next(item for item in store.actions().values() if item["kind"] == "fix")
+    result_head = "c" * 40
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.complete_task(action["task_id"], action, head_sha=result_head)
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+
+    coordinator.run(apply=True)
+
+    assert api.fix_attempts == 2
+    assert store.action(action["key"]) is None
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert any(item.get("attempt") == 2 for item in store.actions().values())
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+
+
+def test_running_last_allowed_task_is_not_reported_as_exhausted(tmp_path):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    for attempt in range(2):
+        coordinator.run(apply=True)
+        action = next(
+            item for item in store.actions().values()
+            if item["kind"] == "fix" and item.get("status") == "sent"
+        )
+        api.complete_task(action["task_id"], action)
+        api.review_submitted_at = "2026-10-01T12:06:00Z"
+    coordinator.run(apply=True)
+    assert api.fix_attempts == 3
+
+    result = coordinator.run(apply=True)
+
+    assert result["pull_requests"][0]["repair_requested"] is False
+    assert "agent" in result["pull_requests"][0]["reasons"]
+    assert "budget" not in result["pull_requests"][0]["reasons"]
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+
+
+@pytest.mark.parametrize("draft,busy", [(True, False), (False, True)])
+def test_neutral_budget_exhaustion_requires_scoped_nondraft_idle_work(
+        tmp_path, draft, busy):
+    api = FakeApi(unresolved=True, active_agent=busy)
+    api.pull.update(mergeable=True, mergeable_state="behind", draft=draft)
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record(attempts=REPAIR_LIMIT))
+    store._mutate(lambda data: data["enrollments"]["16"].update(
+        attempts=REPAIR_LIMIT,
+    ))
+
+    result = Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+
+    plan = result["pull_requests"][0]
+    assert "budget" not in plan["reasons"]
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+    assert api.fix_attempts == 0
+
+
+@pytest.mark.parametrize("change", [
+    {"number": 17},
+    {"id": 160000017},
+    {"node_id": "PR_node_17"},
+    {"head": {"sha": HEAD, "ref": "topic", "repo": {"id": 1}}},
+    {"base": {"sha": BASE, "ref": "main", "repo": {"id": 1}}},
+])
+def test_terminal_pull_snapshot_must_match_enrolled_identity(tmp_path, change):
+    api = FakeApi()
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    api.pull.update(state="closed", merged=True, merge_commit_sha="e" * 40)
+    api.pull.update(change)
+
+    with pytest.raises(CoordinatorError, match="Pull request identity"):
+        coordinator.run(apply=True)
+
+
+@pytest.mark.parametrize("link_type", ["symlink", "hardlink"])
+def test_lifecycle_export_refuses_aliased_destination(tmp_path, link_type):
+    store = StateStore(tmp_path / "state.json")
+    event = {
+        "event_id": "pr:16:execution_uncertain:abc123",
+        "outcome": "execution_uncertain",
+        "reason": "execution_uncertain",
+        "issue_number": 16,
+        "pr_number": 16,
+        "head_sha": HEAD,
+        "merge_sha": None,
+        "decision": None,
+        "occurred_at": "2026-10-01T12:00:00Z",
+    }
+    store.record_lifecycle(event, now=1790856540)
+    destination = tmp_path / "workflow-events.json"
+    target = tmp_path / "target.json"
+    target.write_text("leave this file unchanged")
+    if link_type == "symlink":
+        destination.symlink_to(target)
+    else:
+        os.link(target, destination)
+
+    with pytest.raises(CoordinatorError):
+        store.write_lifecycle_export(
+            now=1790856540, owner_user_id=APP_OWNER_ID,
+        )
+
+    assert target.read_text() == "leave this file unchanged"
+    if link_type == "symlink":
+        assert destination.is_symlink()
+    else:
+        assert destination.stat().st_nlink == 2
+
+
+def test_closed_without_merge_exports_fixed_blocker_without_merge_evidence(tmp_path):
+    api = FakeApi()
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    api.pull.update(
+        state="closed", merged=False, closed_at="2026-10-01T12:10:00Z",
+    )
+
+    coordinator.run(apply=True)
+
+    event = json.loads((tmp_path / "workflow-events.json").read_text())["events"][0]
+    assert event["outcome"] == "closed"
+    assert event["reason"] == "closed_without_merge"
+    assert event["head_sha"] == HEAD
+    assert event["merge_sha"] is None and event["decision"] is None
 
 
 def test_status_transitions_can_repeat_on_same_head(tmp_path):
@@ -985,7 +1509,7 @@ def test_uncertain_status_is_bound_to_generation_and_head(tmp_path):
     api.pull["mergeable"] = False
     store = StateStore(tmp_path / "state.json")
     old_key = f"status:16:{HEAD}:1"
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     store.claim_action(old_key, {"kind": "status", "issue": 16, "head": HEAD,
                                  "generation": 1, "state": "pending", "key": old_key})
     coordinator = Coordinator(api, store)
@@ -1003,7 +1527,7 @@ def test_uncertain_status_reconciles_only_new_owned_remote_generation(tmp_path):
     api.pull["mergeable"] = False
     api.status_state = "pending"
     store = StateStore(tmp_path / "state.json")
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     key = f"status:16:{HEAD}:1"
     store.claim_action(key, {"kind": "status", "issue": 16, "head": HEAD,
                              "generation": 1, "state": "pending", "key": key,
@@ -1169,6 +1693,8 @@ def test_cli_help_does_not_create_bytecode_in_fresh_checkout(tmp_path):
     (tmp_path / "deploy").mkdir()
     (tmp_path / "scripts").mkdir()
     shutil.copy2(root / "deploy/cloud_coordinator.py", tmp_path / "deploy/cloud_coordinator.py")
+    for module in ("workflow_lifecycle.py", "workflow_events.py", "task_receipts.py"):
+        shutil.copy2(root / "deploy" / module, tmp_path / "deploy" / module)
     shutil.copy2(root / "scripts/cloud_coordinator.py", tmp_path / "scripts/cloud_coordinator.py")
     env = dict(__import__("os").environ)
     env.pop("PYTHONDONTWRITEBYTECODE", None)
@@ -1301,7 +1827,7 @@ def test_normalized_source_identity_survives_snapshot_and_final_dispatch(tmp_pat
     api = FakeApi(workflow_runs=[source_run(conclusion=conclusion)])
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store)
-    snapshot = coordinator._snapshot_pull(16, {"attempts": 0}, BASE)
+    snapshot = coordinator._snapshot_pull(16, enrolled_record(attempts=0), BASE)
     expected = {
         "check": "Source checks", "workflow_id": 372155405,
         "repository_id": 1399942965, "head_sha": HEAD,
@@ -1318,7 +1844,8 @@ def test_normalized_source_identity_survives_snapshot_and_final_dispatch(tmp_pat
     assert api.fix_attempts == 1
     assert api.workflow_reads >= 3  # snapshot, plan, final dispatch
     prompt = next(body["prompt"] for route, body in api.writes if route.endswith("/tasks"))
-    assert prompt == planned["body"]
+    assert prompt.startswith(planned["body"] + "\n\n")
+    assert "Hermes-Task-Receipt: v1" in prompt
     evidence = json.loads(prompt.split("Untrusted evidence: `", 1)[1].split("`\n\n<!--", 1)[0])
     assert evidence == {"review_findings": [], "failed_source_checks": [expected]}
     assert result["pull_requests"][0]["repair_requested"]
@@ -1369,13 +1896,348 @@ def test_cloud_review_success_status_is_not_published_from_stale_threads(tmp_pat
     assert not any(route.endswith("/statuses/" + HEAD) for route, _ in api.writes)
 
 
-def test_conflicts_are_not_sent_to_a_fixer_for_neutral_reconciliation(tmp_path):
+INVALID_MERGEABLE_STATES = [
+    None, True, False, 0, 1, 0.0, 1.0, "", "unknown", "CLEAN", "future-state",
+    [], {}, ["clean"], {"state": "clean"},
+]
+
+
+@pytest.mark.parametrize("state", INVALID_MERGEABLE_STATES)
+@pytest.mark.parametrize("mergeable", [True, False])
+@pytest.mark.parametrize("repair_evidence", [False, True])
+def test_invalid_mergeable_state_defers_planning_and_apply(
+        tmp_path, state, mergeable, repair_evidence):
+    api = FakeApi(unresolved=repair_evidence)
+    api.pull.update(mergeable=mergeable, mergeable_state=state)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+
+    for apply in (False, True):
+        summary = coordinator.run(apply=apply)["pull_requests"][0]
+        assert "mergeability-unknown" in summary["reasons"]
+        assert not summary["repair_requested"]
+        assert not summary["auto_merge_eligible"]
+        assert not summary["auto_merge_requested"]
+        assert summary["outcomes"] == 0
+    assert api.fix_attempts == 0
+    assert not api.graphql_writes
+    assert not any(route.endswith(("/tasks", "/comments")) for route, _ in api.writes)
+    persisted = store.snapshot()
+    assert persisted["enrollments"]["16"]["attempts"] == 0
+    assert not any(a["kind"] in {"fix", "auto-merge"}
+                   for a in persisted["actions"].values())
+    assert not persisted["lifecycle_events"]
+
+
+@pytest.mark.parametrize("state", INVALID_MERGEABLE_STATES)
+@pytest.mark.parametrize("fence_read", [3, 4], ids=["dispatch", "final-dispatch"])
+def test_invalid_mergeable_state_at_task_fences_never_claims(tmp_path, state, fence_read):
+    class StateRace(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/pulls/16") and self.pull_reads >= fence_read:
+                return value | {"mergeable_state": state}
+            return value
+
+    api = StateRace(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    summary = Coordinator(api, store).run(apply=True)["pull_requests"][0]
+
+    assert api.pull_reads >= fence_read
+    assert "mergeability-unknown" in summary["reasons"]
+    assert not summary["repair_requested"] and not summary["auto_merge_requested"]
+    assert api.fix_attempts == 0 and not api.graphql_writes
+    persisted = store.snapshot()
+    assert persisted["enrollments"]["16"]["attempts"] == 0
+    assert not any(a["kind"] == "fix" for a in persisted["actions"].values())
+    assert not persisted["lifecycle_events"]
+
+
+@pytest.mark.parametrize("state", INVALID_MERGEABLE_STATES)
+@pytest.mark.parametrize("fence_read", [2, 3], ids=["fresh-plan", "final-merge"])
+def test_invalid_mergeable_state_at_merge_fences_never_mutates(tmp_path, state, fence_read):
+    class StateRace(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/pulls/16") and self.pull_reads >= fence_read:
+                return value | {"mergeable_state": state}
+            return value
+
+    api = StateRace()
+    store = StateStore(tmp_path / "state.json")
+    action = {"kind": "auto-merge", "issue": 16, "head": HEAD, "main_sha": BASE,
+              "key": f"auto-merge:16:{HEAD}:{BASE}"}
+    summary = Coordinator(api, store)._enable_auto_merge(
+        action, {"enrollment": enrolled_record()},
+    )
+
+    assert api.pull_reads >= fence_read
+    assert not summary["auto_merge_eligible"] and summary["merge_action"] is None
+    assert not api.writes and not api.graphql_writes
+    assert store.action(action["key"])["status"] == "blocked"
+
+
+@pytest.mark.parametrize("state, merge_eligible", [
+    ("clean", True), ("unstable", True), ("has_hooks", True),
+    ("blocked", False), ("behind", False), ("dirty", False), ("draft", False),
+])
+@pytest.mark.parametrize("fence_read", [2, 3], ids=["fresh-plan", "final-merge"])
+def test_supported_mergeable_states_preserve_merge_gate(
+        tmp_path, state, merge_eligible, fence_read):
+    class StateRace(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/pulls/16") and self.pull_reads >= fence_read:
+                return value | {"mergeable_state": state}
+            return value
+
+    api = StateRace()  # draft=False and mergeable=True cannot override the state.
+    store = StateStore(tmp_path / "state.json")
+    action = {"kind": "auto-merge", "issue": 16, "head": HEAD, "main_sha": BASE,
+              "key": f"auto-merge:16:{HEAD}:{BASE}"}
+    result = Coordinator(api, store)._enable_auto_merge(
+        action, {"enrollment": enrolled_record()},
+    )
+
+    assert api.pull_reads >= fence_read
+    assert not api.writes
+    if merge_eligible:
+        assert result == "sent"
+        assert len(api.graphql_writes) == 1
+        assert api.graphql_writes[0][1]["expectedHeadOid"] == HEAD
+    else:
+        assert not api.graphql_writes
+        assert not result["auto_merge_eligible"] and result["merge_action"] is None
+        assert store.action(action["key"])["status"] == "blocked"
+
+
+UNCOMPUTED_MERGEABILITY = [
+    {"mergeable": None, "mergeable_state": "unknown"},
+    {"mergeable": None, "mergeable_state": "clean"},
+    {"mergeable": True, "mergeable_state": "unknown"},
+    {"mergeable": False, "mergeable_state": "unknown"},
+    {"mergeable": False, "mergeable_state": "clean"},
+    {"mergeable": None, "mergeable_state": "dirty"},
+    {"mergeable": None, "mergeable_state": "behind"},
+    {},
+] + [
+    {"mergeable": malformed, "mergeable_state": state}
+    for malformed in ("false", "true", 0, 1, 0.0, 1.0, [], {})
+    for state in ("dirty", "behind")
+]
+
+
+@pytest.mark.parametrize("mergeability", UNCOMPUTED_MERGEABILITY)
+@pytest.mark.parametrize("attempts", [0, REPAIR_LIMIT])
+@pytest.mark.parametrize("repair_evidence", [False, True])
+def test_uncomputed_mergeability_defers_without_repair_budget_or_noise(
+        tmp_path, mergeability, attempts, repair_evidence):
+    api = FakeApi(unresolved=repair_evidence, source_failure=repair_evidence)
+    api.pull.pop("mergeable")
+    api.pull.pop("mergeable_state")
+    api.pull.update(mergeability)
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    store._mutate(lambda data: data["enrollments"]["16"].update(attempts=attempts))
+    coordinator = Coordinator(api, store)
+
+    plan = coordinator.run(apply=False)["pull_requests"][0]
+    result = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert api.fix_attempts == 0
+    for summary in (plan, result):
+        assert not summary["repair_requested"]
+        assert not summary["auto_merge_eligible"]
+        assert "mergeability-unknown" in summary["reasons"]
+        assert not {"conflict", "behind", "budget"}.intersection(summary["reasons"])
+        assert summary["outcomes"] == 0
+    state = store.snapshot()
+    assert state["enrollments"]["16"]["attempts"] == attempts
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
+    assert not state["lifecycle_events"]
+    assert not any(route.endswith(("/tasks", "/comments")) for route, _ in api.writes)
+    assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("mergeable, mergeable_state", [
+    (True, "clean"), (False, "dirty"), (True, "behind"),
+])
+def test_computed_mergeability_resumes_expected_task_on_next_poll(
+        tmp_path, mergeable, mergeable_state):
+    api = FakeApi(unresolved=True)
+    api.pull.update(mergeable=None, mergeable_state="unknown")
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    first = coordinator.run(apply=True)["pull_requests"][0]
+    assert not first["repair_requested"]
+    assert api.fix_attempts == 0
+
+    api.pull.update(mergeable=mergeable, mergeable_state=mergeable_state)
+    second = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert second["repair_requested"]
+    assert "mergeability-unknown" not in second["reasons"]
+    task = next(body for route, body in api.writes if route.endswith("/tasks"))
+    assert ("Neutral reconciliation" in task["prompt"]) == (mergeable_state != "clean")
+    assert api.fix_attempts == 1
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+
+
+def test_conflicts_are_sent_to_neutral_reconciler_not_ordinary_fixer(tmp_path):
     api = FakeApi(source_failure=True, unresolved=True)
     api.pull = api.pull | {"mergeable": False, "mergeable_state": "dirty"}
     result = Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
-    assert not any(route.endswith("/tasks") for route, _ in api.writes)
+    task = next(body for route, body in api.writes if route.endswith("/tasks"))
+    assert "Neutral reconciliation" in task["prompt"]
+    assert "force-push" in task["prompt"].lower()
     assert "conflict" in result["pull_requests"][0]["reasons"]
     assert not api.graphql_writes
+
+
+def test_conflict_uses_one_neutral_task_with_both_intents_and_no_force_push(tmp_path):
+    api = FakeApi()
+    api.pull.update(
+        mergeable=False, mergeable_state="dirty",
+        title="Preserve the enrolled PR intent",
+        body="The PR-side behavior must remain available.",
+    )
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856540)
+
+    first = coordinator.run(apply=True)
+    task_posts = [body for route, body in api.writes if route.endswith("/tasks")]
+    assert len(task_posts) == 1
+    task = task_posts[0]
+    assert task["base_ref"] == "main" and task["head_ref"] == "topic"
+    assert "Preserve the enrolled PR intent" in task["prompt"]
+    assert "PR-side behavior must remain available" in task["prompt"]
+    assert HEAD in task["prompt"] and BASE in task["prompt"]
+    assert "force-push" in task["prompt"].lower()
+    assert "rebase" in task["prompt"].lower()
+    assert first["pull_requests"][0]["repair_requested"]
+
+    coordinator.run(apply=True)
+    assert len([body for route, body in api.writes if route.endswith("/tasks")]) == 1
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+
+
+def test_neutral_and_ordinary_repairs_share_one_task_lock(tmp_path):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856540)
+    coordinator.run(apply=True)
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+
+    coordinator.run(apply=True)
+
+    task_posts = [body for route, body in api.writes if route.endswith("/tasks")]
+    assert len(task_posts) == 1
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+
+
+def test_main_advancement_before_neutral_dispatch_cancels_reservation(tmp_path):
+    api = FakeApi(advance_main=True)
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+
+    Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    assert not [body for route, body in api.writes if route.endswith("/tasks")]
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
+
+
+@pytest.mark.parametrize("task_type", ["repair", "neutral"])
+def test_fresh_draft_fence_prevents_task_reservation_and_post(tmp_path, task_type):
+    api = FakeApi()
+    api.pull["draft"] = True
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    action = {
+        "issue": 16, "head": HEAD, "head_ref": "topic", "kind": "fix",
+        "task_type": "neutral" if task_type == "neutral" else "repair",
+        "main_sha": BASE, "key": "fix:16:draft-fence", "body": "bounded prompt",
+    }
+
+    result = Coordinator(api, store, clock=lambda: 1790856540)._dispatch_task(action)
+
+    assert result == "draft"
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
+    assert store.actions() == {}
+    assert not [body for route, body in api.writes if route.endswith("/tasks")]
+
+
+def test_exact_copilot_receipt_reports_incompatible_neutral_result(tmp_path):
+    api = FakeApi()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    action = next(item for item in store.actions().values() if item["kind"] == "fix")
+    api.complete_task("task-1", action, result="conflict_incompatible")
+
+    result = coordinator.run(apply=True)
+
+    assert len([body for route, body in api.writes if route.endswith("/tasks")]) == 1
+    assert "conflict-incompatible" in result["pull_requests"][0]["reasons"]
+    event = json.loads((tmp_path / "workflow-events.json").read_text())["events"][0]
+    assert event["reason"] == "conflict_incompatible"
+    assert event["outcome"] == "blocked"
+    assert event["merge_sha"] is None and event["decision"] is None
+
+
+def test_lifecycle_producer_rejects_ids_outside_shared_schema_bounds():
+    from deploy.cloud_coordinator import _lifecycle_event_valid
+    from deploy.workflow_events import validate_export
+
+    event = {
+        "event_id": "pr:16:merged:oversized",
+        "outcome": "merged",
+        "reason": "merged",
+        "issue_number": 2**31,
+        "pr_number": 2**31,
+        "head_sha": HEAD,
+        "merge_sha": "e" * 40,
+        "decision": None,
+        "occurred_at": "2026-10-01T12:00:00Z",
+    }
+    export = {
+        "version": 1,
+        "repository_id": 1399942965,
+        "repository": "lindayi/hermes-mobile",
+        "owner_user_id": str(OWNER),
+        "generated_at": "2026-10-01T12:01:00Z",
+        "events": [event],
+    }
+
+    assert not _lifecycle_event_valid(event)
+    with pytest.raises(ValueError, match="Invalid lifecycle issue"):
+        validate_export(export, now=datetime.fromisoformat("2026-10-01T12:01:00+00:00"))
+
+
+def test_draft_and_pending_activity_do_not_create_noise_or_repairs(tmp_path):
+    api = FakeApi(unresolved=True, source_failure=True)
+    api.pull["draft"] = True
+    store = StateStore(tmp_path / "state.json")
+
+    result = Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    assert not [body for route, body in api.writes if route.endswith("/tasks")]
+    assert not [body for route, body in api.writes if route.endswith("/comments")]
+    assert store.snapshot()["lifecycle_events"] == []
+    assert result["pull_requests"][0]["outcomes"] == 0
+
+
+def test_pending_required_check_does_not_create_owner_notice(tmp_path):
+    api = FakeApi()
+    api.pending_required = True
+    store = StateStore(tmp_path / "state.json")
+
+    result = Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    assert "checks" in result["pull_requests"][0]["reasons"]
+    assert result["pull_requests"][0]["outcomes"] == 0
+    assert not [body for route, body in api.writes if route.endswith("/comments")]
+    assert store.snapshot()["lifecycle_events"] == []
 
 
 def test_active_copilot_run_on_pr_branch_serializes_fixer_even_without_pr_metadata(tmp_path):
@@ -1455,6 +2317,8 @@ def test_response_uncertain_agent_dispatch_is_reconciled_never_retried(tmp_path)
     assert len(fix) == 1
     assert fix[0]["status"] == "uncertain"
     assert api.fix_attempts == 1
+    assert store.snapshot()["lifecycle_events"][0]["reason"] == "execution_uncertain"
+    assert (tmp_path / "workflow-events.json").exists()
     coordinator.run(apply=True)
     assert api.fix_attempts == 1
     assert [action for action in store.actions().values()
@@ -1512,33 +2376,38 @@ def test_reenrollment_preserves_unresolved_fixer_with_empty_task_list(
         result = restarted_cycle()
     # Empty list results are not proof that an earlier POST did not start a task.
     assert api.fix_attempts == 1
-    expected = fix | {"status": "sent" if claim_status == "sent" else "uncertain"}
-    assert retained == expected
-    assert store.action(fix["key"]) == expected
+    assert retained["status"] == ("sent" if claim_status == "sent" else "uncertain")
+    assert store.action(fix["key"])["status"] == retained["status"]
     assert enrollment["attempts"] == 1
     assert "agent" in result["pull_requests"][0]["reasons"]
     assert not api.graphql_writes
+    if claim_status != "sent":
+        assert retained["blocker"] == "execution_uncertain"
+        assert any(event["reason"] == "execution_uncertain"
+                   for event in store.snapshot()["lifecycle_events"])
 
     if claim_status == "sent":
         old_task = api.tasks[fix["task_id"]]
         old_task.update(id="unrelated-task", state="completed")
         restarted_cycle()
         assert api.fix_attempts == 1
-        assert store.action(fix["key"]) == expected
+        assert store.action(fix["key"])["status"] == "sent"
         old_task.update(id=fix["task_id"], sessions=[
             {"id": "session-1", "state": "waiting_for_user"},
         ])
         restarted_cycle()
         assert api.fix_attempts == 1
-        assert store.action(fix["key"]) == expected
+        assert store.action(fix["key"])["status"] == "sent"
         old_task["sessions"][0]["state"] = "completed"
         restarted_cycle()
-        assert store.action(fix["key"])["status"] == "completed"
-        assert api.fix_attempts == 2
-        new_fix = next(action for action in store.actions().values()
-                       if action.get("task_id") == "task-2")
-        assert new_fix["key"] != fix["key"]
-        assert new_fix["status"] == "sent"
+        assert store.action(fix["key"])["status"] == "sent"
+        assert api.fix_attempts == 1
+        restarted_cycle()
+        assert store.action(fix["key"])["status"] == "uncertain"
+        assert store.action(fix["key"])["blocker"] == "execution_uncertain"
+        assert any(event["reason"] == "execution_uncertain"
+                   for event in store.snapshot()["lifecycle_events"])
+        assert api.fix_attempts == 1
 
 
 def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
@@ -1553,7 +2422,11 @@ def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
         restarted_cycle()
         assert api.fix_attempts == attempt + 1
         if attempt < 2:
-            api.tasks[f"task-{attempt + 1}"]["state"] = "completed"
+            task_id = f"task-{attempt + 1}"
+            action = next(item for item in store.actions().values()
+                          if item.get("task_id") == task_id)
+            api.complete_task(task_id, action)
+            api.review_submitted_at = "2026-10-01T12:06:00Z"
     old_fix = next(action for action in store.actions().values()
                    if action.get("task_id") == "task-3")
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
@@ -1566,9 +2439,7 @@ def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
     assert api.fix_attempts == 3
     assert store.snapshot()["enrollments"]["16"]["active"] is False
     assert store.action(old_fix["key"])["status"] == "sent"
-    api.tasks["task-3"].update(state="completed", sessions=[
-        {"id": "session-3", "state": "completed"},
-    ])
+    api.complete_task("task-3", old_fix)
     api.comments.append({"id": 126, "user": {"id": OWNER},
                          "body": "/hermes enroll", "updated_at": "2026-10-01T12:10:00Z"})
     restarted_cycle()
@@ -1588,6 +2459,7 @@ def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
 def test_task_api_identity_reconciles_across_head_changes(tmp_path):
     api = FakeApi(unresolved=True)
     store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
     coordinator = Coordinator(api, store)
     coordinator.run(apply=True)
     fix = next(action for action in store.actions().values() if action["kind"] == "fix")
@@ -1598,12 +2470,332 @@ def test_task_api_identity_reconciles_across_head_changes(tmp_path):
     assert all("@copilot" not in body.get("body", "") for _, body in api.writes)
     api.head_sha = "c" * 40
     api.pull["head"]["sha"] = api.head_sha
-    api.tasks["task-1"]["state"] = "waiting_for_user"
+    api.complete_task("task-1", fix)
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
     coordinator.run(apply=True)
+    assert api.fix_attempts == 2
+    second = next(item for item in store.actions().values()
+                  if item.get("kind") == "fix" and item.get("task_id") == "task-2")
+    assert second["head"] == api.head_sha
+
+
+@pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
+def test_same_head_handoff_rejects_pre_task_review(tmp_path, review_state):
+    # No unresolved threads: APPROVED also exercises the early review_ok shortcut.
+    api = FakeApi(source_failure=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_state = review_state
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+    assert "agent" in summary["reasons"]
+    assert summary["auto_merge_eligible"] is False
     assert api.fix_attempts == 1
-    api.tasks["task-1"]["state"] = "completed"
+    assert not any("enablePullRequestAutoMerge" in query for query, _ in api.graphql_writes)
+
+
+@pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
+@pytest.mark.parametrize("restart", [False, True])
+def test_post_task_review_completes_handoff_with_durable_session_proof(
+        tmp_path, review_state, restart):
+    api = FakeApi(source_failure=True)
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
     coordinator.run(apply=True)
-    assert store.action(fix["key"])["status"] == "completed"
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    # Mutable task updates and the local observation happen AFTER the fresh review.
+    api.tasks[fix["task_id"]]["updated_at"] = "2026-10-01T12:10:00Z"
+    api.source_failure = False
+    api.review_state = review_state
+    if restart:
+        coordinator.run(apply=True)
+        saved = store.action(fix["key"])
+        assert saved["handoff_state"] == "waiting_review"
+        assert saved["receipt_completed_at"] == "2026-10-01T12:05:30Z"
+        assert saved["receipt_session_id"] == "session-task-1"
+        assert saved["receipt_comment_id"] == 9001
+        # Restart cannot reconstruct chronology from a now-absent task response.
+        api.tasks.clear()
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+    # An earlier-looking wall clock is strictly later as an aware instant.
+    api.review_submitted_at = "2026-10-01T08:05:31-04:00"
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert StateStore(path).action(fix["key"])["handoff_state"] == "done"
+    assert "agent" not in summary["reasons"]
+    assert summary["review_valid"] is (review_state == "APPROVED")
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == int(restart)
+    assert api.fix_attempts == 1
+
+
+@pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
+@pytest.mark.parametrize("submitted_at", [
+    None, 123, "invalid", "2026-10-01T12:06:00",
+    "2026-10-01T12:05:15Z",  # After receipt, but before session completion.
+    "2026-10-01T12:05:30Z",  # Ties do not establish post-task chronology.
+    "2026-10-01T13:05:29+01:00",  # Later wall clock, earlier instant.
+    "2026-10-01T12:11:01Z",  # Future to the independently supplied clock.
+])
+def test_post_task_review_rejects_unproven_submission_time(
+        tmp_path, review_state, submitted_at):
+    api = FakeApi(source_failure=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_state = review_state
+    api.review_submitted_at = submitted_at
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert "agent" in summary["reasons"]
+    assert summary["auto_merge_eligible"] is False
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+    assert api.fix_attempts == 1
+
+
+@pytest.mark.parametrize("review_patch", [
+    {"commit_id": "c" * 40},
+    {"user": {"id": OWNER}},
+    {"user": {"id": str(COPILOT_REVIEWER)}},
+    {"user": {"id": float(COPILOT_REVIEWER)}},
+])
+def test_post_task_review_still_requires_exact_head_and_authenticated_identity(
+        tmp_path, review_patch):
+    class ReviewApi(FakeApi):
+        def get_all(self, route, *, collection=None):
+            rows = super().get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                return [row | review_patch for row in rows]
+            return rows
+
+    api = ReviewApi(source_failure=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert "agent" in summary["reasons"]
+    assert summary["auto_merge_eligible"] is False
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+
+
+@pytest.mark.parametrize("completed_at", [
+    None, "invalid", "2026-10-01T12:05:30", "2026-10-01T12:11:01Z",
+])
+def test_post_task_review_cannot_replace_invalid_persisted_completion_proof(
+        tmp_path, completed_at):
+    api = FakeApi(source_failure=True)
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    coordinator.run(apply=True)
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    store.update_action(fix["key"], "completed", receipt_completed_at=completed_at)
+    api.tasks.clear()
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    writes, graphql_writes = list(api.writes), list(api.graphql_writes)
+
+    summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    assert StateStore(path).action(fix["key"])["handoff_state"] != "done"
+    assert "agent" in summary["pull_requests"][0]["reasons"]
+    assert api.writes == writes and api.graphql_writes == graphql_writes
+
+
+@pytest.mark.parametrize("result_head", [HEAD, "c" * 40], ids=["same-head", "new-head"])
+def test_exhausted_review_handoff_survives_compaction_and_restart(tmp_path, result_head):
+    api = RecordingApi(unresolved=True)
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.complete_task(fix["task_id"], fix, head_sha=result_head)
+    api.review_state = "PENDING"
+
+    for _ in range(MAX_HANDOFF_POLLS):
+        coordinator.run(apply=True)
+
+    action = store.action(fix["key"])
+    assert action is not None, "Compaction must retain the result-head owner blocker"
+    assert action["status"] == "completed" and action["handoff_state"] == "failed"
+    assert action["blocker"] == "review_handoff_exhausted"
+    assert action["head"] == HEAD and action["receipt_head"] == result_head
+    assert action["receipt_base"] == BASE
+    assert action["receipt_comment_id"] == 9001
+    assert action["receipt_session_id"] == "session-task-1"
+    assert action["receipt_completed_at"] == "2026-10-01T12:05:30Z"
+    events = store.snapshot()["lifecycle_events"]
+    assert [event["reason"] for event in events] == ["execution_exhausted"]
+    assert events[0]["head_sha"] == result_head
+    export = (tmp_path / "workflow-events.json").read_bytes()
+
+    # Neither live task inventory nor a later review replaces the exhausted claim.
+    api.tasks.clear()
+    api.review_state = "APPROVED"
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    writes, graphql_writes = list(api.writes), list(api.graphql_writes)
+    restarted = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+    before = path.read_bytes()
+    plan = restarted.run(apply=False)["pull_requests"][0]
+    assert path.read_bytes() == before
+    summary = restarted.run(apply=True)["pull_requests"][0]
+    for item in (plan, summary):
+        assert "agent" in item["reasons"]
+        assert not item["repair_requested"] and not item["auto_merge_eligible"]
+    StateStore(path).retire(16, result_head)
+    persisted = StateStore(path).snapshot()
+    assert persisted["actions"][fix["key"]] == action
+    assert persisted["enrollments"]["16"]["attempts"] == 1
+    assert persisted["lifecycle_events"] == events
+    assert (tmp_path / "workflow-events.json").read_bytes() == export
+    assert api.fix_attempts == 1
+    assert api.writes == writes and api.graphql_writes == graphql_writes
+
+    # Once positively non-current, this terminal blocker remains compactable.
+    StateStore(path).retire(16, "d" * 40)
+    assert StateStore(path).action(fix["key"]) is None
+    assert StateStore(path).snapshot()["lifecycle_events"] == events
+
+
+def test_task_handoff_requests_ready_review_once_and_fails_closed_after_wait(tmp_path):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task("task-1", fix)
+    api.pull["draft"] = True
+    api.review_state = "PENDING"
+
+    coordinator.run(apply=True)
+    action = store.action(fix["key"])
+    assert action["ready_state"] == "done"
+    assert action["handoff_state"] == "waiting_review"
+    assert any("markPullRequestReadyForReview" in query
+               for query, _ in api.graphql_writes)
+    assert not any(route.endswith("/requested_reviewers")
+                   for route, _ in api.writes)
+
+    for _ in range(MAX_HANDOFF_POLLS - 1):
+        coordinator.run(apply=True)
+    action = store.action(fix["key"])
+    assert action["handoff_state"] == "failed"
+    assert action["blocker"] == "review_handoff_exhausted"
+    events = store.snapshot()["lifecycle_events"]
+    assert [event["reason"] for event in events] == ["execution_exhausted"]
+    assert api.fix_attempts == 1
+
+
+@pytest.mark.parametrize("path_kind", ["draft_ready", "review_request"])
+def test_scan_commit_failure_precedes_every_handoff_mutation(tmp_path, monkeypatch,
+                                                              path_kind):
+    import deploy.cloud_coordinator as coordinator_module
+
+    class CapacityFailingScanStore(StateStore):
+        def commit_scan(self, *args, **kwargs):
+            # Exercise the real pre-replace state-capacity guard at the scan commit.
+            with monkeypatch.context() as patch:
+                patch.setattr(coordinator_module, "MAX_STATE_BYTES", 1)
+                return super().commit_scan(*args, **kwargs)
+
+    api = FakeApi(unresolved=True)
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    fix = next(action for action in StateStore(path).actions().values()
+               if action["kind"] == "fix")
+    api.complete_task("task-1", fix)
+    if path_kind == "draft_ready":
+        api.pull["draft"] = True
+        api.review_state = "PENDING"
+    else:
+        api.review_state = "DISMISSED"
+    writes, graphql_writes = list(api.writes), list(api.graphql_writes)
+    prior = StateStore(path).snapshot()
+
+    for _ in range(2):
+        with pytest.raises(CoordinatorError, match="safety bound"):
+            Coordinator(api, CapacityFailingScanStore(path),
+                        clock=lambda: 1790856720).run(apply=True)
+        assert api.writes == writes and api.graphql_writes == graphql_writes
+        state = StateStore(path).snapshot()
+        assert state["cursor"] == prior["cursor"]
+        assert state["events"] == prior["events"]
+        assert state["lifecycle_events"] == prior["lifecycle_events"]
+        assert state == prior  # Receipt acceptance is prepared, not persisted.
+        assert api.fix_attempts == 1
+
+    result = Coordinator(api, StateStore(path), clock=lambda: 1790856780).run(apply=True)
+
+    state = StateStore(path).snapshot()
+    assert state["cursor"] != prior["cursor"]
+    action = state["actions"][fix["key"]]
+    assert action["ready_state"] == "done"
+    assert action["handoff_state"] == "waiting_review"
+    assert action["handoff_waits"] == 1
+    ready = [query for query, _ in api.graphql_writes[len(graphql_writes):]
+             if "markPullRequestReadyForReview" in query]
+    requests = [route for route, _ in api.writes[len(writes):]
+                if route.endswith("/requested_reviewers")]
+    if path_kind == "draft_ready":
+        assert len(ready) == 1 and requests == []
+    else:
+        assert ready == [] and len(requests) == 1
+        assert action["review_request_state"] == "sent"
+    assert api.fix_attempts == 1
+    assert result["pull_requests"][0]["repair_requested"] is False
+    assert "agent" in result["pull_requests"][0]["reasons"]
+
+
+def test_draft_race_at_dispatch_is_reported_as_suppressed_repair(tmp_path):
+    class DraftAfterScanStore(StateStore):
+        def commit_scan(self, *args, **kwargs):
+            result = super().commit_scan(*args, **kwargs)
+            api.pull["draft"] = True
+            return result
+
+    api = FakeApi(unresolved=True)
+    store = DraftAfterScanStore(tmp_path / "state.json")
+
+    result = Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    summary = result["pull_requests"][0]
+    assert summary["repair_requested"] is False
+    assert "draft" in summary["reasons"]
+    assert api.fix_attempts == 0
+    assert not [body for route, body in api.writes if route.endswith("/tasks")]
+    assert not any(action.get("kind") == "fix" for action in store.actions().values())
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
 
 
 def test_unrelated_or_unverified_task_completion_cannot_release_fixer(tmp_path):
@@ -1619,7 +2811,7 @@ def test_unrelated_or_unverified_task_completion_cannot_release_fixer(tmp_path):
     assert api.fix_attempts == 1
 
 
-def test_task_sessions_must_all_be_terminal_before_another_dispatch(tmp_path):
+def test_task_sessions_and_receipt_must_be_verified_before_releasing_fixer(tmp_path):
     api = FakeApi(unresolved=True)
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store)
@@ -1632,7 +2824,15 @@ def test_task_sessions_must_all_be_terminal_before_another_dispatch(tmp_path):
     assert api.fix_attempts == 1
     api.tasks["task-1"]["sessions"][0]["state"] = "completed"
     coordinator.run(apply=True)
-    assert api.fix_attempts == 2
+    assert api.fix_attempts == 1
+    key = next(key for key, value in store.actions().items() if value["kind"] == "fix")
+    assert store.action(key)["status"] == "sent"
+    for _ in range(2):
+        coordinator.run(apply=True)
+    assert store.action(key)["status"] == "uncertain"
+    assert store.action(key)["blocker"] == "execution_uncertain"
+    assert any(event["reason"] == "execution_uncertain"
+               for event in store.snapshot()["lifecycle_events"])
 
 
 def test_other_branch_task_session_does_not_block_this_pr(tmp_path):
@@ -1725,7 +2925,11 @@ def test_task_dispatch_is_bounded_to_three_after_verified_completion(tmp_path):
     for attempt in range(3):
         coordinator.run(apply=True)
         assert api.fix_attempts == attempt + 1
-        api.tasks[f"task-{attempt + 1}"]["state"] = "completed"
+        task_id = f"task-{attempt + 1}"
+        action = next(item for item in store.actions().values()
+                      if item.get("task_id") == task_id)
+        api.complete_task(task_id, action)
+        api.review_submitted_at = "2026-10-01T12:06:00Z"
     result = coordinator.run(apply=True)
     assert api.fix_attempts == 3
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
@@ -1758,6 +2962,7 @@ def test_units_are_templates_only_and_apply_is_explicit():
     assert "--once --apply" in service
     assert "StateDirectoryMode=0700" in service
     assert "ProtectSystem=strict" in service
+    assert "ReadWritePaths=%S/hermes-mobile-coordinator %h/.local/share/hermes-mobile-live" in service
     assert "[Install]" not in service
     assert "WantedBy=timers.target" in timer
 
@@ -1988,19 +3193,20 @@ def test_malformed_ruleset_pull_request_rule_fails_policy_closed(tmp_path, rule)
     assert not any("/statuses/" in route for route, _ in api.writes)
 
 
-def test_behind_pull_is_reported_for_reconciliation_not_sent_to_fixer(tmp_path):
+def test_behind_pull_dispatches_only_a_neutral_reconciliation_task(tmp_path):
     api = FakeApi(source_failure=True, unresolved=True)
     api.pull = api.pull | {"mergeable": True, "mergeable_state": "behind"}
     store = StateStore(tmp_path / "state.json")
     result = Coordinator(api, store).run(apply=True)
     summary = result["pull_requests"][0]
     assert "behind" in summary["reasons"]
-    assert summary["repair_requested"] is False
-    assert api.fix_attempts == 0
-    assert not any(route.endswith("/tasks") for route, _ in api.writes)
-    assert not any(action.get("kind") == "fix" for action in store.actions().values())
+    assert summary["repair_requested"] is True
+    tasks = [body for route, body in api.writes if route.endswith("/tasks")]
+    assert len(tasks) == 1 and "Neutral reconciliation" in tasks[0]["prompt"]
+    assert api.fix_attempts == 1
+    assert next(action for action in store.actions().values()
+                if action["kind"] == "fix")["task_type"] == "neutral"
     assert not api.graphql_writes
-    assert any("neutral reconciler" in body.get("body", "") for _, body in api.writes)
 
 
 @pytest.mark.parametrize("payload", [
@@ -2092,7 +3298,7 @@ def test_terminal_records_compact_across_heads_without_duplicate_writes(tmp_path
     import deploy.cloud_coordinator as coordinator_module
     monkeypatch.setattr(coordinator_module, "TOMBSTONE_LIMIT", 8)
     api = RecordingApi()
-    api.pull["mergeable"] = False
+    api.sensitive = True
     path = tmp_path / "state.json"
 
     def restarted_cycle():
@@ -2108,7 +3314,8 @@ def test_terminal_records_compact_across_heads_without_duplicate_writes(tmp_path
         state = json.loads(path.read_text())
         assert {entry["head"] for entry in state["outbox"].values()} == {head}
         assert {action["head"] for action in state["actions"].values()} <= {head}
-    assert sizes[-1] <= sizes[15] + 512
+    assert sizes[-1] < coordinator_module.MAX_STATE_BYTES
+    assert len(StateStore(path).snapshot()["lifecycle_events"]) == len(heads)
     retired = json.loads(path.read_text())["retired"]["16"]
     assert len(retired["outbox"]) <= 8 and len(retired["actions"]) <= 8
     assert retired["status_generation"] >= 1
@@ -2155,7 +3362,9 @@ def test_closed_pull_retires_terminal_records_but_keeps_unresolved_claims(tmp_pa
     restarted_cycle()
     state = StateStore(path).snapshot()
     fix = next(action for action in state["actions"].values() if action["kind"] == "fix")
-    assert fix["status"] == "uncertain" and state["outbox"]
+    assert fix["status"] == "uncertain"
+    assert any(event["reason"] == "execution_uncertain"
+               for event in state["lifecycle_events"])
     api.pull["state"] = "closed"
     restarted_cycle()
     state = StateStore(path).snapshot()
@@ -2175,7 +3384,7 @@ def test_closed_pull_retires_terminal_records_but_keeps_unresolved_claims(tmp_pa
 def test_state_capacity_is_enforced_before_replace_and_preserves_prior_state(tmp_path):
     path = tmp_path / "state.json"
     store = StateStore(path)
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     assert store.add_outbox("16:small", {"issue": 16, "head": HEAD, "body": "small"})
     prior = path.read_bytes()
     with pytest.raises(CoordinatorError, match="safety bound.*preserved"):
@@ -2192,16 +3401,41 @@ def test_capacity_failure_blocks_cycle_before_remote_write_and_reports(tmp_path,
                                                                        capsys):
     import deploy.cloud_coordinator as coordinator_module
     from deploy.cloud_coordinator import main
+    from deploy.workflow_lifecycle_sources import LifecycleSourcePaths
+    from deploy.workflow_notifications import Paths as NotificationPaths
 
     api = FakeApi()
-    api.pull["mergeable"] = False
+    api.sensitive = True
     path = tmp_path / "state.json"
     Coordinator(api, StateStore(path)).run(apply=True)
     monkeypatch.setattr(coordinator_module, "MAX_STATE_BYTES", path.stat().st_size + 64)
     writes = list(api.writes)
     api.unresolved = True
+    app_root = tmp_path / "app"
+    state_dir = app_root / "state"
+    state_dir.mkdir(mode=0o700, parents=True)
+    app_root.chmod(0o700)
+    config = app_root / "config.json"
+    config.write_text(json.dumps({"state_dir": str(state_dir)}))
+    config.chmod(0o600)
+    with sqlite3.connect(state_dir / "auth.sqlite") as db:
+        db.execute("CREATE TABLE users(id TEXT,role TEXT,status TEXT,profile TEXT)")
+        db.execute(
+            "INSERT INTO users VALUES(?,?,?,?)",
+            (APP_OWNER_ID, "owner", "ready", "default"),
+        )
+    (state_dir / "auth.sqlite").chmod(0o600)
+    source_paths = LifecycleSourcePaths(
+        notifications=NotificationPaths(
+            config=config,
+            delivery_state=app_root / "delivery" / "state.json",
+            controller_state=app_root / "controller",
+        ),
+        starter_state=app_root / "starter" / "state.json",
+    )
     assert main(["--once", "--apply", "--state", str(path)],
-                api_factory=lambda: api) == 1
+                api_factory=lambda: api,
+                lifecycle_source_paths_factory=lambda: source_paths) == 1
     error = capsys.readouterr().err
     assert "Coordinator blocked:" in error and "safety bound" in error
     assert "preserved" in error
@@ -2215,7 +3449,7 @@ def test_atomic_replace_failure_preserves_prior_state(tmp_path, monkeypatch):
 
     path = tmp_path / "state.json"
     store = StateStore(path)
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     prior = path.read_bytes()
 
     def failed_replace(source, target):
@@ -2329,7 +3563,7 @@ def test_reenrollment_preserves_uncertain_nonfix_claim(tmp_path, kind):
 
 def test_reenrollment_preserves_every_unresolved_claim_and_attempt_budget(tmp_path):
     store = StateStore(tmp_path / "state.json")
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
 
     def seed(data):
         data["enrollments"]["16"].update(active=False, attempts=3)
@@ -2357,7 +3591,7 @@ def test_reenrollment_preserves_every_unresolved_claim_and_attempt_budget(tmp_pa
 @pytest.mark.parametrize("status", ["sent", "superseded", "blocked", "completed"])
 def test_reenrollment_keeps_generation_boundary_when_resetting_terminal_status(tmp_path, status):
     store = StateStore(tmp_path / "state.json")
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     action = {"kind": "status", "issue": 16, "head": HEAD, "generation": 7}
     assert store.claim_action("old-status", action)
     store.update_action("old-status", status)
@@ -2485,6 +3719,98 @@ def test_fresh_repair_evidence_supersedes_plan_without_replacement_or_budget(tmp
     assert not any(action["kind"] == "fix" for action in state["actions"].values())
 
 
+@pytest.mark.parametrize("malformed", [
+    None, [], {}, {"number": None}, {"number": True}, {"number": 0},
+    {"number": -1}, {"number": "16"}, {"number": 1.0},
+])
+@pytest.mark.parametrize("inventory", ["issue", "comment"])
+def test_malformed_scan_rows_abort_without_cursor_or_external_actions(
+        tmp_path, malformed, inventory):
+    bad_row = malformed
+    if inventory == "comment" and isinstance(malformed, dict) and "number" in malformed:
+        bad_row = {"id": malformed["number"]}
+
+    class MalformedRows(FakeApi):
+        def get_all(self, route, *, collection=None):
+            if route.startswith("repos/lindayi/hermes-mobile/issues?"):
+                return [self.issue, bad_row] if inventory == "issue" else [self.issue]
+            if route.startswith("repos/lindayi/hermes-mobile/issues/16/comments?"):
+                return [*self.comments, bad_row] if inventory == "comment" else self.comments
+            return super().get_all(route, collection=collection)
+
+    api = MalformedRows()
+    store = StateStore(tmp_path / "state.json")
+    store.commit_scan("2026-10-01T10:00:00Z", [])
+    before = store.path.read_bytes()
+
+    with pytest.raises(CoordinatorError, match="malformed"):
+        Coordinator(api, store).run(apply=True)
+
+    assert store.path.read_bytes() == before
+    assert api.writes == []
+    assert api.graphql_writes == []
+    assert api.fix_attempts == 0
+
+
+def test_unscoped_snapshot_cannot_plan_auto_merge(tmp_path):
+    api = FakeApi()
+    coordinator = Coordinator(api, StateStore(tmp_path / "state.json"))
+    snapshot = coordinator._snapshot_pull(16, enrolled_record(), BASE)
+    snapshot["scoped"] = False
+
+    plan = coordinator._plan_pull(snapshot, {}, apply=False)
+
+    assert plan["merge_action"] is None
+    assert not plan["auto_merge_eligible"]
+
+
+def test_failed_task_still_persists_task_failed_lifecycle_event(tmp_path):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    coordinator.run(apply=True)
+    task = next(item for item in store.actions().values() if item["kind"] == "fix")
+    api.tasks[task["task_id"]]["state"] = "failed"
+
+    coordinator.run(apply=True)
+
+    assert [event["reason"] for event in store.snapshot()["lifecycle_events"]] == [
+        "task_failed",
+    ]
+
+
+def test_pre_send_superseded_repair_can_use_next_attempt_but_uncertain_cannot(
+        tmp_path):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    coordinator = Coordinator(api, store)
+    plan = coordinator._build_plan(apply=False)
+    first = plan["pull_requests"][0]["repair"]
+    assert store.claim_action(first["key"], first)
+    store.update_action(first["key"], "superseded")
+
+    coordinator.run(apply=True)
+
+    assert api.fix_attempts == 1
+    assert store.action(first["key"])["status"] == "superseded"
+    assert any(action.get("attempt") == 2 and action.get("status") == "sent"
+               for action in store.actions().values() if action.get("kind") == "fix")
+
+    blocked_api = FakeApi(unresolved=True)
+    blocked_store = StateStore(tmp_path / "uncertain.json")
+    blocked_store.enroll(enrolled_record())
+    blocked_coordinator = Coordinator(blocked_api, blocked_store)
+    plan = blocked_coordinator._build_plan(apply=False)
+    first = plan["pull_requests"][0]["repair"]
+    assert blocked_store.claim_action(first["key"], first)
+    blocked_store.update_action(first["key"], "uncertain")
+
+    blocked_coordinator.run(apply=True)
+
+    assert blocked_api.fix_attempts == 0
+
+
 @pytest.mark.parametrize("race", ["main", "base", "both", "missing-main"])
 def test_repair_dispatch_rechecks_planned_main_and_base_without_claim(tmp_path, race):
     class MovesAfterPlanning(FakeApi):
@@ -2510,12 +3836,47 @@ def test_repair_dispatch_rechecks_planned_main_and_base_without_claim(tmp_path, 
     assert not any(action["kind"] == "fix" for action in state["actions"].values())
 
 
+@pytest.mark.parametrize("mergeability", UNCOMPUTED_MERGEABILITY)
+@pytest.mark.parametrize("initial_state", ["clean", "dirty", "behind"])
+@pytest.mark.parametrize("fence_read", [3, 4], ids=["dispatch", "final-dispatch"])
+def test_uncomputed_mergeability_at_dispatch_never_claims_or_posts(
+        tmp_path, mergeability, initial_state, fence_read):
+    class BecomesUnknown(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/pulls/16") and self.pull_reads >= fence_read:
+                value = {key: item for key, item in value.items()
+                         if key not in {"mergeable", "mergeable_state"}}
+                return value | mergeability
+            return value
+
+    api = BecomesUnknown(unresolved=True)
+    api.pull.update(mergeable=initial_state != "dirty", mergeable_state=initial_state)
+    path = tmp_path / "state.json"
+
+    result = _managed_cycle(api, path)
+
+    assert api.pull_reads >= fence_read
+    assert api.fix_attempts == 0
+    summary = result["pull_requests"][0]
+    assert not summary["repair_requested"]
+    assert "mergeability-unknown" in summary["reasons"]
+    assert not {"conflict", "behind", "budget"}.intersection(summary["reasons"])
+    assert not summary["auto_merge_requested"]
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
+    assert not state["lifecycle_events"]
+    assert not any(route.endswith(("/tasks", "/comments")) for route, _ in api.writes)
+    assert not api.graphql_writes
+
+
 @pytest.mark.parametrize("mergeable, mergeable_state, reason", [
     (True, "behind", "behind"),
     (True, "dirty", "conflict"),
-    (True, "unknown", "conflict"),
-    (False, "clean", "conflict"),
-    (None, "clean", "conflict"),
+    (True, "unknown", "mergeability-unknown"),
+    (False, "clean", "mergeability-unknown"),
+    (None, "clean", "mergeability-unknown"),
 ])
 def test_dispatch_rechecks_reconciliation_after_planning(tmp_path, mergeable, mergeable_state, reason):
     class BecomesUnmergeable(FakeApi):

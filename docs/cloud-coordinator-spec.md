@@ -22,21 +22,56 @@ head, the owner must separately comment `/hermes authorize-sensitive <40-char-he
 Authorization is recorded only if that SHA is still the pull request's current
 head; it does not carry forward to a later commit.
 
+This is a source/first-activation boundary, not an upgrade path for historical
+coordinator state. Version-1 records remain readable for inspection, but active
+legacy enrollments lacking `pull_id`, `pull_node_id`, or `repository_id` are
+unsupported: pull snapshot collection fails closed with
+`Unsupported legacy enrollment: missing pull/repository identity; automatic migration is not supported; preserve state and stop activation`.
+The coordinator does not backfill identity, replace an active enrollment after a
+new comment, clear approvals, reset cursors/budgets, or discard unresolved claims.
+If such state exists, stop activation and preserve it for separately reviewed
+operator recovery; do not delete/reset state or use re-enrollment as a migration.
+First activation must use the current identity-bound enrollment contract and must
+not proceed on unsupported legacy active enrollments. This change installs or
+enables no coordinator units.
+
 ## Collection and bounded repair
 
 The coordinator captures a precollection watermark, polls issue updates and their
 comments with overlapping reads, and atomically persists accepted commands, their
-IDs and the watermark. A closed or merged PR retires its enrollment; reopening
-requires a fresh owner enrollment command. API errors,
+IDs and the watermark. A terminal PR records any observed merged/closed lifecycle
+event in durable state before retiring its enrollment. A terminal PR already closed
+at the first observation is treated as historical baseline and is not exported;
+reopening requires a fresh owner enrollment command. API errors,
 rate limits, malformed pagination, and incomplete GraphQL review-thread pages
-fail closed; the cursor is advanced only after a complete read.
+fail closed; malformed issue/comment rows or IDs also abort the whole scan. The
+cursor is advanced only after a complete read.
 
 Only current unresolved review-thread comments and completed failed/timed-out
 `Source checks` workflow runs are eligible repair evidence. It sends at most
 eight findings, clips each finding to 1,000 characters, removes links, and never
 fetches check logs. The Copilot request labels all embedded evidence untrusted,
-and the text is never interpreted as shell input. A deterministic marker
-deduplicates a request. At most three requests are claimed per enrollment.
+and the text is never interpreted as shell input. Draft PRs and ordinary pending
+review/check/task activity do not dispatch repairs or create owner notices.
+Budget exhaustion is reported only for currently scoped, non-draft, idle work
+that would otherwise be eligible for a bounded repair or neutral reconciliation.
+
+Behind or genuinely conflicted enrolled PRs receive a neutral task through the same
+durable reservation, exact task-ID reconciliation, serialization lock, and three
+attempt budget as ordinary repair tasks. Its bounded prompt identifies both exact
+branch SHAs and the PR's sanitized title/description as untrusted intent; the task
+must preserve both sides, merge main into the PR branch (never rebase or force-push),
+and test the combined behavior. Before returning a `ready` receipt, the prompt
+requires a PR comment recording each conflict hunk's file/hunk identity,
+classification, decision, and rationale explaining preservation of both branch
+intents (or genuine incompatibility). This is a deliverable under the existing
+task receipt and independent-review contract, not a new receipt schema or an
+automatic semantic approval. A current-main fence is rechecked before dispatch.
+The prompt directs genuinely incompatible requirements or broken required policy
+to a fixed typed result; these stop further repair for that exact head. Waiting or
+uncertain tasks retain the shared lock. Ordinary technical conflicts are repaired
+within the shared budget; exhaustion or ambiguous execution becomes a meaningful
+owner blocker rather than an unbounded retry.
 
 A durable action claim is written before POSTing a task through
 `/agents/repos/{owner}/{repo}/tasks` with the bounded prompt, `base_ref=main`
@@ -52,10 +87,27 @@ not evidence that an earlier task stopped. No second
 `@copilot` dispatch comment is posted. Queued, in-progress, waiting-for-user,
 idle and unknown task states do not release the fixer lock. Completion only
 releases the fixer lock; it is not review or CI success.
+Polling a claimed task requires positive integer creator, owner, and repository
+identities matching the fixed owner/repository before any terminal failure can
+release the lock or emit `task_failed`. Missing or malformed identity evidence
+retains the sent claim, then reaches bounded `execution_uncertain`; it never
+blindly starts another task. Task and session IDs remain opaque strings.
+Live REST pull numbers, pull IDs, and head/base repository IDs must be positive
+integers at collection and every dispatch, ready/review handoff, and merge fence;
+booleans, floats, strings, and missing values are not identity proof.
 Unidentifiable nonterminal repository tasks conservatively block new dispatch
 until GitHub exposes enough branch, session, or PR evidence to scope them.
-Conflicted, unmergeable, or `behind` pull requests are not sent to a fixer;
-they are reported as needing a separately assigned neutral reconciler.
+Only a positively pre-send superseded reservation can advance to a distinct
+bounded attempt on unchanged head/base; sent or uncertain reservations are never
+retried. Only confirmed `dirty` or `behind` pull requests receive the neutral
+reconciliation task described above, not an ordinary repair task. Uncomputed or
+unknown mergeability (including `mergeable: null`, missing fields, or a negative
+mergeability result without an explicit `dirty`/`behind` state) defers both task
+kinds. It claims/posts no task, consumes no attempt, and produces no budget
+exhaustion notice or lifecycle event. Planning and both dispatch fences enforce
+this boundary; a dispatch-time deferral clears `repair_requested` and reports
+`mergeability-unknown` rather than a stale conflict/behind reason. A later poll
+may resume ordinary repair or confirmed neutral reconciliation once computed.
 Immediately before claiming a repair, the coordinator re-reads its bounded
 thread/check evidence and fences the planned head, branch, main SHA, base binding,
 mergeability and active tasks. Changed or incomplete evidence suppresses that
@@ -77,6 +129,29 @@ regardless of response order. This same gate controls planning, status publicati
 and revocation, and the final merge recheck. If the authenticated reviewer
 identity differs, the check fails closed and requires policy review rather than
 inferring approval.
+For task handoff, an authenticated submitted review on the exact result head
+completes the review request only when its timezone-aware submission instant is
+strictly after the independently validated task session completion and no later
+than the current clock. This also applies when the task leaves the head unchanged;
+an earlier approval cannot shortcut the handoff. The validated completion time,
+session ID and receipt comment ID are persisted with the receipt head/base and
+dispatch claim for restart; observation time or mutable task update time is not a
+substitute. Missing or invalid completion proof fails closed. A fresh submitted
+review completes handoff even if unresolved threads keep the approval gate false;
+those threads then remain eligible for the next bounded repair.
+Preparation stages verified receipt/handoff state in memory. Controller evidence
+is collected against durable lifecycle history plus all newly observed merge
+events in the complete plan. The scan commits those source events, receipt state,
+commands, cursor, observations and retirements atomically before any external
+handoff, status or merge write. Capacity, validation or scan failure preserves the
+entire prior state and export. Only a successful commit refreshes the export,
+before deferred external work; preparation is discarded on failure.
+After receipt acceptance, handoff uses the freshly scanned main SHA and rechecks
+live main, exact result head and repository/PR identity. The stored receipt base
+remains provenance, not a requirement that main never advance. This does not
+change receipt schema or first-receipt validation.
+A PR that becomes draft at the final dispatch fence is reported as a suppressed
+repair with the `draft` reason; no task is claimed or posted.
 
 Path classification includes both sides of renames and treats malformed,
 unknown, empty, oversized, or incomplete file inventories as sensitive. Only the
@@ -137,6 +212,58 @@ for writes and the body exactly matches the planned notification. Copied markers
 from other users, missing identity metadata, and edited notification bodies do
 not count. POST responses require the same owner/body proof plus a comment ID;
 unproven responses stay uncertain and are never automatically retried.
+
+Apply mode atomically writes a private `<state_dir>/workflow-events.json` snapshot
+using the closed, versioned schema and fixed lifecycle reason/outcome mapping.
+It includes only sanitized identifiers, exact lowercase SHAs, and UTC times.
+Raw GitHub text, check logs, commands, credentials, and private runtime data are
+excluded. Export persistence is bounded to 256 events and 1 MiB; plan mode never
+writes it. Stable event IDs preserve polling replay identity, and terminal
+enrollment retirement is committed with event persistence.
+
+Before each export, sensitive approval events are filtered against durable
+active enrollment, the exact last observed open head, and still-pending
+`authorize_sensitive_action` authorization. Apply commits the complete scan's
+head observations, owner commands, and retirements before exporting; an old
+enrollment head is not a fallback for missing current-head observation. Authorized,
+head-superseded, retired, unobserved, or unsupported decisions are omitted from
+the exported view only. Durable incident payloads/IDs/times and all other outcomes
+remain unchanged; consumer ACK history is neither read nor rewritten, and export
+never grants or revokes an approval. If filtering leaves no events, the previous
+export is removed rather than refreshing an obsolete request. This is a polling
+snapshot of observed state, not a live authorization endpoint.
+
+The export is written to the existing state directory selected by application
+configuration, not the coordinator's private state directory. The coordinator
+binds the envelope to the sole ready default-profile application owner read from
+the configured auth database. This opaque application user ID is independent of
+GitHub's numeric repository-owner ID.
+
+Issue-starter failure and uncertainty events are read from its durable v1
+command state only when a blocked receipt is persisted as sent and the exact,
+unchanged owner-authored receipt comment is present; that comment's creation
+time supplies the incident timestamp. Deployed events are emitted only for an
+existing exact merged event when the current delivery ledger, successful
+controller status, current release, and git provenance validate for that merge
+SHA. A merge alone is never treated as a deployment.
+
+Task receipts bind the exact task, session, dispatch nonce, authenticated receipt
+comment, PR, dispatched head, resulting head, and current main base. SHA-continuation
+for issue-starter commands is not part of this change; PR29 must build on this
+receipt identity without carrying authorization to a different head. The exact
+receipt comment must have a positive numeric GitHub ID; no authorization is
+inherited when its head or base proof differs.
+
+The owner mobile Inbox consumer is a separate adapter and must validate this
+producer's exact event schema and bind the export to the actual ready application
+owner. A GitHub account ID is not an application owner ID. Exported merged
+outcomes do not imply deployment. The coordinator neither invokes the consumer
+nor activates notification delivery.
+
+PR33 reuses the consumer's read-only owner, private-file, and deployment-evidence
+validators without editing its files. During current-main assembly, preserve
+those validators or expose an equivalent supported shared API, and rerun the
+producer-to-Inbox integration tests against the assembled schema and consumer.
 
 ## Bounded state
 

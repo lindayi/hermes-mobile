@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
@@ -17,6 +18,16 @@ import sys
 import time
 from urllib.parse import quote, unquote, urlencode
 
+from deploy.workflow_lifecycle import (
+    MAX_EVENTS as MAX_LIFECYCLE_EVENTS,
+    REASON_OUTCOMES as LIFECYCLE_OUTCOMES,
+    build_export as build_lifecycle_export,
+    merge_events as merge_lifecycle_events,
+    pull_event as build_pull_lifecycle_event,
+    validate_event as validate_lifecycle_event,
+)
+from deploy.task_receipts import ReceiptError, receipt_instruction, validate_task_receipt
+
 
 REPOSITORY = "lindayi/hermes-mobile"
 REPOSITORY_ID = 1399942965
@@ -28,14 +39,35 @@ COPILOT_WORKFLOW_PATH = "dynamic/copilot-swe-agent/copilot"
 COPILOT_AGENT_ID = 198982749
 MAIN_BRANCH = "main"
 REPAIR_LIMIT = 3
+MAX_RECEIPT_POLLS = 3
+MAX_HANDOFF_POLLS = 6
+HANDOFF_ACTIVE_STATES = frozenset({
+    "pending", "waiting_review", "ready_uncertain", "review_request_uncertain",
+})
+COMPUTED_MERGEABLE_STATES = frozenset({
+    "clean", "unstable", "has_hooks", "blocked", "behind", "dirty", "draft",
+})
+COPILOT_REVIEWER_LOGIN = "copilot-pull-request-reviewer[bot]"
 MAX_PAGES = 100
 MAX_FINDINGS = 8
 MAX_FINDING_CHARS = 1000
 FIX_MARKER_PREFIX = "hermes-coordinator-fix:"
 OUTBOX_MARKER_PREFIX = "hermes-coordinator-outcome:"
+LIFECYCLE_FILE_NAME = "workflow-events.json"
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_EVENTS = 4000
 TOMBSTONE_LIMIT = 512
+LIFECYCLE_OUTCOMES = {
+    "issue_failed": "failed",
+    "task_failed": "failed",
+    "execution_exhausted": "failed",
+    "sensitive_approval": "approval_required",
+    "execution_uncertain": "execution_uncertain",
+    "merged": "merged",
+    "closed_without_merge": "closed",
+    "conflict_incompatible": "blocked",
+    "policy_broken": "blocked",
+}
 CREDENTIAL_RE = re.compile(
     r"(?i)(?:"
     r"gh[pousr]_[a-z0-9_]{20,}|github_pat_[a-z0-9_]{20,}|"
@@ -100,7 +132,8 @@ def enrollment_from_comment(issue, pull, comment):
             or type(user.get("id")) is not int or user["id"] != OWNER_ID
             or not isinstance(comment.get("body"), str)
             or comment["body"].strip() != "/hermes enroll"
-            or type(issue.get("number")) is not int
+            or type(issue.get("number")) is not int or issue["number"] <= 0
+            or type(pull.get("number")) is not int
             or pull.get("number") != issue["number"]
             or pull.get("state") != "open" or pull.get("merged") is not False):
         return None
@@ -109,12 +142,19 @@ def enrollment_from_comment(issue, pull, comment):
         return None
     head_repo, base_repo = head.get("repo"), base.get("repo")
     head_sha, base_sha = head.get("sha"), base.get("sha")
-    if (not isinstance(head_repo, dict) or head_repo.get("id") != REPOSITORY_ID
-            or not isinstance(base_repo, dict) or base_repo.get("id") != REPOSITORY_ID
+    if (not _github_identity(head_repo, REPOSITORY_ID)
+            or not _github_identity(base_repo, REPOSITORY_ID)
             or base.get("ref") != MAIN_BRANCH or not _is_sha(head_sha) or not _is_sha(base_sha)):
         return None
-    return {"issue": issue["number"], "comment": comment.get("id"),
-            "head": head_sha, "base": base_sha}
+    pull_id, pull_node_id = pull.get("id"), pull.get("node_id")
+    if (type(pull_id) is not int or pull_id <= 0
+            or not isinstance(pull_node_id, str) or not pull_node_id):
+        return None
+    return {
+        "issue": issue["number"], "comment": comment.get("id"),
+        "head": head_sha, "base": base_sha, "pull_id": pull_id,
+        "pull_node_id": pull_node_id, "repository_id": REPOSITORY_ID,
+    }
 
 
 def classify_sensitive_paths(changes, *, complete=True):
@@ -276,7 +316,8 @@ def _pull_merge_eligible(pull, current_main_sha):
     base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
     return (pull.get("state") == "open" and pull.get("merged") is False
             and pull.get("draft") is False and pull.get("mergeable") is True
-            and pull.get("mergeable_state") not in {"behind", "dirty", "unknown", "blocked"}
+            and not _mergeability_unknown(pull)
+            and pull.get("mergeable_state") in {"clean", "unstable", "has_hooks"}
             and base.get("ref") == MAIN_BRANCH and base.get("sha") == current_main_sha
             and _is_sha(current_main_sha))
 
@@ -360,6 +401,69 @@ def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0,
         f"Untrusted evidence: `{evidence}`\n\n<!-- {marker} -->"
     )
     return {"marker": marker, "body": body, "head": head_sha, "attempt": attempts + 1}
+
+
+def neutral_reconciliation_request(snapshot, attempts):
+    """Build one bounded cloud request that preserves both branch intents."""
+    pull = snapshot["pull"]
+    head = snapshot["head"]
+    main_sha = snapshot["main_sha"]
+    base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
+    head_data = pull.get("head") if isinstance(pull.get("head"), dict) else {}
+    branch = head_data.get("ref")
+    if (not _is_sha(head) or not _is_sha(main_sha) or not _is_sha(base.get("sha"))
+            or not isinstance(branch, str) or not branch or attempts >= REPAIR_LIMIT):
+        return None
+    intent = {
+        "pull_request_title": _bounded_evidence(pull.get("title", ""))[:240],
+        "pull_request_description": _bounded_evidence(pull.get("body", ""))[:1600],
+    }
+    encoded_intent = json.dumps(intent, ensure_ascii=True, separators=(",", ":"))
+    key = f"{snapshot['issue']}:{head}:{main_sha}:{attempts + 1}:{encoded_intent}"
+    marker = f"{FIX_MARKER_PREFIX}{hashlib.sha256(key.encode()).hexdigest()[:20]}"
+    body = (
+        f"Neutral reconciliation for PR #{snapshot['issue']} at exact PR head `{head}`. "
+        f"The current target main is `{main_sha}`; the PR's recorded base is `{base['sha']}`. "
+        "The task API checks out current main as the base and the enrolled PR branch as the head.\n\n"
+        "Preserve both branch intents: retain all existing main behavior at the exact main SHA, "
+        "and retain the PR behavior described in the untrusted intent below. Inspect both "
+        "branches and their combined changes; do not choose either side wholesale. Merge current "
+        "main into the PR branch, never rebase, and never force-push. For each conflict hunk, "
+        "record its file/hunk identity, classification, decision, and rationale in a PR comment, "
+        "explaining how the resolution preserves both branch intents (or why they are incompatible), "
+        "before returning a `ready` receipt under the existing task receipt contract. "
+        "Test both intended behaviors and their interaction, then leave the PR branch for fresh "
+        "review and checks. If the "
+        "product requirements are genuinely incompatible, stop without guessing and report the "
+        "fixed result `conflict_incompatible`. If required repository policy is broken or absent, "
+        "stop and report `policy_broken`. Do not report either result for an ordinary technical "
+        "conflict; make the smallest safe reconciliation instead. Do not claim approval or CI success.\n\n"
+        f"Untrusted PR intent: `{encoded_intent}`\n\n<!-- {marker} -->"
+    )
+    return {
+        "marker": marker, "body": body, "head": head, "attempt": attempts + 1,
+        "issue": snapshot["issue"], "kind": "fix", "task_type": "neutral",
+        "head_ref": branch, "main_sha": main_sha,
+    }
+
+
+def _lifecycle_event(snapshot, reason, *, occurred_at, merge_sha=None, decision=None,
+                     incident=""):
+    try:
+        return build_pull_lifecycle_event(
+            snapshot, reason, occurred_at=occurred_at, merge_sha=merge_sha,
+            decision=decision, incident=incident,
+        )
+    except (TypeError, ValueError) as error:
+        raise CoordinatorError("Lifecycle event evidence was incomplete") from error
+
+
+def _lifecycle_event_valid(event):
+    try:
+        validate_lifecycle_event(event)
+    except (TypeError, ValueError, KeyError):
+        return False
+    return True
 
 
 def collect_review_threads(api, pull_number):
@@ -720,7 +824,7 @@ def _task_scoped(task, snapshot):
         return False
     for field, expected in (("creator", OWNER_ID), ("repository", REPOSITORY_ID)):
         value = task.get(field)
-        if value is not None and (not isinstance(value, dict) or value.get("id") != expected):
+        if value is not None and not _github_identity(value, expected):
             return False
     head = snapshot["pull"]["head"]["ref"]
     matched = False
@@ -733,7 +837,7 @@ def _task_scoped(task, snapshot):
                 return False
             matched = True
         elif artifact.get("type") == "pull" and snapshot["pull"].get("id") is not None:
-            if not isinstance(data, dict) or data.get("id") != snapshot["pull"]["id"]:
+            if not _github_identity(data, snapshot["pull"]["id"]):
                 return False
             matched = True
     return matched or any(
@@ -802,11 +906,36 @@ def _status_owned(statuses, context, actor_id):
     return latest, isinstance(creator, dict) and creator.get("id") == actor_id
 
 
+def _github_identity(value, expected):
+    return (type(expected) is int and expected > 0
+            and isinstance(value, dict) and type(value.get("id")) is int
+            and value["id"] == expected)
+
+
+def _pull_identity(pull, binding):
+    """Match live REST numeric IDs without bool/float equality aliases."""
+    return (_github_identity(pull, binding.get("pull_id"))
+            and type(binding.get("issue")) is int and binding["issue"] > 0
+            and type(pull.get("number")) is int
+            and pull["number"] == binding["issue"]
+            and isinstance(binding.get("pull_node_id"), str)
+            and bool(binding["pull_node_id"])
+            and pull.get("node_id") == binding["pull_node_id"])
+
+
+def _mergeability_unknown(pull):
+    state = pull.get("mergeable_state")
+    return (type(pull.get("mergeable")) is not bool or type(state) is not str
+            or state not in COMPUTED_MERGEABLE_STATES
+            or (pull.get("mergeable") is not True and state not in {"dirty", "behind"}))
+
+
 def _reconciliation_reasons(pull):
     """Use the same neutral-reconciler boundary when planning and dispatching."""
+    if _mergeability_unknown(pull):
+        return []
     reasons = []
-    if (pull.get("mergeable") is not True
-            or pull.get("mergeable_state") in {"dirty", "unknown"}):
+    if pull.get("mergeable_state") == "dirty":
         reasons.append(("conflict", "A neutral conflict reconciler must be assigned; this coordinator will not start a fixer."))
     if pull.get("mergeable_state") == "behind":
         reasons.append(("behind", "The pull request is behind main; a neutral reconciler must update it, and this coordinator will not start a fixer."))
@@ -816,17 +945,20 @@ def _reconciliation_reasons(pull):
 class Coordinator:
     """Poll, plan, and (only on explicit request) apply bounded public GitHub actions."""
 
-    def __init__(self, api, store, *, clock=time.time):
+    def __init__(self, api, store, *, clock=time.time, owner_user_id=None,
+                 lifecycle_source_paths=None):
         self.api = api
         self.store = store
         self.clock = clock
+        self.owner_user_id = owner_user_id
+        self.lifecycle_source_paths = lifecycle_source_paths
 
     def _identity(self):
         repository = self.api.get(f"repos/{REPOSITORY}")
-        if not isinstance(repository, dict) or repository.get("id") != REPOSITORY_ID:
+        if not _github_identity(repository, REPOSITORY_ID):
             raise CoordinatorError("Authenticated repository identity did not match")
         user = self.api.get("user")
-        if not isinstance(user, dict) or user.get("id") != OWNER_ID:
+        if not _github_identity(user, OWNER_ID):
             raise CoordinatorError("Authenticated GitHub account is not the repository owner")
 
     def _issues(self, cursor):
@@ -840,13 +972,19 @@ class Coordinator:
         commands, processed = [], []
         cursor = state.get("cursor")
         issues = self._issues(cursor)
+        if not isinstance(issues, list):
+            raise CoordinatorError("GitHub issue inventory was malformed")
         for issue in issues:
-            if not isinstance(issue, dict) or type(issue.get("number")) is not int:
-                continue
+            if (not isinstance(issue, dict) or type(issue.get("number")) is not int
+                    or not 1 <= issue["number"] <= 2**31 - 1):
+                raise CoordinatorError("GitHub issue row identity was malformed")
             comments = _all_review_comments(self.api, issue["number"], cursor)
+            if not isinstance(comments, list):
+                raise CoordinatorError("GitHub issue comment inventory was malformed")
             for comment in comments:
-                if not isinstance(comment, dict) or comment.get("id") is None:
-                    continue
+                if (not isinstance(comment, dict) or type(comment.get("id")) is not int
+                        or comment["id"] <= 0):
+                    raise CoordinatorError("GitHub issue comment identity was malformed")
                 key = str(comment["id"])
                 if _event_consumed(state, key):
                     continue
@@ -861,6 +999,8 @@ class Coordinator:
                     pull = self.api.get(f"repos/{REPOSITORY}/pulls/{issue['number']}")
                     enrollment = enrollment_from_comment(issue, pull, comment)
                     if enrollment:
+                        enrollment["last_open_seen"] = True
+                        enrollment["last_open_head"] = enrollment["head"]
                         commands.append(("enroll", enrollment))
                 else:
                     authorized_sha = _is_owner_sensitive_command(comment)
@@ -888,18 +1028,23 @@ class Coordinator:
             if not enrollment:
                 continue
             pull = self.api.get(f"repos/{REPOSITORY}/pulls/{item['issue']}")
-            head, base = pull.get("head"), pull.get("base")
-            if (isinstance(head, dict) and head.get("sha") == item["head"]
-                    and isinstance(head.get("repo"), dict)
-                    and head["repo"].get("id") == REPOSITORY_ID
+            head = pull.get("head") if isinstance(pull, dict) else None
+            base = pull.get("base") if isinstance(pull, dict) else None
+            if (_pull_identity(pull, enrollment)
+                    and isinstance(head, dict) and head.get("sha") == item["head"]
+                    and _github_identity(head.get("repo"), REPOSITORY_ID)
                     and isinstance(base, dict) and base.get("ref") == MAIN_BRANCH
-                    and isinstance(base.get("repo"), dict)
-                    and base["repo"].get("id") == REPOSITORY_ID):
+                    and _github_identity(base.get("repo"), REPOSITORY_ID)):
                 enrollment["sensitive_sha"] = item["head"]
                 item["validated"] = True
         return issues, commands, processed, candidates
 
     def _snapshot_pull(self, number, enrollment, main_sha):
+        if not {"pull_id", "pull_node_id", "repository_id"}.issubset(enrollment):
+            raise CoordinatorError(
+                "Unsupported legacy enrollment: missing pull/repository identity; "
+                "automatic migration is not supported; preserve state and stop activation"
+            )
         pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
         head = pull.get("head") if isinstance(pull, dict) else None
         base = pull.get("base") if isinstance(pull, dict) else None
@@ -907,6 +1052,17 @@ class Coordinator:
             raise CoordinatorError("Pull request data was incomplete")
         if not _is_sha(head.get("sha")):
             raise CoordinatorError("Pull request head was not a commit SHA")
+        head_repo, base_repo = head.get("repo"), base.get("repo")
+        if (
+            type(number) is not int or enrollment.get("issue") != number
+            or not _pull_identity(pull, enrollment)
+            or enrollment.get("repository_id") != REPOSITORY_ID
+            or not _github_identity(head_repo, REPOSITORY_ID)
+            or not _github_identity(base_repo, REPOSITORY_ID)
+            or base.get("ref") != MAIN_BRANCH
+            or not _is_sha(base.get("sha"))
+        ):
+            raise CoordinatorError("Pull request identity did not match enrollment")
         if pull.get("state") != "open" or pull.get("merged") is not False:
             return {
                 "issue": number, "enrollment": enrollment, "pull": pull,
@@ -973,7 +1129,9 @@ class Coordinator:
             "status": latest_status, "status_owned": status_is_owned,
         }
 
-    def _reconcile_actions(self, snapshot, actions, *, apply):
+    def _reconcile_actions(self, snapshot, actions, *, apply, handoffs=None):
+        # Reconciliation never performs handoff mutations; it only collects them.
+        handoffs = [] if handoffs is None else handoffs
         number = snapshot["issue"]
         busy = False
         for key, action in actions.items():
@@ -1001,31 +1159,391 @@ class Coordinator:
                 continue
             if action.get("kind") != "fix":
                 continue
+            if (status == "completed"
+                    and action.get("handoff_state") in HANDOFF_ACTIVE_STATES):
+                if apply:
+                    busy = self._advance_task_handoff(
+                        key, action, snapshot, deferred=handoffs,
+                    ) or busy
+                else:
+                    busy = True
+                continue
+            if status == "completed" and action.get("handoff_state") == "failed":
+                busy = True
+                continue
             if status in {"sending", "uncertain"}:
-                if status == "sending" and apply:
-                    self.store.mark_uncertain(key)
+                if apply and (
+                    status == "sending" or not action.get("lifecycle_event_id")
+                ):
+                    event = self._record_uncertain_task(action)
+                    self.store.update_action_with_lifecycle(
+                        key, "uncertain", event, now=self.clock(),
+                        blocker="execution_uncertain",
+                    )
                 busy = True
                 continue
             if status == "sent":
                 task_id = action.get("task_id")
                 if not isinstance(task_id, str) or not task_id or len(task_id) > 128:
+                    if apply:
+                        self._record_receipt_wait(key, action)
                     busy = True
                     continue
-                task = self.api.get(
-                    f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}"
-                )
+                try:
+                    task = self.api.get(
+                        f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}"
+                    )
+                except CoordinatorError:
+                    if apply:
+                        self._record_receipt_wait(key, action)
+                    busy = True
+                    continue
                 if (not isinstance(task, dict) or task.get("id") != task_id
+                        or not all(_github_identity(task.get(field), expected)
+                                   for field, expected in (
+                                       ("creator", OWNER_ID), ("owner", OWNER_ID),
+                                       ("repository", REPOSITORY_ID),
+                                   ))
                         or not _task_scoped(task, snapshot)):
+                    if apply:
+                        self._record_receipt_wait(key, action)
                     busy = True
                     continue
                 if _task_terminal(task):
-                    if apply:
-                        self.store.update_action(key, "completed")
+                    if task.get("state") in {"failed", "timed_out", "cancelled"}:
+                        if apply:
+                            event = _lifecycle_event(
+                                {"issue": number, "head": action["head"],
+                                 "enrollment": snapshot["enrollment"]},
+                                "task_failed", occurred_at=self._now_string(),
+                                incident=str(action.get("attempt", "")),
+                            )
+                            self.store.update_action_with_lifecycle(
+                                key, "completed", event, now=self.clock(),
+                                blocker="task_failed",
+                            )
+                    else:
+                        try:
+                            receipt = validate_task_receipt(
+                                task, action, snapshot["pull"], snapshot["comments"],
+                                now=datetime.fromtimestamp(self.clock(), timezone.utc),
+                            )
+                        except (ReceiptError, TypeError, ValueError):
+                            receipt = None
+                        if receipt:
+                            if apply:
+                                fields = {
+                                    "receipt_result": receipt["result"],
+                                    "receipt_head": snapshot["head"],
+                                    "receipt_base": snapshot["pull"]["base"]["sha"],
+                                    "receipt_comment_id": receipt["comment_id"],
+                                    "receipt_session_id": receipt["session_id"],
+                                    "receipt_completed_at": receipt["completed_at"],
+                                }
+                                if receipt["result"] == "ready":
+                                    fields["handoff_state"] = "pending"
+                                    self.store.update_action_with_lifecycle(
+                                        key, "completed", None, now=self.clock(), **fields,
+                                    )
+                                    busy = self._advance_task_handoff(
+                                        key, self.store.action(key), snapshot,
+                                        deferred=handoffs,
+                                    ) or busy
+                                else:
+                                    event = _lifecycle_event(
+                                        {"issue": number, "head": fields["receipt_head"],
+                                         "enrollment": snapshot["enrollment"]},
+                                        receipt["result"], occurred_at=self._now_string(),
+                                        incident=str(action.get("attempt", "")),
+                                    )
+                                    self.store.update_action_with_lifecycle(
+                                        key, "completed", event, now=self.clock(),
+                                        blocker=receipt["result"], **fields,
+                                    )
+                        elif apply:
+                            self._record_receipt_wait(key, action)
+                        if not receipt:
+                            busy = True
                 else:
                     busy = True
         return (busy or _other_task_active(snapshot["tasks"], snapshot)
                 or _cloud_agent_active(snapshot.get("workflows", []),
                                        snapshot["pull"]["head"]["ref"]))
+
+    def _now_string(self):
+        return datetime.fromtimestamp(self.clock(), timezone.utc).isoformat(
+            timespec="seconds",
+        ).replace("+00:00", "Z")
+
+    def _record_uncertain_task(self, action):
+        enrollment = self.store.snapshot()["enrollments"].get(str(action["issue"]), {})
+        return _lifecycle_event(
+            {"issue": action["issue"], "head": action["head"],
+             "enrollment": enrollment},
+            "execution_uncertain", occurred_at=self._now_string(),
+            incident=str(action.get("attempt", "")),
+        )
+
+    def _record_receipt_wait(self, key, action):
+        waits = action.get("receipt_waits", 0) + 1
+        if waits >= MAX_RECEIPT_POLLS:
+            event = self._record_uncertain_task(action)
+            self.store.update_action_with_lifecycle(
+                key, "uncertain", event, now=self.clock(),
+                blocker="execution_uncertain", receipt_waits=waits,
+            )
+            return "uncertain"
+        self.store.update_action(key, "sent", receipt_waits=waits)
+        return "waiting"
+
+    def _handoff_wait(self, key, action, snapshot):
+        waits = action.get("handoff_waits", 0) + 1
+        if waits >= MAX_HANDOFF_POLLS:
+            incident = f"review:{action.get('attempt', '')}:{action.get('receipt_head', '')}"
+            event = _lifecycle_event(
+                {"issue": action["issue"], "head": action["receipt_head"],
+                 "enrollment": snapshot["enrollment"]},
+                "execution_exhausted", occurred_at=self._now_string(),
+                incident=incident,
+            )
+            self.store.update_action_with_lifecycle(
+                key, "completed", event, now=self.clock(),
+                blocker="review_handoff_exhausted", handoff_state="failed",
+                handoff_waits=waits,
+            )
+            return True
+        self.store.update_action(
+            key, "completed", handoff_state=action.get("handoff_state", "waiting_review"),
+            handoff_waits=waits,
+        )
+        return True
+
+    def _advance_task_handoff(self, key, action, snapshot, *, deferred=None):
+        """Advance a verified ready handoff.
+
+        During planning, ``deferred`` collects keys whose next step is a remote
+        mutation; those steps run only after the scan commit succeeds.
+        """
+        head = action.get("receipt_head")
+        # Receipt base is provenance; handoff uses the fresh scan and live main.
+        base = snapshot["main_sha"]
+        completed_at = action.get("receipt_completed_at")
+        if not _valid_timestamp(completed_at):
+            return self._handoff_wait(key, action, snapshot)
+        completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        now = datetime.fromtimestamp(self.clock(), timezone.utc)
+        if completed > now:
+            return self._handoff_wait(key, action, snapshot)
+        current = self._fence_pull(action.get("issue"), head, base)
+        if not _pull_identity(current, action):
+            return self._handoff_wait(key, action, snapshot)
+
+        ready_state = action.get("ready_state")
+        if current.get("draft") is True:
+            if ready_state in {"sending", "ready_uncertain"}:
+                self.store.update_action(
+                    key, "completed", ready_state="ready_uncertain",
+                    handoff_state="ready_uncertain",
+                )
+                return self._handoff_wait(
+                    key, action | {"handoff_state": "ready_uncertain"}, snapshot,
+                )
+            if deferred is not None:
+                deferred.append(key)
+                return True
+            self.store.update_action(
+                key, "completed", ready_state="sending", handoff_state="pending",
+            )
+            mutation_id = hashlib.sha256(f"{key}:ready".encode()).hexdigest()[:32]
+            query = """
+            mutation($pullRequestId: ID!, $clientMutationId: String!) {
+              markPullRequestReadyForReview(input: {
+                pullRequestId: $pullRequestId, clientMutationId: $clientMutationId
+              }) {
+                clientMutationId
+                pullRequest { id isDraft headRefOid }
+              }
+            }
+            """
+            try:
+                result = self.api.graphql_write(query, {
+                    "pullRequestId": action["pull_node_id"],
+                    "clientMutationId": mutation_id,
+                })
+            except CoordinatorError:
+                self.store.update_action(
+                    key, "completed", ready_state="ready_uncertain",
+                    handoff_state="ready_uncertain",
+                )
+                return self._handoff_wait(
+                    key, action | {"handoff_state": "ready_uncertain"}, snapshot,
+                )
+            data = result.get("data", {}).get("markPullRequestReadyForReview", {}) \
+                if isinstance(result, dict) else {}
+            ready_pull = data.get("pullRequest") if isinstance(data, dict) else None
+            if (not isinstance(ready_pull, dict)
+                    or data.get("clientMutationId") != mutation_id
+                    or ready_pull.get("id") != action["pull_node_id"]
+                    or ready_pull.get("isDraft") is not False
+                    or ready_pull.get("headRefOid") != head):
+                self.store.update_action(
+                    key, "completed", ready_state="ready_uncertain",
+                    handoff_state="ready_uncertain",
+                )
+                return self._handoff_wait(
+                    key, action | {"handoff_state": "ready_uncertain"}, snapshot,
+                )
+            self.store.update_action(key, "completed", ready_state="done")
+        elif current.get("draft") is False:
+            self.store.update_action(key, "completed", ready_state="done")
+        else:
+            return self._handoff_wait(key, action, snapshot)
+
+        route = f"repos/{REPOSITORY}/pulls/{action['issue']}/requested_reviewers"
+        try:
+            requested = self.api.get(route)
+            reviews = _rest_list(
+                self.api,
+                f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
+            )
+        except CoordinatorError:
+            return self._handoff_wait(key, action, snapshot)
+        if not isinstance(requested, dict) or not isinstance(requested.get("users"), list):
+            return self._handoff_wait(key, action, snapshot)
+        has_request = any(
+            _github_identity(item, COPILOT_REVIEWER_ID) for item in requested["users"]
+        )
+        submitted_reviews = [
+            review for review in reviews
+            if isinstance(review, dict)
+            and review.get("commit_id") == head
+            and review.get("state") in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+            and _github_identity(review.get("user"), COPILOT_REVIEWER_ID)
+            and _valid_timestamp(review.get("submitted_at"))
+            and completed < datetime.fromisoformat(
+                review["submitted_at"].replace("Z", "+00:00")
+            ) <= now
+        ]
+        has_submitted_review = bool(submitted_reviews)
+        if has_submitted_review:
+            self.store.update_action(
+                key, "completed", handoff_state="done",
+                review_request_state="observed",
+            )
+            return False
+        has_pending_review = any(
+            isinstance(review, dict)
+            and review.get("commit_id") == head
+            and review.get("state") == "PENDING"
+            and _github_identity(review.get("user"), COPILOT_REVIEWER_ID)
+            for review in reviews
+        )
+        if has_request or has_pending_review:
+            self.store.update_action(
+                key, "completed", handoff_state="waiting_review",
+                review_request_state="sent" if has_request else "observed",
+            )
+            return self._handoff_wait(
+                key, action | {"handoff_state": "waiting_review"}, snapshot,
+            )
+
+        request_state = action.get("review_request_state")
+        if request_state in {"sending", "uncertain", "sent"}:
+            self.store.update_action(
+                key, "completed", handoff_state="review_request_uncertain",
+                review_request_state="uncertain",
+            )
+            return self._handoff_wait(
+                key, action | {"handoff_state": "review_request_uncertain"}, snapshot,
+            )
+        if deferred is not None:
+            deferred.append(key)
+            return True
+
+        # Re-fence immediately before the notification-producing reviewer request.
+        current = self._fence_pull(action["issue"], head, base)
+        if not _pull_identity(current, action):
+            return self._handoff_wait(key, action, snapshot)
+        self.store.update_action(
+            key, "completed", handoff_state="pending",
+            review_request_state="sending",
+        )
+        try:
+            response = self.api.write(route, {
+                "reviewers": [COPILOT_REVIEWER_LOGIN],
+            })
+        except CoordinatorError:
+            self.store.update_action(
+                key, "completed", handoff_state="review_request_uncertain",
+                review_request_state="uncertain",
+            )
+            return self._handoff_wait(
+                key, action | {"handoff_state": "review_request_uncertain"}, snapshot,
+            )
+        response_reviewers = response.get("requested_reviewers") \
+            if isinstance(response, dict) else None
+        if (not _pull_identity(response, action)
+                or not all(isinstance(response.get(field), dict)
+                           and _github_identity(response[field].get("repo"), REPOSITORY_ID)
+                           for field in ("head", "base"))
+                or response["head"].get("sha") != head
+                or response["head"].get("ref") != action["head_ref"]
+                or response["base"].get("sha") != base
+                or response["base"].get("ref") != "main"
+                or not isinstance(response_reviewers, list)
+                or not any(_github_identity(item, COPILOT_REVIEWER_ID)
+                           for item in response_reviewers)):
+            self.store.update_action(
+                key, "completed", handoff_state="review_request_uncertain",
+                review_request_state="uncertain",
+            )
+            return self._handoff_wait(
+                key, action | {"handoff_state": "review_request_uncertain"}, snapshot,
+            )
+        self.store.update_action(
+            key, "completed", handoff_state="waiting_review",
+            review_request_state="sent",
+        )
+        return self._handoff_wait(
+            key, action | {"handoff_state": "waiting_review"}, snapshot,
+        )
+
+    def _notification_outcomes(self, snapshot, reasons):
+        outcomes = []
+        lifecycle = []
+        for code, message in reasons:
+            if code not in {"sensitive", "budget", "up-to-date-policy",
+                            "conversation-policy", "status-owner", "scope",
+                            "conflict-incompatible", "policy-broken"}:
+                continue
+            key, entry = self._outcome(snapshot, code, message)
+            outcomes.append((key, entry))
+            if code == "sensitive":
+                lifecycle.append(_lifecycle_event(
+                    snapshot, "sensitive_approval", occurred_at=self._now_string(),
+                    decision="authorize_sensitive_action",
+                ))
+            elif code == "budget":
+                lifecycle.append(_lifecycle_event(
+                    snapshot, "execution_exhausted", occurred_at=self._now_string(),
+                    incident=str(snapshot["enrollment"].get("attempts", 0)),
+                ))
+            elif code in {"up-to-date-policy", "conversation-policy", "status-owner", "scope"}:
+                lifecycle.append(_lifecycle_event(
+                    snapshot, "policy_broken", occurred_at=self._now_string(),
+                    incident=code,
+                ))
+            elif code == "conflict-incompatible":
+                lifecycle.append(_lifecycle_event(
+                    snapshot, "conflict_incompatible", occurred_at=self._now_string(),
+                    incident=str(snapshot.get("neutral_blocker_attempt", "")),
+                ))
+            elif code == "policy-broken":
+                lifecycle.append(_lifecycle_event(
+                    snapshot, "policy_broken", occurred_at=self._now_string(),
+                    incident=str(snapshot.get("neutral_blocker_attempt", "policy")),
+                ))
+        return outcomes, lifecycle
 
     def _outcome(self, snapshot, code, message):
         key = f"{snapshot['issue']}:{snapshot['head']}:{code}"
@@ -1037,12 +1555,33 @@ class Coordinator:
     def _plan_pull(self, snapshot, actions, *, apply):
         number, head = snapshot["issue"], snapshot["head"]
         if snapshot.get("terminal"):
+            lifecycle = []
+            enrollment = snapshot["enrollment"]
+            if enrollment.get("last_open_seen") is True:
+                pull = snapshot["pull"]
+                if pull.get("merged") is True:
+                    merge_sha = pull.get("merge_commit_sha")
+                    if not _is_sha(merge_sha):
+                        raise CoordinatorError("Merged pull request lacked an exact merge SHA")
+                    lifecycle.append(_lifecycle_event(
+                        snapshot, "merged",
+                        occurred_at=pull.get("merged_at") or self._now_string(),
+                        merge_sha=merge_sha,
+                    ))
+                elif pull.get("merged") is False:
+                    lifecycle.append(_lifecycle_event(
+                        snapshot, "closed_without_merge",
+                        occurred_at=pull.get("closed_at") or self._now_string(),
+                    ))
+                else:
+                    raise CoordinatorError("Closed pull request lacked verified merge state")
             return {
                 "issue": number, "head": head, "terminal": True,
                 "sensitive": False, "review_valid": False,
                 "required_checks_green": False, "auto_merge_eligible": False,
                 "repair": None, "status_action": None, "merge_action": None,
                 "reasons": ["terminal"], "outcomes": [],
+                "lifecycle_events": lifecycle,
             }
         review_ok = copilot_review_valid(
             head, snapshot["reviews"], snapshot["threads"],
@@ -1060,27 +1599,63 @@ class Coordinator:
             required, snapshot["check_runs"], snapshot["statuses"],
             complete=snapshot["policy_complete"],
         )
-        agent_busy = self._reconcile_actions(snapshot, actions, apply=apply)
+        handoffs = []
+        agent_busy = self._reconcile_actions(
+            snapshot, actions, apply=apply, handoffs=handoffs,
+        )
+        if apply:
+            actions = self.store.actions()
+        neutral_blocker = next((
+            action for action in actions.values()
+            if action.get("kind") == "fix" and action.get("issue") == number
+            and action.get("receipt_head", action.get("head")) == head
+            and action.get("status") == "completed"
+            and action.get("blocker") in {"conflict_incompatible", "policy_broken"}
+        ), None)
+        if neutral_blocker:
+            snapshot["neutral_blocker_attempt"] = neutral_blocker.get("attempt")
         reconciliation = _reconciliation_reasons(snapshot["pull"])
+        needs_reconciliation = bool(reconciliation)
+        mergeability_unknown = _mergeability_unknown(snapshot["pull"])
         repair = None
-        if snapshot["scoped"] and snapshot["threads_complete"] and not reconciliation:
-            repair = repair_request(
-                head, snapshot["enrollment"].get("attempts", 0),
-                snapshot["threads"], snapshot["check_runs"], pull_number=number,
-                source_failure=snapshot["source_failure"],
-            )
+        attempts = snapshot["enrollment"].get("attempts", 0)
+        if (snapshot["scoped"] and not neutral_blocker and not mergeability_unknown
+                and snapshot["pull"].get("draft") is not True):
+            if needs_reconciliation:
+                repair = neutral_reconciliation_request(snapshot, attempts)
+            elif snapshot["threads_complete"]:
+                repair = repair_request(
+                    head, attempts, snapshot["threads"], snapshot["check_runs"],
+                    pull_number=number, source_failure=snapshot["source_failure"],
+                )
         if repair and not agent_busy and snapshot["enrollment"].get("attempts", 0) < REPAIR_LIMIT:
-            repair["issue"] = number
-            repair["kind"] = "fix"
-            repair["head_ref"] = snapshot["pull"]["head"]["ref"]
-            repair["main_sha"] = snapshot["main_sha"]
-            repair["key"] = f"fix:{number}:{repair['marker']}"
+            repair.setdefault("issue", number)
+            repair.setdefault("kind", "fix")
+            repair.setdefault("head_ref", snapshot["pull"]["head"]["ref"])
+            repair.setdefault("key", f"fix:{number}:{repair['marker']}")
+            repair.setdefault("main_sha", snapshot["main_sha"])
+            repair.setdefault("pull_id", snapshot["pull"].get("id"))
+            repair.setdefault("pull_node_id", snapshot["pull"].get("node_id"))
         else:
             repair = None
         reasons = []
         if not snapshot["scoped"]:
             reasons.append(("scope", "The pull request is not based on the current same-repository main branch."))
         reasons.extend(reconciliation)
+        if mergeability_unknown:
+            reasons.append(("mergeability-unknown", "GitHub mergeability is not yet confirmed; repair is deferred."))
+        if neutral_blocker and neutral_blocker["blocker"] == "conflict_incompatible":
+            reasons.append((
+                "conflict-incompatible",
+                "The neutral task reported incompatible product requirements; owner attention is required.",
+            ))
+        elif neutral_blocker:
+            reasons.append((
+                "policy-broken",
+                "The neutral task reported required repository policy is broken; owner attention is required.",
+            ))
+        if snapshot["pull"].get("draft") is True:
+            reasons.append(("draft", "Draft pull requests are not repaired or merged."))
         if not snapshot["up_to_date_required"]:
             reasons.append(("up-to-date-policy", "Branch protection must require current-main checks."))
         if not snapshot["conversation_resolution_required"]:
@@ -1093,9 +1668,15 @@ class Coordinator:
             reasons.append(("checks", "Every configured required check must complete successfully."))
         if agent_busy:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
-        if snapshot["enrollment"].get("attempts", 0) >= REPAIR_LIMIT and repair_request(
-                head, 0, snapshot["threads"], snapshot["check_runs"], pull_number=number,
-                source_failure=snapshot["source_failure"]):
+        budget_needed = (
+            snapshot["scoped"] and not agent_busy and not mergeability_unknown
+            and snapshot["pull"].get("draft") is not True and not neutral_blocker
+            and (needs_reconciliation or repair_request(
+                head, 0, snapshot["threads"], snapshot["check_runs"],
+                pull_number=number, source_failure=snapshot["source_failure"],
+            ))
+        )
+        if snapshot["enrollment"].get("attempts", 0) >= REPAIR_LIMIT and budget_needed:
             reasons.append(("budget", "The three-repair limit is exhausted; owner attention is required."))
         status_state = "success" if review_ok and authorized else "pending"
         status_action = None
@@ -1122,7 +1703,7 @@ class Coordinator:
                         "state": status_state, "generation": generation,
                         "key": f"status:{number}:{head}:{generation}",
                     }
-        merge = eligible_for_auto_merge(
+        merge = snapshot["scoped"] and eligible_for_auto_merge(
             snapshot["pull"], current_main_sha=snapshot["main_sha"],
             required_checks=required, check_runs=snapshot["check_runs"],
             statuses=snapshot["statuses"], checks_complete=snapshot["policy_complete"],
@@ -1134,24 +1715,39 @@ class Coordinator:
             ),
             up_to_date_required=snapshot["up_to_date_required"],
             conversation_resolution_required=snapshot["conversation_resolution_required"],
-            agent_running=agent_busy or repair is not None,
+            agent_running=agent_busy or repair is not None or bool(neutral_blocker),
+        )
+        merge_key = f"auto-merge:{number}:{head}:{snapshot['main_sha']}"
+        merge_requested = bool(snapshot["pull"].get("auto_merge")) or (
+            actions.get(merge_key, {}).get("status") == "sent"
         )
         if merge and not snapshot["pull"].get("auto_merge"):
             merge_action = {
                 "kind": "auto-merge", "issue": number, "head": head,
                 "main_sha": snapshot["main_sha"],
-                "key": f"auto-merge:{number}:{head}:{snapshot['main_sha']}",
+                "key": merge_key,
             }
         else:
             merge_action = None
+        notification_outcomes, lifecycle_events = self._notification_outcomes(
+            snapshot, reasons,
+        )
+        if (snapshot["scoped"] and not agent_busy
+                and snapshot["pull"].get("draft") is not True
+                and attempts >= REPAIR_LIMIT and needs_reconciliation and not neutral_blocker
+                and neutral_reconciliation_request(snapshot, 0)):
+            lifecycle_events.append(_lifecycle_event(
+                snapshot, "execution_exhausted", occurred_at=self._now_string(),
+                incident=str(attempts),
+            ))
         return {"issue": number, "head": head, "sensitive": sensitive,
                 "terminal": False,
                 "review_valid": review_ok, "required_checks_green": checks_ok,
                 "auto_merge_eligible": merge, "reasons": [item[0] for item in reasons],
                 "repair": repair, "status_action": status_action,
-                "merge_action": merge_action, "outcomes": [
-                    self._outcome(snapshot, code, message) for code, message in reasons
-                ]}
+                "merge_action": merge_action, "auto_merge_requested": merge_requested,
+                "outcomes": notification_outcomes,
+                "lifecycle_events": lifecycle_events, "handoffs": handoffs}
 
     def _build_plan(self, *, apply):
         state = self.store.snapshot()
@@ -1170,9 +1766,14 @@ class Coordinator:
             self._plan_pull(snapshot, state["actions"], apply=apply)
             for snapshot in scans
         ]
+        observations = [
+            (snapshot["issue"], snapshot["head"]) for snapshot in scans
+            if not snapshot.get("terminal")
+        ]
         return {
             "cursor": cursor, "processed": processed, "commands": commands,
             "enrollments": enrollments, "snapshots": scans, "pull_requests": plans,
+            "observations": observations, "now": self.clock(),
         }
 
     def _fence_pull(self, number, head, main_sha=None):
@@ -1180,13 +1781,14 @@ class Coordinator:
         base = pull.get("base") if isinstance(pull, dict) else None
         actual = pull.get("head") if isinstance(pull, dict) else None
         if (not isinstance(pull, dict) or pull.get("state") != "open"
+                or type(number) is not int or number <= 0
+                or type(pull.get("number")) is not int or pull["number"] != number
+                or type(pull.get("id")) is not int or pull["id"] <= 0
                 or pull.get("merged") is not False
                 or not isinstance(base, dict) or not isinstance(actual, dict)
                 or actual.get("sha") != head or base.get("ref") != MAIN_BRANCH
-                or not isinstance(actual.get("repo"), dict)
-                or actual["repo"].get("id") != REPOSITORY_ID
-                or not isinstance(base.get("repo"), dict)
-                or base["repo"].get("id") != REPOSITORY_ID):
+                or not _github_identity(actual.get("repo"), REPOSITORY_ID)
+                or not _github_identity(base.get("repo"), REPOSITORY_ID)):
             return False
         if main_sha is not None:
             current_main = self.api.get(f"repos/{REPOSITORY}/commits/{MAIN_BRANCH}")
@@ -1202,8 +1804,17 @@ class Coordinator:
         current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
         if not current:
             return "superseded"
+        if current.get("draft") is not False:
+            return "draft"
+        if not _pull_identity(current, action):
+            return "superseded"
+        if _mergeability_unknown(current):
+            return "mergeability-unknown"
         reconciliation = _reconciliation_reasons(current)
-        if reconciliation:
+        neutral = action.get("task_type") == "neutral"
+        if neutral and not reconciliation:
+            return "superseded"
+        if not neutral and reconciliation:
             return reconciliation[0][0]
         branch = current["head"].get("ref")
         if not isinstance(branch, str) or not branch or branch != action["head_ref"]:
@@ -1222,20 +1833,30 @@ class Coordinator:
         )
         workflows, _ = _workflow_runs(self.api, branch, action["issue"])
         source_failure = _latest_source_failure(workflows, action["head"], branch, action["issue"])
-        fresh = repair_request(
-            action["head"], action["attempt"] - 1, threads, check_runs, pull_number=action["issue"],
-            source_failure=source_failure,
-        )
+        if neutral:
+            fresh = neutral_reconciliation_request({
+                "issue": action["issue"], "head": action["head"],
+                "main_sha": action["main_sha"], "pull": current,
+            }, action["attempt"] - 1)
+        else:
+            fresh = repair_request(
+                action["head"], action["attempt"] - 1, threads, check_runs,
+                pull_number=action["issue"], source_failure=source_failure,
+            )
         if not fresh or fresh["marker"] != action["marker"] or fresh["body"] != action["body"]:
             # Do not claim stale evidence, nor substitute a new repair/merge in this cycle.
             return "superseded"
         tasks = _rest_list(self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
                            collection="tasks")
         current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
-        if not current or current["head"].get("ref") != branch:
+        if not _pull_identity(current, action) or current["head"].get("ref") != branch:
             return "superseded"
+        if _mergeability_unknown(current):
+            return "mergeability-unknown"
         reconciliation = _reconciliation_reasons(current)
-        if reconciliation:
+        if neutral and not reconciliation:
+            return "superseded"
+        if not neutral and reconciliation:
             return reconciliation[0][0]
         if (_other_task_active(tasks, {"pull": current})
                 or _cloud_agent_active(workflows, branch)):
@@ -1244,26 +1865,46 @@ class Coordinator:
         if not claimed:
             existing = self.store.action(key)
             return existing.get("status") if existing else "not-claimed"
+        claimed_action = self.store.action(key)
         try:
             response = self.api.write(
                 f"agents/repos/{REPOSITORY}/tasks",
-                {"prompt": action["body"], "base_ref": MAIN_BRANCH, "head_ref": branch},
+                {"prompt": claimed_action["body"], "base_ref": MAIN_BRANCH, "head_ref": branch},
             )
         except CoordinatorError:
-            self.store.mark_uncertain(key)
+            event = self._record_uncertain_task(claimed_action)
+            self.store.update_action_with_lifecycle(
+                key, "uncertain", event, now=self.clock(),
+                blocker="execution_uncertain",
+            )
             return "uncertain"
         task_id = response.get("id") if isinstance(response, dict) else None
         if (not isinstance(task_id, str) or not task_id or len(task_id) > 128
                 or response.get("state") not in {
                     "queued", "in_progress", "waiting_for_user", "idle",
                     "completed", "failed", "timed_out", "cancelled",
-                }):
-            self.store.mark_uncertain(key)
+                } or not _valid_timestamp(response.get("created_at"))
+                or not _github_identity(response.get("creator"), OWNER_ID)
+                or not _github_identity(response.get("repository"), REPOSITORY_ID)):
+            event = self._record_uncertain_task(claimed_action)
+            self.store.update_action_with_lifecycle(
+                key, "uncertain", event, now=self.clock(),
+                blocker="execution_uncertain", task_id=task_id,
+            )
             return "uncertain"
         if response.get("artifacts") and not _task_scoped(response, {"pull": current}):
-            self.store.update_action(key, "uncertain", task_id=task_id)
+            event = self._record_uncertain_task(claimed_action)
+            self.store.update_action_with_lifecycle(
+                key, "uncertain", event, now=self.clock(),
+                blocker="execution_uncertain", task_id=task_id,
+                task_created_at=response["created_at"],
+            )
             return "uncertain"
-        self.store.update_action(key, "sent", task_id=task_id)
+        self.store.update_action(
+            key, "sent", task_id=task_id,
+            task_created_at=response["created_at"],
+            owner_id=OWNER_ID, repository_id=REPOSITORY_ID,
+        )
         return "sent"
 
     def _publish_status(self, action, snapshot, actor_id):
@@ -1360,6 +2001,7 @@ class Coordinator:
 
     def _enable_auto_merge(self, action, snapshot):
         key = action["key"]
+        self._identity()
         if not self.store.claim_action(key, action):
             existing = self.store.action(key)
             return existing.get("status") if existing else "not-claimed"
@@ -1371,7 +2013,9 @@ class Coordinator:
             self.store.update_action(key, "blocked")
             raise
         if pull is False:
-            self.store.update_action(key, "superseded")
+            # Positive proof: no mutation was attempted by this claim. Legacy
+            # superseded records without this proof remain non-retryable.
+            self.store.update_action(key, "superseded", pre_send=True)
             return "superseded"
         if not isinstance(pull, dict) or not pull.get("node_id"):
             self.store.update_action(key, "blocked")
@@ -1402,7 +2046,7 @@ class Coordinator:
             self.store.update_action(key, "blocked")
             raise
         if pull is False:
-            self.store.update_action(key, "superseded")
+            self.store.update_action(key, "superseded", pre_send=True)
             current_plan["auto_merge_eligible"] = False
             current_plan["merge_action"] = None
             current_plan["reasons"] = list(dict.fromkeys(
@@ -1410,8 +2054,7 @@ class Coordinator:
             ))
             return current_plan
         if (not _pull_merge_eligible(pull, action.get("main_sha"))
-                or pull.get("number") != action["issue"] or not pull.get("node_id")
-                or pull["node_id"] != current["pull"].get("node_id")):
+                or not _pull_identity(pull, current["enrollment"])):
             self.store.update_action(key, "blocked")
             current_plan["auto_merge_eligible"] = False
             current_plan["merge_action"] = None
@@ -1447,13 +2090,23 @@ class Coordinator:
         self.store.update_action(key, "sent")
         return "sent"
 
-    def _apply(self, plan):
+    def _apply(self, plan, *, after_commit=None):
         self.store.commit_scan(
             plan["cursor"], plan["processed"], commands=plan["commands"],
             retirements=[
                 item["issue"] for item in plan["pull_requests"] if item.get("terminal")
             ],
+            # Keep causal pull events ahead of their derived deployment outcomes.
+            lifecycle_events=[
+                event for item in plan["pull_requests"]
+                for event in item.get("lifecycle_events", [])
+            ] + plan.get("source_lifecycle_events", []),
+            observations=plan.get("observations", []),
+            now=plan["now"],
         )
+        # Publish only committed observations before fallible reads or mutations.
+        if after_commit is not None:
+            after_commit()
         summaries = []
         for pr_plan, snapshot in zip(plan["pull_requests"], plan["snapshots"]):
             if pr_plan.get("terminal"):
@@ -1462,6 +2115,12 @@ class Coordinator:
                 continue
             # Compact first so retired records cannot block new evidence at capacity.
             self.store.retire(snapshot["issue"], snapshot["head"])
+            # Handoff mutations require the successfully committed scan above.
+            for key in pr_plan.get("handoffs", ()):
+                handoff = self.store.action(key)
+                if (handoff and handoff.get("status") == "completed"
+                        and handoff.get("handoff_state") in HANDOFF_ACTIVE_STATES):
+                    self._advance_task_handoff(key, handoff, snapshot)
             for key, entry in pr_plan["outcomes"]:
                 self.store.add_outbox(key, entry)
             comments = snapshot["comments"]
@@ -1501,8 +2160,12 @@ class Coordinator:
             action = pr_plan["repair"]
             if action:
                 result = self._dispatch_task(action)
-                if result in {"agent-running", "superseded", "conflict", "behind"}:
+                if result in {"agent-running", "superseded", "conflict", "behind", "draft",
+                              "mergeability-unknown"}:
                     pr_plan["repair"] = None
+                    if result == "mergeability-unknown":
+                        pr_plan["reasons"] = [reason for reason in pr_plan["reasons"]
+                                              if reason not in {"conflict", "behind"}]
                     if result != "superseded":
                         reason = "agent" if result == "agent-running" else result
                         pr_plan["reasons"] = list(dict.fromkeys(
@@ -1515,6 +2178,7 @@ class Coordinator:
             merge_action = pr_plan["merge_action"]
             if merge_action and not action:
                 current_plan = self._enable_auto_merge(merge_action, snapshot)
+                pr_plan["auto_merge_requested"] = current_plan == "sent"
                 if isinstance(current_plan, dict):
                     pr_plan.update({
                         "review_valid": current_plan["review_valid"],
@@ -1523,7 +2187,14 @@ class Coordinator:
                         "reasons": current_plan["reasons"],
                         "status_action": current_plan["status_action"],
                         "merge_action": None,
+                        "auto_merge_requested": current_plan.get("auto_merge_requested", False),
                     })
+                elif current_plan != "sent":
+                    pr_plan["auto_merge_eligible"] = False
+                    pr_plan["merge_action"] = None
+                    pr_plan["reasons"] = list(dict.fromkeys(
+                        pr_plan["reasons"] + [f"auto-merge-{current_plan}"],
+                    ))
             self.store.retire(snapshot["issue"], snapshot["head"])
             summaries.append(self._summary(pr_plan))
         return summaries
@@ -1531,10 +2202,47 @@ class Coordinator:
     def run(self, *, apply=False):
         lock_fd = self.store.execution_lock() if apply else None
         try:
+            owner_user_id = self.owner_user_id
+            export_directory = None
+            if apply:
+                self.store.begin_preparation()
             plan = self._build_plan(apply=apply)
-            pull_requests = self._apply(plan) if apply else [
-                self._summary(item) for item in plan["pull_requests"]
-            ]
+            if apply:
+                if self.lifecycle_source_paths is not None:
+                    from deploy.workflow_lifecycle_sources import (
+                        LifecycleSourceError, collect_source_events,
+                        resolve_application_binding,
+                    )
+                    try:
+                        owner_user_id, export_directory = resolve_application_binding(
+                            self.lifecycle_source_paths.notifications,
+                        )
+                        # Include merges first observed by this complete scan,
+                        # not just durable history. Collection performs no writes.
+                        merged_events = self.store.snapshot()["lifecycle_events"] + [
+                            event for item in plan["pull_requests"]
+                            for event in item.get("lifecycle_events", [])
+                        ]
+                        plan["source_lifecycle_events"] = collect_source_events(
+                            merged_events, api=self.api, paths=self.lifecycle_source_paths,
+                            now=datetime.fromtimestamp(plan["now"], timezone.utc),
+                        )
+                    except LifecycleSourceError as error:
+                        raise CoordinatorError(
+                            "Lifecycle source evidence or owner binding is unavailable"
+                        ) from error
+                pull_requests = self._apply(
+                    plan, after_commit=lambda: self.store.write_lifecycle_export(
+                        now=self.clock(), owner_user_id=owner_user_id,
+                        directory=export_directory,
+                    ),
+                )
+                self.store.write_lifecycle_export(
+                    now=self.clock(), owner_user_id=owner_user_id,
+                    directory=export_directory,
+                )
+            else:
+                pull_requests = [self._summary(item) for item in plan["pull_requests"]]
             return {
                 "repository": REPOSITORY,
                 "mode": "apply" if apply else "plan",
@@ -1543,6 +2251,8 @@ class Coordinator:
                 "actions": [] if not apply else pull_requests,
             }
         finally:
+            if apply:
+                self.store.discard_preparation()
             if lock_fd is not None:
                 os.close(lock_fd)
 
@@ -1556,7 +2266,7 @@ class Coordinator:
             "auto_merge_eligible": item["auto_merge_eligible"],
             "repair_requested": bool(item["repair"]),
             "status_action": item["status_action"]["state"] if item["status_action"] else None,
-            "auto_merge_requested": bool(item["merge_action"]),
+            "auto_merge_requested": item.get("auto_merge_requested", False),
             "reasons": item["reasons"], "outcomes": len(item["outcomes"]),
         }
 
@@ -1593,8 +2303,18 @@ def _retirable_action(action, current_head, inactive):
     """Only positively terminal records may be retired; unresolved claims stay."""
     status = action.get("status")
     if action.get("kind") == "fix":
-        # A sent task may still be running; only verified completion is terminal.
-        return inactive and status == "completed"
+        if action.get("handoff_state") not in {None, "done", "failed"}:
+            return False
+        action_head = (
+            action.get("receipt_head")
+            if action.get("blocker") in {
+                "conflict_incompatible", "policy_broken", "review_handoff_exhausted",
+            }
+            else action.get("head")
+        )
+        return status == "completed" and (
+            inactive or action_head != current_head
+        )
     if status not in {"sent", "superseded", "blocked", "completed"}:
         return False
     return inactive or action.get("head") != current_head
@@ -1617,11 +2337,22 @@ class StateStore:
     def __init__(self, path):
         self.path = Path(path).absolute()
         self.directory = self.path.parent
+        self._prepared = None
+        self._preparation_base = None
+
+    def begin_preparation(self):
+        self._preparation_base = self._load()
+        self._prepared = deepcopy(self._preparation_base)
+
+    def discard_preparation(self):
+        self._prepared = None
+        self._preparation_base = None
 
     @staticmethod
     def _empty():
         return {"version": 1, "cursor": None, "events": [], "event_watermark": 0,
-                "enrollments": {}, "actions": {}, "outbox": {}, "retired": {}}
+                "enrollments": {}, "actions": {}, "outbox": {}, "retired": {},
+                "lifecycle_events": []}
 
     def _ensure_directory(self):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1631,6 +2362,8 @@ class StateStore:
             raise CoordinatorError("Coordinator state directory is not private")
 
     def _load(self):
+        if self._prepared is not None:
+            return deepcopy(self._prepared)
         if not _private_regular(self.path):
             return self._empty()
         try:
@@ -1652,6 +2385,12 @@ class StateStore:
                            and isinstance(item.get("outbox"), list)
                            for item in data["retired"].values())):
             raise CoordinatorError("Coordinator state has an unsupported format")
+        data.setdefault("lifecycle_events", [])
+        if (not isinstance(data["lifecycle_events"], list)
+                or len(data["lifecycle_events"]) > MAX_LIFECYCLE_EVENTS
+                or any(not _lifecycle_event_valid(event)
+                       for event in data["lifecycle_events"])):
+            raise CoordinatorError("Coordinator lifecycle state has an unsupported format")
         return data
 
     def _save(self, data):
@@ -1682,6 +2421,11 @@ class StateStore:
                 temporary.unlink()
 
     def _mutate(self, operation):
+        if self._prepared is not None:
+            data = deepcopy(self._prepared)
+            result = operation(data)
+            self._prepared = data
+            return result
         self._ensure_directory()
         lock_path = self.directory / f".{self.path.name}.lock"
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
@@ -1714,10 +2458,121 @@ class StateStore:
                 _bound_events(data)
         self._mutate(record)
 
-    def commit_scan(self, cursor, processed, *, commands=(), retirements=()):
+    @staticmethod
+    def _add_lifecycle_events(data, events, *, now):
+        try:
+            data["lifecycle_events"] = merge_lifecycle_events(
+                data.get("lifecycle_events", []), events, now=now,
+                limit=MAX_LIFECYCLE_EVENTS,
+            )
+        except (TypeError, ValueError) as error:
+            raise CoordinatorError("Lifecycle event was invalid or capacity was reached") from error
+
+    def record_lifecycle(self, event, *, now=None):
+        def record(data):
+            self._add_lifecycle_events(
+                data, [event], now=time.time() if now is None else now,
+            )
+        self._mutate(record)
+
+    def write_lifecycle_export(self, *, now=None, owner_user_id=None, directory=None):
+        now = time.time() if now is None else now
+        self._ensure_directory()
+        state = self.snapshot()
+        events = []
+        for event in state["lifecycle_events"]:
+            if event["reason"] == "sensitive_approval":
+                enrollment = state["enrollments"].get(str(event["pr_number"]), {})
+                if (enrollment.get("active") is not True
+                        or enrollment.get("last_open_seen") is not True
+                        or enrollment.get("last_open_head") != event["head_sha"]
+                        or enrollment.get("sensitive_sha") == event["head_sha"]
+                        or event["decision"] != "authorize_sensitive_action"):
+                    continue
+            # Filter only the exported view; immutable incidents and consumer ACK
+            # identities are history, not permission to request a stale decision.
+            events.append(event)
+        export_directory = Path(directory).absolute() if directory is not None else self.directory
+        if export_directory != self.directory:
+            from deploy.workflow_notifications import Blocked, _owned_private_path
+
+            try:
+                _owned_private_path(export_directory, directory=True)
+            except Blocked as error:
+                raise CoordinatorError("Lifecycle export directory is not private") from error
+        path = export_directory / LIFECYCLE_FILE_NAME
+        if not events:
+            if _private_regular(path):
+                path.unlink()
+                directory_fd = os.open(
+                    export_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                )
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            return
+        if len(events) > MAX_LIFECYCLE_EVENTS:
+            raise CoordinatorError("Lifecycle event export exceeded its record bound")
+        if not isinstance(owner_user_id, str) or not owner_user_id:
+            raise CoordinatorError("Lifecycle export requires the trusted application owner")
+        try:
+            payload = json.dumps(
+                build_lifecycle_export(events, owner_user_id, now=now),
+                separators=(",", ":"), sort_keys=True, ensure_ascii=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as error:
+            raise CoordinatorError("Lifecycle export did not match the shared schema") from error
+        encoded = payload.encode("utf-8")
+        if len(encoded) > 1024 * 1024:
+            raise CoordinatorError("Lifecycle event export exceeded its byte bound")
+        existing = None
+        if _private_regular(path):
+            existing_info = path.lstat()
+            existing = (existing_info.st_dev, existing_info.st_ino)
+        temporary = export_directory / (
+            f".{LIFECYCLE_FILE_NAME}.{os.getpid()}.{secrets.token_hex(8)}"
+        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(temporary, flags, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if existing is None:
+                if path.exists() or path.is_symlink():
+                    _private_regular(path)
+                    raise CoordinatorError("Lifecycle export appeared during write")
+            else:
+                current = path.lstat()
+                if (current.st_dev, current.st_ino) != existing:
+                    raise CoordinatorError("Lifecycle export changed during write")
+            os.replace(temporary, path)
+            directory_fd = os.open(
+                export_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def commit_scan(self, cursor, processed, *, commands=(), retirements=(),
+                    lifecycle_events=(), observations=(), now=None):
         keys = [str(item) for item in processed]
+        prepared, baseline = self._prepared, self._preparation_base
+        self.discard_preparation()
 
         def commit(data):
+            if prepared is not None:
+                if data != baseline:
+                    raise CoordinatorError("Coordinator state changed during preparation")
+                data.clear()
+                data.update(prepared)
             seen = set(data["events"])
             for item in keys:
                 if item not in seen and not _event_consumed(data, item):
@@ -1766,6 +2621,14 @@ class StateStore:
                     if (enrollment and enrollment.get("active")
                             and _is_sha(item.get("head"))):
                         enrollment["sensitive_sha"] = item["head"]
+            self._add_lifecycle_events(
+                data, lifecycle_events, now=time.time() if now is None else now,
+            )
+            for issue, head in observations:
+                enrollment = data["enrollments"].get(str(issue))
+                if enrollment and enrollment.get("active") and _is_sha(head):
+                    enrollment["last_open_seen"] = True
+                    enrollment["last_open_head"] = head
             for issue in retirements:
                 enrollment = data["enrollments"].get(str(issue))
                 if enrollment:
@@ -1811,8 +2674,17 @@ class StateStore:
                         and claimed["generation"] <= tombstone.get("status_generation", 0))):
                 return False
             if existing:
-                if (claimed.get("kind") in {"status", "auto-merge"}
-                        and existing.get("status") == "blocked"):
+                recover_presend = (
+                    claimed.get("kind") == existing.get("kind") == "auto-merge"
+                    and existing.get("status") == "superseded"
+                    and existing.get("pre_send") is True
+                    and all(existing.get(field) == claimed.get(field)
+                            for field in ("key", "issue", "head", "main_sha"))
+                )
+                if (recover_presend or (claimed.get("kind") in {"status", "auto-merge"}
+                                        and existing.get("status") == "blocked")):
+                    # Replace rather than carry pre-send proof into a new sending
+                    # claim: a crash or ambiguous write must never be retried.
                     del data["actions"][key]
                 else:
                     return False
@@ -1824,6 +2696,11 @@ class StateStore:
                     return False
                 enrollment["attempts"] += 1
                 claimed["attempt"] = enrollment["attempts"]
+                nonce = secrets.token_urlsafe(32)
+                claimed["dispatch_nonce"] = nonce
+                claimed["body"] = (
+                    f"{claimed.get('body', '')}\n\n{receipt_instruction(nonce)}"
+                )
             data["actions"][key] = {**claimed, "status": "sending",
                                     "created_at": time.time()}
             return True
@@ -1841,6 +2718,21 @@ class StateStore:
             if action:
                 action["status"] = status
                 action.update(fields)
+        self._mutate(update)
+
+    def update_action_with_lifecycle(self, key, status, event, *, now=None, **fields):
+        def update(data):
+            action = data["actions"].get(key)
+            if not isinstance(action, dict):
+                raise CoordinatorError("Task claim disappeared before lifecycle commit")
+            if event is not None:
+                self._add_lifecycle_events(
+                    data, [event], now=time.time() if now is None else now,
+                )
+            action["status"] = status
+            action.update(fields)
+            if event is not None:
+                action["lifecycle_event_id"] = event["event_id"]
         self._mutate(update)
 
     def mark_uncertain(self, key):
@@ -1939,7 +2831,8 @@ class StateStore:
         return fd
 
 
-def main(argv=None, *, api_factory=GhApi, store_factory=StateStore):
+def main(argv=None, *, api_factory=GhApi, store_factory=StateStore,
+         lifecycle_source_paths_factory=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--once", action="store_true", help="run one coordinator cycle")
     parser.add_argument("--apply", action="store_true",
@@ -1953,7 +2846,17 @@ def main(argv=None, *, api_factory=GhApi, store_factory=StateStore):
         / "hermes-mobile-coordinator" / "state.json"
     )
     try:
-        coordinator = Coordinator(api_factory(), store_factory(state_path))
+        from deploy.workflow_lifecycle_sources import LifecycleSourcePaths
+
+        source_paths = (
+            lifecycle_source_paths_factory()
+            if lifecycle_source_paths_factory is not None
+            else LifecycleSourcePaths()
+        )
+        coordinator = Coordinator(
+            api_factory(), store_factory(state_path),
+            lifecycle_source_paths=source_paths,
+        )
         result = coordinator.run(apply=args.apply)
         print(json.dumps(result, sort_keys=True))
         return 0

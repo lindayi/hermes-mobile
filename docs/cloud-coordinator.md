@@ -29,6 +29,14 @@ change. The timer requires an explicit owner-reviewed activation after external
 policy wiring. No production service, GitHub setting, branch protection, or
 deployment behavior is changed here.
 
+The service uses the canonical checkout's `.venv/bin/python`, like the workflow
+notification consumer. Provision and verify that environment from the repository
+lockfile before activation; the unit never installs dependencies or falls back to
+system Python. Lifecycle owner/configuration reads import application dependencies,
+so a standard-library-only interpreter or a successful CLI `--help` alone is not
+sufficient qualification. The focused unit regression imports that lazy dependency
+path under a synthetic home without loading live settings or making API calls.
+
 ## What is and is not enforced
 
 Implemented in this slice:
@@ -45,6 +53,11 @@ Implemented in this slice:
 - A 4 MiB state cap checked before replacement (prior state preserved on
   failure) and compaction of positively terminal records into bounded per-PR
   tombstones; unresolved claims and current-head evidence are retained.
+- Immutable shared-schema lifecycle events for coordinator outcomes, plus
+  receipt-backed issue-starter failure/uncertainty and controller-verified
+  deployment outcomes. Export is written to the configured application state
+  directory and bound to its sole ready default-profile owner, not the GitHub
+  account ID. Source readers never dispatch tasks or modify source state.
 - Current-head Copilot review and resolved-thread validation, fail-closed check
   collection, owned `cloud-review` status updates, and protected auto-merge
   eligibility.
@@ -60,8 +73,8 @@ Separate owner/policy work still required:
   `agent-review` unchanged.
 - Install and enable the service/timer only after exact-head review and policy
   wiring. They remain disabled templates in this repository change.
-- Bind a mobile Inbox consumer; the public PR comment outbox is the only adapter
-  implemented here.
+- Keep Inbox ingestion as a separate explicit apply operation; coordinator
+  export does not activate or invoke the consumer or push sender.
 - Roll out native compatibility gating and routine deployment policy under #5.
   This coordinator does not deploy, modify deployment/controller/artifact code,
   or replace the current global `AGENTS.md` requirements.
