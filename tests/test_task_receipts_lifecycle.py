@@ -64,6 +64,40 @@ def test_receipt_is_full_exact_and_bound_to_task_session_pr_and_heads():
     assert "session=<COPILOT_AGENT_SESSION_ID>" in receipt_instruction(NONCE, pull_number=16, start_head=HEAD, base_sha=BASE)
 
 
+@pytest.mark.parametrize("field", [
+    "comment_author", "comment_id", "task_creator", "task_owner", "task_repository",
+    "session_user", "session_owner", "session_repository", "artifact_pull", "pull_number",
+])
+@pytest.mark.parametrize("kind", ["float", "string", "bool", "null"])
+def test_receipt_numeric_identities_require_exact_integers(completed_task_binding, field, kind):
+    import json
+    # JSON round-trip separates fixture aliases so each identity is tested alone.
+    task, action, pull = json.loads(json.dumps(completed_task_binding))
+    comment = receipt()
+    targets = {
+        "comment_author": (comment["user"], "id"),
+        "comment_id": (comment, "id"),
+        "task_creator": (task["creator"], "id"),
+        "task_owner": (task["owner"], "id"),
+        "task_repository": (task["repository"], "id"),
+        "session_user": (task["sessions"][0]["user"], "id"),
+        "session_owner": (task["sessions"][0]["owner"], "id"),
+        "session_repository": (task["sessions"][0]["repository"], "id"),
+        "artifact_pull": (task["artifacts"][1]["data"], "id"),
+        "pull_number": (pull, "number"),
+    }
+    target, key = targets[field]
+    target[key] = {"float": float(target[key]), "string": str(target[key]),
+                   "bool": True, "null": None}[kind]
+    if field == "comment_author":
+        assert validate_task_receipt(task, action, pull, [comment], now=NOW) is None
+        # An unauthenticated copy cannot poison an otherwise valid receipt.
+        assert validate_task_receipt(task, action, pull, [comment, receipt()], now=NOW)
+    else:
+        with pytest.raises(ReceiptError):
+            validate_task_receipt(task, action, pull, [comment], now=NOW)
+
+
 @pytest.mark.parametrize("comment_id", [None, True, 0, -1, "777"])
 def test_receipt_requires_a_positive_numeric_comment_identity(comment_id):
     item = receipt()
@@ -169,6 +203,61 @@ def completed_task_binding():
     pull = {"number": 16, "id": action["pull_id"], "node_id": action["pull_node_id"],
             "head": {"sha": HEAD}, "base": {"sha": BASE}}
     return task, action, pull
+
+
+@pytest.mark.parametrize("artifact_type", ["pull", "branch"])
+@pytest.mark.parametrize("change", ["missing", "duplicate", "conflicting", "conflicting_duplicate"])
+def test_completed_task_requires_exactly_one_matching_artifact(
+        completed_task_binding, artifact_type, change):
+    from copy import deepcopy
+    task, action, pull = completed_task_binding
+    artifact = next(item for item in task["artifacts"] if item["type"] == artifact_type)
+    if change == "missing":
+        task["artifacts"].remove(artifact)
+    elif change == "duplicate":
+        task["artifacts"].append(deepcopy(artifact))
+    else:
+        if change == "conflicting_duplicate":
+            artifact = deepcopy(artifact)
+            task["artifacts"].append(artifact)
+        key, value = ("id", 160000017) if artifact_type == "pull" else ("head_ref", "other")
+        artifact["data"][key] = value
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, [receipt()], now=NOW)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("id", None), ("id", 160000017), ("id", 160000016.0),
+    ("id", "160000016"), ("id", True),
+    ("node_id", None), ("node_id", "PR_node_other"),
+    ("number", None), ("number", 17), ("number", 16.0),
+])
+def test_completed_task_rejects_actual_pull_mismatch(completed_task_binding, field, value):
+    task, action, pull = completed_task_binding
+    if value is None:
+        pull.pop(field)
+    else:
+        pull[field] = value
+    # Even a receipt agreeing with the supplied pull cannot override the durable action.
+    body = receipt_body().replace("pr=16\n", f"pr={pull.get('number')}\n")
+    with pytest.raises(ReceiptError, match="Receipt claim or pull identity is incomplete"):
+        validate_task_receipt(task, action, pull, [receipt(body=body)], now=NOW)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("pull_id", None), ("pull_id", 160000016.0),
+    ("pull_node_id", None), ("pull_node_id", ""),
+    ("issue", None), ("issue", 16.0),
+])
+def test_completed_task_requires_durable_pull_identity(completed_task_binding, field, value):
+    task, action, pull = completed_task_binding
+    action[field] = value
+    # Do not let equally missing or numerically aliased metadata establish identity.
+    pull[{"pull_id": "id", "pull_node_id": "node_id", "issue": "number"}[field]] = value
+    if field in {"pull_id", "pull_node_id"}:
+        task["artifacts"][1]["data"]["id" if field == "pull_id" else "global_id"] = value
+    with pytest.raises(ReceiptError, match="Receipt claim or pull identity is incomplete"):
+        validate_task_receipt(task, action, pull, [receipt()], now=NOW)
 
 
 @pytest.mark.parametrize("field", ["task_id", "session_id", "nonce"])

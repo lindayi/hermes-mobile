@@ -270,6 +270,112 @@ def test_source_events_wait_for_atomic_scan_commit(tmp_path, monkeypatch, failur
     ]
 
 
+@pytest.mark.parametrize("change,failure", [
+    ("authorized", "api"), ("head_changed", "api"),
+    ("authorized", "handoff"), ("authorized", "race"), ("authorized", "commit"),
+])
+def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change, failure):
+    from deploy.cloud_coordinator import Coordinator, CoordinatorError
+    from test_cloud_coordinator import FakeApi
+
+    notification_paths, state_dir, _, _, notifications = app_fixture(tmp_path / "app")
+    controller_evidence(notification_paths)
+    paths = LifecycleSourcePaths(notifications=notification_paths,
+                                 starter_state=tmp_path / "starter" / "state.json")
+    error = CoordinatorError("post-scan API failure") if failure != "handoff" else RuntimeError(
+        "post-scan handoff failure")
+
+    class ScanStore(StateStore):
+        armed = False
+        committed = False
+
+        def commit_scan(self, *args, **kwargs):
+            if self.armed and failure == "commit":
+                raise error
+            result = super().commit_scan(*args, **kwargs)
+            if self.armed:
+                self.committed = True
+                if failure == "race":
+                    api.head_sha = "c" * 40
+                    api.pull["head"]["sha"] = api.head_sha
+            return result
+
+    class FailingApi(FakeApi):
+        def get(self, route):
+            if store.committed and failure == "api":
+                raise error
+            return super().get(route)
+
+        def get_all(self, route, *, collection=None):
+            if (store.committed and failure == "race"
+                    and f"/commits/{HEAD}/statuses?" in route):
+                return []
+            return super().get_all(route, collection=collection)
+
+        def graphql_write(self, query, variables):
+            if store.committed and failure == "handoff":
+                assert "markPullRequestReadyForReview" in query
+                raise error
+            return super().graphql_write(query, variables)
+
+    store = ScanStore(tmp_path / "coordinator" / "state.json")
+    merged = pull_event({"issue": 31, "head": HEAD, "enrollment": {"comment": 55}},
+                        "merged", occurred_at="2026-10-01T20:58:00Z", merge_sha=MERGE)
+    store.record_lifecycle(merged, now=NOW)
+    api = FailingApi(sensitive=True, unresolved=True)
+    Coordinator(api, store, clock=NOW.timestamp, lifecycle_source_paths=paths).run(apply=True)
+    export = state_dir / "workflow-events.json"
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    old_events = json.loads(export.read_bytes())["events"]
+    approval = next(e for e in old_events if e["reason"] == "sensitive_approval")
+    outcomes = [e for e in old_events if e["reason"] != "sensitive_approval"]
+    assert {e["reason"] for e in outcomes} == {"merged", "controller_verified"}
+    process(notification_paths, apply=True, now=NOW)
+    ack_db = state_dir / "workflow-notifications.sqlite"
+    with sqlite3.connect(ack_db) as db:
+        ack_before = db.execute("SELECT event_id,digest,status FROM events ORDER BY event_id").fetchall()
+    assert ack_before and all(row[2] == "acked" for row in ack_before)
+    inbox_before = notifications.list_inbox(APP_OWNER)
+    assert inbox_before
+    before_bytes, before_mtime = export.read_bytes(), export.stat().st_mtime_ns
+    fix = next(a for a in store.actions().values() if a["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.pull["draft"] = True
+    api.review_state = "PENDING"
+    if change == "authorized":
+        api.comments.append({"id": 124, "user": {"id": GITHUB_OWNER},
+                             "body": f"/hermes authorize-sensitive {HEAD}",
+                             "updated_at": "2026-10-01T20:59:00Z"})
+    else:
+        api.head_sha = "c" * 40
+        api.pull["head"]["sha"] = api.head_sha
+    writes, graphql_writes = list(api.writes), list(api.graphql_writes)
+    store.armed = True
+    coordinator = Coordinator(api, store, clock=lambda: NOW.timestamp() + 60,
+                              lifecycle_source_paths=paths)
+    if failure == "race":
+        coordinator.run(apply=True)
+    else:
+        with pytest.raises(type(error)) as caught:
+            coordinator.run(apply=True)
+        assert caught.value is error
+    assert api.writes == writes and api.graphql_writes == graphql_writes
+    assert approval in store.snapshot()["lifecycle_events"]
+    assert all(e in store.snapshot()["lifecycle_events"] for e in outcomes)
+    if failure == "commit":
+        assert not store.committed
+        assert export.read_bytes() == before_bytes
+        assert export.stat().st_mtime_ns == before_mtime
+    else:
+        assert store.committed
+        exported = json.loads(export.read_bytes())["events"]
+        assert approval not in exported
+        assert all(e in exported for e in outcomes)
+    with sqlite3.connect(ack_db) as db:
+        assert db.execute("SELECT event_id,digest,status FROM events ORDER BY event_id").fetchall() == ack_before
+    assert notifications.list_inbox(APP_OWNER) == inbox_before
+
+
 def test_application_owner_binding_rejects_multiple_ready_default_owners(tmp_path):
     notification_paths, _, auth, _, _ = app_fixture(tmp_path / "app")
     with sqlite3.connect(auth) as db:

@@ -144,11 +144,12 @@ def validate_task_receipt(task, action, pull, comments, *, now):
             or not _nonblank_string(task_id, limit=128)
             or type(action.get("pull_id")) is not int
             or not _nonblank_string(action.get("pull_node_id"), limit=256)
+            or type(action.get("issue")) is not int
             or not isinstance(pull_head, dict) or not isinstance(pull_base, dict)
-            or type(pull.get("id")) is not int
+            or not _identity(pull, action["pull_id"])
             or pull.get("node_id") != action["pull_node_id"]
-            or pull.get("number") != action.get("issue")
-            or pull["id"] != action["pull_id"]
+            or type(pull.get("number")) is not int
+            or pull.get("number") != action["issue"]
             or any(not isinstance(value, str) or SHA_RE.fullmatch(value) is None
                    for value in (pull_head.get("sha"), pull_base.get("sha")))):
         raise ReceiptError("Receipt claim or pull identity is incomplete")
@@ -176,7 +177,7 @@ def validate_task_receipt(task, action, pull, comments, *, now):
                 raise ReceiptError("Task branch artifact does not match the dispatch")
             branches.append(data)
         else:
-            if (data.get("id") != action["pull_id"]
+            if (not _identity(data, action["pull_id"])
                     or (data.get("global_id") is not None
                         and data.get("global_id") != action["pull_node_id"])):
                 raise ReceiptError("Task pull artifact does not match the enrolled pull request")
