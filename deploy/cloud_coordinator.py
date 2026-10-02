@@ -310,8 +310,13 @@ def _bounded_evidence(text):
     return text[:MAX_FINDING_CHARS]
 
 
-def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0):
-    """Make one bounded Copilot request from current unresolved public evidence."""
+def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0,
+                   source_failure=None):
+    """Build evidence; source_failure comes only from _latest_source_failure.
+
+    Raw check_runs cannot authenticate a workflow, even with copied identity
+    fields or a same-named GitHub Actions job. They are never repair evidence.
+    """
     if not _is_sha(head_sha) or type(attempts) is not int or attempts >= REPAIR_LIMIT:
         return None
     findings = []
@@ -329,17 +334,14 @@ def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0):
         if len(findings) >= MAX_FINDINGS:
             break
     failures = []
-    for check in check_runs if isinstance(check_runs, list) else ():
-        if (not isinstance(check, dict) or check.get("name") != "Source checks"
-                or check.get("status") != "completed"
-                or check.get("conclusion") not in {"failure", "timed_out"}
-                or check.get("head_sha", head_sha) != head_sha):
-            continue
-        app = check.get("app")
-        if isinstance(app, dict) and app.get("name") not in {"GitHub Actions", "GitHub Actions (bot)"}:
-            continue
-        failures.append({"check": "Source checks", "run_id": str(check.get("id", ""))[:40],
-                         "conclusion": check["conclusion"]})
+    if (isinstance(source_failure, dict)
+            and source_failure.get("workflow_id") == SOURCE_WORKFLOW_ID
+            and source_failure.get("repository_id") == REPOSITORY_ID
+            and source_failure.get("head_sha") == head_sha
+            and source_failure.get("pull_number") == pull_number):
+        failures.append(source_failure)
+    # Reserve one of the shared slots for the authenticated workflow failure.
+    findings = findings[:MAX_FINDINGS - len(failures)]
     if not findings and not failures:
         return None
     evidence = json.dumps({"review_findings": findings, "failed_source_checks": failures},
@@ -671,14 +673,17 @@ def _cloud_agent_active(runs, branch):
 def _latest_source_failure(runs, head_sha, branch, pull_number):
     candidates = [
         run for run in runs
-        if run.get("name") == "Source checks"
+        if isinstance(run, dict) and run.get("name") == "Source checks"
         and run.get("workflow_id") == SOURCE_WORKFLOW_ID
+        and all(isinstance(run.get(field), dict)
+                and run[field].get("id") == REPOSITORY_ID
+                for field in ("repository", "head_repository"))
         and run.get("head_branch") == branch
         and run.get("head_sha") == head_sha
         and any(isinstance(pr, dict) and pr.get("number") == pull_number
                 for pr in run.get("pull_requests", []))
-        and type(run.get("run_number")) is int
-        and type(run.get("run_attempt")) is int
+        and all(type(run.get(field)) is int and run[field] > 0
+                for field in ("id", "run_number", "run_attempt"))
     ]
     if not candidates:
         return None
@@ -689,9 +694,11 @@ def _latest_source_failure(runs, head_sha, branch, pull_number):
             or latest.get("conclusion") not in {"failure", "timed_out"}):
         return None
     return {
-        "id": latest.get("id"), "name": "Source checks", "head_sha": head_sha,
-        "status": latest["status"], "conclusion": latest["conclusion"],
-        "app": {"name": "GitHub Actions"},
+        "check": "Source checks", "workflow_id": SOURCE_WORKFLOW_ID,
+        "repository_id": REPOSITORY_ID, "head_sha": head_sha,
+        "head_branch": branch, "pull_number": pull_number,
+        "run_id": str(latest["id"]), "run_number": latest["run_number"],
+        "run_attempt": latest["run_attempt"], "conclusion": latest["conclusion"],
     }
 
 
@@ -948,8 +955,6 @@ class Coordinator:
         source_failure = _latest_source_failure(
             workflows, sha, head.get("ref", ""), number,
         )
-        if source_failure:
-            check_runs.append(source_failure)
         latest_status, status_is_owned = _status_owned(
             statuses, "cloud-review", OWNER_ID,
         )
@@ -962,6 +967,7 @@ class Coordinator:
             "up_to_date_required": up_to_date_required,
             "conversation_resolution_required": conversation_resolution_required,
             "check_runs": check_runs, "statuses": statuses,
+            "source_failure": source_failure,
             "comments": comments, "workflows": workflows, "tasks": tasks,
             "pull_workflows": pull_workflows,
             "status": latest_status, "status_owned": status_is_owned,
@@ -1061,6 +1067,7 @@ class Coordinator:
             repair = repair_request(
                 head, snapshot["enrollment"].get("attempts", 0),
                 snapshot["threads"], snapshot["check_runs"], pull_number=number,
+                source_failure=snapshot["source_failure"],
             )
         if repair and not agent_busy and snapshot["enrollment"].get("attempts", 0) < REPAIR_LIMIT:
             repair["issue"] = number
@@ -1087,7 +1094,8 @@ class Coordinator:
         if agent_busy:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
         if snapshot["enrollment"].get("attempts", 0) >= REPAIR_LIMIT and repair_request(
-                head, 0, snapshot["threads"], snapshot["check_runs"], pull_number=number):
+                head, 0, snapshot["threads"], snapshot["check_runs"], pull_number=number,
+                source_failure=snapshot["source_failure"]):
             reasons.append(("budget", "The three-repair limit is exhausted; owner attention is required."))
         status_state = "success" if review_ok and authorized else "pending"
         status_action = None
@@ -1214,10 +1222,9 @@ class Coordinator:
         )
         workflows, _ = _workflow_runs(self.api, branch, action["issue"])
         source_failure = _latest_source_failure(workflows, action["head"], branch, action["issue"])
-        if source_failure:
-            check_runs.append(source_failure)
         fresh = repair_request(
             action["head"], action["attempt"] - 1, threads, check_runs, pull_number=action["issue"],
+            source_failure=source_failure,
         )
         if not fresh or fresh["marker"] != action["marker"] or fresh["body"] != action["body"]:
             # Do not claim stale evidence, nor substitute a new repair/merge in this cycle.

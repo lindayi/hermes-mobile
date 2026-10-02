@@ -727,13 +727,7 @@ class FakeApi:
             if self.workflow_runs is not None:
                 return self.workflow_runs
             if self.source_failure:
-                return [{
-                    "id": 567, "name": "Source checks", "head_sha": self.source_failure_sha,
-                    "workflow_id": 372155405, "run_number": 49, "run_attempt": 1,
-                    "head_branch": "topic",
-                    "status": "completed", "conclusion": "failure",
-                    "pull_requests": [{"number": 16}],
-                }]
+                return [source_run(head_sha=self.source_failure_sha)]
             if self.active_agent or (self.active_after_first and self.workflow_reads > 1):
                 return [{
                     "id": 789, "name": "Running Copilot cloud agent",
@@ -1210,6 +1204,127 @@ def test_stale_owner_sensitive_authorization_does_not_carry_to_current_head(tmp_
     assert not api.graphql_writes
 
 
+def source_run(**changes):
+    return {
+        "id": 567, "name": "Source checks", "workflow_id": 372155405,
+        "repository": {"id": 1399942965}, "head_repository": {"id": 1399942965},
+        "head_sha": HEAD, "head_branch": "topic", "pull_requests": [{"number": 16}],
+        "run_number": 49, "run_attempt": 1, "status": "completed", "conclusion": "failure",
+    } | changes
+
+
+@pytest.mark.parametrize("metadata", [
+    {}, {"app": {"name": "GitHub Actions"}},
+    {"app": {"name": "GitHub Actions", "id": 15368},
+     "workflow_id": 372155405, "repository_id": 1399942965,
+     "pull_number": 16, "check": "Source checks", "run_id": "567",
+     "authenticated": True, "normalized": True},
+])
+@pytest.mark.parametrize("fresh_only", [False, True])
+def test_raw_source_named_check_cannot_replace_authenticated_workflow(tmp_path, metadata, fresh_only):
+    raw = source_run() | metadata
+    assert repair_request(HEAD, 0, [], [raw], pull_number=16) is None
+
+    class RawSourceCheck(FakeApi):
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if "/check-runs?" in route:
+                return values + [raw]
+            if "/actions/runs?" in route:
+                return [source_run()] if fresh_only and self.workflow_reads == 1 else []
+            return values
+
+    api = RawSourceCheck()
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert api.fix_attempts == 0
+    assert not result["pull_requests"][0]["repair_requested"]
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
+    if fresh_only:
+        assert api.workflow_reads > 1
+        assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("change", [
+    {"workflow_id": 1}, {"repository": {"id": 1}}, {"repository": None},
+    {"head_repository": {"id": 1}}, {"head_repository": None},
+    {"head_sha": BASE}, {"head_branch": "other"}, {"pull_requests": [{"number": 17}]},
+    {"id": None}, {"id": True}, {"run_number": 0}, {"run_attempt": 0},
+])
+@pytest.mark.parametrize("fresh_only", [False, True])
+def test_source_workflow_identity_is_required_at_plan_and_dispatch(tmp_path, change, fresh_only):
+    class ChangedSource(FakeApi):
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if "/actions/runs?" in route:
+                return [source_run(**(change if not fresh_only or self.workflow_reads > 1 else {}))]
+            return values
+
+    api = ChangedSource()
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert api.fix_attempts == 0
+    assert not result["pull_requests"][0]["repair_requested"]
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
+    if fresh_only:
+        assert api.workflow_reads > 1
+        assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("finding_count", [0, 7, 8, 12])
+def test_combined_repair_evidence_has_one_shared_eight_item_budget(finding_count):
+    from deploy.cloud_coordinator import MAX_FINDINGS, _latest_source_failure
+
+    threads = [{"id": "thread", "isResolved": False,
+                "comments": [{"body": f"Finding {index}"} for index in range(finding_count)]}]
+    source_failure = _latest_source_failure([source_run()], HEAD, "topic", 16)
+    assert source_failure is not None
+    raw = [source_run(id=index + 1) for index in range(40)]
+    request = repair_request(HEAD, 0, threads, raw, pull_number=16, source_failure=source_failure)
+    evidence = json.loads(request["body"].split("Untrusted evidence: `", 1)[1].split("`\n\n<!--", 1)[0])
+    assert len(evidence["review_findings"]) + len(evidence["failed_source_checks"]) <= MAX_FINDINGS == 8
+    assert evidence["failed_source_checks"] == [source_failure]
+    assert [item["comment"] for item in evidence["review_findings"]] == [
+        f"Finding {index}" for index in range(min(finding_count, MAX_FINDINGS - 1))]
+    assert repair_request(HEAD, 0, threads, raw, pull_number=16,
+                          source_failure=source_failure) == request
+    assert repair_request(HEAD, 0, threads, list(reversed(raw)), pull_number=16,
+                          source_failure=source_failure) == request
+    if finding_count >= MAX_FINDINGS:
+        threads[0]["comments"].append({"body": "Outside the bounded evidence"})
+        assert repair_request(HEAD, 0, threads, [], pull_number=16,
+                              source_failure=source_failure) == request
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "timed_out"])
+def test_normalized_source_identity_survives_snapshot_and_final_dispatch(tmp_path, conclusion):
+    api = FakeApi(workflow_runs=[source_run(conclusion=conclusion)])
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    snapshot = coordinator._snapshot_pull(16, {"attempts": 0}, BASE)
+    expected = {
+        "check": "Source checks", "workflow_id": 372155405,
+        "repository_id": 1399942965, "head_sha": HEAD,
+        "head_branch": "topic", "pull_number": 16,
+        "run_id": "567", "run_number": 49, "run_attempt": 1, "conclusion": conclusion,
+    }
+    assert snapshot["source_failure"] == expected
+    assert snapshot["source_failure"] not in snapshot["check_runs"]
+    planned = repair_request(HEAD, 0, [], snapshot["check_runs"], pull_number=16,
+                             source_failure=snapshot["source_failure"])
+    # Even an exact copy of normalized evidence in raw check-runs is untrusted.
+    assert repair_request(HEAD, 0, [], [expected], pull_number=16) is None
+    result = coordinator.run(apply=True)
+    assert api.fix_attempts == 1
+    assert api.workflow_reads >= 3  # snapshot, plan, final dispatch
+    prompt = next(body["prompt"] for route, body in api.writes if route.endswith("/tasks"))
+    assert prompt == planned["body"]
+    evidence = json.loads(prompt.split("Untrusted evidence: `", 1)[1].split("`\n\n<!--", 1)[0])
+    assert evidence == {"review_findings": [], "failed_source_checks": [expected]}
+    assert result["pull_requests"][0]["repair_requested"]
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+
+
 def test_failed_source_workflow_is_batched_without_accessing_run_logs(tmp_path):
     api = FakeApi(source_failure=True, unresolved=True)
     store = StateStore(tmp_path / "state.json")
@@ -1231,12 +1346,8 @@ def test_old_source_workflow_failure_is_not_attributed_to_current_head(tmp_path)
 
 def test_new_successful_source_attempt_supersedes_old_failed_run(tmp_path):
     runs = [
-        {"id": 567, "name": "Source checks", "workflow_id": 372155405,
-         "head_sha": HEAD, "head_branch": "topic", "run_number": 49, "run_attempt": 1,
-         "status": "completed", "conclusion": "failure", "pull_requests": [{"number": 16}]},
-        {"id": 568, "name": "Source checks", "workflow_id": 372155405,
-         "head_sha": HEAD, "head_branch": "topic", "run_number": 50, "run_attempt": 1,
-         "status": "completed", "conclusion": "success", "pull_requests": [{"number": 16}]},
+        source_run(),
+        source_run(id=568, run_number=50, conclusion="success"),
     ]
     api = FakeApi(workflow_runs=runs)
     Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=True)
@@ -2329,6 +2440,7 @@ def test_repair_fences_changes_during_fresh_evidence_collection(tmp_path, race):
 
 @pytest.mark.parametrize("change", [
     "resolved", "edited", "replacement-evidence", "source-green", "source-replaced", "checks-green",
+    "source-rerun",
 ])
 def test_fresh_repair_evidence_supersedes_plan_without_replacement_or_budget(tmp_path, change):
     class ChangedEvidence(FakeApi):
@@ -2347,10 +2459,12 @@ def test_fresh_repair_evidence_supersedes_plan_without_replacement_or_budget(tmp
         def get_all(self, route, *, collection=None):
             values = super().get_all(route, collection=collection)
             if "/actions/runs?" in route and self.workflow_reads > 1:
-                if change == "source-green":
+                if change in {"source-green", "checks-green"}:
                     return [run | {"conclusion": "success"} for run in values]
                 if change == "source-replaced":
                     return [run | {"id": 568, "run_number": 50} for run in values]
+                if change == "source-rerun":
+                    return [run | {"run_attempt": 2} for run in values]
             if "/check-runs?" in route and change == "checks-green":
                 return values + [{"id": 567, "name": "Source checks", "head_sha": HEAD,
                                   "status": "completed", "app": {"name": "GitHub Actions"},
@@ -2358,7 +2472,9 @@ def test_fresh_repair_evidence_supersedes_plan_without_replacement_or_budget(tmp
             return values
 
     api = ChangedEvidence(unresolved=change in {"resolved", "edited", "replacement-evidence"},
-                          source_failure=change in {"source-green", "source-replaced"})
+                          # Check-job changes alone are not workflow evidence.
+                          source_failure=change in {
+                              "source-green", "source-replaced", "checks-green", "source-rerun"})
     path = tmp_path / "state.json"
     result = _managed_cycle(api, path)
     assert api.fix_attempts == 0
