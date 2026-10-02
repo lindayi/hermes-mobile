@@ -20,6 +20,11 @@ use the bound live journal for the admission gate.
 After activation, the probe checks the same outbox and source bindings and waits
 for each applicable owned record to have the existing native `delivered` state
 and its matching owner-scoped bridge receipt, inbox row, and acknowledged flag.
+The receipt's `session_id` must exactly match the current owner-route lineage tip
+computed with the bounded record snapshot; a merely nonempty or different session
+is not ownership evidence. Lease tokens may rotate during retry and are excluded
+from preservation fingerprints, but final ACK evidence still requires the receipt
+token to match the delivered outbox row.
 It also requires zero quarantined/unknown records, conflicts, active notification
 workers, shutdown publications, or unpreserved native notifications. The empty
 backlog case is accepted only when the bound outbox is positively empty and the

@@ -158,11 +158,10 @@ class NativeNotificationCallbacks:
             return None
         return None
 
-    def _record(self, row, route):
+    def _record(self, row, route, session_id, event):
         from backend.background_delivery import BackgroundDeliveryService
 
         try:
-            event = json.loads(row['event_json'])
             if not isinstance(event, dict) or _canonical(event) != row['event_json']:
                 raise ValueError()
             if (_sha(row['event_json']) != row['payload_sha256']
@@ -180,7 +179,9 @@ class NativeNotificationCallbacks:
             if (row['route'] != route or route not in ('owned', 'foreign')
                     or type(row['historical']) is not int or row['historical'] not in (0, 1)
                     or not isinstance(row['provenance'], str) or not row['provenance']
-                    or not isinstance(row['source_state'], str)):
+                    or not isinstance(row['source_state'], str)
+                    or (route == 'owned' and (not isinstance(session_id, str) or not session_id))
+                    or (route != 'owned' and session_id is not None)):
                 raise ValueError()
             if route == 'owned':
                 # Closed vocabulary from the attested NotificationOutbox default,
@@ -213,6 +214,7 @@ class NativeNotificationCallbacks:
                 'source_state': row['source_state'],
                 'receipt_id': row['receipt_id'],
                 'lease_token': row['lease_token'],
+                'session_id': session_id,
                 'event': event,
             }
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -240,13 +242,14 @@ class NativeNotificationCallbacks:
             classify = OwnerRoute(self.home, self.state)
             records = {}
             for row in rows:
-                if not isinstance(row['event_id'], str) or not row['event_id'] or row['event_id'] in records:
+                if (not isinstance(row['event_id'], str) or not row['event_id']
+                        or row['event_id'] in records):
                     raise ValueError()
                 event = json.loads(row['event_json'])
                 if not isinstance(event, dict):
                     raise ValueError()
-                route = classify(event)
-                records[row['event_id']] = self._record(row, route)
+                route, session_id = classify.resolve(event)
+                records[row['event_id']] = self._record(row, route, session_id, event)
             receipt_rows = []
             if include_receipts:
                 with _readonly(self.inbox) as db:
@@ -362,7 +365,7 @@ class NativeNotificationCallbacks:
     @staticmethod
     def _receipt_fingerprints(snapshot):
         fields = ('event_id', 'scope', 'digest', 'user_id', 'origin', 'inbox_id',
-                  'event_json', 'lease_token', 'joined_inbox_id', 'delivery_id',
+                  'event_json', 'joined_inbox_id', 'delivery_id',
                   'inbox_user_id', 'title', 'body', 'session_id')
         result = {}
         for key, receipt in snapshot['receipts'].items():
@@ -479,7 +482,7 @@ class NativeNotificationCallbacks:
                     and receipt['delivery_id'] == 'native-event:v1:' + json.dumps([self.scope, event_id])
                     and receipt['title'] == 'Background result'
                     and receipt['body'] == BackgroundDeliveryService._body(event)
-                    and isinstance(receipt['session_id'], str) and bool(receipt['session_id']))
+                    and receipt['session_id'] == record['session_id'])
             except (KeyError, TypeError, ValueError):
                 raise RuntimeError('Owned notification receipt is inconsistent') from None
             if not valid:

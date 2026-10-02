@@ -186,9 +186,11 @@ def fixture(tmp_path):
     (paths.source / 'backend/native_maintenance.py').write_text('maintenance')
     (paths.source / 'backend/native_session_deletion.py').write_text('deletion')
     (paths.source / 'backend/native_notifications.py').write_text('notifications')
-    from backend.model_controls import _CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES
+    from backend.model_controls import _CONTROL_HASHES, _PRE_ROUTING_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES
     (paths.source / 'backend/model_controls.py').write_text(
-        '_CONTROL_HASHES = ' + repr(_CONTROL_HASHES) + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(_PREVIOUS_CONTROL_HASHES)
+        '_CONTROL_HASHES = ' + repr(_CONTROL_HASHES)
+        + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(_PRE_ROUTING_CONTROL_HASHES)
+        + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(_PREVIOUS_CONTROL_HASHES)
         + '\n_TIMEOUT_BASELINE_CONTROL_HASHES = ' + repr(release.TIMEOUT_BASELINE_CONTROL_HASHES))
     journal = RunJournal(paths.database)
     native_dropin = tmp_path / 'systemd/native.conf'
@@ -694,6 +696,8 @@ def test_authorized_controls_delta_allowed_but_legacy_still_protected(tmp_path, 
     monkeypatch.setattr(model_controls, '_CONTROL_HASHES', approved)
     monkeypatch.setattr(release, 'APPROVED_CONTROL_HASHES', approved)
     (paths.source / 'backend/model_controls.py').write_text(
-        '_CONTROL_HASHES = ' + repr(approved) + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(release.PREVIOUS_CONTROL_HASHES)
+        '_CONTROL_HASHES = ' + repr(approved)
+        + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(release.PRE_ROUTING_CONTROL_HASHES)
+        + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(release.PREVIOUS_CONTROL_HASHES)
         + '\n_TIMEOUT_BASELINE_CONTROL_HASHES = ' + repr(release.TIMEOUT_BASELINE_CONTROL_HASHES))
     assert release.deploy(paths, **args)

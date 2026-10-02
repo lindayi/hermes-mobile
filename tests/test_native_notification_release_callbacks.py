@@ -376,6 +376,15 @@ def test_handoff_fails_closed_when_preexisting_record_disappears(tmp_path):
         under_owned_lock(paths, lambda: callbacks.handoff(candidate))
 
 
+def test_handoff_rejects_owner_mutation_after_capture(tmp_path):
+    _, _, _, paths, callbacks, baseline, _, candidate, _ = setup_release(tmp_path)
+    under_owned_lock(paths, lambda: callbacks.capture(baseline))
+    with sqlite3.connect(callbacks.auth) as db:
+        db.execute("UPDATE users SET id='replacement-owner'")
+    with pytest.raises(RuntimeError, match='owner changed'):
+        under_owned_lock(paths, lambda: callbacks.handoff(candidate))
+
+
 def test_empty_backlog_requires_and_accepts_positive_bound_status(tmp_path):
     _, _, native, paths, callbacks, baseline, _, candidate, _ = setup_release(tmp_path, with_event=False)
     capture_and_handoff(paths, callbacks, baseline, candidate)
@@ -405,8 +414,31 @@ def test_receipt_must_match_the_routed_owner_session(tmp_path):
         under_owned_lock(paths, lambda: callbacks.capture(baseline))
 
 
+def test_bounded_route_snapshot_supplies_receipt_session_binding(tmp_path, monkeypatch):
+    app, outbox, _, paths, callbacks, baseline, _, _, event = setup_release(tmp_path)
+    scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+    create_owned_ack(app, outbox, event, scope)
+    under_owned_lock(paths, lambda: callbacks.capture(baseline))
+    second = {**event, 'delegation_id': 'deleg_2'}
+    outbox.capture(second, {'summary': 'Second synthetic result'}, route='owned')
+    original = OwnerRoute.resolve
+    calls = []
+
+    def resolve(router, routed_event):
+        calls.append(routed_event['delegation_id'])
+        return original(router, routed_event)
+
+    monkeypatch.setattr(OwnerRoute, 'resolve', resolve)
+    snapshot = callbacks._snapshot(include_receipts=True)
+    assert calls == ['deleg_1', 'deleg_2']
+    assert {record['session_id'] for record in snapshot['records'].values()} == {'chat'}
+    monkeypatch.setattr(OwnerRoute, 'resolve',
+                        lambda *_: pytest.fail('receipt validation rescanned owner routes'))
+    callbacks._require_delivered_receipts(snapshot)
+
+
 def test_receipt_retry_token_change_does_not_break_preservation(tmp_path):
-    app, outbox, native, paths, callbacks, baseline, _, candidate, event = setup_release(tmp_path)
+    app, outbox, native, paths, callbacks, baseline, old, candidate, event = setup_release(tmp_path)
     scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
     create_owned_ack(app, outbox, event, scope)
     capture_and_handoff(paths, callbacks, baseline, candidate)
@@ -419,6 +451,13 @@ def test_receipt_retry_token_change_does_not_break_preservation(tmp_path):
                    (retried_token, 'async:' + event['delegation_id']))
     activate(native, paths, candidate)
     assert probe_under_owned_lock(paths, callbacks, candidate) is True
+    (paths.state / 'current').unlink()
+    (paths.state / 'current').symlink_to(old)
+    native.active_root = old
+    native.pid, native.started = 321, 654
+    results = []
+    under_owned_lock(paths, lambda: results.append(callbacks.verify_rollback(old, baseline)))
+    assert results == [True]
 
 
 def test_probe_retries_a_transient_status_snapshot_race(tmp_path):

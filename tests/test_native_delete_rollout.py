@@ -38,7 +38,9 @@ def versions(tmp_path, monkeypatch):
     monkeypatch.setattr(release, 'APPROVED_CONTROL_HASHES', maps[1])
     for root in roots:
         (root / 'backend/model_controls.py').write_text(
-            '_CONTROL_HASHES = ' + repr(maps[1]) + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(maps[0])
+            '_CONTROL_HASHES = ' + repr(maps[1])
+            + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(release.PRE_ROUTING_CONTROL_HASHES)
+            + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(maps[0])
             + '\n_TIMEOUT_BASELINE_CONTROL_HASHES = ' + repr(release.TIMEOUT_BASELINE_CONTROL_HASHES))
     return (*roots, *maps)
 
@@ -75,7 +77,8 @@ def test_unknown_or_mixed_sources_are_not_a_trusted_version(versions, change):
         release.attested_controls(root)
 
 
-@pytest.mark.parametrize('constant', ['_CONTROL_HASHES', '_PREVIOUS_CONTROL_HASHES',
+@pytest.mark.parametrize('constant', ['_CONTROL_HASHES', '_PRE_ROUTING_CONTROL_HASHES',
+                                      '_PREVIOUS_CONTROL_HASHES',
                                       '_TIMEOUT_BASELINE_CONTROL_HASHES'])
 def test_candidate_requires_all_staged_literal_maps(versions, constant):
     old, new, previous, candidate = versions
