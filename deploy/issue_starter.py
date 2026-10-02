@@ -524,10 +524,12 @@ class Coordinator:
         if (not isinstance(user, dict) or type(user.get("id")) is not int
                 or user["id"] != OWNER_ID
                 or not isinstance(repository, dict)
+                or type(repository.get("id")) is not int
                 or repository.get("id") != REPOSITORY_ID
                 or not isinstance(full_name, str)
                 or full_name.casefold() != REPOSITORY.casefold()
-                or not isinstance(owner, dict) or owner.get("id") != OWNER_ID
+                or not isinstance(owner, dict) or type(owner.get("id")) is not int
+                or owner.get("id") != OWNER_ID
                 or repository.get("default_branch") != MAIN_BRANCH):
             raise CoordinatorError("Authenticated GitHub owner or repository identity did not match")
 
@@ -543,7 +545,8 @@ class Coordinator:
         if type(number) is not int or number <= 0:
             raise CoordinatorError("Stored issue identity is invalid")
         value = self.api.get(f"repos/{REPOSITORY}/issues/{number}")
-        if (not isinstance(value, dict) or value.get("number") != number
+        if (not isinstance(value, dict) or type(value.get("number")) is not int
+                or value.get("number") != number
                 or value.get("state") != "open" or "pull_request" in value):
             raise CoordinatorError("Authorized issue is no longer open and actionable")
         digest = _issue_digest(value.get("title"), value.get("body"))
@@ -554,12 +557,14 @@ class Coordinator:
         )
         command = next(
             (item for item in comments if isinstance(item, dict)
+             and type(item.get("id")) is int and item["id"] > 0
              and item.get("id") == record.get("command_id")),
             None,
         )
         user = command.get("user") if isinstance(command, dict) else None
         if (not isinstance(command, dict) or command.get("body") != COMMAND
-                or not isinstance(user, dict) or user.get("id") != OWNER_ID
+                or not isinstance(user, dict) or type(user.get("id")) is not int
+                or user.get("id") != OWNER_ID
                 or command.get("created_at") != record.get("accepted_at")
                 or _parse_time(command.get("created_at")) is None
                 or command.get("updated_at") != command.get("created_at")):
@@ -1005,10 +1010,13 @@ class Coordinator:
         task = self.api.get(f"{TASKS_ROUTE}/{task_id}")
         if (not isinstance(task, dict) or task.get("id") != task_id
                 or not isinstance(task.get("creator"), dict)
+                or type(task["creator"].get("id")) is not int
                 or task["creator"].get("id") != OWNER_ID
                 or not isinstance(task.get("owner"), dict)
+                or type(task["owner"].get("id")) is not int
                 or task["owner"].get("id") != OWNER_ID
                 or not isinstance(task.get("repository"), dict)
+                or type(task["repository"].get("id")) is not int
                 or task["repository"].get("id") != REPOSITORY_ID):
             raise CoordinatorError("Agent task owner or repository identity did not match")
         return task
@@ -1054,7 +1062,7 @@ class Coordinator:
         for pull in pull_list:
             if not isinstance(pull, dict):
                 continue
-            if pull.get("id") == artifact_id:
+            if type(pull.get("id")) is int and pull.get("id") == artifact_id:
                 matches.append(pull)
         if len(matches) != 1:
             return None
@@ -1072,16 +1080,18 @@ class Coordinator:
         base = pull.get("base")
         head_repo = head.get("repo") if isinstance(head, dict) else None
         base_repo = base.get("repo") if isinstance(base, dict) else None
-        if (pull.get("id") != artifact_id
-                or pull.get("number") != number
+        if (type(pull.get("id")) is not int or pull.get("id") != artifact_id
+                or type(pull.get("number")) is not int or pull.get("number") != number
                 or pull.get("node_id") != node_id
                 or pull.get("state") != "open" or pull.get("merged") is not False
                 or type(pull.get("draft")) is not bool
                 or not isinstance(head, dict) or head.get("ref") != branch
                 or not _is_sha(head.get("sha"))
-                or not isinstance(head_repo, dict) or head_repo.get("id") != REPOSITORY_ID
+                or not isinstance(head_repo, dict) or type(head_repo.get("id")) is not int
+                or head_repo.get("id") != REPOSITORY_ID
                 or not isinstance(base, dict) or base.get("ref") != MAIN_BRANCH
-                or not isinstance(base_repo, dict) or base_repo.get("id") != REPOSITORY_ID
+                or not isinstance(base_repo, dict) or type(base_repo.get("id")) is not int
+                or base_repo.get("id") != REPOSITORY_ID
                 or not _contains_closing_reference(pull.get("body"), issue_number)):
             return None
         return pull
@@ -1205,16 +1215,21 @@ class Coordinator:
         pull = self.api.get(f"repos/{REPOSITORY}/pulls/{record['pull_number']}")
         head = pull.get("head") if isinstance(pull, dict) else None
         base = pull.get("base") if isinstance(pull, dict) else None
-        if (not isinstance(pull, dict) or pull.get("number") != record["pull_number"]
+        if (not isinstance(pull, dict)
+                or type(pull.get("id")) is not int or pull["id"] <= 0
+                or type(pull.get("number")) is not int or pull["number"] <= 0
+                or pull.get("number") != record["pull_number"]
                 or pull.get("state") != "open" or pull.get("merged") is not False
                 or pull.get("node_id") != record.get("pull_node_id")
                 or type(pull.get("draft")) is not bool
                 or not isinstance(head, dict) or head.get("sha") != record["head_sha"]
                 or head.get("ref") != record["branch"] or not _is_sha(head.get("sha"))
                 or not isinstance(head.get("repo"), dict)
+                or type(head["repo"].get("id")) is not int
                 or head["repo"].get("id") != REPOSITORY_ID
                 or not isinstance(base, dict) or base.get("ref") != MAIN_BRANCH
                 or not isinstance(base.get("repo"), dict)
+                or type(base["repo"].get("id")) is not int
                 or base["repo"].get("id") != REPOSITORY_ID
                 or not _contains_closing_reference(pull.get("body"), record["issue"])):
             raise CoordinatorError("Task pull request identity or head changed")

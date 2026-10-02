@@ -332,7 +332,7 @@ def test_untrusted_stale_or_unverifiable_issue_evidence_never_dispatches(
     result = make_coordinator(tmp_path, api).run(apply=True)
 
     assert result["dispatched"] == expected
-    assert not any(route.endswith("/agents/tasks") for route, _ in api.posts)
+    assert not any(route.endswith("/tasks") for route, _ in api.posts)
 
 
 @pytest.mark.parametrize(
@@ -646,7 +646,7 @@ def test_nonterminal_or_unknown_task_state_never_hands_off(tmp_path, state):
     result = make_coordinator(tmp_path, api).run(apply=True)
 
     assert result["handed_off"] == 0
-    assert not any(route.endswith("/pulls/41/comments") for route, _ in api.posts)
+    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
     assert api.patches == []
 
 
@@ -815,7 +815,7 @@ def test_wrong_task_or_pull_identity_is_never_handed_off(tmp_path, completed, pu
     result = make_coordinator(tmp_path, api).run(apply=True)
 
     assert result["handed_off"] == 0
-    assert not any(route.endswith("/pulls/41/comments") for route, _ in api.posts)
+    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
     assert api.patches == []
 
 
@@ -837,7 +837,7 @@ def test_task_head_race_blocks_readiness_and_enrollment(tmp_path):
 
     assert result["handed_off"] == 0
     assert api.patches == []
-    assert not any(route.endswith("/pulls/41/comments") for route, _ in api.posts)
+    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
 
 
 @pytest.mark.parametrize("session_count", [None, 0, -1, 101, True, "1"])
