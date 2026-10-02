@@ -90,9 +90,12 @@ def _closing_issue_linked(api, pull, issue_number):
     graph_snapshot = None
     repository_id = None
     for _ in range(MAX_PAGES):
-        response = api.graphql(
-            query, {"number": pull["number"], "after": cursor},
-        )
+        variables = {"number": pull["number"]}
+        # Omit an absent cursor: both production adapters preserve omission,
+        # while the coordinator CLI adapter stringifies Python None.
+        if cursor is not None:
+            variables["after"] = cursor
+        response = api.graphql(query, variables)
         if (not isinstance(response, dict)
                 or ("errors" in response and response["errors"] != [])):
             return False

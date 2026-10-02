@@ -189,7 +189,7 @@ SOURCE_FINGERPRINTS = {
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and corrected shared canonical proof.
     'deploy/issue_starter.py': 'c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9',
-    'deploy/pull_handoff_binding.py': 'e4cf47de3e1b7846da92796781f05437e8225773ddf13debcfc489b58aa50550',
+    'deploy/pull_handoff_binding.py': '0e3c61e46eb82fa8de5404cd3dd36af8e2cf77388630dd0954616fe67b09d601',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.

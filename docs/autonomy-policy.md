@@ -119,16 +119,21 @@ PR58 notification-unit bytes and pins are unchanged.
 | `deploy/pull_handoff_binding.py` | `e4cf47de3e1b7846da92796781f05437e8225773ddf13debcfc489b58aa50550` |
 
 The final combined source overlay retains PR55's `_reconcile_actions` from
-`181455bcb978e8fd9073ebccb90aea64f995efc4` and PR57's admission routines and
-shared helper from `2447f7960141ecdc24ad445deb0e93f858818691`. Its coordinator
-SHA-256 is derived from the combined actual bytes, not either parent's digest:
+`181455bcb978e8fd9073ebccb90aea64f995efc4` and PR57's admission routines from
+`2447f7960141ecdc24ad445deb0e93f858818691`. Its coordinator SHA-256 is derived
+from the combined actual bytes, not either parent's digest. The shared helper
+subsequently omits an absent first-page cursor so both production API adapters
+request the same connection: the coordinator's CLI transport otherwise sends the
+literal string `None`, while the starter's JSON transport sends null. Real cursors,
+all linkage checks, and pagination bounds remain unchanged:
 
 | Final PR55 + PR57 + PR58 assembly overlay | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `4a94bd43f7d350cb8aaee08650726893e6775872e8af20f3a0c8f7f61127345d` |
+| `deploy/pull_handoff_binding.py` | `0e3c61e46eb82fa8de5404cd3dd36af8e2cf77388630dd0954616fe67b09d601` |
 
-The runtime source pin and independent literal fixture explicitly use this
-combined digest. The starter/helper pins above and issue #58 unit pin below are
+The runtime source pins and independent literal fixtures explicitly use these
+combined/current digests. The starter pin above and issue #58 unit pin below are
 unchanged. All other pins and historical baseline hashes are retained. Matching
 bytes and focused synthetic tests are consistency evidence only: final exact-head
 independent review and integration gates remain required, with no activation,
