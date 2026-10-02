@@ -696,7 +696,8 @@ def test_command_containing_pr_body_uses_authenticated_closing_issue_edge(tmp_pa
     ]
     assert queries
     assert all(call["variables"]["number"] == 41 for call in queries)
-    assert all("after" in call["variables"] for call in queries)
+    # This single-page fixture must omit the absent cursor for both adapters.
+    assert all(call["variables"] == {"number": 41} for call in queries)
 
 
 def test_reserved_pull_body_digest_is_immutable(tmp_path):

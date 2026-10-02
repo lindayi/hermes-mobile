@@ -235,7 +235,7 @@ these current assembly pins, also independently literal in the launch fixture:
 | `deploy/hermes-mobile-coordinator.service` | `49d6ebb6e24b4c0a06af3d10e6e2cce11dd6af7ee8056c99268058c2f6f2cab3` |
 
 Issue #56 updates the starter's current source candidate pin to
-`c47d5a305375a20003bdf0e76e17b91ef5cbae8678e7459ebe8756f6d82bb3fb`. This is
+`c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9`. This is
 source consistency only, not independent review, runtime evidence, or activation
 permission.
 
