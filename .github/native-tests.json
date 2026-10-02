@@ -1,0 +1,18 @@
+{
+  "tests/test_cron_delivery_preflight.py": "Exercises the pinned patched cron scheduler with synthetic delivery fixtures; no private host state is required.",
+  "tests/test_delivery_adapter.py": "Exercises the public patched delivery adapter using synthetic transports; no provider credentials are required.",
+  "tests/test_delivery_native.py": "Exercises native delivery behavior with synthetic payloads against the reconstructed public runtime.",
+  "tests/test_member_jobs.py": "Exercises member-job scheduling with synthetic fixtures against the pinned public runtime.",
+  "tests/test_member_scheduler.py": "Exercises scheduler behavior with synthetic fixtures against the pinned public runtime.",
+  "tests/test_model_selection_transport_contract.py": "Checks the patched public transport contract with synthetic model-selection fixtures; no model calls are made.",
+  "tests/test_native_compression_admission.py": "Checks native compression admission using synthetic requests and the reconstructed public runtime.",
+  "tests/test_native_controls_release.py": "Checks fingerprints from the pinned, reconstructed public runtime and its installed tree; no production files are read.",
+  "tests/test_native_controls_startup.py": "Starts the pinned Python 3.11 public runtime in an isolated synthetic workspace; no production service is started.",
+  "tests/test_native_delete_rollout.py": "Exercises native deletion rollout behavior with synthetic state against the pinned public runtime.",
+  "tests/test_native_maintenance.py": "Exercises native maintenance behavior with synthetic state against the pinned public runtime.",
+  "tests/test_native_notifications.py": "Exercises native notifications with synthetic fixtures against the pinned public runtime.",
+  "tests/test_native_parallel_lease_contract.py": "Checks the native lease contract with isolated synthetic fixtures against the pinned public runtime.",
+  "tests/test_native_run_controls.py": "Exercises native run controls with synthetic state against the pinned public runtime.",
+  "tests/test_native_session_deletion.py": "Exercises session deletion with isolated synthetic state against the pinned public runtime.",
+  "tests/test_native_session_deletion_review.py": "Checks reconstructed public source fingerprints only; no private operator or production files are needed."
+}

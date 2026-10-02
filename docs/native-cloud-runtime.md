@@ -24,15 +24,30 @@ uses the existing managed `deploy.test_workspace.run_suite` lifecycle.
 3. Native provisioning uses Python 3.11 and locked public dependencies; test homes,
    caches, and evidence remain isolated on the disposable runner.
 4. All eligible manifest-listed native tests are run unchanged through the managed
-   harness; the four private-operator tests remain excluded and classifications
-   remain unchanged.
+   harness; the four private-operator tests remain excluded from hosted native
+   execution and remain in the installed-runtime host suite.
 5. Existing local managed test paths remain supported for small tasks. Only this
    native provisioner refuses local execution.
 
-No CI workflow, selector, host manifest, application code, or existing test was
-changed. The composite action was syntax-checked, and its preparation command was
-executed in this hosted runner; the pilot did not wire the action into CI. Host
-classifications remain unchanged until a parent integration.
+The original pilot intentionally did not alter CI selection or classifications.
+This integration adds `.github/native-tests.json` as a reason-bearing subset of
+`.github/host-tests.json`, selects it through `scripts/ci_tests.py native`, and
+runs it using the existing managed workspace. The complete host manifest and
+`scripts/ci_tests.py host` behavior remain unchanged, including the four private
+operator tests. The required hosted `source-ci` aggregate and release artifact job
+set now include the native job.
+
+The native job starts with the provisioner's non-mutating hosted-runner preflight,
+then prepares project test dependencies under Python 3.12 and the pinned public
+patched Hermes runtime under Python 3.11. It exports the provisioner's runner-local
+SQLite 3.51.3 library path to the managed test process. Checkout credentials are
+not persisted; the job runs only on disposable GitHub-hosted Ubuntu and has no
+private state, deployment credential or operator upload.
+
+Hosted native success demonstrates repeatable behavior against reconstructed
+public source only. It does not replace the required installed/private host
+compatibility run, prove the deployed bytes or live services, or justify reporting
+the `integration-tests` status.
 
 ## Public provenance
 
