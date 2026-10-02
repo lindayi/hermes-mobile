@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import os
@@ -140,7 +141,7 @@ def pull_request(*, pull_id=3301, node_id="PR_kwDO123", head_ref="copilot/issue-
         "base": {
             "sha": "b" * 40,
             "ref": base_ref,
-            "repo": {"id": REPOSITORY_ID},
+            "repo": {"id": REPOSITORY_ID, "node_id": GRAPHQL_REPOSITORY_ID},
         },
     }
 
@@ -837,6 +838,50 @@ def test_malformed_or_inconsistent_closing_issue_responses_block(tmp_path, inval
     assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
 
 
+@pytest.mark.parametrize("invalid", [
+    "coherent_wrong_repository_id", "missing_rest_node_id", "empty_rest_node_id",
+    "null_rest_node_id", "nonstring_rest_node_id", "changed_rest_node_id",
+])
+def test_closing_repository_is_bound_to_fixed_rest_identity(tmp_path, invalid):
+    # Independent review R2: self-consistent GraphQL IDs are not a REST anchor.
+    class SnapshotApi(FakeApi):
+        def get(self, route):
+            return copy.deepcopy(super().get(route))
+
+        def post(self, route, body):
+            response = copy.deepcopy(super().post(route, body))
+            if (invalid == "changed_rest_node_id" and route == "graphql"
+                    and "closingIssuesReferences" in body.get("query", "")):
+                self.pulls[0]["base"]["repo"]["node_id"] = "R_other"
+            return response
+
+    pull = pull_request()
+    api = SnapshotApi(pulls=[pull])
+    response = closing_issue_response(pull, nodes=[issue_reference()])
+    repository = response["data"]["repository"]
+    if invalid == "coherent_wrong_repository_id":
+        repository["id"] = "R_other"
+        repository["pullRequest"]["closingIssuesReferences"]["nodes"][0][
+            "repository"
+        ]["id"] = "R_other"
+    elif invalid == "missing_rest_node_id":
+        del pull["base"]["repo"]["node_id"]
+    elif invalid != "changed_rest_node_id":
+        pull["base"]["repo"]["node_id"] = {
+            "empty_rest_node_id": "", "null_rest_node_id": None,
+            "nonstring_rest_node_id": REPOSITORY_ID,
+        }[invalid]
+    api.closing_pages[None] = response
+
+    result = _run_completed_handoff(tmp_path, api)
+
+    assert result["handed_off"] == 0
+    assert result["blocked"] == 1
+    assert not any("markPullRequestReadyForReview" in call["query"]
+                   for call in api.graphql_calls)
+    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
+
+
 def test_unbounded_closing_issue_pagination_fails_closed(tmp_path):
     class EndlessPagesApi(FakeApi):
         def post(self, route, body):
@@ -949,6 +994,64 @@ def test_pull_body_change_after_enrollment_post_is_not_reported_or_reposted(tmp_
         if route.endswith("/issues/41/comments")
         and body.get("body", "").startswith("/hermes enroll ")
     ]) == 1
+
+
+@pytest.mark.parametrize("path", ["direct", "reconciliation"])
+def test_redraft_after_enrollment_blocks_completion_without_repost(tmp_path, path):
+    # Reproduce independent review R1 with immutable transport snapshots.
+    class RedraftApi(FakeApi):
+        redraft_on_comments = False
+
+        def get(self, route):
+            response = copy.deepcopy(super().get(route))
+            if (self.redraft_on_comments
+                    and route.startswith(f"repos/{REPOSITORY}/issues/41/comments?")):
+                self.redraft_on_comments = False
+                self.pulls[0]["draft"] = True
+            return response
+
+        def post(self, route, body):
+            response = copy.deepcopy(super().post(route, body))
+            if (route.endswith("/issues/41/comments")
+                    and body.get("body", "").startswith("/hermes enroll ")):
+                if path == "reconciliation":
+                    raise TimeoutError("accepted enrollment response lost")
+                self.pulls[0]["draft"] = True
+            return response
+
+    api = RedraftApi(pulls=[pull_request()])
+    result = _run_completed_handoff(tmp_path, api)
+    if path == "reconciliation":
+        assert result["blocked"] == 1
+        record = make_coordinator(tmp_path, api).store.snapshot()["commands"]["28:9001"]
+        assert record["enrollment_state"] == "uncertain"
+        # Re-draft only after the pre-enrollment fence, at reconciliation's read.
+        api.redraft_on_comments = True
+        result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert api.pulls[0]["draft"] is True
+    assert result["handed_off"] == 0
+    assert result["blocked"] == 1
+    record = make_coordinator(tmp_path, api).store.snapshot()["commands"]["28:9001"]
+    assert record["phase"] == "handoff_failed"
+    assert record["enrollment_state"] == "uncertain"
+    assert record["blocker"] == "pull_changed_after_enrollment"
+    assert record["receipt"]["kind"] == "blocked"
+    # Even restoring readiness cannot retry this consumed enrollment attempt.
+    api.pulls[0]["draft"] = False
+    retry = make_coordinator(tmp_path, api).run(apply=True)
+    assert retry["handed_off"] == 0
+    assert len([
+        body for route, body in api.posts
+        if route.endswith("/issues/41/comments")
+        and body.get("body", "").startswith("/hermes enroll ")
+    ]) == 1
+    assert len([
+        call for call in api.graphql_calls
+        if "markPullRequestReadyForReview" in call["query"]
+    ]) == 1
+    assert not any("ready for review" in body.get("body", "")
+                   for route, body in api.posts if route.endswith("/issues/28/comments"))
 
 
 def test_completed_bound_task_marks_its_draft_pr_ready_and_enrolls_once(tmp_path):

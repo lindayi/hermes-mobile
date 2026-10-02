@@ -1037,12 +1037,14 @@ class Coordinator:
                 or not isinstance(base_repo, dict)
                 or type(base_repo.get("id")) is not int
                 or base_repo["id"] != REPOSITORY_ID
+                or not isinstance(base_repo.get("node_id"), str)
+                or not base_repo["node_id"]
                 or not isinstance(body, str) or len(body) > MAX_TEXT_CHARS):
             return None
         return (
             pull["id"], pull["number"], pull["node_id"], pull["state"],
             pull["merged"], pull["draft"], head["ref"], head["sha"],
-            head_repo["id"], base["ref"], base_repo["id"], body,
+            head_repo["id"], base["ref"], base_repo["id"], base_repo["node_id"], body,
         )
 
     def _closing_issue_linked(self, pull, issue_number):
@@ -1088,6 +1090,7 @@ class Coordinator:
             if (not isinstance(repository, dict)
                     or not isinstance(repository.get("id"), str)
                     or not repository["id"]
+                    or repository["id"] != pull["base"]["repo"]["node_id"]
                     or not isinstance(repository.get("nameWithOwner"), str)
                     or repository["nameWithOwner"].casefold() != REPOSITORY.casefold()
                     or not isinstance(node, dict)
@@ -1533,7 +1536,8 @@ class Coordinator:
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
             try:
-                self._current_pull(record)
+                if self._current_pull(record).get("draft") is not False:
+                    raise CoordinatorError("Task pull request is no longer ready after enrollment")
             except Exception:
                 self.store.update(key, {
                     "phase": "handoff_failed",
@@ -1563,7 +1567,8 @@ class Coordinator:
             )
             if eligible:
                 try:
-                    self._current_pull(record)
+                    if self._current_pull(record).get("draft") is not False:
+                        raise CoordinatorError("Task pull request is no longer ready after enrollment")
                 except Exception:
                     self.store.update(key, {
                         "phase": "handoff_failed",
