@@ -223,6 +223,23 @@ def _static_python_control_closure(source_root=None, roots=None):
     unresolved_imports = set()
     local_roots = {'backend', 'deploy', 'scripts'}
 
+    def initializer_attributes(module_path):
+        initializer = module_path / '__init__.py'
+        if not initializer.is_file():
+            return set()
+        attributes = set()
+        # Only direct declarations prove an attribute. Import requests, nested
+        # scopes and annotation-only names do not prove a package member exists.
+        for statement in ast.parse(initializer.read_text()).body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                attributes.add(statement.name)
+            elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                if isinstance(statement, ast.AnnAssign) and statement.value is None:
+                    continue
+                targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                attributes.update(target.id for target in targets if isinstance(target, ast.Name))
+        return attributes
+
     def enqueue(module, *, optional=False):
         namespace = module.partition('.')[0]
         if namespace not in local_roots:
@@ -260,9 +277,10 @@ def _static_python_control_closure(source_root=None, roots=None):
         dynamic_names = {'__import__', 'eval', 'exec'}
         for imported in ast.walk(tree):
             if isinstance(imported, ast.ImportFrom) and imported.module in {
-                    'builtins', 'importlib'}:
+                    'builtins', 'importlib', 'importlib.util'}:
                 for alias in imported.names:
-                    if alias.name in {'__import__', 'eval', 'exec', 'import_module'}:
+                    if alias.name in {'__import__', 'eval', 'exec', 'import_module',
+                                      'spec_from_file_location', 'load_module'}:
                         dynamic_names.add(alias.asname or alias.name)
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -284,11 +302,12 @@ def _static_python_control_closure(source_root=None, roots=None):
                 enqueue(module)
                 module_path = source_root.joinpath(*module.split('.'))
                 if node.module is None or module_path.is_dir():
+                    attributes = initializer_attributes(module_path)
                     for alias in node.names:
                         if alias.name == '*':
                             unresolved_imports.add(path)
                         else:
-                            enqueue(f'{module}.{alias.name}', optional=True)
+                            enqueue(f'{module}.{alias.name}', optional=alias.name in attributes)
             if isinstance(node, ast.Call):
                 function = node.func
                 if ((isinstance(function, ast.Name) and function.id in dynamic_names)
@@ -341,6 +360,82 @@ def test_static_python_closure_reports_unsupported_execution_and_missing_modules
     assert closure == {'deploy/runner.py'}
     assert dynamic_imports == {'deploy/runner.py'}
     assert unresolved_imports == {'deploy.missing'}
+
+
+@pytest.mark.parametrize(('module', 'name'), [
+    ('builtins', '__import__'),
+    ('builtins', 'eval'),
+    ('builtins', 'exec'),
+    ('importlib', 'import_module'),
+    ('importlib.util', 'spec_from_file_location'),
+    ('importlib.util', 'load_module'),
+])
+@pytest.mark.parametrize('aliased', [False, True])
+def test_static_python_closure_reports_direct_dynamic_callable_imports(tmp_path, module, name, aliased):
+    binding = 'load' if aliased else name
+    suffix = ' as load' if aliased else ''
+    _write_python(
+        tmp_path, 'deploy/runner.py',
+        f'from {module} import {name}{suffix}\n{binding}("synthetic")\n',
+    )
+
+    closure, dynamic_imports, unresolved_imports = _static_python_control_closure(
+        tmp_path, roots={'deploy/runner.py'},
+    )
+
+    assert closure == {'deploy/runner.py'}
+    assert dynamic_imports == {'deploy/runner.py'}
+    assert not unresolved_imports
+
+
+@pytest.mark.parametrize('import_statement', [
+    'from . import missing',
+    'from deploy import missing as alias',
+])
+@pytest.mark.parametrize('initializer', [
+    None,
+    '',
+    'known = 1\n',
+    'missing: object\n',
+    'class Container:\n    missing = 1\n',
+    'def factory():\n    missing = 1\n',
+    'from . import missing\n',
+])
+def test_static_python_closure_rejects_missing_package_members(tmp_path, import_statement, initializer):
+    _write_python(tmp_path, 'deploy/runner.py', import_statement + '\n')
+    if initializer is not None:
+        _write_python(tmp_path, 'deploy/__init__.py', initializer)
+
+    closure, dynamic_imports, unresolved_imports = _static_python_control_closure(
+        tmp_path, roots={'deploy/runner.py'},
+    )
+
+    expected = {'deploy/runner.py'}
+    if initializer is not None:
+        expected.add('deploy/__init__.py')
+    assert closure == expected
+    assert not dynamic_imports
+    assert unresolved_imports == {'deploy.missing'}
+
+
+@pytest.mark.parametrize('initializer', [
+    'exported = 1\n',
+    'exported: int = 1\n',
+    'def exported():\n    pass\n',
+    'async def exported():\n    pass\n',
+    'class exported:\n    pass\n',
+])
+def test_static_python_closure_accepts_declared_initializer_attributes(tmp_path, initializer):
+    _write_python(tmp_path, 'deploy/__init__.py', initializer)
+    _write_python(tmp_path, 'deploy/runner.py', 'from . import exported as alias\n')
+
+    closure, dynamic_imports, unresolved_imports = _static_python_control_closure(
+        tmp_path, roots={'deploy/runner.py'},
+    )
+
+    assert closure == {'deploy/__init__.py', 'deploy/runner.py'}
+    assert not dynamic_imports
+    assert not unresolved_imports
 
 
 def test_reviewed_source_fixture_matches_complete_required_contract():
