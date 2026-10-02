@@ -59,6 +59,16 @@ No native source is changed and no other historical pin is automatically refresh
 | `backend/model_controls.py` | `206fb5164283c16f46c51da99babe1b5f5e8932f062b4a1ee5bc07affe1f2c34` |
 | `backend/native_notifications.py` | `230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610` |
 
+Issue #46's post-release observer change deliberately updates only the runtime
+inventory and independent test fixture for its two source files. These candidate
+pins describe the exact proposed bytes, not a historical main revision, independent
+review acceptance, or permission to activate the observer contract.
+
+| Issue #46 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/native_controls_release.py` | `8e3d0ea18ca3d781533f4e915184f4ca779a7507f22895fbb41d15169b6d133e` |
+| `deploy/observe_release.py` | `bf01500fb253f7d41ce49d375bba63a9e4d80569eb376a6aeae50f56cf71923f` |
+
 The authorization lineage is `native25-final-runtime-review.json` (SHA-256
 `92642f88cb6c9daa5c381ea31cdd2648aba5aec2d51aa5bed7c0a2160f23448e`),
 which records these exact hashes and accepts the controller flow, together with

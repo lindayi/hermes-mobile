@@ -17,11 +17,19 @@ def test_native_observer_independently_checks_listener(tmp_path,monkeypatch,caps
             if native_failure:raise RuntimeError('Native verification failed')
     monkeypatch.setattr(native,'NativeProbe',Probe)
     def observe(p,since,expected,**kw):
-        kw['verify'](p,stage,True)
+        try:
+            kw['verify'](p,stage,True)
+        except Exception:
+            observer.set_diagnostic(kw['diagnostics'],'native_health','verification_failed')
+            return 'verification_failed'
+        observer.set_diagnostic(kw['diagnostics'],'status_recheck','verified')
         return 'succeeded'
     monkeypatch.setattr(observer,'observe',observe)
     assert observer.main(['--since-ns','1','--expected',str(expected),'--unit','fixture','--native'],paths=paths)==int(native_failure)
-    assert json.loads(capsys.readouterr().out)['status']==('failed' if native_failure else 'succeeded')
+    assert json.loads(capsys.readouterr().out)=={
+        'unit':'fixture','status':'verification_failed' if native_failure else 'succeeded',
+        'notification':'disabled','phase':'native_health' if native_failure else 'status_recheck',
+        'reason':'verification_failed' if native_failure else 'verified'}
     assert calls==[('public',stage),('native',stage)]
 
 
@@ -51,16 +59,30 @@ def operational_probe(tmp_path,monkeypatch,health_change=None):
     if health_change == 'busy':
         work['active_run_tasks']=1
         health['readiness']['checks']['background_queues']['active_api_runs']=1
-    elif health_change in ('unsafe','unpreserved'):
-        work['stopping_runs']=1
+    elif health_change and health_change.startswith('unsafe:'):
+        work[health_change.partition(':')[2]]=1
+    elif health_change == 'unknown':
+        work['unknown_worker']=0
+    elif health_change == 'malformed':
+        work['active_run_tasks']=True
+    elif health_change == 'wrong_pid':
+        health['pid']=124
+    elif health_change == 'wrong_start':
+        health['native_maintenance']['start_ticks']=457
+    elif health_change == 'bad_health':
+        health['status']='degraded'
     if health_change == 'unpreserved':
         notices.update(durable_retained=77,unpreserved=1)
     caps={'mobile_run_controls':dict(version=1,steering=True,live_commentary=True),
           'mobile_native_maintenance':dict(version=1,scope='dedicated-listener',atomic_drain=False),
           'features':{'mobile_session_delete_version':1},
           'mobile_notifications':dict(version=1,delivery='durable-inbox',automatic_model_wake=False)}
+    if health_change == 'bad_caps':
+        caps['mobile_run_controls']['steering']=False
     def request(path,*,authenticated=True):
         if not authenticated:
+            if health_change == 'anonymous':
+                return deepcopy(health)
             raise HTTPError('private',401,'Unauthorized',{},None)
         return deepcopy(health) if path == '/health/detailed' else caps
     probe.request=request
@@ -79,7 +101,11 @@ def test_post_release_native_observation_accepts_attested_busy_work(tmp_path,mon
         probe.verify(root)
 
 
-@pytest.mark.parametrize('change',['unsafe','unpreserved'])
+@pytest.mark.parametrize('change',[
+    'unsafe:shutdown_agents','unsafe:stopping_runs','unsafe:cancellation_uncertain',
+    'unsafe:session_deletion_workers','unsafe:notification_lifecycle_uncertain',
+    'unpreserved','unknown','malformed','wrong_pid','wrong_start','bad_health','bad_caps','anonymous',
+])
 def test_post_release_native_observation_rejects_unsafe_or_unpreserved_work(
         tmp_path,monkeypatch,change):
     _,probe,root,_=operational_probe(tmp_path,monkeypatch,change)

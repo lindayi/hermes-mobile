@@ -367,6 +367,12 @@ def require_native_quiescence(evidence):
     return all(v == 0 for v in values)
 
 
+OPERATIONAL_UNSAFE_WORK = (
+    'shutdown_agents', 'stopping_runs', 'cancellation_uncertain',
+    'session_deletion_workers', 'notification_lifecycle_uncertain',
+)
+
+
 class NativeProbe:
     """Read-only private native boundary; fixed owner endpoint, no model calls."""
     def __init__(self, source, *, config=CONFIG, run=subprocess.run, legacy_notice_approval=None):
@@ -553,7 +559,35 @@ class NativeProbe:
             idle = status in TERMINAL and idle
         return idle
 
-    def verify_unchanged(self, root, *, baseline):
+    @staticmethod
+    def _require_operational_activity(health):
+        work = health['native_maintenance']['work']
+        notifications = health['native_maintenance']['notifications']
+        if notifications['unpreserved'] != 0:
+            raise RuntimeError('Native notifications are not fully preserved')
+        if any(work[name] != 0 for name in OPERATIONAL_UNSAFE_WORK):
+            raise RuntimeError('Native lifecycle is not safe for observation')
+
+    def verify_operational(self, root):
+        """Verify a healthy running release without requiring maintenance idle."""
+        pid = self.attest(root)
+        source_hashes = approved_controls(root)
+        started = self._start_ticks(pid)
+        health = self.request('/health/detailed')
+        if (health.get('status') != 'ok' or type(health.get('pid')) is not int
+                or health['pid'] != pid):
+            raise RuntimeError('Native operational health or PID mismatch')
+        self._ready(health, root=root)
+        self._require_operational_activity(health)
+        caps = self.request('/v1/capabilities')
+        require_controls_capabilities(
+            caps, session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
+            notification_version=int('backend/native_notifications.py' in source_hashes))
+        self.verify_unchanged(root, baseline=dict(
+            root=str(root), legacy=False, caps=caps, source_hashes=source_hashes,
+            pid=pid, start_ticks=started), operational=True)
+
+    def verify_unchanged(self, root, *, baseline, operational=False):
         """Abort before restart: identity/health/auth, not a drain of live work."""
         from urllib.error import HTTPError
         pid = self.attest(root, legacy=baseline['legacy'])
@@ -582,6 +616,8 @@ class NativeProbe:
         require_native_quiescence(health)  # Validate typed known evidence, permit busy.
         if not baseline['legacy']:
             self._ready(health, baseline=baseline)  # Validate schema/source, permit busy.
+            if operational:
+                self._require_operational_activity(health)
         if json.dumps(self.request('/v1/capabilities'), sort_keys=True, allow_nan=False) != json.dumps(
                 baseline['caps'], sort_keys=True, allow_nan=False):
             raise RuntimeError('Unchanged native capabilities differ')

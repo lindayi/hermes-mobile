@@ -24,6 +24,22 @@ CONFIG = Path('/home/lindayi/.local/share/hermes-mobile-live/config.json')
 DEFAULT_TIMEOUT = 2100
 MAX_TIMEOUT = 86400
 
+DIAGNOSTIC_PHASES = {
+    'observer_setup', 'observer', 'worker_status', 'deployment_status',
+    'release_proofs', 'release_checks', 'native_health', 'status_recheck',
+}
+DIAGNOSTIC_REASONS = {
+    'starting', 'waiting', 'checking', 'deployment_failed',
+    'verification_failed', 'verified', 'terminal_status_missing', 'timeout',
+}
+
+
+def set_diagnostic(diagnostics, phase, reason):
+    if diagnostics is not None:
+        diagnostics.update(
+            phase=phase if phase in DIAGNOSTIC_PHASES else 'observer',
+            reason=reason if reason in DIAGNOSTIC_REASONS else 'verification_failed')
+
 
 def validate_timeout(timeout):
     if type(timeout) is not int or not 1 <= timeout <= MAX_TIMEOUT:
@@ -32,23 +48,29 @@ def validate_timeout(timeout):
 
 
 def observe(paths, since_ns, expected, *, clock=time.monotonic, sleep=time.sleep,
-            verify=verify_release, timeout=DEFAULT_TIMEOUT, worker_state=None):
+            verify=verify_release, timeout=DEFAULT_TIMEOUT, worker_state=None,
+            diagnostics=None):
     timeout = validate_timeout(timeout)
     deadline = clock() + timeout
     seen_worker = False
     while clock() < deadline:
-        result = classify(paths, since_ns, expected, verify=verify)
+        result = classify(paths, since_ns, expected, verify=verify, diagnostics=diagnostics)
         if result is None and worker_state is not None:
             state = worker_state()
             seen_worker = seen_worker or state == 'active'
             if state == 'failed' or (seen_worker and state in ('inactive', 'missing')):
                 # The worker may publish its final status between our two reads.
-                result = classify(paths, since_ns, expected, verify=verify) or 'failed'
+                result = classify(paths, since_ns, expected, verify=verify,
+                                  diagnostics=diagnostics)
+                if result is None:
+                    set_diagnostic(diagnostics, 'worker_status', 'terminal_status_missing')
+                    result = 'verification_failed'
         if clock() >= deadline:
             break
         if result is not None:
             return result
         sleep(min(2, deadline - clock()))
+    set_diagnostic(diagnostics, 'observer', 'timeout')
     return 'timeout'
 
 
@@ -97,7 +119,8 @@ def notify_owner(unit, outcome, *, config_path=CONFIG):
     from backend.notifications import NotificationService
     safe_unit(unit)
     messages = {'succeeded': 'Release completed and verification passed.',
-                'failed': 'The release could not be verified. The update may already be running. Check deployment status before retrying.',
+                'failed': 'The release did not complete successfully.',
+                'verification_failed': 'The release could not be verified. The update may already be running. Check deployment status before retrying.',
                 'timeout': 'Release observation timed out. Operator review is required.'}
     body = messages[outcome]
     config_path = private_existing(config_path)
@@ -135,8 +158,8 @@ def notify_owner(unit, outcome, *, config_path=CONFIG):
                                   body, silent=True)['id']
 
 
-def classify(paths, since_ns, expected, *, verify=verify_release):
-    """Return None (pending), failed, or independently verified succeeded."""
+def classify(paths, since_ns, expected, *, verify=verify_release, diagnostics=None):
+    """Return None (pending), failed, verification_failed, or verified succeeded."""
     status_path = paths.state / 'status.json'
     try:
         with status_path.open() as handle:
@@ -149,16 +172,20 @@ def classify(paths, since_ns, expected, *, verify=verify_release):
     if not isinstance(record, dict):
         return None
     if record.get('status') in ('failed', 'rolled_back', 'rollback_failed'):
+        set_diagnostic(diagnostics, 'deployment_status', 'deployment_failed')
         return 'failed'
     if record.get('status') != 'succeeded':
         return None
     try:
+        set_diagnostic(diagnostics, 'release_proofs', 'checking')
         release = record.get('release')
         if not isinstance(release, str) or not re.fullmatch('[0-9a-f]{32}', release):
-            return 'failed'
+            set_diagnostic(diagnostics, 'release_proofs', 'verification_failed')
+            return 'verification_failed'
         stage = paths.state / 'releases' / release
         if not stage.is_dir() or stage.resolve(strict=True) != stage.absolute():
-            return 'failed'
+            set_diagnostic(diagnostics, 'release_proofs', 'verification_failed')
+            return 'verification_failed'
         def proofs():
             current = paths.state / 'current'
             if not current.is_symlink() or current.resolve(strict=True) != stage:
@@ -177,14 +204,20 @@ def classify(paths, since_ns, expected, *, verify=verify_release):
                 if db.execute('SELECT 1 FROM deployment_gate LIMIT 1').fetchone():
                     raise ValueError('Deployment gate is closed')
         proofs()
+        set_diagnostic(diagnostics, 'release_checks', 'checking')
         verify(paths, stage, True)
+        set_diagnostic(diagnostics, 'release_proofs', 'checking')
         proofs()
         if status_path.stat().st_mtime_ns != stamp or json.loads(status_path.read_text()) != record:
-            return 'failed'
+            set_diagnostic(diagnostics, 'status_recheck', 'verification_failed')
+            return 'verification_failed'
+        set_diagnostic(diagnostics, 'status_recheck', 'verified')
         return 'succeeded'
     except Exception:
         # Receipts never include exception strings (which may contain secrets).
-        return 'failed'
+        phase = diagnostics.get('phase', 'release_checks') if diagnostics is not None else 'release_checks'
+        set_diagnostic(diagnostics, phase, 'verification_failed')
+        return 'verification_failed'
 
 
 class ObservationTimeout(BaseException):
@@ -213,7 +246,8 @@ def main(argv=None, *, paths=None):
         validate_timeout(args.timeout)
     except ValueError as error:
         parser.error(str(error))
-    receipt = {'unit': args.unit, 'status': 'failed', 'notification': 'disabled'}
+    diagnostics = {'phase': 'observer_setup', 'reason': 'starting'}
+    receipt = {'unit': args.unit, 'status': 'verification_failed', 'notification': 'disabled'}
     def expired(signum, frame):
         raise ObservationTimeout()
     previous_handler = signal.signal(signal.SIGALRM, expired)
@@ -222,20 +256,26 @@ def main(argv=None, *, paths=None):
         expected = json.loads(args.expected.read_text())
         worker_state = (lambda: read_worker_state(args.unit)) if args.watch_worker else None
         def verify_candidate(p, stage, backend):
+            set_diagnostic(diagnostics, 'release_checks', 'checking')
             verify_release(p, stage, backend)
             if args.native:
+                set_diagnostic(diagnostics, 'native_health', 'checking')
                 from deploy.native_controls_release import NativeProbe
-                NativeProbe(p.source).verify(stage)
+                NativeProbe(p.source).verify_operational(stage)
         receipt['status'] = observe(paths or Paths(), args.since_ns, expected,
                                     timeout=args.timeout, worker_state=worker_state,
+                                    diagnostics=diagnostics,
                                     **({'verify': verify_candidate} if args.native else {}))
     except ObservationTimeout:
         receipt['status'] = 'timeout'
+        set_diagnostic(diagnostics, 'observer', 'timeout')
     except Exception:
-        receipt['status'] = 'failed'
+        receipt['status'] = 'verification_failed'
+        set_diagnostic(diagnostics, 'observer_setup', 'verification_failed')
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous_handler)
+    receipt.update(diagnostics)
     if args.notify_owner:
         try:
             receipt['inbox_id'] = notify_owner(args.unit, receipt['status'])

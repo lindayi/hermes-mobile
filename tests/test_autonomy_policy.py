@@ -100,6 +100,12 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
     'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
 }
+
+_ISSUE46_OBSERVER_FIXTURE = {
+    'deploy/native_controls_release.py': '8e3d0ea18ca3d781533f4e915184f4ca779a7507f22895fbb41d15169b6d133e',
+    'deploy/observe_release.py': 'bf01500fb253f7d41ce49d375bba63a9e4d80569eb376a6aeae50f56cf71923f',
+}
+
 # Accepted merged PR25 bytes; absent only from the historical b85c098 baseline.
 _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
     'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
@@ -134,7 +140,8 @@ _PENDING_ISSUE43_LAUNCH_FIXTURE = {
 
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
-            | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE)
+            | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE
+            | _ISSUE46_OBSERVER_FIXTURE)
 
 
 def _source_ci():
@@ -489,10 +496,17 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending = {'deploy/cloud_coordinator.py', 'deploy/native_notification_release.py',
                'deploy/review_evidence.py'} | set(_PENDING_PR40_LIFECYCLE_FIXTURE)
     pending |= set(_PENDING_ISSUE43_LAUNCH_FIXTURE)
+    pending |= set(_ISSUE46_OBSERVER_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
-    } == _MERGED_MAIN_SOURCE_FIXTURE
+    } == {
+        path: digest for path, digest in _MERGED_MAIN_SOURCE_FIXTURE.items()
+        if path not in _ISSUE46_OBSERVER_FIXTURE
+    }
+    assert {
+        path: SOURCE_FINGERPRINTS[path] for path in _ISSUE46_OBSERVER_FIXTURE
+    } == _ISSUE46_OBSERVER_FIXTURE
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in {'deploy/cloud_coordinator.py', 'deploy/review_evidence.py'}
@@ -530,6 +544,15 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         'main': 'b85c098857e7fb8229f47bd688d703bb677aeb34',
         'deploy/cloud_coordinator.py': '403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83',
     }
+
+
+@pytest.mark.parametrize('pins', [
+    SOURCE_FINGERPRINTS, _ISSUE46_OBSERVER_FIXTURE,
+], ids=['policy', 'independent-fixture'])
+@pytest.mark.parametrize('path', sorted(_ISSUE46_OBSERVER_FIXTURE))
+def test_issue46_observer_pin_matches_exact_candidate_bytes(pins, path):
+    source = Path(__file__).resolve().parents[1] / path
+    assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
 
 
 @pytest.mark.parametrize('pins', [
