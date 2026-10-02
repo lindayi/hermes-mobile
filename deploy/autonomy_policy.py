@@ -151,7 +151,7 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     'deploy/cloud_coordinator.py': 'bd5513b06b6e9539b4224c2ec83a8a4769fe6f94c5526b377b5bac09ebb9d134',
     # Pending issue #39 coordinator dependency candidate bytes; parent review only.
-    'deploy/review_evidence.py': '538fd629a7df4632d89ba8e9d40c3850c452c24de2bc4d39cb39c43d524f7916',
+    'deploy/review_evidence.py': '908a88498c8e4bd52da4706c0b1e52dfdd3ef85a960a67e03d57eb7df15d84f6',
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
     'backend/model_controls.py': 'a6276a114d770f8a52677ae11a48011b586daf7cd047dd667099e4a6251ccb6b',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',

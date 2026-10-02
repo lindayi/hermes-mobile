@@ -106,7 +106,7 @@ _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
 
 # Issue #39 coordinator dependency candidate bytes; not present in the main baseline.
 _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE = {
-    'deploy/review_evidence.py': '538fd629a7df4632d89ba8e9d40c3850c452c24de2bc4d39cb39c43d524f7916',
+    'deploy/review_evidence.py': '908a88498c8e4bd52da4706c0b1e52dfdd3ef85a960a67e03d57eb7df15d84f6',
 }
 
 
@@ -476,6 +476,15 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         'main': 'b85c098857e7fb8229f47bd688d703bb677aeb34',
         'deploy/cloud_coordinator.py': '403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83',
     }
+
+
+@pytest.mark.parametrize('pins', [
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE39_REVIEW_EVIDENCE_FIXTURE,
+], ids=['policy', 'independent-fixture'])
+def test_pending_review_evidence_pin_matches_actual_candidate_bytes(pins):
+    path = 'deploy/review_evidence.py'
+    source = Path(__file__).resolve().parents[1] / path
+    assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
 
 
 def test_reviewed_static_python_closure_is_complete_and_has_no_dynamic_imports():

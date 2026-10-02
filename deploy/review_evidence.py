@@ -15,11 +15,11 @@ MAX_BODY_CHARS = 64 * 1024
 MAX_BODY_FINDINGS = 8
 FINDING_KINDS = frozenset({"previously-missed", "changes-requested"})
 _MISSED_RE = re.compile(
-    r"<summary>\s*<strong>\s*Previously missed\s*\((\d{1,3})\)\s*</strong>\s*</summary>",
+    r"<summary\b[^>]*>\s*<strong>\s*Previously missed\b([^<]*)</strong>\s*</summary\s*>",
     re.IGNORECASE,
 )
 _OPEN_RE = re.compile(
-    r"<summary>\s*<strong>\s*Open\s*\(\d{1,3}\)\s*</strong>\s*</summary>", re.IGNORECASE,
+    r"<summary>\s*<strong>\s*Open\s*\((\d{1,3})\)\s*</strong>\s*</summary>", re.IGNORECASE,
 )
 _DETAILS_TOKEN_RE = re.compile(r"<details\b[^>]*>|</details\s*>", re.IGNORECASE)
 _SUMMARY_RE = re.compile(
@@ -109,12 +109,13 @@ def _previously_missed(body):
     """
     items = []
     for match in _MISSED_RE.finditer(body):
-        expected = int(match.group(1))
+        count = re.fullmatch(r"\s*\((\d{1,3})\)\s*", match.group(1))
+        expected = int(count.group(1)) if count else None
         if expected == 0:
             continue
         parent = _enclosing_details(body, match.start())
         section = _matching_details(body, parent) if parent is not None else None
-        parsed, malformed = [], section is None
+        parsed, malformed = [], section is None or expected is None
         end = section[2] if section else len(body)
         section_end = section[1] if section else len(body)
         position = match.end()
@@ -161,17 +162,17 @@ def _overview_summary(body):
 
 def _non_actionable_overview(body):
     summary = _overview_summary(body)
-    if re.search(r"\b(?:pending|awaiting|not yet (?:verified|validated|complete))\b",
-                 summary, re.IGNORECASE):
-        return True
-    if re.search(r"\bno (?:issues?|findings?) (?:were )?(?:found|reported)\b",
-                 summary, re.IGNORECASE):
+    # A validation-status clause is evidence of waiting; a domain object such
+    # as a "pending receipt" in a requested correction is not.
+    if re.search(r"(?:^|,\s*while\s+)(?:exact-head\s+)?(?:verification|validation)\s+"
+                 r"(?:remains|is)\s+pending[.!]?\s*$",
+                 summary, re.IGNORECASE | re.MULTILINE):
         return True
     return (
-        _OPEN_RE.search(body) is None
-        and re.search(r"\bresolved\b", summary, re.IGNORECASE) is not None
-        and re.search(r"<summary\b[^>]*>\s*<strong>\s*Resolved since last review\b",
-                      body, re.IGNORECASE) is not None
+        re.search(r"^###\s+(?:🟢\s+)?Looks good\s*$", summary,
+                  re.IGNORECASE | re.MULTILINE) is not None
+        and re.search(r"^\*\*Findings:\*\*\s*None\s*$", summary,
+                      re.IGNORECASE | re.MULTILINE) is not None
     )
 
 
@@ -188,14 +189,15 @@ def body_findings(reviews, head_sha, *, reviewer_id):
     state, body = review.get("state"), review.get("body")
     if (not isinstance(head_sha, str) or review.get("commit_id") != head_sha
             or not positive_id(review.get("id"))
-            or state not in {"COMMENTED", "CHANGES_REQUESTED"}
+            or type(state) is not str or state not in {"COMMENTED", "CHANGES_REQUESTED"}
             or not isinstance(body, str) or not body.strip()):
         return []
     body = body[:MAX_BODY_CHARS]
     found = []
     if OVERVIEW_MARKER in body:
         found = [("previously-missed", text) for text in _previously_missed(body)]
-        if (not found and state == "CHANGES_REQUESTED" and not _OPEN_RE.search(body)
+        if (not found and state == "CHANGES_REQUESTED"
+                and not any(int(match.group(1)) > 0 for match in _OPEN_RE.finditer(body))
                 and not _non_actionable_overview(body)):
             found = [("changes-requested", _overview_summary(body))]
     elif state == "CHANGES_REQUESTED":

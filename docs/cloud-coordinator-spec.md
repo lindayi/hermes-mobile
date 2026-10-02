@@ -46,12 +46,17 @@ current head with a positive record ID is read, and only when it is `COMMENTED` 
 `CHANGES_REQUESTED`. From a `ccr-overview-v2` body, each item of a
 `Previously missed (N)` section is forwarded (including under a `Findings: None`
 headline); disclosure boundaries are balanced, and a section whose item structure
-or count cannot be proven is forwarded whole as one item. `Open` items (including
-`Open (0)`) suppress summary fallback; positive open findings are carried by their
-review threads and are not duplicated. No-findings, pending-validation, and
-resolved-only overviews yield nothing. `CHANGES_REQUESTED` prose without structured
-items (a plain body, or an actionable overview with neither `Open` nor
-`Previously missed` items) is forwarded as one summary. Each body finding records
+or count cannot be proven is forwarded whole as one item. Section headings allow
+summary attributes; unsupported counts such as `(unknown)` take that whole-section
+fallback. Positive `Open (N)` counts suppress summary fallback because those
+findings are carried by their review threads, not duplicated. `Open (0)` alone
+does not suppress an actionable summary. A `Looks good` disposition with
+`Findings: None`, or an explicit validation-status clause such as `exact-head
+verification remains pending`, yields no summary evidence. Domain words such as
+`pending receipts` alone do not declare validation pending. `CHANGES_REQUESTED`
+prose without structured items (a plain body, or an actionable overview with no
+positive `Open` count and no `Previously missed` items) is forwarded as one summary.
+Each body finding records
 the genuine review ID, head SHA, and submission time; it never carries a thread ID.
 Body text is untrusted evidence: it is never approval, and approval is never
 inferred from prose. At most 64 KiB of a body is parsed.

@@ -162,9 +162,43 @@ def test_changes_requested_prose_without_inline_findings_is_forwarded(tmp_path):
     assert finding["review"] == REVIEW_ID and "thread" not in finding
 
 
+@pytest.mark.parametrize("prose", [
+    "Required correction: reject pending receipts before claiming an attempt.",
+    "Required correction: reject receipts awaiting validation before claiming an attempt.",
+    "Required correction: reject receipts not yet verified before claiming an attempt.",
+])
+def test_changes_requested_overview_domain_state_correction_consumes_one_attempt(tmp_path, prose):
+    body = overview("🟡 Changes recommended", prose, "None")
+    api = ReviewApi([copilot_review(body, state="CHANGES_REQUESTED")])
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert result["pull_requests"][0]["repair_requested"]
+    assert not result["pull_requests"][0]["review_valid"]
+    prompts, evidence = _task_evidence(api)
+    assert len(prompts) == 1 and api.fix_attempts == 1
+    [finding] = evidence[0]["review_findings"]
+    assert prose in finding["comment"]
+    assert finding["kind"] == "changes-requested"
+    assert finding["review"] == REVIEW_ID and finding["head"] == HEAD
+    assert finding["submitted_at"] == SUBMITTED and "thread" not in finding
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+
+
 @pytest.mark.parametrize("body", [NO_FINDINGS, PENDING_VALIDATION, RESOLVED_ONLY],
                          ids=["no-findings", "pending-validation", "resolved-only"])
 def test_non_actionable_changes_requested_overviews_never_consume_budget(tmp_path, body):
+    api = ReviewApi([copilot_review(body, state="CHANGES_REQUESTED")])
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert not result["pull_requests"][0]["repair_requested"]
+    assert api.fix_attempts == 0
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
+
+
+def test_looks_good_without_findings_never_consumes_budget(tmp_path):
+    body = overview("🟢 Looks good", "The change preserves validation behavior.", "None")
     api = ReviewApi([copilot_review(body, state="CHANGES_REQUESTED")])
     path = tmp_path / "state.json"
     result = _managed_cycle(api, path)
@@ -192,12 +226,29 @@ def test_changes_requested_overview_without_open_or_missed_items_forwards_summar
     ]) is None
 
 
-def test_open_zero_overview_is_not_repair_evidence():
-    open_zero = section("Open (0)", "")
-    body = overview("🟡 Changes recommended", "Synthetic summary.", "None", open_zero)
-    assert repair_request(HEAD, 0, [], [], pull_number=16, reviews=[
+def test_open_zero_does_not_suppress_actionable_changes_requested_summary():
+    prose = "Required correction: reject stale receipts."
+    body = overview("🟡 Changes recommended", prose, "None", section("Open (0)", ""))
+    request = repair_request(HEAD, 0, [], [], pull_number=16, reviews=[
         copilot_review(body, state="CHANGES_REQUESTED"),
-    ]) is None
+    ])
+    assert request is not None
+    [finding] = _evidence(request)["review_findings"]
+    assert prose in finding["comment"]
+    assert finding["kind"] == "changes-requested"
+
+
+@pytest.mark.parametrize("body", [NO_FINDINGS, PENDING_VALIDATION, RESOLVED_ONLY])
+def test_open_zero_nonactionable_overview_is_not_repair_evidence(tmp_path, body):
+    body = body.replace(FOOTER, section("Open (0)", "") + FOOTER)
+    api = ReviewApi([copilot_review(body, state="CHANGES_REQUESTED")])
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert not result["pull_requests"][0]["repair_requested"]
+    assert api.fix_attempts == 0
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
 
 
 @pytest.mark.parametrize("review", [
@@ -212,11 +263,13 @@ def test_open_zero_overview_is_not_repair_evidence():
     copilot_review(BODY_ONLY, state="APPROVED"),
     copilot_review(BODY_ONLY, state="PENDING", submitted_at=None),
     copilot_review(BODY_ONLY, state="DISMISSED"),
+    copilot_review(BODY_ONLY, state=[]),
+    copilot_review(BODY_ONLY, state={}),
     copilot_review("", state="CHANGES_REQUESTED"),
 ], ids=[
     "no-findings", "pending-validation", "resolved-only", "open-only", "plain-comment",
     "stale-head", "foreign-owner", "foreign-agent", "approved", "pending", "dismissed",
-    "empty-changes-requested",
+    "list-state", "object-state", "empty-changes-requested",
 ])
 def test_non_actionable_or_unauthenticated_reviews_never_consume_budget(tmp_path, review):
     api = ReviewApi([review])
@@ -294,6 +347,26 @@ def test_unproven_previously_missed_section_is_forwarded_whole_not_dropped():
     [finding] = _evidence(request)["review_findings"]
     assert "Previously missed (2)" in finding["comment"]
     assert "Synthetic only parsed item" in finding["comment"]
+
+
+@pytest.mark.parametrize("heading", [
+    '<summary class="finding"><strong>Previously missed (1)</strong></summary>',
+    '<summary><strong>Previously missed (unknown)</strong></summary>',
+])
+def test_previously_missed_heading_attributes_or_unproven_count_preserves_finding(heading):
+    missed = "<details>" + heading + missed_item(
+        "Reject synthetic stale receipts", "deploy/example.py:7", "Preserve required correction.",
+    ) + "</details>"
+    body = overview("🔵 Needs a closer look", "Synthetic.", "None", missed)
+    request = repair_request(HEAD, 0, [], [], pull_number=16, reviews=[copilot_review(body)])
+    assert request is not None
+    [finding] = _evidence(request)["review_findings"]
+    assert finding["kind"] == "previously-missed"
+    assert "Reject synthetic stale receipts" in finding["comment"]
+    assert "Preserve required correction." in finding["comment"]
+    assert len(finding["comment"]) <= 1000 and "thread" not in finding
+    if "unknown" in heading:
+        assert "Previously missed (unknown)" in finding["comment"]
 
 
 def test_nested_details_preserve_actionable_tail_of_previously_missed_item():
