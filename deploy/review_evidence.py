@@ -21,11 +21,9 @@ _MISSED_RE = re.compile(
 _OPEN_RE = re.compile(
     r"<summary>\s*<strong>\s*Open\s*\(\d{1,3}\)\s*</strong>\s*</summary>", re.IGNORECASE,
 )
-_DETAILS_OPEN_RE = re.compile(r"<details\b[^>]*>", re.IGNORECASE)
-_DETAILS_CLOSE_RE = re.compile(r"</details>", re.IGNORECASE)
-_ITEM_RE = re.compile(
-    r"<details\b[^>]*>\s*<summary>(.*?)</summary>(.*?)</details>",
-    re.IGNORECASE | re.DOTALL,
+_DETAILS_TOKEN_RE = re.compile(r"<details\b[^>]*>|</details\s*>", re.IGNORECASE)
+_SUMMARY_RE = re.compile(
+    r"^\s*<summary\b[^>]*>(.*?)</summary\s*>", re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -76,6 +74,33 @@ def _strip_markup(text):
     return re.sub(r"<[^>]*>", " ", text)
 
 
+def _matching_details(body, opening):
+    token = _DETAILS_TOKEN_RE.match(body, opening)
+    if not token or token.group(0).lower().startswith("</"):
+        return None
+    depth = 1
+    for nested in _DETAILS_TOKEN_RE.finditer(body, token.end()):
+        if nested.group(0).lower().startswith("</"):
+            depth -= 1
+            if depth == 0:
+                return token.start(), nested.start(), nested.end()
+        else:
+            depth += 1
+    return None
+
+
+def _enclosing_details(body, position):
+    stack = []
+    for token in _DETAILS_TOKEN_RE.finditer(body, 0, position):
+        if token.group(0).lower().startswith("</"):
+            if not stack:
+                return None
+            stack.pop()
+        else:
+            stack.append(token.start())
+    return stack[-1] if stack else None
+
+
 def _previously_missed(body):
     """Return item texts from every Previously missed section.
 
@@ -87,24 +112,31 @@ def _previously_missed(body):
         expected = int(match.group(1))
         if expected == 0:
             continue
-        position, parsed, malformed = match.end(), [], False
-        while True:
-            opening = _DETAILS_OPEN_RE.search(body, position)
-            closing = _DETAILS_CLOSE_RE.search(body, position)
-            closing = closing.start() if closing else -1
-            if closing < 0:
-                malformed, end = True, len(body)
+        parent = _enclosing_details(body, match.start())
+        section = _matching_details(body, parent) if parent is not None else None
+        parsed, malformed = [], section is None
+        end = section[2] if section else len(body)
+        section_end = section[1] if section else len(body)
+        position = match.end()
+        while not malformed and position < section_end:
+            token = _DETAILS_TOKEN_RE.search(body, position, section_end)
+            if token is None:
                 break
-            if opening is None or opening.start() > closing:
-                end = closing
+            if token.group(0).lower().startswith("</"):
+                malformed = True
                 break
-            item = _ITEM_RE.match(body, opening.start())
-            if not item:
-                malformed, end = True, closing
+            item = _matching_details(body, token.start())
+            if item is None or item[2] > section_end:
+                malformed = True
                 break
-            parsed.append(f"{_strip_markup(item.group(1)).strip()}\n"
-                          f"{_strip_markup(item.group(2)).strip()}")
-            position = item.end()
+            item_content = body[token.end():item[1]]
+            summary = _SUMMARY_RE.match(item_content)
+            if summary is None:
+                malformed = True
+                break
+            parsed.append(f"{_strip_markup(summary.group(1)).strip()}\n"
+                          f"{_strip_markup(item_content[summary.end():]).strip()}")
+            position = item[2]
         if malformed or len(parsed) != expected:
             items.append(_strip_markup(body[match.start():end]).strip())
         else:
@@ -127,6 +159,22 @@ def _overview_summary(body):
     return _strip_markup(summary).strip()
 
 
+def _non_actionable_overview(body):
+    summary = _overview_summary(body)
+    if re.search(r"\b(?:pending|awaiting|not yet (?:verified|validated|complete))\b",
+                 summary, re.IGNORECASE):
+        return True
+    if re.search(r"\bno (?:issues?|findings?) (?:were )?(?:found|reported)\b",
+                 summary, re.IGNORECASE):
+        return True
+    return (
+        _OPEN_RE.search(body) is None
+        and re.search(r"\bresolved\b", summary, re.IGNORECASE) is not None
+        and re.search(r"<summary\b[^>]*>\s*<strong>\s*Resolved since last review\b",
+                      body, re.IGNORECASE) is not None
+    )
+
+
 def body_findings(reviews, head_sha, *, reviewer_id):
     """Return actionable body-only findings from the latest exact-head review.
 
@@ -147,7 +195,8 @@ def body_findings(reviews, head_sha, *, reviewer_id):
     found = []
     if OVERVIEW_MARKER in body:
         found = [("previously-missed", text) for text in _previously_missed(body)]
-        if not found and state == "CHANGES_REQUESTED" and not _OPEN_RE.search(body):
+        if (not found and state == "CHANGES_REQUESTED" and not _OPEN_RE.search(body)
+                and not _non_actionable_overview(body)):
             found = [("changes-requested", _overview_summary(body))]
     elif state == "CHANGES_REQUESTED":
         found = [("changes-requested", _strip_markup(body).strip())]

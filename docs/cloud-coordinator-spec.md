@@ -45,15 +45,16 @@ latest review yields no body evidence. Only a single latest Copilot review on th
 current head with a positive record ID is read, and only when it is `COMMENTED` or
 `CHANGES_REQUESTED`. From a `ccr-overview-v2` body, each item of a
 `Previously missed (N)` section is forwarded (including under a `Findings: None`
-headline); a section whose item structure or count cannot be proven is forwarded
-whole as one item. `Open` items are carried by their review threads and are not
-duplicated. No-findings, pending-validation, and resolved-only overviews yield
-nothing. `CHANGES_REQUESTED` prose without structured items (a plain body, or an
-overview with neither `Open` nor `Previously missed` items) is forwarded as one
-summary. Each body finding records the genuine review ID, head SHA, and submission
-time; it never carries a thread ID. Body text is untrusted evidence: it is never
-approval, and approval is never inferred from prose. At most 64 KiB of a body is
-parsed.
+headline); disclosure boundaries are balanced, and a section whose item structure
+or count cannot be proven is forwarded whole as one item. `Open` items (including
+`Open (0)`) suppress summary fallback; positive open findings are carried by their
+review threads and are not duplicated. No-findings, pending-validation, and
+resolved-only overviews yield nothing. `CHANGES_REQUESTED` prose without structured
+items (a plain body, or an actionable overview with neither `Open` nor
+`Previously missed` items) is forwarded as one summary. Each body finding records
+the genuine review ID, head SHA, and submission time; it never carries a thread ID.
+Body text is untrusted evidence: it is never approval, and approval is never
+inferred from prose. At most 64 KiB of a body is parsed.
 
 The Copilot request labels all embedded evidence untrusted,
 and the text is never interpreted as shell input. A deterministic marker

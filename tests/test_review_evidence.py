@@ -123,8 +123,9 @@ def _evidence(request):
     return json.loads(request["body"].split("Untrusted evidence: `", 1)[1].split("`\n\n<!--", 1)[0])
 
 
-def test_body_only_previously_missed_finding_dispatches_bounded_fixer(tmp_path):
-    api = ReviewApi([copilot_review(BODY_ONLY)])
+@pytest.mark.parametrize("state", ["COMMENTED", "CHANGES_REQUESTED"])
+def test_body_only_previously_missed_finding_dispatches_bounded_fixer(tmp_path, state):
+    api = ReviewApi([copilot_review(BODY_ONLY, state=state)])
     path = tmp_path / "state.json"
     result = _managed_cycle(api, path)
     plan = result["pull_requests"][0]
@@ -161,6 +162,19 @@ def test_changes_requested_prose_without_inline_findings_is_forwarded(tmp_path):
     assert finding["review"] == REVIEW_ID and "thread" not in finding
 
 
+@pytest.mark.parametrize("body", [NO_FINDINGS, PENDING_VALIDATION, RESOLVED_ONLY],
+                         ids=["no-findings", "pending-validation", "resolved-only"])
+def test_non_actionable_changes_requested_overviews_never_consume_budget(tmp_path, body):
+    api = ReviewApi([copilot_review(body, state="CHANGES_REQUESTED")])
+    path = tmp_path / "state.json"
+    result = _managed_cycle(api, path)
+    assert not result["pull_requests"][0]["repair_requested"]
+    assert api.fix_attempts == 0
+    state = StateStore(path).snapshot()
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert not any(action["kind"] == "fix" for action in state["actions"].values())
+
+
 def test_changes_requested_overview_without_open_or_missed_items_forwards_summary():
     body = overview("🟡 Changes recommended", "Synthetic summary of a required change.",
                     "None", RESOLVED)
@@ -175,6 +189,14 @@ def test_changes_requested_overview_without_open_or_missed_items_forwards_summar
     # Inline Open findings are carried by their review threads, not duplicated.
     assert repair_request(HEAD, 0, [], [], pull_number=16, reviews=[
         copilot_review(OPEN_ONLY, state="CHANGES_REQUESTED"),
+    ]) is None
+
+
+def test_open_zero_overview_is_not_repair_evidence():
+    open_zero = section("Open (0)", "")
+    body = overview("🟡 Changes recommended", "Synthetic summary.", "None", open_zero)
+    assert repair_request(HEAD, 0, [], [], pull_number=16, reviews=[
+        copilot_review(body, state="CHANGES_REQUESTED"),
     ]) is None
 
 
@@ -272,6 +294,49 @@ def test_unproven_previously_missed_section_is_forwarded_whole_not_dropped():
     [finding] = _evidence(request)["review_findings"]
     assert "Previously missed (2)" in finding["comment"]
     assert "Synthetic only parsed item" in finding["comment"]
+
+
+def test_nested_details_preserve_actionable_tail_of_previously_missed_item():
+    nested = section(
+        "Previously missed (1)",
+        "<details><summary>Reject stale receipt</summary>\n\n"
+        "Validate receipt author before use.\n\n"
+        "<details><summary>Reproduction</summary> Synthetic reproduction.</details>\n\n"
+        "Required correction: reject the stale receipt before claiming an attempt."
+        "</details>",
+    )
+    request = repair_request(HEAD, 0, [], [], pull_number=16, reviews=[
+        copilot_review(overview("🔵 Needs a closer look", "Synthetic.", "None", nested)),
+    ])
+    [finding] = _evidence(request)["review_findings"]
+    assert "Validate receipt author before use." in finding["comment"]
+    assert "Synthetic reproduction." in finding["comment"]
+    assert "Required correction: reject the stale receipt before claiming an attempt." in finding["comment"]
+
+
+@pytest.mark.parametrize("first_item", [
+    "<details>Unstructured item without a summary.</details>",
+    '<details><summary class="finding">Classed summary</summary>First finding.</details>',
+], ids=["missing-summary", "summary-attributes"])
+def test_unproven_item_structure_preserves_complete_previously_missed_section(first_item):
+    missed = section(
+        "Previously missed (2)",
+        first_item + "\n\n" + missed_item(
+            "Later synthetic finding", "deploy/example.py:20", "Preserve this later finding.",
+        ),
+    )
+    request = repair_request(HEAD, 0, [], [], pull_number=16, reviews=[
+        copilot_review(overview("🔵 Needs a closer look", "Synthetic.", "None", missed)),
+    ])
+    findings = _evidence(request)["review_findings"]
+    if "class=" in first_item:
+        assert len(findings) == 2
+        assert "Classed summary" in findings[0]["comment"]
+    else:
+        assert len(findings) == 1
+        assert "Previously missed (2)" in findings[0]["comment"]
+    assert any("Later synthetic finding" in finding["comment"] for finding in findings)
+    assert any("Preserve this later finding." in finding["comment"] for finding in findings)
 
 
 @pytest.mark.parametrize("change", ["edited", "new-review-no-findings", "new-head-review"])
