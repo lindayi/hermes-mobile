@@ -12,6 +12,7 @@ from deploy.issue_starter import (
     REPOSITORY_ID,
     Coordinator,
     CoordinatorError,
+    GhApi,
     StateStore,
     _contains_closing_reference,
     _public_prompt,
@@ -45,7 +46,7 @@ def issue(*, state="open", body="Please implement the public feature.", title="E
     }
 
 
-def task(task_id="task-1", *, state="queued", artifacts=None, sessions=None,
+def task(task_id="task-1", *, state="queued", artifacts=None, session_count=0,
          creator_id=OWNER_ID, owner_id=OWNER_ID, repository_id=REPOSITORY_ID):
     value = {
         "id": task_id,
@@ -54,9 +55,8 @@ def task(task_id="task-1", *, state="queued", artifacts=None, sessions=None,
         "owner": {"id": owner_id},
         "repository": {"id": repository_id},
         "artifacts": artifacts or [],
+        "session_count": session_count,
     }
-    if sessions is not None:
-        value["sessions"] = sessions
     return value
 
 
@@ -66,6 +66,7 @@ def completed_task(*, repository_id=REPOSITORY_ID, creator_id=OWNER_ID,
         state="completed",
         creator_id=creator_id,
         repository_id=repository_id,
+        session_count=1,
         artifacts=[
             {
                 "provider": "github",
@@ -77,18 +78,6 @@ def completed_task(*, repository_id=REPOSITORY_ID, creator_id=OWNER_ID,
                 "type": "pull",
                 "data": {"id": pull_id, "global_id": node_id},
             },
-        ],
-        sessions=[
-            {
-                "id": "session-1",
-                "task_id": "task-1",
-                "state": "completed",
-                "user": {"id": OWNER_ID},
-                "owner": {"id": OWNER_ID},
-                "repository": {"id": REPOSITORY_ID},
-                "head_ref": head_ref,
-                "base_ref": "main",
-            }
         ],
     )
 
@@ -244,6 +233,24 @@ def start_task(tmp_path, api):
     return result
 
 
+@pytest.mark.parametrize("timeline", [
+    [{"event": "reopened"}],
+    [{"event": "reopened", "created_at": "2026-10-01T20:40:00Z"}],
+    [{"event": "closed", "created_at": "2026-10-01T20:30:00Z"}],
+    [
+        {"event": "closed", "created_at": "2026-10-01T20:30:00Z"},
+        {"event": "reopened"},
+    ],
+])
+def test_malformed_or_unpaired_lifecycle_evidence_fails_closed(tmp_path, timeline):
+    api = FakeApi(timeline=timeline)
+
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert result["dispatched"] == 0
+    assert not any(route.endswith("/tasks") for route, _ in api.posts)
+
+
 def test_read_only_plan_uses_exact_owner_command_and_creates_no_state(tmp_path):
     api = FakeApi()
     state_path = tmp_path / "private" / "issue-starter.json"
@@ -254,6 +261,26 @@ def test_read_only_plan_uses_exact_owner_command_and_creates_no_state(tmp_path):
     assert not list(tmp_path.rglob("*.lock"))
     assert api.posts == []
     assert api.patches == []
+
+
+def test_gh_api_disables_prompt_and_update_notifier(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("GH_PROMPT_DISABLED", "0")
+    monkeypatch.setenv("GH_NO_UPDATE_NOTIFIER", "0")
+    captured = {}
+
+    def run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout='{"id":5164171}')
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    assert GhApi().get("user") == {"id": OWNER_ID}
+    assert captured["kwargs"]["env"]["GH_PROMPT_DISABLED"] == "1"
+    assert captured["kwargs"]["env"]["GH_NO_UPDATE_NOTIFIER"] == "1"
 
 
 def test_cli_default_plan_creates_no_state_directory_or_lock(tmp_path, monkeypatch, capsys):
@@ -766,11 +793,17 @@ def test_task_head_race_blocks_readiness_and_enrollment(tmp_path):
     assert not any(route.endswith("/pulls/41/comments") for route, _ in api.posts)
 
 
-def test_task_completion_requires_successful_matching_session(tmp_path):
+@pytest.mark.parametrize("session_count", [None, 0, -1, 101, True, "1"])
+def test_task_completion_requires_bounded_documented_session_count(
+    tmp_path, session_count,
+):
     api = FakeApi(pulls=[pull_request()])
     start_task(tmp_path, api)
     api.task_detail = completed_task()
-    api.task_detail["sessions"][0]["state"] = "failed"
+    if session_count is None:
+        del api.task_detail["session_count"]
+    else:
+        api.task_detail["session_count"] = session_count
 
     result = make_coordinator(tmp_path, api).run(apply=True)
 

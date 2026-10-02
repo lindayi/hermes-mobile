@@ -54,7 +54,8 @@ state byte-for-byte intact and readable.
 `gh` must be authenticated as the fixed repository owner with a user token that
 has the GitHub Agent tasks repository permission (read/write). GitHub App
 installation tokens are not supported by these endpoints. No credential value
-is read or persisted by the worker. Apply one bounded poll at a time; repeated
+is read or persisted by the worker. CLI prompt and update-notifier behavior is
+disabled for each invocation. Apply one bounded poll at a time; repeated
 invocations may be needed while a task is running. Poll failures, uncertain
 responses, and unverified identities are escalated rather than used to select
 or dispatch arbitrary tasks.
@@ -68,8 +69,10 @@ current trusted `main` SHA. The request uses `create_pull_request: true` and
 execution, and no merge, production access, settings, or permissions changes.
 
 The worker polls only the persisted task ID. It requires the task's repository
-and owner/creator identity, a completed task and successful bound session, and
-the task's unique GitHub branch/PR artifacts. It checks the PR's repository,
+and owner/creator identity, a completed task with a bounded positive
+`session_count`, and the task's unique GitHub branch/PR artifacts. The public
+task response does not include a per-session array; `session_count` is not
+treated as evidence that tests or reviews passed. It checks the PR's repository,
 main target, branch, open state, issue-closing reference, and exact current head
 before any handoff. Closing references are accepted only in a conservative plain
 Markdown subset. Raw HTML, links/images, code, lists/quotes (including lazy

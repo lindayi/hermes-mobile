@@ -149,16 +149,24 @@ def _latest_reopen(timeline):
     reopened_at = None
     for event in timeline:
         if not isinstance(event, dict):
-            continue
+            raise CoordinatorError("Issue close/reopen timeline was incomplete")
         name = event.get("event")
+        if name not in {"closed", "reopened"}:
+            continue
         when = _parse_time(event.get("created_at"))
         if when is None:
-            continue
+            raise CoordinatorError("Issue close/reopen timestamp was invalid")
         if name == "closed":
+            if closed_at is not None:
+                raise CoordinatorError("Issue close/reopen events were unpaired")
             closed_at = when
-        elif name == "reopened" and closed_at is not None and when >= closed_at:
+        elif closed_at is not None and when >= closed_at:
             reopened_at = when
             closed_at = None
+        else:
+            raise CoordinatorError("Issue close/reopen events were unpaired")
+    if closed_at is not None:
+        raise CoordinatorError("Issue close/reopen events were unpaired")
     return reopened_at
 
 
@@ -402,6 +410,11 @@ class GhApi:
         try:
             result = subprocess.run(
                 command, input=input_text, capture_output=True, text=True, timeout=45, check=False,
+                env={
+                    **os.environ,
+                    "GH_PROMPT_DISABLED": "1",
+                    "GH_NO_UPDATE_NOTIFIER": "1",
+                },
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ApiError("GitHub API transport failed") from exc
@@ -530,7 +543,10 @@ class Coordinator:
             self.api, f"repos/{REPOSITORY}/issues/{number}/timeline",
         )
         accepted_at = record.get("accepted_at")
-        reopen_at = _latest_reopen(timeline)
+        try:
+            reopen_at = _latest_reopen(timeline)
+        except CoordinatorError as exc:
+            raise CoordinatorError("Issue close/reopen evidence could not be verified") from exc
         accepted = _parse_time(accepted_at)
         edits = self._issue_edit_evidence(number)
         if (_edited_after_authorization(timeline, accepted_at)
@@ -662,16 +678,18 @@ class Coordinator:
             return []
         timeline = _all_pages(self.api, f"repos/{REPOSITORY}/issues/{number}/timeline")
         try:
+            reopen_at = _latest_reopen(timeline)
+        except CoordinatorError:
+            return []
+        try:
             edit_evidence = self._issue_edit_evidence(number)
         except (ApiError, CoordinatorError):
             return []
         prior = self._prior_commands(state, number)
-        reopen_at = None
         if prior:
             previous = prior[-1]
             if previous.get("phase") not in TERMINAL_PHASES:
                 return []
-            reopen_at = _latest_reopen(timeline)
             accepted = _parse_time(previous.get("accepted_at"))
             if accepted is None or reopen_at is None or reopen_at <= accepted:
                 return []
@@ -965,23 +983,14 @@ class Coordinator:
             raise CoordinatorError("Agent task owner or repository identity did not match")
         return task
 
-    def _successful_sessions(self, task, task_id, branch):
-        sessions = task.get("sessions")
-        if not isinstance(sessions, list) or not sessions or len(sessions) > 100:
-            return False
-        for session in sessions:
-            if (not isinstance(session, dict) or session.get("task_id") != task_id
-                    or session.get("state") != "completed" or session.get("error")
-                    or not isinstance(session.get("user"), dict)
-                    or session["user"].get("id") != OWNER_ID
-                    or not isinstance(session.get("owner"), dict)
-                    or session["owner"].get("id") != OWNER_ID
-                    or not isinstance(session.get("repository"), dict)
-                    or session["repository"].get("id") != REPOSITORY_ID
-                    or session.get("head_ref") != branch
-                    or session.get("base_ref") != MAIN_BRANCH):
-                return False
-        return True
+    @staticmethod
+    def _successful_task_completion(task):
+        session_count = task.get("session_count")
+        return (
+            task.get("state") == "completed"
+            and type(session_count) is int
+            and 0 < session_count <= 100
+        )
 
     def _find_task_pull(self, task, issue_number):
         artifacts = task.get("artifacts")
@@ -1123,7 +1132,7 @@ class Coordinator:
                 and isinstance(item.get("data"), dict)
             ] if isinstance(artifacts, list) else []
             branch = branches[0].get("head_ref") if len(branches) == 1 else None
-            if not self._successful_sessions(task, record["task_id"], branch):
+            if not self._successful_task_completion(task):
                 self.store.update(key, {
                     "phase": "failed",
                     "blocker": "task_completion_unverified",
@@ -1198,10 +1207,7 @@ class Coordinator:
 
     def _advance_handoff(self, key, record, task):
         try:
-            if (task.get("state") != "completed"
-                    or not self._successful_sessions(
-                        task, record["task_id"], record["branch"],
-                    )):
+            if not self._successful_task_completion(task):
                 raise CoordinatorError("Completed task identity changed")
             linked_pull = self._find_task_pull(task, record["issue"])
             if (linked_pull is None
@@ -1272,10 +1278,7 @@ class Coordinator:
             try:
                 self.store.update(key, {"ready_state": "uncertain"})
                 fresh_task = self._task(record["task_id"])
-                if (fresh_task.get("state") != "completed"
-                        or not self._successful_sessions(
-                            fresh_task, record["task_id"], record["branch"],
-                        )):
+                if not self._successful_task_completion(fresh_task):
                     raise CoordinatorError("Completed task identity changed after readiness")
                 linked_pull = self._find_task_pull(fresh_task, record["issue"])
                 if (linked_pull is None
