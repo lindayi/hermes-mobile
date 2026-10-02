@@ -591,7 +591,11 @@ def create_app(settings=None, *, gateway_client=None):
         session=result.get('session',{})
         if not session.get('id'):
             raise IntegrationUnavailable('Native session creation could not be confirmed')
-        return {'id':session['id'],'title':session.get('title',body.title)}
+        response={'id':session['id']}
+        title=session.get('title')
+        if isinstance(title,str) and title.strip():
+            response['title']=title
+        return response
 
     @app.patch(BASE+'/sessions/{sid}')
     async def rename_session(sid:str,body:SessionInput,request:Request,user=Depends(ready_user)):

@@ -29,6 +29,20 @@ test('detached list controls cannot change another owner’s query/filter/page o
  }finally{h.close();}
 });
 
+test('New chat button sends only the New chat placeholder and leaves untitled native creation unresolved',async()=>{
+ const h=await setup({request:(path,options)=>{
+  if(path==='/sessions' && options.method==='POST')return {id:'native-untitled'};
+  if(path==='/sessions/native-untitled')return {id:'native-untitled',title:null};
+  if(path.includes('/messages'))return {items:[]};
+ }});try{
+  button(h.doc,'New chat').click();await tick();
+  const create=h.calls.find(call=>call.path==='/sessions' && call.options.method==='POST');
+  assert.deepEqual(create.options.body,{title:'New chat'});
+  assert.equal(h.doc.querySelector('.conversation-head h1').textContent,'Untitled conversation');
+  assert.ok(h.calls.some(call=>call.path==='/sessions/native-untitled'),'untitled creation reads native metadata instead of treating the placeholder as a saved title');
+ }finally{h.close();}
+});
+
 test('old deletion actions explicitly lock through a failed refresh and recover only on a fresh result',async()=>{
  const h=await setup();try{
   const remove=button(h.doc,'Delete conversation: Original');h.slow();h.search('pending');assert.equal(remove.disabled,true,'stale delete must not look actionable');assert.match(remove.title,/updating|refresh/i);

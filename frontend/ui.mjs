@@ -571,7 +571,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     }));
     if(!visibleItems.length)list.append(empty('No conversations',state.query ? 'No conversations match this search and filter.' : 'No conversations in this filter.'));
     }
-    content.replaceChildren(h('div',{class:'page-heading conversation-list-heading'},h('div',{},h('h1',{},'Sessions')),h('div',{class:'history-toolbar'},searchToggle,filterToggle,button(icon('newchat'),e=>action(e.currentTarget,async()=>{if(!current())return;const session=await api.request('/sessions',{method:'POST',body:{title:'New conversation'}});if(current())await openSession(session);}),'primary icon-button',{'aria-label':'New chat',title:'New chat'}),filter)),searchForm,
+    content.replaceChildren(h('div',{class:'page-heading conversation-list-heading'},h('div',{},h('h1',{},'Sessions')),h('div',{class:'history-toolbar'},searchToggle,filterToggle,button(icon('newchat'),e=>action(e.currentTarget,async()=>{if(!current())return;const session=await api.request('/sessions',{method:'POST',body:{title:'New chat'}});if(current())await openSession(session);}),'primary icon-button',{'aria-label':'New chat',title:'New chat'}),filter)),searchForm,
       h('p',{id:'session-action-help',class:'sr-only'},'Swipe left to reveal Delete, or use Conversation actions, right-click, or Shift+F10. Deletion requires confirmation.'),pendingDeletionPanel(version),results,
       h('div',{class:'pagination'},previous,count,next));
     await refresh();
@@ -857,7 +857,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         messages.scrollTop=previousTop+messages.scrollHeight-previousHeight;
       }),'secondary');messages.prepend(more);
     }
-    if (!result.items?.length) messages.append(empty('New conversation',''));
+    if (!result.items?.length) messages.append(empty('New chat',''));
     const draftKey=key(`draft:${session.id}`);
     const textarea = h('textarea',{name:'message',rows:2,placeholder:'Message Hermes…','aria-label':'Message Hermes',maxlength:32000});
     textarea.value=drafts.get(session.id) ?? storage.get(draftKey) ?? '';
