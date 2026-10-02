@@ -93,6 +93,9 @@ APP_OWNER_ID = "synthetic-mobile-owner"
 COPILOT_REVIEWER = 175728472
 HEAD = "a" * 40
 BASE = "b" * 40
+RESULT_HEAD = "c" * 40
+CURRENT_MAIN = "d" * 40
+NEXT_RESULT_HEAD = "e" * 40
 
 
 def Coordinator(api, store, **kwargs):
@@ -964,6 +967,8 @@ class FakeApi:
         self.status_author_id = status_author_id
         self.advance_main = advance_main
         self.main_reads = 0
+        self.current_main_sha = None
+        self.compare_results = {}
         self.active_agent = active_agent
         self.active_after_first = active_after_first
         self.strict_protection = strict_protection
@@ -1040,9 +1045,14 @@ class FakeApi:
             return self.tasks[route.rsplit("/", 1)[-1]]
         if route == "repos/lindayi/hermes-mobile/commits/main":
             self.main_reads += 1
+            if self.current_main_sha is not None:
+                return {"sha": self.current_main_sha}
             if self.advance_main and self.main_reads > 1:
                 return {"sha": "d" * 40}
             return {"sha": BASE}
+        if route.startswith("repos/lindayi/hermes-mobile/compare/"):
+            comparison = route.rsplit("/compare/", 1)[1]
+            return self.compare_results[comparison]
         if route.endswith("/branches/main/protection"):
             return {"required_conversation_resolution": {
                 "enabled": self.conversation_resolution,
@@ -1190,7 +1200,8 @@ class FakeApi:
             response.update(user={"id": OWNER}, body=body["body"])
         return response
 
-    def complete_task(self, task_id, action, *, result="ready", head_sha=None):
+    def complete_task(self, task_id, action, *, result="ready", head_sha=None,
+                      base_sha=BASE):
         task = self.tasks[task_id]
         session_id = f"session-{task_id}"
         created = "2026-10-01T12:00:00Z"
@@ -1223,7 +1234,7 @@ class FakeApi:
             "pr=16\n"
             f"start_head={action['head']}\n"
             f"head={current_head}\n"
-            f"base={BASE}\n"
+            f"base={base_sha}\n"
             f"result={result}"
         )
         self.comments.append({
@@ -1250,6 +1261,160 @@ class FakeApi:
         return {"data": {"enablePullRequestAutoMerge": {"pullRequest": {
             "id": "PR_node_16", "autoMergeRequest": {"enabledAt": "2026-10-01T12:02:00Z"},
         }}}}
+
+
+def _compare_result(base_sha, head_sha, *, ahead_by, status="ahead",
+                    behind_by=0, merge_base_sha=None):
+    return {
+        "status": status,
+        "ahead_by": ahead_by,
+        "behind_by": behind_by,
+        "base_commit": {"sha": base_sha},
+        "merge_base_commit": {"sha": merge_base_sha or base_sha},
+    }
+
+
+def _ready_sha_bound_handoff(tmp_path):
+    api = FakeApi(unresolved=True)
+    api.comments[0].update(
+        body=f"/hermes enroll {HEAD}",
+        created_at="2026-10-01T11:00:00Z",
+        updated_at="2026-10-01T11:00:00Z",
+    )
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    first = next(action for action in store.actions().values()
+                 if action.get("kind") == "fix")
+    api.complete_task(first["task_id"], first, head_sha=RESULT_HEAD)
+    api.head_sha = RESULT_HEAD
+    api.pull["head"]["sha"] = RESULT_HEAD
+    api.comments[-1]["body"] = (
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={first['dispatch_nonce']}\n"
+        "pr=16\n"
+        f"session=session-{first['task_id']}\n"
+        f"start_head={HEAD}\n"
+        f"base={BASE}\n"
+        f"head={RESULT_HEAD}\n"
+        "result=ready"
+    )
+    api.review_state = "PENDING"
+    coordinator.run(apply=True)
+    assert store.action(first["key"])["handoff_state"] == "waiting_review"
+    api.current_main_sha = CURRENT_MAIN
+    api.pull["mergeable_state"] = "behind"
+    api.compare_results = {
+        f"{BASE}...{CURRENT_MAIN}": _compare_result(
+            BASE, CURRENT_MAIN, ahead_by=21,
+        ),
+        f"{BASE}...{RESULT_HEAD}": _compare_result(
+            BASE, RESULT_HEAD, ahead_by=1,
+        ),
+    }
+    return api, store, coordinator, first
+
+
+def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
+    api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
+
+    result = coordinator.run(apply=True)
+    actions = list(store.actions().values())
+    neutral = [action for action in actions
+               if action.get("task_type") == "neutral"]
+
+    assert len(neutral) == 1
+    assert api.fix_attempts == 2
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
+    assert first["receipt_base"] == BASE
+    assert store.action(first["key"])["handoff_state"] == "superseded"
+    assert neutral[0]["main_sha"] == CURRENT_MAIN
+    assert neutral[0]["head"] == RESULT_HEAD
+    assert "repair_requested" in result["pull_requests"][0]
+    assert result["pull_requests"][0]["auto_merge_eligible"] is False
+
+    before_writes = list(api.writes)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+    assert api.fix_attempts == 2
+    assert api.writes == before_writes
+
+
+def test_stale_base_reconciliation_accepts_a_validated_new_head_handoff(tmp_path):
+    api, store, coordinator, _ = _ready_sha_bound_handoff(tmp_path)
+    coordinator.run(apply=True)
+    neutral = next(action for action in store.actions().values()
+                   if action.get("task_type") == "neutral")
+
+    api.complete_task(
+        neutral["task_id"], neutral, head_sha=NEXT_RESULT_HEAD,
+        base_sha=CURRENT_MAIN,
+    )
+    api.head_sha = NEXT_RESULT_HEAD
+    api.pull["head"]["sha"] = NEXT_RESULT_HEAD
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull["mergeable_state"] = "clean"
+    api.requested_reviewers.clear()
+    api.review_state = "PENDING"
+
+    coordinator.run(apply=True)
+    updated = store.action(neutral["key"])
+    assert updated["status"] == "completed"
+    assert updated["receipt_head"] == NEXT_RESULT_HEAD
+    assert updated["receipt_base"] == CURRENT_MAIN
+    assert updated["handoff_state"] == "waiting_review"
+    assert store.action(next(
+        action["key"] for action in store.actions().values()
+        if action.get("task_id") == neutral["task_id"]
+    ))["receipt_body"] == api.comments[-1]["body"]
+    assert api.fix_attempts == 2
+    assert len(api.requested_reviewers) == 1
+
+
+@pytest.mark.parametrize("hazard", [
+    "active-task", "uncertain-task", "wrong-ref", "wrong-repository", "wrong-head",
+    "main-diverged", "head-diverged", "partial-compare", "edited-receipt",
+])
+def test_stale_base_reconciliation_fails_closed(tmp_path, hazard):
+    api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
+    if hazard == "active-task":
+        api.tasks[first["task_id"]]["state"] = "in_progress"
+    elif hazard == "uncertain-task":
+        store.update_action(first["key"], "uncertain")
+    elif hazard == "wrong-ref":
+        api.pull["base"]["ref"] = "other"
+    elif hazard == "wrong-repository":
+        api.pull["base"]["repo"]["id"] = 42
+    elif hazard == "wrong-head":
+        api.pull["head"]["sha"] = "f" * 40
+        api.head_sha = "f" * 40
+    elif hazard == "main-diverged":
+        api.compare_results[f"{BASE}...{CURRENT_MAIN}"] = _compare_result(
+            BASE, CURRENT_MAIN, ahead_by=21, status="diverged", behind_by=2,
+            merge_base_sha="a" * 40,
+        )
+    elif hazard == "head-diverged":
+        api.compare_results[f"{BASE}...{RESULT_HEAD}"] = _compare_result(
+            BASE, RESULT_HEAD, ahead_by=1, status="diverged", behind_by=1,
+            merge_base_sha="a" * 40,
+        )
+    elif hazard == "partial-compare":
+        api.compare_results[f"{BASE}...{CURRENT_MAIN}"] = {
+            "status": "ahead", "ahead_by": 21, "behind_by": 0,
+        }
+    elif hazard == "edited-receipt":
+        api.comments[-1]["body"] += "\nedited"
+        api.comments[-1]["updated_at"] = "2026-10-01T12:06:00Z"
+
+    attempts_before = store.snapshot()["enrollments"]["16"]["attempts"]
+    try:
+        coordinator.run(apply=True)
+    except CoordinatorError:
+        pass
+
+    assert api.fix_attempts == 1
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == attempts_before
+    assert not [action for action in store.actions().values()
+                if action.get("task_type") == "neutral"]
 
 
 def test_plan_is_read_only_and_apply_uses_protected_auto_merge(tmp_path):
