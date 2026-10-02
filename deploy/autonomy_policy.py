@@ -49,6 +49,7 @@ SOURCE_CONTROL_PYTHON_FILES = frozenset({
     'deploy/native_notification_release.py', 'deploy/native_readiness.py', 'deploy/observe_release.py', 'deploy/public_http.py',
     'deploy/release_artifact.py', 'deploy/self_deploy.py', 'deploy/test_workspace.py',
     'deploy/cloud_coordinator.py', 'deploy/issue_starter.py', 'deploy/review_evidence.py',
+    'deploy/pull_handoff_binding.py',
     'deploy/task_receipts.py', 'deploy/workflow_events.py', 'deploy/workflow_lifecycle.py',
     'deploy/workflow_lifecycle_sources.py', 'deploy/workflow_notifications.py',
     'scripts/cloud_coordinator.py', 'scripts/issue_starter.py',
@@ -104,6 +105,7 @@ REQUIRED_FILES = (
     'patches/cron-delivery-baseline.json',
     'deploy/cloud_coordinator.py',
     'deploy/issue_starter.py',
+    'deploy/pull_handoff_binding.py',
     'deploy/review_evidence.py',
     'deploy/task_receipts.py',
     'deploy/workflow_events.py',
@@ -183,9 +185,11 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    'deploy/cloud_coordinator.py': '0935088cb9e3429b83dcc7daa8552cf2c58830e5494549270ec276a076e3193b',
+    'deploy/cloud_coordinator.py': '4a94bd43f7d350cb8aaee08650726893e6775872e8af20f3a0c8f7f61127345d',
     # Issue #43 launch/authority candidates; final assembled review remains required.
-    'deploy/issue_starter.py': '49debd3c1da5252ea67322a0febb9eb5b56d0ac1a830f3718e4d07377993b517',
+    # PR57 paired admission fence and corrected shared canonical proof.
+    'deploy/issue_starter.py': 'c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9',
+    'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
@@ -199,7 +203,8 @@ SOURCE_FINGERPRINTS = {
     'scripts/workflow_notifications.py': '03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f',
     'deploy/hermes-mobile-coordinator.service': '49d6ebb6e24b4c0a06af3d10e6e2cce11dd6af7ee8056c99268058c2f6f2cab3',
     'deploy/hermes-mobile-coordinator.timer': 'ffa239c67b492b5a361b823c754d5f204eb4efaa2c69f7df99df577e12d2a6c1',
-    'deploy/hermes-workflow-notifications.service': '998ee55dc5df990c6004f0f435e073766702e5efbf56aa83e946b6d05e21c000',
+    # Issue #58 user-unit replacement; source consistency, not activation evidence.
+    'deploy/hermes-workflow-notifications.service': '934effd6540b6a6ed026fcdac2dda6ebf176792e583c6738dc7b72dc737f199e',
     'deploy/hermes-workflow-notifications.timer': '627463b4dd06eb72f7fecc88a79dad29ec8ab4b5514b29c62c131cdbd2963cc8',
     'deploy/hermes-mobile-issue-starter.service': '1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69',
     'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
@@ -270,6 +275,7 @@ SOURCE_BLOCKERS = {
     'patches/cron-delivery-baseline.json': 'native-job-contract',
     'deploy/cloud_coordinator.py': 'coordinator-review-contract',
     'deploy/issue_starter.py': 'autonomy-launch-contract',
+    'deploy/pull_handoff_binding.py': 'coordinator-review-contract',
     'deploy/review_evidence.py': 'coordinator-review-contract',
     'deploy/task_receipts.py': 'coordinator-review-contract',
     'deploy/workflow_events.py': 'coordinator-review-contract',

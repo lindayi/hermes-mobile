@@ -11,7 +11,8 @@ def test_starter_unit_uses_canonical_checkout_and_cli_help(tmp_path):
     source = Path(__file__).resolve().parents[1]
     home = tmp_path / 'home'
     checkout = home / 'projects' / 'hermes-mobile-git'
-    for name in ('scripts/issue_starter.py', 'deploy/issue_starter.py'):
+    for name in ('scripts/issue_starter.py', 'deploy/issue_starter.py',
+                 'deploy/pull_handoff_binding.py'):
         target = checkout / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source / name, target)

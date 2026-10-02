@@ -127,14 +127,17 @@ _PENDING_PR40_LIFECYCLE_FIXTURE = {
 
 _PENDING_ISSUE43_LAUNCH_FIXTURE = {
     'deploy/cloud_coordinator.py': '3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c',
-    'deploy/issue_starter.py': '49debd3c1da5252ea67322a0febb9eb5b56d0ac1a830f3718e4d07377993b517',
+    # PR57 paired admission fence and corrected shared canonical proof.
+    'deploy/issue_starter.py': 'c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9',
+    'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
     'scripts/issue_starter.py': '09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1',
     'scripts/workflow_notifications.py': '03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f',
     'deploy/hermes-mobile-coordinator.service': '49d6ebb6e24b4c0a06af3d10e6e2cce11dd6af7ee8056c99268058c2f6f2cab3',
     'deploy/hermes-mobile-coordinator.timer': 'ffa239c67b492b5a361b823c754d5f204eb4efaa2c69f7df99df577e12d2a6c1',
-    'deploy/hermes-workflow-notifications.service': '998ee55dc5df990c6004f0f435e073766702e5efbf56aa83e946b6d05e21c000',
+    # Issue #58 replacement, independently literal rather than read from policy.
+    'deploy/hermes-workflow-notifications.service': '934effd6540b6a6ed026fcdac2dda6ebf176792e583c6738dc7b72dc737f199e',
     'deploy/hermes-workflow-notifications.timer': '627463b4dd06eb72f7fecc88a79dad29ec8ab4b5514b29c62c131cdbd2963cc8',
     'deploy/hermes-mobile-issue-starter.service': '1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69',
     'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
@@ -146,7 +149,7 @@ _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE = {
 }
 
 _PENDING_ISSUE50_RECEIPT_FIXTURE = {
-    'deploy/cloud_coordinator.py': '0935088cb9e3429b83dcc7daa8552cf2c58830e5494549270ec276a076e3193b',
+    'deploy/cloud_coordinator.py': '4a94bd43f7d350cb8aaee08650726893e6775872e8af20f3a0c8f7f61127345d',
     'deploy/task_receipts.py': '60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb',
 }
 
@@ -711,12 +714,13 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
     }
     coordinator = {
         'deploy/cloud_coordinator.py', 'deploy/review_evidence.py',
+        'deploy/pull_handoff_binding.py',
         'deploy/task_receipts.py', 'deploy/workflow_events.py',
         'deploy/workflow_lifecycle.py', 'deploy/workflow_lifecycle_sources.py',
         'deploy/workflow_notifications.py',
     }
     assert closure == shared | coordinator
-    assert len(closure) == 36
+    assert len(closure) == 37
     assert closure <= set(REQUIRED_FILES)
     assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in coordinator)
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract' for path in shared)

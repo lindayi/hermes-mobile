@@ -71,10 +71,10 @@ current trusted `main` SHA. The request uses `create_pull_request: true` and
 plain-paragraph PR description with a literal `Closes #N` reference and all
 required evidence fields from the repository template, managed strict TDD, exact
 test/review evidence, cloud-only execution, and no merge, production access,
-settings, or permissions changes. PR descriptions must contain no Markdown
-headings, lists, links, code, quotes, HTML, or inline markup because the
-conservative closing-reference parser rejects unsupported markup throughout the
-body. Optional rich evidence belongs in comments, not the description.
+settings, or permissions changes. Keep the plain-paragraph description and
+literal closing reference for readability; neither its punctuation nor its
+contents prove issue linkage. Optional rich evidence belongs in comments, not
+the description.
 
 The worker polls only the persisted task ID. It requires the task's repository
 and owner/creator identity, a completed task with a bounded positive
@@ -84,16 +84,21 @@ includes `sessions` (in the second `allOf` member of its OpenAPI response schema
 unlike the task-list summary. Coordinator continuation binds the persisted task
 to that authenticated session's identity, dispatch nonce, branch and completion
 time, then validates the exact result receipt. `session_count` alone is not
-evidence that tests or reviews passed. It checks the PR's repository,
-main target, branch, open state, issue-closing reference, and exact current head
-before any handoff. Closing references are accepted only in a conservative plain
-Markdown subset. Raw HTML, links/images, code, lists/quotes (including lazy
-continuations), escapes, and other unsupported markup fail closed for the whole
-body, even if a separate valid directive exists. Complete same-line inline HTML
-comments within a text paragraph are ignored without joining surrounding text;
-line-start comments are HTML blocks, not inline text (CommonMark §4.6). Use the
-plain-paragraph repository template for every PR description, rather than
-waiting for a rich description to be rejected. Include baseline, scope,
+evidence that tests or reviews passed. For each handoff it reads the actual
+`PullRequest.closingIssuesReferences` GraphQL connection from the fixed
+repository, follows every bounded page, and requires exactly one matching
+issue number and repository ID. On every page, the outer GraphQL repository ID
+must match the supported REST `base.repo.node_id` from the detailed pull, whose integer
+`base.repo.id` must equal the fixed repository ID `1399942965`. Missing or malformed
+node IDs fail closed, and the anchor must remain unchanged in the fresh REST read;
+self-consistent GraphQL IDs and repository names alone are not sufficient. It also
+binds the PR node, number, head branch and SHA, base branch, and body to that pull.
+Null, partial, malformed, duplicate, inconsistent, or unbounded results fail
+closed. Every page must describe the same PR snapshot, and a fresh REST pull
+must match after collection. The body digest and exact head are reserved with
+the handoff and rechecked before and after readiness and enrollment operations;
+linkage is never cached across a changed body or head. There is no fallback to
+description parsing or caller-supplied linkage flags. Include baseline, scope,
 acceptance, RED/GREEN, exact tests and review evidence, rollout, and
 merged-versus-deployed state. Unsupported source claims remain blocked. No
 renderer or additional runtime dependency is introduced.
@@ -111,16 +116,37 @@ contains only `clientMutationId` and `pullRequestId` (verified by live read-only
 mutation boundary can therefore mark a newer head ready. Fresh post-mutation
 reads block enrollment on a detected change; uncertain writes are not retried.
 
-Only after that proof, the worker posts exactly `/hermes enroll <40lowerhex>`,
-using the reserved verified head SHA and owner-authenticated API client. Before
-posting, it captures the PR comment high-water ID and reserves a fresh enrollment,
+Only after that proof, the worker posts exactly
+`/hermes enroll <40lowerhex> issue <N> body-sha256 <64lowerhex>`, using the
+reserved verified head SHA, originating issue number, and exact raw UTF-8 PR body
+digest with the owner-authenticated API client. The issue number is canonical
+positive decimal, at most 2147483647. No trimming or Markdown normalization is
+performed. Before posting, it captures the PR comment high-water ID and reserves a fresh enrollment,
 even if an exact historical command exists: that command may already have been
 consumed on a different head. Only an exact, immutable owner comment with a positive
 ID above this boundary can confirm the POST response or reconcile a started/uncertain
-send; an uncertain send is never reposted. The
-paired cloud coordinator recognizes this command in its complete scan, requires
-the SHA to match the current PR head, and persists the bound head. A mismatch is
-consumed without enrollment and cannot authorize a later head or be replayed.
+send; an uncertain send is never reposted. Both direct POST confirmation and
+uncertain-send reconciliation require a final fresh pull with `draft` explicitly
+`false` before recording completion. A re-draft blocks completion while preserving
+the consumed enrollment attempt: neither enrollment nor readiness is retried.
+This producer-side certification does not retract a comment already sent or make
+the handoff atomic. The paired cloud coordinator authenticates the same immutable
+owner command, exact current head and body digest, explicitly ready PR, and
+canonical originating-issue closing edge before durable admission. Both clients
+use the dependency-leaf `deploy/pull_handoff_binding.py`: at most 20 GraphQL pages,
+100 nodes per page, and 60000 body characters, with unchanged repository anchors,
+cursor/duplicate checks and a final REST snapshot (including base SHA) reread.
+A complete stale-command rejection is consumed without enrollment and cannot
+authorize a later head or be replayed. After all planning/source collection and
+immediately before the atomic scan commit, the consumer repeats the command and
+binding proof for every effective new starter admission or renewal. A late change
+or incomplete read discards the entire prepared scan, including cursor, events,
+receipt acceptance, lifecycle retirement and export, with no external write.
+Compact versioned `starter_admission` provenance is committed with enrollment.
+This is an admission condition, not a lifetime body/linkage pin: later legitimate
+body reports and receipt-authorized result heads remain supported. GitHub reads,
+local state commit and remote writes are not one transaction; a change after the
+final coherent read remains an unavoidable remote race.
 Bound enrollment cannot inherit authority on a subsequent push; an explicit
 new owner command is needed. A newer exact-head command renews an active bound
 enrollment without replacing its initial `authorized_head`; it retains unresolved
@@ -138,13 +164,15 @@ check success to a new head. Recorded base provenance survives unrelated main
 advance, including before first receipt observation or after compaction/restart;
 behind proven heads still require bounded neutral reconciliation and fresh gates.
 
-The owner's legacy exact `/hermes enroll` remains broad/manual coordinator
-authorization. The starter never emits it or accepts it as proof of its own
-SHA-bound handoff. Because both clients use the same owner identity, historical
-bare comments cannot be distinguished from manual authorization by GitHub author
-ID: review/reconcile any legacy starter comments before activation. Install the
-paired consumer before enabling this producer; it accepts only the SHA-bound
-command for this handoff, with no fallback to bare commands.
+The owner's exact `/hermes enroll` and `/hermes enroll <40lowerhex>` remain
+explicit manual coordinator authorization with their existing timestamp contracts.
+The starter never emits either legacy form or accepts it as proof of its own
+extended handoff. Malformed extended commands never downgrade to a legacy prefix.
+Because both clients use the same owner identity, historical bare or SHA-only
+starter comments cannot be distinguished from manual authorization by author ID:
+review/reconcile any in-flight legacy starter comments before activation. Install
+the paired consumer before enabling this producer; no automatic migration or
+legacy fallback is provided.
 The starter does not import the coordinator at runtime. A task completion is not
 a passing test, review, required check, approval, merge, or deployment. Existing
 coordinator and repository protections remain authoritative.

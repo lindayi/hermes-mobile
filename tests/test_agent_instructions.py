@@ -7,9 +7,6 @@ import subprocess
 import pytest
 import yaml
 
-from deploy.issue_starter import _contains_closing_reference
-
-
 def _node():
     node = os.environ.get('HERMES_TEST_NODE') or shutil.which('node')
     assert node, 'The managed checks require Node'
@@ -126,6 +123,8 @@ SYNCED_RULES = (
     'allowed, and coding agents never access production.',
     'Write PR descriptions as plain paragraphs using the repository template; include a '
     'literal Closes #N and all required evidence, with no Markdown markup in the body.',
+    'For task handoff, a literal Closes #N is a readability convention; verify linkage '
+    'from authenticated GitHub closing-issue references, never PR body text.',
 )
 
 
@@ -148,12 +147,12 @@ def test_agent_instructions_are_portable_and_copilot_rules_stay_synced():
     assert 'repository setting' in workflow
 
 
-def test_pull_request_template_is_accepted_by_the_starter_parser():
+def test_pull_request_template_keeps_plain_closing_reference_and_evidence_fields():
     template = (ROOT / '.github/pull_request_template.md').read_text()
     body = template.replace('NUMBER', '48')
     evidence = {
         'Baseline main commit:': 'Baseline main commit: 9aca9b642d9aa4a90e108bc8e3c821314125f583',
-        'In scope:': 'In scope: user service hardening and parser-compatible handoff metadata.',
+        'In scope:': 'In scope: user service hardening and authenticated handoff metadata.',
         'Explicitly out of scope:': 'Explicitly out of scope: host activation and deployment.',
         'Acceptance cases:': 'Acceptance cases: the user unit retains supported hardening.',
         'RED command and observed failure:': 'RED command and observed failure: the focused regression failed.',
@@ -167,7 +166,7 @@ def test_pull_request_template_is_accepted_by_the_starter_parser():
     for field, value in evidence.items():
         body = body.replace(field, value)
 
-    assert _contains_closing_reference(body, 48)
+    assert 'Closes #48' in body
     assert all(value in body for value in evidence.values())
     assert 'Review and integration' in body
 

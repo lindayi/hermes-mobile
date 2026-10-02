@@ -21,6 +21,8 @@ Prefer small complete changes within the approved issue scope. Preserve existing
 
 Write PR descriptions as plain paragraphs using the repository template; include a literal Closes #N and all required evidence, with no Markdown markup in the body.
 
+For task handoff, a literal Closes #N is a readability convention; verify linkage from authenticated GitHub closing-issue references, never PR body text.
+
 The autonomous gate transition is conditional, not active by documentation alone.
 Until the parent operator verifies dependencies and actual current-head evidence and
 changes repository protection, require the exact pre-cutover contexts `source-ci`,
