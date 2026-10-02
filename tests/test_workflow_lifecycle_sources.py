@@ -1044,3 +1044,366 @@ def test_acked_merge_context_supports_only_exact_later_controller_proof(tmp_path
     else:
         assert state["lifecycle_events"] == []
         assert not export.exists()
+
+
+@pytest.mark.parametrize("proof", ["wrong_sha", "stale_ledger"])
+def test_durable_retired_merge_reloads_before_late_controller_proof(tmp_path, proof):
+    from test_cloud_coordinator import Coordinator
+
+    notification_paths, state_dir, _, inbox, _ = app_fixture(tmp_path / "app")
+    paths = LifecycleSourcePaths(
+        notifications=notification_paths, starter_state=tmp_path / "starter" / "state.json",
+    )
+    store = StateStore(tmp_path / "coordinator" / "state.json")
+    merged = pull_event(
+        {"issue": 31, "head": HEAD, "enrollment": {"comment": 55}},
+        "merged", occurred_at="2026-10-01T20:58:00Z", merge_sha=MERGE,
+    )
+    store.record_lifecycle(merged, now=NOW)
+    owner, directory = resolve_application_binding(notification_paths)
+    store.write_lifecycle_export(now=NOW, owner_user_id=owner, directory=directory)
+    export = state_dir / "workflow-events.json"
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == 1
+    assert not notification_paths.controller_state.exists()
+
+    Coordinator(
+        EmptyLifecycleApi(), store, clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    store_path = store.path
+    del store
+    retired = StateStore(store_path).snapshot()
+    assert retired["lifecycle_events"] == []
+    assert retired["lifecycle_context"]["events"] == [merged]
+    assert not export.exists()
+
+    controller_evidence(notification_paths)
+    if proof == "wrong_sha":
+        private_json(
+            notification_paths.controller_state / "status.json",
+            {"status": "succeeded", "git_sha": "d" * 40, "release": "c" * 32},
+            modified=NOW.timestamp() - 10,
+        )
+    else:
+        stale = NOW.timestamp() - 2 * 86400
+        os.utime(notification_paths.delivery_state, (stale, stale))
+    Coordinator(
+        EmptyLifecycleApi(), StateStore(store_path), clock=NOW.timestamp,
+        lifecycle_source_paths=paths,
+    ).run(apply=True)
+    rejected = StateStore(store_path).snapshot()
+    assert rejected["lifecycle_events"] == []
+    assert rejected["lifecycle_context"]["events"] == [merged]
+    assert not export.exists()
+
+    if proof == "wrong_sha":
+        private_json(
+            notification_paths.controller_state / "status.json",
+            {"status": "succeeded", "git_sha": MERGE, "release": "c" * 32},
+            modified=NOW.timestamp() - 10,
+        )
+    else:
+        os.utime(notification_paths.delivery_state, (NOW.timestamp() - 1,) * 2)
+    later = NOW + timedelta(minutes=1)
+    Coordinator(
+        EmptyLifecycleApi(), StateStore(store_path), clock=lambda: later.timestamp(),
+        lifecycle_source_paths=paths,
+    ).run(apply=True)
+    state = StateStore(store_path).snapshot()
+    assert state["lifecycle_context"]["events"] == [merged]
+    assert len(state["lifecycle_events"]) == 1
+    deployed = state["lifecycle_events"][0]
+    assert deployed["reason"] == "controller_verified"
+    assert (deployed["pr_number"], deployed["head_sha"], deployed["merge_sha"]) == (
+        merged["pr_number"], HEAD, MERGE,
+    )
+    assert event_digest(state["lifecycle_context"]["events"][0]) == event_digest(merged)
+    assert json.loads(export.read_bytes())["events"] == [deployed]
+    os.utime(export, (later.timestamp(), later.timestamp()))
+    assert process(notification_paths, apply=True, now=later)["inbox_items"] == 1
+    Coordinator(
+        EmptyLifecycleApi(), StateStore(store_path), clock=lambda: later.timestamp(),
+        lifecycle_source_paths=paths,
+    ).run(apply=True)
+    final = StateStore(store_path).snapshot()
+    assert final["lifecycle_events"] == []
+    assert final["lifecycle_context"]["events"] == [merged, deployed]
+    assert not export.exists()
+    with sqlite3.connect(inbox) as db:
+        assert db.execute("SELECT count(*) FROM inbox WHERE user_id=?", (APP_OWNER,)).fetchone() == (2,)
+        assert db.execute(
+            "SELECT count(*) FROM inbox WHERE user_id='synthetic-member'"
+        ).fetchone() == (0,)
+
+
+def write_starter_outcomes(path, api, phases):
+    commands, comments = {}, []
+    for number, phase in enumerate(phases, 1):
+        marker = f"<!-- hermes-issue-starter:blocked:31:{number} -->"
+        occurred = f"2026-10-01T20:58:{number:02d}Z"
+        commands[f"31:{number}"] = {
+            "issue": 31, "command_id": number,
+            "accepted_title_body_sha256": "d" * 64,
+            "accepted_at": "2026-10-01T20:00:00Z", "phase": phase,
+            "receipt": {"kind": "blocked", "state": "sent", "marker": marker},
+        }
+        comments.append({
+            "id": 20000 + number, "user": {"id": GITHUB_OWNER},
+            "body": (
+                f"{marker}\nHermes issue starter is blocked for issue #31. "
+                "Owner action is required; no uncertain task was automatically retried."
+            ),
+            "created_at": occurred, "updated_at": occurred,
+        })
+    api.comments = comments
+    private_json(path, {"version": 1, "commands": commands})
+
+
+def test_interrupted_consumer_ack_preserves_mixed_producer_outcomes(tmp_path, monkeypatch):
+    from deploy import workflow_notifications as adapter
+    from test_cloud_coordinator import Coordinator
+
+    notification_paths, state_dir, _, inbox, _ = app_fixture(tmp_path / "app")
+    paths = LifecycleSourcePaths(
+        notifications=notification_paths, starter_state=tmp_path / "starter" / "state.json",
+    )
+    api = EmptyLifecycleApi()
+    write_starter_outcomes(paths.starter_state, api, ["failed", "unknown", "handoff_uncertain"])
+    store_path = tmp_path / "coordinator" / "state.json"
+    Coordinator(
+        api, StateStore(store_path), clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    acked, pending, unreserved = StateStore(store_path).snapshot()["lifecycle_events"]
+    assert [item["reason"] for item in (acked, pending, unreserved)] == [
+        "issue_failed", "execution_uncertain", "execution_uncertain",
+    ]
+    export = state_dir / "workflow-events.json"
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    original_connection = adapter._state_connection
+
+    class InterruptedConnection:
+        def __init__(self, db):
+            self.db = db
+            self.interrupt = False
+
+        def __getattr__(self, name):
+            return getattr(self.db, name)
+
+        def execute(self, sql, parameters=()):
+            result = self.db.execute(sql, parameters)
+            if sql.startswith("UPDATE events SET status='acked'"):
+                self.interrupt = parameters[2] == pending["event_id"]
+            return result
+
+        def commit(self):
+            if self.interrupt:
+                raise SystemExit("interrupted after Inbox commit before consumer ACK commit")
+            self.db.commit()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(adapter, "_state_connection",
+                      lambda path: InterruptedConnection(original_connection(path)))
+        with pytest.raises(SystemExit, match="before consumer ACK commit"):
+            process(notification_paths, apply=True, now=NOW)
+    ledger = state_dir / adapter.ADAPTER_STATE_NAME
+    with sqlite3.connect(ledger) as db:
+        rows = db.execute(
+            "SELECT event_id,digest,status,inbox_id FROM events ORDER BY created_at,event_id"
+        ).fetchall()
+        assert {row[0]: row[2] for row in rows} == {
+            acked["event_id"]: "acked", pending["event_id"]: "pending",
+        }
+        assert next(row for row in rows if row[0] == pending["event_id"])[1:] == (
+            event_digest(pending), "pending", None,
+        )
+    with sqlite3.connect(inbox) as db:
+        pending_inbox = db.execute(
+            "SELECT id FROM inbox WHERE user_id=? AND delivery_id=?",
+            (APP_OWNER, "workflow-event:v1:" + pending["event_id"]),
+        ).fetchone()[0]
+        assert db.execute("SELECT count(*) FROM inbox").fetchone() == (2,)
+    consumer_before = {path: path.read_bytes() for path in (ledger, inbox)}
+
+    Coordinator(
+        api, StateStore(store_path), clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    state = StateStore(store_path).snapshot()
+    assert state["lifecycle_context"]["events"] == [acked]
+    assert state["lifecycle_events"] == [pending, unreserved]
+    assert json.loads(export.read_bytes())["events"] == [pending, unreserved]
+    assert {path: path.read_bytes() for path in consumer_before} == consumer_before
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == 2
+    assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute(
+            "SELECT digest,status,inbox_id FROM events WHERE event_id=?",
+            (pending["event_id"],),
+        ).fetchone() == (event_digest(pending), "acked", pending_inbox)
+    with sqlite3.connect(inbox) as db:
+        assert db.execute("SELECT count(*) FROM inbox WHERE user_id=?", (APP_OWNER,)).fetchone() == (3,)
+        assert db.execute(
+            "SELECT count(*) FROM inbox WHERE user_id='synthetic-member'"
+        ).fetchone() == (0,)
+    Coordinator(
+        api, StateStore(store_path), clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    final = StateStore(store_path).snapshot()
+    assert final["lifecycle_events"] == []
+    assert final["lifecycle_context"]["events"] == [acked, pending, unreserved]
+    assert not export.exists()
+
+
+def test_persistent_coordinator_incident_replays_canonical_retired_payload(tmp_path):
+    from deploy.cloud_coordinator import Coordinator as CloudCoordinator
+    from test_cloud_coordinator import Coordinator, FakeApi
+
+    notification_paths, state_dir, _, inbox, _ = app_fixture(tmp_path / "app")
+    paths = LifecycleSourcePaths(
+        notifications=notification_paths, starter_state=tmp_path / "starter" / "state.json",
+    )
+    api = FakeApi(strict_protection=False)
+    store_path = tmp_path / "coordinator" / "state.json"
+    Coordinator(
+        api, StateStore(store_path), clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    original = StateStore(store_path).snapshot()["lifecycle_events"]
+    assert len(original) == 1 and original[0]["reason"] == "policy_broken"
+    export = state_dir / "workflow-events.json"
+    assert json.loads(export.read_bytes())["events"] == original
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == 1
+    Coordinator(
+        api, StateStore(store_path), clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    retired = StateStore(store_path).snapshot()
+    assert retired["lifecycle_events"] == []
+    assert retired["lifecycle_context"]["events"] == original
+    assert not export.exists()
+    ledger = state_dir / "workflow-notifications.sqlite"
+    consumer_before = {path: path.read_bytes() for path in (ledger, inbox)}
+
+    later = NOW + timedelta(hours=1)
+    api.head_sha = "d" * 40
+    api.pull["head"]["sha"] = api.head_sha
+    class ReplayCoordinator(CloudCoordinator):
+        def _build_plan(self, *, apply):
+            plan = super()._build_plan(apply=apply)
+            regenerated, = plan["pull_requests"][0]["lifecycle_events"]
+            assert regenerated["event_id"] == original[0]["event_id"]
+            assert regenerated["head_sha"] == api.head_sha != original[0]["head_sha"]
+            assert regenerated["occurred_at"] == later.isoformat().replace("+00:00", "Z")
+            assert regenerated["occurred_at"] != original[0]["occurred_at"]
+            return plan
+
+    for _ in range(2):
+        result = ReplayCoordinator(
+            api, StateStore(store_path), clock=lambda: later.timestamp(),
+            lifecycle_source_paths=paths,
+        ).run(apply=True)
+        assert "up-to-date-policy" in result["pull_requests"][0]["reasons"]
+        replayed = StateStore(store_path).snapshot()
+        assert replayed["lifecycle_events"] == []
+        assert replayed["lifecycle_context"]["events"] == original
+        assert event_digest(replayed["lifecycle_context"]["events"][0]) == event_digest(original[0])
+        assert not export.exists()
+    assert {path: path.read_bytes() for path in consumer_before} == consumer_before
+    with sqlite3.connect(inbox) as db:
+        assert db.execute("SELECT count(*) FROM inbox WHERE user_id=?", (APP_OWNER,)).fetchone() == (1,)
+        assert db.execute(
+            "SELECT count(*) FROM inbox WHERE user_id='synthetic-member'"
+        ).fetchone() == (0,)
+
+
+def test_retention_context_growth_byte_boundary_is_atomic_and_restart_safe(tmp_path, monkeypatch):
+    from deploy import cloud_coordinator
+    from test_cloud_coordinator import Coordinator, CoordinatorError
+
+    notification_paths, state_dir, _, inbox, _ = app_fixture(tmp_path / "app")
+    paths = LifecycleSourcePaths(
+        notifications=notification_paths, starter_state=tmp_path / "starter" / "state.json",
+    )
+    api = EmptyLifecycleApi()
+    store_path = tmp_path / "coordinator" / "state.json"
+    export = state_dir / "workflow-events.json"
+    ledger = state_dir / "workflow-notifications.sqlite"
+    write_starter_outcomes(paths.starter_state, api, ["failed"])
+    Coordinator(
+        api, StateStore(store_path), clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    first = StateStore(store_path).snapshot()["lifecycle_events"][0]
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == 1
+    write_starter_outcomes(paths.starter_state, api, ["failed", "failed"])
+    Coordinator(
+        api, StateStore(store_path), clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    second = StateStore(store_path).snapshot()["lifecycle_events"][0]
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == 1
+    unacked = issue_event(
+        31, "execution_uncertain", occurred_at="2026-10-01T20:59:00Z",
+        incident="byte-bound-unacked",
+    )
+    store = StateStore(store_path)
+    store.record_lifecycle(unacked, now=NOW)
+    store.write_lifecycle_export(now=NOW, owner_user_id=APP_OWNER, directory=state_dir)
+    baseline = StateStore(store_path).snapshot()
+    assert baseline["lifecycle_context"]["events"] == [first]
+    assert baseline["lifecycle_events"] == [second, unacked]
+    write_starter_outcomes(paths.starter_state, api, ["failed", "failed", "unknown"])
+    before = {path: path.read_bytes() for path in (store_path, export, inbox, ledger)}
+    bound = len(before[store_path]) + 32
+    attempted = []
+    original_save = store._save
+
+    def capture_save(data):
+        attempted.append(json.loads(json.dumps(data)))
+        return original_save(data)
+
+    monkeypatch.setattr(store, "_save", capture_save)
+    with monkeypatch.context() as patch:
+        patch.setattr(cloud_coordinator, "MAX_STATE_BYTES", bound)
+        with pytest.raises(CoordinatorError, match="prior state was preserved"):
+            Coordinator(
+                api, store, clock=NOW.timestamp, lifecycle_source_paths=paths,
+            ).run(apply=True)
+        assert {path: path.read_bytes() for path in before} == before
+        assert StateStore(store_path).snapshot() == baseline
+    assert len(attempted) == 1
+    prepared = attempted[0]
+    assert prepared["lifecycle_context"]["events"] == [first, second]
+    assert prepared["lifecycle_events"][0] == unacked
+    assert len(prepared["lifecycle_events"]) == 2
+    assert len(json.dumps(prepared, separators=(",", ":"), sort_keys=True).encode()) > bound
+    prepared["lifecycle_context"]["events"].remove(second)
+    assert len(json.dumps(prepared, separators=(",", ":"), sort_keys=True).encode()) <= bound
+    assert store.snapshot() == baseline
+    assert not api.writes and not api.graphql_writes
+
+    Coordinator(
+        api, StateStore(store_path), clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    recovered = StateStore(store_path).snapshot()
+    assert recovered["lifecycle_context"]["events"] == [first, second]
+    assert recovered["lifecycle_events"][0] == unacked
+    assert len(recovered["lifecycle_events"]) == 2
+    assert json.loads(export.read_bytes())["events"] == recovered["lifecycle_events"]
+    assert inbox.read_bytes() == before[inbox] and ledger.read_bytes() == before[ledger]
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == 2
+    assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == 0
+    Coordinator(
+        api, StateStore(store_path), clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    final = StateStore(store_path).snapshot()
+    assert final["lifecycle_events"] == []
+    assert final["lifecycle_context"]["events"] == [
+        first, second, *recovered["lifecycle_events"],
+    ]
+    assert not export.exists()
+    with sqlite3.connect(inbox) as db:
+        assert db.execute("SELECT count(*) FROM inbox WHERE user_id=?", (APP_OWNER,)).fetchone() == (4,)
+        assert db.execute(
+            "SELECT count(*) FROM inbox WHERE user_id='synthetic-member'"
+        ).fetchone() == (0,)
