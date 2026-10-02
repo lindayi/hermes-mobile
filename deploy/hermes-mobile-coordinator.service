@@ -17,7 +17,6 @@ ReadWritePaths=%S/hermes-mobile-coordinator %h/.local/share/hermes-mobile-live
 PrivateTmp=yes
 NoNewPrivileges=yes
 ProtectKernelTunables=yes
-ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes

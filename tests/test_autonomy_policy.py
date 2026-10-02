@@ -49,12 +49,10 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'deploy/frontend_release.py': '7749afb862a515fc673712b11278145adfb3d39ba2d012a34ecea257399eade3',
     'deploy/git_source.py': 'c69c7c5a45bc3a16ab26996872c258cc352cf2ec56c19d6256595e18ac713d63',
     'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
-    'deploy/native_controls_release.py': 'b3d3c601db4afd9ff003f4df759fcb057c19a83b920206fb2766d1560fd99175',
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': '49d784af17d0807c95b460b2a285254f0a616361c390afa69b3cc0345a56b498',
     'deploy/public_http.py': 'dd352b8d0295f242f4a5d31a55eaaec523ef8405601461d4ab5fa8dc6dc302e7',
     'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
-    'deploy/self_deploy.py': 'c8b9febf5e73c22de2aebbbf6ecb63e08597f58ea7ff5eede979d4be51783550',
     'deploy/ci_selection.py': '07493f74bc4b932e26342e0d27fee8c3c38601af8211e0a950920935173b2f16',
     'deploy/test_workspace.py': 'baeb1103608ff15db3903677fa8ec9c80c9c8b9a0246ce18ada27bf7c04a486a',
     'scripts/ci_tests.py': '6ed905a90720fb17226472a0453fb762395424b8370df474fed4536827b398d6',
@@ -100,6 +98,17 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
     'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
 }
+
+# Native-controller candidate includes both issue46 observation and issue52 hosting.
+_ISSUE46_OBSERVER_FIXTURE = {
+    'deploy/native_controls_release.py': '0887a6ad4fa0bb5c1351089cc6c53fc8ff7be4c609f42d956d3a51642256dba5',
+    'deploy/observe_release.py': 'bf01500fb253f7d41ce49d375bba63a9e4d80569eb376a6aeae50f56cf71923f',
+}
+
+_ISSUE52_MERGED_MAIN_BASE_FIXTURE = {
+    'deploy/native_controls_release.py': 'b3d3c601db4afd9ff003f4df759fcb057c19a83b920206fb2766d1560fd99175',
+    'deploy/self_deploy.py': 'c8b9febf5e73c22de2aebbbf6ecb63e08597f58ea7ff5eede979d4be51783550',
+}
 # Accepted merged PR25 bytes; absent only from the historical b85c098 baseline.
 _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
     'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
@@ -118,12 +127,12 @@ _PENDING_PR40_LIFECYCLE_FIXTURE = {
 
 _PENDING_ISSUE43_LAUNCH_FIXTURE = {
     'deploy/cloud_coordinator.py': '3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c',
-    'deploy/issue_starter.py': '701faa6e15a2717cb3c79f7e93c728bdde326e4f72e451ccd77ec1f8eabdc011',
+    'deploy/issue_starter.py': '49debd3c1da5252ea67322a0febb9eb5b56d0ac1a830f3718e4d07377993b517',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
     'scripts/issue_starter.py': '09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1',
     'scripts/workflow_notifications.py': '03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f',
-    'deploy/hermes-mobile-coordinator.service': '672f1e134e2cb5acbcd648eb7e124947af8d7c11143f20cea8e5be5d97c42807',
+    'deploy/hermes-mobile-coordinator.service': '49d6ebb6e24b4c0a06af3d10e6e2cce11dd6af7ee8056c99268058c2f6f2cab3',
     'deploy/hermes-mobile-coordinator.timer': 'ffa239c67b492b5a361b823c754d5f204eb4efaa2c69f7df99df577e12d2a6c1',
     'deploy/hermes-workflow-notifications.service': '998ee55dc5df990c6004f0f435e073766702e5efbf56aa83e946b6d05e21c000',
     'deploy/hermes-workflow-notifications.timer': '627463b4dd06eb72f7fecc88a79dad29ec8ab4b5514b29c62c131cdbd2963cc8',
@@ -131,10 +140,23 @@ _PENDING_ISSUE43_LAUNCH_FIXTURE = {
     'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
 }
 
+_PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE = {
+    'deploy/native_controls_release.py': '0887a6ad4fa0bb5c1351089cc6c53fc8ff7be4c609f42d956d3a51642256dba5',
+    'deploy/self_deploy.py': '592cc957ad79a1f020a02ec1ca72b53d68bbbd49a8800c16af8cdead13d45469',
+}
+
+_PENDING_ISSUE50_RECEIPT_FIXTURE = {
+    'deploy/cloud_coordinator.py': '0935088cb9e3429b83dcc7daa8552cf2c58830e5494549270ec276a076e3193b',
+    'deploy/task_receipts.py': '60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb',
+}
+
 
 def _source_files():
-    return (_MERGED_MAIN_SOURCE_FIXTURE | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
-            | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE)
+    return (_MERGED_MAIN_SOURCE_FIXTURE | _ISSUE52_MERGED_MAIN_BASE_FIXTURE
+            | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
+            | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE
+            | _ISSUE46_OBSERVER_FIXTURE | _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
+            | _PENDING_ISSUE50_RECEIPT_FIXTURE)
 
 
 def _source_ci():
@@ -489,16 +511,29 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending = {'deploy/cloud_coordinator.py', 'deploy/native_notification_release.py',
                'deploy/review_evidence.py'} | set(_PENDING_PR40_LIFECYCLE_FIXTURE)
     pending |= set(_PENDING_ISSUE43_LAUNCH_FIXTURE)
+    pending |= set(_ISSUE46_OBSERVER_FIXTURE)
+    pending |= set(_PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE)
+    pending |= set(_PENDING_ISSUE50_RECEIPT_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
-    } == _MERGED_MAIN_SOURCE_FIXTURE
+    } == {
+        path: digest for path, digest in _MERGED_MAIN_SOURCE_FIXTURE.items()
+        if path not in _ISSUE46_OBSERVER_FIXTURE
+    }
+    assert {
+        path: SOURCE_FINGERPRINTS[path] for path in _ISSUE46_OBSERVER_FIXTURE
+    } == _ISSUE46_OBSERVER_FIXTURE
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in {'deploy/cloud_coordinator.py', 'deploy/review_evidence.py'}
     } == {
-        path: _PENDING_ISSUE43_LAUNCH_FIXTURE[path]
-        for path in ('deploy/cloud_coordinator.py', 'deploy/review_evidence.py')
+        'deploy/cloud_coordinator.py': _PENDING_ISSUE50_RECEIPT_FIXTURE[
+            'deploy/cloud_coordinator.py'
+        ],
+        'deploy/review_evidence.py': _PENDING_ISSUE43_LAUNCH_FIXTURE[
+            'deploy/review_evidence.py'
+        ],
     }
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
@@ -507,7 +542,22 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_PR40_LIFECYCLE_FIXTURE
-    } == _PENDING_PR40_LIFECYCLE_FIXTURE
+        and path not in _PENDING_ISSUE50_RECEIPT_FIXTURE
+    } == {
+        path: digest for path, digest in _PENDING_PR40_LIFECYCLE_FIXTURE.items()
+        if path not in _PENDING_ISSUE50_RECEIPT_FIXTURE
+    }
+    assert {
+        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
+        if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
+    } == _PENDING_ISSUE50_RECEIPT_FIXTURE
+    assert {
+        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
+        if path in _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
+    } == _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
+    for path, digest in _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE.items():
+        source = Path(__file__).resolve().parents[1] / path
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
     assert set(SOURCE_BLOCKERS) == set(REQUIRED_FILES)
     assert len(REQUIRED_FILES) == len(set(REQUIRED_FILES))
@@ -533,15 +583,39 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
 
 
 @pytest.mark.parametrize('pins', [
+    SOURCE_FINGERPRINTS, _ISSUE46_OBSERVER_FIXTURE,
+], ids=['policy', 'independent-fixture'])
+@pytest.mark.parametrize('path', sorted(_ISSUE46_OBSERVER_FIXTURE))
+def test_issue46_observer_pin_matches_exact_candidate_bytes(pins, path):
+    source = Path(__file__).resolve().parents[1] / path
+    assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _PENDING_ISSUE43_LAUNCH_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
-@pytest.mark.parametrize('path', sorted(_PENDING_ISSUE43_LAUNCH_FIXTURE))
+@pytest.mark.parametrize(
+    'path', sorted(set(_PENDING_ISSUE43_LAUNCH_FIXTURE) -
+                   set(_PENDING_ISSUE50_RECEIPT_FIXTURE)),
+)
 def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
     source = Path(__file__).resolve().parents[1] / path
     assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
 
 
-@pytest.mark.parametrize('path', sorted(_PENDING_PR40_LIFECYCLE_FIXTURE))
+@pytest.mark.parametrize('pins', [
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE,
+], ids=['policy', 'independent-fixture'])
+@pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
+def test_issue50_receipt_pin_matches_actual_candidate_bytes(path, pins):
+    source = Path(__file__).resolve().parents[1] / path
+    assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    'path', sorted(set(_PENDING_PR40_LIFECYCLE_FIXTURE) -
+                   set(_PENDING_ISSUE50_RECEIPT_FIXTURE)),
+)
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _PENDING_PR40_LIFECYCLE_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
@@ -578,7 +652,10 @@ def test_pending_lifecycle_actual_byte_mutation_or_missing_source_blocks(phase, 
 
 
 @pytest.mark.parametrize('phase', PHASES)
-@pytest.mark.parametrize('path', sorted(_PENDING_ISSUE43_LAUNCH_FIXTURE))
+@pytest.mark.parametrize(
+    'path', sorted(set(_PENDING_ISSUE43_LAUNCH_FIXTURE) |
+                   set(_PENDING_ISSUE50_RECEIPT_FIXTURE)),
+)
 @pytest.mark.parametrize('change', ['missing', 'malformed', 'mutated'])
 def test_issue43_launch_actual_byte_mutation_or_missing_source_blocks(phase, path, change):
     evidence = _phase_evidence(phase)

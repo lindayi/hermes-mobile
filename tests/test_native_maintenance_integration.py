@@ -81,9 +81,10 @@ def test_cli_forwards_explicit_approval_only_with_bootstrap(tmp_path,monkeypatch
     monkeypatch.setattr(r.os,'geteuid',lambda:1000)
     calls=[]
     approval=tmp_path/'private-approval.json'
-    assert r.main(['--schedule','--bootstrap-dedicated-native','--legacy-restart-approval',str(approval)],
+    assert r.main(['--schedule','--local-full-checks','--bootstrap-dedicated-native','--legacy-restart-approval',str(approval)],
                   paths=paths,run=lambda cmd,**kw:calls.append(cmd))==0
     assert '--watch-worker' in calls[0]
+    assert '--local-full-checks' in calls[1]
     assert calls[1][-2:]==['--legacy-restart-approval',str(approval)]
     with pytest.raises(SystemExit):
         r.main(['--schedule','--legacy-restart-approval',str(approval)],paths=paths,run=lambda *a,**kw:pytest.fail('unauthorized schedule'))
@@ -108,7 +109,7 @@ def test_worker_loads_verified_scoped_approval(tmp_path,monkeypatch):
     deployed=[]
     monkeypatch.setattr(r,'NativeProbe',FakeNativeProbe)
     monkeypatch.setattr(r,'deploy',lambda deployed_paths,**kw:deployed.append((deployed_paths,kw)))
-    assert r.main(['--worker','--bootstrap-dedicated-native','--legacy-restart-approval',str(approval)],paths=paths)==0
+    assert r.main(['--worker','--local-full-checks','--bootstrap-dedicated-native','--legacy-restart-approval',str(approval)],paths=paths)==0
     assert seen[0]==approval and deployed[0][1]['native']['legacy_notice_approval']=={'pid':123}
     deployed_paths,callbacks=deployed[0]
     notification_callbacks=callbacks['handoff']
@@ -116,6 +117,39 @@ def test_worker_loads_verified_scoped_approval(tmp_path,monkeypatch):
     assert deployed_paths.database.resolve()==notification_callbacks.runs
     assert notification_callbacks.state==deployed_paths.database.parent.resolve()
     assert notification_callbacks.controller!=notification_callbacks.state
+
+
+def test_worker_forwards_hosted_run_id_to_controller(tmp_path, monkeypatch):
+    from backend import native_api_service
+    from deploy import native_notification_release
+    from test_self_deploy import deploy_fixture
+    _, paths = deploy_fixture(tmp_path)
+    monkeypatch.setattr(r.os, 'geteuid', lambda: 1000)
+    monkeypatch.setenv('INVOCATION_ID', 'synthetic-systemd-context')
+    monkeypatch.setattr(native_api_service, 'OWNER_HOME', tmp_path / 'synthetic-home')
+    monkeypatch.setattr(r, 'NativeProbe', lambda *a, **kw: object())
+
+    class Notifications:
+        probe = object()
+        verify_rollback = object()
+
+        def __init__(self, *a, **kw):
+            self.capture = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(native_notification_release, 'NativeNotificationCallbacks', Notifications)
+    deployed = []
+    monkeypatch.setattr(r, 'deploy', lambda paths, **kw: deployed.append(kw))
+    assert r.main(['--worker', '--hosted-run-id', '765', '--expected-source-sha', 'a' * 40],
+                  paths=paths) == 0
+    assert deployed[0]['hosted_run_id'] == 765
+    assert deployed[0]['local_full_checks'] is False
+    assert deployed[0]['expected_source_sha'] == 'a' * 40
 
 
 def test_controller_new_readiness_consumes_scoped_evidence(tmp_path,monkeypatch,versions):
