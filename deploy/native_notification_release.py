@@ -10,13 +10,16 @@ import stat
 import time
 
 
-MAX_RECORDS = 10000
+# Retained outbox history is append-only; read it in bounded pages, never truncated.
+PAGE_SIZE = 500
+CAPTURE_ATTEMPTS = 5
 STATUS_KEYS = ('pending', 'delivered', 'quarantined', 'foreign', 'conflicts',
                'foreign_retained', 'active_workers', 'shutdown_publications')
 
 
 class _EvidenceChanged(RuntimeError):
-    pass
+    def __init__(self, message='Native notification evidence changed during observation'):
+        super().__init__(message)
 
 
 def _canonical(value):
@@ -71,8 +74,10 @@ class NativeNotificationCallbacks:
         self.baseline = None
         self.capture_attempted = False
         self.initial_records = None
+        self.initial_deliveries = None
         self.initial_receipts = None
         self.handoff_records = None
+        self.handoff_deliveries = None
         self.handoff_receipts = None
         self.owner_id = None
         self.scope = None
@@ -232,12 +237,20 @@ class NativeNotificationCallbacks:
             with _readonly(self.outbox) as db:
                 binding = [row['home'] for row in db.execute('SELECT home FROM notification_binding')]
                 conflicts = db.execute('SELECT COUNT(*) FROM notification_conflicts').fetchone()[0]
-                rows = [dict(row) for row in db.execute('''SELECT event_id,event_json,result_json,
-                    payload_sha256,route,state,historical,provenance,source_state,receipt_id,lease_token
-                    FROM notification_outbox ORDER BY event_id LIMIT ?''', (MAX_RECORDS + 1,))]
+                total = db.execute('SELECT COUNT(*) FROM notification_outbox').fetchone()[0]
+                rows, after = [], -(2 ** 63)
+                while True:
+                    page = db.execute('''SELECT rowid,event_id,event_json,result_json,
+                        payload_sha256,route,state,historical,provenance,source_state,receipt_id,
+                        lease_token FROM notification_outbox WHERE rowid>?
+                        ORDER BY rowid LIMIT ?''', (after, PAGE_SIZE)).fetchall()
+                    if not page:
+                        break
+                    rows.extend(dict(row) for row in page)
+                    after = page[-1]['rowid']
             if binding != [str(self.home)] or type(conflicts) is not int or conflicts != 0:
                 raise ValueError()
-            if len(rows) > MAX_RECORDS:
+            if type(total) is not int or len(rows) != total:
                 raise ValueError()
             classify = OwnerRoute(self.home, self.state)
             records = {}
@@ -363,6 +376,20 @@ class NativeNotificationCallbacks:
             raise RuntimeError('Durable native notification record changed after handoff')
 
     @staticmethod
+    def _deliveries(records):
+        return {key: record['receipt_id'] for key, record in records.items()
+                if record['state'] == 'delivered'}
+
+    @staticmethod
+    def _preserved_deliveries(before, records):
+        # Delivery is monotonic: pending may become delivered, never the reverse,
+        # and an established receipt binding cannot be erased or replaced.
+        for key, receipt_id in before.items():
+            record = records.get(key)
+            if record is None or record['state'] != 'delivered' or record['receipt_id'] != receipt_id:
+                raise RuntimeError('Delivered native notification record was not preserved')
+
+    @staticmethod
     def _receipt_fingerprints(snapshot):
         fields = ('event_id', 'scope', 'digest', 'user_id', 'origin', 'inbox_id',
                   'event_json', 'joined_inbox_id', 'delivery_id',
@@ -420,14 +447,29 @@ class NativeNotificationCallbacks:
         pointer = self.controller / 'current'
         if not pointer.is_symlink():
             raise RuntimeError('Native notification bridge baseline is unavailable')
-        snapshot = self._snapshot(include_receipts=True)
-        self._require_health(identity=(baseline['pid'], baseline['start_ticks']),
-                             baseline=baseline, require_idle=False, snapshot=snapshot)
+        # Capture precedes drain: legitimate appends may race the native status
+        # reads. Retry only that churn, re-proving gate and identity each time.
+        for attempt in range(CAPTURE_ATTEMPTS):
+            if attempt:
+                self.sleep(self.poll_interval)
+                self._require_controller_gate(baseline['gate_owner'])
+                if (self.native.attest(root) != baseline['pid']
+                        or self.native._start_ticks(baseline['pid']) != baseline['start_ticks']):
+                    raise RuntimeError('Native notification process identity changed')
+            try:
+                snapshot = self._snapshot(include_receipts=True)
+                self._require_health(identity=(baseline['pid'], baseline['start_ticks']),
+                                     baseline=baseline, require_idle=False, snapshot=snapshot)
+                break
+            except _EvidenceChanged:
+                if attempt + 1 == CAPTURE_ATTEMPTS:
+                    raise
         self.baseline = dict(baseline)
         self.owner_id, self.scope = snapshot['owner'], snapshot['scope']
         self._require_delivered_receipts(snapshot)
         self.identities = snapshot['identities']
         self.initial_records = self._fingerprints(snapshot['records'])
+        self.initial_deliveries = self._deliveries(snapshot['records'])
         self.initial_receipts = self._receipt_fingerprints(snapshot)
         self.bridge_root = pointer.resolve(strict=True)
         return True
@@ -446,6 +488,7 @@ class NativeNotificationCallbacks:
         snapshot = self._snapshot(expected_owner=self.owner_id, include_receipts=True)
         self.handoff_receipts = self._receipt_fingerprints(snapshot)
         self._preserved(self.initial_records, snapshot['records'])
+        self._preserved_deliveries(self.initial_deliveries, snapshot['records'])
         self._preserved_receipts(self.initial_receipts, snapshot)
         self._require_delivered_receipts(snapshot)
         if snapshot['identities'] != self.identities:
@@ -454,6 +497,7 @@ class NativeNotificationCallbacks:
                                     baseline=self.baseline, require_idle=True, snapshot=snapshot):
             raise RuntimeError('Native notification handoff is not idle')
         self.handoff_records = self._fingerprints(snapshot['records'])
+        self.handoff_deliveries = self._deliveries(snapshot['records'])
         return True
 
     def _receipts_complete(self, snapshot):
@@ -517,6 +561,7 @@ class NativeNotificationCallbacks:
                 if snapshot['identities'] != self.identities:
                     raise RuntimeError('Native notification database binding changed')
                 self._preserved(self.handoff_records, self._fingerprints(snapshot['records']), exact=True)
+                self._preserved_deliveries(self.handoff_deliveries, snapshot['records'])
                 self._preserved_receipts(self.initial_receipts, snapshot)
                 self._preserved_receipts(self.handoff_receipts, snapshot)
                 ready = self._require_health(identity=(pid, started), root=stage,
@@ -551,8 +596,13 @@ class NativeNotificationCallbacks:
         snapshot = self._snapshot(expected_owner=self.owner_id, include_receipts=True)
         if snapshot['identities'] != self.identities:
             raise RuntimeError('Native notification database binding changed')
-        expected = self.handoff_records if self.handoff_records is not None else self.initial_records
-        self._preserved(expected, self._fingerprints(snapshot['records']), exact=True)
+        handed_off = self.handoff_records is not None
+        expected = self.handoff_records if handed_off else self.initial_records
+        # Before handoff the old listener was not yet drained and may append.
+        self._preserved(expected, self._fingerprints(snapshot['records']), exact=handed_off)
+        self._preserved_deliveries(self.initial_deliveries, snapshot['records'])
+        if handed_off:
+            self._preserved_deliveries(self.handoff_deliveries, snapshot['records'])
         self._preserved_receipts(self.initial_receipts, snapshot)
         if self.handoff_receipts is not None:
             self._preserved_receipts(self.handoff_receipts, snapshot)

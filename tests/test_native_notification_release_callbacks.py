@@ -736,3 +736,202 @@ def test_outbox_path_must_match_the_native_private_config(tmp_path):
     native.config_bytes = json.dumps({'state_dir': str(tmp_path / 'other-state')}).encode()
     with pytest.raises(RuntimeError, match='outbox path'):
         under_owned_lock(paths, lambda: callbacks.capture(baseline))
+
+
+def append_owned_record(outbox, event, delegation_id):
+    outbox.capture({**event, 'delegation_id': delegation_id},
+                   {'summary': 'Synthetic ' + delegation_id}, route='owned')
+
+
+def test_controller_retries_capture_after_legitimate_predrain_append(tmp_path, monkeypatch):
+    _, outbox, native, paths, callbacks, args, old, event = setup_controller_release(
+        tmp_path, monkeypatch)
+    callbacks.sleep = lambda _: None
+    original = native.request
+    appended = []
+
+    def request(path):
+        # Active pre-drain work appends between the local snapshot and native status.
+        if path == '/v1/mobile/notifications/status' and not appended:
+            append_owned_record(outbox, event, 'deleg_2')
+            appended.append(True)
+        return original(path)
+
+    native.request = request
+    with pytest.raises(RuntimeError, match='receipt verification timed out'):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    assert appended == [True]
+    assert set(callbacks.initial_records) == {'async:deleg_1', 'async:deleg_2'}
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'rolled_back'
+    assert (paths.state / 'current').resolve() == old
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
+
+
+def test_controller_capture_retry_is_bounded_with_stable_diagnostic(tmp_path, monkeypatch):
+    _, outbox, native, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch)
+    sleeps = []
+    callbacks.sleep = sleeps.append
+    original = native.request
+    appended = []
+
+    def request(path):
+        if path == '/v1/mobile/notifications/status':
+            appended.append(True)
+            append_owned_record(outbox, event, 'churn_%d' % len(appended))
+        return original(path)
+
+    native.request = request
+    with pytest.raises(RuntimeError, match='admission gate remains closed'):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status['status'] == 'rollback_failed'
+    assert status['error'] == 'Native notification evidence changed during observation'
+    assert len(appended) == len(sleeps) + 1 > 1
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT owner FROM deployment_gate').fetchone() == (status['release'],)
+
+
+def test_controller_capture_retry_rechecks_process_identity(tmp_path, monkeypatch):
+    _, outbox, native, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch)
+    original = native.request
+    appended = []
+
+    def request(path):
+        if path == '/v1/mobile/notifications/status' and not appended:
+            append_owned_record(outbox, event, 'deleg_2')
+            appended.append(True)
+        return original(path)
+
+    def restart_between_attempts(_):
+        native.pid, native.started = native.pid + 10, native.started + 10
+
+    native.request = request
+    callbacks.sleep = restart_between_attempts
+    with pytest.raises(RuntimeError, match='admission gate remains closed'):
+        release.deploy(paths, idle_timeout=0, **args)
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status['status'] == 'rollback_failed'
+    assert status['error'] == 'Native notification process identity changed'
+    assert callbacks.baseline is None
+
+
+def test_evidence_change_has_a_stable_diagnostic():
+    from deploy.native_notification_release import _EvidenceChanged
+    assert str(_EvidenceChanged()) == 'Native notification evidence changed during observation'
+
+
+def regress_delivered_record(outbox, event):
+    with outbox.transaction() as db:
+        db.execute('''UPDATE notification_outbox SET state='pending',receipt_id=NULL,
+            lease_until=NULL WHERE event_id=?''', ('async:' + event['delegation_id'],))
+
+
+def test_controller_keeps_gate_closed_when_delivered_record_regresses(tmp_path, monkeypatch):
+    _, outbox, _, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch)
+
+    def regress_then_fail(stage):
+        regress_delivered_record(outbox, event)
+        raise RuntimeError('ordinary candidate failure after regression')
+
+    args['probe'] = regress_then_fail
+    with pytest.raises(RuntimeError, match='admission gate remains closed'):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status['status'] == 'rollback_failed'
+    assert status['rollback_error'] == 'Delivered native notification record was not preserved'
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT owner FROM deployment_gate').fetchone() == (status['release'],)
+
+
+@pytest.mark.parametrize('phase', ['handoff', 'probe', 'rollback'])
+@pytest.mark.parametrize('change', ['pending', 'receipt'])
+def test_delivered_state_and_receipt_binding_are_monotonic(tmp_path, phase, change):
+    native, paths, callbacks, action = prepare_proof_phase(tmp_path, phase)
+    callbacks.receipt_timeout, callbacks.sleep = 0, lambda _: None
+    with native.outbox.transaction() as db:
+        if change == 'pending':
+            db.execute("UPDATE notification_outbox SET state='pending',receipt_id=NULL")
+        else:
+            db.execute("UPDATE notification_outbox SET receipt_id='another-receipt'")
+    with pytest.raises(RuntimeError, match='not preserved|inconsistent'):
+        under_owned_lock(paths, action)
+
+
+def test_rollback_allows_predrain_append_before_handoff(tmp_path, monkeypatch):
+    _, outbox, native, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch)
+
+    def append_then_stay_busy(*values, **kwargs):
+        if not any(key == 'async:deleg_2' for key in callbacks.initial_records):
+            append_owned_record(outbox, event, 'deleg_2')
+        return False
+
+    native.idle = append_then_stay_busy
+    with pytest.raises(RuntimeError, match='Native idle wait timed out'):
+        release.deploy(paths, idle_timeout=0, **args)
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'rolled_back'
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
+
+
+def test_snapshot_pages_retained_delivered_history_in_one_transaction(tmp_path, monkeypatch):
+    from deploy import native_notification_release as callbacks_module
+    app, outbox, native, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch)
+    scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+    for delegation_id in ('deleg_2', 'deleg_3', 'deleg_4'):
+        routed = {**event, 'delegation_id': delegation_id}
+        append_owned_record(outbox, event, delegation_id)
+        create_owned_ack(app, outbox, routed, scope)
+    monkeypatch.setattr(callbacks_module, 'PAGE_SIZE', 3)
+    opened, original_readonly = [], callbacks_module._readonly
+    resolved, original_resolve = [], OwnerRoute.resolve
+
+    def readonly(path):
+        opened.append(Path(path).name)
+        return original_readonly(path)
+
+    def resolve(router, routed_event):
+        resolved.append(routed_event['delegation_id'])
+        return original_resolve(router, routed_event)
+
+    monkeypatch.setattr(callbacks_module, '_readonly', readonly)
+    monkeypatch.setattr(OwnerRoute, 'resolve', resolve)
+    snapshot = callbacks._snapshot(include_receipts=True)
+    assert opened.count('native-notifications.sqlite') == 1
+    assert sorted(resolved) == ['deleg_1', 'deleg_2', 'deleg_3', 'deleg_4']
+    assert {record['state'] for record in snapshot['records'].values()} == {'delivered'}
+    assert len(snapshot['records']) == 4
+
+    release.deploy(paths, idle_timeout=0, **args)
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'succeeded'
+    assert set(callbacks.handoff_records) == {
+        'async:deleg_1', 'async:deleg_2', 'async:deleg_3', 'async:deleg_4'}
+
+
+def test_retained_history_beyond_former_cap_does_not_deadlock_release(tmp_path, monkeypatch):
+    _, outbox, _, paths, callbacks, args, _, event = setup_controller_release(
+        tmp_path, monkeypatch)
+    rows = []
+    for index in range(10001):
+        foreign = {**event, 'delegation_id': 'history_%05d' % index, 'platform': 'telegram'}
+        encoded = json.dumps(foreign, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        rows.append(('async:' + foreign['delegation_id'], encoded,
+                     hashlib.sha256(encoded.encode()).hexdigest()))
+    with outbox.transaction() as db:
+        db.executemany('''INSERT INTO notification_outbox(event_id,event_json,payload_sha256,
+            route,state,historical,provenance,source_state)
+            VALUES(?,?,?,'foreign','foreign',0,'publisher','foreign-retained')''', rows)
+
+    release.deploy(paths, idle_timeout=0, **args)
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'succeeded'
+    assert len(callbacks.handoff_records) == 10002
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)

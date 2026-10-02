@@ -21,10 +21,17 @@ After activation, the probe checks the same outbox and source bindings and waits
 for each applicable owned record to have the existing native `delivered` state
 and its matching owner-scoped bridge receipt, inbox row, and acknowledged flag.
 The receipt's `session_id` must exactly match the current owner-route lineage tip
-computed with the bounded record snapshot; a merely nonempty or different session
+computed with the paged record snapshot; a merely nonempty or different session
 is not ownership evidence. Lease tokens may rotate during retry and are excluded
 from preservation fingerprints, but final ACK evidence still requires the receipt
 token to match the delivered outbox row.
+The append-only outbox retains delivered history, so every snapshot reads all
+records in bounded rowid pages inside one read-only transaction and requires the
+page total to equal the table count; there is no record cap or truncation. Each
+record is routed once per snapshot, after the outbox read transaction ends.
+Delivery is monotonic: a record proven `delivered` must remain `delivered` with
+the same `receipt_id` in every later handoff, probe, and rollback proof, while a
+`pending` record may advance to `delivered`.
 It also requires zero quarantined/unknown records, conflicts, active notification
 workers, shutdown publications, or unpreserved native notifications. The empty
 backlog case is accepted only when the bound outbox is positively empty and the
@@ -56,6 +63,14 @@ and `NotificationCapture.transfer`/`claim` in `backend/native_notifications.py`:
 Recognized pending records can be captured and retained without manufacturing
 source transitions or delivery; a successful activation still requires their
 existing delivery receipts.
+
+Capture runs before drain, so a legitimate append may race the native status
+reads. Capture retries only that evidence change, a bounded number of times, and
+re-proves gate ownership and baseline PID/start ticks before each retry; identity
+or other evidence failures are not retried. Exhausted retries fail closed with the
+stable diagnostic `Native notification evidence changed during observation`.
+Rollback before handoff accepts positively validated records appended by the
+undrained old listener; after handoff the record set must match exactly.
 
 Before either abort path reopens admission, the controller requires a separate
 read-only rollback proof against the captured source, database identities, durable
