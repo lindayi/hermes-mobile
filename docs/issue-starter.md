@@ -68,8 +68,13 @@ or dispatch arbitrary tasks.
 Before the task POST, state durably reserves the issue/comment identity and the
 current trusted `main` SHA. The request uses `create_pull_request: true` and
 `base_ref: "main"`. Its fixed instructions require reading `AGENTS.md`, a
-`Closes #N` PR, managed strict TDD, exact test/review evidence, cloud-only
-execution, and no merge, production access, settings, or permissions changes.
+plain-paragraph PR description with a literal `Closes #N` reference and all
+required evidence fields from the repository template, managed strict TDD, exact
+test/review evidence, cloud-only execution, and no merge, production access,
+settings, or permissions changes. PR descriptions must contain no Markdown
+headings, lists, links, code, quotes, HTML, or inline markup because the
+conservative closing-reference parser rejects unsupported markup throughout the
+body. Optional rich evidence belongs in comments, not the description.
 
 The worker polls only the persisted task ID. It requires the task's repository
 and owner/creator identity, a completed task with a bounded positive
@@ -86,9 +91,12 @@ Markdown subset. Raw HTML, links/images, code, lists/quotes (including lazy
 continuations), escapes, and other unsupported markup fail closed for the whole
 body, even if a separate valid directive exists. Complete same-line inline HTML
 comments within a text paragraph are ignored without joining surrounding text;
-line-start comments are HTML blocks, not inline text (CommonMark §4.6). Use a
-plain `Closes #N` description if a rich description is rejected. No renderer or
-additional runtime dependency is introduced.
+line-start comments are HTML blocks, not inline text (CommonMark §4.6). Use the
+plain-paragraph repository template for every PR description, rather than
+waiting for a rich description to be rejected. Include baseline, scope,
+acceptance, RED/GREEN, exact tests and review evidence, rollout, and
+merged-versus-deployed state. Unsupported source claims remain blocked. No
+renderer or additional runtime dependency is introduced.
 
 If the task leaves the PR as a draft, a durable one-time
 readiness reservation invokes GitHub's `markPullRequestReadyForReview` GraphQL
@@ -161,6 +169,16 @@ GitHub API fixtures through the managed test runner. The producer-to-consumer te
 runs the actual in-checkout starter and coordinator enrollment scan. Coordinator
 tests also exercise fixer receipts across result heads, fresh review/check evidence,
 restart, and replay. There is no absent-consumer skip or external source override.
+
+Coordinator and notification services run under the same Unix account and user
+manager as their owner, not a separate service identity. Unit sandbox settings
+restrict access but do not isolate the service from all files and user-level
+resources available to that account. `NoNewPrivileges` prevents gaining new
+privileges through execution but does not remove the account's existing access.
+`ProtectKernelModules` is deliberately omitted from these user units because the
+unprivileged user manager cannot apply it and reports `218/CAPABILITIES`. Other
+tested hardening remains enabled. This source change is not proof of successful
+host activation; the parent operator owns that qualification.
 
 ```sh
 HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \

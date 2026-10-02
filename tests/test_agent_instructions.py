@@ -124,6 +124,8 @@ SYNCED_RULES = (
     'and test result against the exact head SHA.',
     'Merging and deployment are separate; only guarded deployment from verified main is '
     'allowed, and coding agents never access production.',
+    'Write PR descriptions as plain paragraphs using the repository template; include a '
+    'literal Closes #N and all required evidence, with no Markdown markup in the body.',
 )
 
 
@@ -221,13 +223,13 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
     assert 'Full managed integration result, if required' not in template
     for clause in (
         'Mandatory final integration evidence',
-        'before cutover `source-ci`, `integration-tests`, `agent-review`, and `issue-link`',
-        'staging retains those four plus `cloud-review`',
-        'after cutover `source-ci`, `issue-link`, and `cloud-review`',
-        'actual authenticated Copilot `APPROVED` review',
+        'Before cutover source-ci, integration-tests, agent-review, and issue-link',
+        'Staging retains those four plus cloud-review',
+        'after cutover source-ci, issue-link, and cloud-review',
+        'actual authenticated Copilot APPROVED review',
         'resolved review threads',
-        'current with freshly fetched `origin/main`',
-        'No owner/admin bypass',
+        'current with freshly fetched origin/main',
+        'No owner or administrator bypass',
     ):
         assert clause in template, clause
 
@@ -244,7 +246,11 @@ def test_all_pre_cutover_context_lists_include_issue_link():
         'README.md',
     ):
         text = ' '.join((ROOT / path).read_text().split())
-        assert context_list in text, path
+        expected = (
+            'source-ci, integration-tests, agent-review, and issue-link'
+            if path == '.github/pull_request_template.md' else context_list
+        )
+        assert expected in text, path
 
     policy = ' '.join((ROOT / 'docs/autonomy-policy.md').read_text().split())
     assert (
@@ -403,23 +409,14 @@ def test_pull_request_template_records_linked_scope_evidence_risks_and_review():
     ):
         assert heading in template
     assert 'Closes #' in template
-    assert '- Closes #NUMBER' in template.splitlines()
-    assert 'Replace NUMBER with the actual issue number.' in template
+    assert 'Closes #NUMBER' in template.splitlines()
     assert 'exact head SHA' in template
 
 
-def test_pull_request_template_links_work_outside_repository_file_view():
-    from urllib.parse import urlsplit
-
+def test_pull_request_template_uses_plain_text_without_markdown_markup():
     template = (ROOT / '.github/pull_request_template.md').read_text()
-    links = re.findall(r'\]\(([^)]+)\)', template)
-    assert links
-    for link in links:
-        url = urlsplit(link)
-        assert url.scheme == 'https' and url.netloc == 'github.com'
-        prefix = '/lindayi/hermes-mobile/blob/main/'
-        assert url.path.startswith(prefix)
-        assert (ROOT / url.path.removeprefix(prefix)).is_file()
+    assert not re.search(r'(?m)^\s*(?:#{1,6}\s|[-+*]\s|\d+[.)]\s|>)', template)
+    assert not any(markup in template for markup in ('[', ']', '`', '<', '>', '*', '_', '~', '|'))
 
 
 def test_completed_pull_request_template_passes_issue_link_policy():
