@@ -115,6 +115,117 @@ def routing_fixture(tmp_path):
     return home, state
 
 
+@pytest.fixture
+def observe_route_queries(monkeypatch):
+    """Instrument real resolver SQLite cursors, not the callback outbox reader."""
+    from collections import Counter
+    from contextlib import contextmanager
+    from pathlib import Path
+
+    observed = {'opened': Counter(), 'rows': Counter(), 'sessions': []}
+    original = module().readonly
+
+    class BoundedCursor:
+        def __init__(self, cursor, kind):
+            self.cursor, self.kind = cursor, kind
+
+        def fetchall(self):
+            pytest.fail(f'{self.kind} route query must not fetchall fanout')
+
+        def fetchone(self):
+            row = self.cursor.fetchone()
+            if row is not None:
+                observed['rows'][self.kind] += 1
+            return row
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            row = self.fetchone()
+            if row is None:
+                raise StopIteration
+            return row
+
+    class ObservedDatabase:
+        def __init__(self, db):
+            self.db = db
+
+        def execute(self, sql, values=()):
+            assert self.db.in_transaction
+            cursor = self.db.execute(sql, values)
+            normalized = ' '.join(sql.split())
+            if 'FROM runs' in normalized and 'upstream_id IN' in normalized:
+                return BoundedCursor(cursor, 'runs')
+            if 'FROM sessions WHERE parent_session_id=' in normalized:
+                return BoundedCursor(cursor, 'children')
+            if 'FROM sessions WHERE id=' in normalized:
+                observed['sessions'].append(values[0])
+            return cursor
+
+    @contextmanager
+    def readonly(path):
+        observed['opened'][Path(path).name] += 1
+        with original(path) as db:
+            yield ObservedDatabase(db)
+
+    monkeypatch.setattr(module(), 'readonly', readonly)
+    return observed
+
+
+@pytest.mark.parametrize('fanout', [2, 9])
+@pytest.mark.parametrize('duplicate_owner', ['owner', 'member'])
+def test_bounded_route_rejects_run_fanout_before_lineage(
+        tmp_path, observe_route_queries, fanout, duplicate_owner):
+    from deploy.native_notification_release import _resolve_routes
+
+    home, state = routing_fixture(tmp_path)
+    with sqlite3.connect(state / 'runs.sqlite') as db:
+        db.executemany('INSERT INTO runs VALUES(?,?,?,?,?)', [
+            (f'duplicate_{index}', duplicate_owner, 'default', f'unwalked_{index}',
+             'run_native') for index in range(fanout - 1)])
+        db.execute("INSERT INTO runs VALUES('unique','owner','default','session_a','unique')")
+        # A different profile must not make the default-profile key ambiguous.
+        db.execute("INSERT INTO runs VALUES('other','owner','other','unwalked','unique')")
+        db.execute("INSERT INTO runs VALUES('member','member','default','unwalked','member')")
+    events = [{**event(), 'session_key': key}
+              for key in ('run_native', 'unique', 'member', 'missing')]
+    assert _resolve_routes(events, home, state) == ('owner', [
+        ('quarantined', None), ('owned', 'session_a'),
+        ('quarantined', None), ('quarantined', None)])
+    observed = observe_route_queries
+    assert observed['rows']['runs'] <= len(events)
+    # Ambiguous and nonowner keys must be rejected before any lineage walk.
+    assert observed['sessions'] == ['session_a']
+    assert observed['opened'] == {'auth.sqlite': 1, 'runs.sqlite': 1, 'state.db': 1}
+
+
+@pytest.mark.parametrize('eligible_count', [0, 1, 2, 9])
+def test_bounded_route_child_ambiguity_counts_only_eligible_rows(
+        tmp_path, observe_route_queries, eligible_count):
+    from deploy.native_notification_release import _resolve_routes
+
+    home, state = routing_fixture(tmp_path)
+    with sqlite3.connect(home / 'state.db') as db:
+        db.execute("UPDATE sessions SET end_reason='compression' WHERE id='session_a'")
+        # These precede the real continuation: LIMIT on raw children would lose
+        # the unique eligible route or falsely accept a later ambiguous family.
+        children = [('tool', 'tool', '{}'), ('subagent', 'subagent', '{}'),
+                    ('branch', 'api_server', '{"_branched_from":"session_a"}'),
+                    ('delegate', 'api_server', '{"_delegate_from":"session_a"}')]
+        children.extend((f'child_{index}', 'api_server', '{}')
+                        for index in range(eligible_count))
+        db.executemany('''INSERT INTO sessions VALUES(
+            ?,'session_a',?,'default',?,NULL,NULL,NULL,NULL,NULL,NULL)''', children)
+    expected = ('owned', 'child_0') if eligible_count == 1 else ('quarantined', None)
+    assert _resolve_routes([event()], home, state) == ('owner', [expected])
+    observed = observe_route_queries
+    assert observed['rows']['children'] == min(eligible_count, 2)
+    assert observed['sessions'] == (['session_a', 'child_0'] if eligible_count == 1
+                                    else ['session_a'])
+    assert observed['opened'] == {'auth.sqlite': 1, 'runs.sqlite': 1, 'state.db': 1}
+
+
 def test_positive_route_lineage_foreign_and_deletion(tmp_path):
     home, state = routing_fixture(tmp_path)
     classify = module().OwnerRoute(home, state)
@@ -131,6 +242,38 @@ def test_positive_route_lineage_foreign_and_deletion(tmp_path):
     with sqlite3.connect(state / 'runs.sqlite') as db:
         db.execute("INSERT INTO session_deletions VALUES('owner','default','session_a')")
     assert classify(event()) == 'quarantined'
+
+
+def test_batched_route_resolution_preserves_family_and_negative_evidence(tmp_path):
+    from deploy.native_notification_release import _resolve_routes
+
+    home, state = routing_fixture(tmp_path)
+    with sqlite3.connect(home / 'state.db') as db:
+        db.execute("UPDATE sessions SET end_reason='compression' WHERE id='session_a'")
+        db.execute("INSERT INTO sessions VALUES('session_b','session_a','api_server','default','{}',NULL,NULL,NULL,NULL,NULL,NULL)")
+        db.execute("INSERT INTO sessions VALUES('branch','session_a','api_server','default','{\"_branched_from\":\"session_a\"}',NULL,NULL,NULL,NULL,NULL,NULL)")
+    owner, routes = _resolve_routes([
+        event(),
+        {**event('deleg_family'), 'origin_session_id': 'session_b',
+         'parent_session_id': 'session_a'},
+        {**event('deleg_branch'), 'origin_session_id': 'branch'},
+        {**event('deleg_wrong_session'), 'origin_session_id': 'missing'},
+        {**event('deleg_foreign'), 'session_key': 'telegram:chat'},
+        event('deleg_api_alias', platform='api'),
+    ], home, state)
+
+    assert owner == 'owner'
+    assert routes == [
+        ('owned', 'session_b'),
+        ('owned', 'session_b'),
+        ('quarantined', None),
+        ('quarantined', None),
+        ('foreign', None),
+        ('owned', 'session_b'),
+    ]
+    with sqlite3.connect(state / 'runs.sqlite') as db:
+        db.execute("INSERT INTO session_deletions VALUES('owner','default','session_a')")
+    assert _resolve_routes([event()], home, state)[1] == [('quarantined', None)]
 
 
 @pytest.mark.parametrize('field', ['chat_id', 'chat_type', 'thread_id', 'user_id'])

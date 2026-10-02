@@ -13,6 +13,16 @@ _CONTROL_HASHES = {
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': 'e083b0941b2b849559cd685d946ed10fb14a87128cf8ea2d125f77cb38ce434b',
     'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
+    'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
+}
+
+# Exact immediately prior version, retained for rollback.
+_PRE_ROUTING_CONTROL_HASHES = {
+    'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
+    'backend/native_run_controls.py': '6e3a8796028925ea771bf90b2b97ba1fd7a47cbbd979a71e9be7fb525c129b16',
+    'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/native_maintenance.py': 'e083b0941b2b849559cd685d946ed10fb14a87128cf8ea2d125f77cb38ce434b',
+    'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
     'backend/native_notifications.py': '0159fbdd02705469853f51be7bb32479ea9e2fa0d6fdbc6789253d3b3c1c85fe',
 }
 
@@ -44,7 +54,8 @@ def _control_source_hashes(root):
     """Select an exact approved version, never a per-file mixture."""
     import hashlib
     try:
-        versions = (_CONTROL_HASHES, _TIMEOUT_BASELINE_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES)
+        versions = (_CONTROL_HASHES, _PRE_ROUTING_CONTROL_HASHES,
+                    _TIMEOUT_BASELINE_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES)
         for hashes in versions:
             absent = set().union(*versions) - set(hashes)
             if any((root/name).exists() or (root/name).is_symlink() for name in absent):
