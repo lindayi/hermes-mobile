@@ -87,8 +87,12 @@ time, then validates the exact result receipt. `session_count` alone is not
 evidence that tests or reviews passed. For each handoff it reads the actual
 `PullRequest.closingIssuesReferences` GraphQL connection from the fixed
 repository, follows every bounded page, and requires exactly one matching
-issue number and repository ID. It binds the GraphQL repository and PR node,
-number, head branch and SHA, base branch, and body to the detailed REST pull.
+issue number and repository ID. On every page, the outer GraphQL repository ID
+must match the supported REST `base.repo.node_id` from the detailed pull, whose integer
+`base.repo.id` must equal the fixed repository ID `1399942965`. Missing or malformed
+node IDs fail closed, and the anchor must remain unchanged in the fresh REST read;
+self-consistent GraphQL IDs and repository names alone are not sufficient. It also
+binds the PR node, number, head branch and SHA, base branch, and body to that pull.
 Null, partial, malformed, duplicate, inconsistent, or unbounded results fail
 closed. Every page must describe the same PR snapshot, and a fresh REST pull
 must match after collection. The body digest and exact head are reserved with
@@ -118,9 +122,14 @@ posting, it captures the PR comment high-water ID and reserves a fresh enrollmen
 even if an exact historical command exists: that command may already have been
 consumed on a different head. Only an exact, immutable owner comment with a positive
 ID above this boundary can confirm the POST response or reconcile a started/uncertain
-send; an uncertain send is never reposted. The
-paired cloud coordinator recognizes this command in its complete scan, requires
-the SHA to match the current PR head, and persists the bound head. A mismatch is
+send; an uncertain send is never reposted. Both direct POST confirmation and
+uncertain-send reconciliation require a final fresh pull with `draft` explicitly
+`false` before recording completion. A re-draft blocks completion while preserving
+the consumed enrollment attempt: neither enrollment nor readiness is retried.
+This producer-side certification does not retract a comment already sent or make
+the handoff atomic. The paired cloud coordinator recognizes this command in its
+complete scan, requires the SHA to match the current PR head, and persists the
+bound head. A mismatch is
 consumed without enrollment and cannot authorize a later head or be replayed.
 Bound enrollment cannot inherit authority on a subsequent push; an explicit
 new owner command is needed. A newer exact-head command renews an active bound
