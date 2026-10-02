@@ -806,10 +806,13 @@ def _reconciliation_reasons(pull):
 class Coordinator:
     """Poll, plan, and (only on explicit request) apply bounded public GitHub actions."""
 
-    def __init__(self, api, store, *, clock=time.time):
+    def __init__(self, api, store, *, clock=time.time, owner_user_id=None,
+                 lifecycle_source_paths=None):
         self.api = api
         self.store = store
         self.clock = clock
+        self.owner_user_id = owner_user_id
+        self.lifecycle_source_paths = lifecycle_source_paths
 
     def _identity(self):
         repository = self.api.get(f"repos/{REPOSITORY}")
@@ -904,8 +907,10 @@ class Coordinator:
             type(number) is not int or enrollment.get("issue") != number
             or pull.get("number") != number
             or type(pull.get("id")) is not int
+            or pull.get("id") <= 0
             or pull.get("id") != enrollment.get("pull_id")
             or not isinstance(pull.get("node_id"), str)
+            or not pull.get("node_id")
             or pull.get("node_id") != enrollment.get("pull_node_id")
             or enrollment.get("repository_id") != REPOSITORY_ID
             or not isinstance(head_repo, dict)
@@ -913,6 +918,7 @@ class Coordinator:
             or not isinstance(base_repo, dict)
             or base_repo.get("id") != REPOSITORY_ID
             or base.get("ref") != MAIN_BRANCH
+            or not _is_sha(base.get("sha"))
         ):
             raise CoordinatorError("Pull request identity did not match enrollment")
         if pull.get("state") != "open" or pull.get("merged") is not False:
@@ -1255,14 +1261,28 @@ class Coordinator:
         has_request = any(
             _github_identity(item, COPILOT_REVIEWER_ID) for item in requested["users"]
         )
-        has_submitted_review = any(
-            isinstance(review, dict)
+        submitted_reviews = [
+            review for review in reviews
+            if isinstance(review, dict)
             and review.get("commit_id") == head
             and review.get("state") in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
             and _github_identity(review.get("user"), COPILOT_REVIEWER_ID)
-            for review in reviews
+        ]
+        has_submitted_review = bool(submitted_reviews)
+        has_actionable_review = any(
+            review.get("state") in {"COMMENTED", "CHANGES_REQUESTED"}
+            for review in submitted_reviews
         )
         if has_submitted_review:
+            if (action.get("receipt_head") != action.get("head")
+                    and not has_actionable_review):
+                self.store.update_action(
+                    key, "completed", handoff_state="waiting_review",
+                    review_request_state="observed",
+                )
+                return self._handoff_wait(
+                    key, action | {"handoff_state": "waiting_review"}, snapshot,
+                )
             self.store.update_action(
                 key, "completed", handoff_state="done",
                 review_request_state="observed",
@@ -1944,10 +1964,53 @@ class Coordinator:
     def run(self, *, apply=False):
         lock_fd = self.store.execution_lock() if apply else None
         try:
+            owner_user_id = self.owner_user_id
+            export_directory = None
+            if apply and self.lifecycle_source_paths is not None:
+                from deploy.workflow_lifecycle_sources import (
+                    LifecycleSourceError,
+                    collect_source_events,
+                    resolve_application_binding,
+                )
+
+                try:
+                    owner_user_id, export_directory = resolve_application_binding(
+                        self.lifecycle_source_paths.notifications,
+                    )
+                    source_events = collect_source_events(
+                        self.store.snapshot()["lifecycle_events"],
+                        api=self.api,
+                        paths=self.lifecycle_source_paths,
+                        now=datetime.fromtimestamp(self.clock(), timezone.utc),
+                    )
+                    for event in source_events:
+                        self.store.record_lifecycle(event, now=self.clock())
+                except LifecycleSourceError as error:
+                    raise CoordinatorError(
+                        "Lifecycle source evidence or owner binding is unavailable"
+                    ) from error
             plan = self._build_plan(apply=apply)
             if apply:
                 pull_requests = self._apply(plan)
-                self.store.write_lifecycle_export(now=self.clock())
+                if self.lifecycle_source_paths is not None:
+                    from deploy.workflow_lifecycle_sources import collect_controller_verified_events
+
+                    try:
+                        deployed_events = collect_controller_verified_events(
+                            self.store.snapshot()["lifecycle_events"],
+                            self.lifecycle_source_paths.notifications,
+                            datetime.fromtimestamp(self.clock(), timezone.utc),
+                        )
+                        for event in deployed_events:
+                            self.store.record_lifecycle(event, now=self.clock())
+                    except (TypeError, ValueError) as error:
+                        raise CoordinatorError(
+                            "Controller lifecycle evidence is invalid"
+                        ) from error
+                self.store.write_lifecycle_export(
+                    now=self.clock(), owner_user_id=owner_user_id,
+                    directory=export_directory,
+                )
             else:
                 pull_requests = [self._summary(item) for item in plan["pull_requests"]]
             return {
@@ -2161,16 +2224,24 @@ class StateStore:
             )
         self._mutate(record)
 
-    def write_lifecycle_export(self, *, now=None):
+    def write_lifecycle_export(self, *, now=None, owner_user_id=None, directory=None):
         now = time.time() if now is None else now
         self._ensure_directory()
         events = self.snapshot()["lifecycle_events"]
-        path = self.directory / LIFECYCLE_FILE_NAME
+        export_directory = Path(directory).absolute() if directory is not None else self.directory
+        if export_directory != self.directory:
+            from deploy.workflow_notifications import Blocked, _owned_private_path
+
+            try:
+                _owned_private_path(export_directory, directory=True)
+            except Blocked as error:
+                raise CoordinatorError("Lifecycle export directory is not private") from error
+        path = export_directory / LIFECYCLE_FILE_NAME
         if not events:
             if _private_regular(path):
                 path.unlink()
                 directory_fd = os.open(
-                    self.directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    export_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
                 )
                 try:
                     os.fsync(directory_fd)
@@ -2179,9 +2250,11 @@ class StateStore:
             return
         if len(events) > MAX_LIFECYCLE_EVENTS:
             raise CoordinatorError("Lifecycle event export exceeded its record bound")
+        if not isinstance(owner_user_id, str) or not owner_user_id:
+            raise CoordinatorError("Lifecycle export requires the trusted application owner")
         try:
             payload = json.dumps(
-                build_lifecycle_export(events, str(OWNER_ID), now=now),
+                build_lifecycle_export(events, owner_user_id, now=now),
                 separators=(",", ":"), sort_keys=True, ensure_ascii=True,
                 allow_nan=False,
             )
@@ -2194,7 +2267,7 @@ class StateStore:
         if _private_regular(path):
             existing_info = path.lstat()
             existing = (existing_info.st_dev, existing_info.st_ino)
-        temporary = self.directory / (
+        temporary = export_directory / (
             f".{LIFECYCLE_FILE_NAME}.{os.getpid()}.{secrets.token_hex(8)}"
         )
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -2214,7 +2287,7 @@ class StateStore:
                     raise CoordinatorError("Lifecycle export changed during write")
             os.replace(temporary, path)
             directory_fd = os.open(
-                self.directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                export_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
             )
             try:
                 os.fsync(directory_fd)
@@ -2478,7 +2551,8 @@ class StateStore:
         return fd
 
 
-def main(argv=None, *, api_factory=GhApi, store_factory=StateStore):
+def main(argv=None, *, api_factory=GhApi, store_factory=StateStore,
+         lifecycle_source_paths_factory=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--once", action="store_true", help="run one coordinator cycle")
     parser.add_argument("--apply", action="store_true",
@@ -2492,7 +2566,17 @@ def main(argv=None, *, api_factory=GhApi, store_factory=StateStore):
         / "hermes-mobile-coordinator" / "state.json"
     )
     try:
-        coordinator = Coordinator(api_factory(), store_factory(state_path))
+        from deploy.workflow_lifecycle_sources import LifecycleSourcePaths
+
+        source_paths = (
+            lifecycle_source_paths_factory()
+            if lifecycle_source_paths_factory is not None
+            else LifecycleSourcePaths()
+        )
+        coordinator = Coordinator(
+            api_factory(), store_factory(state_path),
+            lifecycle_source_paths=source_paths,
+        )
         result = coordinator.run(apply=args.apply)
         print(json.dumps(result, sort_keys=True))
         return 0

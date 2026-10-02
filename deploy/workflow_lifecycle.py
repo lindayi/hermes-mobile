@@ -62,18 +62,26 @@ def merge_events(existing, additions, *, now=None, limit=MAX_EVENTS):
         event_id = event["event_id"]
         prior = known.get(event_id)
         if prior is not None:
+            stable_identity = (
+                prior.get("reason") == event.get("reason")
+                and prior.get("outcome") == event.get("outcome")
+                and prior.get("issue_number") == event.get("issue_number")
+                and prior.get("pr_number") == event.get("pr_number")
+                and prior.get("merge_sha") == event.get("merge_sha")
+                and prior.get("decision") == event.get("decision")
+            )
             persistent_incident = (
                 prior.get("reason") in {
                     "execution_exhausted", "execution_uncertain", "policy_broken",
                     "sensitive_approval", "conflict_incompatible",
                 }
-                and {
-                    key: value for key, value in prior.items()
-                    if key != "occurred_at"
-                } == {
-                    key: value for key, value in event.items()
-                    if key != "occurred_at"
-                }
+                and stable_identity
+                and (
+                    prior.get("reason") not in {
+                        "sensitive_approval", "conflict_incompatible",
+                    }
+                    or prior.get("head_sha") == event.get("head_sha")
+                )
             )
             if prior != event and not persistent_incident:
                 raise ValueError("Lifecycle event identity conflicts with its immutable payload")
@@ -121,5 +129,24 @@ def pull_event(snapshot, reason, *, occurred_at, merge_sha=None, decision=None,
         "head_sha": head,
         "merge_sha": merge_sha,
         "decision": decision,
+        "occurred_at": occurred_at,
+    })
+
+
+def issue_event(issue_number, reason, *, occurred_at, incident):
+    if (reason not in {"issue_failed", "execution_uncertain"}
+            or type(issue_number) is not int or not 1 <= issue_number <= 2**31 - 1):
+        raise ValueError("Issue lifecycle identity or reason is invalid")
+    identity = f"{issue_number}:{reason}:{incident}"
+    event_id = f"issue:{issue_number}:{reason}:{hashlib.sha256(identity.encode()).hexdigest()[:32]}"
+    return validate_event({
+        "event_id": event_id,
+        "outcome": REASON_OUTCOMES[reason],
+        "reason": reason,
+        "issue_number": issue_number,
+        "pr_number": None,
+        "head_sha": None,
+        "merge_sha": None,
+        "decision": None,
         "occurred_at": occurred_at,
     })

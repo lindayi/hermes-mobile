@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 from urllib.parse import parse_qs, urlparse
@@ -11,7 +12,7 @@ import pytest
 
 from deploy.cloud_coordinator import (
     ApiError,
-    Coordinator,
+    Coordinator as CloudCoordinator,
     CoordinatorError,
     GhApi,
     MAX_HANDOFF_POLLS,
@@ -37,9 +38,15 @@ def test_auto_merge_requires_strict_current_base_and_conversation_resolution(tmp
 
 
 OWNER = 5164171
+APP_OWNER_ID = "synthetic-mobile-owner"
 COPILOT_REVIEWER = 175728472
 HEAD = "a" * 40
 BASE = "b" * 40
+
+
+def Coordinator(api, store, **kwargs):
+    kwargs.setdefault("owner_user_id", APP_OWNER_ID)
+    return CloudCoordinator(api, store, **kwargs)
 
 
 def valid_pr(**changes):
@@ -57,6 +64,16 @@ def valid_pr(**changes):
     }
     pr.update(changes)
     return pr
+
+
+def enrolled_record(**changes):
+    enrollment = {
+        "issue": 16, "comment": 123, "head": HEAD, "base": BASE,
+        "pull_id": 160000016, "pull_node_id": "PR_node_16",
+        "repository_id": 1399942965,
+    }
+    enrollment.update(changes)
+    return enrollment
 
 
 def test_enrollment_requires_an_authenticated_owner_command_and_main_pr():
@@ -277,7 +294,7 @@ def test_state_survives_restart_and_does_not_replay_or_retry_ambiguous_writes(tm
 
 def test_three_repair_attempts_are_the_hard_limit(tmp_path):
     store = StateStore(tmp_path / "state.json")
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     for attempt in range(3):
         assert store.claim_action(f"fix:{attempt}", {
             "kind": "fix", "issue": 16, "status": "sending",
@@ -757,7 +774,7 @@ def test_owner_can_authorize_a_new_current_head_after_enrollment(tmp_path):
         sensitive=True, authorize=True, authorize_sha=new_head, head_sha=new_head,
     )
     store = StateStore(tmp_path / "state.json")
-    store.enroll({"issue": 16, "comment": 122, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record(comment=122))
     store.record_event("123")
     Coordinator(api, store).run(apply=True)
     enrollment = store.snapshot()["enrollments"]["16"]
@@ -805,7 +822,7 @@ def test_terminal_lifecycle_outcome_is_exported_before_enrollment_retirement(tmp
     exported = json.loads((tmp_path / "workflow-events.json").read_text())
     assert exported["repository_id"] == 1399942965
     assert exported["repository"] == "lindayi/hermes-mobile"
-    assert exported["owner_user_id"] == str(OWNER)
+    assert exported["owner_user_id"] == APP_OWNER_ID
     assert len(exported["events"]) == 1
     event = exported["events"][0]
     assert event == {
@@ -825,6 +842,46 @@ def test_terminal_lifecycle_outcome_is_exported_before_enrollment_retirement(tmp
     assert info.st_mode & 0o777 == 0o600 and info.st_nlink == 1
     coordinator.run(apply=True)
     assert json.loads((tmp_path / "workflow-events.json").read_text())["events"] == [event]
+
+
+def test_coordinator_exports_to_configured_app_owner_not_github_owner(tmp_path):
+    from deploy.workflow_lifecycle_sources import LifecycleSourcePaths
+    from deploy.workflow_notifications import Paths as NotificationPaths
+
+    root = tmp_path / "app"
+    state_dir = root / "state"
+    state_dir.mkdir(mode=0o700, parents=True)
+    root.chmod(0o700)
+    config = root / "config.json"
+    config.write_text(json.dumps({"state_dir": str(state_dir)}))
+    config.chmod(0o600)
+    with sqlite3.connect(state_dir / "auth.sqlite") as db:
+        db.execute("CREATE TABLE users(id TEXT,role TEXT,status TEXT,profile TEXT)")
+        db.execute(
+            "INSERT INTO users VALUES(?,?,?,?)",
+            (APP_OWNER_ID, "owner", "ready", "default"),
+        )
+    (state_dir / "auth.sqlite").chmod(0o600)
+    source_paths = LifecycleSourcePaths(
+        notifications=NotificationPaths(
+            config=config,
+            delivery_state=root / "delivery" / "state.json",
+            controller_state=root / "controller",
+        ),
+        starter_state=root / "starter" / "state.json",
+    )
+    api = FakeApi(strict_protection=False)
+    store = StateStore(tmp_path / "coordinator" / "state.json")
+
+    CloudCoordinator(
+        api, store, clock=lambda: 1790856540,
+        lifecycle_source_paths=source_paths,
+    ).run(apply=True)
+
+    exported = json.loads((state_dir / "workflow-events.json").read_text())
+    assert exported["owner_user_id"] == APP_OWNER_ID
+    assert exported["owner_user_id"] != str(OWNER)
+    assert not (tmp_path / "coordinator" / "workflow-events.json").exists()
 
 
 def test_terminal_event_survives_crash_before_export_write(tmp_path, monkeypatch):
@@ -855,7 +912,7 @@ def test_terminal_event_survives_crash_before_export_write(tmp_path, monkeypatch
 def test_terminal_historical_baseline_is_not_exported(tmp_path):
     api = FakeApi(pull_state="closed", merged=True)
     store = StateStore(tmp_path / "state.json")
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
 
     Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
 
@@ -924,9 +981,14 @@ def test_repeated_incident_keeps_its_original_timestamp(tmp_path, reason):
 
     store.record_lifecycle(first, now=1790856540)
     store.record_lifecycle(repeated, now=1790856600)
-
     assert store.snapshot()["lifecycle_events"] == [first]
     assert store.snapshot()["lifecycle_events"][0]["occurred_at"] == "2026-10-01T12:00:00Z"
+    unrelated = _lifecycle_event(
+        snapshot, "execution_uncertain", occurred_at="2026-10-01T12:02:00Z",
+        incident="fresh",
+    )
+    store.record_lifecycle(unrelated, now=1790856720)
+    assert store.snapshot()["lifecycle_events"] == [first, unrelated]
 
 
 @pytest.mark.parametrize("result", ["conflict_incompatible", "policy_broken"])
@@ -949,7 +1011,13 @@ def test_new_head_receipt_blocker_vetoes_that_result_head(tmp_path, result):
         event for event in store.snapshot()["lifecycle_events"]
         if event["reason"] == result
     )
+    blocked_action = next(
+        item for item in store.actions().values()
+        if item.get("blocker") == result
+    )
     assert blocker["head_sha"] == result_head
+    assert blocked_action["head"] == HEAD
+    assert blocked_action["receipt_head"] == result_head
     assert summary["auto_merge_eligible"] is False
     assert not any("enablePullRequestAutoMerge" in query for query, _ in api.graphql_writes)
 
@@ -1041,7 +1109,9 @@ def test_lifecycle_export_refuses_aliased_destination(tmp_path, link_type):
         os.link(target, destination)
 
     with pytest.raises(CoordinatorError):
-        store.write_lifecycle_export(now=1790856540)
+        store.write_lifecycle_export(
+            now=1790856540, owner_user_id=APP_OWNER_ID,
+        )
 
     assert target.read_text() == "leave this file unchanged"
     if link_type == "symlink":
@@ -1090,7 +1160,7 @@ def test_uncertain_status_is_bound_to_generation_and_head(tmp_path):
     api.pull["mergeable"] = False
     store = StateStore(tmp_path / "state.json")
     old_key = f"status:16:{HEAD}:1"
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     store.claim_action(old_key, {"kind": "status", "issue": 16, "head": HEAD,
                                  "generation": 1, "state": "pending", "key": old_key})
     coordinator = Coordinator(api, store)
@@ -1108,7 +1178,7 @@ def test_uncertain_status_reconciles_only_new_owned_remote_generation(tmp_path):
     api.pull["mergeable"] = False
     api.status_state = "pending"
     store = StateStore(tmp_path / "state.json")
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     key = f"status:16:{HEAD}:1"
     store.claim_action(key, {"kind": "status", "issue": 16, "head": HEAD,
                              "generation": 1, "state": "pending", "key": key})
@@ -1292,7 +1362,7 @@ def test_fresh_draft_fence_prevents_task_reservation_and_post(tmp_path, task_typ
     api = FakeApi()
     api.pull["draft"] = True
     store = StateStore(tmp_path / "state.json")
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     action = {
         "issue": 16, "head": HEAD, "head_ref": "topic", "kind": "fix",
         "task_type": "neutral" if task_type == "neutral" else "repair",
@@ -1928,7 +1998,7 @@ def test_closed_pull_retires_terminal_records_but_keeps_unresolved_claims(tmp_pa
 def test_state_capacity_is_enforced_before_replace_and_preserves_prior_state(tmp_path):
     path = tmp_path / "state.json"
     store = StateStore(path)
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     assert store.add_outbox("16:small", {"issue": 16, "head": HEAD, "body": "small"})
     prior = path.read_bytes()
     with pytest.raises(CoordinatorError, match="safety bound.*preserved"):
@@ -1945,6 +2015,8 @@ def test_capacity_failure_blocks_cycle_before_remote_write_and_reports(tmp_path,
                                                                        capsys):
     import deploy.cloud_coordinator as coordinator_module
     from deploy.cloud_coordinator import main
+    from deploy.workflow_lifecycle_sources import LifecycleSourcePaths
+    from deploy.workflow_notifications import Paths as NotificationPaths
 
     api = FakeApi()
     api.sensitive = True
@@ -1953,8 +2025,31 @@ def test_capacity_failure_blocks_cycle_before_remote_write_and_reports(tmp_path,
     monkeypatch.setattr(coordinator_module, "MAX_STATE_BYTES", path.stat().st_size + 64)
     writes = list(api.writes)
     api.unresolved = True
+    app_root = tmp_path / "app"
+    state_dir = app_root / "state"
+    state_dir.mkdir(mode=0o700, parents=True)
+    app_root.chmod(0o700)
+    config = app_root / "config.json"
+    config.write_text(json.dumps({"state_dir": str(state_dir)}))
+    config.chmod(0o600)
+    with sqlite3.connect(state_dir / "auth.sqlite") as db:
+        db.execute("CREATE TABLE users(id TEXT,role TEXT,status TEXT,profile TEXT)")
+        db.execute(
+            "INSERT INTO users VALUES(?,?,?,?)",
+            (APP_OWNER_ID, "owner", "ready", "default"),
+        )
+    (state_dir / "auth.sqlite").chmod(0o600)
+    source_paths = LifecycleSourcePaths(
+        notifications=NotificationPaths(
+            config=config,
+            delivery_state=app_root / "delivery" / "state.json",
+            controller_state=app_root / "controller",
+        ),
+        starter_state=app_root / "starter" / "state.json",
+    )
     assert main(["--once", "--apply", "--state", str(path)],
-                api_factory=lambda: api) == 1
+                api_factory=lambda: api,
+                lifecycle_source_paths_factory=lambda: source_paths) == 1
     error = capsys.readouterr().err
     assert "Coordinator blocked:" in error and "safety bound" in error
     assert "preserved" in error
@@ -1968,7 +2063,7 @@ def test_atomic_replace_failure_preserves_prior_state(tmp_path, monkeypatch):
 
     path = tmp_path / "state.json"
     store = StateStore(path)
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     prior = path.read_bytes()
 
     def failed_replace(source, target):
@@ -2082,7 +2177,7 @@ def test_reenrollment_preserves_uncertain_nonfix_claim(tmp_path, kind):
 
 def test_reenrollment_preserves_every_unresolved_claim_and_attempt_budget(tmp_path):
     store = StateStore(tmp_path / "state.json")
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
 
     def seed(data):
         data["enrollments"]["16"].update(active=False, attempts=3)
@@ -2110,7 +2205,7 @@ def test_reenrollment_preserves_every_unresolved_claim_and_attempt_budget(tmp_pa
 @pytest.mark.parametrize("status", ["sent", "superseded", "blocked", "completed"])
 def test_reenrollment_keeps_generation_boundary_when_resetting_terminal_status(tmp_path, status):
     store = StateStore(tmp_path / "state.json")
-    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    store.enroll(enrolled_record())
     action = {"kind": "status", "issue": 16, "head": HEAD, "generation": 7}
     assert store.claim_action("old-status", action)
     store.update_action("old-status", status)

@@ -139,10 +139,30 @@ excluded. Export persistence is bounded to 256 events and 1 MiB; plan mode never
 writes it. Stable event IDs preserve polling replay identity, and terminal
 enrollment retirement is committed with event persistence.
 
+The export is written to the existing state directory selected by application
+configuration, not the coordinator's private state directory. The coordinator
+binds the envelope to the sole ready default-profile application owner read from
+the configured auth database. This opaque application user ID is independent of
+GitHub's numeric repository-owner ID.
+
+Issue-starter failure and uncertainty events are read from its durable v1
+command state only when a blocked receipt is persisted as sent and the exact,
+unchanged owner-authored receipt comment is present; that comment's creation
+time supplies the incident timestamp. Deployed events are emitted only for an
+existing exact merged event when the current delivery ledger, successful
+controller status, current release, and git provenance validate for that merge
+SHA. A merge alone is never treated as a deployment.
+
 The owner mobile Inbox consumer is a separate adapter and must validate this
 producer's exact event schema and bind the export to the actual ready application
 owner. A GitHub account ID is not an application owner ID. Exported merged
-outcomes do not imply deployment.
+outcomes do not imply deployment. The coordinator neither invokes the consumer
+nor activates notification delivery.
+
+PR33 reuses the consumer's read-only owner, private-file, and deployment-evidence
+validators without editing its files. During current-main assembly, preserve
+those validators or expose an equivalent supported shared API, and rerun the
+producer-to-Inbox integration tests against the assembled schema and consumer.
 
 ## Bounded state
 
