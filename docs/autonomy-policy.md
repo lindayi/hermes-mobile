@@ -41,6 +41,15 @@ unresolved local imports and unsupported dynamic imports. This bounded inventory
 does not discover arbitrary subprocess roots or establish complete execution-source
 coverage by itself.
 
+The release controller statically imports `deploy/native_notification_release.py`,
+which imports `backend/native_notifications.py`; both are therefore in the fixed
+inventory. `backend/native_notifications.py` is pinned to its
+`b85c098857e7fb8229f47bd688d703bb677aeb34` bytes like other inventory paths.
+`deploy/native_notification_release.py` is absent from that baseline; its pin and
+separate test fixture are the pending PR25 candidate bytes, awaiting parent review
+against the exact source. They are not independently verified, are not runtime
+evidence, and do not affect the unconditional `pending-source-contract` hold.
+
 The source-level workflow, import traversal, subprocess-root, and mutation
 regressions recorded in issue #35 are repaired in this revision. That does not
 complete issue #35, certify operational source pins, or permit the

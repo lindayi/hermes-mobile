@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
@@ -1309,7 +1310,8 @@ class Coordinator:
         mutation; those steps run only after the scan commit succeeds.
         """
         head = action.get("receipt_head")
-        base = action.get("receipt_base")
+        # Receipt base is provenance; handoff uses the fresh scan and live main.
+        base = snapshot["main_sha"]
         completed_at = action.get("receipt_completed_at")
         if not _valid_timestamp(completed_at):
             return self._handoff_wait(key, action, snapshot)
@@ -2191,54 +2193,39 @@ class Coordinator:
         try:
             owner_user_id = self.owner_user_id
             export_directory = None
-            source_events = []
-            if apply and self.lifecycle_source_paths is not None:
-                from deploy.workflow_lifecycle_sources import (
-                    LifecycleSourceError,
-                    collect_source_events,
-                    resolve_application_binding,
-                )
-
-                try:
-                    owner_user_id, export_directory = resolve_application_binding(
-                        self.lifecycle_source_paths.notifications,
-                    )
-                    source_events = collect_source_events(
-                        self.store.snapshot()["lifecycle_events"],
-                        api=self.api,
-                        paths=self.lifecycle_source_paths,
-                        now=datetime.fromtimestamp(self.clock(), timezone.utc),
-                    )
-                except LifecycleSourceError as error:
-                    raise CoordinatorError(
-                        "Lifecycle source evidence or owner binding is unavailable"
-                    ) from error
+            if apply:
+                self.store.begin_preparation()
             plan = self._build_plan(apply=apply)
             if apply:
-                # Independent sources share the complete scan's atomic commit;
-                # malformed scans must not persist even valid source events.
-                plan["source_lifecycle_events"] = source_events
+                if self.lifecycle_source_paths is not None:
+                    from deploy.workflow_lifecycle_sources import (
+                        LifecycleSourceError, collect_source_events,
+                        resolve_application_binding,
+                    )
+                    try:
+                        owner_user_id, export_directory = resolve_application_binding(
+                            self.lifecycle_source_paths.notifications,
+                        )
+                        # Include merges first observed by this complete scan,
+                        # not just durable history. Collection performs no writes.
+                        merged_events = self.store.snapshot()["lifecycle_events"] + [
+                            event for item in plan["pull_requests"]
+                            for event in item.get("lifecycle_events", [])
+                        ]
+                        plan["source_lifecycle_events"] = collect_source_events(
+                            merged_events, api=self.api, paths=self.lifecycle_source_paths,
+                            now=datetime.fromtimestamp(plan["now"], timezone.utc),
+                        )
+                    except LifecycleSourceError as error:
+                        raise CoordinatorError(
+                            "Lifecycle source evidence or owner binding is unavailable"
+                        ) from error
                 pull_requests = self._apply(
                     plan, after_commit=lambda: self.store.write_lifecycle_export(
                         now=self.clock(), owner_user_id=owner_user_id,
                         directory=export_directory,
                     ),
                 )
-                if self.lifecycle_source_paths is not None:
-                    from deploy.workflow_lifecycle_sources import collect_controller_verified_events
-
-                    try:
-                        deployed_events = collect_controller_verified_events(
-                            self.store.snapshot()["lifecycle_events"],
-                            self.lifecycle_source_paths.notifications,
-                            datetime.fromtimestamp(self.clock(), timezone.utc),
-                        )
-                        for event in deployed_events:
-                            self.store.record_lifecycle(event, now=self.clock())
-                    except (TypeError, ValueError) as error:
-                        raise CoordinatorError(
-                            "Controller lifecycle evidence is invalid"
-                        ) from error
                 self.store.write_lifecycle_export(
                     now=self.clock(), owner_user_id=owner_user_id,
                     directory=export_directory,
@@ -2253,6 +2240,8 @@ class Coordinator:
                 "actions": [] if not apply else pull_requests,
             }
         finally:
+            if apply:
+                self.store.discard_preparation()
             if lock_fd is not None:
                 os.close(lock_fd)
 
@@ -2335,6 +2324,16 @@ class StateStore:
     def __init__(self, path):
         self.path = Path(path).absolute()
         self.directory = self.path.parent
+        self._prepared = None
+        self._preparation_base = None
+
+    def begin_preparation(self):
+        self._preparation_base = self._load()
+        self._prepared = deepcopy(self._preparation_base)
+
+    def discard_preparation(self):
+        self._prepared = None
+        self._preparation_base = None
 
     @staticmethod
     def _empty():
@@ -2350,6 +2349,8 @@ class StateStore:
             raise CoordinatorError("Coordinator state directory is not private")
 
     def _load(self):
+        if self._prepared is not None:
+            return deepcopy(self._prepared)
         if not _private_regular(self.path):
             return self._empty()
         try:
@@ -2407,6 +2408,11 @@ class StateStore:
                 temporary.unlink()
 
     def _mutate(self, operation):
+        if self._prepared is not None:
+            data = deepcopy(self._prepared)
+            result = operation(data)
+            self._prepared = data
+            return result
         self._ensure_directory()
         lock_path = self.directory / f".{self.path.name}.lock"
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
@@ -2545,8 +2551,15 @@ class StateStore:
     def commit_scan(self, cursor, processed, *, commands=(), retirements=(),
                     lifecycle_events=(), observations=(), now=None):
         keys = [str(item) for item in processed]
+        prepared, baseline = self._prepared, self._preparation_base
+        self.discard_preparation()
 
         def commit(data):
+            if prepared is not None:
+                if data != baseline:
+                    raise CoordinatorError("Coordinator state changed during preparation")
+                data.clear()
+                data.update(prepared)
             seen = set(data["events"])
             for item in keys:
                 if item not in seen and not _event_consumed(data, item):

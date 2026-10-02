@@ -131,10 +131,17 @@ dispatch claim for restart; observation time or mutable task update time is not 
 substitute. Missing or invalid completion proof fails closed. A fresh submitted
 review completes handoff even if unresolved threads keep the approval gate false;
 those threads then remain eligible for the next bounded repair.
-Handoff planning only reads and records verified receipt/handoff state; the
-ready-for-review mutation and Copilot review request run only after that cycle's
-scan commit succeeds, and then re-fence the exact result head. A failed scan
-commit (including the state-capacity bound) therefore makes no handoff mutation.
+Preparation stages verified receipt/handoff state in memory. Controller evidence
+is collected against durable lifecycle history plus all newly observed merge
+events in the complete plan. The scan commits those source events, receipt state,
+commands, cursor, observations and retirements atomically before any external
+handoff, status or merge write. Capacity, validation or scan failure preserves the
+entire prior state and export. Only a successful commit refreshes the export,
+before deferred external work; preparation is discarded on failure.
+After receipt acceptance, handoff uses the freshly scanned main SHA and rechecks
+live main, exact result head and repository/PR identity. The stored receipt base
+remains provenance, not a requirement that main never advance. This does not
+change receipt schema or first-receipt validation.
 A PR that becomes draft at the final dispatch fence is reported as a suppressed
 repair with the `draft` reason; no task is claimed or posted.
 

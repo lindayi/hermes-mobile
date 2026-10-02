@@ -43,9 +43,10 @@ def test_timeout_baseline_remains_exactly_attested_for_drain_and_rollback(tmp_pa
     from deploy import native_controls_release as release
     import pytest
     baseline = getattr(controls, '_TIMEOUT_BASELINE_CONTROL_HASHES', None)
+    assert controls._PRE_ROUTING_CONTROL_HASHES == release.PRE_ROUTING_CONTROL_HASHES
     assert baseline is not None, 'The immediate pre-fix listener must remain attestable'
     assert baseline == release.TIMEOUT_BASELINE_CONTROL_HASHES
-    assert baseline == {**controls._CONTROL_HASHES, 'backend/native_run_controls.py':
+    assert baseline == {**controls._PRE_ROUTING_CONTROL_HASHES, 'backend/native_run_controls.py':
         '5107e54ed631fe2579efe2fb50c6a8ba1e9e3616c4fcd1d0e8ead2f7f29445d9'}
     # Synthetic source sets exercise attestation without production release reads.
     maps = []

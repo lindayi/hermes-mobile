@@ -38,6 +38,16 @@ APPROVED_CONTROL_HASHES = {
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': 'e083b0941b2b849559cd685d946ed10fb14a87128cf8ea2d125f77cb38ce434b',
     'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
+    'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
+}
+
+# Exact immediately prior version, retained for rollback.
+PRE_ROUTING_CONTROL_HASHES = {
+    'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
+    'backend/native_run_controls.py': '6e3a8796028925ea771bf90b2b97ba1fd7a47cbbd979a71e9be7fb525c129b16',
+    'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/native_maintenance.py': 'e083b0941b2b849559cd685d946ed10fb14a87128cf8ea2d125f77cb38ce434b',
+    'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
     'backend/native_notifications.py': '0159fbdd02705469853f51be7bb32479ea9e2fa0d6fdbc6789253d3b3c1c85fe',
 }
 
@@ -62,22 +72,24 @@ PREVIOUS_CONTROL_HASHES = {
 def attested_controls(root):
     """Runtime/rollback approval accepts only one complete known source set."""
     from backend.model_controls import (
-        _CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES, _TIMEOUT_BASELINE_CONTROL_HASHES,
-        _control_source_hashes)
+        _CONTROL_HASHES, _PRE_ROUTING_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES,
+        _TIMEOUT_BASELINE_CONTROL_HASHES, _control_source_hashes)
     actual = _control_source_hashes(root)
     if (set(APPROVED_CONTROL_HASHES) != {
                 'backend/native_controls_service.py', 'backend/native_run_controls.py',
                 'backend/native_api_service.py', 'backend/native_maintenance.py',
                 'backend/native_session_deletion.py', 'backend/native_notifications.py'}
+            or set(PRE_ROUTING_CONTROL_HASHES) != set(APPROVED_CONTROL_HASHES)
             or set(PREVIOUS_CONTROL_HASHES) != {
                 'backend/native_controls_service.py', 'backend/native_run_controls.py',
                 'backend/native_api_service.py', 'backend/native_maintenance.py'}
             or _CONTROL_HASHES != APPROVED_CONTROL_HASHES
+            or _PRE_ROUTING_CONTROL_HASHES != PRE_ROUTING_CONTROL_HASHES
             or _PREVIOUS_CONTROL_HASHES != PREVIOUS_CONTROL_HASHES
             or set(TIMEOUT_BASELINE_CONTROL_HASHES) != set(APPROVED_CONTROL_HASHES)
             or _TIMEOUT_BASELINE_CONTROL_HASHES != TIMEOUT_BASELINE_CONTROL_HASHES
-            or actual not in (APPROVED_CONTROL_HASHES, TIMEOUT_BASELINE_CONTROL_HASHES,
-                              PREVIOUS_CONTROL_HASHES)):
+            or actual not in (APPROVED_CONTROL_HASHES, PRE_ROUTING_CONTROL_HASHES,
+                              TIMEOUT_BASELINE_CONTROL_HASHES, PREVIOUS_CONTROL_HASHES)):
         raise RuntimeError('Native controls do not match approved source version')
     return actual
 
@@ -86,6 +98,7 @@ def approved_controls(root):
     try:
         tree = ast.parse((root / 'backend/model_controls.py').read_bytes())
         for name, expected in (('_CONTROL_HASHES', APPROVED_CONTROL_HASHES),
+                               ('_PRE_ROUTING_CONTROL_HASHES', PRE_ROUTING_CONTROL_HASHES),
                                ('_PREVIOUS_CONTROL_HASHES', PREVIOUS_CONTROL_HASHES),
                                ('_TIMEOUT_BASELINE_CONTROL_HASHES', TIMEOUT_BASELINE_CONTROL_HASHES)):
             constants = [ast.literal_eval(node.value) for node in tree.body
@@ -133,15 +146,19 @@ def require_controls_capabilities(caps, *, session_delete_version, notification_
 
 def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
            run=subprocess.run, sleep=time.sleep, idle_timeout=1800,
-           bootstrap_dedicated_native=False, probe=None, handoff=None):
+           bootstrap_dedicated_native=False, probe=None, handoff=None,
+           rollback_verify=None):
     """One lock and one candidate, with owner-gated verified rollback.
 
-    Notification candidates require two synchronous operator callbacks:
-    handoff(stage) durably copies all approved backlog to the private outbox
-    after drain, before publication/restarts; it must never mutate SDK source
-    or its registry. probe(stage) proves delivery receipts after activation.
-    Both run under the same deployment lock and owned admission gate. A
-    callback must raise on incomplete work; its return value is not evidence.
+    Notification candidates require synchronous callbacks:
+    handoff(stage) proves durable retention in the existing private outbox after
+    drain and before publication/restarts; it never mutates SDK source or registry.
+    probe(stage) proves delivery receipts after activation.
+    rollback_verify(old, baseline) proves captured notification evidence before
+    either abort path reopens admission.
+    All callbacks run under the same deployment lock and owned admission gate.
+    Capture (when supplied), handoff, probe and rollback verification must return
+    literal True only after completing their proof; no-op/truthy values fail closed.
     """
     from .git_source import preflight
     preflight(paths, service_run=run, extra_paths=(native_dropin,))
@@ -183,6 +200,8 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
                 raise RuntimeError('Notification release requires operator delivery receipt verification')
             if 'backend/native_notifications.py' in candidate_hashes and not callable(handoff):
                 raise RuntimeError('Notification release requires operator pre-restart handoff')
+            if 'backend/native_notifications.py' in candidate_hashes and not callable(rollback_verify):
+                raise RuntimeError('Notification release requires rollback preservation verification')
             protected = tuple(n for n in bridge.PROTECTED if n not in
                               ('backend/native_controls_service.py', 'backend/native_run_controls.py',
                                'backend/native_maintenance.py', 'backend/native_session_deletion.py',
@@ -231,6 +250,12 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
         backup = paths.state / 'backups' / release_id
         switched = False
         try:
+            prepare_handoff = getattr(handoff, 'capture', None)
+            if prepare_handoff is not None:
+                if not callable(prepare_handoff):
+                    raise RuntimeError('Invalid native notification handoff preparation')
+                if prepare_handoff(baseline) is not True:
+                    raise RuntimeError('Native notification capture did not verify')
             bridge.wait_idle(journal, timeout=idle_timeout, sleep=sleep)
             with closing(journal.connect()) as db:
                 required_ids = tuple(dict.fromkeys(
@@ -242,7 +267,8 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
                     raise RuntimeError('Native idle wait timed out')
                 sleep(1)
             if handoff is not None:
-                handoff(stage)
+                if handoff(stage) is not True:
+                    raise RuntimeError('Native notification handoff did not verify')
             if bridge.fingerprints(stage, names) != frozen:
                 raise RuntimeError('Staged source changed after checks')
             if handoff is not None and not native.idle(journal, baseline, required_ids=required_ids):
@@ -264,7 +290,8 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
                 # Notification candidates require this operator-supplied proof:
                 # drain the old backlog to real web receipts before reopening
                 # deletion/admission. Native readiness proves retention only.
-                probe(stage)
+                if probe(stage) is not True:
+                    raise RuntimeError('Native notification receipt verification did not pass')
             if bridge.fingerprints(stage, names) != frozen:
                 raise RuntimeError('Staged source changed during activation')
         except Exception as error:
@@ -307,10 +334,15 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
                         # identity, health, capabilities and auth must be unchanged.
                         native.verify_unchanged(Path(baseline['root']), baseline=baseline)
                         check_abort(db)
+                        if callable(rollback_verify) and rollback_verify(old, baseline) is not True:
+                            raise RuntimeError('Native notification rollback preservation was not verified')
+                        check_abort(db)
                         changed = db.execute('DELETE FROM deployment_gate WHERE singleton=1 AND owner=?', (release_id,))
                         if changed.rowcount != 1:
                             raise RuntimeError('Owned pre-mutation gate was not cleared')
                 else:
+                    if callable(rollback_verify) and rollback_verify(old, baseline) is not True:
+                        raise RuntimeError('Native notification rollback preservation was not verified')
                     journal.clear_deployment_gate(release_id)
             except Exception as rollback_error:
                 report('rollback_failed', error=str(error), rollback_error=str(rollback_error))
@@ -658,9 +690,16 @@ def main(argv=None, *, paths=None, run=subprocess.run):
     from .native_readiness import load_legacy_notice_approval
     approval = load_legacy_notice_approval(args.legacy_restart_approval) if args.legacy_restart_approval else None
     native = NativeProbe(paths.source, run=run, legacy_notice_approval=approval)
-    deploy(paths, checks=lambda stage: bridge.run_checks(paths, stage, run=run),
-           verify=lambda stage, backend, **kw: bridge.verify_release(paths, stage, backend, run=run, **kw),
-           native=native, run=run, bootstrap_dedicated_native=args.bootstrap_dedicated_native)
+    from backend.native_api_service import OWNER_HOME
+    from .native_notification_release import NativeNotificationCallbacks
+    # The private scratch proof lives exactly as long as this deploy, including
+    # its rollback verification, and is deleted on every exit path.
+    with NativeNotificationCallbacks(paths, native, home=OWNER_HOME) as notifications:
+        deploy(paths, checks=lambda stage: bridge.run_checks(paths, stage, run=run),
+               verify=lambda stage, backend, **kw: bridge.verify_release(paths, stage, backend, run=run, **kw),
+               native=native, run=run, bootstrap_dedicated_native=args.bootstrap_dedicated_native,
+               handoff=notifications, probe=notifications.probe,
+               rollback_verify=notifications.verify_rollback)
     return 0
 
 
