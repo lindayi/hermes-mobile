@@ -488,6 +488,9 @@ def test_closing_reference_parser_does_not_join_or_expose_html_comments(body, ex
     '1. <!-- hidden --> Closes #28',
     '+ <!-- hidden --> Closes #28',
     '1) <!-- hidden --> Closes #28',
+    '# Closes #28',
+    '## Summary\nCloses #28',
+    '  ### Summary\nCloses #28',
 ])
 def test_closing_reference_fails_closed_on_unsupported_markdown(body):
     assert not _contains_closing_reference(body, ISSUE_NUMBER)

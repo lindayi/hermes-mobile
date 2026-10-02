@@ -185,7 +185,7 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     'deploy/cloud_coordinator.py': '3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c',
     # Issue #43 launch/authority candidates; final assembled review remains required.
-    'deploy/issue_starter.py': '621e5e8adae801f3ea61c61bdaf1fa2e0bb6e986291f7d84da2e6d7c6f34cda2',
+    'deploy/issue_starter.py': '49debd3c1da5252ea67322a0febb9eb5b56d0ac1a830f3718e4d07377993b517',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.

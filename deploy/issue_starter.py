@@ -250,6 +250,7 @@ def _contains_closing_reference(body, issue_number):
     for line in body.split("\n"):
         if (line.startswith("    ") or line.lstrip().startswith("<!--")
                 or re.match(r"^ {0,3}(?:[-+*]|\d+[.)])(?: |$)", line)
+                or re.match(r"^ {0,3}#{1,6}(?:[ \t]+|$)", line)
                 or any(ord(char) < 32 for char in line)):
             return False
         # Only complete, same-line comments in a text paragraph are supported.
