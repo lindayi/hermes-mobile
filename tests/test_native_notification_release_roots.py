@@ -79,7 +79,7 @@ def test_worker_default_two_root_layout_reaches_real_proofs(worker, monkeypatch,
             return paths
 
         monkeypatch.setattr(release.bridge, 'Paths', defaults)
-    assert release.main(['--worker'], run=args['run'],
+    assert release.main(['--worker', '--local-full-checks'], run=args['run'],
                         **({} if default_paths else {'paths': paths})) == 0
     assert len(observed) == 2
     callbacks, (initial_records, handoff_records, initial_receipts) = observed
@@ -140,5 +140,5 @@ def test_worker_rejects_unbound_roots_before_deployment(worker, monkeypatch, bad
     calls = []
     monkeypatch.setattr(release, 'deploy', lambda *a, **kw: calls.append('deployment'))
     with pytest.raises(RuntimeError, match='binding|outbox path'):
-        release.main(['--worker'], paths=paths, run=args['run'])
+        release.main(['--worker', '--local-full-checks'], paths=paths, run=args['run'])
     assert calls == []

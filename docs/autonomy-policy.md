@@ -66,7 +66,7 @@ review acceptance, or permission to activate the observer contract.
 
 | Issue #46 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/native_controls_release.py` | `8e3d0ea18ca3d781533f4e915184f4ca779a7507f22895fbb41d15169b6d133e` |
+| `deploy/native_controls_release.py` | `0887a6ad4fa0bb5c1351089cc6c53fc8ff7be4c609f42d956d3a51642256dba5` |
 | `deploy/observe_release.py` | `bf01500fb253f7d41ce49d375bba63a9e4d80569eb376a6aeae50f56cf71923f` |
 
 The authorization lineage is `native25-final-runtime-review.json` (SHA-256
@@ -81,6 +81,26 @@ source-review lineage, not runtime evidence or portable test inputs.
 its `native25-route-bound-review.json` and PR33 merged-preservation lineage is
 accepted source evidence, not a still-unreviewed PR25 candidate or activation approval.
 It was absent only from the historical b85c098 baseline.
+
+### Issue #52 native hosted-artifact candidate
+
+The proposed native hosted-artifact release change updates the current source
+inventory for the two release controllers below. The policy fixture keeps their
+historical merged-main bytes separate from these exact candidate hashes and checks
+the candidate against the source bytes. These are issue #52 candidate pins only;
+they do not assert independent review, merge, deployment, or gate activation.
+
+| Issue #52 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/native_controls_release.py` | `0887a6ad4fa0bb5c1351089cc6c53fc8ff7be4c609f42d956d3a51642256dba5` |
+| `deploy/self_deploy.py` | `592cc957ad79a1f020a02ec1ca72b53d68bbbd49a8800c16af8cdead13d45469` |
+
+The native-controller hash in both candidate tables and independent fixtures is
+the integrated issue #46 + #52 source: operational busy observation remains
+separate from idle-required maintenance with verified hosted artifacts. It replaces
+the separate PR47 and PR53 controller candidate hashes, not historical-main pins.
+The observer, self-deploy, and issue #48 starter/unit pins retain their accepted
+source bytes. This local assembly does not authorize activation or deployment.
 
 The coordinator's exact 36-file static closure and fixed dependency inventory are
 retained. Shared backend dependencies keep their existing blocker labels. The five
