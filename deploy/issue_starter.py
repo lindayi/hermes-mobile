@@ -205,48 +205,34 @@ def _public_prompt(issue_number, title, body):
 
 
 def _contains_closing_reference(body, issue_number):
+    """Recognize literal closing text only in a conservative Markdown subset.
+
+    This is not a Markdown renderer. Reject unsupported constructs throughout
+    the body rather than expose their attributes, link titles, code or lazy
+    continuations as text. An ordinary same-line inline HTML comment is the
+    sole supported HTML form; a line-start comment is an HTML *block*, including
+    any text after its closing delimiter on that line (CommonMark section 4.6).
+    """
     if not isinstance(body, str) or len(body) > MAX_TEXT_CHARS:
         return False
-    fence = None
-    in_comment = False
     visible = []
-    for line in body.splitlines():
-        if fence:
-            closing = re.match(r"^ {0,3}(`{3,}|~{3,})[ \t]*$", line)
-            if closing and closing.group(1)[0] == fence[0] and len(closing.group(1)) >= len(fence):
-                fence = None
-            continue
-        if re.match(r"^(?: {4}| {0,3}\t|\s*>)", line):
-            continue
-        while True:
-            if in_comment:
-                end = line.find("-->")
-                if end < 0:
-                    line = "\0"
-                    break
-                line = "\0" + line[end + 3:]
-                in_comment = False
-            start = line.find("<!--")
-            if start < 0:
-                break
-            end = line.find("-->", start + 4)
-            if end < 0:
-                line = line[:start] + "\0"
-                in_comment = True
-                break
-            line = line[:start] + "\0" + line[end + 3:]
-        marker = re.match(r"^ {0,3}(?:(?:[-+*]|\d+[.)])[ \t]+)?(`{3,}|~{3,})(.*)$", line)
-        if marker and (marker.group(1)[0] == "~" or "`" not in marker.group(2)):
-            fence = marker.group(1)
-            continue
+    for line in body.split("\n"):
+        if (line.startswith("    ") or line.lstrip().startswith("<!--")
+                or re.match(r"^ {0,3}(?:[-+*]|\d+[.)])(?: |$)", line)
+                or any(ord(char) < 32 for char in line)):
+            return False
+        # Only complete, same-line comments in a text paragraph are supported.
+        # Keep a non-whitespace barrier: never manufacture a closing directive
+        # by joining text separated by markup.
+        line = re.sub(r"<!--(?:(?!--|<|>).)*-->", "\0", line)
+        if any(char in line for char in "<>[]`\\~$|*_"):
+            return False
         visible.append(line)
-    plain = re.sub(r"(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)", " ", "\n".join(visible))
-    return re.search(
-        rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?[ \t]+"
-        rf"(?:{re.escape(REPOSITORY)}\s+)?#{issue_number}\b",
-        plain,
-        re.IGNORECASE,
-    ) is not None
+    return any(re.search(
+        rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[ ]*:?[ ]+"
+        rf"(?:{re.escape(REPOSITORY)}[ ]+)?#{issue_number}\b",
+        line, re.IGNORECASE,
+    ) is not None for line in visible)
 
 
 def _private_regular(path):
@@ -304,13 +290,16 @@ class StateStore:
         return data
 
     def _save(self, data):
+        payload = json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        if len(payload) > MAX_STATE_BYTES:
+            raise CoordinatorError("Issue-starter state exceeded its safety bound")
         self._ensure_directory()
         temporary = self.directory / f".{self.path.name}.{os.getpid()}.{secrets.token_hex(8)}"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(temporary, flags, 0o600)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(data, stream, separators=(",", ":"), sort_keys=True)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
@@ -1063,10 +1052,10 @@ class Coordinator:
             self.api, f"repos/{REPOSITORY}/issues/{pull_number}/comments",
         )
 
-    def _owner_enrollment_comment(self, comments):
+    def _owner_enrollment_comment(self, comments, head_sha):
         return next(
             (comment for comment in comments if isinstance(comment, dict)
-             and comment.get("body") == "/hermes enroll"
+             and comment.get("body") == f"/hermes enroll {head_sha}"
              and isinstance(comment.get("user"), dict)
              and comment["user"].get("id") == OWNER_ID),
             None,
@@ -1156,7 +1145,7 @@ class Coordinator:
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
             comments = self._pr_comments(pull["number"])
-            existing = self._owner_enrollment_comment(comments)
+            existing = self._owner_enrollment_comment(comments, pull["head"]["sha"])
             self.store.update(key, {
                 "phase": "handoff_reserved",
                 "pull_number": pull["number"],
@@ -1338,7 +1327,8 @@ class Coordinator:
             return {"planned": 0, "pending": 0, "dispatched": 0,
                     "handed_off": 0, "blocked": 1}
         comments = self._pr_comments(record["pull_number"])
-        existing = self._owner_enrollment_comment(comments)
+        enrollment_body = f"/hermes enroll {record['head_sha']}"
+        existing = self._owner_enrollment_comment(comments, record["head_sha"])
         enrollment_state = record.get("enrollment_state")
         if existing:
             self.store.update(key, {
@@ -1360,7 +1350,7 @@ class Coordinator:
             try:
                 response = self.api.post(
                     f"repos/{REPOSITORY}/issues/{record['pull_number']}/comments",
-                    {"body": "/hermes enroll"},
+                    {"body": enrollment_body},
                 )
             except Exception:
                 self.store.update(key, {
@@ -1372,7 +1362,7 @@ class Coordinator:
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
             user = response.get("user") if isinstance(response, dict) else None
-            if (not isinstance(response, dict) or response.get("body") != "/hermes enroll"
+            if (not isinstance(response, dict) or response.get("body") != enrollment_body
                     or not isinstance(user, dict) or user.get("id") != OWNER_ID):
                 self.store.update(key, {
                     "phase": "handoff_uncertain",
@@ -1398,7 +1388,7 @@ class Coordinator:
                 (item for item in comments if isinstance(item, dict)
                  and type(item.get("id")) is int
                  and item["id"] > record.get("comment_high_water", 0)
-                 and item.get("body") == "/hermes enroll"
+                 and item.get("body") == enrollment_body
                  and isinstance(item.get("user"), dict)
                  and item["user"].get("id") == OWNER_ID),
                 None,

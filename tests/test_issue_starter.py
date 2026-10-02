@@ -429,6 +429,34 @@ def test_closing_reference_parser_does_not_join_or_expose_html_comments(body, ex
     assert _contains_closing_reference(body, ISSUE_NUMBER) is expected
 
 
+@pytest.mark.parametrize("body", [
+    '<span title="Closes #28"></span>',
+    '<div>\nCloses #28\n</div>',
+    '<script>\nCloses #28\n</script>',
+    '<!-- hidden --> Closes #28',  # CommonMark HTML block, not inline text.
+    '[link](https://example.test "Closes #28")',
+    '[ref]: https://example.test "Closes #28"',
+    '![Closes #28](image.png)',
+    '> quoted\nCloses #28',  # Lazy blockquote continuation.
+    '```text\nCloses #28\n```',
+    '`Closes #28`',
+    '    Closes #28',
+    '\\Closes #28',
+    '<custom\n title="Closes #28">',
+    '- <!-- hidden --> Closes #28',  # HTML block in a list item.
+    '1. <!-- hidden --> Closes #28',
+    '+ <!-- hidden --> Closes #28',
+    '1) <!-- hidden --> Closes #28',
+])
+def test_closing_reference_fails_closed_on_unsupported_markdown(body):
+    assert not _contains_closing_reference(body, ISSUE_NUMBER)
+
+
+@pytest.mark.parametrize("body", ["Closes #28", "Fixes #28", "Resolves #28\n\nPublic details."])
+def test_plain_closing_reference_is_recognized(body):
+    assert _contains_closing_reference(body, ISSUE_NUMBER)
+
+
 def test_dispatch_is_reserved_and_uses_bounded_issue_only_prompt(tmp_path):
     api = FakeApi()
     start_task(tmp_path, api)
@@ -614,7 +642,7 @@ def test_completed_bound_task_marks_its_draft_pr_ready_and_enrolls_once(tmp_path
         body["body"] for route, body in api.posts
         if route.endswith("/issues/41/comments")
     ]
-    assert enrollment == ["/hermes enroll"]
+    assert enrollment == [("/hermes enroll " + "a" * 40)]
     assert api.pulls[0]["draft"] is False
 
 
@@ -624,7 +652,7 @@ def test_uncertain_enrollment_comment_reconciles_without_duplicate_comment(tmp_p
 
         def post(self, route, body):
             response = super().post(route, body)
-            if route.endswith("/issues/41/comments") and body["body"] == "/hermes enroll" and not self.lost:
+            if route.endswith("/issues/41/comments") and body["body"] == ("/hermes enroll " + "a" * 40) and not self.lost:
                 self.lost = True
                 raise TimeoutError("response lost")
             return response
@@ -642,7 +670,7 @@ def test_uncertain_enrollment_comment_reconciles_without_duplicate_comment(tmp_p
     assert final["handed_off"] == 0
     assert len([
         item for item in api.posts
-        if item[0].endswith("/issues/41/comments") and item[1]["body"] == "/hermes enroll"
+        if item[0].endswith("/issues/41/comments") and item[1]["body"] == ("/hermes enroll " + "a" * 40)
     ]) == 1
 
 
@@ -688,7 +716,7 @@ def test_task_change_after_readiness_mutation_blocks_enrollment(tmp_path):
 
     assert result["handed_off"] == 0
     assert not any(
-        route.endswith("/issues/41/comments") and body.get("body") == "/hermes enroll"
+        route.endswith("/issues/41/comments") and body.get("body") == ("/hermes enroll " + "a" * 40)
         for route, body in api.posts
     )
 
@@ -768,7 +796,7 @@ def test_task_pull_without_optional_global_id_resolves_and_binds_detail_node(tmp
     assert len(readiness) == 1
     assert readiness[0]["variables"]["pullRequestId"] == "PR_kwDO123"
     assert [body["body"] for route, body in api.posts
-            if route.endswith("/issues/41/comments")] == ["/hermes enroll"]
+            if route.endswith("/issues/41/comments")] == [("/hermes enroll " + "a" * 40)]
 
 
 @pytest.mark.parametrize("invalid", ["global_mismatch", "global_null", "id_missing",
@@ -812,7 +840,7 @@ def test_task_pull_artifact_binding_failures_never_handoff(tmp_path, invalid):
         for call in api.graphql_calls
     )
     assert not any(
-        route.endswith("/issues/41/comments") and body.get("body") == "/hermes enroll"
+        route.endswith("/issues/41/comments") and body.get("body") == ("/hermes enroll " + "a" * 40)
         for route, body in api.posts
     )
 
@@ -1090,7 +1118,7 @@ def test_final_fresh_draft_read_blocks_enrollment_without_readiness_retry(tmp_pa
     assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == 0
     assert len([call for call in api.graphql_calls
                 if "markPullRequestReadyForReview" in call["query"]]) == int(path != "already_ready")
-    assert not any(route.endswith("/issues/41/comments") and body["body"] == "/hermes enroll"
+    assert not any(route.endswith("/issues/41/comments") and body["body"] == ("/hermes enroll " + "a" * 40)
                    for route, body in api.posts)
 
 
@@ -1141,6 +1169,46 @@ def test_private_state_rejects_symlinked_directory_and_readonly_snapshot_is_clea
     assert not list(tmp_path.rglob("*.lock"))
     with pytest.raises(CoordinatorError):
         store.reserve({"issue": ISSUE_NUMBER, "command_id": COMMAND_ID})
+
+
+def test_state_size_is_checked_before_temporary_write_and_preserves_prior_bytes(tmp_path, monkeypatch):
+    from deploy import issue_starter
+
+    api = FakeApi()
+    start_task(tmp_path, api)
+    store = make_coordinator(tmp_path, api).store
+    before = store.path.read_bytes()
+    prior = store.snapshot()
+    limit = len(before) + 32
+    monkeypatch.setattr(issue_starter, "MAX_STATE_BYTES", limit)
+    original_open = os.open
+    temporary_opens = []
+
+    def watch_open(path, flags, *args, **kwargs):
+        if flags & os.O_EXCL:
+            temporary_opens.append(path)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", watch_open)
+    with pytest.raises(CoordinatorError, match="safety bound"):
+        store.update("28:9001", {"blocker": "é" * limit})
+    assert temporary_opens == []
+    assert store.path.read_bytes() == before
+    assert store.snapshot() == prior
+
+    # Check the exact serialized byte boundary, including JSON escaping.
+    candidate = json.loads(before)
+    candidate["commands"]["28:9001"]["blocker"] = "é"
+    encoded = json.dumps(candidate, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    monkeypatch.setattr(issue_starter, "MAX_STATE_BYTES", len(encoded) - 1)
+    with pytest.raises(CoordinatorError, match="safety bound"):
+        store.update("28:9001", {"blocker": "é"})
+    assert temporary_opens == []
+    assert store.path.read_bytes() == before
+    monkeypatch.setattr(issue_starter, "MAX_STATE_BYTES", len(encoded))
+    store.update("28:9001", {"blocker": "é"})
+    assert store.path.read_bytes() == encoded
+    assert store.snapshot() == candidate
 
 
 def test_cli_help_does_not_create_bytecode(tmp_path):
