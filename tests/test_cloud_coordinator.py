@@ -156,6 +156,172 @@ def test_review_requires_authenticated_copilot_approval_on_current_head():
     )
 
 
+@pytest.mark.parametrize("timestamp", [
+    {}, {"submitted_at": None}, {"submitted_at": ""},
+    {"submitted_at": "not-a-time"}, {"submitted_at": 123},
+    {"submitted_at": "2026-10-01T13:00:00"},
+    {"submitted_at": "2026-10-01"},
+])
+@pytest.mark.parametrize("state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
+def test_review_rejects_every_authenticated_invalid_timestamp(timestamp, state):
+    approved = {
+        "state": "APPROVED", "commit_id": HEAD,
+        "submitted_at": "2026-10-01T12:00:00Z",
+        "user": {"id": COPILOT_REVIEWER},
+    }
+    invalid = {"state": state, "commit_id": HEAD,
+               "user": {"id": COPILOT_REVIEWER}, **timestamp}
+    assert not copilot_review_valid(HEAD, [invalid], [])
+    for reviews in ([approved, invalid], [invalid, approved]):
+        assert not copilot_review_valid(HEAD, reviews, [])
+    # Unauthenticated review metadata must not interfere with Copilot evidence.
+    assert copilot_review_valid(HEAD, [approved, invalid | {"user": {"id": OWNER}}], [])
+
+
+def test_pending_review_without_submission_time_blocks_approval():
+    approved = {
+        "state": "APPROVED", "commit_id": HEAD,
+        "submitted_at": "2026-10-01T12:00:00Z",
+        "user": {"id": COPILOT_REVIEWER},
+    }
+    # GitHub's REST API omits submitted_at for an unsubmitted PENDING review.
+    pending = {"state": "PENDING", "commit_id": HEAD,
+               "user": {"id": COPILOT_REVIEWER}}
+    assert not copilot_review_valid(HEAD, [pending], [])
+    for reviews in ([approved, pending], [pending, approved]):
+        assert not copilot_review_valid(HEAD, reviews, [])
+
+
+@pytest.mark.parametrize("timestamp", [
+    {}, {"submitted_at": "not-a-time"}, {"submitted_at": "2026-10-01T13:00:00"},
+])
+def test_invalid_review_timestamp_revokes_owned_success_on_same_head(tmp_path, timestamp):
+    class InvalidReview(RecordingApi):
+        invalid = False
+
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if self.invalid and route.endswith("/pulls/16/reviews?per_page=100"):
+                return values + [{"state": "APPROVED", "commit_id": HEAD,
+                                  "user": {"id": COPILOT_REVIEWER}, **timestamp}]
+            return values
+
+    api = InvalidReview()
+    api.pull["mergeable"] = False
+    path = tmp_path / "state.json"
+    _managed_cycle(api, path)
+    assert api.status_log[HEAD][-1]["state"] == "success"
+    api.invalid = True
+    result = _managed_cycle(api, path)
+    assert not result["pull_requests"][0]["review_valid"]
+    assert api.status_log[HEAD][-1]["state"] == "pending"
+    assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("conflict", [
+    {"state": "COMMENTED"}, {"state": "CHANGES_REQUESTED"},
+    {"state": "DISMISSED"}, {"commit_id": BASE},
+])
+@pytest.mark.parametrize("timestamp", ["2026-10-01T12:00:00Z", "2026-10-01T14:00:00+02:00"])
+def test_review_latest_time_bucket_must_unanimously_approve_current_head(conflict, timestamp):
+    approved = {
+        "state": "APPROVED", "commit_id": HEAD,
+        "submitted_at": "2026-10-01T12:00:00Z",
+        "user": {"id": COPILOT_REVIEWER},
+    }
+    conflicting = approved | conflict | {"submitted_at": timestamp}
+    for reviews in ([approved, conflicting], [conflicting, approved]):
+        assert not copilot_review_valid(HEAD, reviews, [])
+        # Only the latest bucket must agree; old disagreement cannot poison a
+        # subsequent unambiguous approval, regardless of API list order.
+        later = approved | {"submitted_at": "2026-10-01T15:00:00Z"}
+        assert copilot_review_valid(HEAD, [later, *reviews], [])
+        assert copilot_review_valid(HEAD, [*reviews, later], [])
+    assert copilot_review_valid(HEAD, [approved, approved | {"submitted_at": timestamp}], [])
+
+
+@pytest.mark.parametrize("newer", [
+    "2026-10-01T11:30:00-01:00", "2026-10-01T12:00:00.500Z",
+])
+def test_review_order_uses_instants_not_timestamp_strings(newer):
+    approved = {
+        "state": "APPROVED", "commit_id": HEAD,
+        "submitted_at": "2026-10-01T12:00:00Z",
+        "user": {"id": COPILOT_REVIEWER},
+    }
+    commented = approved | {"state": "COMMENTED", "submitted_at": newer}
+    for reviews in ([approved, commented], [commented, approved]):
+        assert not copilot_review_valid(HEAD, reviews, [])
+    assert copilot_review_valid(HEAD, [
+        approved | {"submitted_at": newer},
+        commented | {"submitted_at": approved["submitted_at"]},
+    ], [])
+
+
+@pytest.mark.parametrize("phase", ["plan-revocation", "status-recheck", "merge-recheck"])
+@pytest.mark.parametrize("invalid", [False, True])
+def test_review_races_fail_closed_at_each_consumer(tmp_path, phase, invalid):
+    class ChangingReviews(FakeApi):
+        review_reads = 0
+
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                self.review_reads += 1
+                if phase == "plan-revocation" or self.review_reads > 1:
+                    conflicting = values[0] | {"state": "COMMENTED"}
+                    if invalid:
+                        conflicting.pop("submitted_at")
+                    return values + [conflicting]
+            return values
+
+    api = ChangingReviews(review_status_present=(phase != "status-recheck"))
+    result = _managed_cycle(api, tmp_path / "state.json")
+    assert not api.graphql_writes
+    statuses = [body["state"] for route, body in api.writes if "/statuses/" in route]
+    assert "success" not in statuses
+    if phase != "status-recheck":
+        assert statuses == ["pending"]  # Revoke an existing owned success immediately.
+        assert not result["pull_requests"][0]["review_valid"]
+    else:
+        assert api.review_reads >= 2  # Planned success must be revalidated before POST.
+
+
+@pytest.mark.parametrize("source_state", [
+    None, "skipped", "cancelled", "in_progress", "failure", "success",
+])
+def test_current_main_source_ci_policy_still_fails_closed(tmp_path, source_state):
+    class CurrentPolicy(FakeApi):
+        def get(self, route):
+            value = super().get(route)
+            if route.endswith("/protection/required_status_checks"):
+                return value | {"contexts": [
+                    "source-ci", "integration-tests", "agent-review", "cloud-review",
+                ]}
+            return value
+
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if "/check-runs?" in route:
+                values += [{"name": name, "status": "completed", "conclusion": "success"}
+                           for name in ("Source checks", "agent-review")]
+                if source_state is not None:
+                    values.append({
+                        "name": "source-ci",
+                        "status": "in_progress" if source_state == "in_progress" else "completed",
+                        "conclusion": None if source_state == "in_progress" else source_state,
+                    })
+            return values
+
+    api = CurrentPolicy()
+    result = _managed_cycle(api, tmp_path / "state.json")
+    assert result["pull_requests"][0]["auto_merge_eligible"] is (source_state == "success")
+    assert bool(api.graphql_writes) is (source_state == "success")
+    # A legacy Source checks success is not the required source-ci aggregate.
+    assert all(body.get("context") not in {"source-ci", "integration-tests", "agent-review"}
+               for _, body in api.writes)
+
+
 def test_required_checks_need_complete_green_evidence_for_every_context():
     required = [{"context": "Source checks"}, {"context": "integration-tests"}]
     successful_runs = [

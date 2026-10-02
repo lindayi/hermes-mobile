@@ -186,10 +186,18 @@ def copilot_review_valid(head_sha, reviews, threads, *, threads_complete=True,
         and type(review["user"].get("id")) is int
         and review["user"]["id"] == COPILOT_REVIEWER_ID
     ]
-    if not authored:
+    # PENDING reviews have no submitted_at in GitHub's API. They cannot be
+    # ordered against an approval; do not invent a time or ignore that evidence.
+    if not authored or any(not _valid_timestamp(review.get("submitted_at"))
+                           for review in authored):
         return False
-    latest = max(authored, key=lambda review: str(review.get("submitted_at") or ""))
-    return latest.get("state") == "APPROVED" and latest.get("commit_id") == head_sha
+    submitted = [datetime.fromisoformat(review["submitted_at"].replace("Z", "+00:00"))
+                 for review in authored]
+    latest = max(submitted)
+    # GitHub timestamp precision can tie submissions. Neither list position nor
+    # review ID proves their order: every review at the latest instant must agree.
+    return all(review.get("state") == "APPROVED" and review.get("commit_id") == head_sha
+               for review, timestamp in zip(authored, submitted) if timestamp == latest)
 
 
 def _required_contexts(required):

@@ -68,8 +68,15 @@ The `cloud-review` gate accepts only a latest `APPROVED` review authored by the
 authenticated Copilot review identity (GitHub ID `175728472`) on the exact current
 head SHA, plus fully paginated review threads that are all resolved. A `COMMENTED`
 review, arbitrary comment, stale approval, author assertion, or truncated thread
-list does not pass. If the authenticated reviewer identity differs, the check
-fails closed and requires policy review rather than inferring approval.
+list does not pass. All authenticated reviews must have valid timezone-aware
+submission times. Missing, malformed, or naive timestamps fail closed; this
+includes an unsubmitted `PENDING` review, for which GitHub omits `submitted_at`.
+Times are compared as instants, not strings. Every review tied at the latest
+instant must approve the current head; conflicting states or heads fail closed
+regardless of response order. This same gate controls planning, status publication
+and revocation, and the final merge recheck. If the authenticated reviewer
+identity differs, the check fails closed and requires policy review rather than
+inferring approval.
 
 Path classification includes both sides of renames and treats malformed,
 unknown, empty, oversized, or incomplete file inventories as sensitive. Only the
