@@ -129,7 +129,7 @@ _PENDING_ISSUE43_LAUNCH_FIXTURE = {
     'deploy/cloud_coordinator.py': '3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c',
     # PR57 paired admission fence and corrected shared canonical proof.
     'deploy/issue_starter.py': 'c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9',
-    'deploy/pull_handoff_binding.py': '0e3c61e46eb82fa8de5404cd3dd36af8e2cf77388630dd0954616fe67b09d601',
+    'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
     'scripts/issue_starter.py': '09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1',

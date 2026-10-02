@@ -44,6 +44,7 @@ def _pull_snapshot(pull):
             or type(head_repo.get("id")) is not int
             or head_repo["id"] != REPOSITORY_ID
             or not isinstance(base, dict) or not isinstance(base.get("ref"), str)
+            or not _is_sha(base.get("sha"))
             or not isinstance(base_repo, dict)
             or type(base_repo.get("id")) is not int
             or base_repo["id"] != REPOSITORY_ID

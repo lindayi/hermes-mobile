@@ -124,13 +124,15 @@ The final combined source overlay retains PR55's `_reconcile_actions` from
 from the combined actual bytes, not either parent's digest. The shared helper
 subsequently omits an absent first-page cursor so both production API adapters
 request the same connection: the coordinator's CLI transport otherwise sends the
-literal string `None`, while the starter's JSON transport sends null. Real cursors,
-all linkage checks, and pagination bounds remain unchanged:
+literal string `None`, while the starter's JSON transport sends null. It also
+requires a valid lowercase 40-hex base SHA on the initial and final REST snapshots,
+matching the paired consumer's admission contract. All other linkage checks and
+pagination bounds remain unchanged:
 
 | Final PR55 + PR57 + PR58 assembly overlay | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `4a94bd43f7d350cb8aaee08650726893e6775872e8af20f3a0c8f7f61127345d` |
-| `deploy/pull_handoff_binding.py` | `0e3c61e46eb82fa8de5404cd3dd36af8e2cf77388630dd0954616fe67b09d601` |
+| `deploy/pull_handoff_binding.py` | `3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b` |
 
 The runtime source pins and independent literal fixtures explicitly use these
 combined/current digests. The starter pin above and issue #58 unit pin below are
