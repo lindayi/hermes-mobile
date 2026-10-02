@@ -200,6 +200,7 @@ class FakeApi:
                 "id": 9101,
                 "body": body["body"],
                 "created_at": "2026-10-01T21:00:00Z",
+                "updated_at": "2026-10-01T21:00:00Z",
                 "user": {"id": OWNER_ID},
             }
             self.comments.append(comment)
@@ -209,6 +210,7 @@ class FakeApi:
                 "id": 9102,
                 "body": body["body"],
                 "created_at": "2026-10-01T21:00:00Z",
+                "updated_at": "2026-10-01T21:00:00Z",
                 "user": {"id": OWNER_ID},
             }
             self.comments.append(comment)

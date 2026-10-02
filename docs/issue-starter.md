@@ -73,9 +73,13 @@ execution, and no merge, production access, settings, or permissions changes.
 
 The worker polls only the persisted task ID. It requires the task's repository
 and owner/creator identity, a completed task with a bounded positive
-`session_count`, and the task's unique GitHub branch/PR artifacts. The public
-task response does not include a per-session array; `session_count` is not
-treated as evidence that tests or reviews passed. It checks the PR's repository,
+`session_count`, and the task's unique GitHub branch/PR artifacts. The documented
+[task-detail GET endpoint](https://docs.github.com/rest/agent-tasks/agent-tasks#get-a-task-by-repo)
+includes `sessions` (in the second `allOf` member of its OpenAPI response schema),
+unlike the task-list summary. Coordinator continuation binds the persisted task
+to that authenticated session's identity, dispatch nonce, branch and completion
+time, then validates the exact result receipt. `session_count` alone is not
+evidence that tests or reviews passed. It checks the PR's repository,
 main target, branch, open state, issue-closing reference, and exact current head
 before any handoff. Closing references are accepted only in a conservative plain
 Markdown subset. Raw HTML, links/images, code, lists/quotes (including lazy
@@ -157,6 +161,7 @@ restart, and replay. There is no absent-consumer skip or external source overrid
 HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
   python3 scripts/test.py python -- \
     tests/test_issue_starter.py tests/test_issue_starter_unit.py \
+    tests/test_issue_starter_comment_proofs.py \
     tests/test_issue_starter_handoff.py tests/test_issue_starter_paired_lifecycle.py \
     tests/test_cloud_coordinator.py tests/test_cloud_coordinator_latest_review.py \
     tests/test_cloud_coordinator_presend.py tests/test_task_receipts.py \

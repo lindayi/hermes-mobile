@@ -75,6 +75,21 @@ def _parse_time(value):
     return parsed.astimezone(timezone.utc)
 
 
+def _verified_owner_comment(comment, expected, *, now, not_before=None):
+    """Verify fixed text and immutable GitHub metadata, not just a marker."""
+    if (not isinstance(comment, dict) or comment.get("body") != expected
+            or type(comment.get("id")) is not int or comment["id"] <= 0
+            or not isinstance(comment.get("user"), dict)
+            or type(comment["user"].get("id")) is not int
+            or comment["user"]["id"] != OWNER_ID):
+        return False
+    created = _parse_time(comment.get("created_at"))
+    return (created is not None
+            and comment.get("updated_at") == comment.get("created_at")
+            and created <= now
+            and (not_before is None or created >= not_before))
+
+
 def _issue_digest(title, body):
     if (not isinstance(title, str) or not isinstance(body, str)
             or not title.strip() or len(title) + len(body) > MAX_ISSUE_CHARS):
@@ -838,17 +853,22 @@ class Coordinator:
             })
             return {"planned": 0, "pending": 0, "dispatched": 0,
                     "handed_off": 0, "blocked": 1}
-        found = next(
-            (item for item in comments if isinstance(item, dict)
-             and isinstance(item.get("body"), str) and marker in item["body"]
-             and isinstance(item.get("user"), dict)
-             and item["user"].get("id") == OWNER_ID),
-            None,
-        )
-        if found:
+        text = self._receipt_text(record, receipt)
+        accepted = _parse_time(record["accepted_at"])
+        matches = [
+            item for item in comments if isinstance(item, dict)
+            and isinstance(item.get("body"), str) and marker in item["body"]
+            and isinstance(item.get("user"), dict)
+            and item["user"].get("id") == OWNER_ID
+        ]
+        if len(matches) == 1 and _verified_owner_comment(
+            matches[0], text, now=self.clock(), not_before=accepted,
+        ):
             self.store.update(key, {"receipt": {**receipt, "state": "sent"}})
             return {"planned": 0, "pending": 0, "dispatched": 0, "handed_off": 0, "blocked": 0}
-        if receipt.get("state") != "reserved":
+        # An owner marker can fence a possible prior write, but cannot prove
+        # delivery of the exact, unedited receipt consumed by lifecycle sources.
+        if matches or receipt.get("state") != "reserved":
             attempts = receipt.get("lookup_failures", 0) + 1
             state = "abandoned" if attempts >= MAX_READ_FAILURES else "uncertain"
             self.store.update(key, {
@@ -856,7 +876,6 @@ class Coordinator:
             })
             return {"planned": 0, "pending": 0, "dispatched": 0, "handed_off": 0, "blocked": 1}
         self.store.update(key, {"receipt": {**receipt, "state": "sending"}})
-        text = self._receipt_text(record, receipt)
         try:
             response = self.api.post(
                 f"repos/{REPOSITORY}/issues/{issue_number}/comments", {"body": text},
@@ -865,9 +884,9 @@ class Coordinator:
             current = self.store.snapshot()["commands"][key]
             self.store.update(key, {"receipt": {**current["receipt"], "state": "uncertain"}})
             return {"planned": 0, "pending": 0, "dispatched": 0, "handed_off": 0, "blocked": 1}
-        user = response.get("user") if isinstance(response, dict) else None
-        if (not isinstance(response, dict) or response.get("body") != text
-                or not isinstance(user, dict) or user.get("id") != OWNER_ID):
+        if not _verified_owner_comment(
+            response, text, now=self.clock(), not_before=accepted,
+        ):
             current = self.store.snapshot()["commands"][key]
             self.store.update(key, {"receipt": {**current["receipt"], "state": "uncertain"}})
             return {"planned": 0, "pending": 0, "dispatched": 0, "handed_off": 0, "blocked": 1}
@@ -1074,10 +1093,9 @@ class Coordinator:
 
     def _owner_enrollment_comment(self, comments, head_sha):
         return next(
-            (comment for comment in comments if isinstance(comment, dict)
-             and comment.get("body") == f"/hermes enroll {head_sha}"
-             and isinstance(comment.get("user"), dict)
-             and comment["user"].get("id") == OWNER_ID),
+            (comment for comment in comments if _verified_owner_comment(
+                comment, f"/hermes enroll {head_sha}", now=self.clock(),
+            )),
             None,
         )
 
@@ -1368,9 +1386,9 @@ class Coordinator:
                 })
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
-            user = response.get("user") if isinstance(response, dict) else None
-            if (not isinstance(response, dict) or response.get("body") != enrollment_body
-                    or not isinstance(user, dict) or user.get("id") != OWNER_ID):
+            if not _verified_owner_comment(
+                response, enrollment_body, now=self.clock(),
+            ):
                 self.store.update(key, {
                     "phase": "handoff_uncertain",
                     "enrollment_state": "uncertain",
@@ -1392,12 +1410,9 @@ class Coordinator:
                     "handed_off": 1, "blocked": 0}
         if enrollment_state in {"started", "uncertain"}:
             eligible = next(
-                (item for item in comments if isinstance(item, dict)
-                 and type(item.get("id")) is int
-                 and item["id"] > record.get("comment_high_water", 0)
-                 and item.get("body") == enrollment_body
-                 and isinstance(item.get("user"), dict)
-                 and item["user"].get("id") == OWNER_ID),
+                (item for item in comments if _verified_owner_comment(
+                    item, enrollment_body, now=self.clock(),
+                ) and item["id"] > record.get("comment_high_water", 0)),
                 None,
             )
             if eligible:
