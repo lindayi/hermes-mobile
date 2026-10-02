@@ -558,6 +558,230 @@ def test_replay_after_crash_before_ack_and_concurrent_replay_are_idempotent(tmp_
         assert db.execute('SELECT status FROM events').fetchone() == ('acked',)
 
 
+@pytest.mark.parametrize('interruption', ['empty', 'schema', 'binding', 'commit', 'validated', 'installed'])
+def test_first_initialization_interruption_never_publishes_partial_state(tmp_path, interruption):
+    import multiprocessing
+    from deploy import workflow_notifications as adapter
+
+    paths, state_dir, _, inbox, _, _ = adapter_fixture(tmp_path)
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    before = inbox.read_bytes()
+
+    def interrupted_apply():
+        real_connection = adapter._state_connection
+        real_install = adapter._install_state
+
+        def install(source, destination):
+            if interruption == 'validated':
+                os._exit(73)
+            real_install(source, destination)
+            if interruption == 'installed':
+                os._exit(73)
+
+        adapter._install_state = install
+
+        def connection(path):
+            if interruption == 'empty':
+                os._exit(73)
+            db = real_connection(path)
+
+            def interrupt_sql(statement):
+                normalized = statement.strip().upper()
+                stop = {'schema': 'CREATE TABLE EVENTS', 'binding': 'INSERT INTO BINDING',
+                        'commit': 'COMMIT'}.get(interruption, 'NEVER')
+                if normalized.startswith(stop):
+                    os._exit(73)
+
+            db.set_trace_callback(interrupt_sql)
+            return db
+
+        adapter._state_connection = connection
+        adapter.process(paths, apply=True, now=NOW)
+
+    child = multiprocessing.get_context('fork').Process(target=interrupted_apply)
+    child.start()
+    try:
+        child.join(10)
+        assert child.exitcode == 73
+    finally:
+        if child.is_alive():
+            child.kill()
+            child.join()
+    assert os.path.lexists(state) == (interruption == 'installed')
+    if state.exists():
+        adapter._validate_adapter_state(state)
+        adapter._check_binding(state, 'owner-user')
+        assert state.stat().st_nlink == 1
+    assert inbox.read_bytes() == before
+    abandoned = {p: p.read_bytes() for p in state_dir.glob('.workflow-notifications.sqlite.*')}
+    assert bool(abandoned) == (interruption != 'installed')
+    assert all(p.stat().st_mode & 0o077 == 0 for p in abandoned)
+    assert adapter.process(paths, now=NOW) == {'status': 'plan', 'events': 1, 'writes': False}
+    assert adapter.process(paths, apply=True, now=NOW)['inbox_items'] == 1
+    assert {p: p.read_bytes() for p in abandoned} == abandoned
+    assert state.stat().st_nlink == 1
+    adapter._validate_adapter_state(state)
+    adapter._check_binding(state, 'owner-user')
+    assert adapter.process(paths, apply=True, now=NOW)['inbox_items'] == 0
+
+
+@pytest.mark.parametrize('suffix', ['-journal', '-wal', '-shm'])
+def test_first_initialization_preserves_unknown_canonical_sidecars(tmp_path, suffix):
+    from deploy import workflow_notifications as adapter
+
+    paths, state_dir, _, inbox, _, _ = adapter_fixture(tmp_path)
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    sidecar = Path(str(state) + suffix)
+    sidecar.write_bytes(b'unknown interrupted state')
+    sidecar.chmod(0o600)
+    before = inbox.read_bytes()
+    with pytest.raises(adapter.Blocked):
+        adapter.process(paths, apply=True, now=NOW)
+    assert not os.path.lexists(state)
+    assert sidecar.read_bytes() == b'unknown interrupted state'
+    assert inbox.read_bytes() == before
+    assert not list(state_dir.glob('.workflow-notifications.sqlite.*'))
+
+
+@pytest.mark.parametrize('kind', ['empty', 'partial', 'symlink', 'valid_other_owner'])
+def test_first_initialization_never_repairs_existing_canonical_state(tmp_path, kind):
+    from deploy import workflow_notifications as adapter
+
+    paths, state_dir, _, inbox, _, _ = adapter_fixture(tmp_path)
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    if kind == 'valid_other_owner':
+        adapter._initialize_state(state, 'other-owner')
+    elif kind == 'symlink':
+        state.symlink_to(state_dir / 'absent')
+    else:
+        state.touch(mode=0o600)
+        if kind == 'partial':
+            with sqlite3.connect(state) as db:
+                db.execute('CREATE TABLE binding(singleton TEXT)')
+    before = None if state.is_symlink() else state.read_bytes()
+    inode = state.lstat().st_ino
+    inbox_before = inbox.read_bytes()
+    for apply in (False, True):
+        with pytest.raises(adapter.Blocked):
+            adapter.process(paths, apply=apply, now=NOW)
+    with pytest.raises(adapter.Blocked):
+        adapter._initialize_state(state, 'owner-user')
+    assert state.lstat().st_ino == inode
+    assert (None if state.is_symlink() else state.read_bytes()) == before
+    assert inbox.read_bytes() == inbox_before
+
+
+@pytest.mark.parametrize('kind', ['file', 'symlink', 'sidecar'])
+def test_atomic_install_does_not_overwrite_state_appearing_during_initialization(tmp_path, monkeypatch, kind):
+    from deploy import workflow_notifications as adapter
+
+    paths, state_dir, _, inbox, _, _ = adapter_fixture(tmp_path)
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    original_install = adapter._install_state
+    before = inbox.read_bytes()
+    observed = {}
+
+    def competing_install(source, destination):
+        adapter._validate_adapter_state(source)
+        adapter._check_binding(source, 'owner-user')
+        assert source.parent == destination.parent
+        assert source.stat().st_size <= adapter.MAX_STATE_BYTES
+        if kind == 'sidecar':
+            appeared = Path(str(destination) + '-journal')
+            appeared.write_bytes(b'unknown competing journal')
+            appeared.chmod(0o600)
+        elif kind == 'file':
+            appeared = destination
+            destination.write_bytes(b'unknown competing canonical state')
+            destination.chmod(0o600)
+        else:
+            appeared = destination
+            destination.symlink_to(state_dir / 'absent')
+        observed['path'] = appeared
+        observed['inode'] = appeared.lstat().st_ino
+        original_install(source, destination)
+
+    monkeypatch.setattr(adapter, '_install_state', competing_install)
+    with pytest.raises(adapter.Blocked):
+        adapter.process(paths, apply=True, now=NOW)
+    assert observed['path'].lstat().st_ino == observed['inode']
+    if kind == 'sidecar':
+        assert not os.path.lexists(state)
+        assert observed['path'].read_bytes() == b'unknown competing journal'
+    elif kind == 'file':
+        assert state.read_bytes() == b'unknown competing canonical state'
+    else:
+        assert state.is_symlink()
+    assert inbox.read_bytes() == before
+    assert not list(state_dir.glob('.workflow-notifications.sqlite.*'))
+
+
+def test_first_initialization_real_capacity_failure_cleans_only_owned_temporary(tmp_path):
+    from deploy import workflow_notifications as adapter
+
+    paths, state_dir, _, _, _, _ = adapter_fixture(tmp_path)
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    abandoned = state_dir / '.workflow-notifications.sqlite.abandoned'
+    abandoned.write_bytes(b'untrusted abandoned temporary')
+    abandoned.chmod(0o600)
+    with pytest.raises(adapter.Blocked) as failure:
+        adapter._initialize_state(state, 'x' * adapter.MAX_STATE_BYTES)
+    assert failure.value.__cause__.sqlite_errorcode == sqlite3.SQLITE_FULL
+    assert not state.exists()
+    assert list(state_dir.glob('.workflow-notifications.sqlite.*')) == [abandoned]
+    assert abandoned.read_bytes() == b'untrusted abandoned temporary'
+    assert adapter.process(paths, apply=True, now=NOW)['inbox_items'] == 1
+
+
+@pytest.mark.parametrize('failure', [None, 'file', 'directory'])
+def test_first_initialization_fsync_order_and_failure_preserve_retry(tmp_path, monkeypatch, failure):
+    import fcntl
+    import stat
+    from deploy import workflow_notifications as adapter
+
+    paths, state_dir, _, inbox, _, _ = adapter_fixture(tmp_path)
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    before = inbox.read_bytes()
+    real_fsync = adapter.os.fsync
+    synced = []
+
+    def fsync(fd):
+        kind = 'directory' if stat.S_ISDIR(os.fstat(fd).st_mode) else 'file'
+        synced.append(kind)
+        # Validate the fully committed DB before publication, with the lock held.
+        check = os.open(state_dir / adapter.LOCK_NAME, os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(check, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(check)
+        if kind == 'file':
+            assert not state.exists()
+            temporary, = state_dir.glob('.workflow-notifications.sqlite.*')
+            adapter._validate_adapter_state(temporary)
+            adapter._check_binding(temporary, 'owner-user')
+        else:
+            adapter._validate_adapter_state(state)
+            adapter._check_binding(state, 'owner-user')
+            assert state.stat().st_nlink == 1
+        if failure == kind:
+            raise OSError('synthetic fsync failure')
+        real_fsync(fd)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(adapter.os, 'fsync', fsync)
+        if failure is None:
+            assert adapter.process(paths, apply=True, now=NOW)['inbox_items'] == 1
+        else:
+            with pytest.raises(adapter.Blocked):
+                adapter.process(paths, apply=True, now=NOW)
+            assert inbox.read_bytes() == before
+            assert state.exists() == (failure == 'directory')
+    assert synced == (['file'] if failure == 'file' else ['file', 'directory'])
+    assert not list(state_dir.glob('.workflow-notifications.sqlite.*'))
+    assert adapter.process(paths, apply=True, now=NOW)['inbox_items'] == (0 if failure is None else 1)
+
+
 def _write_deployed_proof(paths, merge_sha, *, status='succeeded', duplicate_last=False):
     delivery_file = paths.delivery_state
     delivery_file.parent.mkdir(mode=0o700)
@@ -585,6 +809,236 @@ def _write_deployed_proof(paths, merge_sha, *, status='succeeded', duplicate_las
     status_file.chmod(0o600)
     for path in (delivery_file, status_file):
         os.utime(path, (NOW.timestamp(), NOW.timestamp()))
+
+
+@pytest.mark.parametrize('reserved', [False, True])
+@pytest.mark.parametrize('change', ['current', 'ledger', 'clock'])
+def test_deployment_proof_changed_while_waiting_on_real_lock_defers(tmp_path, monkeypatch, reserved, change):
+    import fcntl
+    from datetime import timedelta
+    from threading import Event
+    from deploy import workflow_notifications as adapter
+
+    deployed = event('deployed', 'controller_verified', pr_number=32,
+                     head_sha='a' * 40, merge_sha='b' * 40)
+    fresh = event(event_id='fresh:after-lock')
+    paths, state_dir, _, inbox, event_path, _ = adapter_fixture(tmp_path, export(deployed, fresh))
+    _write_deployed_proof(paths, deployed['merge_sha'])
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    if reserved:
+        adapter._initialize_state(state, 'owner-user')
+        with sqlite3.connect(state) as db:
+            db.execute('INSERT INTO events VALUES(?,?,?,?,?,?,?)',
+                       (deployed['event_id'], event_digest(deployed), 'owner-user', 'pending', None, 1, 1))
+    export_before = event_path.read_bytes()
+    current_time = [NOW]
+
+    class WallClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return current_time[0]
+
+    monkeypatch.setattr(adapter, 'datetime', WallClock)
+    if change == 'clock':
+        almost_stale = NOW.timestamp() - adapter.MAX_EVENT_AGE + 1
+        for proof in (paths.delivery_state, paths.controller_state / 'status.json'):
+            os.utime(proof, (almost_stale, almost_stale))
+    waiting = Event()
+    real_flock = fcntl.flock
+
+    def announce_wait(fd, operation):
+        waiting.set()
+        return real_flock(fd, operation)
+
+    lock_fd = os.open(state_dir / adapter.LOCK_NAME, os.O_CREAT | os.O_RDWR, 0o600)
+    real_flock(lock_fd, fcntl.LOCK_EX)
+    monkeypatch.setattr(adapter.fcntl, 'flock', announce_wait)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            # Exercise the production wall-clock default, not the fixed-now seam.
+            future = pool.submit(adapter.process, paths, apply=True)
+            try:
+                assert waiting.wait(10)
+                assert not future.done(), 'The worker must actually wait on the held lock'
+                if change == 'current':
+                    # Old terminal record remains, but current provenance changed.
+                    current = paths.controller_state / 'current'
+                    other = paths.controller_state / 'releases' / ('d' * 32)
+                    other.mkdir(mode=0o700)
+                    current.unlink()
+                    current.symlink_to(other, target_is_directory=True)
+                elif change == 'ledger':
+                    ledger = json.loads(paths.delivery_state.read_text())
+                    ledger['latest_id'] += 1
+                    paths.delivery_state.write_text(json.dumps(ledger))
+                    os.utime(paths.delivery_state, (NOW.timestamp(), NOW.timestamp()))
+                else:
+                    current_time[0] += timedelta(seconds=2)
+            finally:
+                real_flock(lock_fd, fcntl.LOCK_UN)
+            result = future.result(timeout=10)
+    finally:
+        os.close(lock_fd)
+    assert result == {
+        'status': 'applied', 'events': 2, 'inbox_items': 1,
+        'deferred': [{'event_id': deployed['event_id'], 'status': 'deferred',
+                      'reason': 'deployment_evidence_unavailable'}],
+    }
+    with sqlite3.connect(state) as db:
+        assert db.execute('SELECT digest,status,inbox_id FROM events WHERE event_id=?',
+                          (deployed['event_id'],)).fetchone() == (event_digest(deployed), 'pending', None)
+    with sqlite3.connect(inbox) as db:
+        assert db.execute('SELECT delivery_id FROM inbox').fetchall() == [
+            ('workflow-event:v1:' + fresh['event_id'],)]
+    assert event_path.read_bytes() == export_before
+
+
+@pytest.mark.parametrize('reserved', [False, True])
+@pytest.mark.parametrize('phase', ['initialization', 'prior_event', 'reservation', 'inbox_owner'])
+def test_deployment_proof_is_fresh_throughout_locked_apply(tmp_path, monkeypatch, reserved, phase):
+    from datetime import timedelta
+    from deploy import workflow_notifications as adapter
+
+    deployed = event('deployed', 'controller_verified', pr_number=32,
+                     head_sha='a' * 40, merge_sha='b' * 40)
+    first = event(event_id='fresh:before-deployment')
+    items = [first, deployed] if phase == 'prior_event' else [deployed]
+    paths, state_dir, _, inbox, _, _ = adapter_fixture(tmp_path, export(*items))
+    _write_deployed_proof(paths, deployed['merge_sha'])
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    if reserved:
+        adapter._initialize_state(state, 'owner-user')
+        with sqlite3.connect(state) as db:
+            db.execute('INSERT INTO events VALUES(?,?,?,?,?,?,?)',
+                       (deployed['event_id'], event_digest(deployed), 'owner-user', 'pending', None, 1, 1))
+    current_time = [NOW]
+    changed = []
+    if phase == 'prior_event':
+        almost_stale = NOW.timestamp() - adapter.MAX_EVENT_AGE + 1
+        for proof in (paths.delivery_state, paths.controller_state / 'status.json'):
+            os.utime(proof, (almost_stale, almost_stale))
+
+    def change_evidence():
+        if not changed:
+            changed.append(True)
+            if phase == 'prior_event':
+                current_time[0] += timedelta(seconds=2)
+            else:
+                paths.delivery_state.unlink()
+
+    if phase == 'initialization':
+        original = adapter._initialize_state
+
+        def initialize(*args):
+            original(*args)
+            change_evidence()
+
+        monkeypatch.setattr(adapter, '_initialize_state', initialize)
+    elif phase == 'prior_event':
+        original = adapter._notification_copy
+
+        def notifications(*args, **kwargs):
+            service = original(*args, **kwargs)
+            ingest = service.ingest
+
+            def ingest_first(*args, **kwargs):
+                result = ingest(*args, **kwargs)
+                change_evidence()
+                return result
+
+            service.ingest = ingest_first
+            return service
+
+        monkeypatch.setattr(adapter, '_notification_copy', notifications)
+    elif phase == 'reservation':
+        original = adapter._state_connection
+
+        def connection(path):
+            db = original(path)
+            if path == state:
+                db.set_trace_callback(lambda sql: change_evidence()
+                                      if sql == 'BEGIN IMMEDIATE' else None)
+            return db
+
+        monkeypatch.setattr(adapter, '_state_connection', connection)
+    else:
+        original = adapter._owner
+        calls = []
+
+        def owner(path):
+            result = original(path)
+            calls.append(True)
+            if len(calls) == 3:  # Full preflight, locked binding, then pre-Inbox binding.
+                change_evidence()
+            return result
+
+        monkeypatch.setattr(adapter, '_owner', owner)
+    result = adapter.process(paths, apply=True, clock=lambda: current_time[0])
+    assert changed
+    assert result['inbox_items'] == len(items) - 1
+    assert result['deferred'] == [{'event_id': deployed['event_id'], 'status': 'deferred',
+                                  'reason': 'deployment_evidence_unavailable'}]
+    with sqlite3.connect(state) as db:
+        assert db.execute('SELECT digest,status,inbox_id FROM events WHERE event_id=?',
+                          (deployed['event_id'],)).fetchone() == (event_digest(deployed), 'pending', None)
+    with sqlite3.connect(inbox) as db:
+        assert db.execute('SELECT count(*) FROM inbox').fetchone() == (len(items) - 1,)
+        assert db.execute("SELECT count(*) FROM inbox WHERE title LIKE '%verified deployed%'").fetchone() == (0,)
+
+
+@pytest.mark.parametrize('transition', ['proof_recovered', 'acked'])
+def test_lock_waiter_refreshes_preflight_deferral_and_exact_ack(tmp_path, monkeypatch, transition):
+    import fcntl
+    from threading import Event
+    from deploy import workflow_notifications as adapter
+
+    deployed = event('deployed', 'controller_verified', pr_number=32,
+                     head_sha='a' * 40, merge_sha='b' * 40)
+    paths, state_dir, _, inbox, _, notifications = adapter_fixture(tmp_path, export(deployed))
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    adapter._initialize_state(state, 'owner-user')
+    with sqlite3.connect(state) as db:
+        db.execute('INSERT INTO events VALUES(?,?,?,?,?,?,?)',
+                   (deployed['event_id'], event_digest(deployed), 'owner-user', 'pending', None, 1, 1))
+    waiting = Event()
+    real_flock = fcntl.flock
+
+    def announce_wait(fd, operation):
+        waiting.set()
+        return real_flock(fd, operation)
+
+    lock_fd = os.open(state_dir / adapter.LOCK_NAME, os.O_CREAT | os.O_RDWR, 0o600)
+    real_flock(lock_fd, fcntl.LOCK_EX)
+    monkeypatch.setattr(adapter.fcntl, 'flock', announce_wait)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(adapter.process, paths, apply=True, now=NOW)
+            try:
+                assert waiting.wait(10)
+                assert not future.done()
+                if transition == 'proof_recovered':
+                    _write_deployed_proof(paths, deployed['merge_sha'])
+                else:
+                    title, body = adapter._message(deployed)
+                    notice = notifications.ingest(
+                        'owner-user', 'workflow-event:v1:' + deployed['event_id'], title, body,
+                        session_id=None, category='operational', profile='default')
+                    with sqlite3.connect(state) as db:
+                        db.execute("UPDATE events SET status='acked',inbox_id=?", (notice['id'],))
+            finally:
+                real_flock(lock_fd, fcntl.LOCK_UN)
+            result = future.result(timeout=10)
+    finally:
+        os.close(lock_fd)
+    assert result == {'status': 'applied', 'events': 1,
+                      'inbox_items': 1 if transition == 'proof_recovered' else 0}
+    with sqlite3.connect(inbox) as db:
+        assert db.execute('SELECT count(*) FROM inbox').fetchone() == (1,)
+    # Replays after proof disappears still neither defer nor recreate retained ACKs.
+    if paths.delivery_state.exists():
+        paths.delivery_state.unlink()
+    assert adapter.process(paths, apply=True, now=NOW) == {
+        'status': 'applied', 'events': 1, 'inbox_items': 0}
 
 
 @pytest.mark.parametrize('proof', ['superseded', 'stale', 'missing'])

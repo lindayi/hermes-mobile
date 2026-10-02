@@ -2,6 +2,8 @@
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import ctypes
+import errno
 import fcntl
 import json
 import os
@@ -9,6 +11,7 @@ from pathlib import Path
 import re
 import sqlite3
 import stat
+import tempfile
 import time
 
 from deploy.workflow_events import (
@@ -394,13 +397,10 @@ def _load(paths, now):
     acked = _acked_event_ids(state_path, payload, owner)
     deferred = {}
     for item in payload['events']:
-        if item['outcome'] == 'deployed' and item['event_id'] not in acked:
-            try:
-                _deployed_evidence(item, paths, now)
-            except Blocked:
-                # Only deployment proof is event-local. Schema, owner and all
-                # durable identity checks above remain whole-batch failures.
-                deferred[item['event_id']] = 'deployment_evidence_unavailable'
+        if item['event_id'] not in acked:
+            # Only deployment proof is event-local. Schema, owner and all
+            # durable identity checks above remain whole-batch failures.
+            _refresh_deployment(item, paths, now, deferred)
     return state_dir, owner, auth_path, inbox_path, payload, state_path, deferred
 
 
@@ -432,21 +432,45 @@ def _state_connection(path):
         raise Blocked('Adapter state database is unavailable') from error
 
 
+def _install_state(source, destination):
+    for suffix in ('-journal', '-wal', '-shm'):
+        if os.path.lexists(str(destination) + suffix):
+            raise Blocked('Unknown adapter state sidecars prevent installation')
+    # Linux service: fail closed if atomic no-replace rename is unavailable.
+    # link/unlink would leave an aliased canonical DB if interrupted between them.
+    rename = getattr(ctypes.CDLL(None, use_errno=True), 'renameat2', None)
+    if rename is None:
+        raise Blocked('Atomic adapter state installation is unavailable')
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+                       ctypes.c_uint)
+    rename.restype = ctypes.c_int
+    # AT_FDCWD=-100 and RENAME_NOREPLACE=1: one atomic namespace operation.
+    if rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1) != 0:
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise Blocked('Adapter state appeared during initialization')
+        raise OSError(error, os.strerror(error))
+
+
 def _initialize_state(path, owner):
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
-        os.fchmod(fd, 0o600)
-        os.close(fd)
-    except FileExistsError:
+    """Called under the apply lock; never publish an incomplete database."""
+    if os.path.lexists(path):
         _owned_private_path(path, max_bytes=MAX_STATE_BYTES)
         _validate_adapter_state(path)
         _check_binding(path, owner)
         return
-    except OSError as error:
-        raise Blocked('Adapter state could not be created safely') from error
+    _owned_private_path(path.parent, directory=True)
+    for suffix in ('-journal', '-wal', '-shm'):
+        if os.path.lexists(str(path) + suffix):
+            raise Blocked('Unknown adapter state sidecars prevent initialization')
+    temporary = None
     try:
-        with closing(_state_connection(path)) as db:
+        fd, name = tempfile.mkstemp(prefix=f'.{path.name}.', dir=path.parent)
+        temporary = Path(name)
+        os.close(fd)
+        with closing(_state_connection(temporary)) as db:
             db.executescript('''
+                BEGIN IMMEDIATE;
                 CREATE TABLE binding(
                     singleton TEXT PRIMARY KEY CHECK(singleton='repository'),
                     version INTEGER NOT NULL, repository_id INTEGER NOT NULL,
@@ -462,9 +486,25 @@ def _initialize_state(path, owner):
             db.execute("INSERT INTO binding VALUES('repository',?,?,?)",
                        (SCHEMA_VERSION, REPOSITORY_ID, owner))
             db.commit()
-        _validate_adapter_state(path)
+        _owned_private_path(temporary, max_bytes=MAX_STATE_BYTES)
+        _validate_adapter_state(temporary)
+        _check_binding(temporary, owner)
+        with temporary.open('rb') as stream:
+            os.fsync(stream.fileno())
+        _install_state(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except (OSError, sqlite3.Error) as error:
         raise Blocked('Adapter state schema could not be initialized') from error
+    finally:
+        # Only this invocation's unique temporary files are ours to remove.
+        # Abandoned files from interrupted runs are never reused or promoted.
+        if temporary is not None:
+            for suffix in ('-journal', '-wal', '-shm', ''):
+                Path(str(temporary) + suffix).unlink(missing_ok=True)
 
 
 def _notification_copy(path, *, clock=time.time):
@@ -553,7 +593,18 @@ def _with_deferred(result, deferred):
     return result
 
 
-def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, now, deferred):
+def _refresh_deployment(item, paths, now, deferred):
+    if item['outcome'] != 'deployed':
+        return
+    try:
+        _deployed_evidence(item, paths, now)
+    except Blocked:
+        deferred[item['event_id']] = 'deployment_evidence_unavailable'
+    else:
+        deferred.pop(item['event_id'], None)
+
+
+def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, paths, clock):
     lock_path = state_dir / LOCK_NAME
     existed = lock_path.exists() or lock_path.is_symlink()
     if existed:
@@ -578,17 +629,24 @@ def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, 
                 or lock_info.st_nlink != 1 or lock_info.st_mode & 0o077):
             raise Blocked('Adapter lock file is unsafe')
         fcntl.flock(fd, fcntl.LOCK_EX)
+        now = clock()
         if _owner(auth_path) != owner:
             raise Blocked('Owner binding changed before apply')
+        acked = set()
         if state_path.exists() or state_path.is_symlink():
             _owned_private_path(state_path, max_bytes=MAX_STATE_BYTES)
             _validate_adapter_state(state_path)
             _check_binding(state_path, owner)
             # A lock waiter must recheck the entire batch, not discover a later
             # conflict only after committing an earlier event.
-            _acked_event_ids(state_path, payload, owner)
-        else:
-            _initialize_state(state_path, owner)
+            acked = _acked_event_ids(state_path, payload, owner)
+        # Preflight proof may have changed during the lock wait. Recheck the
+        # whole unACKed batch before initialization, reservations or Inbox writes.
+        deferred = {}
+        for item in payload['events']:
+            if item['event_id'] not in acked:
+                _refresh_deployment(item, paths, clock(), deferred)
+        _initialize_state(state_path, owner)
         notifications = _notification_copy(inbox_path, clock=lambda: now.timestamp())
         ingested = 0
         for item in payload['events']:
@@ -610,6 +668,9 @@ def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, 
                         db.commit()
                         deferred.pop(item['event_id'], None)
                         continue
+                # Initialization, earlier events and SQLite lock waits can all
+                # outlive the batch proof. Sample again before this reservation.
+                _refresh_deployment(item, paths, clock(), deferred)
                 try:
                     if prior is None:
                         db.execute('''INSERT INTO events
@@ -629,6 +690,9 @@ def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, 
             delivery_id = 'workflow-event:v1:' + item['event_id']
             if _owner(auth_path) != owner:
                 raise Blocked('Owner binding changed before Inbox ingestion')
+            _refresh_deployment(item, paths, clock(), deferred)
+            if item['event_id'] in deferred:
+                continue
             inbox_item = notifications.ingest(
                 owner, delivery_id, title, body, session_id=None,
                 category='operational', profile='default')
@@ -663,15 +727,21 @@ def _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, 
             os.close(fd)
 
 
-def process(paths=None, *, apply=False, now=None):
-    """Validate the full batch; apply eligible events and report explicit deferrals."""
+def process(paths=None, *, apply=False, now=None, clock=None):
+    """Validate and apply eligible events; clock returns aware current datetimes.
+
+    Explicit now is the fixed-clock compatibility seam for deterministic callers.
+    Production callers omit both overrides and sample wall time at each proof check.
+    """
     paths = paths or Paths()
-    now = now or datetime.now(timezone.utc)
+    if clock is None:
+        clock = (lambda: now) if now is not None else (lambda: datetime.now(timezone.utc))
+    now = now or clock()
     state_dir, owner, auth_path, inbox_path, payload, state_path, deferred = _load(paths, now)
     if not apply:
         return _with_deferred(
             {'status': 'plan', 'events': len(payload['events']), 'writes': False}, deferred)
-    return _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, now, deferred)
+    return _locked_state(state_dir, state_path, owner, auth_path, payload, inbox_path, paths, clock)
 
 
 def main(argv=None, *, paths=None, now=None):

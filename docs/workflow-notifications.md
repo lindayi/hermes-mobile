@@ -87,7 +87,15 @@ per-event deferrals when needed (at most the 256 input events). It does not crea
 adapter state, write Inbox/outbox rows, call a sender, or write bytecode. Schema,
 owner, recipient and digest conflicts anywhere in the complete snapshot remain
 whole-batch failures before writes; durable identities are rechecked for the
-complete batch again after taking the apply lock.
+complete batch again after taking the apply lock. Deployment proof for every
+unACKed event is also re-read with fresh current time under that lock before
+initialization or reservations. Each unACKed deployment is checked again after
+any SQLite reservation-lock wait and immediately before Inbox ingestion: slow
+initialization or earlier events must not extend the lifetime of old proof.
+Unavailable proof remains an event-local deferral, while recovered proof can
+clear a preflight deferral. Exact ACKed replays do not require obsolete proof.
+Production uses wall time at each check; Python callers can inject an aware
+`clock()` for deterministic advancing-clock tests, or `now` for a fixed clock.
 
 SQLite inputs are opened read-only only when their header identifies
 rollback-journal mode and no `-wal`, `-shm`, or `-journal` sidecar exists. WAL
@@ -106,6 +114,19 @@ and no session. Existing master/category preferences, hide-details previews,
 device rules, retention, and sender dispatch remain authoritative. A disabled
 category or master switch suppresses the outbox entry; a successful ingest is
 not evidence that a push was physically received.
+
+First initialization builds a uniquely named private temporary database in the
+same directory under the held apply lock. Its schema and owner/repository binding
+are committed, validated and fsynced within the same main-file capacity bound
+before Linux `renameat2(RENAME_NOREPLACE)` atomically installs it; the directory
+is then fsynced. Installation fails closed if this no-overwrite primitive is
+unavailable or a canonical name/sidecar has appeared. No incomplete canonical
+file is published, and existing malformed/unknown state is never blindly repaired,
+replaced or deleted. Normal failure removes only this invocation's temporary
+files. Interrupted temporary files are ignored, never reused/promoted, and are
+not automatically swept; repeated interruption can consume additional disk and
+requires operator inspection. A crash after installation leaves a complete,
+unaliased database that normal validation can accept on retry.
 
 The event digest and recipient are checked before each ingestion. A process
 crash after the Inbox commit but before adapter acknowledgement safely retries
