@@ -8,8 +8,8 @@ from pathlib import Path
 import re
 
 from deploy.workflow_lifecycle import (
+    filter_acknowledged_replays,
     issue_event,
-    merge_events,
     timestamp,
     validate_event,
 )
@@ -224,7 +224,8 @@ def collect_controller_verified_events(merged_events, paths, now):
     return results
 
 
-def collect_source_events(merged_events, *, api, paths, now):
+def collect_source_events(merged_events, *, api, paths, now, active_events=(),
+                          lifecycle_context=(), acknowledgements=None):
     """Collect only receipt-backed starter failures and controller-proven deployments."""
     now = now.astimezone(timezone.utc)
     starter = _issue_starter_events(paths.starter_state, api, now)
@@ -232,6 +233,9 @@ def collect_source_events(merged_events, *, api, paths, now):
         merged_events, paths.notifications, now,
     ) if merged_events else []
     try:
-        return merge_events([], [*starter, *deployed], now=now)
+        return filter_acknowledged_replays(
+            [*starter, *deployed], active=active_events, context=lifecycle_context,
+            acknowledgements=acknowledgements, now=now,
+        )
     except (TypeError, ValueError) as error:
         raise LifecycleSourceError("Lifecycle source events conflict with the shared schema") from error

@@ -6,6 +6,7 @@ import ctypes
 import errno
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -364,6 +365,89 @@ def _acked_event_ids(state_path, payload, owner):
             if row['status'] == 'acked':
                 acked.add(item['event_id'])
     return acked
+
+
+def read_lifecycle_acknowledgements(state_path, owner, events):
+    """Read the bound consumer ledger once without initializing or recovering it."""
+    if not isinstance(owner, str) or not owner:
+        raise Blocked('A trusted application owner is required for lifecycle ACKs')
+    if not os.path.lexists(state_path):
+        return {}
+    _owned_private_path(state_path, max_bytes=MAX_STATE_BYTES)
+    expected = {}
+    try:
+        for event in events:
+            event_id = event['event_id']
+            digest = event_digest(event)
+            if event_id in expected and expected[event_id] != digest:
+                raise Blocked('Coordinator lifecycle identities have conflicting canonical payloads')
+            expected[event_id] = digest
+    except (KeyError, TypeError, ValueError) as error:
+        raise Blocked('Coordinator lifecycle context is malformed') from error
+    acknowledgements = {}
+    with closing(_open_readonly(Path(state_path))) as db:
+        try:
+            db.execute('BEGIN')
+            objects = {(row['type'], row['name']) for row in db.execute(
+                "SELECT type,name FROM sqlite_master"
+            )}
+            if objects != {
+                    ('table', 'binding'), ('table', 'events'),
+                    ('index', 'sqlite_autoindex_binding_1'),
+                    ('index', 'sqlite_autoindex_events_1')}:
+                raise Blocked('Existing adapter state contains unsupported database objects')
+            for table, columns in _STATE_COLUMNS.items():
+                if not _table_matches(db, table, columns, _STATE_PRIMARY_KEYS[table]):
+                    raise Blocked('Existing adapter state schema is incompatible')
+            if (not _unique_state_index(db, 'binding', ('singleton',))
+                    or not _unique_state_index(db, 'events', ('event_id',))):
+                raise Blocked('Existing adapter state uniqueness is incompatible')
+            bindings = db.execute(
+                'SELECT singleton,version,repository_id,owner_user_id FROM binding'
+            ).fetchall()
+            if (len(bindings) != 1 or bindings[0]['singleton'] != 'repository'
+                    or type(bindings[0]['version']) is not int
+                    or bindings[0]['version'] != SCHEMA_VERSION
+                    or type(bindings[0]['repository_id']) is not int
+                    or bindings[0]['repository_id'] != REPOSITORY_ID
+                    or bindings[0]['owner_user_id'] != owner):
+                raise Blocked('Existing adapter state is bound to a different repository or owner')
+            if [tuple(row) for row in db.execute('PRAGMA integrity_check')] != [('ok',)]:
+                raise Blocked('Existing adapter state integrity check failed')
+            rows = db.execute(
+                'SELECT event_id,digest,recipient_id,status,inbox_id,created_at,updated_at FROM events'
+            ).fetchall()
+            if len(rows) > MAX_STATE_BYTES // 128:
+                raise Blocked('Existing adapter state has too many lifecycle records')
+            acked_inbox_ids = set()
+            for row in rows:
+                event_id = row['event_id']
+                digest = row['digest']
+                status = row['status']
+                inbox_id = row['inbox_id']
+                if (not isinstance(event_id, str) or event_id not in expected
+                        or not isinstance(digest, str) or digest != expected[event_id]
+                        or row['recipient_id'] != owner
+                        or status not in ('pending', 'acked')
+                        or type(row['created_at']) not in (int, float)
+                        or not math.isfinite(row['created_at'])
+                        or type(row['updated_at']) not in (int, float)
+                        or not math.isfinite(row['updated_at'])
+                        or (status == 'pending' and inbox_id is not None)
+                        or (status == 'acked'
+                            and (not isinstance(inbox_id, str) or not inbox_id
+                                 or len(inbox_id) > 256 or any(ord(char) < 32 for char in inbox_id)))):
+                    raise Blocked('Existing lifecycle adapter state conflicts with coordinator history')
+                if status == 'acked':
+                    if inbox_id in acked_inbox_ids:
+                        raise Blocked('Existing lifecycle adapter state has a duplicate Inbox binding')
+                    acked_inbox_ids.add(inbox_id)
+                acknowledgements[event_id] = {
+                    'digest': digest, 'status': status, 'inbox_id': inbox_id,
+                }
+        except sqlite3.Error as error:
+            raise Blocked('Existing lifecycle adapter state is unavailable') from error
+    return acknowledgements
 
 
 def _load_export(state_dir, owner, now):
