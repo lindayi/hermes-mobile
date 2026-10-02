@@ -199,7 +199,8 @@ SOURCE_FINGERPRINTS = {
     'scripts/workflow_notifications.py': '03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f',
     'deploy/hermes-mobile-coordinator.service': '49d6ebb6e24b4c0a06af3d10e6e2cce11dd6af7ee8056c99268058c2f6f2cab3',
     'deploy/hermes-mobile-coordinator.timer': 'ffa239c67b492b5a361b823c754d5f204eb4efaa2c69f7df99df577e12d2a6c1',
-    'deploy/hermes-workflow-notifications.service': '998ee55dc5df990c6004f0f435e073766702e5efbf56aa83e946b6d05e21c000',
+    # Issue #58 user-unit replacement; source consistency, not activation evidence.
+    'deploy/hermes-workflow-notifications.service': '934effd6540b6a6ed026fcdac2dda6ebf176792e583c6738dc7b72dc737f199e',
     'deploy/hermes-workflow-notifications.timer': '627463b4dd06eb72f7fecc88a79dad29ec8ab4b5514b29c62c131cdbd2963cc8',
     'deploy/hermes-mobile-issue-starter.service': '1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69',
     'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
