@@ -151,19 +151,25 @@ def test_agent_instructions_are_portable_and_copilot_rules_stay_synced():
 def test_pull_request_template_is_accepted_by_the_starter_parser():
     template = (ROOT / '.github/pull_request_template.md').read_text()
     body = template.replace('NUMBER', '48')
+    evidence = {
+        'Baseline main commit:': 'Baseline main commit: 9aca9b642d9aa4a90e108bc8e3c821314125f583',
+        'In scope:': 'In scope: user service hardening and parser-compatible handoff metadata.',
+        'Explicitly out of scope:': 'Explicitly out of scope: host activation and deployment.',
+        'Acceptance cases:': 'Acceptance cases: the user unit retains supported hardening.',
+        'RED command and observed failure:': 'RED command and observed failure: the focused regression failed.',
+        'GREEN command and observed result:': 'GREEN command and observed result: 884 focused tests passed.',
+        'Exact tested head SHA:': 'Exact tested head SHA: eacef83b5a025867b32f1c41ca50f82566bf845b',
+        'Rollout effect:': 'Rollout effect: source-only change pending operator qualification.',
+        'Merge state: not merged or exact merged PR and main SHA:': 'Merge state: not merged.',
+        'Deployment state: not deployed or separately verified deployed main SHA:':
+            'Deployment state: not deployed.',
+    }
+    for field, value in evidence.items():
+        body = body.replace(field, value)
 
     assert _contains_closing_reference(body, 48)
-    for field in (
-        'Baseline main commit:',
-        'Acceptance cases:',
-        'RED command and observed failure:',
-        'GREEN command and observed result:',
-        'Exact tested head SHA:',
-        'Rollout effect:',
-        'Merge state:',
-        'Deployment state:',
-    ):
-        assert field in body
+    assert all(value in body for value in evidence.values())
+    assert 'Review and integration' in body
 
 
 def test_product_preferences_remain_explicit_in_canonical_instructions():
