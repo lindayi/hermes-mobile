@@ -678,6 +678,153 @@ def test_lifecycle_ack_snapshot_rejects_malformed_or_foreign_rows(tmp_path, tamp
             read_lifecycle_acknowledgements(adapter, APP_OWNER, [item])
 
 
+@pytest.mark.parametrize("context_count", [0, 1, 2], ids=[
+    "active-active", "context-active", "context-context",
+])
+def test_lifecycle_ack_snapshot_rejects_duplicate_inbox_bindings(
+        tmp_path, monkeypatch, context_count):
+    from deploy.cloud_coordinator import Coordinator, CoordinatorError
+    from deploy.workflow_notifications import Blocked, read_lifecycle_acknowledgements
+
+    notification_paths, state_dir, _, inbox, _ = app_fixture(tmp_path / "app")
+    paths = LifecycleSourcePaths(
+        notifications=notification_paths, starter_state=tmp_path / "absent-starter.json",
+    )
+    store = StateStore(tmp_path / "coordinator" / "state.json")
+    api = EmptyLifecycleApi()
+    coordinator = Coordinator(api, store, clock=NOW.timestamp, lifecycle_source_paths=paths)
+    items = [
+        issue_event(31, "issue_failed", occurred_at="2026-10-01T20:58:00Z",
+                    incident=f"duplicate-inbox-{number}")
+        for number in range(3)
+    ]
+    export = state_dir / "workflow-events.json"
+    for batch in (items[:context_count], items[context_count:]):
+        if not batch:
+            continue
+        for item in batch:
+            store.record_lifecycle(item, now=NOW)
+        store.write_lifecycle_export(now=NOW, owner_user_id=APP_OWNER, directory=state_dir)
+        os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+        assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == len(batch)
+        if batch == items[:context_count]:
+            coordinator.run(apply=True)
+
+    snapshot = store.snapshot()
+    assert snapshot["lifecycle_events"] == items[context_count:]
+    assert (snapshot.get("lifecycle_context") or {}).get("events", []) == items[:context_count]
+    adapter = state_dir / "workflow-notifications.sqlite"
+    with sqlite3.connect(adapter) as db:
+        assert db.execute("SELECT count(DISTINCT inbox_id) FROM events").fetchone() == (3,)
+        # Deliberate ledger corruption, not a normal consumer ACK path.
+        db.execute(
+            "UPDATE events SET inbox_id=(SELECT inbox_id FROM events WHERE event_id=?) "
+            "WHERE event_id=?", (items[0]["event_id"], items[1]["event_id"]),
+        )
+    before = {path: path.read_bytes() for path in (store.path, export, adapter, inbox)}
+    with pytest.raises(Blocked, match="Inbox binding"):
+        read_lifecycle_acknowledgements(
+            adapter, APP_OWNER,
+            [*snapshot["lifecycle_events"],
+             *(snapshot.get("lifecycle_context") or {}).get("events", [])],
+        )
+
+    def unexpected_retirement(*_args, **_kwargs):
+        pytest.fail("Invalid ACK snapshot reached retirement")
+
+    monkeypatch.setattr(store, "retire_acknowledged_lifecycle_events", unexpected_retirement)
+    with pytest.raises(CoordinatorError, match="Lifecycle ACK or owner evidence") as caught:
+        coordinator.run(apply=True)
+    assert isinstance(caught.value.__cause__, Blocked)
+    assert store.snapshot() == snapshot
+    assert {path: path.read_bytes() for path in before} == before
+    assert api.writes == [] and api.graphql_writes == []
+
+
+def test_lifecycle_ack_survives_physical_inbox_retention_and_replay(tmp_path):
+    from deploy.cloud_coordinator import Coordinator
+    from deploy.workflow_notifications import read_lifecycle_acknowledgements
+
+    notification_paths, state_dir, _, inbox, _ = app_fixture(tmp_path / "app")
+    paths = LifecycleSourcePaths(
+        notifications=notification_paths, starter_state=tmp_path / "absent-starter.json",
+    )
+    store = StateStore(tmp_path / "coordinator" / "state.json")
+    acked = issue_event(
+        31, "issue_failed", occurred_at="2026-10-01T20:58:00Z", incident="inbox-retention",
+    )
+    pending = pull_event(
+        {"issue": 32, "head": HEAD, "enrollment": {"comment": 55}},
+        "controller_verified", occurred_at="2026-10-01T20:58:00Z", merge_sha=MERGE,
+    )
+    for item in (acked, pending):
+        store.record_lifecycle(item, now=NOW)
+    store.write_lifecycle_export(now=NOW, owner_user_id=APP_OWNER, directory=state_dir)
+    export = state_dir / "workflow-events.json"
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    original_export = export.read_bytes()
+    result = process(notification_paths, apply=True, now=NOW)
+    assert result["inbox_items"] == 1
+    assert result["deferred"] == [{
+        "event_id": pending["event_id"], "status": "deferred",
+        "reason": "deployment_evidence_unavailable",
+    }]
+    adapter = state_dir / "workflow-notifications.sqlite"
+    acknowledgements = read_lifecycle_acknowledgements(adapter, APP_OWNER, [acked, pending])
+    inbox_id = acknowledgements[acked["event_id"]]["inbox_id"]
+    assert acknowledgements == {
+        acked["event_id"]: {
+            "digest": event_digest(acked), "status": "acked", "inbox_id": inbox_id,
+        },
+        pending["event_id"]: {
+            "digest": event_digest(pending), "status": "pending", "inbox_id": None,
+        },
+    }
+    with sqlite3.connect(inbox) as db:
+        assert db.execute("SELECT id,user_id,delivery_id FROM inbox").fetchall() == [
+            (inbox_id, APP_OWNER, "workflow-event:v1:" + acked["event_id"]),
+        ]
+        # Model physical retention, not UI dismissal; keep foreign keys enforced.
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("DELETE FROM notification_policy WHERE inbox_id=?", (inbox_id,))
+        db.execute("DELETE FROM inbox WHERE id=?", (inbox_id,))
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+    consumer_before = {path: path.read_bytes() for path in (adapter, inbox)}
+    assert read_lifecycle_acknowledgements(
+        adapter, APP_OWNER, [acked, pending],
+    ) == acknowledgements
+
+    api = EmptyLifecycleApi()
+    Coordinator(api, store, clock=NOW.timestamp, lifecycle_source_paths=paths).run(apply=True)
+    state = StateStore(store.path).snapshot()
+    assert state["lifecycle_context"]["events"] == [acked]
+    assert state["lifecycle_events"] == [pending]
+    assert json.loads(export.read_bytes())["events"] == [pending]
+    assert {path: path.read_bytes() for path in consumer_before} == consumer_before
+
+    # Replay the old export after retirement and Inbox removal. The retained ACK
+    # deduplicates the delivered event; absence never ACKs the pending deployment.
+    export.write_bytes(original_export)
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    assert process(notification_paths, apply=False, now=NOW)["status"] == "plan"
+    replay = process(notification_paths, apply=True, now=NOW)
+    assert replay["inbox_items"] == 0
+    assert replay["deferred"] == result["deferred"]
+    assert {path: path.read_bytes() for path in consumer_before} == consumer_before
+    with sqlite3.connect(inbox) as db:
+        assert db.execute("SELECT count(*) FROM inbox").fetchone() == (0,)
+
+    Coordinator(
+        api, StateStore(store.path), clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    restarted = StateStore(store.path).snapshot()
+    assert restarted["lifecycle_context"]["events"] == [acked]
+    assert restarted["lifecycle_events"] == [pending]
+    assert json.loads(export.read_bytes())["events"] == [pending]
+    assert {path: path.read_bytes() for path in consumer_before} == consumer_before
+    assert api.writes == [] and api.graphql_writes == []
+
+
 def test_lifecycle_ack_reader_rejects_unsafe_paths_and_sidecars(tmp_path, monkeypatch):
     import deploy.workflow_notifications as notifications_module
     from deploy.workflow_notifications import Blocked, read_lifecycle_acknowledgements

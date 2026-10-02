@@ -210,11 +210,26 @@ coordinator execution lock, the producer reads the existing adapter database
 read-only in one SQLite snapshot. It requires the sole ready default-profile
 application owner, schema version 1, repository ID `1399942965`, and exact
 `event_id`, canonical event digest, owner recipient, `status='acked'`, and
-nonempty durable `inbox_id`. The database remains subject to the existing private
-canonical path, 4 MiB main-file, rollback-journal, and no-sidecar rules. The
-producer never initializes, recovers, or modifies it. Missing or pending rows do
-not authorize retirement; malformed, foreign, conflicting, or incomplete rows
-block the complete coordinator preparation before state commit or external writes.
+nonempty retained `inbox_id`. At original ACK creation, the consumer verifies the
+Inbox record's owner, delivery ID, and Inbox ID before committing the ACK. The
+producer validates this retained consumer assertion and detectable consistency
+constraints; it does not require the Inbox row to remain present. An `inbox_id`
+shared by distinct ACKed event IDs anywhere in the snapshot (including
+active/context and context/context pairs) blocks preparation before any retirement.
+The database remains subject to the existing private canonical path, 4 MiB
+main-file, rollback-journal, and no-sidecar rules. The producer never initializes,
+recovers, or modifies it. Missing or pending rows do not authorize retirement;
+malformed, foreign, conflicting, or incomplete rows block the complete coordinator
+preparation before state commit or external writes.
+
+The unchanged consumer-owned ledger remains ACK authority after physical Inbox
+retention: a genuine retained ACK still authorizes retirement and deduplicates
+replay, while absence of an Inbox row never ACKs a pending event. This is not a
+tamper-proof receipt system. Once Inbox evidence is removed, a unique well-formed
+substituted historical Inbox ID or an arbitrary internally consistent ledger
+rewrite is not detectable from the retained assertion alone. The producer does
+not claim comprehensive tamper detection or introduce new authority or indefinite
+Inbox retention.
 
 Only exact ACKed lifecycle events are removed from the producer's active 256-event
 export set. Their canonical payloads remain in a strictly validated, owner- and

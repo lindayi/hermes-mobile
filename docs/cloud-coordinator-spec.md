@@ -259,9 +259,21 @@ read transaction validates the adapter schema/binding (version 1 and repository
 ID `1399942965`) and every stored event identity against active lifecycle events
 or retained context. A row authorizes producer retirement only when its
 `event_id`, canonical event digest, recipient owner, `acked` status, and nonempty
-durable `inbox_id` all match. Missing and pending rows retain events; malformed,
-foreign, tampered, or unbound adapter state blocks preparation. The coordinator
-does not initialize, recover, or write the consumer database.
+retained `inbox_id` satisfy the consumer-ledger checks. The consumer verifies the
+Inbox record's owner, delivery ID, and Inbox ID before committing the original
+ACK; the producer validates that retained assertion and its consistency, not a
+currently present Inbox row. No two ACKed event IDs may share an `inbox_id`, across
+all active and retained-context rows; any duplicate blocks the whole preparation
+before retirement. Missing and pending rows retain events; malformed, foreign,
+unbound, or detectably inconsistent adapter state blocks preparation. The
+coordinator does not initialize, recover, or write the consumer database.
+
+The unchanged consumer-owned ACK ledger remains authoritative after physical
+Inbox retention, so a valid historical ACK still permits retirement and prevents
+replay. These checks are not tamper-proof: after the Inbox row is removed, a
+unique well-formed substituted Inbox ID or an arbitrary internally consistent
+historical ledger rewrite cannot be distinguished from the trusted retained
+assertion. No new receipt authority or indefinite Inbox retention is implied.
 
 Exact ACKed outcomes move from the active export list into optional
 `lifecycle_context`, which has a closed schema, fixed repository binding, exact

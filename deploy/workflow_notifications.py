@@ -419,6 +419,7 @@ def read_lifecycle_acknowledgements(state_path, owner, events):
             ).fetchall()
             if len(rows) > MAX_STATE_BYTES // 128:
                 raise Blocked('Existing adapter state has too many lifecycle records')
+            acked_inbox_ids = set()
             for row in rows:
                 event_id = row['event_id']
                 digest = row['digest']
@@ -437,6 +438,10 @@ def read_lifecycle_acknowledgements(state_path, owner, events):
                             and (not isinstance(inbox_id, str) or not inbox_id
                                  or len(inbox_id) > 256 or any(ord(char) < 32 for char in inbox_id)))):
                     raise Blocked('Existing lifecycle adapter state conflicts with coordinator history')
+                if status == 'acked':
+                    if inbox_id in acked_inbox_ids:
+                        raise Blocked('Existing lifecycle adapter state has a duplicate Inbox binding')
+                    acked_inbox_ids.add(inbox_id)
                 acknowledgements[event_id] = {
                     'digest': digest, 'status': status, 'inbox_id': inbox_id,
                 }
