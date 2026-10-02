@@ -25,7 +25,9 @@ def test_real_starter_command_is_sha_bound_at_consumer_scan(tmp_path, consumer, 
     api = PushApi(pulls=[pull_request()])
     start_task(tmp_path, api)
     api.task_detail = completed_task()
-    assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == 1
+    assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == (
+        0 if race == "before_post" else 1
+    )
     emitted = next(c for c in api.comments if c["id"] == 9101)
     assert emitted["body"] == "/hermes enroll " + "a" * 40
     if race in {"after_post", "edited_comment"}:

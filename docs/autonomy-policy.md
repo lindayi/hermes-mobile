@@ -181,6 +181,11 @@ these current assembly pins, also independently literal in the launch fixture:
 | `deploy/issue_starter.py` | `49debd3c1da5252ea67322a0febb9eb5b56d0ac1a830f3718e4d07377993b517` |
 | `deploy/hermes-mobile-coordinator.service` | `49d6ebb6e24b4c0a06af3d10e6e2cce11dd6af7ee8056c99268058c2f6f2cab3` |
 
+Issue #56 updates the starter's current source candidate pin to
+`a14b4b2d8438fa84773b5db3411701a0bd00fec94f87493c114a5b55f46915d5`. This is
+source consistency only, not independent review, runtime evidence, or activation
+permission.
+
 Issue #50's receipt-transport candidate overlays only
 `deploy/cloud_coordinator.py` and `deploy/task_receipts.py` in the current source
 inventory. The historical PR40 and issue #43 table hashes above remain unchanged:

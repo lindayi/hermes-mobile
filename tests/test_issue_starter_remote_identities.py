@@ -135,7 +135,7 @@ def test_task_pull_binding_requires_exact_positive_remote_ids(tmp_path, field, k
     assert_no_handoff_writes(api)
 
 
-@pytest.mark.parametrize("read_number", [3, 5, 6])
+@pytest.mark.parametrize("read_number", [5, 9, 11])
 @pytest.mark.parametrize("field", ["id", "number", "head_repository", "base_repository"])
 @pytest.mark.parametrize("kind", KINDS)
 def test_current_pull_revalidates_numeric_ids_at_each_write_boundary(
@@ -164,7 +164,7 @@ def test_current_pull_revalidates_numeric_ids_at_each_write_boundary(
         assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
         assert len([call for call in api.graphql_calls
                     if "markPullRequestReadyForReview" in call["query"]]) == (
-            0 if read_number == 3 else 1
+            0 if read_number == 5 else 1
         )
         assert api.patches == []
 

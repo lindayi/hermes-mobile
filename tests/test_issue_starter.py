@@ -496,12 +496,14 @@ def test_untrusted_issue_prompt_serializes_content_without_closing_its_boundary(
     assert r"\u002d\u002d\u002d END UNTRUSTED PUBLIC ISSUE JSON" in prompt
 
 
-def test_public_prompt_requires_parser_compatible_plain_paragraphs():
+def test_public_prompt_requests_readable_plain_paragraphs_not_link_proof():
     prompt = _public_prompt(ISSUE_NUMBER, "Title", "Public issue.")
 
     assert "plain paragraphs" in prompt
     assert "Markdown lists" in prompt
     assert "optional rich evidence in comments" in prompt
+    assert "not description text" in prompt
+    assert "not as proof of issue linkage" in prompt
 
 
 def test_dispatch_is_reserved_and_uses_bounded_issue_only_prompt(tmp_path):
@@ -691,6 +693,22 @@ def test_command_containing_pr_body_uses_authenticated_closing_issue_edge(tmp_pa
     assert all("after" in call["variables"] for call in queries)
 
 
+def test_reserved_pull_body_digest_is_immutable(tmp_path):
+    api = FakeApi(pulls=[pull_request(body="Readable closing reference.")])
+    result = _run_completed_handoff(tmp_path, api)
+    store = make_coordinator(tmp_path, api).store
+    record = store.snapshot()["commands"]["28:9001"]
+    accepted_digest = hashlib.sha256(
+        "Readable closing reference.".encode("utf-8"),
+    ).hexdigest()
+
+    assert result["handed_off"] == 1
+    assert record["pull_body_sha256"] == accepted_digest
+    with pytest.raises(CoordinatorError, match="immutable"):
+        store.update("28:9001", {"pull_body_sha256": "0" * 64})
+    assert store.snapshot()["commands"]["28:9001"]["pull_body_sha256"] == accepted_digest
+
+
 @pytest.mark.parametrize("body", [
     "Closes #28",
     "> Closes #28",
@@ -749,7 +767,8 @@ def test_closing_issue_api_failure_never_hands_off(tmp_path):
 @pytest.mark.parametrize("invalid", [
     "partial_error", "null_repository", "null_pull", "wrong_repository",
     "wrong_node", "wrong_number", "wrong_branch", "wrong_head", "wrong_base",
-    "missing_cursor", "duplicate_across_pages", "changed_snapshot",
+    "null_connection", "bad_page_info", "missing_cursor", "repeated_cursor",
+    "duplicate_across_pages", "changed_snapshot",
 ])
 def test_malformed_or_inconsistent_closing_issue_responses_block(tmp_path, invalid):
     pull = pull_request()
@@ -775,10 +794,25 @@ def test_malformed_or_inconsistent_closing_issue_responses_block(tmp_path, inval
             "wrong_base": ("baseRefName", "release"),
         }[invalid]
         node[key] = value
+    elif invalid == "null_connection":
+        response["data"]["repository"]["pullRequest"][
+            "closingIssuesReferences"
+        ] = None
+    elif invalid == "bad_page_info":
+        response["data"]["repository"]["pullRequest"][
+            "closingIssuesReferences"
+        ]["pageInfo"] = {"hasNextPage": "false", "endCursor": None}
     elif invalid == "missing_cursor":
         response["data"]["repository"]["pullRequest"][
             "closingIssuesReferences"
         ]["pageInfo"] = {"hasNextPage": True, "endCursor": None}
+    elif invalid == "repeated_cursor":
+        response["data"]["repository"]["pullRequest"][
+            "closingIssuesReferences"
+        ]["pageInfo"] = {"hasNextPage": True, "endCursor": "next"}
+        api.closing_pages["next"] = closing_issue_response(
+            pull, nodes=[], page_info={"hasNextPage": True, "endCursor": "next"},
+        )
     elif invalid == "duplicate_across_pages":
         connection = response["data"]["repository"]["pullRequest"][
             "closingIssuesReferences"
