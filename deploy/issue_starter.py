@@ -232,7 +232,15 @@ def _contains_closing_reference(body, issue_number):
         # Only complete, same-line comments in a text paragraph are supported.
         # Keep a non-whitespace barrier: never manufacture a closing directive
         # by joining text separated by markup.
-        line = re.sub(r"<!--(?:(?!--|<|>).)*-->", "\0", line)
+        while "<!--" in line:
+            start = line.find("<!--")
+            end = line.find("-->", start + 4)
+            if end < 0:
+                return False
+            comment = line[start + 4:end]
+            if "--" in comment or "<" in comment or ">" in comment:
+                return False
+            line = line[:start] + "\0" + line[end + 3:]
         if any(char in line for char in "<>[]`\\~$|*_"):
             return False
         visible.append(line)
@@ -1125,13 +1133,6 @@ class Coordinator:
                 })
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
-            artifacts = task.get("artifacts")
-            branches = [
-                item.get("data") for item in artifacts if isinstance(item, dict)
-                and item.get("type") == "branch" and item.get("provider") == "github"
-                and isinstance(item.get("data"), dict)
-            ] if isinstance(artifacts, list) else []
-            branch = branches[0].get("head_ref") if len(branches) == 1 else None
             if not self._successful_task_completion(task):
                 self.store.update(key, {
                     "phase": "failed",

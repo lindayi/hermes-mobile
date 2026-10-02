@@ -447,9 +447,11 @@ def test_untrusted_issue_prompt_serializes_content_without_closing_its_boundary(
     "body, expected",
     [
         ("Closes #28 <!-- hidden -->", True),
+        ("Closes #28 <!-- first --> <!-- second -->", True),
         ("<!-- Closes #28 --> ordinary text", False),
         ("Closes<!-- hidden --> #28", False),
         ("<!-- hidden\nCloses #28\n-->", False),
+        ("Closes #28 <!-- malformed -- comment -->", False),
     ],
 )
 def test_closing_reference_parser_does_not_join_or_expose_html_comments(body, expected):
