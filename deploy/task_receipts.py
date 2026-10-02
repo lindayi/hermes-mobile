@@ -46,6 +46,10 @@ def _identity(value, expected):
     return isinstance(value, dict) and type(value.get("id")) is int and value["id"] == expected
 
 
+def _nonblank_string(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _expected_body(nonce, task_id, session_id, pull_number, start_head,
                    head_sha, base_sha, result):
     return (
@@ -67,8 +71,9 @@ def find_receipt(comments, *, complete, nonce, task_id, session_id,
                  now):
     if complete is not True:
         raise ReceiptError("Receipt comments are not completely paginated")
-    if (not isinstance(comments, list) or not nonce or not isinstance(task_id, str)
-            or not isinstance(session_id, str) or type(pull_number) is not int
+    if (not isinstance(comments, list)
+            or not all(_nonblank_string(value) for value in (nonce, task_id, session_id))
+            or type(pull_number) is not int
             or pull_number < 1):
         raise ReceiptError("Receipt identity is incomplete")
     if now.tzinfo is None:
@@ -118,7 +123,7 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     created_at = action.get("task_created_at")
     pull_head = pull.get("head") if isinstance(pull, dict) else None
     pull_base = pull.get("base") if isinstance(pull, dict) else None
-    if (not isinstance(nonce, str) or not nonce
+    if (not _nonblank_string(nonce) or not _nonblank_string(task_id)
             or not isinstance(pull_head, dict) or not isinstance(pull_base, dict)):
         raise ReceiptError("Receipt claim or pull identity is incomplete")
     if (not isinstance(task, dict) or task.get("id") != task_id
@@ -159,7 +164,8 @@ def validate_task_receipt(task, action, pull, comments, *, now):
             raise ReceiptError("Task session evidence is malformed")
         prompt = session.get("prompt")
         if isinstance(prompt, str) and nonce in prompt:
-            if (session.get("task_id") != task_id
+            if (not _nonblank_string(session.get("id"))
+                    or session.get("task_id") != task_id
                     or session.get("state") != "completed"
                     or not _identity(session.get("user"), action.get("owner_id"))
                     or not _identity(session.get("owner"), action.get("owner_id"))

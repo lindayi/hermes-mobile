@@ -203,6 +203,73 @@ def test_real_starter_and_controller_sources_reach_owner_inbox_unchanged(tmp_pat
     assert len(notifications.list_inbox(APP_OWNER)) == 3
 
 
+@pytest.mark.parametrize("failure", ["issue", "comment", "commit"])
+def test_source_events_wait_for_atomic_scan_commit(tmp_path, monkeypatch, failure):
+    from deploy.cloud_coordinator import Coordinator, CoordinatorError
+    from test_cloud_coordinator import FakeApi
+
+    notification_paths, state_dir, _, _, _ = app_fixture(tmp_path / "app")
+    controller_evidence(notification_paths)
+    paths = LifecycleSourcePaths(
+        notifications=notification_paths,
+        starter_state=tmp_path / "starter" / "state.json",
+    )
+    merged = pull_event(
+        {"issue": 31, "head": HEAD, "enrollment": {"comment": 55}},
+        "merged", occurred_at="2026-10-01T20:58:00Z", merge_sha=MERGE,
+    )
+    store = StateStore(tmp_path / "coordinator" / "state.json")
+    store.commit_scan("2026-10-01T10:00:00Z", [], lifecycle_events=[merged], now=NOW)
+    before = store.path.read_bytes()
+    before_state = store.snapshot()
+
+    class ScanApi(FakeApi):
+        fail_scan = True
+
+        def get_all(self, route, *, collection=None):
+            rows = super().get_all(route, collection=collection)
+            if self.fail_scan and (
+                (failure == "issue" and "/issues?" in route)
+                or (failure == "comment" and "/issues/16/comments?" in route)
+            ):
+                return [*rows, {}]
+            return rows
+
+    api = ScanApi()
+    # Real collection from private synthetic controller/ledger/provenance files,
+    # independent of the PR being scanned, not a fabricated collector result.
+    source_events = collect_source_events([merged], api=api, paths=paths, now=NOW)
+    assert len(source_events) == 1
+    assert source_events[0]["reason"] == "controller_verified"
+    coordinator = Coordinator(
+        api, store, clock=NOW.timestamp, lifecycle_source_paths=paths,
+    )
+
+    def fail_commit(*args, **kwargs):
+        raise CoordinatorError("simulated scan commit failure")
+
+    with monkeypatch.context() as patch:
+        if failure == "commit":
+            patch.setattr(store, "commit_scan", fail_commit)
+        with pytest.raises(CoordinatorError, match="malformed|scan commit failure"):
+            coordinator.run(apply=True)
+
+    assert store.snapshot() == before_state
+    assert store.path.read_bytes() == before
+    assert api.writes == [] and api.graphql_writes == [] and api.fix_attempts == 0
+    assert not (state_dir / "workflow-events.json").exists()
+
+    api.fail_scan = False
+    coordinator.run(apply=True)
+    after = store.snapshot()
+    assert after["cursor"] != before_state["cursor"]
+    assert "123" in after["events"]
+    assert after["lifecycle_events"] == [merged, *source_events]
+    assert json.loads((state_dir / "workflow-events.json").read_bytes())["events"] == [
+        merged, *source_events,
+    ]
+
+
 def test_application_owner_binding_rejects_multiple_ready_default_owners(tmp_path):
     notification_paths, _, auth, _, _ = app_fixture(tmp_path / "app")
     with sqlite3.connect(auth) as db:

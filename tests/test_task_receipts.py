@@ -2,7 +2,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from deploy.task_receipts import ReceiptError, find_receipt, receipt_instruction
+from deploy.task_receipts import (
+    ReceiptError, find_receipt, receipt_instruction, validate_task_receipt,
+)
 
 
 NOW = datetime.fromisoformat("2026-10-01T12:06:00+00:00")
@@ -38,13 +40,13 @@ def receipt(*, author_id=198982749, body=None, created="2026-10-01T12:05:00Z",
     }
 
 
-def parse(comments, *, complete=True):
+def parse(comments, *, complete=True, nonce=NONCE, task_id=TASK_ID, session_id=SESSION_ID):
     return find_receipt(
         comments,
         complete=complete,
-        nonce=NONCE,
-        task_id=TASK_ID,
-        session_id=SESSION_ID,
+        nonce=nonce,
+        task_id=task_id,
+        session_id=session_id,
         pull_number=16,
         start_head=HEAD,
         head_sha=HEAD,
@@ -124,3 +126,81 @@ def test_incomplete_pages_or_conflicting_receipts_never_yield_success():
 def test_only_closed_result_codes_are_accepted():
     with pytest.raises(ReceiptError):
         parse([receipt(body=receipt_body("success"))])
+
+
+@pytest.mark.parametrize("field", ["nonce", "task_id", "session_id"])
+@pytest.mark.parametrize("invalid", ["", " \t\n", None, 123, True, {}, []])
+def test_receipt_rejects_blank_or_nonstring_identity(field, invalid):
+    expected = {"nonce": NONCE, "task_id": TASK_ID, "session_id": SESSION_ID}
+    body = receipt_body().replace(expected[field], str(invalid))
+    with pytest.raises(ReceiptError, match="identity is incomplete"):
+        parse([receipt(body=body)], **{field: invalid})
+
+
+@pytest.fixture
+def completed_task_binding():
+    owner = {"id": 5164171}
+    repository = {"id": 1399942965}
+    action = {
+        "task_id": TASK_ID, "dispatch_nonce": NONCE,
+        "task_created_at": "2026-10-01T12:00:00Z",
+        "owner_id": owner["id"], "repository_id": repository["id"],
+        "pull_id": 160000016, "pull_node_id": "PR_node_16",
+        "head_ref": "topic", "head": HEAD,
+    }
+    task = {
+        "id": TASK_ID, "state": "completed", "creator": owner, "owner": owner,
+        "repository": repository, "created_at": action["task_created_at"],
+        "updated_at": "2026-10-01T12:05:30Z",
+        "artifacts": [
+            {"provider": "github", "type": "branch",
+             "data": {"head_ref": "topic", "base_ref": "main"}},
+            {"provider": "github", "type": "pull",
+             "data": {"id": action["pull_id"], "global_id": action["pull_node_id"]}},
+        ],
+        "sessions": [{
+            "id": SESSION_ID, "task_id": TASK_ID, "state": "completed",
+            "user": owner, "owner": owner, "repository": repository,
+            "head_ref": "topic", "base_ref": "main", "prompt": receipt_instruction(NONCE),
+            "created_at": "2026-10-01T12:01:00Z",
+            "completed_at": "2026-10-01T12:05:30Z",
+        }],
+    }
+    pull = {"number": 16, "head": {"sha": HEAD}, "base": {"sha": BASE}}
+    return task, action, pull
+
+
+@pytest.mark.parametrize("field", ["task_id", "session_id", "nonce"])
+@pytest.mark.parametrize("invalid", ["", " \t\n", None, 123, True, {}, []])
+def test_completed_task_rejects_blank_or_nonstring_identity(completed_task_binding, field, invalid):
+    task, action, pull = completed_task_binding
+    session = task["sessions"][0]
+    if field == "task_id":
+        task["id"] = action["task_id"] = session["task_id"] = invalid
+    elif field == "session_id":
+        session["id"] = invalid
+    else:
+        action["dispatch_nonce"] = invalid
+        session["prompt"] = receipt_instruction(invalid)
+    expected = {"nonce": NONCE, "task_id": TASK_ID, "session_id": SESSION_ID}
+    body = receipt_body().replace(expected[field], str(invalid))
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, [receipt(body=body)], now=NOW)
+
+
+def test_completed_task_accepts_complete_exact_returned_identities(completed_task_binding):
+    task, action, pull = completed_task_binding
+    # IDs are opaque: retain the entire returned value, without normalization.
+    task_id = "task_01234567-89ab-cdef-0123-456789abcdef"
+    session_id = "session_abcdef01-2345-6789-abcd-ef0123456789"
+    task["id"] = action["task_id"] = task["sessions"][0]["task_id"] = task_id
+    task["sessions"][0]["id"] = session_id
+    body = receipt_body().replace(TASK_ID, task_id).replace(SESSION_ID, session_id)
+    assert validate_task_receipt(task, action, pull, [receipt(body=body)], now=NOW) == {
+        "result": "ready", "comment_id": 777,
+    }
+    for identity in (task_id, session_id):
+        with pytest.raises(ReceiptError):
+            validate_task_receipt(
+                task, action, pull, [receipt(body=body.replace(identity, identity[:-1]))], now=NOW,
+            )

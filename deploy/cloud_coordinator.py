@@ -2048,7 +2048,7 @@ class Coordinator:
             retirements=[
                 item["issue"] for item in plan["pull_requests"] if item.get("terminal")
             ],
-            lifecycle_events=[
+            lifecycle_events=plan.get("source_lifecycle_events", []) + [
                 event for item in plan["pull_requests"]
                 for event in item.get("lifecycle_events", [])
             ],
@@ -2142,6 +2142,7 @@ class Coordinator:
         try:
             owner_user_id = self.owner_user_id
             export_directory = None
+            source_events = []
             if apply and self.lifecycle_source_paths is not None:
                 from deploy.workflow_lifecycle_sources import (
                     LifecycleSourceError,
@@ -2159,14 +2160,15 @@ class Coordinator:
                         paths=self.lifecycle_source_paths,
                         now=datetime.fromtimestamp(self.clock(), timezone.utc),
                     )
-                    for event in source_events:
-                        self.store.record_lifecycle(event, now=self.clock())
                 except LifecycleSourceError as error:
                     raise CoordinatorError(
                         "Lifecycle source evidence or owner binding is unavailable"
                     ) from error
             plan = self._build_plan(apply=apply)
             if apply:
+                # Independent sources share the complete scan's atomic commit;
+                # malformed scans must not persist even valid source events.
+                plan["source_lifecycle_events"] = source_events
                 pull_requests = self._apply(plan)
                 if self.lifecycle_source_paths is not None:
                     from deploy.workflow_lifecycle_sources import collect_controller_verified_events
