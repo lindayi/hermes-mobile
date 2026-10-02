@@ -1340,8 +1340,12 @@ def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
     assert len(neutral) == 1
     assert api.fix_attempts == 2
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
-    assert store.action(first["key"])["receipt_base"] == BASE
-    assert store.action(first["key"])["handoff_state"] == "superseded"
+    first_proof = next(
+        proof for proof in store.snapshot()["enrollments"]["16"]["receipt_proofs"]
+        if proof["task_id"] == first["task_id"]
+    )
+    assert first_proof["receipt_base"] == BASE
+    assert store.action(first["key"]) is None
     assert neutral[0]["main_sha"] == CURRENT_MAIN
     assert neutral[0]["head"] == RESULT_HEAD
     assert "repair_requested" in result["pull_requests"][0]
@@ -1381,6 +1385,38 @@ def test_stale_base_reconciliation_releases_exhausted_review_handoff(tmp_path):
     assert store.action(first["key"])["handoff_state"] == "superseded"
     assert api.fix_attempts == 2
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
+
+
+def test_superseded_stale_handoffs_retire_before_reenrollment(tmp_path):
+    api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
+    coordinator.run(apply=True)
+    neutral = next(action for action in store.actions().values()
+                   if action.get("task_type") == "neutral")
+    api.tasks[neutral["task_id"]]["state"] = "completed"
+    store.update_action(neutral["key"], "completed", handoff_state="done")
+    receipt_proofs = store.snapshot()["enrollments"]["16"]["receipt_proofs"]
+
+    api.pull["state"] = "closed"
+    coordinator.run(apply=True)
+
+    assert store.snapshot()["enrollments"]["16"]["active"] is False
+    assert store.action(first["key"]) is None
+    assert store.action(neutral["key"]) is None
+
+    api.pull["state"] = "open"
+    api.comments.append({
+        "id": 127, "user": {"id": OWNER},
+        "body": f"/hermes enroll {RESULT_HEAD}",
+        "created_at": "2026-10-01T12:10:00Z",
+        "updated_at": "2026-10-01T12:10:00Z",
+    })
+    coordinator.run(apply=True)
+
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["active"] is True
+    assert enrollment["comment"] == 127
+    assert enrollment["attempts"] == 0
+    assert enrollment["receipt_proofs"] == receipt_proofs
 
 
 def test_stale_base_reconciliation_rechecks_current_main_before_claim(tmp_path):
@@ -1442,6 +1478,147 @@ def test_stale_base_reconciliation_accepts_a_validated_new_head_handoff(tmp_path
     ))["receipt_body"] == api.comments[-1]["body"]
     assert api.fix_attempts == 2
     assert len(api.requested_reviewers) == 1
+
+
+def test_neutral_acceptance_and_predecessor_supersession_are_atomic(tmp_path):
+    class FailingSplitUpdateStore(StateStore):
+        def update_action(self, key, status, **fields):
+            if fields.get("handoff_state") == "superseded":
+                raise CoordinatorError("injected predecessor-write failure")
+            return super().update_action(key, status, **fields)
+
+    api, original_store, _, first = _ready_sha_bound_handoff(tmp_path)
+    store = FailingSplitUpdateStore(original_store.path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+
+    try:
+        coordinator.run(apply=True)
+    except CoordinatorError as error:
+        assert str(error) == "injected predecessor-write failure"
+
+    neutral = next(action for action in store.actions().values()
+                   if action.get("task_type") == "neutral")
+    assert neutral["status"] == "sent"
+    assert store.action(first["key"]) is None
+    assert api.fix_attempts == 2
+
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+
+    assert api.fix_attempts == 2
+    assert not any(event["reason"] == "review_handoff_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+
+
+def test_neutral_atomic_acceptance_survives_restart_without_duplicate_post(tmp_path):
+    class CrashAfterAcceptanceStore(StateStore):
+        def accept_task(self, key, task_id, task_created_at):
+            super().accept_task(key, task_id, task_created_at)
+            if self.action(key).get("task_type") == "neutral":
+                raise SystemExit("crash after atomic acceptance")
+
+    api, original_store, _, first = _ready_sha_bound_handoff(tmp_path)
+    store = CrashAfterAcceptanceStore(original_store.path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+
+    with pytest.raises(SystemExit, match="crash after atomic acceptance"):
+        coordinator.run(apply=True)
+
+    neutral = next(action for action in store.actions().values()
+                   if action.get("task_type") == "neutral")
+    assert neutral["status"] == "sent"
+    assert store.action(first["key"])["handoff_state"] == "superseded"
+    assert api.fix_attempts == 2
+
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+
+    assert api.fix_attempts == 2
+    assert store.action(first["key"]) is None
+    assert not any(event["reason"] == "review_handoff_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+
+
+def test_neutral_acceptance_replace_failure_recovers_as_uncertain_lock(tmp_path):
+    class FailingAcceptedWriteStore(StateStore):
+        def __init__(self, path):
+            super().__init__(path)
+            self.fail_accepted_write = False
+
+        def accept_task(self, key, task_id, task_created_at):
+            self.fail_accepted_write = True
+            try:
+                super().accept_task(key, task_id, task_created_at)
+            finally:
+                self.fail_accepted_write = False
+
+        def _save(self, data):
+            if self.fail_accepted_write:
+                self.fail_accepted_write = False
+                raise CoordinatorError("injected atomic task-write failure")
+            super()._save(data)
+
+    api, original_store, _, first = _ready_sha_bound_handoff(tmp_path)
+    store = FailingAcceptedWriteStore(original_store.path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+
+    with pytest.raises(CoordinatorError, match="injected atomic task-write failure"):
+        coordinator.run(apply=True)
+
+    neutral = next(action for action in store.actions().values()
+                   if action.get("task_type") == "neutral")
+    assert neutral["status"] == "sending"
+    assert store.action(first["key"])["handoff_state"] == "waiting_review"
+    assert api.fix_attempts == 2
+
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+
+    assert api.fix_attempts == 2
+    assert store.action(neutral["key"])["status"] == "uncertain"
+    assert store.action(first["key"]) is None
+    assert any(event["reason"] == "execution_uncertain"
+               for event in store.snapshot()["lifecycle_events"])
+    assert not any(event["reason"] == "review_handoff_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+
+
+def test_ambiguous_neutral_post_stays_locked_and_is_never_retried(tmp_path):
+    api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
+    api.fail_fix = True
+
+    coordinator.run(apply=True)
+    neutral = next(action for action in store.actions().values()
+                   if action.get("task_type") == "neutral")
+    assert neutral["status"] == "uncertain"
+    assert "task_id" not in neutral
+    assert store.action(first["key"]) is None
+    assert api.fix_attempts == 2
+
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+
+    assert api.fix_attempts == 2
+    assert store.action(neutral["key"])["status"] == "uncertain"
+    assert store.action(first["key"]) is None
+    assert not any(event["reason"] == "review_handoff_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+
+
+@pytest.mark.parametrize(
+    "base_sha,tip_sha,status,ahead_by",
+    [
+        (BASE, RESULT_HEAD, "identical", 0),
+        (BASE, BASE, "ahead", 1),
+    ],
+)
+def test_compare_evidence_rejects_inconsistent_equal_sha_status(
+        tmp_path, base_sha, tip_sha, status, ahead_by):
+    api = FakeApi()
+    api.compare_results[f"{base_sha}...{tip_sha}"] = _compare_result(
+        BASE, ahead_by=ahead_by, status=status,
+    )
+    coordinator = Coordinator(api, StateStore(tmp_path / "state.json"))
+
+    assert not coordinator._compare_proves_ancestry(
+        base_sha, tip_sha, allow_identical=True,
+    )
 
 
 @pytest.mark.parametrize("hazard", [
@@ -3026,12 +3203,12 @@ def test_reenrollment_preserves_unresolved_fixer_with_empty_task_list(
     coordinator = Coordinator(api, store, clock=lambda: 1790856540)
     if claim_status == "sending":
         # POST succeeds remotely, but the process dies before persisting its ID.
-        def crash_before_task_id(key, status, **fields):
-            assert status == "sent" and fields["task_id"] == "task-1"
+        def crash_before_task_id(key, task_id, task_created_at):
+            assert task_id == "task-1"
             raise SystemExit("crash before task ID persistence")
 
         with monkeypatch.context() as patch:
-            patch.setattr(store, "update_action", crash_before_task_id)
+            patch.setattr(store, "accept_task", crash_before_task_id)
             with pytest.raises(SystemExit, match="crash before task ID persistence"):
                 coordinator.run(apply=True)
     else:

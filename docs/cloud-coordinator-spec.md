@@ -313,17 +313,23 @@ recorded base against both current main and that result head. It requires the re
 compare fields `status`, `ahead_by`, `behind_by`, `base_commit.sha`, and
 `merge_base_commit.sha`, with the recorded base as both base and merge base,
 non-boolean nonnegative counts, zero `behind_by`, and `ahead` (or `identical` only
-for a result head equal to its base). Missing, malformed, unknown, diverged, or
-inconsistent compare evidence fails closed. Before releasing the old handoff lock,
-the coordinator re-fetches the exact task by its durable ID and revalidates its
-terminal state, identity, session, nonce, and complete unchanged remote receipt.
-The recorded dispatch base and immutable initial authorization are never rewritten.
-Only a positively authorized result head can use this exception, and the neutral
-task consumes the existing combined three-attempt budget. Once that neutral task is
-positively accepted, its new receipt owns the next head handoff; replay does not
-dispatch it twice. Historical-base scope is not current-main eligibility: stale PRs
-receive no status action or merge eligibility, and exact current-main, fresh
-review/check, status, and merge fences remain mandatory after reconciliation.
+for equal input SHAs); `ahead` requires unequal input SHAs. Missing, malformed,
+unknown, diverged, or inconsistent compare evidence fails closed. Before releasing
+the old handoff lock, the coordinator re-fetches the exact task by its durable ID
+and revalidates its terminal state, identity, session, nonce, and complete unchanged
+remote receipt. The recorded dispatch base and immutable initial authorization are
+never rewritten. Only a positively authorized result head can use this exception,
+and the neutral task consumes the existing combined three-attempt budget. Once that
+neutral task is positively accepted, its task ID and the superseded predecessor
+handoff are committed in one StateStore mutation. An ambiguous neutral POST instead
+leaves an uncertain claim as the lock and atomically supersedes the predecessor;
+neither the claim nor the predecessor can trigger a duplicate POST or a false
+review-handoff exhaustion. Superseded completed handoffs are terminal for retirement,
+while their validated receipt proofs remain in the enrollment across compaction and
+re-enrollment. Replay does not dispatch an accepted task twice. Historical-base
+scope is not current-main eligibility: stale PRs receive no status action or merge
+eligibility, and exact current-main, fresh review/check, status, and merge fences
+remain mandatory after reconciliation.
 
 Polling a claimed task requires positive integer creator, owner, and repository
 identities matching the fixed owner/repository before any terminal failure can
