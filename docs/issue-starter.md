@@ -24,7 +24,10 @@ issue content is JSON-escaped in the task prompt. Before accepting that snapshot
 the worker verifies bounded GraphQL `Issue.lastEditedAt` and
 `Issue.userContentEdits` history plus timestamped REST `renamed` timeline events.
 Edits after authorization, incomplete pagination/evidence, closed issues, and
-stale commands fail closed. Reopening requires a newer owner command and verified
+stale commands fail closed. Both collection and preflight require the owner command
+to have a valid `created_at` and an identical explicit `updated_at`; edited or
+unverifiable commands cannot dispatch or hand off. Reopening requires a newer owner
+command and verified
 terminal evidence for any earlier remote task; closed authorization does not clear
 an active or response-uncertain task fence.
 
@@ -102,8 +105,10 @@ paired cloud coordinator recognizes this command in its complete scan, requires
 the SHA to match the current PR head, and persists the bound head. A mismatch is
 consumed without enrollment and cannot authorize a later head or be replayed.
 Bound enrollment cannot inherit authority on a subsequent push; an explicit
-new owner command is needed. A new owner command retains unresolved task claims
-and the repair budget. Coordinator-dispatched fixer continuation requires an
+new owner command is needed. A newer exact-head command renews an active bound
+enrollment without replacing its initial `authorized_head`; it retains unresolved
+task claims, durable receipt proofs and the repair budget, and clears sensitive
+authorization. Coordinator-dispatched fixer continuation requires an
 unchanged exact task/session/nonce receipt with result `ready`, chained from the
 immutable initial head. A receipt does not carry sensitive authorization, review
 approval, or check success to a new head.

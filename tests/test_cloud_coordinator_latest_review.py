@@ -1,0 +1,121 @@
+"""Direct seam regressions for PR33 review 5388069795."""
+import json
+
+import pytest
+
+from deploy.cloud_coordinator import neutral_reconciliation_request
+from deploy.workflow_lifecycle import pull_event
+from test_cloud_coordinator import (
+    APP_OWNER_ID, BASE, HEAD, Coordinator, CoordinatorError, FakeApi, StateStore,
+    enrolled_record,
+)
+
+
+def test_legacy_enrollment_reports_unsupported_upgrade_without_changing_state(tmp_path):
+    api = FakeApi()
+    store = StateStore(tmp_path / "state.json")
+    store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
+    # Preserve outstanding claims and command fences; fresh enrollment is not recovery.
+    store.record_event("123")
+    store.claim_action("legacy-uncertain", {"kind": "fix", "issue": 16})
+    store.mark_uncertain("legacy-uncertain")
+    before = store.path.read_bytes()
+    with pytest.raises(CoordinatorError, match=(
+        "Unsupported legacy enrollment: missing pull/repository identity; "
+        "automatic migration is not supported; preserve state and stop activation"
+    )):
+        Coordinator(api, store)._snapshot_pull(
+            16, store.snapshot()["enrollments"]["16"], BASE,
+        )
+    assert store.path.read_bytes() == before
+    assert not api.writes and not api.graphql_writes
+
+
+def test_neutral_prompt_requires_per_hunk_decisions_before_ready_receipt():
+    api = FakeApi()
+    request = neutral_reconciliation_request({
+        "issue": 16, "head": HEAD, "main_sha": BASE, "pull": api.pull,
+    }, 0)
+    prompt = request["body"]
+    assert "each conflict hunk" in prompt
+    assert "classification, decision, and rationale" in prompt
+    assert "preserves both branch intents" in prompt
+    assert "PR comment" in prompt and "before returning a `ready` receipt" in prompt
+    assert "fresh review and checks" in prompt
+
+
+@pytest.mark.parametrize("change", ["authorized", "head_changed", "retired", "unobserved", "wrong_decision"])
+@pytest.mark.parametrize("retain_outcomes", [False, True])
+def test_export_omits_obsolete_approval_without_rewriting_history(tmp_path, change, retain_outcomes):
+    now = 1790856660
+    store = StateStore(tmp_path / "state.json")
+    enrollment = enrolled_record(last_open_seen=True, last_open_head=HEAD)
+    store.enroll(enrollment)
+    snapshot = {"issue": 16, "head": HEAD, "enrollment": enrollment}
+    approval = pull_event(
+        snapshot, "sensitive_approval", occurred_at="2026-10-01T12:10:00Z",
+        decision="authorize_sensitive_action",
+    )
+    history = [pull_event(
+        snapshot, reason, occurred_at="2026-10-01T12:10:00Z",
+        merge_sha="e" * 40 if reason in {"merged", "controller_verified"} else None,
+    ) for reason in ("merged", "controller_verified", "task_failed")] if retain_outcomes else []
+    for event in [approval, *history]:
+        store.record_lifecycle(event, now=now)
+    export = tmp_path / "workflow-events.json"
+    store.write_lifecycle_export(now=now, owner_user_id=APP_OWNER_ID)
+    assert json.loads(export.read_text())["events"] == [approval, *history]
+
+    if change == "authorized":
+        store.authorize_sensitive(16, HEAD)
+    elif change == "head_changed":
+        store.commit_scan(None, [], observations=[(16, "c" * 40)], now=now)
+    elif change == "retired":
+        store.commit_scan(None, [], retirements=[16], now=now)
+    else:
+        # Synthetic preexisting state: absence of current observation/decision proof.
+        data = store.snapshot()
+        if change == "unobserved":
+            data["enrollments"]["16"].pop("last_open_head")
+        else:
+            data["lifecycle_events"][0]["decision"] = "approve_production"
+        store._save(data)
+    before = store.path.read_bytes()
+    retained = store.snapshot()["lifecycle_events"]
+
+    # Reopening StateStore proves the filter uses durable state, not process memory.
+    restarted = StateStore(store.path)
+    for tick in (now + 1, now + 2):
+        restarted.write_lifecycle_export(now=tick, owner_user_id=APP_OWNER_ID)
+        if history:
+            assert json.loads(export.read_text())["events"] == history
+        else:
+            assert not export.exists()
+        assert store.path.read_bytes() == before
+        assert store.snapshot()["lifecycle_events"] == retained
+
+
+@pytest.mark.parametrize("authorize", [False, True])
+def test_apply_refreshes_approval_export_from_current_scan(tmp_path, authorize):
+    api = FakeApi(sensitive=True)
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    export = tmp_path / "workflow-events.json"
+    old_event = json.loads(export.read_text())["events"][0]
+    assert old_event["head_sha"] == HEAD
+    if authorize:
+        api.comments.append({
+            "id": 124, "user": {"id": 5164171},
+            "body": f"/hermes authorize-sensitive {HEAD}",
+            "updated_at": "2026-10-01T12:10:00Z",
+        })
+    else:
+        api.head_sha = "c" * 40
+        api.pull["head"]["sha"] = api.head_sha
+    coordinator.run(apply=True)
+    exported = json.loads(export.read_text())["events"] if export.exists() else []
+    approvals = [event for event in exported if event["reason"] == "sensitive_approval"]
+    assert [event["head_sha"] for event in approvals] == ([] if authorize else ["c" * 40])
+    assert old_event in store.snapshot()["lifecycle_events"]
+    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] == (HEAD if authorize else None)

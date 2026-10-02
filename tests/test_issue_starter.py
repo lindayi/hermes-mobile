@@ -32,6 +32,7 @@ def issue_comment(*, user_id=OWNER_ID, body="/hermes start", comment_id=COMMAND_
         "id": comment_id,
         "body": body,
         "created_at": created_at,
+        "updated_at": created_at,
         "user": {"id": user_id},
     }
 

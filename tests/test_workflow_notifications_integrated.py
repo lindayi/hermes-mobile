@@ -51,6 +51,109 @@ def test_actual_worker_v2_terminal_is_consumed(tmp_path, monkeypatch, risk, boot
         assert db.execute('SELECT count(*) FROM inbox').fetchone() == (1,)
 
 
+@pytest.mark.parametrize(('risk', 'bootstrap'), [
+    ('routine', False), ('sensitive', False), ('sensitive', True),
+])
+def test_cli_lifecycle_export_uses_real_v2_ledger_and_reaches_owner_inbox(
+        tmp_path, monkeypatch, capsys, risk, bootstrap):
+    from datetime import datetime, timezone
+
+    from deploy.cloud_coordinator import StateStore, main
+    from deploy.workflow_lifecycle_sources import LifecycleSourcePaths
+    from test_pull_delivery import BASE, NOW as WORKER_NOW, SHA, raw, worker_v2
+    from test_workflow_notifications import NOW, _write_deployed_proof
+
+    worker_root = tmp_path / 'worker'
+    worker_root.mkdir(mode=0o700)
+    producer, worker_paths, _, api, _, run, post = worker_v2(
+        worker_root, monkeypatch, risk,
+        base=None if bootstrap else BASE,
+        local=None if bootstrap else BASE,
+        diff=raw(('M', 'backend/app.py' if risk == 'sensitive' else 'frontend/styles.css')),
+    )
+    result = producer.poll_once(
+        worker_paths, get=api.__getitem__, post=post, run=run, now=WORKER_NOW,
+    )
+    assert result['status'] == 'deployed', result
+    assert producer.poll_once(
+        worker_paths, get=api.__getitem__, post=post, run=run, now=WORKER_NOW,
+    )['status'] == 'duplicate'
+    ledger = json.loads((worker_paths.state / 'state.json').read_text())
+
+    fixture = adapter_fixture(tmp_path / 'adapter', export(event()))
+    consumer_paths, state_dir, _, inbox, export_path, notifications = fixture
+    _write_deployed_proof(consumer_paths, SHA)
+    consumer_paths.delivery_state.write_text(json.dumps(ledger))
+    consumer_paths.delivery_state.chmod(0o600)
+    os.utime(consumer_paths.delivery_state, (NOW.timestamp(), NOW.timestamp()))
+
+    class ClosedPullApi:
+        issue = {'number': 16, 'pull_request': {'url': 'pull/16'}}
+        comment = {
+            'id': 123, 'user': {'id': 5164171}, 'body': '/hermes enroll',
+            'updated_at': '2026-10-01T11:00:00Z',
+        }
+        pull = {
+            'number': 16, 'id': 160000016, 'node_id': 'PR_node_16',
+            'state': 'closed', 'merged': True, 'merge_commit_sha': SHA,
+            'merged_at': NOW.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'head': {'sha': 'a' * 40, 'ref': 'topic', 'repo': {'id': 1399942965}},
+            'base': {'sha': BASE, 'ref': 'main', 'repo': {'id': 1399942965}},
+        }
+
+        def get(self, route):
+            if route == 'repos/lindayi/hermes-mobile':
+                return {'id': 1399942965}
+            if route == 'user':
+                return {'id': 5164171}
+            if route == 'repos/lindayi/hermes-mobile/commits/main':
+                return {'sha': BASE}
+            if route == 'repos/lindayi/hermes-mobile/pulls/16':
+                return self.pull
+            raise AssertionError(f'Unexpected API read: {route}')
+
+        def get_all(self, route, *, collection=None):
+            if route.startswith('repos/lindayi/hermes-mobile/issues?'):
+                return [self.issue]
+            if route.startswith('repos/lindayi/hermes-mobile/issues/16/comments?'):
+                return [self.comment]
+            raise AssertionError(f'Unexpected API list: {route}')
+
+    coordinator_state = tmp_path / 'coordinator' / 'state.json'
+    seed = StateStore(coordinator_state)
+    seed.enroll({
+        'issue': 16, 'comment': 123, 'head': 'a' * 40, 'base': BASE,
+        'pull_id': 160000016, 'pull_node_id': 'PR_node_16',
+        'repository_id': 1399942965, 'last_open_seen': True,
+    })
+    source_paths = LifecycleSourcePaths(
+        notifications=consumer_paths,
+        starter_state=tmp_path / 'starter-state.json',
+    )
+    assert main(
+        ['--once', '--apply', '--state', str(coordinator_state)],
+        api_factory=ClosedPullApi,
+        store_factory=StateStore,
+        lifecycle_source_paths_factory=lambda: source_paths,
+    ) == 0
+    capsys.readouterr()
+
+    unchanged_export = export_path.read_bytes()
+    payload = json.loads(unchanged_export)
+    assert {item['reason'] for item in payload['events']} >= {'merged', 'controller_verified'}
+    now = datetime.now(timezone.utc)
+    assert adapter.process(consumer_paths, now=now)['writes'] is False
+    assert adapter.process(consumer_paths, apply=True, now=now)['inbox_items'] == 2
+    assert adapter.process(consumer_paths, apply=True, now=now)['inbox_items'] == 0
+    assert export_path.read_bytes() == unchanged_export
+    with sqlite3.connect(inbox) as db:
+        recipients = db.execute('SELECT DISTINCT user_id FROM inbox').fetchall()
+        assert recipients == [('owner-user',)]
+        assert db.execute('SELECT count(*) FROM inbox').fetchone() == (2,)
+    assert notifications.list_inbox('member-user') == []
+    assert state_dir == consumer_paths.config.parent / 'app-state'
+
+
 @pytest.mark.parametrize('change', [
     {'version': True}, {'version': 2.0}, {'version': 1}, {'version': 3},
     {'risk': []}, {'risk': 'other'}, {'risk': None},

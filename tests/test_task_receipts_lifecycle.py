@@ -1,0 +1,210 @@
+from datetime import datetime, timezone
+
+import pytest
+
+from deploy.task_receipts import (
+    ReceiptError, find_receipt, receipt_instruction, validate_task_receipt,
+)
+
+
+NOW = datetime.fromisoformat("2026-10-01T12:06:00+00:00")
+NONCE = "sQb2j8J_Wac6hJ5sU1ZWVwO4GdI1xC7r8sVZgg"
+TASK_ID = "task-123"
+SESSION_ID = "session-456"
+HEAD = "a" * 40
+BASE = "b" * 40
+
+
+def receipt_body(result="ready"):
+    return (
+        "Hermes-Task-Receipt: v1\n"
+        f"nonce={NONCE}\n"
+        f"task={TASK_ID}\n"
+        f"session={SESSION_ID}\n"
+        "pr=16\n"
+        f"start_head={HEAD}\n"
+        f"head={HEAD}\n"
+        f"base={BASE}\n"
+        f"result={result}"
+    )
+
+
+def receipt(*, author_id=198982749, body=None, created="2026-10-01T12:05:00Z",
+            updated=None):
+    return {
+        "id": 777,
+        "user": {"id": author_id},
+        "body": receipt_body() if body is None else body,
+        "created_at": created,
+        "updated_at": created if updated is None else updated,
+    }
+
+
+def parse(comments, *, complete=True, nonce=NONCE, task_id=TASK_ID, session_id=SESSION_ID):
+    return find_receipt(
+        comments,
+        complete=complete,
+        nonce=nonce,
+        task_id=task_id,
+        session_id=session_id,
+        pull_number=16,
+        start_head=HEAD,
+        head_sha=HEAD,
+        base_sha=BASE,
+        task_created_at="2026-10-01T12:00:00Z",
+        session_created_at="2026-10-01T12:01:00Z",
+        session_completed_at="2026-10-01T12:05:30Z",
+        now=NOW,
+    )
+
+
+def test_receipt_is_full_exact_and_bound_to_task_session_pr_and_heads():
+    assert parse([receipt()])["result"] == "ready"
+    assert "nonce=" in receipt_instruction(NONCE)
+    assert "task=" in receipt_instruction(NONCE)
+
+
+@pytest.mark.parametrize("comment_id", [None, True, 0, -1, "777"])
+def test_receipt_requires_a_positive_numeric_comment_identity(comment_id):
+    item = receipt()
+    item["id"] = comment_id
+
+    with pytest.raises(ReceiptError):
+        parse([item])
+
+
+@pytest.mark.parametrize("field,value", [
+    ("task", "other-task"),
+    ("session", "other-session"),
+    ("pr", "17"),
+    ("start_head", "c" * 40),
+    ("head", "c" * 40),
+    ("base", "c" * 40),
+])
+def test_receipt_rejects_a_mismatched_binding(field, value):
+    body = receipt_body().replace(
+        f"{field}=" + {
+            "task": TASK_ID,
+            "session": SESSION_ID,
+            "pr": "16",
+            "start_head": HEAD,
+            "head": HEAD,
+            "base": BASE,
+        }[field],
+        f"{field}={value}",
+    )
+    with pytest.raises(ReceiptError):
+        parse([receipt(body=body)])
+
+
+def test_receipt_ignores_other_authors_and_rejects_copied_or_edited_receipts():
+    assert parse([receipt(author_id=123)]) is None
+    copied = "quoted receipt:\n" + receipt_body()
+    with pytest.raises(ReceiptError):
+        parse([receipt(body=copied)])
+    with pytest.raises(ReceiptError):
+        parse([receipt(updated="2026-10-01T12:05:10Z")])
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"created": "2026-10-01T11:59:59Z"},
+    {"created": "2026-10-01T12:05:31Z"},
+    {"created": "2026-10-01T12:06:01Z"},
+])
+def test_receipt_must_be_within_documented_task_session_and_current_times(kwargs):
+    with pytest.raises(ReceiptError):
+        parse([receipt(**kwargs)])
+
+
+def test_incomplete_pages_or_conflicting_receipts_never_yield_success():
+    with pytest.raises(ReceiptError):
+        parse([receipt()], complete=False)
+    with pytest.raises(ReceiptError):
+        parse([receipt(), receipt(body=receipt_body("policy_broken"))])
+
+
+def test_only_closed_result_codes_are_accepted():
+    with pytest.raises(ReceiptError):
+        parse([receipt(body=receipt_body("success"))])
+
+
+@pytest.mark.parametrize("field", ["nonce", "task_id", "session_id"])
+@pytest.mark.parametrize("invalid", ["", " \t\n", None, 123, True, {}, []])
+def test_receipt_rejects_blank_or_nonstring_identity(field, invalid):
+    expected = {"nonce": NONCE, "task_id": TASK_ID, "session_id": SESSION_ID}
+    body = receipt_body().replace(expected[field], str(invalid))
+    with pytest.raises(ReceiptError, match="identity is incomplete"):
+        parse([receipt(body=body)], **{field: invalid})
+
+
+@pytest.fixture
+def completed_task_binding():
+    owner = {"id": 5164171}
+    repository = {"id": 1399942965}
+    action = {
+        "issue": 16, "task_id": TASK_ID, "dispatch_nonce": NONCE,
+        "task_created_at": "2026-10-01T12:00:00Z",
+        "owner_id": owner["id"], "repository_id": repository["id"],
+        "pull_id": 160000016, "pull_node_id": "PR_node_16",
+        "head_ref": "topic", "head": HEAD,
+    }
+    task = {
+        "id": TASK_ID, "state": "completed", "creator": owner, "owner": owner,
+        "repository": repository, "created_at": action["task_created_at"],
+        "updated_at": "2026-10-01T12:05:30Z",
+        "artifacts": [
+            {"provider": "github", "type": "branch",
+             "data": {"head_ref": "topic", "base_ref": "main"}},
+            {"provider": "github", "type": "pull",
+             "data": {"id": action["pull_id"], "global_id": action["pull_node_id"]}},
+        ],
+        "sessions": [{
+            "id": SESSION_ID, "task_id": TASK_ID, "state": "completed",
+            "user": owner, "owner": owner, "repository": repository,
+            "head_ref": "topic", "base_ref": "main", "prompt": receipt_instruction(NONCE),
+            "created_at": "2026-10-01T12:01:00Z",
+            "completed_at": "2026-10-01T12:05:30Z",
+        }],
+    }
+    pull = {"number": 16, "id": action["pull_id"], "node_id": action["pull_node_id"],
+            "head": {"sha": HEAD}, "base": {"sha": BASE}}
+    return task, action, pull
+
+
+@pytest.mark.parametrize("field", ["task_id", "session_id", "nonce"])
+@pytest.mark.parametrize("invalid", ["", " \t\n", None, 123, True, {}, []])
+def test_completed_task_rejects_blank_or_nonstring_identity(completed_task_binding, field, invalid):
+    task, action, pull = completed_task_binding
+    session = task["sessions"][0]
+    if field == "task_id":
+        task["id"] = action["task_id"] = session["task_id"] = invalid
+    elif field == "session_id":
+        session["id"] = invalid
+    else:
+        action["dispatch_nonce"] = invalid
+        session["prompt"] = receipt_instruction(invalid)
+    expected = {"nonce": NONCE, "task_id": TASK_ID, "session_id": SESSION_ID}
+    body = receipt_body().replace(expected[field], str(invalid))
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, [receipt(body=body)], now=NOW)
+
+
+def test_completed_task_accepts_complete_exact_returned_identities(completed_task_binding):
+    task, action, pull = completed_task_binding
+    # IDs are opaque: retain the entire returned value, without normalization.
+    task_id = "task_01234567-89ab-cdef-0123-456789abcdef"
+    session_id = "session_abcdef01-2345-6789-abcd-ef0123456789"
+    task["id"] = action["task_id"] = task["sessions"][0]["task_id"] = task_id
+    task["sessions"][0]["id"] = session_id
+    body = receipt_body().replace(TASK_ID, task_id).replace(SESSION_ID, session_id)
+    assert validate_task_receipt(task, action, pull, [receipt(body=body)], now=NOW) == {
+        "result": "ready", "comment_id": 777,
+        "created_at": "2026-10-01T12:05:00Z", "body": body,
+        "task_id": task_id, "session_id": session_id, "nonce": NONCE,
+        "start_head": HEAD, "head": HEAD, "base": BASE,
+    }
+    for identity in (task_id, session_id):
+        with pytest.raises(ReceiptError):
+            validate_task_receipt(
+                task, action, pull, [receipt(body=body.replace(identity, identity[:-1]))], now=NOW,
+            )

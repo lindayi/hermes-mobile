@@ -545,7 +545,9 @@ class Coordinator:
         user = command.get("user") if isinstance(command, dict) else None
         if (not isinstance(command, dict) or command.get("body") != COMMAND
                 or not isinstance(user, dict) or user.get("id") != OWNER_ID
-                or command.get("created_at") != record.get("accepted_at")):
+                or command.get("created_at") != record.get("accepted_at")
+                or _parse_time(command.get("created_at")) is None
+                or command.get("updated_at") != command.get("created_at")):
             raise CoordinatorError("Owner issue command evidence could not be verified")
         timeline = _all_pages(
             self.api, f"repos/{REPOSITORY}/issues/{number}/timeline",
@@ -715,7 +717,8 @@ class Coordinator:
             if (key is None or key in state["commands"]
                     or comment.get("body") != COMMAND
                     or not isinstance(user, dict) or type(user.get("id")) is not int
-                    or user["id"] != OWNER_ID or created is None):
+                    or user["id"] != OWNER_ID or created is None
+                    or comment.get("updated_at") != created_at):
                 continue
             if reopen_at is not None and created <= reopen_at:
                 continue
