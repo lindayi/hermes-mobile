@@ -684,7 +684,9 @@ def test_completed_bound_task_marks_its_draft_pr_ready_and_enrolls_once(tmp_path
 
     body = enrollment[0]
     pull_issue = {"number": 41, "pull_request": {"url": "pull/41"}}
-    owner_comment = {"id": 9101, "user": {"id": OWNER_ID}, "body": body}
+    owner_comment = next(comment for comment in api.comments if comment["id"] == 9101)
+    assert owner_comment["body"] == body
+    assert owner_comment["created_at"] == owner_comment["updated_at"]
     handoff = enrollment_from_comment(
         pull_issue, api.pulls[0], owner_comment,
     )

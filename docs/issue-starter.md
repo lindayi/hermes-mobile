@@ -166,7 +166,7 @@ restart, and replay. There is no absent-consumer skip or external source overrid
 HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
   python3 scripts/test.py python -- \
     tests/test_issue_starter.py tests/test_issue_starter_unit.py \
-    tests/test_issue_starter_comment_proofs.py \
+    tests/test_issue_starter_comment_proofs.py tests/test_issue_starter_remote_identities.py \
     tests/test_issue_starter_handoff.py tests/test_issue_starter_paired_lifecycle.py \
     tests/test_cloud_coordinator.py tests/test_cloud_coordinator_unit.py \
     tests/test_cloud_coordinator_latest_review.py \
