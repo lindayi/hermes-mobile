@@ -16,6 +16,7 @@ V2_TRANSPORT_MAX_BYTES = 8192
 V2_TRANSPORT_MAX_LINES = 64
 REVIEW_REPORT_SCHEMA = "hermes-independent-review-report-v1"
 REVIEW_REPORT_HEADER = "Hermes-Review-Anchor: "
+REVIEW_REPORT_ROLE = "independent-reviewer"
 REVIEW_REPORT_VERDICTS = {"pass", "changes_requested"}
 MAX_REVIEW_REPORT_BYTES = 8192
 MAX_REVIEW_REPORT_LINES = 64
@@ -284,11 +285,13 @@ def _reply_transport_json(body, *, anchor_prefix):
 
 
 def _valid_review_report(report, *, nonce, session_id, pull_number, head_sha, base_sha,
-                         source_start_head, source_session_id, source_comment_id):
+                         source_start_head, source_session_id, source_comment_id,
+                         anchor_comment_id):
     if not isinstance(report, dict):
         return None
     if set(report) != {
         "schema", "nonce", "session_id", "repository", "repository_id", "pr",
+        "anchor_comment_id", "role",
         "head", "base", "source_start_head", "source_session_id",
         "source_comment_id", "verdict", "summary", "findings", "files", "report",
     }:
@@ -300,6 +303,8 @@ def _valid_review_report(report, *, nonce, session_id, pull_number, head_sha, ba
             or report.get("repository") != "lindayi/hermes-mobile"
             or report.get("repository_id") != 1399942965
             or report.get("pr") != pull_number
+            or report.get("anchor_comment_id") != anchor_comment_id
+            or report.get("role") != REVIEW_REPORT_ROLE
             or report.get("head") != head_sha
             or report.get("base") != base_sha
             or report.get("source_start_head") != source_start_head
@@ -332,8 +337,8 @@ def _valid_review_report(report, *, nonce, session_id, pull_number, head_sha, ba
 
 def find_review_report(comments, *, complete, anchor_prefix, nonce, session_id,
                        pull_number, head_sha, base_sha, source_start_head,
-                       source_session_id, source_comment_id, session_created_at,
-                       session_completed_at, now):
+                       source_session_id, source_comment_id, anchor_comment_id,
+                       session_created_at, session_completed_at, now):
     if (complete is not True or not isinstance(comments, list)
             or len(comments) > 10000
             or not all(isinstance(comment, dict) for comment in comments)
@@ -342,6 +347,7 @@ def find_review_report(comments, *, complete, anchor_prefix, nonce, session_id,
                 nonce, session_id, source_session_id,
             ))
             or type(source_comment_id) is not int or source_comment_id <= 0
+            or type(anchor_comment_id) is not int or anchor_comment_id <= 0
             or type(pull_number) is not int or pull_number < 1
             or any(not isinstance(value, str) or SHA_RE.fullmatch(value) is None
                    for value in (head_sha, base_sha, source_start_head))):
@@ -375,6 +381,7 @@ def find_review_report(comments, *, complete, anchor_prefix, nonce, session_id,
             source_start_head=source_start_head,
             source_session_id=source_session_id,
             source_comment_id=source_comment_id,
+            anchor_comment_id=anchor_comment_id,
         )
         if report is None:
             raise ReceiptError("Review report fields or bindings do not match")

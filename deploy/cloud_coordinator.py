@@ -656,7 +656,9 @@ def review_task_request(snapshot, source_action, anchor_comment_id, anchor_prefi
         f"\"nonce\":\"{nonce}\","
         "\"session_id\":\"COPILOT_AGENT_SESSION_ID\","
         f"\"repository\":\"{REPOSITORY}\",\"repository_id\":{REPOSITORY_ID},"
-        f"\"pr\":{snapshot['issue']},\"head\":\"{snapshot['head']}\","
+        f"\"pr\":{snapshot['issue']},\"anchor_comment_id\":{anchor_comment_id},"
+        "\"role\":\"independent-reviewer\","
+        f"\"head\":\"{snapshot['head']}\","
         f"\"base\":\"{snapshot['main_sha']}\","
         f"\"source_start_head\":\"{source_action['head']}\","
         f"\"source_session_id\":\"{source_action['receipt_session_id']}\","
@@ -2237,6 +2239,7 @@ class Coordinator:
             source_start_head=action["source_start_head"],
             source_session_id=action["source_session_id"],
             source_comment_id=action["source_comment_id"],
+            anchor_comment_id=action["anchor_comment_id"],
             session_created_at=session["created_at"],
             session_completed_at=session["completed_at"],
             now=datetime.fromtimestamp(self.clock(), timezone.utc),
