@@ -3,6 +3,7 @@ import importlib.util
 import json
 import sys
 import threading
+import time
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -18,6 +19,11 @@ class Base:
         self._stopping_run_ids = set()
     async def _handle_capabilities(self, request):
         return web.json_response({'features': {'runs': True}})
+    def _http_route_table(self):
+        return []
+    async def _handle_get_run(self, request):
+        run_id = request.match_info['run_id']
+        return web.json_response(self._run_statuses.get(run_id, {}))
     def _check_auth(self, request):
         return None
     async def _read_json_body(self, request):
@@ -141,6 +147,44 @@ def attach(a, agent):
     result = a._create_agent(tool_progress_callback=callback, stream_delta_callback=lambda text: None)
     a._active_run_agents['r'] = result
     return result
+
+
+def test_clarification_callback_waits_for_answer_and_returns_tool_result(registry):
+    async def check():
+        a = adapter()
+        agent = SimpleNamespace(steer=lambda text: True, clear_interrupt=lambda: True,
+                                run_conversation=lambda: {})
+        attach(a, agent)
+        assert callable(agent.clarify_callback)
+        result = {}
+        started = threading.Event()
+
+        def tool_call():
+            from tools.clarify_tool import clarify_tool
+            started.set()
+            result['value'] = clarify_tool(
+                'Which option?', ['Keep current', 'Change it'], callback=agent.clarify_callback)
+
+        worker = threading.Thread(target=tool_call)
+        worker.start()
+        assert started.wait(1)
+        q = a._run_streams['r']
+        event = await asyncio.wait_for(q.get(), timeout=1)
+        assert event['event'] == 'run.clarification'
+        assert event['status'] == 'pending'
+        assert event['question'] == 'Which option?'
+        assert event['choices'] == ['Keep current', 'Change it']
+        assert not result
+        response = await a._handle_clarification_answer(SimpleNamespace(
+            match_info={'run_id': 'r', 'question_id': event['question_id']},
+            body={'answer': 'Change it', 'other': False}))
+        assert json.loads(response.text)['status'] == 'answered'
+        await asyncio.to_thread(worker.join, 1)
+        assert not worker.is_alive()
+        assert json.loads(result['value'])['user_response'] == 'Change it'
+        assert a._run_statuses['r']['status'] == 'running'
+        assert len(a._run_streams) == 1
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize('ending', ['completed', 'failed', 'cancelled', 'exception'])
