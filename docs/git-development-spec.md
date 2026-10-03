@@ -47,13 +47,15 @@ naming are separate PRs after migration.
 ## Test environments
 
 Hosted GitHub Actions verifies syntax, secrets, JavaScript/browser tests and the
-portable Python partition without credentials or production access. Once the
-native CI dependency is present on main, `source-ci` also requires the complete
-public native suite and exact generated-artifact evidence. Before the owner-verified
-cutover, exact-head integration status requires both hosted `source-ci` and the
-entire residual host partition through managed `scripts/ci_tests.py host`. After
-cutover, installed/private compatibility remains required at guarded exact-main
-deployment, not by executing public PR code on a production host. See
+portable Python partition without credentials or production access. `source-ci`
+requires the complete hosted native suite and exact generated-artifact evidence.
+The automatically emitted exact-head `integration-tests` check succeeds only when
+the same-run complete `source-ci` aggregate succeeds; this hosted result gates
+merging in every phase. The residual host-only compatibility partition is not
+premerge PR evidence. The full `.github/host-tests.json` suite remains required
+inside guarded exact-main deployment against the verified staged source and
+artifact, before activation; a compatibility failure blocks activation. Never
+execute public PR code on a production host. See
 `hosted-ci-spec.md` and `autonomy-policy.md`. No production-host self-hosted
 Actions runner executes public PR code automatically. Main merges trigger CI, not
 deployment. Release staging retains its conservative full test gate until

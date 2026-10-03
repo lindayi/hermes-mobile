@@ -176,6 +176,19 @@ can remain eligible if app cleanup fails even when the legacy failure lands.
 | --- | --- |
 | `.github/workflows/issue-link.yml` | `dd722de884fba6c9d613a72baee43f3b81d2d6816954f6a8e77d972b0fd1eafc` |
 
+Issue #75 adds the automatic hosted `integration-tests` job and extends the exact
+successful source-run job contract. The job depends on `source-ci`, always evaluates
+its result, and succeeds only when the complete aggregate succeeds in that same
+workflow run and attempt. Main attestation depends on both gates. These candidate
+fingerprints are derived from the actual final workflow and verifier bytes; they do
+not claim that this candidate has passed hosted CI, been independently reviewed, or
+been activated.
+
+| Issue #75 candidate path | SHA-256 |
+| --- | --- |
+| `.github/workflows/ci.yml` | `5a1b1a694d286d5f8a1a4188802af7e8f6ab46855d278224d9f248cccec844d9` |
+| `deploy/release_artifact.py` | `ef47db3b7fa3e4805488ea4c941e770f26b6256842ad26ffb210476e5f86e721` |
+
 The coordinator's exact 37-file static closure includes the PR57 shared canonical
 handoff proof leaf; the fixed 80-file dependency inventory remains explicit. Shared backend
 dependencies keep their existing blocker labels. The five
@@ -374,17 +387,23 @@ current-main readback. Readiness requires:
 - A hosted `native` job on GitHub-hosted Ubuntu that runs the managed native test
   suite, is a direct dependency of the `always()` `source-ci` aggregate, and is
   included in its exact fail-closed result set.
+- An always-evaluated `integration-tests` job directly depending on `source-ci`,
+  which fails unless that same-run result is `success`; main attestation depends on
+  both checks. Its job result and every source job remain bound to the exact run,
+  attempt and head SHA.
 - The complete public hosted build, checks, JavaScript, portable Python, browser
   and native job contract; browser shards consume the exact generated artifact.
-  `deploy/release_artifact.py` must require the matching complete job set and exact
-  main-source provenance, including native success.
+  `deploy/release_artifact.py` must require the exact set including
+  `integration-tests` and exact main-source provenance, including hosted gate success.
 - A successful `push` workflow run for the same current main SHA, complete unique
   successful jobs for that attempt, an unexpired same-attempt artifact, and
   verified GitHub-hosted provenance bound to this repository, workflow, ref,
   source/signer SHA and run attempt.
 - The installed host manifest and guarded deployment path must remain intact.
-  Exact-main deployment continues to run the private/installed compatibility gate;
-  untrusted PR code is never sent to a production or self-hosted runner.
+  Exact-main deployment runs the full private/installed compatibility gate against
+  the verified staged source and artifact before activation; a failure blocks
+  activation. This is not PR-head evidence, and untrusted PR code is never sent to a
+  production or self-hosted runner.
 - Actual fixed-repository branch-protection readback with strict up-to-date checks,
   administrator enforcement and resolved-conversation protection.
 - The fixed repository/coordinator identities and a complete exact-head review

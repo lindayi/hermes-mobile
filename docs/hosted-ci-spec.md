@@ -41,18 +41,21 @@ Current staging intentionally includes `.github`, covered separately by
    exercise generated assets built from the checked-out revision. No raw runner
    bypass, blind retries, increased gesture thresholds or assertion removal.
 5. The required `source-ci` aggregate fails on failed, cancelled, skipped or missing
-   `native` or any other constituent job. Release evidence pins the exact required
-   job set for the exact successful main workflow attempt. Server compatibility and
-   independent agent review remain separate exact-head gates. Existing required
-   gates are not weakened during migration.
+   `native` or any other constituent job. An always-evaluated `integration-tests`
+   job depends on that aggregate and succeeds only when its result is successful in
+   the same workflow run; release evidence pins this additional job in the exact
+   complete job set for the exact successful main attempt. The full host-only
+   compatibility partition is a guarded exact-main deployment gate before
+   activation, not PR-head evidence. Independent agent review remains a separate
+   exact-head gate. Existing test coverage and required checks are retained.
 6. Failures expose useful bounded synthetic logs/screenshots with short retention;
    never upload native homes, databases, credentials or host operator files.
 7. Small managed RED/GREEN tests verify partitioning, shard union/disjointness,
    validation, concurrency, native failure blocking and workflow gate contracts.
    Real GitHub Actions runs prove native provisioning and hosted suites. The native
    reconstruction proves public-source reproducibility, not installed production
-   compatibility; local validation still runs the complete residual host suite
-   plus focused regressions, not another broad full suite.
+   compatibility. Local iteration uses focused regressions; guarded exact-main
+   deployment runs the complete residual host partition before activation.
 8. Formal independent review, follow-up commits and exact-head gates precede
    protected merge. Reconcile intervening main changes without dropping parallel
    work, then remove only this task's merged branch/worktree and scratch.
@@ -65,6 +68,7 @@ release provenance, drain/gating, live checks and rollback protections remain.
 Any reuse of hosted evidence by the release path must bind successful trusted
 workflow results to the exact source and generated asset bytes; absent verified
 evidence must fail closed or use the existing full validation, never skip it.
-The hosted native job does not replace the installed/private host suite or its
-required `integration-tests` gate. A successful hosted aggregate alone is not
-evidence that installed production files, private operators or live services work.
+The hosted native job does not replace installed/private host compatibility or prove
+that deployed files, private operators or live services work. The matching
+`integration-tests` result is hosted merge evidence only; it does not establish
+deployment compatibility.

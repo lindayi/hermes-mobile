@@ -81,15 +81,15 @@ runner capabilities on the revision being integrated, not a pending PR's promise
 The active required contexts are `source-ci` (Actions app 15368),
 `integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), with
 strict/up-to-date checks and required conversation resolution. `cloud-review` is
-advisory and is not a substitute for any required context. Integration requires
-complete matching hosted results plus all residual host tests listed in
-`.github/host-tests.json` through `scripts/ci_tests.py host` on the same exact head SHA.
-Verify coverage, configuration and successful results against that revision's
-documented partition; file presence, dependency setup, selected tests, or a partial
-hosted pass alone are not full integration. If the documented partition is
-unavailable, conservatively use the existing managed `all` suite on a compatible
-isolated host (`python3 scripts/test.py all`, with Python selected through
-`HERMES_TEST_PYTHON` or the repository `.venv`).
+advisory and is not a substitute for any required context. The automatic
+`integration-tests` job succeeds only when the same-run `source-ci` aggregate
+confirms every hosted build, Python, JavaScript, browser and native job succeeded.
+Verify this actual check on the same exact head SHA; local tests, selected subsets, dependency
+setup, or a partial hosted pass cannot replace it. Host-only compatibility is not
+run on PR heads. The complete `.github/host-tests.json` partition must run through
+`scripts/ci_tests.py host` against verified exact-main staged source and artifact
+inside guarded deployment before activation; failure blocks activation. Never
+execute PR code on a production or self-hosted runner.
 
 The four active contexts above govern protected auto-merge and source consistency.
 Independent technical acceptance additionally requires the latest authenticated,
@@ -139,8 +139,9 @@ authorization.
 
 Use follow-up fix commits, reply in actual GitHub threads with the fix SHA and test
 evidence, and check findings before resolving them. Publish `agent-review` only
-after verifying the independent review of that head. Publish
-`integration-tests` only after verifying complete final integration. Require resolved review threads
+after verifying the independent review of that head. Verify the automatically
+emitted `integration-tests` result is bound to that exact head and its same-run
+`source-ci` aggregate succeeded. Require resolved review threads
 and a branch current with freshly fetched `origin/main` before merging through
 GitHub. No owner/admin bypass; never self-approve, fabricate approvals, review/test
 statuses or identities, bypass protections, or write directly to `main`. Report

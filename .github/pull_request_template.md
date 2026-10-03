@@ -66,7 +66,7 @@ The branch is current with freshly fetched origin/main. Any conflicts preserve b
 
 The exact required contexts source-ci (Actions app 15368), integration-tests, agent-review, and issue-link (Actions app 15368) are verified on the exact head. cloud-review is advisory, not required or synthesized. New commits invalidate old-head authority and status evidence:
 
-Complete hosted source-ci and residual host coverage pass on the same head. Installed and private host compatibility remains a guarded exact-main deployment gate, not PR execution:
+The exact-head integration-tests job and its same-run complete hosted source-ci aggregate pass. Host-only compatibility is not PR-head evidence; the complete installed/private host suite remains a guarded exact-main deployment gate before activation:
 
 No owner or administrator bypass, self-approval, fabricated approvals, statuses, or identities, or direct writes to main:
 
