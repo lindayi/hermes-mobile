@@ -157,6 +157,10 @@ _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
 }
 
+_PENDING_ISSUE67_WORKFLOW_FIXTURE = {
+    '.github/workflows/issue-link.yml': '730d21e8281ec2b06c736b6d3088a594c544257d256848f1bc32c12b9eb79340',
+}
+
 
 # Accepted PR45 candidate overlay; historical merged-main fixture stays intact.
 _PENDING_PR45_NAMING_FIXTURE = {
@@ -170,7 +174,7 @@ def _source_files():
             | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE
             | _ISSUE46_OBSERVER_FIXTURE | _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
             | _PENDING_ISSUE50_RECEIPT_FIXTURE | _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
-            | _PENDING_PR45_NAMING_FIXTURE)
+            | _PENDING_ISSUE67_WORKFLOW_FIXTURE | _PENDING_PR45_NAMING_FIXTURE)
 
 
 def _source_ci():
@@ -538,6 +542,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE)
     pending |= set(_PENDING_ISSUE50_RECEIPT_FIXTURE)
     pending |= set(_PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE)
+    pending |= set(_PENDING_ISSUE67_WORKFLOW_FIXTURE)
     pending |= set(_PENDING_PR45_NAMING_FIXTURE)
     assert {path: SOURCE_FINGERPRINTS[path] for path in _PENDING_PR45_NAMING_FIXTURE
             } == _PENDING_PR45_NAMING_FIXTURE
@@ -582,6 +587,10 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
     } == _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
+    assert {
+        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
+        if path in _PENDING_ISSUE67_WORKFLOW_FIXTURE
+    } == _PENDING_ISSUE67_WORKFLOW_FIXTURE
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
