@@ -27,6 +27,7 @@ from deploy.cloud_coordinator import (
     required_checks_pass,
     repair_request,
     _is_owner_sensitive_command,
+    _required_checks,
 )
 from deploy.cloud_coordinator import _authorized_result_heads
 
@@ -91,6 +92,7 @@ def test_auto_merge_requires_strict_current_base_and_conversation_resolution(tmp
 OWNER = 5164171
 APP_OWNER_ID = "synthetic-mobile-owner"
 COPILOT_REVIEWER = 175728472
+COPILOT_AGENT = 198982749
 HEAD = "a" * 40
 BASE = "b" * 40
 RESULT_HEAD = "c" * 40
@@ -113,6 +115,7 @@ def valid_pr(**changes):
         "draft": False,
         "mergeable": True,
         "mergeable_state": "clean",
+        "user": {"id": COPILOT_AGENT},
         "head": {"sha": HEAD, "ref": "topic", "repo": {"id": 1399942965}},
         "base": {"sha": BASE, "ref": "main", "repo": {"id": 1399942965}},
     }
@@ -663,21 +666,18 @@ def test_review_races_fail_closed_at_each_consumer(tmp_path, phase, invalid):
 def test_current_main_source_ci_policy_still_fails_closed(tmp_path, source_state):
     class CurrentPolicy(FakeApi):
         def get(self, route):
-            value = super().get(route)
-            if route.endswith("/protection/required_status_checks"):
-                return value | {"contexts": [
-                    "source-ci", "integration-tests", "agent-review", "cloud-review",
-                ]}
-            return value
+            return super().get(route)
 
         def get_all(self, route, *, collection=None):
             values = super().get_all(route, collection=collection)
             if "/check-runs?" in route:
+                values = [run for run in values if run.get("name") != "source-ci"]
                 values += [{"name": name, "status": "completed", "conclusion": "success"}
-                           for name in ("Source checks", "agent-review")]
+                           for name in ("Source checks",)]
                 if source_state is not None:
                     values.append({
                         "name": "source-ci",
+                        "app": {"id": 15368},
                         "status": "in_progress" if source_state == "in_progress" else "completed",
                         "conclusion": None if source_state == "in_progress" else source_state,
                     })
@@ -721,6 +721,48 @@ def test_required_checks_need_complete_green_evidence_for_every_context():
           "created_at": "2026-10-01T12:00:00Z"}],
         complete=True,
     )
+
+
+@pytest.mark.parametrize("drift", [
+    None, "missing-context", "extra-context", "wrong-source-app",
+    "wrong-issue-app", "wrong-agent-app",
+])
+def test_required_policy_accepts_only_current_four_contexts_and_apps(drift):
+    checks = [
+        {"context": "source-ci", "app_id": 15368},
+        {"context": "integration-tests", "app_id": None},
+        {"context": "agent-review", "app_id": None},
+        {"context": "issue-link", "app_id": 15368},
+    ]
+    if drift == "missing-context":
+        checks.pop(2)
+    elif drift == "extra-context":
+        checks.append({"context": "cloud-review", "app_id": None})
+    elif drift == "wrong-source-app":
+        checks[0]["app_id"] = 15369
+    elif drift == "wrong-issue-app":
+        checks[-1]["app_id"] = None
+    elif drift == "wrong-agent-app":
+        checks[2]["app_id"] = 15368
+
+    class PolicyApi:
+        def get(self, route):
+            if route.endswith("/branches/main/protection"):
+                return {"required_conversation_resolution": {"enabled": True}}
+            if route.endswith("/branches/main/protection/required_status_checks"):
+                return {"checks": checks, "strict": True}
+            if "/rules/branches/main?" in route:
+                return []
+            raise AssertionError(route)
+
+    required, complete, strict, conversations = _required_checks(PolicyApi())
+    assert complete is (drift is None)
+    assert strict and conversations
+    if drift is None:
+        assert {(check["context"], check["app_id"]) for check in required} == {
+            ("source-ci", 15368), ("integration-tests", None),
+            ("agent-review", None), ("issue-link", 15368),
+        }
 
 
 def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
@@ -802,7 +844,8 @@ def test_structured_owner_comment_accepts_review_without_copilot_approval():
     }, separators=(",", ":"))
     owner_review = {
         "id": 64001, "state": "COMMENTED", "commit_id": HEAD,
-        "submitted_at": "2026-10-01T12:10:00Z", "body": owner_body,
+        "submitted_at": "2026-10-01T12:10:00Z",
+        "updated_at": "2026-10-01T12:10:00Z", "body": owner_body,
         "user": {"id": OWNER},
     }
     copilot_comment = {
@@ -830,6 +873,29 @@ def test_structured_owner_comment_accepts_review_without_copilot_approval():
         HEAD, [owner_review, rejected], [],
         pull_author_id=198982749, reviews_complete=True, threads_complete=True,
     )
+
+
+def test_owner_comment_only_four_check_gate_replays_without_duplicate_dispatch(tmp_path):
+    api = FakeApi()
+    api.review_state = "COMMENTED"
+    path = tmp_path / "state.json"
+
+    first = _managed_cycle(api, path)["pull_requests"][0]
+    assert first["review_valid"] and first["required_checks_green"]
+    assert first["auto_merge_eligible"]
+    assert api.graphql_writes
+    assert api.fix_attempts == 0
+    assert not api.requested_reviewers
+    assert not any("/statuses/" in route for route, _ in api.writes)
+
+    writes = list(api.writes)
+    merge_writes = list(api.graphql_writes)
+    second = _managed_cycle(api, path)["pull_requests"][0]
+    assert second["review_valid"] and second["required_checks_green"]
+    assert api.graphql_writes == merge_writes
+    assert api.writes == writes
+    assert api.fix_attempts == 0
+    assert not api.requested_reviewers
 
 
 def test_repair_request_is_bounded_deduplicable_and_uses_only_actionable_evidence():
@@ -1073,7 +1139,7 @@ class FakeApi:
         self.owner_review_id = 64001
         self.owner_review_body = json.dumps({
             "schema": "hermes-independent-agent-review-v1",
-            "reviewed_head_sha": authorize_sha,
+            "reviewed_head_sha": authorize_sha if authorize_sha is not None else head_sha,
             "review_method": "independent-agent",
             "verdict": "pass",
             "evidence_sha256": "c" * 64,
@@ -1136,7 +1202,12 @@ class FakeApi:
             return {"users": list(self.requested_reviewers), "teams": []}
         if route.endswith("/branches/main/protection/required_status_checks"):
             return {
-                "contexts": ["integration-tests", "cloud-review"],
+                "checks": [
+                    {"context": "source-ci", "app_id": 15368},
+                    {"context": "integration-tests", "app_id": None},
+                    {"context": "agent-review", "app_id": None},
+                    {"context": "issue-link", "app_id": 15368},
+                ],
                 "strict": self.strict_protection,
             }
         if urlparse(route).path.endswith("/rules/branches/main"):
@@ -1181,23 +1252,29 @@ class FakeApi:
                 "submitted_at": self.review_submitted_at,
                 "user": {"id": COPILOT_REVIEWER},
             }]
-            if self.authorize_sha_review:
-                reviews.append({
-                    "id": self.owner_review_id, "state": "COMMENTED",
-                    "commit_id": self.authorize_sha, "submitted_at": "2026-10-01T11:00:00Z",
-                    "body": self.owner_review_body, "user": {"id": OWNER},
-                })
+            reviews.append({
+                "id": self.owner_review_id, "state": "COMMENTED",
+                "commit_id": self.authorize_sha if self.authorize_sha_review else self.head_sha,
+                "submitted_at": "2026-10-01T11:00:00Z",
+                "updated_at": "2026-10-01T11:00:00Z",
+                "body": self.owner_review_body, "user": {"id": OWNER},
+            })
             return reviews
         if f"/commits/{self.head_sha}/check-runs?" in route:
-            if self.pending_required:
-                return [{
-                    "name": "integration-tests", "status": "in_progress",
-                    "conclusion": None,
-                }]
-            return [{
-                "name": "integration-tests", "status": "completed",
-                "conclusion": "success",
-            }]
+            return [
+                {
+                    "name": name,
+                    "app": {"id": app_id} if app_id is not None else {},
+                    "status": ("in_progress" if self.pending_required and name == "integration-tests"
+                               else "completed"),
+                    "conclusion": (None if self.pending_required and name == "integration-tests"
+                                   else "success"),
+                }
+                for name, app_id in (
+                    ("source-ci", 15368), ("integration-tests", None),
+                    ("agent-review", None), ("issue-link", 15368),
+                )
+            ]
         if route.endswith("/commits/" + self.head_sha + "/statuses?per_page=100"):
             if not self.review_status_present:
                 return []
@@ -4173,9 +4250,10 @@ def test_required_policy_preserves_classic_and_multiple_ruleset_sources():
         }} for app in (8, 9)
     ] + [{"type": "pull_request", "parameters": {"required_review_thread_resolution": False}}])
     required, complete, strict, conversations = _required_checks(api)
-    assert complete and strict and conversations
+    assert not complete and strict and conversations
     assert {(item["context"], item["app_id"]) for item in required} == {
-        ("legacy", None), ("bound", 7), ("bound", 8), ("bound", 9),
+        ("source-ci", 15368), ("integration-tests", None), ("agent-review", None),
+        ("issue-link", 15368), ("legacy", None), ("bound", 7), ("bound", 8), ("bound", 9),
     }
 
 

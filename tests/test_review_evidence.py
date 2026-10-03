@@ -156,7 +156,8 @@ def _independent_review_evidence():
     body_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
     review = {
         "id": review_id, "user": {"id": OWNER}, "commit_id": HEAD,
-        "state": "COMMENTED", "submitted_at": SUBMITTED, "body": body,
+        "state": "COMMENTED", "submitted_at": SUBMITTED,
+        "updated_at": SUBMITTED, "body": body,
     }
     authorization = {
         "actor_id": OWNER, "head_sha": HEAD, "state": "approved",
@@ -229,6 +230,11 @@ def test_current_independent_review_is_bound_to_latest_exact_unedited_record():
     assert current_independent_agent_review(
         [dict(review, updated_at="2026-10-01T12:31:00Z")],
         HEAD, owner_id=OWNER,
+    ) is None
+    missing_update = dict(review)
+    missing_update.pop("updated_at")
+    assert current_independent_agent_review(
+        [missing_update], HEAD, owner_id=OWNER,
     ) is None
     assert body == review["body"]
 

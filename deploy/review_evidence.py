@@ -82,10 +82,13 @@ def selected_independent_agent_review(reviews, head_sha, review_id, body_sha256,
     if not latest or len(latest) != 1:
         return None
     review = latest[0]
+    submitted = review_timestamp(review.get("submitted_at"))
+    updated_at = review_timestamp(review.get("updated_at"))
     body = review.get("body")
     if (review.get("id") != review_id or review.get("state") != "COMMENTED"
             or review.get("commit_id") != head_sha or not isinstance(body, str)
             or len(body) > MAX_INDEPENDENT_REVIEW_CHARS
+            or submitted is None or updated_at is None or updated_at != submitted
             or review.get("dismissed") is True
             or review.get("dismissed_at") not in (None, "")):
         return None
@@ -115,8 +118,8 @@ def current_independent_agent_review(
         return None
     review = latest[0]
     submitted = review_timestamp(review.get("submitted_at"))
-    updated_at = review.get("updated_at")
-    if updated_at is not None and review_timestamp(updated_at) != submitted:
+    updated_at = review_timestamp(review.get("updated_at"))
+    if submitted is None or updated_at is None or updated_at != submitted:
         return None
     body = review.get("body")
     if not isinstance(body, str):

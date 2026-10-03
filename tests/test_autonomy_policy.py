@@ -29,6 +29,7 @@ from deploy.autonomy_policy import (
     WORKFLOW_PATH,
     validate_transition,
 )
+from deploy.review_evidence import current_independent_agent_review
 from scripts.autonomy_policy import MAX_EVIDENCE, main as cli_main
 
 SHA = 'a' * 40
@@ -130,7 +131,7 @@ _PENDING_ISSUE43_LAUNCH_FIXTURE = {
     # PR57 paired proof plus issue #63 fail-closed boundary, independently literal.
     'deploy/issue_starter.py': '20603a350aa4c3972563010035a9faed8fcf086b251af847dbed7e4b32e900ca',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
-    'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
+    'deploy/review_evidence.py': '6828a01fbd09a75ff57b11e735f7a3c48e66909cbc74175d97307d554d201b4d',
     'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
     'scripts/issue_starter.py': '09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1',
     'scripts/workflow_notifications.py': '03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f',
@@ -149,7 +150,7 @@ _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE = {
 }
 
 _PENDING_ISSUE50_RECEIPT_FIXTURE = {
-    'deploy/cloud_coordinator.py': '4a94bd43f7d350cb8aaee08650726893e6775872e8af20f3a0c8f7f61127345d',
+    'deploy/cloud_coordinator.py': '2c1354f251fc12917e5051fa41413cb666314eeb8c5cff47c2d88d9cac88f4e1',
     'deploy/task_receipts.py': '60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb',
 }
 
@@ -214,6 +215,19 @@ def _source_ci():
 
 def _evidence():
     review_head = 'c' * 40
+    review_body = json.dumps({
+        'schema': 'hermes-independent-agent-review-v1',
+        'reviewed_head_sha': review_head,
+        'review_method': 'independent-agent',
+        'verdict': 'pass',
+        'evidence_sha256': 'c' * 64,
+    }, separators=(',', ':'))
+    review_body_sha256 = hashlib.sha256(review_body.encode('utf-8')).hexdigest()
+    selected_review = {
+        'review_id': 1, 'reviewer_id': OWNER_ID, 'head_sha': review_head,
+        'state': 'COMMENTED', 'body_sha256': review_body_sha256,
+        'evidence_sha256': 'c' * 64,
+    }
     return {
         'repository': {'id': REPOSITORY_ID, 'full_name': REPOSITORY},
         'main': {
@@ -225,28 +239,29 @@ def _evidence():
             'complete': True, 'strict': True, 'enforce_admins': True,
             'required_conversation_resolution': True,
             'required_checks': [
-                {'context': 'source-ci', 'app_id': None},
+                {'context': 'source-ci', 'app_id': 15368},
                 {'context': 'integration-tests', 'app_id': None},
                 {'context': 'agent-review', 'app_id': None},
                 {'context': 'issue-link', 'app_id': 15368},
             ],
         },
         'source_ci': _source_ci(),
-        'cloud_review': {
+        'independent_review': {
             'repository_id': REPOSITORY_ID, 'base_branch': 'main', 'base_sha': SHA,
             'state': 'open', 'draft': False,
             'pull_author_id': COPILOT_AGENT_ID,
             'head_sha': review_head, 'reviews_complete': True, 'threads_complete': True,
             'reviews': [{
-                'id': 1,
-                'user': {'id': COPILOT_REVIEWER_ID}, 'state': 'APPROVED',
+                'id': 2, 'user': {'id': COPILOT_REVIEWER_ID}, 'state': 'COMMENTED',
                 'commit_id': review_head, 'submitted_at': '2026-10-01T21:00:00Z',
+            }, {
+                'id': 1, 'user': {'id': OWNER_ID}, 'state': 'COMMENTED',
+                'commit_id': review_head, 'submitted_at': '2026-10-01T20:00:00Z',
+                'updated_at': '2026-10-01T20:00:00Z',
+                'body': review_body,
             }],
             'threads': [{'isResolved': True, 'comments_complete': True}],
-            'status': {
-                'context': 'cloud-review', 'state': 'success',
-                'head_sha': review_head, 'creator_id': OWNER_ID,
-            },
+            'selected_review': selected_review,
             'change': {'head_sha': review_head, 'files_complete': True, 'sensitive': False},
         },
     }
@@ -256,23 +271,12 @@ PHASES = ('pre-cutover', 'staging', 'post-cutover')
 
 
 def _phase_evidence(phase):
-    evidence = _evidence()
-    if phase == 'pre-cutover':
-        evidence['cloud_review'].pop('status')
-    else:
-        evidence['protection']['required_checks'][0]['app_id'] = 15368
-        evidence['protection']['required_checks'].append({'context': 'cloud-review', 'app_id': None})
-        if phase == 'post-cutover':
-            evidence['protection']['required_checks'] = [
-                check for check in evidence['protection']['required_checks']
-                if check['context'] not in ('integration-tests', 'agent-review')
-            ]
-    return evidence
+    return _evidence()
 
 
 def _sensitive_evidence(phase, state='COMMENTED'):
     evidence = _phase_evidence(phase)
-    review = evidence['cloud_review']
+    review = evidence['independent_review']
     head = review['head_sha']
     body = json.dumps({
         'schema': 'hermes-independent-agent-review-v1',
@@ -286,17 +290,19 @@ def _sensitive_evidence(phase, state='COMMENTED'):
         sensitive=True,
         owner_authorization={
             'actor_id': OWNER_ID, 'head_sha': head, 'state': 'approved',
-            'review_id': 2, 'body_sha256': body_sha256,
+            'review_id': 3, 'body_sha256': body_sha256,
         },
         targeted_review={
-            'review_id': 2, 'reviewer_id': OWNER_ID, 'head_sha': head,
+            'review_id': 3, 'reviewer_id': OWNER_ID, 'head_sha': head,
             'state': state, 'body_sha256': body_sha256, 'evidence_sha256': 'c' * 64,
         },
     )
     review['reviews'].append({
-        'id': 2, 'user': {'id': OWNER_ID}, 'commit_id': head, 'state': state,
-        'submitted_at': '2026-10-01T22:00:00Z', 'body': body,
+        'id': 3, 'user': {'id': OWNER_ID}, 'commit_id': head, 'state': state,
+        'submitted_at': '2026-10-01T23:00:00Z',
+        'updated_at': '2026-10-01T23:00:00Z', 'body': body,
     })
+    review['selected_review'] = review['change']['targeted_review']
     return evidence
 
 
@@ -799,15 +805,19 @@ def test_launch_roots_have_complete_fixed_closure_and_independent_unit_pins():
     (('source_ci', 'jobs_complete'), False, 'source-ci-jobs'),
     (('source_ci', 'artifact', 'expired'), True, 'release-artifact-evidence'),
     (('source_ci', 'artifact', 'attestation', 'verified'), False, 'release-attestation'),
-    (('cloud_review', 'reviews', 0, 'id'), True, 'cloud-review-approval'),
-    (('cloud_review', 'reviews', 0, 'submitted_at'), '2026-10-01T21:00:00', 'cloud-review-approval'),
-    (('cloud_review', 'reviews', 0, 'state'), 'COMMENTED', 'cloud-review-approval'),
-    (('cloud_review', 'reviews_complete'), False, 'cloud-review-evidence'),
-    (('cloud_review', 'threads', 0, 'isResolved'), False, 'cloud-review-threads'),
+    (('independent_review', 'reviews', 1, 'id'), True, 'independent-review'),
+    (('independent_review', 'reviews', 1, 'body'), 'malformed report', 'independent-review'),
+    (('independent_review', 'reviews_complete'), False, 'independent-review-evidence'),
+    (('independent_review', 'threads', 0, 'isResolved'), False, 'independent-review-threads'),
     (('protection', 'strict'), False, 'branch-protection'),
 ])
 def test_caller_flags_cannot_override_failed_components(phase, sensitive, claimed_ready, path, value, blocker):
     evidence = _sensitive_evidence(phase) if sensitive else _phase_evidence(phase)
+    sensitive_review_mutation = (
+        sensitive and path[:3] == ('independent_review', 'reviews', 1)
+    )
+    if sensitive_review_mutation:
+        path = path[:2] + (-1,) + path[3:]
     node = evidence
     for key in path[:-1]:
         node = node[key]
@@ -822,7 +832,7 @@ def test_caller_flags_cannot_override_failed_components(phase, sensitive, claime
     expected = {blocker}
     if path == ('main', 'current'):
         expected.add('main-source-missing')
-    if sensitive and path == ('cloud_review', 'reviews', 0, 'id'):
+    if sensitive and sensitive_review_mutation and path[-1] in {'id', 'body'}:
         expected.add('sensitive-review-authorization')
     assert validate_transition(evidence, phase=phase) == {
         'ready': False, 'phase': phase, 'blockers': sorted(expected),
@@ -843,25 +853,12 @@ def test_complete_synthetic_components_report_source_policy_ready(phase, sensiti
     assert evidence == before
 
 
-@pytest.mark.parametrize('source_app', [None, 15368])
-@pytest.mark.parametrize('published_status', [False, True])
-def test_pre_cutover_preserves_actual_four_checks_without_bootstrap_deadlock(source_app, published_status):
-    # Only protection mirrors the observed policy; all other records are synthetic.
+def test_all_phases_preserve_the_exact_four_checks():
     evidence = _evidence()
-    evidence['protection']['required_checks'] = [
-        {'context': 'source-ci', 'app_id': source_app},
-        {'context': 'integration-tests', 'app_id': None},
-        {'context': 'agent-review', 'app_id': None},
-        {'context': 'issue-link', 'app_id': 15368},
-    ]
-    if not published_status:
-        evidence['cloud_review'].pop('status')
-    before = copy.deepcopy(evidence)
-
-    assert validate_transition(evidence, phase='pre-cutover') == {
-        'ready': True, 'phase': 'pre-cutover', 'blockers': [],
-    }
-    assert evidence == before
+    for phase in PHASES:
+        assert validate_transition(evidence, phase=phase) == {
+            'ready': True, 'phase': phase, 'blockers': [],
+        }
 
 
 def test_missing_pending_pr16_source_cannot_satisfy_current_main_contract():
@@ -929,8 +926,8 @@ def test_missing_native_job_record_and_truncated_review_block():
     assert 'source-ci-jobs' in _blockers(evidence)
 
     evidence = _evidence()
-    evidence['cloud_review']['threads'][0]['comments_complete'] = False
-    assert 'cloud-review-threads' in _blockers(evidence)
+    evidence['independent_review']['threads'][0]['comments_complete'] = False
+    assert 'independent-review-threads' in _blockers(evidence)
 
 
 def test_missing_installed_host_gate_blocks():
@@ -1032,23 +1029,25 @@ def test_wrong_required_check_app_identity_or_partial_cutover_blocks():
     assert 'required-check-policy' in _blockers(evidence)
 
     evidence = _evidence()
+    evidence['protection']['required_checks'].remove(
+        {'context': 'integration-tests', 'app_id': None},
+    )
     assert 'required-check-policy' in _blockers(evidence, phase='post-cutover')
 
 
 @pytest.mark.parametrize('mutate', [
-    lambda review: review['reviews'][0].update(state='COMMENTED'),
-    lambda review: review['reviews'][0].update(commit_id='d' * 40),
+    lambda review: review['reviews'][1].update(body='edited review'),
+    lambda review: review['reviews'][1].update(commit_id='d' * 40),
     lambda review: review.update(reviews_complete=False),
     lambda review: review.update(threads_complete=False),
     lambda review: review['threads'][0].update(isResolved=False),
-    lambda review: review['status'].update(head_sha='d' * 40),
 ])
-def test_review_requires_authenticated_exact_head_approval_and_complete_threads(mutate):
+def test_review_requires_authenticated_exact_head_independent_evidence_and_complete_threads(mutate):
     evidence = _evidence()
-    mutate(evidence['cloud_review'])
+    mutate(evidence['independent_review'])
     assert _blockers(evidence) & {
-        'cloud-review-approval', 'cloud-review-evidence',
-        'cloud-review-threads', 'cloud-review-status',
+        'independent-review', 'independent-review-evidence',
+        'independent-review-threads',
     }
 
 
@@ -1116,8 +1115,8 @@ def test_mismatched_current_head_and_sensitive_approval_block():
     assert 'source-ci-evidence' in _blockers(evidence)
 
     evidence = _evidence()
-    evidence['cloud_review']['change'] = {
-        'head_sha': evidence['cloud_review']['head_sha'],
+    evidence['independent_review']['change'] = {
+        'head_sha': evidence['independent_review']['head_sha'],
         'files_complete': True,
         'sensitive': True,
         'owner_authorization': {'actor_id': OWNER_ID, 'head_sha': SHA, 'state': 'approved'},
@@ -1126,7 +1125,7 @@ def test_mismatched_current_head_and_sensitive_approval_block():
     assert 'sensitive-review-authorization' in _blockers(evidence)
 
     evidence = _evidence()
-    evidence['cloud_review'].pop('change')
+    evidence['independent_review'].pop('change')
     assert 'change-scope-evidence' in _blockers(evidence)
 
 
@@ -1177,20 +1176,20 @@ def test_additive_staging_requires_exact_app_bindings(phase):
     (('protection', 'enforce_admins'), False, 'branch-protection'),
     (('protection', 'required_conversation_resolution'), False, 'branch-protection'),
     (('protection', 'complete'), False, 'branch-protection'),
-    (('cloud_review', 'reviews'), [], 'cloud-review-approval'),
-    (('cloud_review', 'reviews', 0, 'state'), 'COMMENTED', 'cloud-review-approval'),
-    (('cloud_review', 'reviews', 0, 'state'), 'CHANGES_REQUESTED', 'cloud-review-approval'),
-    (('cloud_review', 'reviews', 0, 'state'), 'DISMISSED', 'cloud-review-approval'),
-    (('cloud_review', 'reviews', 0, 'user', 'id'), OWNER_ID, 'cloud-review-approval'),
-    (('cloud_review', 'reviews', 0, 'commit_id'), 'd' * 40, 'cloud-review-approval'),
-    (('cloud_review', 'reviews_complete'), False, 'cloud-review-evidence'),
-    (('cloud_review', 'threads_complete'), False, 'cloud-review-evidence'),
-    (('cloud_review', 'threads', 0, 'isResolved'), False, 'cloud-review-threads'),
-    (('cloud_review', 'threads', 0, 'comments_complete'), False, 'cloud-review-threads'),
-    (('cloud_review', 'base_sha'), 'd' * 40, 'cloud-review-evidence'),
-    (('cloud_review', 'change', 'head_sha'), 'd' * 40, 'change-scope-evidence'),
-    (('cloud_review', 'change', 'files_complete'), False, 'change-scope-evidence'),
-    (('cloud_review', 'change', 'sensitive'), True, 'sensitive-review-authorization'),
+    (('independent_review', 'reviews'), [], 'independent-review'),
+    (('independent_review', 'reviews', 1, 'state'), 'APPROVED', 'independent-review'),
+    (('independent_review', 'reviews', 1, 'state'), 'CHANGES_REQUESTED', 'independent-review'),
+    (('independent_review', 'reviews', 1, 'state'), 'DISMISSED', 'independent-review'),
+    (('independent_review', 'reviews', 1, 'user', 'id'), COPILOT_REVIEWER_ID, 'independent-review'),
+    (('independent_review', 'reviews', 1, 'commit_id'), 'd' * 40, 'independent-review'),
+    (('independent_review', 'reviews_complete'), False, 'independent-review-evidence'),
+    (('independent_review', 'threads_complete'), False, 'independent-review-evidence'),
+    (('independent_review', 'threads', 0, 'isResolved'), False, 'independent-review-threads'),
+    (('independent_review', 'threads', 0, 'comments_complete'), False, 'independent-review-threads'),
+    (('independent_review', 'base_sha'), 'd' * 40, 'independent-review-evidence'),
+    (('independent_review', 'change', 'head_sha'), 'd' * 40, 'change-scope-evidence'),
+    (('independent_review', 'change', 'files_complete'), False, 'change-scope-evidence'),
+    (('independent_review', 'change', 'sensitive'), True, 'sensitive-review-authorization'),
     (('source_ci', 'head_sha'), 'd' * 40, 'source-ci-evidence'),
     (('source_ci', 'workflow_id'), 1, 'source-ci-evidence'),
     (('source_ci', 'jobs_complete'), False, 'source-ci-jobs'),
@@ -1221,10 +1220,10 @@ def test_additive_staging_missing_merged_coordinator_blocks(phase):
 @pytest.mark.parametrize('phase', PHASES)
 def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(phase):
     evidence = _phase_evidence(phase)
-    review = evidence['cloud_review']
-    review['reviews'].append(dict(review['reviews'][0], state='COMMENTED',
-                                  submitted_at='2026-10-01T22:00:00Z'))
-    assert _blockers(evidence, phase) == {'cloud-review-approval'}
+    review = evidence['independent_review']
+    review['reviews'].append(dict(review['reviews'][1], id=3,
+                                  submitted_at='2026-10-01T23:00:00Z'))
+    assert _blockers(evidence, phase) == {'independent-review'}
     review['reviews'].pop()
     evidence = _sensitive_evidence(phase)
     assert _blockers(evidence, phase) == set()
@@ -1237,8 +1236,11 @@ def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(p
         ('targeted_review', 'state', 'DISMISSED'),
     ):
         changed = copy.deepcopy(evidence)
-        changed['cloud_review']['change'][record][field] = value
-        assert _blockers(changed, phase) == {'sensitive-review-authorization'}
+        changed['independent_review']['change'][record][field] = value
+        expected = {'sensitive-review-authorization'}
+        if record == 'targeted_review':
+            expected.add('independent-review')
+        assert _blockers(changed, phase) == expected
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -1262,8 +1264,8 @@ def test_sensitive_owner_review_must_be_a_formal_comment_not_approval(phase):
     pytest.param(lambda review: review['reviews'].pop(), id='absent-record'),
     pytest.param(lambda review: review['change'].pop('targeted_review'), id='absent-claim'),
     pytest.param(lambda review: review['change']['targeted_review'].pop('review_id'), id='absent-id'),
-    pytest.param(lambda review: review['change']['targeted_review'].update(review_id=3), id='wrong-id'),
-    pytest.param(lambda review: review['reviews'][-1].update(id=3), id='record-id-mismatch'),
+    pytest.param(lambda review: review['change']['targeted_review'].update(review_id=4), id='wrong-id'),
+    pytest.param(lambda review: review['reviews'][-1].update(id=4), id='record-id-mismatch'),
     pytest.param(lambda review: review['reviews'][-1]['user'].update(id=77), id='wrong-reviewer'),
     pytest.param(lambda review: review['reviews'][-1]['user'].update(id='76'), id='untyped-reviewer'),
     pytest.param(lambda review: review['reviews'][-1].pop('user'), id='missing-reviewer'),
@@ -1279,16 +1281,14 @@ def test_sensitive_owner_review_must_be_a_formal_comment_not_approval(phase):
 ])
 def test_sensitive_targeted_review_rejects_unbound_claim(phase, mutate):
     evidence = _sensitive_evidence(phase)
-    mutate(evidence['cloud_review'])
+    mutate(evidence['independent_review'])
     expected = {'sensitive-review-authorization'}
-    reviewer = evidence['cloud_review']['reviews'][-1].get('user')
-    if (not isinstance(reviewer, dict) or type(reviewer.get('id')) is not int
-            or reviewer['id'] < 1):
-        expected.add('cloud-review-approval')
-    review_ids = [record.get('id') for record in evidence['cloud_review']['reviews']
-                  if isinstance(record, dict)]
-    if len(review_ids) != len(set(review_ids)):
-        expected.add('cloud-review-approval')
+    if ('targeted_review' in evidence['independent_review']['change']
+            and current_independent_agent_review(
+                evidence['independent_review']['reviews'],
+                evidence['independent_review']['head_sha'], owner_id=OWNER_ID,
+                expected=evidence['independent_review'].get('selected_review')) is None):
+        expected.add('independent-review')
     assert _blockers(evidence, phase) == expected
 
 
@@ -1300,17 +1300,17 @@ def test_sensitive_targeted_review_rejects_unbound_claim(phase, mutate):
 ])
 def test_targeted_review_timestamp_must_be_valid_and_timezone_aware(phase, state, timestamp):
     evidence = _sensitive_evidence(phase, state)
-    record = evidence['cloud_review']['reviews'][-1]
+    record = evidence['independent_review']['reviews'][-1]
     if timestamp is None:
         record.pop('submitted_at')
     else:
         record['submitted_at'] = timestamp
     # A valid timestamp on the claim cannot replace the matched record's timestamp.
-    evidence['cloud_review']['change']['targeted_review']['submitted_at'] = '2026-10-01T22:00:00Z'
+    evidence['independent_review']['change']['targeted_review']['submitted_at'] = '2026-10-01T22:00:00Z'
     before = copy.deepcopy(evidence)
 
     assert _blockers(evidence, phase) == {
-        'sensitive-review-authorization',
+        'sensitive-review-authorization', 'independent-review',
     }
     assert evidence == before
 
@@ -1319,14 +1319,16 @@ def test_targeted_review_timestamp_must_be_valid_and_timezone_aware(phase, state
 @pytest.mark.parametrize('timestamp', ['2026-10-01T22:00:00Z', '2026-10-01T18:00:00-04:00'])
 def test_targeted_review_timestamp_accepts_valid_aware_record(phase, timestamp):
     evidence = _sensitive_evidence(phase)
-    evidence['cloud_review']['reviews'][-1]['submitted_at'] = timestamp
+    record = evidence['independent_review']['reviews'][-1]
+    record['submitted_at'] = timestamp
+    record['updated_at'] = timestamp
     assert _blockers(evidence, phase) == set()
 
 
 @pytest.mark.parametrize('review_id', [None, 0, -1, True, 2.0, '2'])
 def test_sensitive_targeted_review_requires_positive_integer_id(review_id):
     evidence = _sensitive_evidence('pre-cutover')
-    review = evidence['cloud_review']
+    review = evidence['independent_review']
     review['change']['targeted_review']['review_id'] = review_id
     review['reviews'][-1]['id'] = review_id
     assert 'sensitive-review-authorization' in _blockers(evidence)
@@ -1335,8 +1337,8 @@ def test_sensitive_targeted_review_requires_positive_integer_id(review_id):
 @pytest.mark.parametrize('phase', PHASES)
 def test_sensitive_targeted_review_requires_complete_collection(phase):
     evidence = _sensitive_evidence(phase)
-    evidence['cloud_review']['reviews_complete'] = False
-    assert _blockers(evidence, phase) == {'cloud-review-evidence'}
+    evidence['independent_review']['reviews_complete'] = False
+    assert _blockers(evidence, phase) == {'independent-review-evidence'}
 
 
 @pytest.mark.parametrize('reviewer_id', [
@@ -1344,21 +1346,20 @@ def test_sensitive_targeted_review_requires_complete_collection(phase):
 ])
 def test_sensitive_targeted_reviewer_must_be_positive_and_independent(reviewer_id):
     evidence = _sensitive_evidence('pre-cutover', 'APPROVED')
-    review = evidence['cloud_review']
+    review = evidence['independent_review']
     review['pull_author_id'] = 77
     review['change']['targeted_review']['reviewer_id'] = reviewer_id
     review['reviews'][-1]['user']['id'] = reviewer_id
-    expected = {'sensitive-review-authorization'}
-    if type(reviewer_id) is not int or reviewer_id < 1:
-        expected.add('cloud-review-approval')
-    assert _blockers(evidence) == expected
+    assert _blockers(evidence) == {
+        'sensitive-review-authorization', 'independent-review',
+    }
 
 
 @pytest.mark.parametrize('author_id', [None, 0, -1, '198982749', 1.5])
 def test_pr_author_identity_is_required_and_well_formed(author_id):
     evidence = _evidence()
-    evidence['cloud_review']['pull_author_id'] = author_id
-    assert 'cloud-review-evidence' in _blockers(evidence)
+    evidence['independent_review']['pull_author_id'] = author_id
+    assert 'independent-review-evidence' in _blockers(evidence)
 
 
 @pytest.mark.parametrize('field,value', [
@@ -1373,8 +1374,8 @@ def test_pr_author_identity_is_required_and_well_formed(author_id):
 ])
 def test_malformed_authenticated_review_ordering_fails_closed(field, value):
     evidence = _evidence()
-    evidence['cloud_review']['reviews'][0][field] = value
-    assert 'cloud-review-approval' in _blockers(evidence)
+    evidence['independent_review']['reviews'][1][field] = value
+    assert 'independent-review' in _blockers(evidence)
 
 
 @pytest.mark.parametrize('malformed', [
@@ -1392,68 +1393,45 @@ def test_malformed_authenticated_review_ordering_fails_closed(field, value):
 ])
 def test_every_review_author_is_validated_before_copilot_filtering(malformed):
     evidence = _evidence()
-    evidence['cloud_review']['reviews'].append(malformed)
+    evidence['independent_review']['reviews'].append(malformed)
 
-    assert _blockers(evidence) == {'cloud-review-approval'}
+    assert _blockers(evidence) == {'independent-review'}
 
 
-def test_well_formed_non_copilot_review_is_validated_then_filtered():
+def test_definite_review_rejection_blocks_acceptance():
     evidence = _evidence()
-    evidence['cloud_review']['reviews'].append({
-        'id': 2, 'user': {'id': 76}, 'state': 'CHANGES_REQUESTED',
-        'commit_id': evidence['cloud_review']['head_sha'],
-        'submitted_at': '2026-10-01T22:00:00Z',
+    evidence['independent_review']['reviews'].append({
+        'id': 3, 'user': {'id': COPILOT_REVIEWER_ID}, 'state': 'CHANGES_REQUESTED',
+        'commit_id': evidence['independent_review']['head_sha'],
+        'submitted_at': '2026-10-01T23:00:00Z',
     })
 
+    assert _blockers(evidence) == {'independent-review-rejection'}
+
+
+def test_copilot_comment_or_missing_approval_is_advisory():
+    evidence = _evidence()
+    review = evidence['independent_review']
     assert _blockers(evidence) == set()
-
-
-def test_tied_latest_reviews_require_every_copilot_review_to_approve():
-    evidence = _evidence()
-    review = evidence['cloud_review']
-    review['reviews'].append({
-        'id': 2, 'user': {'id': COPILOT_REVIEWER_ID}, 'state': 'COMMENTED',
-        'commit_id': review['head_sha'], 'submitted_at': '2026-10-01T21:00:00Z',
-    })
-    assert 'cloud-review-approval' in _blockers(evidence)
-
-    review['reviews'][0]['state'] = 'COMMENTED'
-    review['reviews'][1]['state'] = 'APPROVED'
-    review['reviews'].reverse()
-    assert _blockers(evidence) == {'cloud-review-approval'}
-    for record in review['reviews']:
-        record['state'] = 'APPROVED'
+    review['reviews'] = [item for item in review['reviews']
+                         if item['user']['id'] != COPILOT_REVIEWER_ID]
     assert _blockers(evidence) == set()
 
 
 @pytest.mark.parametrize('phase', PHASES)
-def test_additive_staging_status_omission_only_before_staging(phase):
+def test_advisory_cloud_review_status_does_not_replace_review_evidence(phase):
     evidence = _phase_evidence(phase)
-    evidence['cloud_review'].pop('status', None)
-    assert _blockers(evidence, phase) == (
-        set() if phase == 'pre-cutover' else {'cloud-review-status'}
-    )
+    evidence['independent_review']['reviews'] = []
+    evidence['independent_review']['advisory_cloud_review_status'] = {
+        'state': 'success', 'head_sha': evidence['independent_review']['head_sha'],
+    }
+    assert _blockers(evidence, phase) == {'independent-review'}
 
 
-@pytest.mark.parametrize('phase', PHASES)
-@pytest.mark.parametrize('status', [
-    None, {}, 'success',
-    {'context': 'agent-review', 'state': 'success', 'head_sha': 'c' * 40, 'creator_id': OWNER_ID},
-    {'context': 'cloud-review', 'state': 'pending', 'head_sha': 'c' * 40, 'creator_id': OWNER_ID},
-    {'context': 'cloud-review', 'state': 'success', 'head_sha': 'd' * 40, 'creator_id': OWNER_ID},
-    {'context': 'cloud-review', 'state': 'success', 'head_sha': 'c' * 40, 'creator_id': 15368},
-])
-def test_additive_staging_supplied_status_must_be_fixed_creator_exact_head_success(phase, status):
-    evidence = _phase_evidence(phase)
-    evidence['cloud_review']['status'] = status
-    assert _blockers(evidence, phase) == {'cloud-review-status'}
-
-
-def test_additive_staging_rejects_other_phase_maps():
+def test_all_phases_use_the_same_four_check_map():
     for selected in PHASES:
         for supplied in PHASES:
-            if selected != supplied:
-                assert 'required-check-policy' in _blockers(_phase_evidence(supplied), selected)
+            assert _blockers(_phase_evidence(supplied), selected) == set()
 
 
 def test_missing_evidence_blocks_and_validator_does_not_mutate_input():
@@ -1469,19 +1447,12 @@ def test_missing_evidence_blocks_and_validator_does_not_mutate_input():
 
 
 @pytest.mark.parametrize('phase', PHASES)
-@pytest.mark.parametrize('published_status', [False, True])
-def test_cli_phase_selection_is_read_only_and_never_bootstraps_status(tmp_path, capsys, phase, published_status):
+def test_cli_phase_selection_is_read_only_and_does_not_require_advisory_status(tmp_path, capsys, phase):
     evidence = _phase_evidence(phase)
-    if published_status:
-        evidence['cloud_review']['status'] = _evidence()['cloud_review']['status']
-    else:
-        evidence['cloud_review'].pop('status', None)
     path = tmp_path / 'evidence.json'
     raw = json.dumps(evidence)
     path.write_text(raw)
     expected_blockers = []
-    if phase != 'pre-cutover' and not published_status:
-        expected_blockers.insert(0, 'cloud-review-status')
 
     result = cli_main(['--phase', phase, str(path)])
 

@@ -2,6 +2,7 @@
 
 import re
 from deploy.review_evidence import (
+    current_independent_agent_review,
     latest_reviews,
     sensitive_review_authorized,
 )
@@ -64,14 +65,11 @@ RUN_JOBS = frozenset({
     'native', 'source-ci', 'attest',
 })
 REQUIRED_CHECKS = {
-    'pre-cutover': {
-        'source-ci': None, 'integration-tests': None, 'agent-review': None, 'issue-link': 15368,
-    },
-    'staging': {
-        'source-ci': 15368, 'integration-tests': None, 'agent-review': None,
-        'issue-link': 15368, 'cloud-review': None,
-    },
-    'post-cutover': {'source-ci': 15368, 'issue-link': 15368, 'cloud-review': None},
+    phase: {
+        'source-ci': 15368, 'integration-tests': None,
+        'agent-review': None, 'issue-link': 15368,
+    }
+    for phase in ('pre-cutover', 'staging', 'post-cutover')
 }
 REQUIRED_FILES = (
     WORKFLOW_PATH,
@@ -185,12 +183,12 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    'deploy/cloud_coordinator.py': '4a94bd43f7d350cb8aaee08650726893e6775872e8af20f3a0c8f7f61127345d',
+    'deploy/cloud_coordinator.py': '2c1354f251fc12917e5051fa41413cb666314eeb8c5cff47c2d88d9cac88f4e1',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '20603a350aa4c3972563010035a9faed8fcf086b251af847dbed7e4b32e900ca',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
-    'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
+    'deploy/review_evidence.py': '6828a01fbd09a75ff57b11e735f7a3c48e66909cbc74175d97307d554d201b4d',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     # Issue #65 producer-only overlay; historical receipt hashes remain documented.
@@ -386,10 +384,7 @@ def _check_protection(evidence, phase, blockers):
                 blockers.add('required-check-policy')
                 return
             actual[context] = check.get('app_id')
-    # The only pre-cutover variant is an already Actions-bound source-ci.
-    if actual != expected and not (
-        phase == 'pre-cutover' and actual == expected | {'source-ci': 15368}
-    ):
+    if actual != expected:
         blockers.add('required-check-policy')
 
 
@@ -457,37 +452,37 @@ def _check_source_run(evidence, sha, blockers):
 
 
 def _check_review(evidence, main_sha, phase, blockers):
-    review = evidence.get('cloud_review')
+    review = evidence.get('independent_review')
     if not isinstance(review, dict):
-        blockers.add('cloud-review-evidence')
+        blockers.add('independent-review-evidence')
         return
     head = review.get('head_sha')
     if (review.get('repository_id') != REPOSITORY_ID or review.get('base_branch') != 'main'
             or review.get('base_sha') != main_sha or not _valid_sha(head)
             or review.get('state') != 'open' or review.get('draft') is not False
             or type(review.get('pull_author_id')) is not int or review['pull_author_id'] < 1
+            or review['pull_author_id'] == OWNER_ID
             or review.get('reviews_complete') is not True
             or review.get('threads_complete') is not True):
-        blockers.add('cloud-review-evidence')
+        blockers.add('independent-review-evidence')
         return
     reviews, threads = review.get('reviews'), review.get('threads')
     if not isinstance(reviews, list) or not isinstance(threads, list):
-        blockers.add('cloud-review-evidence')
+        blockers.add('independent-review-evidence')
         return
-    latest = latest_reviews(reviews, COPILOT_REVIEWER_ID)
-    if not latest or any(
-            item.get('state') != 'APPROVED' or item.get('commit_id') != head
-            for item in latest):
-        blockers.add('cloud-review-approval')
+    if current_independent_agent_review(
+            reviews, head, owner_id=OWNER_ID,
+            expected=review.get('selected_review'),
+            complete=review.get('reviews_complete')) is None:
+        blockers.add('independent-review')
+    latest_copilot = latest_reviews(reviews, COPILOT_REVIEWER_ID)
+    if latest_copilot and any(
+            item.get('state') == 'CHANGES_REQUESTED' and item.get('commit_id') == head
+            for item in latest_copilot):
+        blockers.add('independent-review-rejection')
     if any(not isinstance(thread, dict) or thread.get('isResolved') is not True
            or thread.get('comments_complete') is not True for thread in threads):
-        blockers.add('cloud-review-threads')
-    status = review.get('status')
-    if (phase != 'pre-cutover' or 'status' in review) and (
-            not isinstance(status, dict) or status.get('context') != 'cloud-review'
-            or status.get('state') != 'success' or status.get('head_sha') != head
-            or status.get('creator_id') != OWNER_ID):
-        blockers.add('cloud-review-status')
+        blockers.add('independent-review-threads')
 
     change = review.get('change')
     if (not isinstance(change, dict) or change.get('head_sha') != head
