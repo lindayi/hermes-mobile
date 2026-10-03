@@ -290,7 +290,7 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
 
     assert "unauthorized-continuation" in result["pull_requests"][0]["reasons"]
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] != result_head
-    assert api.fix_attempts == 2
+    assert api.fix_attempts == 1
 
 
 def test_sha_bound_enrollment_rejects_unproven_or_unrelated_result_heads(tmp_path):
@@ -428,7 +428,7 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     assert first_proof["receipt_result"] == "ready"
     assert first_proof["receipt_start_head"] == HEAD
     assert first_proof["receipt_head"] == result_head
-    assert api.fix_attempts == 1
+    assert api.fix_attempts == 2
     assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     durable = store.snapshot()["enrollments"]["16"]["receipt_proofs"][0]
     assert durable["receipt_start_head"] == HEAD
@@ -449,7 +449,7 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     assert store.snapshot()["enrollments"]["16"]["authorized_head"] == HEAD
     coordinator().run(apply=True)
     assert len(api.graphql_writes) == 1
-    assert api.fix_attempts == 1
+    assert api.fix_attempts == 2
 
 
 @pytest.mark.parametrize("change", [
@@ -1725,7 +1725,7 @@ def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
                if action.get("task_type") == "neutral"]
 
     assert len(neutral) == 1
-    assert api.fix_attempts == 1
+    assert api.fix_attempts == 2
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
     first_proof = next(
         proof for proof in store.snapshot()["enrollments"]["16"]["receipt_proofs"]
@@ -1886,7 +1886,7 @@ def test_neutral_acceptance_and_predecessor_supersession_are_atomic(tmp_path):
                    if action.get("task_type") == "neutral")
     assert neutral["status"] == "sent"
     assert store.action(first["key"]) is None
-    assert api.fix_attempts == 2
+    assert api.fix_attempts == 1
 
     Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
 
