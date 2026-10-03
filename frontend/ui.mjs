@@ -816,6 +816,32 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     if (!current()) return;
     connection.snapshot(result,initial);
     const messages = h('div',{class:'messages','aria-label':'Conversation'});
+    let initialRestorePending=true,initialScrollAway=false,recentScrollIntent=-Infinity;
+    const scrollKeys=new Set(['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' ']);
+    const markInitialScrollIntent=event=>{
+      if(!initialRestorePending)return;
+      if(event.type==='keydown' && !scrollKeys.has(event.key))return;
+      recentScrollIntent=win.performance.now();
+    };
+    const noteInitialScroll=()=>{
+      if(!initialRestorePending || win.performance.now()-recentScrollIntent>250)return;
+      if(messages.scrollHeight-messages.scrollTop-messages.clientHeight>4)initialScrollAway=true;
+    };
+    messages.addEventListener('wheel',markInitialScrollIntent,{passive:true});
+    messages.addEventListener('touchstart',markInitialScrollIntent,{passive:true});
+    messages.addEventListener('pointerdown',markInitialScrollIntent,{passive:true});
+    messages.addEventListener('keydown',markInitialScrollIntent);
+    messages.addEventListener('scroll',noteInitialScroll,{passive:true});
+    const finishInitialRestore=()=>{initialRestorePending=false;recentScrollIntent=-Infinity;};
+    const stopInitialRestoreWatch=()=>{
+      finishInitialRestore();
+      messages.removeEventListener('wheel',markInitialScrollIntent);
+      messages.removeEventListener('touchstart',markInitialScrollIntent);
+      messages.removeEventListener('pointerdown',markInitialScrollIntent);
+      messages.removeEventListener('keydown',markInitialScrollIntent);
+      messages.removeEventListener('scroll',noteInitialScroll);
+    };
+    const shouldFollowInitialRestore=()=>messages.scrollHeight-messages.scrollTop-messages.clientHeight<100 && !win.getSelection()?.toString() && (!initialRestorePending || !initialScrollAway);
     stopDisclosureReachability=observeDisclosureReachability(messages,current);
     const resultIds=new Set();
     let reflowBackground=()=>({changed:false,tail:false});
@@ -1185,6 +1211,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     connection.background(refreshBackground,!resolveTitle);
     void api.request(`/sessions/${encodeURIComponent(session.id)}/telemetry`).then(renderTelemetry).catch(error=>{if(version===routeVersion && error.status===401)expiredSession();});
     content.classList.add('conversation');
+    const priorExtras=stopExtras;stopExtras=()=>{stopInitialRestoreWatch();priorExtras?.();};
     messages.scrollTop=messages.scrollHeight;
     if(!result.run && result.last_run)composerAction.attach(result.last_run);
     if(Object.hasOwn(result,'run')) {
@@ -1192,7 +1219,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         messages.querySelector('.empty')?.remove();
         messages.append(renderMessage({role:'user',content:result.run.input,timestamp:result.run.created_at,run_id:result.run.id,session_id:session.id}),...renderReminders(result.run));
         messages.scrollTop=messages.scrollHeight;
-        await trackRun(result.run,messages,composerAction,result.tool_replay);
+        await trackRun(result.run,messages,composerAction,result.tool_replay,{follow:shouldFollowInitialRestore,finish:finishInitialRestore});
       } else if(result.last_run?.status==='unknown') {
         composerAction.set('unknown');
         inform('Outcome unknown. Check the conversation before submitting again; Hermes will not replay this action.',true);
@@ -1201,15 +1228,17 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const runId=storage.get(key(`run:${session.id}`),true);
       if(runId) {try {
         const run=await api.request(`/runs/${encodeURIComponent(runId)}`);
-        if(version===routeVersion)await trackRun(run,messages,composerAction);
+        if(version===routeVersion)await trackRun(run,messages,composerAction,null,{follow:shouldFollowInitialRestore,finish:finishInitialRestore});
       }catch(error){if(version===routeVersion){if(error.status===401)expiredSession();else inform(errorMessage(error),true);}}}
     }
   }
   const finalStates = new Set(['completed','done','failed','cancelled','stopped','unknown']);
-  async function trackRun(run,messages,composerAction,replay=null) {
+  async function trackRun(run,messages,composerAction,replay=null,initialRestore={}) {
     disconnect();
     const version=routeVersion,connection=headerState;
     const sessionId=run.session_id || state.session.id;
+    const atTail=()=>messages.scrollHeight-messages.scrollTop-messages.clientHeight<100 && !win.getSelection()?.toString();
+    const followTail=()=>initialRestore.follow?.() ?? atTail();
     approvalState?.run(run.id);
     composerAction.attach?.(run);
     storage.set(key(`run:${sessionId}`),run.id,true);
@@ -1243,13 +1272,13 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const crossing=Number.isFinite(time) && deltaChunks.some(chunk=>Number.isFinite(chunk.observed_at) && chunk.observed_at<=time) && deltaChunks.some(chunk=>Number.isFinite(chunk.observed_at) && chunk.observed_at>time);
       if(!finalStates.has(currentStatus) && (fresh || crossing))flushPublic();
     };
-    composerAction.activity?.(article.querySelector('.live-activity-heading'),node=>{const atBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;flushPublic();output.before(node);splitTools=true;if(atBottom)messages.scrollTop=messages.scrollHeight;});
-    const wasAtBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;
+    composerAction.activity?.(article.querySelector('.live-activity-heading'),node=>{const atBottom=followTail();flushPublic();output.before(node);splitTools=true;if(atBottom)messages.scrollTop=messages.scrollHeight;});
+    const wasAtBottom=followTail();
     messages.append(article);
     if(wasAtBottom)messages.scrollTop=messages.scrollHeight;
     let seeding=true;
     const renderTool=data=>{
-      const atBottom=!seeding && messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;
+      const atBottom=!seeding && followTail();
       const name=data.name || data.tool || data.tool_name || 'Tool';
       const id=data.tool_call_id || data.toolCallId;
       const status=toolStatus(data);
@@ -1272,12 +1301,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     const renderCommentary=data=>{
       const text=publicText(data);if(!text || (data.id && commentaryIds.has(data.id)))return;
-      const atBottom=!seeding && messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;
+      const atBottom=!seeding && followTail();
       flushPublic();retainPublic(text,data.observed_at);if(data.id)commentaryIds.add(data.id);
       if(atBottom)messages.scrollTop=messages.scrollHeight;
     };
     const renderDelta=data=>{
-      const atBottom=!seeding && messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;
+      const atBottom=!seeding && followTail();
       if(!output.textContent && publicText(data))markHistoryNode(output,{timestamp:data.observed_at,run_id:run.id,session_id:sessionId},sessionId);
       const text=publicText(data);if(text){const node=doc.createTextNode(text);deltaChunks.push({text,observed_at:data.observed_at,node});output.append(node);}
       if(atBottom)messages.scrollTop=messages.scrollHeight;
@@ -1305,7 +1334,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }
       currentStatus=current.status || currentStatus;
       composerAction.set(stopPending && !finalStates.has(currentStatus)?'stopping':currentStatus,stop);
-      const atBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;
+      const atBottom=followTail();
       status.textContent=current.status || status.textContent;connection?.run(current.status);
       if(current.status==='running')void approvalState?.reconcile();
       // Only a terminal output supersedes streamed text. Active snapshots may
@@ -1335,6 +1364,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(atBottom)messages.scrollTop=messages.scrollHeight;
     };
     apply(run);
+    if(wasAtBottom && version===routeVersion && messages.isConnected && !win.getSelection()?.toString())messages.scrollTop=messages.scrollHeight;
+    initialRestore.finish?.();
     if(finalStates.has(run.status))return;
     const events=win.EventSource ? new win.EventSource(`/hermes/app-api/runs/${encodeURIComponent(run.id)}/events`) : {addEventListener(){},close(){}};
     stream=events;
