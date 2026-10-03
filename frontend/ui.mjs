@@ -664,7 +664,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   function watchConversation(session,version,node,refreshTitle) {
     const owner=state.user?.id;
     let disposed=false,revision=0,offline=win.navigator.onLine===false,transport='connecting',activity='idle',timer=null,controller=null,deadline=null,refreshBackground=null;
-    let titleRevision=0,renaming=false;
+    let titleRevision=0,renaming=false,queuedProbe=null;
     const labels={connecting:'Connecting…',idle:'Connected · Idle',sending:'Sending',submitted:'Queued',queued:'Queued',running:'Running',waiting_for_approval:'Waiting for approval',stopping:'Stopping',stopped:'Stopped',cancelled:'Stopped',failed:'Failed',unknown:'Outcome unknown',reconnecting:'Reconnecting',disconnected:'Disconnected'};
     const active=()=>!disposed && version===routeVersion && owner===state.user?.id;
     const render=()=>{if(!active())return;const value=offline?'disconnected':transport==='connected'?activity:transport;const label=labels[value] || 'Recovering';if(node.dataset.state!==value){node.dataset.state=value;node.textContent=label;}};
@@ -674,7 +674,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const run=value=>{if(!active() || !value)return;revision++;activity=['completed','done'].includes(value)?'idle':Object.hasOwn(labels,value)?value:'unknown';render();};
     const snapshot=(data,token)=>{if(!active() || token!==revision)return;success(token);run(data.run?.status || data.last_run?.status || session.run_status || 'idle');};
     async function probe(backgroundOnly=false,includeTitle=true){
-      if(!active() || controller || offline){schedule();return;}
+      if(!active() || offline){schedule();return;}
+      if(controller){
+        // Coalesce refresh intent, retaining the strongest requested read scope.
+        queuedProbe={backgroundOnly:backgroundOnly && (queuedProbe?.backgroundOnly ?? true),includeTitle:includeTitle || (queuedProbe?.includeTitle ?? false)};
+        return;
+      }
       // Share this bounded watcher with receipts, even while the run stream is healthy.
       const token=revision;controller=new win.AbortController();
       const titleToken=titleRevision;
@@ -689,7 +694,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           backgroundOnly || stream && transport==='connected' ? null : api.request(`/sessions/${encodeURIComponent(session.id)}/messages?latest=true&limit=1`,{signal:controller.signal}).then(data=>{if(!Array.isArray(data.items))throw new Error('Invalid conversation snapshot');snapshot(data,token);}).catch(failed)
         ]);
       }catch(error){failed(error);}
-      finally{win.clearTimeout(deadline);deadline=null;controller=null;schedule();}
+      finally{
+        win.clearTimeout(deadline);deadline=null;controller=null;
+        const queued=queuedProbe;queuedProbe=null;
+        if(queued)void probe(queued.backgroundOnly,queued.includeTitle);else schedule();
+      }
     }
     const onOffline=()=>{offline=true;revision++;transport='disconnected';render();controller?.abort();};
     const onOnline=()=>{offline=false;revision++;transport='reconnecting';render();void probe();};
@@ -697,7 +706,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const focus=()=>{void probe(true);};
     win.addEventListener('offline',onOffline);win.addEventListener('online',onOnline);win.addEventListener('focus',focus);doc.addEventListener('visibilitychange',visible);
     render();schedule();
-    return {token:()=>revision,success,failure,run,snapshot,rename(pending){titleRevision++;renaming=pending;},background(callback,includeTitle=true){refreshBackground=callback;void probe(true,includeTitle);},refresh:focus,destroy(){disposed=true;controller?.abort();win.clearTimeout(timer);win.clearTimeout(deadline);win.removeEventListener('offline',onOffline);win.removeEventListener('online',onOnline);win.removeEventListener('focus',focus);doc.removeEventListener('visibilitychange',visible);}};
+    return {token:()=>revision,success,failure,run,snapshot,rename(pending){titleRevision++;renaming=pending;},background(callback,includeTitle=true){refreshBackground=callback;void probe(true,includeTitle);},refresh:focus,destroy(){disposed=true;queuedProbe=null;controller?.abort();win.clearTimeout(timer);win.clearTimeout(deadline);win.removeEventListener('offline',onOffline);win.removeEventListener('online',onOnline);win.removeEventListener('focus',focus);doc.removeEventListener('visibilitychange',visible);}};
   }
   function releasePresenceIdentity() {releasePushIdentity?.();releasePushIdentity=null;pushIdentityKey=null;}
   async function preparePresenceIdentity(data,current) {

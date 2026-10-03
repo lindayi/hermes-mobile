@@ -88,6 +88,94 @@ for(const trigger of ['completion','watcher'])test(`native automatic title refre
  }finally{h.close();}
 });
 
+for(const extraRefreshes of [0,5])test(`completion queues one native title refresh after the background read settles (${extraRefreshes} extra refreshes)`,async()=>{
+ const background=deferred();let title=null;
+ const h=await setup(p=>{
+  if(p.startsWith('/sessions?'))return {items:[{id:'s1',title:null}],total:1};
+  if(p==='/sessions/s1')return {id:'s1',title};
+  if(p==='/sessions/s1/background')return background.promise;
+ },{items:[],run:{id:'r1',session_id:'s1',status:'running',input:'Hello'}});
+ const reads=path=>h.calls.filter(c=>c.path===path).length;
+ try{
+  click(h.doc,'Untitled conversation');await tick();
+  const header=h.doc.querySelector('.conversation-head'),textarea=h.doc.querySelector('textarea');
+  textarea.value='Retained draft';assert.equal(header.querySelector('h1').textContent,'Untitled conversation');
+  assert.equal(reads('/sessions/s1'),1);assert.equal(reads('/sessions/s1/background'),1);
+  title='Generated after the initial title read';h.streams[0].emit('done',{status:'completed'});await tick();
+  for(let i=0;i<extraRefreshes;i++)h.win.dispatchEvent(new h.win.Event('focus'));
+  await tick();
+  assert.equal(reads('/sessions/s1'),1,'completion must not overlap the held probe');
+  assert.equal(reads('/sessions/s1/background'),1);
+  assert.equal([...h.timers.values()].filter(v=>v.delay===10000).length,1,'one deadline while the original probe remains pending');
+  background.resolve({items:[]});await tick();
+  assert.equal(reads('/sessions/s1'),2,'completion must refresh after settlement without waiting for the 30s timer');
+  assert.equal(reads('/sessions/s1/background'),2);
+  assert.equal(header.querySelector('h1').textContent,title);assert.equal(header.querySelector('h1').title,title);
+  assert.equal(h.doc.querySelector('.conversation-head'),header);assert.equal(h.doc.querySelector('textarea'),textarea);assert.equal(textarea.value,'Retained draft');
+  await tick();assert.equal(reads('/sessions/s1'),2);assert.equal(reads('/sessions/s1/background'),2);
+  assert.equal(h.calls.filter(c=>c.path.includes('limit=1')).length,0,'background-only refresh stays background-only');
+  assert.equal([...h.timers.values()].filter(v=>v.delay===10000).length,0);
+  assert.equal([...h.timers.values()].filter(v=>v.delay===30000).length,1,'resume one ordinary watcher timer, not a refresh loop');
+ }finally{h.close();}
+});
+
+for(const departure of ['destroy','navigation','account'])test(`queued completion refresh is discarded after ${departure}`,async()=>{
+ const background=deferred();let user='u';
+ const h=await setup(p=>{
+  if(p==='/auth/me')return {user:{id:user,status:'ready'}};
+  if(p==='/sessions/s1')return {id:'s1',title:null};
+  if(p==='/sessions/s1/background')return background.promise;
+ },{items:[],run:{id:'r1',session_id:'s1',status:'running',input:'Hello'}});
+ try{
+  await h.open();h.streams[0].emit('done',{status:'completed'});
+  for(let i=0;i<5;i++)h.win.dispatchEvent(new h.win.Event('focus'));
+  const signal=h.calls.find(c=>c.path==='/sessions/s1/background').options.signal;
+  if(departure==='destroy')h.app.destroy();
+  else if(departure==='account'){user='other-user';await h.app.start();assert.equal(h.app.state.user.id,user);}
+  else{click(h.doc,'Back to chats');await tick();click(h.doc,'Second conversation');await tick();}
+  assert.equal(signal.aborted,true);
+  const text=h.doc.body.textContent;
+  background.resolve({items:[]});await tick();
+  assert.equal(h.calls.filter(c=>c.path==='/sessions/s1').length,1,'no queued metadata read for the departed identity');
+  assert.equal(h.calls.filter(c=>c.path==='/sessions/s1/background').length,1,'no queued receipt read for the departed identity');
+  assert.equal(h.doc.body.textContent,text);
+  if(departure!=='navigation')assert.equal(h.timers.size,0,'disposed watcher cannot reschedule itself');
+ }finally{h.close();}
+});
+
+test('queued refresh preserves a full health read when later refreshes are background-only',async()=>{
+ const background=deferred();
+ const h=await setup(p=>p==='/sessions/s1/background'?background.promise:undefined);
+ try{
+  await h.open();h.win.dispatchEvent(new h.win.Event('online'));
+  for(let i=0;i<5;i++)h.win.dispatchEvent(new h.win.Event('focus'));
+  assert.equal(h.calls.filter(c=>c.path.includes('limit=1')).length,0);
+  background.resolve({items:[]});await tick();
+  assert.equal(h.calls.filter(c=>c.path.includes('limit=1')).length,1);
+  assert.equal(h.calls.filter(c=>c.path==='/sessions/s1/background').length,2);
+  assert.equal(h.doc.querySelector('.conversation-status').dataset.state,'idle');
+ }finally{h.close();}
+});
+
+test('queued completion refresh respects a pending manual rename',async()=>{
+ const background=deferred(),save=deferred();
+ const h=await setup((p,o)=>{
+  if(o.method==='PATCH')return save.promise;
+  if(p==='/sessions/s1')return {id:'s1',title:null};
+  if(p==='/sessions/s1/background')return background.promise;
+ },{items:[],run:{id:'r1',session_id:'s1',status:'running',input:'Hello'}});
+ try{
+  await h.open();h.streams[0].emit('done',{status:'completed'});
+  click(h.doc,'Rename session');const form=h.doc.querySelector('[role=dialog] form');
+  form.querySelector('input').value='Manual title';form.dispatchEvent(new h.win.Event('submit',{cancelable:true}));await tick();
+  background.resolve({items:[]});await tick();
+  assert.equal(h.calls.filter(c=>c.path==='/sessions/s1' && c.options.method!=='PATCH').length,1,'queued probe skips metadata during rename');
+  assert.equal(h.calls.filter(c=>c.path==='/sessions/s1/background').length,2,'queued receipt refresh still runs');
+  save.resolve({id:'s1',title:'Manual title'});await tick();
+  assert.equal(h.doc.querySelector('.conversation-head h1').textContent,'Manual title');
+ }finally{h.close();}
+});
+
 for(const departure of ['rename','navigation'])test(`late native title refresh cannot overwrite ${departure}`,async()=>{
  let pending=null;
  const h=await setup((p,o)=>{
