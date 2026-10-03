@@ -426,14 +426,18 @@ independent review. Copilot feedback is supplemental; COMMENTED or missing APPRO
 alone does not block acceptance, trigger repeated review requests, or consume fixer
 budget. Actual open findings must still be resolved, and a definite rejection is
 not acceptance.
-Task receipt handoff and review acceptance are separate. A validated `ready`
-receipt completes the source-writing task handoff after the exact result head,
-repository, base and authorization fences pass; the coordinator does not request
-or wait for an advisory Copilot review. This transition is not review evidence:
-merge still requires the current owner-published independent-agent review above,
-resolved threads, required checks and every other existing guard. Copilot
-`CHANGES_REQUESTED` findings remain actionable and a definite rejection cannot be
-treated as acceptance.
+Task receipt handoff and review acceptance are separate. After the exact result
+head, repository, base and authorization fences pass, the coordinator completes
+the source-writing task handoff only when a current owner-published
+independent-agent review is present on that head and review/thread collection is
+complete. Unresolved threads still block merge and remain available to the bounded
+repair path. Otherwise the task stays in `waiting_review`, retaining its lock
+without consuming fixer or handoff-wait budgets. The coordinator never requests
+or waits for an advisory Copilot review. Copilot `CHANGES_REQUESTED` findings
+remain actionable and a definite rejection cannot be treated as acceptance.
+Completing a handoff is not merge evidence: merge still requires the valid
+independent-agent review, resolved threads, required checks and every other
+existing guard.
 
 The existing task API exposes task identity, GitHub pull/branch artifacts and
 authenticated session metadata; the existing receipt comment proves task

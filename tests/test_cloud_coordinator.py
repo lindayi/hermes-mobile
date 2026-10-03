@@ -3931,7 +3931,8 @@ def test_completed_task_handoff_does_not_wait_for_copilot_or_bypass_independent_
     result = coordinator.run(apply=True)
 
     action = store.action(fix["key"])
-    assert action["handoff_state"] == "done"
+    assert action["handoff_state"] == "waiting_review"
+    assert action.get("handoff_waits", 0) == 0
     assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     assert api.fix_attempts == 1
     assert result["pull_requests"][0]["review_valid"] is False
@@ -3940,11 +3941,32 @@ def test_completed_task_handoff_does_not_wait_for_copilot_or_bypass_independent_
 
     for _ in range(MAX_HANDOFF_POLLS + 1):
         coordinator.run(apply=True)
-    assert store.action(fix["key"])["handoff_state"] == "done"
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert store.action(fix["key"]).get("handoff_waits", 0) == 0
     assert api.fix_attempts == 1
     assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
+
+
+def test_current_independent_review_completes_handoff_without_copilot(tmp_path):
+    api = FakeApi(source_failure=True)
+    api.pending_required = True
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_state = "PENDING"
+
+    result = coordinator.run(apply=True)
+
+    assert store.action(fix["key"])["handoff_state"] == "done"
+    assert result["pull_requests"][0]["review_valid"] is True
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert api.fix_attempts == 1
+    assert not api.graphql_writes
 
 
 @pytest.mark.parametrize("path_kind", ["draft_ready", "review_request"])
