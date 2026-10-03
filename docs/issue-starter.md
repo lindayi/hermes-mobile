@@ -103,6 +103,20 @@ acceptance, RED/GREEN, exact tests and review evidence, rollout, and
 merged-versus-deployed state. Unsupported source claims remain blocked. No
 renderer or additional runtime dependency is introduced.
 
+The documented [Start a task](https://docs.github.com/en/rest/agent-tasks/agent-tasks#start-a-task)
+request accepts a prompt and task/branch options, but no originating issue binding.
+The documented [Update a pull request](https://docs.github.com/en/rest/pulls/pulls#update-a-pull-request)
+operation can replace the body, but its inputs provide no atomic precondition tying
+that write to an expected body, head, base, or draft snapshot. Therefore the starter
+does not rewrite a provider-generated report to add a closing directive: a completed
+task with a missing or unverifiable canonical issue edge is durably blocked with
+`canonical_issue_link_unverified_no_safe_recovery`. The original report is preserved,
+and readiness and enrollment remain blocked. Reconciliation by reads alone cannot
+make a later body write conditional; do not add a blind retry or treat prompt text as
+linkage. Revisit automatic recovery only if GitHub exposes a supported conditional
+metadata write or task-origin binding. The paired consumer's authenticated canonical
+link requirement is unchanged.
+
 If the task leaves the PR as a draft, a durable one-time
 readiness reservation invokes GitHub's `markPullRequestReadyForReview` GraphQL
 mutation for the verified PR node ID. Fresh task, artifact, PR, and head evidence

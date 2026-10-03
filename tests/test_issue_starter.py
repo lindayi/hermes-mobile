@@ -700,6 +700,34 @@ def test_command_containing_pr_body_uses_authenticated_closing_issue_edge(tmp_pa
     assert all(call["variables"] == {"number": 41} for call in queries)
 
 
+def test_rewritten_report_without_closing_edge_is_blocked_without_metadata_write(tmp_path):
+    body = (
+        "## Summary\n\n"
+        "Provider-generated final report with the original task evidence.\n\n"
+        "## Tests\n\n"
+        "Focused regression passed."
+    )
+    api = FakeApi(pulls=[pull_request(body=body)])
+    api.closing_issues = []
+
+    result = _run_completed_handoff(tmp_path, api)
+    record = make_coordinator(tmp_path, api).store.snapshot()["commands"]["28:9001"]
+    next_result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert result["handed_off"] == 0
+    assert record["phase"] == "failed"
+    assert record["blocker"] == "canonical_issue_link_unverified_no_safe_recovery"
+    assert api.pulls[0]["body"] == body
+    assert api.patches == []
+    assert not any(
+        "markPullRequestReadyForReview" in call["query"]
+        for call in api.graphql_calls
+    )
+    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
+    assert next_result["handed_off"] == 0
+    assert api.patches == []
+
+
 def test_reserved_pull_body_digest_is_immutable(tmp_path):
     api = FakeApi(pulls=[pull_request(body="Readable closing reference.")])
     result = _run_completed_handoff(tmp_path, api)

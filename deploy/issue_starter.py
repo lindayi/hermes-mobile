@@ -64,6 +64,10 @@ class ApiError(CoordinatorError):
     """An authenticated GitHub API operation failed."""
 
 
+class CanonicalIssueLinkUnverified(CoordinatorError):
+    """A task pull lacks a safely verified canonical issue-closing edge."""
+
+
 def _is_sha(value):
     return isinstance(value, str) and MAX_SHA_RE.fullmatch(value) is not None
 
@@ -1078,8 +1082,12 @@ class Coordinator:
                 or not isinstance(base, dict) or base.get("ref") != MAIN_BRANCH
                 or not isinstance(base_repo, dict) or type(base_repo.get("id")) is not int
                 or base_repo.get("id") != REPOSITORY_ID
-                or not self._closing_issue_linked(pull, issue_number)):
+                or _pull_snapshot(pull) is None):
             return None
+        if not self._closing_issue_linked(pull, issue_number):
+            raise CanonicalIssueLinkUnverified(
+                "Canonical issue-closing edge is missing or unverifiable",
+            )
         return pull
 
     def _pr_comments(self, pull_number):
@@ -1152,7 +1160,18 @@ class Coordinator:
                 self._publish_receipt(key, updated)
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
-            pull = self._find_task_pull(task, record["issue"])
+            try:
+                pull = self._find_task_pull(task, record["issue"])
+            except CanonicalIssueLinkUnverified:
+                self.store.update(key, {
+                    "phase": "failed",
+                    "blocker": "canonical_issue_link_unverified_no_safe_recovery",
+                    "receipt": self._receipt("blocked", record),
+                })
+                updated = self.store.snapshot()["commands"][key]
+                self._publish_receipt(key, updated)
+                return {"planned": 0, "pending": 0, "dispatched": 0,
+                        "handed_off": 0, "blocked": 1}
             if pull is None:
                 self.store.update(key, {
                     "phase": "failed",

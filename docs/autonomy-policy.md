@@ -253,6 +253,12 @@ Issue #56 updates the starter's current source candidate pin to
 source consistency only, not independent review, runtime evidence, or activation
 permission.
 
+Issue #63 updates the current starter candidate pin to
+`f5d006b2f90b2b8200363bd7f13487eed722b724c87632a66b2c22235bf7999c` for its
+durable fail-closed handling of missing or unverifiable canonical issue linkage.
+The PR57 digest above remains historical. The refreshed current pin is source
+consistency only, not independent review, runtime evidence, or activation permission.
+
 Issue #50's historical receipt-transport candidate overlaid only
 `deploy/cloud_coordinator.py` and `deploy/task_receipts.py` in the source inventory.
 The historical PR40 and issue #43 table hashes above remain unchanged:
