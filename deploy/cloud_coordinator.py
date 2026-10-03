@@ -1942,26 +1942,13 @@ class Coordinator:
         else:
             return self._handoff_wait(key, action, snapshot)
 
-        reviews_complete = snapshot.get("reviews_complete") is True
-        review = current_independent_agent_review(
-            snapshot.get("reviews"), head, owner_id=OWNER_ID,
-            complete=reviews_complete,
-        )
-        threads = snapshot.get("threads")
-        threads_complete = (
-            snapshot.get("threads_complete") is True
-            and isinstance(threads, list)
-            and all(
-                isinstance(thread, dict)
-                and type(thread.get("isResolved")) is bool
-                and thread.get("comments_complete", True) is True
-                for thread in threads
-            )
-        )
         author = current.get("user")
         author_id = author.get("id") if isinstance(author, dict) else None
-        if (review is None or not threads_complete
-                or type(author_id) is not int or author_id == OWNER_ID):
+        if not independent_review_valid(
+                head, snapshot.get("reviews"), snapshot.get("threads"),
+                pull_author_id=author_id,
+                threads_complete=snapshot.get("threads_complete") is True,
+                reviews_complete=snapshot.get("reviews_complete") is True):
             self.store.update_action(key, "completed", handoff_state="waiting_review")
             return True
 

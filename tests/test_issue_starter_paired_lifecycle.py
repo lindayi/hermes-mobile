@@ -50,7 +50,7 @@ def test_bound_proof_is_durable_before_compaction_and_survives_restart(tmp_path,
     api, store, worker, action = bound_worker(tmp_path)
     finish(api, action)
     api.unresolved = False
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    refresh_owner_review(api, RESULT_HEAD)
     original_retire = store.retire
     observed = []
 
@@ -253,13 +253,12 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     first = next(a for a in store.actions().values() if a["kind"] == "fix")
     finish(api, first)
     api.pending_required = True
-    api.review_sha = RESULT_HEAD
     api.review_state = stale_review_state
-    # Same result head is insufficient: this review predates task completion.
+    # A stale-head owner report is not evidence for the changed result head.
     waiting = run()
     assert not waiting["auto_merge_requested"] and api.fix_attempts == 1
     assert store.action(first["key"])["handoff_state"] == "waiting_review"
-    assert sum(route.endswith("/requested_reviewers") for route, _ in api.writes) == 1
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     saved = store.action(first["key"])
     assert saved["receipt_session_completed_at"] == "2026-10-01T12:05:30Z"
     assert saved["receipt_completed_at"] == saved["receipt_session_completed_at"]
@@ -271,11 +270,14 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     assert store.action(first["key"])["handoff_state"] == "waiting_review"
     assert not waiting["repair_requested"] and not waiting["auto_merge_requested"]
     assert api.fix_attempts == 1
-    assert sum(route.endswith("/requested_reviewers") for route, _ in api.writes) == 1
-    api.review_sha = RESULT_HEAD
-    api.review_state = "COMMENTED"
-    api.review_submitted_at = "2026-10-01T08:05:31-04:00"
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    api.unresolved = False
+    api.review_state = "PENDING"
+    api.source_failure = True
+    api.source_failure_sha = RESULT_HEAD
+    refresh_owner_review(api, RESULT_HEAD)
     assert run()["repair_requested"]
+    api.review_sha = RESULT_HEAD
     second = next(a for a in store.actions().values() if a.get("task_id") == "task-2")
     assert second["head"] == RESULT_HEAD
     assert store.action(first["key"]) is None
@@ -287,9 +289,10 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     api.tasks[second["task_id"]]["sessions"][0]["completed_at"] = "2026-10-01T12:07:00Z"
     api.tasks[second["task_id"]]["updated_at"] = "2026-10-01T12:10:00Z"
     api.unresolved = False
-    api.review_state = "APPROVED"
+    api.source_failure = False
+    api.review_state = "PENDING"
     waiting = run()
-    assert store.action(second["key"])["handoff_state"] == "waiting_review"
+    assert store.action(second["key"])["handoff_state"] == "done"
     assert not waiting["auto_merge_requested"] and api.fix_attempts == 2
     api.tasks.clear()
     assert not run()["auto_merge_requested"]
@@ -360,7 +363,7 @@ def test_actual_paired_v2_main_advance_keeps_authority_but_requires_neutral_repa
     api, store, first = actual_starter_consumer(tmp_path)
     finish_v2(api, first)
     api.unresolved = False
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    refresh_owner_review(api, RESULT_HEAD)
     api.pending_required = True
 
     def run():
@@ -459,8 +462,8 @@ def test_compacted_receipt_metadata_must_match_canonical_body(tmp_path, version,
     api, store, worker, action = bound_worker(tmp_path)
     (finish_v2 if version == "v2" else finish)(api, action)
     api.unresolved = False
+    refresh_owner_review(api, RESULT_HEAD)
     api.pending_required = True
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
     worker.run(apply=True)
     assert store.action(action["key"]) is None
     enrollment = store.snapshot()["enrollments"]["16"]
@@ -504,8 +507,8 @@ def test_restart_revalidates_unique_unchanged_strict_numeric_receipt(tmp_path, v
     api, store, worker, action = bound_worker(tmp_path)
     (finish_v2 if version == "v2" else finish)(api, action)
     api.unresolved = False
+    refresh_owner_review(api, RESULT_HEAD)
     api.pending_required = True
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
     worker.run(apply=True)
     assert store.action(action["key"]) is None
     api.tasks.clear()
@@ -754,8 +757,8 @@ def test_admitted_starter_body_report_and_v2_receipt_survive_restart_and_manual_
     api.closing_issues = []  # The starter proof is not lifetime PR authority.
     finish_v2(api, action)
     api.unresolved = False
+    refresh_owner_review(api, RESULT_HEAD)
     api.pending_required = True
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
 
     def run():
         return Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)["pull_requests"][0]

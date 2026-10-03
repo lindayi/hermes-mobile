@@ -81,7 +81,7 @@ targeted independent review.
 - Current-head owner-published independent-agent review and resolved-thread
   validation, fail-closed check collection, and protected auto-merge eligibility.
   Copilot feedback is supplemental; the coordinator does not request Copilot review
-  or publish a `cloud-review` status.
+  or treat its owned advisory `cloud-review` status as required review evidence.
 - Failure to read the required-check policy or to prove complete/current evidence
   blocks auto-merge. The coordinator never reports tests as successful.
 
@@ -107,11 +107,12 @@ release was deployed. The parent continues to require fresh evidence on the
 result head.
 
 Accepted task IDs are reconciled by GET, including when the PR head advances.
-Queued, running, waiting, or uncertain tasks retain the serialization lock. An
-ambiguous task-creation response is never blindly resent; preserve the durable
-claim and state for verified recovery rather than resetting state or assuming a
-new enrollment stopped the earlier task. A receipt, task comment, or completed
-session never triggers a second dispatch by itself.
+Queued, running, waiting, uncertain, and completed tasks awaiting independent
+review retain the serialization lock; review waits consume neither handoff nor
+fixer budgets. An ambiguous task-creation response is never blindly resent;
+preserve the durable claim and state for verified recovery rather than resetting
+state or assuming a new enrollment stopped the earlier task. A receipt, task
+comment, or completed session never triggers a second dispatch by itself.
 
 ## Review, merge, delivery, and Inbox are separate
 
@@ -129,16 +130,13 @@ Sensitive changes additionally need owner authorization bound to that exact SHA
 and the documented targeted independent review; neither approval nor authorization
 carries to a later head.
 
-Until an owner-verified policy transition is actually applied, the existing
-pre-cutover contexts `source-ci`, `integration-tests`, `agent-review`, and
-`issue-link` remain required. The independent formal `COMMENT` review remains
-required under the current workflow. Any future transition is staged and
-owner-controlled: staging adds the verified `cloud-review` status without
-retiring legacy contexts; only independently verified staging evidence and an
-authorized settings change can retire `integration-tests` and `agent-review`.
-Documentation, validator success, or this change does not activate that
-transition. See [`autonomy-policy.md`](autonomy-policy.md) for the exact phases
-and prerequisites.
+The active required contexts are exactly `source-ci` (Actions app 15368),
+`integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), with
+strict/up-to-date checks and resolved review conversations. The coordinator may
+publish an owned advisory `cloud-review` status, but it is not required and never
+replaces the structured independent review. No repository settings or protections
+are changed by this source behavior. See [`autonomy-policy.md`](autonomy-policy.md)
+for the owner-controlled deployment boundary.
 
 When eligible, the coordinator requests GitHub protected auto-merge; branch
 protection and fresh current-head review, thread, check, and policy fences remain
@@ -176,8 +174,9 @@ Separate owner/policy work still required:
 
 - Keep the active required contexts and protections owner-controlled. The
   coordinator does not configure Copilot reviewer requirements, publish
-  `cloud-review`, or change repository settings. Exact current required contexts
-  and independent-review evidence are documented in
+  `cloud-review` as a required status, or change repository settings. Its owned
+  `cloud-review` status remains advisory and never substitutes for independent
+  review. Exact current required contexts and independent-review evidence are documented in
   [`AGENTS.md`](../AGENTS.md) and
   [`cloud-coordinator-spec.md`](cloud-coordinator-spec.md).
 - Install and enable the service/timer only after exact-head review and policy

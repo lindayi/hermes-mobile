@@ -428,16 +428,14 @@ budget. Actual open findings must still be resolved, and a definite rejection is
 not acceptance.
 Task receipt handoff and review acceptance are separate. After the exact result
 head, repository, base and authorization fences pass, the coordinator completes
-the source-writing task handoff only when a current owner-published
-independent-agent review is present on that head and review/thread collection is
-complete. Unresolved threads still block merge and remain available to the bounded
-repair path. Otherwise the task stays in `waiting_review`, retaining its lock
-without consuming fixer or handoff-wait budgets. The coordinator never requests
-or waits for an advisory Copilot review. Copilot `CHANGES_REQUESTED` findings
-remain actionable and a definite rejection cannot be treated as acceptance.
-Completing a handoff is not merge evidence: merge still requires the valid
-independent-agent review, resolved threads, required checks and every other
-existing guard.
+the source-writing task handoff only when the existing independent-review gate
+accepts a current owner-published review on that head, with complete review and
+thread collection and all threads resolved. Otherwise the task stays in
+`waiting_review`, retaining its lock without consuming fixer or handoff-wait
+budgets. Unresolved findings and definite rejection are not treated as acceptance.
+The coordinator never requests or waits for an advisory Copilot review. Completing
+a handoff is not merge evidence: merge still requires the valid independent-agent
+review, resolved threads, required checks and every other existing guard.
 
 The existing task API exposes task identity, GitHub pull/branch artifacts and
 authenticated session metadata; the existing receipt comment proves task
@@ -483,8 +481,9 @@ deployment-policy docs are sensitive too. This PR classification concerns merge
 authorization; the separate release policy still classifies the complete diff
 from the deployed base before deployment.
 
-The coordinator does not publish or require `cloud-review`; a status is not a
-substitute for reading the structured independent review. The current protected
+The coordinator may publish its existing owned advisory `cloud-review` status,
+but does not require it; a status is not a substitute for reading the structured
+independent review. The current protected
 policy is exactly `source-ci` (Actions app 15368), `integration-tests`,
 `agent-review`, and `issue-link` (Actions app 15368), with strict/up-to-date checks
 and required conversation resolution. Missing, extra, or differently app-bound

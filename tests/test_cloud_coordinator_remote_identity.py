@@ -79,7 +79,7 @@ def mutate_pull(pull, field, kind):
 
 
 @pytest.mark.parametrize("stage", [
-    "dispatch_first", "dispatch_last", "handoff_first", "handoff_last", "merge_last",
+    "dispatch_first", "dispatch_last", "handoff_first", "merge_last",
 ])
 @pytest.mark.parametrize("field", ["number", "id", "head_repo", "base_repo"])
 @pytest.mark.parametrize("kind", ["valid", "float", "missing", "bool", "zero", "negative", "string", "other"])
@@ -91,7 +91,7 @@ def test_fresh_pull_fences_reject_weak_numeric_identity(tmp_path, monkeypatch, s
         api.complete_task(fix["task_id"], fix)
         plan = coordinator._build_plan(apply=True)  # Verify receipt; defer remote handoff.
         action = store.action(fix["key"])
-        assert action["handoff_state"] == "pending"
+        assert action["handoff_state"] == "waiting_review"
         if stage == "handoff_first":
             api.pull["draft"] = True
     else:
@@ -101,7 +101,7 @@ def test_fresh_pull_fences_reject_weak_numeric_identity(tmp_path, monkeypatch, s
     original_get = api.get
     reads = 0
     target_read = {"dispatch_first": 1, "dispatch_last": 2,
-                   "handoff_first": 1, "handoff_last": 2, "merge_last": 3}[stage]
+                   "handoff_first": 1, "merge_last": 3}[stage]
 
     def get(route):
         nonlocal reads
@@ -133,68 +133,27 @@ def test_fresh_pull_fences_reject_weak_numeric_identity(tmp_path, monkeypatch, s
             assert store.action(action["key"])["handoff_waits"] == 1
 
 
-@pytest.mark.parametrize("field", ["number", "id", "head_repo", "base_repo"])
-@pytest.mark.parametrize("kind", KINDS)
-def test_review_request_response_requires_numeric_pull_identity(tmp_path, monkeypatch, field, kind):
+def test_task_handoff_never_requests_or_waits_for_copilot(tmp_path, monkeypatch):
     api, store, coordinator = setup(tmp_path)
     coordinator.run(apply=True)
     fix = next(a for a in store.actions().values() if a["kind"] == "fix")
     api.complete_task(fix["task_id"], fix)
-    plan = coordinator._build_plan(apply=True)
-    snapshot = plan["snapshots"][0]
-    original_write = api.write
+    original_get, original_write = api.get, api.write
+
+    def get(route):
+        assert not route.endswith("/requested_reviewers")
+        return original_get(route)
 
     def write(route, body):
-        response = deepcopy(original_write(route, body))
-        if route.endswith("/requested_reviewers"):
-            mutate_pull(response, field, kind)
-        return response
+        assert not route.endswith("/requested_reviewers")
+        return original_write(route, body)
 
+    monkeypatch.setattr(api, "get", get)
     monkeypatch.setattr(api, "write", write)
-    coordinator._advance_task_handoff(fix["key"], store.action(fix["key"]), snapshot)
-    stored = store.action(fix["key"])
-    assert stored["review_request_state"] == ("sent" if kind == "valid" else "uncertain")
-    assert stored["handoff_state"] == ("waiting_review" if kind == "valid" else "review_request_uncertain")
-    api.requested_reviewers = []  # No later independent proof: never blindly re-POST.
-    writes = list(api.writes)
-    coordinator = Coordinator(api, StateStore(store.path), clock=lambda: 1790856660)
-    coordinator._advance_task_handoff(fix["key"], store.action(fix["key"]), snapshot)
-    assert api.writes == writes
-    assert api.fix_attempts == 1
-
-
-@pytest.mark.parametrize("field", ["head_sha", "head_ref", "base_sha", "base_ref"])
-@pytest.mark.parametrize("change", ["valid", "changed", "missing"])
-def test_review_response_is_bound_to_handoff_revision(tmp_path, monkeypatch, field, change):
-    api, store, coordinator = setup(tmp_path)
     coordinator.run(apply=True)
-    fix = next(a for a in store.actions().values() if a["kind"] == "fix")
-    api.complete_task(fix["task_id"], fix)
-    plan = coordinator._build_plan(apply=True)
-    snapshot = plan["snapshots"][0]
-    original_write = api.write
-
-    def write(route, body):
-        response = deepcopy(original_write(route, body))
-        if route.endswith("/requested_reviewers"):
-            side, key = field.split("_")
-            if change == "missing":
-                response[side].pop(key)
-            elif change == "changed":
-                response[side][key] = "f" * 40 if key == "sha" else "other-branch"
-        return response
-
-    monkeypatch.setattr(api, "write", write)
-    coordinator._advance_task_handoff(fix["key"], store.action(fix["key"]), snapshot)
-    stored = store.action(fix["key"])
-    assert stored["review_request_state"] == ("sent" if change == "valid" else "uncertain")
-    assert stored["handoff_state"] == ("waiting_review" if change == "valid" else "review_request_uncertain")
-    api.requested_reviewers = []
-    writes = list(api.writes)
-    coordinator = Coordinator(api, StateStore(store.path), clock=lambda: 1790856660)
-    coordinator._advance_task_handoff(fix["key"], store.action(fix["key"]), snapshot)
-    assert api.writes == writes
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
     assert api.fix_attempts == 1
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
 
 
 @pytest.mark.parametrize("stage", ["enrollment", "snapshot", "authorization"])
