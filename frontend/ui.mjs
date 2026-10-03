@@ -1210,6 +1210,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     disconnect();
     const version=routeVersion,connection=headerState;
     const sessionId=run.session_id || state.session.id;
+    const atTail=()=>messages.scrollHeight-messages.scrollTop-messages.clientHeight<100 && !win.getSelection()?.toString();
     approvalState?.run(run.id);
     composerAction.attach?.(run);
     storage.set(key(`run:${sessionId}`),run.id,true);
@@ -1243,13 +1244,13 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const crossing=Number.isFinite(time) && deltaChunks.some(chunk=>Number.isFinite(chunk.observed_at) && chunk.observed_at<=time) && deltaChunks.some(chunk=>Number.isFinite(chunk.observed_at) && chunk.observed_at>time);
       if(!finalStates.has(currentStatus) && (fresh || crossing))flushPublic();
     };
-    composerAction.activity?.(article.querySelector('.live-activity-heading'),node=>{const atBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;flushPublic();output.before(node);splitTools=true;if(atBottom)messages.scrollTop=messages.scrollHeight;});
-    const wasAtBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;
+    composerAction.activity?.(article.querySelector('.live-activity-heading'),node=>{const atBottom=atTail();flushPublic();output.before(node);splitTools=true;if(atBottom)messages.scrollTop=messages.scrollHeight;});
+    const wasAtBottom=atTail();
     messages.append(article);
     if(wasAtBottom)messages.scrollTop=messages.scrollHeight;
     let seeding=true;
     const renderTool=data=>{
-      const atBottom=!seeding && messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;
+      const atBottom=!seeding && atTail();
       const name=data.name || data.tool || data.tool_name || 'Tool';
       const id=data.tool_call_id || data.toolCallId;
       const status=toolStatus(data);
@@ -1272,12 +1273,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     const renderCommentary=data=>{
       const text=publicText(data);if(!text || (data.id && commentaryIds.has(data.id)))return;
-      const atBottom=!seeding && messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;
+      const atBottom=!seeding && atTail();
       flushPublic();retainPublic(text,data.observed_at);if(data.id)commentaryIds.add(data.id);
       if(atBottom)messages.scrollTop=messages.scrollHeight;
     };
     const renderDelta=data=>{
-      const atBottom=!seeding && messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;
+      const atBottom=!seeding && atTail();
       if(!output.textContent && publicText(data))markHistoryNode(output,{timestamp:data.observed_at,run_id:run.id,session_id:sessionId},sessionId);
       const text=publicText(data);if(text){const node=doc.createTextNode(text);deltaChunks.push({text,observed_at:data.observed_at,node});output.append(node);}
       if(atBottom)messages.scrollTop=messages.scrollHeight;
@@ -1305,7 +1306,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }
       currentStatus=current.status || currentStatus;
       composerAction.set(stopPending && !finalStates.has(currentStatus)?'stopping':currentStatus,stop);
-      const atBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<100;
+      const atBottom=atTail();
       status.textContent=current.status || status.textContent;connection?.run(current.status);
       if(current.status==='running')void approvalState?.reconcile();
       // Only a terminal output supersedes streamed text. Active snapshots may
@@ -1335,6 +1336,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(atBottom)messages.scrollTop=messages.scrollHeight;
     };
     apply(run);
+    if(wasAtBottom && version===routeVersion && messages.isConnected && !win.getSelection()?.toString())messages.scrollTop=messages.scrollHeight;
     if(finalStates.has(run.status))return;
     const events=win.EventSource ? new win.EventSource(`/hermes/app-api/runs/${encodeURIComponent(run.id)}/events`) : {addEventListener(){},close(){}};
     stream=events;

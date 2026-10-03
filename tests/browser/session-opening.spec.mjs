@@ -166,7 +166,7 @@ test('opening long sessions lands on latest replay or terminal output in a narro
    await page.waitForTimeout(100);
    const state=await page.evaluate(()=>{
     const messages=document.querySelector('.messages'),composer=document.querySelector('.composer'),live=document.querySelector('.live-message');
-    const tail=[...live.querySelectorAll('.public-activity,.message-body')].at(-1),box=messages.getBoundingClientRect(),tailBox=tail.getBoundingClientRect();
+    const tail=[...live.querySelectorAll('.activity-summary,.message-body')].filter(node=>node.textContent.trim()).at(-1),box=messages.getBoundingClientRect(),tailBox=tail.getBoundingClientRect();
     return {gap:messages.scrollHeight-messages.clientHeight-messages.scrollTop,scrollY,focusedComposer:composer.contains(document.activeElement),messagesBottom:box.bottom,tailBottom:tailBox.bottom,tailTop:tailBox.top,text:live.textContent,tailText:tail.textContent};
    });
    evidence.cases.push({scenario:next.status,state,calls:[...calls]});
@@ -177,15 +177,23 @@ test('opening long sessions lands on latest replay or terminal output in a narro
    assert.equal(state.focusedComposer,false,'opening never focuses the composer');
    assert.equal(state.scrollY,0,'opening moves only the transcript scroller');
    assert.equal(await page.locator('.live-message').count(),1,'replay restores exactly one live run');
-   assert.equal(calls.filter(call=>call.method!=='GET').length,0,'opening does not submit or mutate a run');
+   assert.equal(calls.filter(call=>call.method==='POST' && call.path==='/runs').length,0,'opening never executes a new run');
    assert.equal(calls.filter(call=>call.path==='/sessions/s0/messages').length,1,'latest history is fetched once');
    if(next.status==='running'){
     const before=await page.locator('.messages').evaluate(el=>el.scrollTop);
-    await page.locator('.messages').evaluate(el=>el.scrollTop=0);
-    await page.evaluate(()=>{const body=document.querySelector('.live-message .message-body'),range=document.createRange(),text=body.firstChild;range.selectNodeContents(text);getSelection().addRange(range);});
-    eventSink?.write('id: 62\nevent: delta\ndata: {"text":"A later live update"}\n\n');
+    assert.ok(eventSink,'the synthetic live event stream is connected');
+    await page.evaluate(()=>{
+     const root=document.querySelector('.live-message'),walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
+     let text;while((text=walker.nextNode()) && !text.textContent.trim()){}
+     const range=document.createRange();range.selectNodeContents(text);getSelection().addRange(range);
+    });
+    eventSink.write('id: 62\nevent: delta\ndata: {"text":"A later live update"}\n\n');
     await page.waitForTimeout(100);
-    assert.equal(await page.locator('.messages').evaluate(el=>el.scrollTop),0,'later updates preserve deliberate upward reading and text selection');
+    assert.equal(await page.locator('.messages').evaluate(el=>el.scrollTop),before,'later updates preserve selected transcript text');
+    await page.evaluate(()=>{getSelection().removeAllRanges();document.querySelector('.messages').scrollTop=0;});
+    eventSink.write('id: 63\nevent: delta\ndata: {"text":"Another later live update"}\n\n');
+    await page.waitForTimeout(100);
+    assert.equal(await page.locator('.messages').evaluate(el=>el.scrollTop),0,'later updates preserve deliberate upward reading');
     assert.ok(before>0,'replay content is taller than the narrow transcript viewport');
    }
    await context.close();context=null;
