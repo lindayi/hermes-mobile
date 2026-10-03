@@ -105,6 +105,31 @@ def selected_independent_agent_review(reviews, head_sha, review_id, body_sha256,
     }
 
 
+def current_independent_agent_review(
+        reviews, head_sha, *, owner_id, expected=None, complete=True):
+    """Select the latest authenticated positive independent-agent COMMENT review."""
+    if complete is not True:
+        return None
+    latest = latest_reviews(reviews, owner_id)
+    if not latest or len(latest) != 1:
+        return None
+    review = latest[0]
+    submitted = review_timestamp(review.get("submitted_at"))
+    updated_at = review.get("updated_at")
+    if updated_at is not None and review_timestamp(updated_at) != submitted:
+        return None
+    body = review.get("body")
+    if not isinstance(body, str):
+        return None
+    selected = selected_independent_agent_review(
+        reviews, head_sha, review.get("id"),
+        hashlib.sha256(body.encode("utf-8")).hexdigest(), owner_id=owner_id,
+    )
+    if selected is None or (expected is not None and selected != expected):
+        return None
+    return selected
+
+
 def sensitive_review_authorized(
         reviews, head_sha, owner_authorization, targeted_review, *, owner_id):
     """Bind owner approval to one complete, current, structured review record."""

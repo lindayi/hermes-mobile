@@ -21,6 +21,7 @@ from urllib.parse import quote, unquote, urlencode
 from deploy.review_evidence import (
     FINDING_KINDS,
     body_findings,
+    current_independent_agent_review,
     latest_reviews,
     positive_id,
     selected_independent_agent_review,
@@ -60,6 +61,10 @@ COMPUTED_MERGEABLE_STATES = frozenset({
     "clean", "unstable", "has_hooks", "blocked", "behind", "dirty", "draft",
 })
 COPILOT_REVIEWER_LOGIN = "copilot-pull-request-reviewer[bot]"
+CURRENT_REQUIRED_CHECKS = frozenset({
+    ("source-ci", 15368), ("integration-tests", None),
+    ("agent-review", None), ("issue-link", 15368),
+})
 MAX_PAGES = 100
 MAX_FINDINGS = 8
 MAX_FINDING_CHARS = 1000
@@ -318,6 +323,25 @@ def copilot_review_valid(head_sha, reviews, threads, *, threads_complete=True,
     )
 
 
+def independent_review_valid(head_sha, reviews, threads, *, pull_author_id,
+                             threads_complete=True, reviews_complete=True):
+    """Require current owner-published independent evidence, not Copilot approval."""
+    if (not _is_sha(head_sha) or type(pull_author_id) is not int
+            or pull_author_id <= 0 or pull_author_id == OWNER_ID
+            or reviews_complete is not True
+            or not _complete_resolved_threads(threads, complete=threads_complete)):
+        return False
+    if current_independent_agent_review(
+            reviews, head_sha, owner_id=OWNER_ID, complete=reviews_complete) is None:
+        return False
+    latest_copilot = latest_reviews(reviews, COPILOT_REVIEWER_ID)
+    return not latest_copilot or not any(
+        review.get("state") == "CHANGES_REQUESTED"
+        and review.get("commit_id") == head_sha
+        for review in latest_copilot
+    )
+
+
 def _required_contexts(required):
     if not isinstance(required, list):
         return []
@@ -399,18 +423,16 @@ def _pull_merge_eligible(pull, current_main_sha):
 
 def eligible_for_auto_merge(pull, *, current_main_sha, required_checks, check_runs,
                             statuses, checks_complete, review_valid, sensitive_authorized,
-                            cloud_review_required, cloud_review_status_owned,
                             up_to_date_required, conversation_resolution_required,
                             agent_running):
     """Pure eligibility gate; GitHub still enforces protected auto-merge."""
     if (not _pull_merge_eligible(pull, current_main_sha)
             or not review_valid or not sensitive_authorized
-            or not cloud_review_required or not cloud_review_status_owned
             or not up_to_date_required or not conversation_resolution_required
             or agent_running):
         return False
     contexts = _required_contexts(required_checks)
-    if "cloud-review" not in {entry["context"] for entry in contexts}:
+    if {(entry["context"], entry["app_id"]) for entry in contexts} != CURRENT_REQUIRED_CHECKS:
         return False
     return required_checks_pass(
         required_checks, check_runs, statuses, complete=checks_complete,
@@ -860,6 +882,8 @@ def _required_checks(api):
         if normalized:
             item = normalized[0]
             unique[(item["context"], item["app_id"])] = item
+    if set(unique) != CURRENT_REQUIRED_CHECKS:
+        available = False
     return (list(unique.values()), available, up_to_date_required,
             conversation_resolution_required)
 
