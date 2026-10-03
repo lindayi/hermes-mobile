@@ -1,8 +1,11 @@
 from datetime import datetime, timezone
+import json
 
 import pytest
 
-from deploy.task_receipts import ReceiptError, receipt_instruction, validate_task_receipt
+from deploy.task_receipts import (
+    ReceiptError, find_review_report, receipt_instruction, validate_task_receipt,
+)
 
 
 NOW = datetime.fromisoformat("2026-10-01T12:06:00+00:00")
@@ -456,3 +459,57 @@ def test_receipt_rejects_incomplete_task_session_and_artifact_evidence():
     task["artifacts"].pop()
     with pytest.raises(ReceiptError):
         validate_task_receipt(task, action, pull, comments, now=NOW)
+
+
+def test_review_report_rejects_observed_quoted_provider_payload_shape():
+    anchor = "Hermes-Review-Anchor: hermes-coordinator-review-anchor:synthetic-anchor"
+    payload = {
+        "schema": "hermes-independent-review-report-v1",
+        "nonce": NONCE,
+        "session_id": SESSION_ID,
+        "repository": "lindayi/hermes-mobile",
+        "repository_id": 1399942965,
+        "pr": 16,
+        "anchor_comment_id": 888,
+        "role": "independent-reviewer",
+        "head": START_HEAD,
+        "base": BASE,
+        "source_start_head": START_HEAD,
+        "source_session_id": "source-session",
+        "source_comment_id": 777,
+        "verdict": "changes_requested",
+        "summary": "One bounded UI defect.",
+        "findings": [{
+            "path": "frontend/ui.mjs",
+            "line": 1371,
+            "severity": "medium",
+            "description": "Keep a locally rejected answer form available for correction.",
+        }],
+        "files": {
+            "frontend/ui.mjs": "a" * 64,
+            "backend/clarifications.py": "b" * 64,
+        },
+        "report": "Reviewed the exact synthetic head and found one bounded issue.",
+    }
+    comment = {
+        "id": 999,
+        "user": {"id": 198982749},
+        "body": (
+            f"\n> {anchor}\n"
+            "> Reserved independent-review anchor for a synthetic PR.\n"
+            "> \n"
+            f"{json.dumps(payload, separators=(',', ':'))}"
+        ),
+        "created_at": "2026-10-01T12:04:00Z",
+        "updated_at": "2026-10-01T12:04:00Z",
+    }
+
+    with pytest.raises(ReceiptError, match="fields or bindings"):
+        find_review_report(
+            [comment], complete=True, anchor_prefix=anchor, nonce=NONCE,
+            session_id=SESSION_ID, pull_number=16, head_sha=START_HEAD,
+            base_sha=BASE, source_start_head=START_HEAD,
+            source_session_id="source-session", source_comment_id=777,
+            anchor_comment_id=888, session_created_at="2026-10-01T12:00:00Z",
+            session_completed_at="2026-10-01T12:05:00Z", now=NOW,
+        )

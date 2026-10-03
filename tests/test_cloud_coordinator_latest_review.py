@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from deploy.cloud_coordinator import neutral_reconciliation_request
+from deploy.cloud_coordinator import neutral_reconciliation_request, review_task_request
 from deploy.workflow_lifecycle import pull_event
 from test_cloud_coordinator import (
     APP_OWNER_ID, BASE, HEAD, Coordinator, CoordinatorError, FakeApi, StateStore,
@@ -42,6 +42,56 @@ def test_neutral_prompt_requires_per_hunk_decisions_before_ready_receipt():
     assert "preserves both branch intents" in prompt
     assert "PR comment" in prompt and "before returning a `ready` receipt" in prompt
     assert "fresh review and checks" in prompt
+
+
+def test_review_prompt_matches_report_schema_and_inventories_every_changed_path():
+    api = FakeApi()
+    files = [
+        {
+            "filename": f"src/module_{index:02}.py",
+            "status": "removed" if index == 2 else "modified",
+            "sha": f"{index + 1:040x}",
+        }
+        for index in range(27)
+    ]
+    snapshot = {
+        "issue": 16,
+        "head": HEAD,
+        "main_sha": BASE,
+        "pull": api.pull,
+        "files": files,
+        "files_complete": True,
+    }
+    source_action = {
+        "task_id": "source-task",
+        "head": HEAD,
+        "receipt_session_id": "source-session",
+        "receipt_comment_id": 777,
+    }
+    request = review_task_request(
+        snapshot, source_action, 888,
+        "Hermes-Review-Anchor: hermes-coordinator-review-anchor:synthetic",
+    )
+    prompt = request["body"]
+
+    assert "exactly the keys `path` and `comment`" in prompt
+    assert "1-8" in prompt and "1,000" in prompt
+    assert "independently compute" in prompt
+    assert "Git blob" in prompt and "deleted" in prompt and "`null`" in prompt
+    assert all(item["filename"] in prompt for item in files)
+    template_line = next(
+        line for line in prompt.splitlines()
+        if line.startswith('{"schema":"hermes-independent-review-report-v1"')
+    )
+    template = json.loads(template_line)
+    assert set(template) == {
+        "schema", "nonce", "session_id", "repository", "repository_id", "pr",
+        "anchor_comment_id", "role", "head", "base", "source_start_head",
+        "source_session_id", "source_comment_id", "verdict", "summary",
+        "findings", "files", "report",
+    }
+    assert set(template["findings"][0]) == {"path", "comment"}
+    assert set(template["files"]) == {item["filename"] for item in files}
 
 
 @pytest.mark.parametrize("change", ["authorized", "head_changed", "retired", "unobserved", "wrong_decision"])

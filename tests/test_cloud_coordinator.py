@@ -4309,6 +4309,92 @@ def test_review_report_rejects_forged_file_sha256_inventory(tmp_path):
     )
 
 
+def test_completed_partial_review_report_persists_error_and_retries_once(tmp_path):
+    api = FakeApi(source_failure=True, review_status_present=False)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    api.pull_files = [
+        {
+            "filename": f"src/module_{index:02}.py",
+            "status": "modified",
+            "sha": f"{index + 1:040x}",
+        }
+        for index in range(27)
+    ]
+    api.blob_contents = {
+        item["sha"]: f"synthetic file {index}".encode()
+        for index, item in enumerate(api.pull_files)
+    }
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    source_fix = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    api.review_state = "PENDING"
+    coordinator.run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    original_review = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "review"
+    )
+    api.complete_review_task(
+        original_review["task_id"], original_review,
+        source_action=StateStore(path).action(source_fix["key"]),
+        files={
+            filename: digest
+            for filename, digest in list(api.review_file_digests().items())[:2]
+        },
+    )
+    malformed_comment = next(
+        comment for comment in api.comments
+        if "hermes-independent-review-report-v1" in comment.get("body", "")
+    )
+    malformed_body = malformed_comment["body"]
+
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    recovered = StateStore(path).action(original_review["key"])
+
+    assert recovered["status"] == "completed"
+    assert "files do not match the exact head" in recovered["report_error"]
+    assert recovered["task_id"] == original_review["task_id"]
+    assert recovered["dispatch_nonce"] == original_review["dispatch_nonce"]
+    assert malformed_comment["body"] == malformed_body
+    assert sum(
+        comment.get("body", "").count("hermes-coordinator-outcome:")
+        for comment in api.comments
+    ) == 1
+
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    actions = StateStore(path).actions()
+    corrections = [
+        action for action in actions.values()
+        if action.get("kind") == "review"
+        and action.get("task_type") == "report-correction"
+    ]
+    assert len(corrections) == 1
+    correction = corrections[0]
+    assert correction["status"] == "sent"
+    assert correction["task_id"] != original_review["task_id"]
+    assert correction["dispatch_nonce"] != original_review["dispatch_nonce"]
+    assert correction["anchor_comment_id"] != original_review["anchor_comment_id"]
+    assert StateStore(path).action(source_fix["key"])["task_id"] == source_fix["task_id"]
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert not any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for status in api.status_log.get(HEAD, [])
+    )
+    assert sum(
+        comment.get("body", "").count("hermes-coordinator-outcome:")
+        for comment in api.comments
+    ) == 1
+
+
 def test_review_report_findings_publish_and_trigger_bounded_followup(tmp_path):
     api = FakeApi(source_failure=True)
     api.owner_reviews = []
