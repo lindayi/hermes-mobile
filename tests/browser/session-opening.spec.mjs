@@ -17,6 +17,7 @@ test('session opening accepts browser clicks inside tap slop',{timeout:240000},a
   if(!/app\.[a-f0-9]+\.js/.test(await readFile(dir+'/index.html','utf8'))){
    dir=tmp+'/public';const env={...process.env};delete env.HERMES_FRONTEND_DIR;
    execFileSync(process.env.HERMES_TEST_PYTHON || repo+'.venv/bin/python',['-c','from deploy.frontend_release import build_frontend; from pathlib import Path; import sys; build_frontend(Path("frontend"),Path(sys.argv[1]))',dir],{cwd:repo,env});
+
   }
   server=createServer(async(req,res)=>{
    const p=new URL(req.url,'http://fixture').pathname;
@@ -105,6 +106,93 @@ test('session opening accepts browser clicks inside tap slop',{timeout:240000},a
   assert.deepEqual(evidence.errors,[]);
  }finally{
   if(process.env.HERMES_TEST_ARTIFACT_DIR){await mkdir(process.env.HERMES_TEST_ARTIFACT_DIR,{recursive:true});await writeFile(process.env.HERMES_TEST_ARTIFACT_DIR+'/session-opening.json',JSON.stringify(evidence,null,2));}
+  await context?.close();await browser?.close();if(server){server.closeAllConnections();await new Promise(r=>server.close(r));}await rm(tmp,{recursive:true,force:true});
+ }
+});
+
+test('opening long sessions lands on latest replay or terminal output in a narrow viewport',{timeout:120000},async t=>{
+ const tmp=await mkdtemp((process.env.TMPDIR || '/tmp')+'/b-');let server,browser,context;
+ const evidence={cases:[],errors:[]},calls=[];
+ try {
+  let dir=process.env.HERMES_FRONTEND_DIR || repo+'frontend';
+  if(!/app\.[a-f0-9]+\.js/.test(await readFile(dir+'/index.html','utf8'))){
+   dir=tmp+'/public';const env={...process.env};delete env.HERMES_FRONTEND_DIR;
+   execFileSync(process.env.HERMES_TEST_PYTHON || repo+'.venv/bin/python',['-c','from deploy.frontend_release import build_frontend; from pathlib import Path; import sys; build_frontend(Path("frontend"),Path(sys.argv[1]))',dir],{cwd:repo,env});
+  }
+  let scenario,eventSink;
+  const replay=()=>{
+   const events=Array.from({length:60},(_,index)=>{
+    const id=index+1,observed_at=1000+id;
+    if(id%3===1)return {id,name:'commentary',observed_at,data:{text:`Public replay commentary ${id}. ${'A restored public segment with useful progress. '.repeat(8)}`}};
+    if(id%3===2)return {id,name:'delta',observed_at,data:{text:`Restored output ${id}. ${'A long synthetic output segment. '.repeat(8)}`}};
+    return {id,name:'tool',observed_at,data:{name:`synthetic_tool_${id}`,tool_call_id:`tool-${id}`,status:'completed',summary:`Restored tool result ${id}. ${'Synthetic result detail. '.repeat(4)}`}};
+   });
+   events.push({id:61,name:'commentary',observed_at:1061,data:{text:'Latest live progress from restored activity.'}});
+   return events;
+  };
+  server=createServer(async(req,res)=>{
+   const p=new URL(req.url,'http://fixture').pathname;
+   if(p.startsWith('/hermes/app-api/')){
+    const path=p.slice('/hermes/app-api'.length);calls.push({path,method:req.method});
+    if(path==='/auth/me')return res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({user:{id:'synthetic-owner',status:'ready'},csrf_token:'fixture'}));
+    if(path==='/sessions')return res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({deletion_available:true,total:1,items:[{id:'s0',title:'Long synthetic session',source:'cli',run_status:scenario?.status || 'idle'}]}));
+    if(path==='/sessions/s0/messages'){
+     const run={id:'run-'+scenario.status,session_id:'s0',status:scenario.status,input:'Current synthetic prompt',created_at:1000,...(scenario.status==='completed'?{output:scenario.output,updated_at:1100}:{})};
+     const items=Array.from({length:24},(_,i)=>({id:`history-${i}`,role:i%2?'assistant':'user',content:`Synthetic retained history item ${i}. ${'Ordinary public history. '.repeat(10)}`,timestamp:900+i}));
+     return res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({items,offset:0,run,tool_replay:{run_id:run.id,cursor:61,events:replay()}}));
+    }
+    if(path.endsWith('/events')){
+     eventSink=res;res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache'});res.write(': connected\n\n');return;
+    }
+    const data=path==='/push/preferences'?{revision:0,enabled:false,categories:{completion:true,approval:true,attention:true,scheduled:true,operational:true},hide_details:false}:{items:[]};
+    return res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(data));
+   }
+   const relative=p.replace(/^\/hermes\//,'')||'index.html';
+   if(relative.includes('..'))return res.writeHead(400).end();
+   try{res.writeHead(200,{'Content-Type':({html:'text/html',js:'text/javascript',mjs:'text/javascript',css:'text/css',svg:'image/svg+xml'})[relative.split('.').pop()]||'application/octet-stream'}).end(await readFile(dir+'/'+relative));}catch{res.writeHead(404).end();}
+  });
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage'],env:{...process.env,TMPDIR:tmp}});
+  const url=`http://127.0.0.1:${server.address().port}/hermes/`;
+  for(const next of [{status:'running'},{status:'completed',output:`Latest terminal output. ${'Synthetic terminal detail. '.repeat(120)}`}])await t.test(`${next.status} run replay`,async()=>{
+   scenario=next;eventSink=null;calls.length=0;
+   context=await browser.newContext({viewport:{width:320,height:640},hasTouch:true,serviceWorkers:'block'});
+   const page=await context.newPage();page.setDefaultTimeout(5000);page.on('pageerror',e=>evidence.errors.push(e.message));
+   await page.goto(url);
+   await page.locator('.session-row').first().click();
+   await page.locator('.messages').waitFor();
+   const latest=next.status==='running'?'Latest live progress from restored activity.':'Latest terminal output.';
+   await page.locator('.live-message').waitFor();
+   await page.waitForTimeout(100);
+   const state=await page.evaluate(()=>{
+    const messages=document.querySelector('.messages'),composer=document.querySelector('.composer'),live=document.querySelector('.live-message');
+    const tail=[...live.querySelectorAll('.public-activity,.message-body')].at(-1),box=messages.getBoundingClientRect(),tailBox=tail.getBoundingClientRect();
+    return {gap:messages.scrollHeight-messages.clientHeight-messages.scrollTop,scrollY,focusedComposer:composer.contains(document.activeElement),messagesBottom:box.bottom,tailBottom:tailBox.bottom,tailTop:tailBox.top,text:live.textContent,tailText:tail.textContent};
+   });
+   evidence.cases.push({scenario:next.status,state,calls:[...calls]});
+   assert.ok(state.gap<=4,`opening ${next.status} run should land at the transcript bottom; gap=${state.gap}`);
+   assert.ok(state.text.includes(latest),`latest ${next.status} progress is rendered`);
+   assert.ok(state.tailText.includes(latest),'newest progress/output is the final run segment');
+   assert.ok(state.tailBottom<=state.messagesBottom+1 && state.tailBottom>state.tailTop,'latest replay/output is inside the transcript viewport above the composer');
+   assert.equal(state.focusedComposer,false,'opening never focuses the composer');
+   assert.equal(state.scrollY,0,'opening moves only the transcript scroller');
+   assert.equal(await page.locator('.live-message').count(),1,'replay restores exactly one live run');
+   assert.equal(calls.filter(call=>call.method!=='GET').length,0,'opening does not submit or mutate a run');
+   assert.equal(calls.filter(call=>call.path==='/sessions/s0/messages').length,1,'latest history is fetched once');
+   if(next.status==='running'){
+    const before=await page.locator('.messages').evaluate(el=>el.scrollTop);
+    await page.locator('.messages').evaluate(el=>el.scrollTop=0);
+    await page.evaluate(()=>{const body=document.querySelector('.live-message .message-body'),range=document.createRange(),text=body.firstChild;range.selectNodeContents(text);getSelection().addRange(range);});
+    eventSink?.write('id: 62\nevent: delta\ndata: {"text":"A later live update"}\n\n');
+    await page.waitForTimeout(100);
+    assert.equal(await page.locator('.messages').evaluate(el=>el.scrollTop),0,'later updates preserve deliberate upward reading and text selection');
+    assert.ok(before>0,'replay content is taller than the narrow transcript viewport');
+   }
+   await context.close();context=null;
+  });
+  assert.deepEqual(evidence.errors,[]);
+ }finally{
+  if(process.env.HERMES_TEST_ARTIFACT_DIR){await mkdir(process.env.HERMES_TEST_ARTIFACT_DIR,{recursive:true});await writeFile(process.env.HERMES_TEST_ARTIFACT_DIR+'/session-opening-scroll.json',JSON.stringify(evidence,null,2));}
   await context?.close();await browser?.close();if(server){server.closeAllConnections();await new Promise(r=>server.close(r));}await rm(tmp,{recursive:true,force:true});
  }
 });
