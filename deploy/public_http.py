@@ -1,5 +1,6 @@
 """Public byte checks over a bounded, reusable strict HTTP connection session."""
 import multiprocessing
+import math
 import time
 from urllib.parse import urljoin, urlsplit
 
@@ -122,7 +123,13 @@ class PublicHTTPSession:
         parent, child = self._context.Pipe()
         process = self._context.Process(
             target=_session_worker, args=(child, self._ca_bundle), daemon=True)
-        process.start()
+        try:
+            process.start()
+        except BaseException:
+            parent.close()
+            child.close()
+            process.close()
+            raise
         child.close()
         self._connection = parent
         self._process = process
@@ -151,17 +158,29 @@ class PublicHTTPSession:
         if self._closed:
             raise RuntimeError('Public HTTP session is closed')
         timeout = float(timeout)
-        if timeout <= 0:
+        if not math.isfinite(timeout) or timeout <= 0:
             raise TimeoutError('Public HTTP deadline exceeded')
-        self._start()
         deadline = time.monotonic() + timeout
+        self._start()
         try:
+            if time.monotonic() >= deadline:
+                self._stop()
+                raise TimeoutError('Public HTTP deadline exceeded')
             self._connection.send((url, expected))
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not self._connection.poll(remaining):
                 self._stop()
                 raise TimeoutError('Public HTTP deadline exceeded')
+            if time.monotonic() >= deadline:
+                self._stop()
+                raise TimeoutError('Public HTTP deadline exceeded')
             kind, value = self._connection.recv()
+            if time.monotonic() >= deadline:
+                self._stop()
+                raise TimeoutError('Public HTTP deadline exceeded')
+        except TimeoutError:
+            self._stop()
+            raise
         except (EOFError, BrokenPipeError, OSError) as error:
             self._stop()
             raise ConnectionError(f'Public HTTP transport failed: {urlsplit(url).path}') from error

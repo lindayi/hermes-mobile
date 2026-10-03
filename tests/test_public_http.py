@@ -1,5 +1,5 @@
 """Whole HTTP deadline and TLS/credential guard tests for public static checks."""
-import subprocess
+import socket
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +44,7 @@ def https_fixture(tmp_path):
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.load_cert_chain(cert_path, key_path)
     requests = []
+    reset_paths = set()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
@@ -53,7 +54,30 @@ def https_fixture(tmp_path):
 
         def do_GET(self):
             requests.append((self.path, self.client_address[1]))
-            body = b'expected bytes'
+            if self.path == '/reset-once' and self.path not in reset_paths:
+                reset_paths.add(self.path)
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+                return
+            if self.path == '/redirect-external':
+                self.send_response(302)
+                self.send_header('Location', 'https://127.0.0.1:1/untrusted')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            if self.path == '/redirect-same':
+                self.send_response(302)
+                self.send_header('Location', '/canonical')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            if self.path == '/error':
+                self.send_response(403)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            body = b'expected bytes plus extra' if self.path == '/oversized' else (
+                b'wrong bytes' if self.path == '/wrong' else b'expected bytes')
             self.send_response(200)
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
@@ -71,16 +95,69 @@ def https_fixture(tmp_path):
         thread.join()
 
 
-def test_same_session_reuses_verified_https_connection(https_fixture):
+def test_same_session_reuses_verified_https_connection(https_fixture, monkeypatch):
     from deploy.public_http import PublicHTTPSession, public_asset_matches
 
     url, ca_bundle, requests = https_fixture
+    monkeypatch.setenv('HTTPS_PROXY', 'http://127.0.0.1:1')
+    monkeypatch.setenv('https_proxy', 'http://127.0.0.1:1')
     with PublicHTTPSession(ca_bundle=ca_bundle) as session:
         assert public_asset_matches(url + 'canonical', b'expected bytes', 3, session=session)
         assert public_asset_matches(url + 'cache?deploy=synthetic', b'expected bytes', 3,
                                     session=session)
     assert [path for path, _ in requests] == ['/canonical', '/cache?deploy=synthetic']
     assert len({port for _, port in requests}) == 1
+
+
+def test_untrusted_https_certificate_fails_closed(https_fixture):
+    from deploy.public_http import PublicHTTPSession, public_asset_matches
+
+    url, _, _ = https_fixture
+    with PublicHTTPSession() as session:
+        with pytest.raises(ConnectionError, match='TLS'):
+            public_asset_matches(url + 'canonical', b'expected bytes', 3, session=session)
+
+
+def test_reset_is_not_accepted_and_same_session_can_retry(https_fixture):
+    from deploy.public_http import PublicHTTPSession, public_asset_matches
+
+    url, ca_bundle, requests = https_fixture
+    with PublicHTTPSession(ca_bundle=ca_bundle) as session:
+        with pytest.raises(ConnectionError):
+            public_asset_matches(url + 'reset-once', b'expected bytes', 3, session=session)
+        assert public_asset_matches(url + 'reset-once', b'expected bytes', 3, session=session)
+    assert len(requests) == 2
+    assert requests[0][1] != requests[1][1]
+
+
+def test_wrong_and_oversized_https_bodies_never_match(https_fixture):
+    from deploy.public_http import PublicHTTPSession, public_asset_matches
+
+    url, ca_bundle, _ = https_fixture
+    with PublicHTTPSession(ca_bundle=ca_bundle) as session:
+        assert not public_asset_matches(url + 'wrong', b'expected bytes', 3, session=session)
+        assert not public_asset_matches(url + 'oversized', b'expected bytes', 3, session=session)
+
+
+def test_http_errors_and_cross_origin_redirects_fail_closed(https_fixture):
+    from deploy.public_http import PublicHTTPSession, public_asset_matches
+
+    url, ca_bundle, _ = https_fixture
+    with PublicHTTPSession(ca_bundle=ca_bundle) as session:
+        with pytest.raises(RuntimeError, match='Public HTTP 403'):
+            public_asset_matches(url + 'error', b'', 3, session=session)
+        with pytest.raises(RuntimeError, match='redirect rejected'):
+            public_asset_matches(url + 'redirect-external', b'expected bytes', 3,
+                                 session=session)
+
+
+def test_same_origin_https_redirect_is_followed(https_fixture):
+    from deploy.public_http import PublicHTTPSession, public_asset_matches
+
+    url, ca_bundle, requests = https_fixture
+    with PublicHTTPSession(ca_bundle=ca_bundle) as session:
+        assert public_asset_matches(url + 'redirect-same', b'expected bytes', 3, session=session)
+    assert [path for path, _ in requests] == ['/redirect-same', '/canonical']
 
 
 @pytest.mark.parametrize('phase',['headers','body'])
@@ -100,22 +177,3 @@ def test_trickling_headers_and_body_cannot_outlive_request_deadline(phase):
         with pytest.raises(TimeoutError):public_asset_matches(f'http://127.0.0.1:{server.server_port}/',b'x'*30,.2)
         assert time.monotonic()-started<1.0
     finally:server.shutdown();server.server_close();thread.join()
-
-
-def test_temporary_tls_handshake_failure_is_retryable_but_not_accepted(monkeypatch):
-    from deploy.public_http import public_asset_matches
-    monkeypatch.setattr(subprocess,'run',lambda command,**kw:subprocess.CompletedProcess(command,35,b'\n000',b'handshake interrupted'))
-    with pytest.raises(ConnectionError):public_asset_matches('https://example.invalid/sw.js',b'expected',3)
-
-
-def test_public_fetch_keeps_tls_checks_ignores_user_config_and_bounds_process(monkeypatch):
-    from deploy.public_http import public_asset_matches
-    seen=[]
-    def run(command,**kwargs):seen.append((command,kwargs));return subprocess.CompletedProcess(command,60,b'',b'certificate failed')
-    monkeypatch.setattr(subprocess,'run',run)
-    with pytest.raises(RuntimeError,match='transport failed.*60'):public_asset_matches('https://example.invalid/sw.js',b'expected',3)
-    command,options=seen[0]
-    assert command[:2]==['/usr/bin/curl','--disable']
-    assert '--insecure' not in command and '-k' not in command
-    assert command[command.index('--noproxy')+1]=='*'
-    assert options['timeout']==3 and options.get('shell',False) is False

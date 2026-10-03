@@ -51,7 +51,7 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': '49d784af17d0807c95b460b2a285254f0a616361c390afa69b3cc0345a56b498',
-    'deploy/public_http.py': 'dd352b8d0295f242f4a5d31a55eaaec523ef8405601461d4ab5fa8dc6dc302e7',
+    'deploy/public_http.py': 'd1f655b777448a20fd26e1abd1375fef8e4114d041bdcc9e35d8bf81b72d2dd4',
     'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
     'deploy/ci_selection.py': '07493f74bc4b932e26342e0d27fee8c3c38601af8211e0a950920935173b2f16',
     'deploy/test_workspace.py': 'baeb1103608ff15db3903677fa8ec9c80c9c8b9a0246ce18ada27bf7c04a486a',
@@ -145,7 +145,7 @@ _PENDING_ISSUE43_LAUNCH_FIXTURE = {
 
 _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE = {
     'deploy/native_controls_release.py': '0887a6ad4fa0bb5c1351089cc6c53fc8ff7be4c609f42d956d3a51642256dba5',
-    'deploy/self_deploy.py': '592cc957ad79a1f020a02ec1ca72b53d68bbbd49a8800c16af8cdead13d45469',
+    'deploy/self_deploy.py': '04036a85d2abba0cf38e7717c30d5e6b6f04da2fd7efcea16bbf21086f2ab68a',
 }
 
 _PENDING_ISSUE50_RECEIPT_FIXTURE = {

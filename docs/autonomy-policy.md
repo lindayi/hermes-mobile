@@ -93,14 +93,15 @@ they do not assert independent review, merge, deployment, or gate activation.
 | Issue #52 candidate path | SHA-256 |
 | --- | --- |
 | `deploy/native_controls_release.py` | `0887a6ad4fa0bb5c1351089cc6c53fc8ff7be4c609f42d956d3a51642256dba5` |
-| `deploy/self_deploy.py` | `592cc957ad79a1f020a02ec1ca72b53d68bbbd49a8800c16af8cdead13d45469` |
+| `deploy/self_deploy.py` | `04036a85d2abba0cf38e7717c30d5e6b6f04da2fd7efcea16bbf21086f2ab68a` |
 
 The native-controller hash in both candidate tables and independent fixtures is
 the integrated issue #46 + #52 source: operational busy observation remains
 separate from idle-required maintenance with verified hosted artifacts. It replaces
 the separate PR47 and PR53 controller candidate hashes, not historical-main pins.
-The observer, self-deploy, and issue #48 starter/unit pins retain their accepted
-source bytes. This local assembly does not authorize activation or deployment.
+Issue #59 updates the self-deploy candidate with reusable public HTTPS transport;
+the new source pin records that change, not operational approval. This local
+assembly does not authorize activation or deployment.
 
 PR57 extends the assembled starter/consumer authority contract with the exact
 head/issue/body-digest command and a final prepared-scan admission fence. Its new

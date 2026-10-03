@@ -163,12 +163,16 @@ Changing builder transformation semantics requires its format-marker bump.
    browser and cache-busted URLs must match, at most six attempts per resource
    with 1/2/4/8/8-second backoff and a 90-second aggregate public-check budget.
    Persistent wrong bytes and HTTP failures still fail; TLS validation stays enabled.
-   Public checks require installed /usr/bin/curl (already present on this host):
-   --disable ignores user curlrc, proxies are off, redirects remain HTTPS, body
-   size is bounded, and both curl total timeout and subprocess timeout enforce
-   whole-request deadlines, including slowly streaming headers/bodies. Transient
-   read timeouts may retry inside the same finite budget. A final deadline check
-   rejects matching bytes that arrive too late.
+   Public checks use one isolated strict-TLS HTTP session for the complete byte
+   verification. Environment proxies are disabled; redirects are limited to five
+   same-origin HTTPS hops; and each response is read only up to one byte beyond
+   the expected asset size. The parent process enforces each whole-request deadline,
+   including DNS, TLS, headers, and trickling bodies, and terminates a stalled
+   worker. Transient network failures and byte mismatches may retry only inside
+   the existing finite aggregate budget; a final deadline check rejects matching
+   bytes that arrive too late. Reusing transport reduces connection churn in
+   synthetic verification, but does not establish a CDN, rate-limit, or production
+   root cause.
 9. Failure restores the prior pointer/drop-in and public preimages, restarts the
    old bridge if activation began, and verifies old health/public serving before
    reopening admission. Source project files and user DBs are never restored.
