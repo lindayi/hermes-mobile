@@ -119,7 +119,7 @@ def test_invalid_base_sha_never_completes_starter_handoff(tmp_path, base_sha, st
         1 if stage == "after_post" else 0
     )
     if stage == "final_reread":
-        assert api.pull_detail_reads == 2
+        assert api.pull_detail_reads == 3
         assert any("closingIssuesReferences" in c["query"] for c in api.graphql_calls)
     if stage != "after_post":
         assert not any("markPullRequestReadyForReview" in c["query"] for c in api.graphql_calls)

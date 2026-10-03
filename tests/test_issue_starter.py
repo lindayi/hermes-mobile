@@ -83,6 +83,7 @@ def issue_comment(*, user_id=OWNER_ID, body="/hermes start", comment_id=COMMAND_
 def issue(*, state="open", body="Please implement the public feature.", title="Example"):
     return {
         "number": ISSUE_NUMBER,
+        "node_id": "I_kwDOIssue28",
         "title": title,
         "body": body,
         "state": state,
@@ -106,7 +107,7 @@ def task(task_id="task-1", *, state="queued", artifacts=None, session_count=0,
 
 def completed_task(*, repository_id=REPOSITORY_ID, creator_id=OWNER_ID,
                    head_ref="copilot/issue-28", pull_id=3301, node_id="PR_kwDO123"):
-    return task(
+    value = task(
         state="completed",
         creator_id=creator_id,
         repository_id=repository_id,
@@ -124,6 +125,16 @@ def completed_task(*, repository_id=REPOSITORY_ID, creator_id=OWNER_ID,
             },
         ],
     )
+    value["sessions"] = [{
+        "id": "session-1",
+        "user": {"id": OWNER_ID},
+        "owner": {"id": OWNER_ID},
+        "repository": {"id": REPOSITORY_ID},
+        "task_id": value["id"],
+        "state": "completed",
+        "completed_at": "2026-10-01T20:30:00Z",
+    }]
+    return value
 
 
 def pull_request(*, pull_id=3301, node_id="PR_kwDO123", head_ref="copilot/issue-28",
@@ -176,6 +187,7 @@ class FakeApi:
         self.graphql_calls = []
         self.task_detail_reads = 0
         self.pull_detail_reads = 0
+        self.issue_node_id = "I_kwDOIssue28"
 
     def get(self, route):
         if route == "user":
@@ -219,15 +231,46 @@ class FakeApi:
     def post(self, route, body):
         if route == "graphql":
             self.graphql_calls.append(body)
+            if "addCloseIssueReferences" in body.get("query", ""):
+                variables = body["variables"]
+                issue_id = variables["issueId"]
+                pull_ids = variables["pullRequestIds"]
+                if issue_id != self.issue_node_id or len(pull_ids) != 1:
+                    raise AssertionError("Mutation was not bound to actual issue/PR nodes")
+                pull = next(item for item in self.pulls if item["node_id"] == pull_ids[0])
+                if not any(
+                    reference.get("number") == ISSUE_NUMBER
+                    and reference.get("repository", {}).get("id") == GRAPHQL_REPOSITORY_ID
+                    for reference in self.closing_issues if isinstance(reference, dict)
+                ):
+                    self.closing_issues.append(issue_reference())
+                return {
+                    "data": {
+                        "addCloseIssueReferences": {
+                            "clientMutationId": variables.get("clientMutationId"),
+                            "issue": {
+                                "id": issue_id,
+                                "number": ISSUE_NUMBER,
+                                "repository": GRAPHQL_REPOSITORY.copy(),
+                            },
+                        },
+                    },
+                }
             if "closingIssuesReferences" in body.get("query", ""):
                 number = body["variables"]["number"]
                 pull = next(item for item in self.pulls if item["number"] == number)
                 after = body["variables"].get("after")
                 if after in self.closing_pages:
                     return self.closing_pages[after]
-                return closing_issue_response(
+                response = closing_issue_response(
                     pull, nodes=self.closing_issues,
                 )
+                response["data"]["repository"]["issue"] = {
+                    "id": self.issue_node_id,
+                    "number": ISSUE_NUMBER,
+                    "repository": GRAPHQL_REPOSITORY.copy(),
+                }
+                return response
             if "markPullRequestReadyForReview" in body.get("query", ""):
                 pull_id = body["variables"]["pullRequestId"]
                 pull = next(item for item in self.pulls if item["node_id"] == pull_id)
@@ -696,8 +739,41 @@ def test_command_containing_pr_body_uses_authenticated_closing_issue_edge(tmp_pa
     ]
     assert queries
     assert all(call["variables"]["number"] == 41 for call in queries)
-    # This single-page fixture must omit the absent cursor for both adapters.
-    assert all(call["variables"] == {"number": 41} for call in queries)
+    # Both the producer's issue-node read and paired consumer omit absent cursors.
+    assert all("after" not in call["variables"] for call in queries)
+
+
+def test_rewritten_report_without_closing_edge_gets_canonical_link_without_body_write(tmp_path):
+    body = (
+        "## Summary\n\n"
+        "Provider-generated final report with the original task evidence.\n\n"
+        "## Tests\n\n"
+        "Focused regression passed."
+    )
+    api = FakeApi(pulls=[pull_request(body=body)])
+    api.closing_issues = []
+
+    result = _run_completed_handoff(tmp_path, api)
+    record = make_coordinator(tmp_path, api).store.snapshot()["commands"]["28:9001"]
+    next_result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert result["handed_off"] == 1
+    assert next_result["handed_off"] == 0
+    assert record["phase"] == "handed_off"
+    assert api.pulls[0]["body"] == body
+    assert api.patches == []
+    links = [
+        call for call in api.graphql_calls
+        if "addCloseIssueReferences" in call["query"]
+    ]
+    assert len(links) == 1
+    assert links[0]["variables"] == {
+        "issueId": "I_kwDOIssue28",
+        "pullRequestIds": ["PR_kwDO123"],
+        "clientMutationId": "hermes-issue-starter:28:9001:close-link",
+    }
+    assert api.closing_issues == [issue_reference()]
+    assert api.patches == []
 
 
 def test_reserved_pull_body_digest_is_immutable(tmp_path):
@@ -716,6 +792,356 @@ def test_reserved_pull_body_digest_is_immutable(tmp_path):
     assert store.snapshot()["commands"]["28:9001"]["pull_body_sha256"] == accepted_digest
 
 
+@pytest.fixture(params=[
+    ([issue_reference(number=29)], None),
+    ([issue_reference(), issue_reference(number=29)], None),
+    ([issue_reference()], [issue_reference(number=29)]),
+    ([], [issue_reference(number=29)]),
+    ([issue_reference(number=29, repository={
+        "id": "R_other", "nameWithOwner": "someone/else",
+    })], None),
+], ids=["other-only", "target-and-other", "conflicting-page-two",
+        "other-only-page-two", "other-repository"])
+def conflicting_closing_api(request):
+    first, second = request.param
+    pull = pull_request(body="Provider report must remain untouched.")
+    api = FakeApi(pulls=[pull])
+    api.closing_issues = copy.deepcopy(first)
+    if second is not None:
+        for cursor, nodes, page_info in [
+            (None, first, {"hasNextPage": True, "endCursor": "next"}),
+            ("next", second, {"hasNextPage": False, "endCursor": None}),
+        ]:
+            response = closing_issue_response(pull, nodes=nodes, page_info=page_info)
+            response["data"]["repository"]["issue"] = {
+                "id": api.issue_node_id, "number": ISSUE_NUMBER,
+                "repository": GRAPHQL_REPOSITORY.copy(),
+            }
+            api.closing_pages[cursor] = response
+    return api
+
+
+def test_conflicting_canonical_refs_are_neither_absent_nor_linked(
+    tmp_path, conflicting_closing_api,
+):
+    api = conflicting_closing_api
+    assert make_coordinator(tmp_path, api)._closing_issue_status(
+        api.pulls[0], ISSUE_NUMBER, api.issue_node_id,
+    ) is None
+
+
+def test_conflicting_canonical_refs_block_starter_without_writes(
+    tmp_path, conflicting_closing_api,
+):
+    api = conflicting_closing_api
+    original_pull = copy.deepcopy(api.pulls[0])
+
+    result = _run_completed_handoff(tmp_path, api)
+
+    assert not any("addCloseIssueReferences" in call["query"]
+                   for call in api.graphql_calls)
+    assert not any("markPullRequestReadyForReview" in call["query"]
+                   for call in api.graphql_calls)
+    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
+    assert api.patches == []
+    assert api.pulls[0] == original_pull
+    assert result["handed_off"] == 0
+    assert result["blocked"] == 1
+
+
+@pytest.mark.parametrize("initially_linked", [False, True], ids=["empty-recovery", "sole-target"])
+@pytest.mark.parametrize("target_page", [1, 2])
+def test_complete_paginated_closing_refs_preserve_safe_handoff(
+    tmp_path, initially_linked, target_page,
+):
+    class PaginatedApi(FakeApi):
+        def post(self, route, body):
+            response = super().post(route, body)
+            if route == "graphql" and "closingIssuesReferences" in body.get("query", ""):
+                connection = response["data"]["repository"]["pullRequest"][
+                    "closingIssuesReferences"
+                ]
+                page = 2 if body["variables"].get("after") == "next" else 1
+                if page != target_page:
+                    connection["nodes"] = []
+                connection["pageInfo"] = {
+                    "hasNextPage": page == 1,
+                    "endCursor": "next" if page == 1 else None,
+                }
+            return response
+
+    api = PaginatedApi(pulls=[pull_request(body="Unchanged provider report.")])
+    api.closing_issues = [issue_reference()] if initially_linked else []
+    original_body = api.pulls[0]["body"]
+    coordinator = make_coordinator(tmp_path, api)
+    assert coordinator._closing_issue_status(
+        api.pulls[0], ISSUE_NUMBER, api.issue_node_id,
+    ) is initially_linked
+    assert [call["variables"].get("after") for call in api.graphql_calls] == [None, "next"]
+    assert api.pull_detail_reads == 1
+
+    result = _run_completed_handoff(tmp_path, api)
+
+    assert result["handed_off"] == 1
+    assert len([call for call in api.graphql_calls
+                if "addCloseIssueReferences" in call["query"]]) == int(not initially_linked)
+    assert len([call for call in api.graphql_calls
+                if "markPullRequestReadyForReview" in call["query"]]) == 1
+    assert len([route for route, _ in api.posts if route.endswith("/issues/41/comments")]) == 1
+    assert api.closing_issues == [issue_reference()]
+    assert api.pulls[0]["body"] == original_body
+    assert api.patches == []
+
+
+def test_existing_canonical_edge_takes_zero_write_path(tmp_path):
+    body = "Provider-authored report, left untouched."
+    api = FakeApi(pulls=[pull_request(body=body)])
+
+    result = _run_completed_handoff(tmp_path, api)
+
+    assert result["handed_off"] == 1
+    assert not any("addCloseIssueReferences" in call["query"]
+                   for call in api.graphql_calls)
+    assert api.pulls[0]["body"] == body
+
+
+def test_link_mutation_is_reserved_and_uses_documented_graphql_shape(tmp_path):
+    api = FakeApi(pulls=[pull_request()])
+    api.closing_issues = []
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    coordinator = make_coordinator(tmp_path, api)
+    original_post = api.post
+    reservations = []
+
+    def assert_reserved_before_send(route, body):
+        if route == "graphql" and "addCloseIssueReferences" in body.get("query", ""):
+            saved = coordinator.store.snapshot()["commands"]["28:9001"]
+            reservations.append((saved["link_state"], saved["link_intent"]))
+        return original_post(route, body)
+
+    api.post = assert_reserved_before_send
+    result = coordinator.run(apply=True)
+
+    assert result["handed_off"] == 1
+    assert len(reservations) == 1
+    state, intent = reservations[0]
+    assert state == "started"
+    assert intent["issue_node_id"] == "I_kwDOIssue28"
+    assert intent["pull_node_id"] == "PR_kwDO123"
+    assert intent["session_id"] == "session-1"
+    mutation = next(call for call in api.graphql_calls
+                    if "addCloseIssueReferences" in call["query"])
+    assert "issueId: ID!" in mutation["query"]
+    assert "pullRequestIds: [ID!]!" in mutation["query"]
+    assert mutation["variables"] == {
+        "issueId": "I_kwDOIssue28",
+        "pullRequestIds": ["PR_kwDO123"],
+        "clientMutationId": "hermes-issue-starter:28:9001:close-link",
+    }
+    with pytest.raises(CoordinatorError, match="reservation cannot be reset"):
+        coordinator.store.update("28:9001", {"link_state": "reserved"})
+
+
+def test_lost_link_response_reconciles_from_complete_readback(tmp_path):
+    class LostAfterWriteApi(FakeApi):
+        def post(self, route, body):
+            response = super().post(route, body)
+            if route == "graphql" and "addCloseIssueReferences" in body.get("query", ""):
+                raise TimeoutError("synthetic response loss after mutation")
+            return response
+
+    body = "Exact provider report."
+    api = LostAfterWriteApi(pulls=[pull_request(body=body)])
+    api.closing_issues = []
+
+    result = _run_completed_handoff(tmp_path, api)
+
+    assert result["handed_off"] == 1
+    assert len([call for call in api.graphql_calls
+                if "addCloseIssueReferences" in call["query"]]) == 1
+    assert api.pulls[0]["body"] == body
+
+
+def test_uncertain_unapplied_link_is_never_retried_after_restart(tmp_path):
+    class LostBeforeWriteApi(FakeApi):
+        def post(self, route, body):
+            if route == "graphql" and "addCloseIssueReferences" in body.get("query", ""):
+                self.graphql_calls.append(body)
+                raise TimeoutError("synthetic request outcome unknown")
+            return super().post(route, body)
+
+    api = LostBeforeWriteApi(pulls=[pull_request()])
+    api.closing_issues = []
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+
+    first = make_coordinator(tmp_path, api).run(apply=True)
+    saved = make_coordinator(tmp_path, api).store.snapshot()["commands"]["28:9001"]
+    assert first["handed_off"] == 0
+    assert saved["link_state"] == "uncertain"
+    assert saved["link_intent"]["pull_node_id"] == "PR_kwDO123"
+
+    for _ in range(3):
+        assert make_coordinator(tmp_path, api).run(apply=True)["handed_off"] == 0
+    assert len([call for call in api.graphql_calls
+                if "addCloseIssueReferences" in call["query"]]) == 1
+    assert not any("markPullRequestReadyForReview" in call["query"]
+                   for call in api.graphql_calls)
+    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
+
+
+def test_restart_reconciles_link_applied_before_process_crash(tmp_path):
+    class CrashAfterWriteApi(FakeApi):
+        def post(self, route, body):
+            response = super().post(route, body)
+            if route == "graphql" and "addCloseIssueReferences" in body.get("query", ""):
+                raise KeyboardInterrupt("synthetic crash after remote mutation")
+            return response
+
+    api = CrashAfterWriteApi(pulls=[pull_request()])
+    api.closing_issues = []
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+
+    with pytest.raises(KeyboardInterrupt, match="synthetic crash"):
+        make_coordinator(tmp_path, api).run(apply=True)
+    assert make_coordinator(tmp_path, api).store.snapshot()["commands"]["28:9001"][
+        "link_state"
+    ] == "started"
+
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert result["handed_off"] == 1
+    assert len([call for call in api.graphql_calls
+                if "addCloseIssueReferences" in call["query"]]) == 1
+    assert not api.patches
+
+
+@pytest.mark.parametrize("change", [
+    "issue_body", "owner_command", "task_session", "task_artifact",
+    "head", "body", "base", "draft", "pull_node",
+])
+@pytest.mark.parametrize("stage", ["before_mutation", "after_mutation"])
+def test_changed_link_authority_or_pull_snapshot_blocks_handoff(
+    tmp_path, change, stage,
+):
+    class ChangingApi(FakeApi):
+        changed = False
+
+        def change_evidence(self):
+            if change == "issue_body":
+                self.current_issue["body"] = "Edited after owner authorization."
+            elif change == "owner_command":
+                self.comments[0]["updated_at"] = "2026-10-01T20:01:00Z"
+            elif change == "task_session":
+                self.task_detail["sessions"][0]["id"] = "session-other"
+            elif change == "task_artifact":
+                self.task_detail["artifacts"][0]["data"]["head_ref"] = "copilot/other"
+            elif change == "head":
+                self.pulls[0]["head"]["sha"] = "c" * 40
+            elif change == "body":
+                self.pulls[0]["body"] = "Changed by another actor."
+            elif change == "base":
+                self.pulls[0]["base"]["sha"] = "d" * 40
+            elif change == "draft":
+                self.pulls[0]["draft"] = False
+            elif change == "pull_node":
+                self.pulls[0]["node_id"] = "PR_other"
+
+        def post(self, route, body):
+            result = super().post(route, body)
+            is_link_read = (
+                route == "graphql"
+                and "closingIssuesReferences" in body.get("query", "")
+                and "issueNumber" in body.get("variables", {})
+            )
+            is_link_write = (
+                route == "graphql"
+                and "addCloseIssueReferences" in body.get("query", "")
+            )
+            if not self.changed and (
+                (stage == "before_mutation" and is_link_read)
+                or (stage == "after_mutation" and is_link_write)
+            ):
+                self.changed = True
+                self.change_evidence()
+            return result
+
+    api = ChangingApi(pulls=[pull_request()])
+    api.closing_issues = []
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    original_body = api.pulls[0]["body"]
+
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    writes = [call for call in api.graphql_calls
+              if "addCloseIssueReferences" in call["query"]]
+    assert result["handed_off"] == 0
+    assert len(writes) == int(stage == "after_mutation")
+    assert not any("markPullRequestReadyForReview" in call["query"]
+                   for call in api.graphql_calls)
+    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
+    if change != "body":
+        assert api.pulls[0]["body"] == original_body
+
+
+@pytest.mark.parametrize("invalid_session", [
+    "missing", "duplicate", "wrong_user", "wrong_owner", "wrong_repository",
+    "wrong_task", "not_completed", "bad_timestamp", "count_mismatch",
+])
+def test_link_recovery_requires_one_authenticated_completed_task_session(
+    tmp_path, invalid_session,
+):
+    api = FakeApi(pulls=[pull_request()])
+    api.closing_issues = []
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    sessions = api.task_detail["sessions"]
+    if invalid_session == "missing":
+        del api.task_detail["sessions"]
+    elif invalid_session == "duplicate":
+        sessions.append(dict(sessions[0]))
+        api.task_detail["session_count"] = 2
+    elif invalid_session == "wrong_user":
+        sessions[0]["user"]["id"] = 99
+    elif invalid_session == "wrong_owner":
+        sessions[0]["owner"]["id"] = 99
+    elif invalid_session == "wrong_repository":
+        sessions[0]["repository"]["id"] = 99
+    elif invalid_session == "wrong_task":
+        sessions[0]["task_id"] = "task-other"
+    elif invalid_session == "not_completed":
+        sessions[0]["state"] = "in_progress"
+    elif invalid_session == "bad_timestamp":
+        sessions[0]["completed_at"] = "not-a-timestamp"
+    else:
+        api.task_detail["session_count"] = 2
+
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert result["handed_off"] == 0
+    assert not any("addCloseIssueReferences" in call["query"]
+                   for call in api.graphql_calls)
+    assert not any("markPullRequestReadyForReview" in call["query"]
+                   for call in api.graphql_calls)
+
+
+def test_documented_optional_session_completion_time_is_not_required(tmp_path):
+    api = FakeApi(pulls=[pull_request()])
+    api.closing_issues = []
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    del api.task_detail["sessions"][0]["completed_at"]
+
+    result = make_coordinator(tmp_path, api).run(apply=True)
+
+    assert result["handed_off"] == 1
+    assert len([call for call in api.graphql_calls
+                if "addCloseIssueReferences" in call["query"]]) == 1
+
+
 @pytest.mark.parametrize("body", [
     "Closes #28",
     "> Closes #28",
@@ -725,18 +1151,16 @@ def test_reserved_pull_body_digest_is_immutable(tmp_path):
     "Unrelated change",
     "ordinary description with command HERMES_TEST_PYTHON=$PWD/.venv/bin/python",
 ])
-def test_closing_looking_body_without_authenticated_edge_never_hands_off(tmp_path, body):
+def test_closing_looking_body_without_edge_uses_mutation_not_description_proof(tmp_path, body):
     api = FakeApi(pulls=[pull_request(body=body)])
     api.closing_issues = []
 
     result = _run_completed_handoff(tmp_path, api)
 
-    assert result["handed_off"] == 0
-    assert not any(
-        "markPullRequestReadyForReview" in call["query"]
-        for call in api.graphql_calls
-    )
-    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
+    assert result["handed_off"] == 1
+    assert len([call for call in api.graphql_calls
+                if "addCloseIssueReferences" in call["query"]]) == 1
+    assert api.pulls[0]["body"] == body
 
 
 @pytest.mark.parametrize("references", [
@@ -747,12 +1171,17 @@ def test_closing_looking_body_without_authenticated_edge_never_hands_off(tmp_pat
     [{"number": ISSUE_NUMBER, "repository": None}],
 ])
 def test_wrong_or_ambiguous_closing_issue_edges_never_handoff(tmp_path, references):
+    # A different issue is conflicting evidence, not safe absence (issue #63).
     api = FakeApi(pulls=[pull_request(body="Any plain text and command $HOME")])
     api.closing_issues = references
 
     result = _run_completed_handoff(tmp_path, api)
 
     assert result["handed_off"] == 0
+    assert not any("addCloseIssueReferences" in call["query"]
+                   for call in api.graphql_calls)
+    assert not any("markPullRequestReadyForReview" in call["query"]
+                   for call in api.graphql_calls)
     assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
 
 
@@ -774,6 +1203,7 @@ def test_closing_issue_api_failure_never_hands_off(tmp_path):
 @pytest.mark.parametrize("invalid", [
     "partial_error", "null_repository", "null_pull", "wrong_repository",
     "wrong_node", "wrong_number", "wrong_branch", "wrong_head", "wrong_base",
+    "wrong_issue_node", "wrong_issue_number", "wrong_issue_repository",
     "null_connection", "bad_page_info", "missing_cursor", "repeated_cursor",
     "duplicate_across_pages", "changed_snapshot",
 ])
@@ -781,6 +1211,11 @@ def test_malformed_or_inconsistent_closing_issue_responses_block(tmp_path, inval
     pull = pull_request()
     api = FakeApi(pulls=[pull])
     response = closing_issue_response(pull, nodes=[issue_reference()])
+    response["data"]["repository"]["issue"] = {
+        "id": "I_kwDOIssue28",
+        "number": ISSUE_NUMBER,
+        "repository": GRAPHQL_REPOSITORY.copy(),
+    }
     if invalid == "partial_error":
         response["errors"] = [{"message": "partial GraphQL response"}]
     elif invalid == "null_repository":
@@ -801,6 +1236,18 @@ def test_malformed_or_inconsistent_closing_issue_responses_block(tmp_path, inval
             "wrong_base": ("baseRefName", "release"),
         }[invalid]
         node[key] = value
+    elif invalid in {
+        "wrong_issue_node", "wrong_issue_number", "wrong_issue_repository",
+    }:
+        issue_value = response["data"]["repository"]["issue"]
+        if invalid == "wrong_issue_node":
+            issue_value["id"] = "I_other"
+        elif invalid == "wrong_issue_number":
+            issue_value["number"] = ISSUE_NUMBER + 1
+        else:
+            issue_value["repository"] = {
+                "id": "R_other", "nameWithOwner": "someone/else",
+            }
     elif invalid == "null_connection":
         response["data"]["repository"]["pullRequest"][
             "closingIssuesReferences"
@@ -841,6 +1288,8 @@ def test_malformed_or_inconsistent_closing_issue_responses_block(tmp_path, inval
     result = _run_completed_handoff(tmp_path, api)
 
     assert result["handed_off"] == 0
+    assert not any("addCloseIssueReferences" in call["query"]
+                   for call in api.graphql_calls)
     assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
 
 
@@ -850,14 +1299,22 @@ def test_malformed_or_inconsistent_closing_issue_responses_block(tmp_path, inval
 ])
 def test_closing_repository_is_bound_to_fixed_rest_identity(tmp_path, invalid):
     # Independent review R2: self-consistent GraphQL IDs are not a REST anchor.
+    fresh_rest_repository_ids = []
+
     class SnapshotApi(FakeApi):
+        closing_graph_read = False
+
         def get(self, route):
-            return copy.deepcopy(super().get(route))
+            response = copy.deepcopy(super().get(route))
+            if self.closing_graph_read and route == f"repos/{REPOSITORY}/pulls/41":
+                fresh_rest_repository_ids.append(response["base"]["repo"]["node_id"])
+            return response
 
         def post(self, route, body):
             response = copy.deepcopy(super().post(route, body))
             if (invalid == "changed_rest_node_id" and route == "graphql"
                     and "closingIssuesReferences" in body.get("query", "")):
+                self.closing_graph_read = True
                 self.pulls[0]["base"]["repo"]["node_id"] = "R_other"
             return response
 
@@ -872,7 +1329,13 @@ def test_closing_repository_is_bound_to_fixed_rest_identity(tmp_path, invalid):
         ]["id"] = "R_other"
     elif invalid == "missing_rest_node_id":
         del pull["base"]["repo"]["node_id"]
-    elif invalid != "changed_rest_node_id":
+    elif invalid == "changed_rest_node_id":
+        repository["issue"] = {
+            "id": api.issue_node_id,
+            "number": ISSUE_NUMBER,
+            "repository": GRAPHQL_REPOSITORY.copy(),
+        }
+    else:
         pull["base"]["repo"]["node_id"] = {
             "empty_rest_node_id": "", "null_rest_node_id": None,
             "nonstring_rest_node_id": REPOSITORY_ID,
@@ -886,6 +1349,9 @@ def test_closing_repository_is_bound_to_fixed_rest_identity(tmp_path, invalid):
     assert not any("markPullRequestReadyForReview" in call["query"]
                    for call in api.graphql_calls)
     assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
+    if invalid == "changed_rest_node_id":
+        # Reach the fresh REST comparison, not an earlier GraphQL shape rejection.
+        assert fresh_rest_repository_ids == ["R_other"]
 
 
 def test_unbounded_closing_issue_pagination_fails_closed(tmp_path):
@@ -896,10 +1362,16 @@ def test_unbounded_closing_issue_pagination_fails_closed(tmp_path):
                 after = body["variables"].get("after")
                 index = int(after[1:]) if after else 0
                 pull = self.pulls[0]
-                return closing_issue_response(
+                response = closing_issue_response(
                     pull, nodes=[],
                     page_info={"hasNextPage": True, "endCursor": f"c{index + 1}"},
                 )
+                response["data"]["repository"]["issue"] = {
+                    "id": "I_kwDOIssue28",
+                    "number": ISSUE_NUMBER,
+                    "repository": GRAPHQL_REPOSITORY.copy(),
+                }
+                return response
             return super().post(route, body)
 
     api = EndlessPagesApi(pulls=[pull_request()])
@@ -911,6 +1383,8 @@ def test_unbounded_closing_issue_pagination_fails_closed(tmp_path):
         call for call in api.graphql_calls
         if "closingIssuesReferences" in call["query"]
     ]) == 20
+    assert not any("addCloseIssueReferences" in call["query"]
+                   for call in api.graphql_calls)
     assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
 
 
@@ -1578,32 +2052,35 @@ def test_final_fresh_draft_read_blocks_enrollment_without_readiness_retry(tmp_pa
             return result
 
     class RedraftedApi(FakeApi):
-        redraft_at = None
+        redraft_next_pull_read = False
 
         def post(self, route, body):
             result = super().post(route, body)
             if (path == "mutation" and route == "graphql"
                     and "markPullRequestReadyForReview" in body.get("query", "")):
-                self.redraft_at = self.pull_detail_reads + 3
+                self.redraft_next_pull_read = True
+            elif (path == "already_ready" and route == "graphql"
+                  and "closingIssuesReferences" in body.get("query", "")
+                  and "issueNumber" not in body.get("variables", {})):
+                self.redraft_next_pull_read = True
             return result
 
         def get(self, route):
             if (route == f"repos/{REPOSITORY}/pulls/41"
-                    and self.pull_detail_reads + 1 == self.redraft_at):
+                    and self.redraft_next_pull_read):
+                self.redraft_next_pull_read = False
                 self.pulls[0]["draft"] = True
             return super().get(route)
 
     api = RedraftedApi(pulls=[pull_request(draft=path != "already_ready")])
     start_task(tmp_path, api)
     api.task_detail = completed_task()
-    if path == "already_ready":
-        api.redraft_at = 4
-    elif path == "restart":
+    if path == "restart":
         store = CrashAfterReadyStore(tmp_path / "private" / "issue-starter.json")
         with pytest.raises(Crash):
             Coordinator(api, store).run(apply=True)
         assert store.snapshot()["commands"]["28:9001"]["ready_state"] == "done"
-        api.redraft_at = api.pull_detail_reads + 3
+        api.redraft_next_pull_read = True
 
     result = make_coordinator(tmp_path, api).run(apply=True)
 

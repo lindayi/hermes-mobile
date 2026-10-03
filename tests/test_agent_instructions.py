@@ -425,14 +425,40 @@ def test_pull_request_template_uses_plain_text_without_markdown_markup():
 
 
 def test_completed_pull_request_template_passes_issue_link_policy():
-    from test_issue_link_policy import evaluate
+    import hashlib
+    import json
+    from test_issue_link_policy import issue, make_payload, run_pipeline
 
     template = (ROOT / '.github/pull_request_template.md').read_text()
-    result = evaluate(template.replace('#NUMBER', '#7'))
-    assert result['errors'] == []
-    assert result['requests'] == [
-        {'owner': 'lindayi', 'repo': 'hermes-mobile', 'issue_number': 7}]
-    assert result['statuses'] == []
+    body = template.replace('#NUMBER', '#7')
+    # The template supplies readable metadata, not proof of a closing relation.
+    # Supply that independent API evidence explicitly, without parsing the body.
+    payload = make_payload(body=body, refs=[issue(7, node_id='I_template_7')])
+    pending, validation, published = run_pipeline(payload)
+    assert pending['errors'] == validation['errors'] == published['errors'] == []
+    assert validation['calls']['graphql']
+    expected_relation = hashlib.sha256(
+        json.dumps([['I_template_7', 7]], separators=(',', ':')).encode()).hexdigest()
+    assert validation['outputs']['relation_digest'] == expected_relation
+    assert validation['calls']['statuses'] == []
+    assert validation['calls']['checkCreates'] == validation['calls']['checkUpdates'] == []
+    assert published['calls']['checkUpdates'][-1]['conclusion'] == 'success'
+    assert published['calls']['statuses'][-1]['state'] == 'success'
+
+
+def test_completed_pull_request_template_alone_is_not_canonical_linkage():
+    from test_issue_link_policy import make_payload, run_pipeline
+
+    template = (ROOT / '.github/pull_request_template.md').read_text()
+    pending, validation, published = run_pipeline(
+        make_payload(body=template.replace('#NUMBER', '#7'), refs=[]))
+    assert pending['errors'] == []
+    assert validation['errors']
+    assert validation['calls']['statuses'] == []
+    assert published['calls']['checkUpdates'][-1]['conclusion'] == 'failure'
+    assert all(status['state'] != 'success'
+               for stage in (pending, validation, published)
+               for status in stage['calls']['statuses'])
 
 
 def test_copilot_setup_is_pinned_minimal_and_never_runs_tests():

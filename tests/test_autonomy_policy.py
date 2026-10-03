@@ -127,8 +127,8 @@ _PENDING_PR40_LIFECYCLE_FIXTURE = {
 
 _PENDING_ISSUE43_LAUNCH_FIXTURE = {
     'deploy/cloud_coordinator.py': '3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c',
-    # PR57 paired admission fence and corrected shared canonical proof.
-    'deploy/issue_starter.py': 'c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9',
+    # PR57 paired proof plus issue #63 fail-closed boundary, independently literal.
+    'deploy/issue_starter.py': '20603a350aa4c3972563010035a9faed8fcf086b251af847dbed7e4b32e900ca',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
@@ -153,8 +153,17 @@ _PENDING_ISSUE50_RECEIPT_FIXTURE = {
     'deploy/task_receipts.py': '60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb',
 }
 
+# Current producer overlay only; preserve the independent historical issue50 literal.
+_ISSUE65_RECEIPT_PRODUCER_FIXTURE = {
+    'deploy/task_receipts.py': '50a3a2177ce9bce3ac6626cae36c245aab72f1fa14b342d788e0ffc80e06b90c',
+}
+
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
+}
+
+_PENDING_ISSUE67_WORKFLOW_FIXTURE = {
+    '.github/workflows/issue-link.yml': 'dd722de884fba6c9d613a72baee43f3b81d2d6816954f6a8e77d972b0fd1eafc',
 }
 
 
@@ -170,7 +179,8 @@ def _source_files():
             | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE
             | _ISSUE46_OBSERVER_FIXTURE | _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
             | _PENDING_ISSUE50_RECEIPT_FIXTURE | _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
-            | _PENDING_PR45_NAMING_FIXTURE)
+            | _PENDING_ISSUE67_WORKFLOW_FIXTURE | _PENDING_PR45_NAMING_FIXTURE
+            | _ISSUE65_RECEIPT_PRODUCER_FIXTURE)
 
 
 def _source_ci():
@@ -538,6 +548,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE)
     pending |= set(_PENDING_ISSUE50_RECEIPT_FIXTURE)
     pending |= set(_PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE)
+    pending |= set(_PENDING_ISSUE67_WORKFLOW_FIXTURE)
     pending |= set(_PENDING_PR45_NAMING_FIXTURE)
     assert {path: SOURCE_FINGERPRINTS[path] for path in _PENDING_PR45_NAMING_FIXTURE
             } == _PENDING_PR45_NAMING_FIXTURE
@@ -577,11 +588,15 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
-    } == _PENDING_ISSUE50_RECEIPT_FIXTURE
+    } == (_PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
     } == _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
+    assert {
+        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
+        if path in _PENDING_ISSUE67_WORKFLOW_FIXTURE
+    } == _PENDING_ISSUE67_WORKFLOW_FIXTURE
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
@@ -635,10 +650,10 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
 
 
 @pytest.mark.parametrize('pins', [
-    SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE,
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
-def test_issue50_receipt_pin_matches_actual_candidate_bytes(path, pins):
+def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
     source = Path(__file__).resolve().parents[1] / path
     assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
 

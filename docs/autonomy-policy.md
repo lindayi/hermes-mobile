@@ -153,6 +153,20 @@ bytes and focused synthetic tests are consistency evidence only: final exact-hea
 independent review and integration gates remain required, with no activation,
 deployment, installed-service qualification, or operational approval implied.
 
+Issue #67 refreshes the current issue-link workflow candidate and its independent
+literal fixture. The historical merged-main fixture retains the previous workflow
+digest; the candidate pin describes only these proposed workflow bytes, not an
+observed Actions check run or activation approval. The publication-ordering follow-up
+creates the blocking app check before its compatibility status and publishes final
+app success only after compatibility success. Failure cleanup attempts the blocking
+check and status independently. These are ordered best-effort writes, not atomic:
+a total outage can preserve prior success, and an uncertain successful app write
+can remain eligible if app cleanup fails even when the legacy failure lands.
+
+| Issue #67 candidate path | SHA-256 |
+| --- | --- |
+| `.github/workflows/issue-link.yml` | `dd722de884fba6c9d613a72baee43f3b81d2d6816954f6a8e77d972b0fd1eafc` |
+
 The coordinator's exact 37-file static closure includes the PR57 shared canonical
 handoff proof leaf; the fixed 80-file dependency inventory remains explicit. Shared backend
 dependencies keep their existing blocker labels. The five
@@ -253,6 +267,12 @@ Issue #56 updates the starter's current source candidate pin to
 source consistency only, not independent review, runtime evidence, or activation
 permission.
 
+Issue #63 updates the current starter candidate pin to
+`20603a350aa4c3972563010035a9faed8fcf086b251af847dbed7e4b32e900ca` for its
+durable one-shot canonical issue-link recovery with complete readback.
+The PR57 digest above remains historical. The refreshed current pin is source
+consistency only, not independent review, runtime evidence, or activation permission.
+
 Issue #50's historical receipt-transport candidate overlaid only
 `deploy/cloud_coordinator.py` and `deploy/task_receipts.py` in the source inventory.
 The historical PR40 and issue #43 table hashes above remain unchanged:
@@ -262,9 +282,28 @@ The historical PR40 and issue #43 table hashes above remain unchanged:
 | `deploy/cloud_coordinator.py` | `0935088cb9e3429b83dcc7daa8552cf2c58830e5494549270ec276a076e3193b` |
 | `deploy/task_receipts.py` | `60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb` |
 
-PR55 (issue #54) now overlays only the coordinator entry from that historical
-candidate; `deploy/task_receipts.py` retains the Issue #50 bytes above. This
-restart-ordering follow-up starts at `00f47230596fd68649088823268b8b76ac2dc884`
+Issue #65 overlays only the current `deploy/task_receipts.py` source pin and its
+independent literal fixture with the producer-only instruction change. The
+historical PR40 and issue #50 receipt digests above remain provenance, not current
+bytes:
+
+| Issue #65 producer candidate path | SHA-256 |
+| --- | --- |
+| `deploy/task_receipts.py` | `50a3a2177ce9bce3ac6626cae36c245aab72f1fa14b342d788e0ffc80e06b90c` |
+
+Only `receipt_instruction` changes: complete-binding/session preflight before
+source edits, contiguous fixed dispatch fields before plain ASCII replacement
+labels, and explicit replacement instructions. The receipt consumer and all
+identity, chronology, grammar and replay checks are unchanged. Focused synthetic
+checks exercise the actual `GhApi.write` JSON request representation and reject
+unreplaced labels at first acceptance and persisted-proof validation. They do not
+establish provider-delivered model bytes, task compliance with the preflight, or
+operational readiness. Exact-head review/integration and an owner-controlled real
+task trial remain separate gates; no task history or service state is rewritten.
+
+PR55 (issue #54) overlaid only the coordinator entry from the historical issue #50
+candidate; issue #65 now supersedes its receipt producer bytes as recorded above.
+The PR55 restart-ordering follow-up starts at `00f47230596fd68649088823268b8b76ac2dc884`
 (coordinator SHA-256 `a3d011e97862aa76b07fb88ae40b5307db77d3cd9f46bf170a2cf5b78ec3b7d8`).
 Review 5396963413 reproduced pending neutral recovery resurrecting a superseded
 predecessor after remote head advancement. The follow-up resolves ownership before

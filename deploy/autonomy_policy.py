@@ -157,7 +157,7 @@ REQUIRED_FILES = (
 )
 SOURCE_FINGERPRINTS = {
     '.github/workflows/ci.yml': '39110e6f940fc59ef3aec9846f07616a86a2e07335d2aaed6c6cd0ab444ff195',
-    '.github/workflows/issue-link.yml': '5569875b9fc45d686f857712bc035d75a100fcfc4f3862f48b0d8bd045eca415',
+    '.github/workflows/issue-link.yml': 'dd722de884fba6c9d613a72baee43f3b81d2d6816954f6a8e77d972b0fd1eafc',
     '.github/native-tests.json': 'b97ddb088e595197cf65d97b0b4af89f4f83f5c4ad25463c566df7099817209f',
     '.github/host-tests.json': '8af5fc30188f81ba95d3d7c11ba6801f52795175c2cac7f634424f906947ce5a',
     '.github/actions/test-environment/action.yml': '638ed56955c8c8202fdd41640abe3be8b8065129e2965b8dc67b69f024017604',
@@ -187,13 +187,14 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     'deploy/cloud_coordinator.py': '4a94bd43f7d350cb8aaee08650726893e6775872e8af20f3a0c8f7f61127345d',
     # Issue #43 launch/authority candidates; final assembled review remains required.
-    # PR57 paired admission fence and corrected shared canonical proof.
-    'deploy/issue_starter.py': 'c28b18b003bf8761fb583fc72f6023701a22c736edd9e57765eb7886dbecbda9',
+    # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
+    'deploy/issue_starter.py': '20603a350aa4c3972563010035a9faed8fcf086b251af847dbed7e4b32e900ca',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
-    'deploy/task_receipts.py': '60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb',
+    # Issue #65 producer-only overlay; historical receipt hashes remain documented.
+    'deploy/task_receipts.py': '50a3a2177ce9bce3ac6626cae36c245aab72f1fa14b342d788e0ffc80e06b90c',
     'deploy/workflow_events.py': '5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af',
     'deploy/workflow_lifecycle.py': '71be9101223f40511818bde2db9f6bd6b021736f35152e16cb3e1c9c3e2085a3',
     'deploy/workflow_lifecycle_sources.py': 'dfff5b5ec33b9bd1756a67150827541ea86193b87e6de5b5c3a965f02f19b837',

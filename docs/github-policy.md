@@ -7,39 +7,71 @@ must stay aligned; private owner memories are not a source to upload.
 ## Issue → PR → merge → release
 
 Create/search an issue before implementing an approved requirement. Each delivery
-PR targets `main` and contains an actionable closing reference (`Closes #N`).
-Split partial work into bounded child issues; reference the parent epic without
-closing it early. The `Issue-first policy` workflow validates real open same-repo
-issues, not PR numbers or links hidden in inline, fenced or indented code examples,
-comments or quoted lines. Use a plain prose `Closes #N` or
-`Closes lindayi/hermes-mobile#N` reference; this is a conservative metadata policy,
-not a general Markdown renderer.
+PR targets `main` and includes an actionable closing reference (`Closes #N`) for
+readability. Split partial work into bounded child issues; reference the parent epic
+without closing it early. The `Issue-first policy` workflow validates the complete
+authenticated `PullRequest.closingIssuesReferences` GraphQL connection, not text
+guesses from the PR description. Every reference must be a distinct open issue in
+this repository; PR references, foreign repositories, closed issues, malformed or
+incomplete pages, and more than ten links fail closed.
 
 The workflow runs with `pull_request_target` from the trusted base/default branch,
 never the PR's workflow definition. It does not fetch or execute PR source, load
 artifacts, interpolate PR text into JavaScript, or reference deployment secrets.
-The SHA-pinned `github-script` validator has only `issues: read`. Default workflow
-permissions are empty. Separate metadata-only publisher jobs receive only
-`statuses: write` (and `pull-requests: read` for the final freshness check); that
-narrow write permission is necessary to report an enforceable PR-head result.
+Default workflow permissions are empty. Its single metadata-only job receives only
+`checks: write`, `statuses: write`, `issues: read`, and `pull-requests: read`. It
+creates a genuine GitHub Actions check run named `issue-link` for the exact PR head,
+then updates that same run and retains the matching legacy commit status. The
+workflow's Actions identity is the app-bound producer; app identity is not inferred
+from or attached to a commit status.
 
-The publishers set commit-status context `issue-link` on the event's exact PR head
-SHA, first `pending`, then `success` only for successful validation and an unchanged
-current open PR (head, body and base). Failure, cancellation or skipped validation
-cannot produce success. Once pending is written, a publication/API failure leaves
-it blocking rather than reusing an earlier success. Runs serialize per PR instead
-of cancelling an in-flight publisher. Actions job names are deliberately different
-from `issue-link`: a `pull_request_target` job check is associated with the trusted
-base/default SHA, not evidence for the PR head.
+For authenticated PR events, the compatibility status and check run are invalidated
+on the event-bound head before any fallible PR metadata read. Both writes are
+attempted independently; a failure prevents validation from succeeding. Dispatch
+must first authenticate its supplied PR/head against the current open PR on main;
+untrusted refs, mismatched heads, or unavailable authorization reads permit no writes.
 
-Enable required `issue-link` only after the workflow is on main and actual PR runs
-prove both passing and failing statuses on their exact heads, including a body edit
-and a fork PR. Bind the required status to GitHub Actions, not any status producer.
-This context does not distinguish different workflows using that same app; retain
-independent `agent-review` and protection for workflow/policy changes. Metadata
-changes and status updates are asynchronous, not an atomic merge-time transaction;
-an unscheduled run or a failed initial pending write needs operator attention.
-Merge closes the implementation issue; it does not assert production deployment.
+The `always()` publisher can finalize failure without a snapshot digest or create a
+failure check when no check ID was returned. Missing pending outputs use only the
+authenticated event head, or a freshly authenticated dispatch PR/head, never arbitrary
+inputs. Check publication failure still attempts the blocking compatibility status.
+Success still requires all pending outputs, complete canonical-reference validation
+and fresh REST/GraphQL checks
+that the PR identity, head, base, body, issue set, and open issue states remain
+unchanged. Failed, cancelled, skipped, malformed, incomplete, or stale validation
+cannot produce success. Successful finalization publishes compatibility status
+success first and authoritative app-check success last. Any publication failure
+attempts a blocking check and then a blocking compatibility status independently;
+a failed cleanup write does not suppress the other attempt. Runs serialize per PR
+and do not cancel an in-flight publisher.
+
+The documented pull-request workflow events do not include a dedicated action for
+manually adding or removing an issue link through the Development panel. The workflow therefore
+supports `workflow_dispatch` from trusted `main` with a canonical positive PR number
+and expected head SHA; it rereads the open PR and rejects a different head or base.
+Use this bounded recheck after adding a canonical link to an already-ready PR rather
+than assuming a readiness or edit event will occur. Ordinary PR events still cover
+open, edit, synchronize, reopen, and ready-for-review actions. Neither manual
+dispatch nor a passing check changes branch protection. After the workflow reaches
+protected main, verify real passing and failing exact-head check runs, including
+manual links, a body edit, and a fork PR, before treating live publication as proven.
+Metadata reads and check/status writes are not an atomic merge-time transaction;
+an absent event, unavailable check/status APIs, dispatch authorization that cannot
+be read, or an update racing after the final read still needs attention. In particular,
+if both publication APIs remain unavailable no workflow can guarantee overwriting
+prior success; API errors are not proof that invalidation reached GitHub. Merge
+closes the implementation issue; it does not assert deployment.
+
+The workflow uses documented GitHub inputs only: the
+[PullRequest GraphQL schema](https://docs.github.com/en/graphql/reference/objects#pullrequest)
+defines `closingIssuesReferences` and its `userLinkedOnly` filter. The pinned
+Octokit `github.graphql` resolves direct data (not an HTTP `data` envelope) and
+throws on GraphQL errors, including partial-data errors. The checks
+[create](https://docs.github.com/en/rest/checks/runs#create-a-check-run) and
+[update](https://docs.github.com/en/rest/checks/runs#update-a-check-run) endpoints
+publish the exact-head check run. Manual rechecks use the documented
+[`workflow_dispatch`](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch)
+event and are rejected unless they run from trusted `main`.
 
 Substantial work can use `gh agent-task create --repo lindayi/hermes-mobile
 --from-file task.txt`. Include acceptance, ownership and non-goals, and require
