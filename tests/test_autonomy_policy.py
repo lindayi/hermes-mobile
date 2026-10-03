@@ -119,7 +119,7 @@ _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
 # spelled out (not copied from policy constants at runtime). Issue43 source
 # acceptance does not authorize operational activation.
 _PENDING_PR40_LIFECYCLE_FIXTURE = {
-    'deploy/task_receipts.py': '8ad9e60ec697de8135679b9110ed5d924057e0d8a59e731c67fceedec6525197',
+    'deploy/task_receipts.py': '33008ea8157b1c72468253609bb8e7fad82bf06147c1303e5f080d21f0faceb8',
     'deploy/workflow_events.py': '5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af',
     'deploy/workflow_lifecycle.py': '71be9101223f40511818bde2db9f6bd6b021736f35152e16cb3e1c9c3e2085a3',
     'deploy/workflow_lifecycle_sources.py': 'dfff5b5ec33b9bd1756a67150827541ea86193b87e6de5b5c3a965f02f19b837',
@@ -127,7 +127,7 @@ _PENDING_PR40_LIFECYCLE_FIXTURE = {
 }
 
 _PENDING_ISSUE43_LAUNCH_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'd2f67c9877c2292db48d3fe06a2fe15d58e5124f603ba720e1bea2aff4104386',
+    'deploy/cloud_coordinator.py': 'da18d23138f7b9bea38ed0e6411682026bd3b50dfd1f42b92fa6d8efe0e021fe',
     # PR57 paired proof plus issue #63 fail-closed boundary, independently literal.
     'deploy/issue_starter.py': '20603a350aa4c3972563010035a9faed8fcf086b251af847dbed7e4b32e900ca',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
@@ -150,13 +150,13 @@ _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE = {
 }
 
 _PENDING_ISSUE50_RECEIPT_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'd2f67c9877c2292db48d3fe06a2fe15d58e5124f603ba720e1bea2aff4104386',
-    'deploy/task_receipts.py': '24db7e69013e3aaf20f84dc48e47f1f3ac857982db0df518a89bd122b2890074',
+    'deploy/cloud_coordinator.py': 'da18d23138f7b9bea38ed0e6411682026bd3b50dfd1f42b92fa6d8efe0e021fe',
+    'deploy/task_receipts.py': '33008ea8157b1c72468253609bb8e7fad82bf06147c1303e5f080d21f0faceb8',
 }
 
 # Current producer overlay only; preserve the independent historical issue50 literal.
 _ISSUE65_RECEIPT_PRODUCER_FIXTURE = {
-    'deploy/task_receipts.py': '24db7e69013e3aaf20f84dc48e47f1f3ac857982db0df518a89bd122b2890074',
+    'deploy/task_receipts.py': '33008ea8157b1c72468253609bb8e7fad82bf06147c1303e5f080d21f0faceb8',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
