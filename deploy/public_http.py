@@ -1,11 +1,17 @@
 """Public byte checks over a bounded, reusable strict HTTP connection session."""
-import multiprocessing
 import math
+import multiprocessing
+import pickle
+import selectors
+import socket
+import struct
 import time
 from urllib.parse import urljoin, urlsplit
 
 
 _REDIRECTS = {301, 302, 303, 307, 308}
+_FRAME_LENGTH = struct.Struct('!Q')
+_MAX_RESPONSE_FRAME = 1024 * 1024
 
 
 def _origin(url):
@@ -16,17 +22,95 @@ def _origin(url):
     return parts.scheme, parts.hostname.lower(), port
 
 
-def _request_matches(session, url, expected):
+def _send_frame(connection, value, deadline=None):
+    payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    header = _FRAME_LENGTH.pack(len(payload))
+    if deadline is None:
+        connection.sendall(header)
+        connection.sendall(payload)
+        return
+    if time.monotonic() >= deadline:
+        raise TimeoutError('Public HTTP deadline exceeded')
+    with selectors.DefaultSelector() as selector:
+        selector.register(connection, selectors.EVENT_WRITE)
+        for data in (header, payload):
+            view = memoryview(data)
+            while view:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise TimeoutError('Public HTTP deadline exceeded')
+                try:
+                    sent = connection.send(view)
+                except BlockingIOError:
+                    continue
+                if not sent:
+                    raise ConnectionError('Public HTTP worker disconnected')
+                view = view[sent:]
+
+
+def _read_exact(connection, size, selector=None, deadline=None):
+    result = bytearray()
+    while len(result) < size:
+        if selector is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise TimeoutError('Public HTTP deadline exceeded')
+        try:
+            chunk = connection.recv(size - len(result))
+        except BlockingIOError:
+            continue
+        if not chunk:
+            if not result:
+                raise EOFError
+            raise ConnectionError('Public HTTP worker disconnected')
+        result.extend(chunk)
+    return bytes(result)
+
+
+def _receive_frame(connection, deadline=None, max_size=None):
+    if deadline is None:
+        header = _read_exact(connection, _FRAME_LENGTH.size)
+        selector = None
+    else:
+        selector = selectors.DefaultSelector()
+        selector.register(connection, selectors.EVENT_READ)
+        header = _read_exact(connection, _FRAME_LENGTH.size, selector, deadline)
+    try:
+        length = _FRAME_LENGTH.unpack(header)[0]
+        if max_size is not None and length > max_size:
+            raise RuntimeError('Public HTTP worker response is too large')
+        payload = _read_exact(connection, length, selector, deadline)
+        return pickle.loads(payload)
+    finally:
+        if selector is not None:
+            selector.close()
+
+
+def _request_matches(session, url, expected, deadline):
     import requests
 
     origin = _origin(url)
     current = url
     for redirect_count in range(6):
-        response = session.get(
+        session.cookies.clear()
+        request = requests.Request(
+            'GET',
             current,
             headers={'Accept-Encoding': 'identity', 'Cache-Control': 'no-cache'},
-            allow_redirects=False,
+        )
+        prepared = session.prepare_request(request)
+        prepared.headers.pop('Cookie', None)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise requests.exceptions.Timeout('Public HTTP deadline exceeded')
+        adapter = session.get_adapter(current)
+        response = adapter.send(
+            prepared,
             stream=True,
+            timeout=remaining,
+            verify=session.verify,
+            cert=session.cert,
+            proxies={},
         )
         if response.status_code in _REDIRECTS:
             location = response.headers.get('Location')
@@ -77,13 +161,14 @@ def _session_worker(connection, ca_bundle):
     if ca_bundle is not None:
         session.verify = ca_bundle
     try:
+        _send_frame(connection, ('ready', None))
         while True:
-            request = connection.recv()
+            request = _receive_frame(connection)
             if request is None:
                 break
-            url, expected = request
+            url, expected, deadline = request
             try:
-                result = ('match', _request_matches(session, url, expected))
+                result = ('match', _request_matches(session, url, expected, deadline))
             except requests.exceptions.SSLError:
                 result = ('tls', 'Public TLS validation or connection failed')
             except requests.exceptions.Timeout:
@@ -92,8 +177,8 @@ def _session_worker(connection, ca_bundle):
                 result = ('connection', f'Public HTTP transport failed: {urlsplit(url).path}')
             except RuntimeError as error:
                 result = ('runtime', str(error))
-            connection.send(result)
-    except (EOFError, OSError):
+            _send_frame(connection, result)
+    except (EOFError, OSError, ConnectionError):
         pass
     finally:
         session.close()
@@ -113,14 +198,13 @@ class PublicHTTPSession:
     def __enter__(self):
         if self._closed:
             raise RuntimeError('Public HTTP session is closed')
-        self._start()
         return self
 
-    def _start(self):
+    def _start(self, deadline):
         if self._process is not None and self._process.is_alive():
             return
         self._stop()
-        parent, child = self._context.Pipe()
+        parent, child = socket.socketpair()
         process = self._context.Process(
             target=_session_worker, args=(child, self._ca_bundle), daemon=True)
         try:
@@ -131,26 +215,37 @@ class PublicHTTPSession:
             process.close()
             raise
         child.close()
+        parent.setblocking(False)
         self._connection = parent
         self._process = process
+        try:
+            kind, value = _receive_frame(parent, deadline, _MAX_RESPONSE_FRAME)
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Public HTTP deadline exceeded')
+            if kind != 'ready':
+                raise RuntimeError(value)
+        except BaseException:
+            self._stop()
+            raise
 
     def _stop(self, *, graceful=False):
         connection, process = self._connection, self._process
         self._connection = self._process = None
         if connection is not None and graceful and process is not None and process.is_alive():
             try:
-                connection.send(None)
-            except (BrokenPipeError, EOFError, OSError):
+                _send_frame(connection, None, time.monotonic() + 0.1)
+            except (BrokenPipeError, ConnectionError, EOFError, OSError, TimeoutError):
                 pass
-            process.join(timeout=0.5)
+            process.join(timeout=0.1)
         if process is not None:
             if process.is_alive():
                 process.terminate()
-                process.join(timeout=1)
+                process.join(timeout=0.1)
             if process.is_alive():
                 process.kill()
-                process.join()
-            process.close()
+                process.join(timeout=0.25)
+            if not process.is_alive():
+                process.close()
         if connection is not None:
             connection.close()
 
@@ -161,29 +256,20 @@ class PublicHTTPSession:
         if not math.isfinite(timeout) or timeout <= 0:
             raise TimeoutError('Public HTTP deadline exceeded')
         deadline = time.monotonic() + timeout
-        self._start()
         try:
+            self._start(deadline)
+            _send_frame(self._connection, (url, expected, deadline), deadline)
+            kind, value = _receive_frame(
+                self._connection, deadline, _MAX_RESPONSE_FRAME)
             if time.monotonic() >= deadline:
-                self._stop()
-                raise TimeoutError('Public HTTP deadline exceeded')
-            self._connection.send((url, expected))
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not self._connection.poll(remaining):
-                self._stop()
-                raise TimeoutError('Public HTTP deadline exceeded')
-            if time.monotonic() >= deadline:
-                self._stop()
-                raise TimeoutError('Public HTTP deadline exceeded')
-            kind, value = self._connection.recv()
-            if time.monotonic() >= deadline:
-                self._stop()
                 raise TimeoutError('Public HTTP deadline exceeded')
         except TimeoutError:
             self._stop()
             raise
-        except (EOFError, BrokenPipeError, OSError) as error:
+        except (EOFError, BrokenPipeError, OSError, ConnectionError) as error:
             self._stop()
-            raise ConnectionError(f'Public HTTP transport failed: {urlsplit(url).path}') from error
+            raise ConnectionError(
+                f'Public HTTP transport failed: {urlsplit(url).path}') from error
         if kind == 'match':
             return value
         if kind == 'tls':

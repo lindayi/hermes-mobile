@@ -1,11 +1,14 @@
 """Whole HTTP deadline and TLS/credential guard tests for public static checks."""
+import gzip
+import os
+import signal
 import socket
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
 import ssl
-from threading import Thread
+from threading import Event, Thread
 import pytest
 
 
@@ -41,10 +44,11 @@ def https_fixture(tmp_path):
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption()))
     ca_path.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
-    tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.load_cert_chain(cert_path, key_path)
     requests = []
+    cookies = []
     reset_paths = set()
 
     class Handler(BaseHTTPRequestHandler):
@@ -55,41 +59,61 @@ def https_fixture(tmp_path):
 
         def do_GET(self):
             requests.append((self.path, self.client_address[1]))
+            cookies.append(self.headers.get('Cookie'))
             if self.path == '/reset-once' and self.path not in reset_paths:
                 reset_paths.add(self.path)
                 self.connection.shutdown(socket.SHUT_RDWR)
                 self.connection.close()
                 return
-            if self.path == '/redirect-external':
+            if self.path in ('/redirect-external', '/redirect-external-large'):
                 self.send_response(302)
                 self.send_header('Location', 'https://127.0.0.1:1/untrusted')
-                self.send_header('Content-Length', '0')
-                self.end_headers()
-                return
-            if self.path == '/redirect-same':
+                body = b'x' * 1024 * 1024 if self.path.endswith('-large') else b''
+            elif self.path in ('/redirect-same', '/redirect-same-large',
+                               '/redirect-same-compressed'):
                 self.send_response(302)
                 self.send_header('Location', '/canonical')
-                self.send_header('Content-Length', '0')
-                self.end_headers()
-                return
-            if self.path == '/error':
+                body = b'x' * 1024 * 1024 if self.path.endswith('-large') else b''
+                if self.path.endswith('-compressed'):
+                    body = gzip.compress(bytes(range(256)) * 4096)
+                    self.send_header('Content-Encoding', 'gzip')
+            elif self.path == '/error':
                 self.send_response(403)
                 self.send_header('Content-Length', '0')
                 self.end_headers()
                 return
-            body = b'expected bytes plus extra' if self.path == '/oversized' else (
-                b'wrong bytes' if self.path == '/wrong' else b'expected bytes')
-            self.send_response(200)
+            elif self.path == '/cookie-seed':
+                self.send_response(200)
+                self.send_header('Set-Cookie', 'verification=synthetic')
+                body = b'expected bytes'
+            elif self.path == '/cookie-gated':
+                self.send_response(200)
+                body = (b'expected bytes' if self.headers.get('Cookie') ==
+                        'verification=synthetic' else b'anonymous bytes')
+            else:
+                body = b'expected bytes plus extra' if self.path == '/oversized' else (
+                    b'wrong bytes' if self.path == '/wrong' else b'expected bytes')
+                self.send_response(200)
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if body:
+                if self.path.startswith('/redirect-') and self.path != '/redirect-same':
+                    try:
+                        self.wfile.write(body[:1024])
+                        self.wfile.flush()
+                        time.sleep(.5)
+                        self.wfile.write(body[1024:])
+                    except OSError:
+                        pass
+                else:
+                    self.wfile.write(body)
 
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     server.socket = tls.wrap_socket(server.socket, server_side=True)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f'https://127.0.0.1:{server.server_port}/', ca_path, requests
+        yield f'https://127.0.0.1:{server.server_port}/', ca_path, requests, cookies
     finally:
         server.shutdown()
         server.server_close()
@@ -99,7 +123,7 @@ def https_fixture(tmp_path):
 def test_same_session_reuses_verified_https_connection(https_fixture, monkeypatch):
     from deploy.public_http import PublicHTTPSession, public_asset_matches
 
-    url, ca_bundle, requests = https_fixture
+    url, ca_bundle, requests, _ = https_fixture
     monkeypatch.setenv('HTTPS_PROXY', 'http://127.0.0.1:1')
     monkeypatch.setenv('https_proxy', 'http://127.0.0.1:1')
     with PublicHTTPSession(ca_bundle=ca_bundle) as session:
@@ -113,7 +137,7 @@ def test_same_session_reuses_verified_https_connection(https_fixture, monkeypatc
 def test_untrusted_https_certificate_fails_closed(https_fixture):
     from deploy.public_http import PublicHTTPSession, public_asset_matches
 
-    url, _, _ = https_fixture
+    url, _, _, _ = https_fixture
     with PublicHTTPSession() as session:
         with pytest.raises(ConnectionError, match='TLS'):
             public_asset_matches(url + 'canonical', b'expected bytes', 3, session=session)
@@ -122,7 +146,7 @@ def test_untrusted_https_certificate_fails_closed(https_fixture):
 def test_reset_is_not_accepted_and_same_session_can_retry(https_fixture):
     from deploy.public_http import PublicHTTPSession, public_asset_matches
 
-    url, ca_bundle, requests = https_fixture
+    url, ca_bundle, requests, _ = https_fixture
     with PublicHTTPSession(ca_bundle=ca_bundle) as session:
         with pytest.raises(ConnectionError):
             public_asset_matches(url + 'reset-once', b'expected bytes', 3, session=session)
@@ -134,7 +158,7 @@ def test_reset_is_not_accepted_and_same_session_can_retry(https_fixture):
 def test_wrong_and_oversized_https_bodies_never_match(https_fixture):
     from deploy.public_http import PublicHTTPSession, public_asset_matches
 
-    url, ca_bundle, _ = https_fixture
+    url, ca_bundle, _, _ = https_fixture
     with PublicHTTPSession(ca_bundle=ca_bundle) as session:
         assert not public_asset_matches(url + 'wrong', b'expected bytes', 3, session=session)
         assert not public_asset_matches(url + 'oversized', b'expected bytes', 3, session=session)
@@ -143,7 +167,7 @@ def test_wrong_and_oversized_https_bodies_never_match(https_fixture):
 def test_http_errors_and_cross_origin_redirects_fail_closed(https_fixture):
     from deploy.public_http import PublicHTTPSession, public_asset_matches
 
-    url, ca_bundle, _ = https_fixture
+    url, ca_bundle, _, _ = https_fixture
     with PublicHTTPSession(ca_bundle=ca_bundle) as session:
         with pytest.raises(RuntimeError, match='Public HTTP 403'):
             public_asset_matches(url + 'error', b'', 3, session=session)
@@ -155,10 +179,80 @@ def test_http_errors_and_cross_origin_redirects_fail_closed(https_fixture):
 def test_same_origin_https_redirect_is_followed(https_fixture):
     from deploy.public_http import PublicHTTPSession, public_asset_matches
 
-    url, ca_bundle, requests = https_fixture
+    url, ca_bundle, requests, _ = https_fixture
     with PublicHTTPSession(ca_bundle=ca_bundle) as session:
         assert public_asset_matches(url + 'redirect-same', b'expected bytes', 3, session=session)
     assert [path for path, _ in requests] == ['/redirect-same', '/canonical']
+
+
+@pytest.mark.parametrize('path', [
+    'redirect-same-large',
+    'redirect-same-compressed',
+    'redirect-external-large',
+])
+def test_redirect_bodies_are_not_buffered_before_policy_check(
+        https_fixture, path):
+    from deploy.public_http import PublicHTTPSession, public_asset_matches
+
+    url, ca_bundle, _, _ = https_fixture
+    with PublicHTTPSession(ca_bundle=ca_bundle) as session:
+        if path == 'redirect-external-large':
+            with pytest.raises(RuntimeError, match='redirect rejected'):
+                public_asset_matches(url + path, b'expected bytes', .3, session=session)
+        else:
+            assert public_asset_matches(url + path, b'expected bytes', .3, session=session)
+
+
+def test_reused_session_never_replays_server_cookies(https_fixture):
+    from deploy.public_http import PublicHTTPSession, public_asset_matches
+
+    url, ca_bundle, _, cookies = https_fixture
+    with PublicHTTPSession(ca_bundle=ca_bundle) as session:
+        assert public_asset_matches(url + 'cookie-seed', b'expected bytes', 3, session=session)
+        assert not public_asset_matches(url + 'cookie-gated', b'expected bytes', 3,
+                                        session=session)
+    assert cookies == [None, None]
+
+
+def test_large_ipc_send_is_bounded_when_worker_stalls(https_fixture):
+    if not hasattr(signal, 'SIGSTOP'):
+        pytest.skip('requires POSIX process signals')
+    from deploy.public_http import PublicHTTPSession, public_asset_matches
+
+    url, ca_bundle, _, _ = https_fixture
+    released = Event()
+    with PublicHTTPSession(ca_bundle=ca_bundle) as session:
+        assert public_asset_matches(url + 'canonical', b'expected bytes', 3, session=session)
+        process = session._process
+        os.kill(process.pid, signal.SIGSTOP)
+
+        def resume_after_watchdog():
+            if not released.wait(1):
+                if process.is_alive():
+                    os.kill(process.pid, signal.SIGCONT)
+
+        watchdog = Thread(target=resume_after_watchdog, daemon=True)
+        watchdog.start()
+        started = time.monotonic()
+        try:
+            with pytest.raises(TimeoutError):
+                session.matches(url + 'canonical', b'x' * (8 * 1024 * 1024), .15)
+        finally:
+            released.set()
+            watchdog.join(1.5)
+        assert time.monotonic() - started < .75
+        assert session._process is None
+
+
+def test_expired_startup_budget_does_not_leave_a_worker(https_fixture):
+    from deploy.public_http import PublicHTTPSession
+
+    url, ca_bundle, _, _ = https_fixture
+    session = PublicHTTPSession(ca_bundle=ca_bundle)
+    with pytest.raises(TimeoutError):
+        session.matches(url + 'canonical', b'expected bytes', 1e-6)
+    assert session._process is None or not session._process.is_alive()
+    session.close()
 
 
 @pytest.mark.parametrize('phase',['headers','body'])

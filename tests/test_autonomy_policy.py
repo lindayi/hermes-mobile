@@ -51,7 +51,7 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': '49d784af17d0807c95b460b2a285254f0a616361c390afa69b3cc0345a56b498',
-    'deploy/public_http.py': 'd1f655b777448a20fd26e1abd1375fef8e4114d041bdcc9e35d8bf81b72d2dd4',
+    'deploy/public_http.py': 'dd352b8d0295f242f4a5d31a55eaaec523ef8405601461d4ab5fa8dc6dc302e7',
     'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
     'deploy/ci_selection.py': '07493f74bc4b932e26342e0d27fee8c3c38601af8211e0a950920935173b2f16',
     'deploy/test_workspace.py': 'baeb1103608ff15db3903677fa8ec9c80c9c8b9a0246ce18ada27bf7c04a486a',
@@ -153,13 +153,17 @@ _PENDING_ISSUE50_RECEIPT_FIXTURE = {
     'deploy/task_receipts.py': '60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb',
 }
 
+_PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
+    'deploy/public_http.py': '5d1be7c9e55ff3ab357b53745860a6983131aa21d414c57eb4bc219359db751f',
+}
+
 
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _ISSUE52_MERGED_MAIN_BASE_FIXTURE
             | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
             | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE
             | _ISSUE46_OBSERVER_FIXTURE | _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
-            | _PENDING_ISSUE50_RECEIPT_FIXTURE)
+            | _PENDING_ISSUE50_RECEIPT_FIXTURE | _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE)
 
 
 def _source_ci():
@@ -517,12 +521,13 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_ISSUE46_OBSERVER_FIXTURE)
     pending |= set(_PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE)
     pending |= set(_PENDING_ISSUE50_RECEIPT_FIXTURE)
+    pending |= set(_PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
     } == {
         path: digest for path, digest in _MERGED_MAIN_SOURCE_FIXTURE.items()
-        if path not in _ISSUE46_OBSERVER_FIXTURE
+        if path not in (set(_ISSUE46_OBSERVER_FIXTURE) | pending)
     }
     assert {
         path: SOURCE_FINGERPRINTS[path] for path in _ISSUE46_OBSERVER_FIXTURE
@@ -554,6 +559,10 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
     } == _PENDING_ISSUE50_RECEIPT_FIXTURE
+    assert {
+        path: digest for path, digest in SOURCE_FINGERPRINTS.items()
+        if path in _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
+    } == _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
@@ -611,6 +620,15 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
 def test_issue50_receipt_pin_matches_actual_candidate_bytes(path, pins):
+    source = Path(__file__).resolve().parents[1] / path
+    assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize('pins', [
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE,
+], ids=['policy', 'independent-fixture'])
+@pytest.mark.parametrize('path', sorted(_PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE))
+def test_issue59_public_http_pin_matches_actual_candidate_bytes(path, pins):
     source = Path(__file__).resolve().parents[1] / path
     assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
 

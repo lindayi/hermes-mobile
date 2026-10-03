@@ -173,7 +173,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/native_controls_release.py': '0887a6ad4fa0bb5c1351089cc6c53fc8ff7be4c609f42d956d3a51642256dba5',
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': 'bf01500fb253f7d41ce49d375bba63a9e4d80569eb376a6aeae50f56cf71923f',
-    'deploy/public_http.py': 'd1f655b777448a20fd26e1abd1375fef8e4114d041bdcc9e35d8bf81b72d2dd4',
+    'deploy/public_http.py': '5d1be7c9e55ff3ab357b53745860a6983131aa21d414c57eb4bc219359db751f',
     'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
     'deploy/self_deploy.py': '04036a85d2abba0cf38e7717c30d5e6b6f04da2fd7efcea16bbf21086f2ab68a',
     'deploy/ci_selection.py': '07493f74bc4b932e26342e0d27fee8c3c38601af8211e0a950920935173b2f16',
