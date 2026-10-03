@@ -172,7 +172,13 @@ Changing builder transformation semantics requires its format-marker bump.
    the existing finite aggregate budget; a final deadline check rejects matching
    bytes that arrive too late. Reusing transport reduces connection churn in
    synthetic verification, but does not establish a CDN, rate-limit, or production
-   root cause.
+   root cause. The worker executes the fixed reviewed transport file with Python
+   `-I`, without caller-main replay or a multiprocessing preparation-data pipe.
+   Variable bootstrap data shares the deadline-controlled socket. No helper
+   thread or Python pre-exec callback is used. Deadlines count startup/imports;
+   OS process creation/exec and scheduling remain trusted platform operations,
+   not interruptible hard-real-time guarantees. Finite termination/reaping waits
+   can add cleanup overhead; see the lifecycle boundary in the acceptance spec.
 9. Failure restores the prior pointer/drop-in and public preimages, restarts the
    old bridge if activation began, and verifies old health/public serving before
    reopening admission. Source project files and user DBs are never restored.

@@ -103,6 +103,17 @@ Issue #59 updates the self-deploy candidate with reusable public HTTPS transport
 the new source pin records that change, not operational approval. This local
 assembly does not authorize activation or deployment.
 
+The PR60 second transport follow-up replaces multiprocessing preparation transfer
+with a fixed isolated child entrypoint in the already inventoried
+`deploy/public_http.py`; the source closure and blockers do not change. Its
+current candidate SHA-256 is
+`a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295`.
+This PR60 + accepted PR45 assembly also overlays the existing `backend/app.py`
+pin with `5f0d210cb24b6b49cbf30a4286e6b256c42baa1f552f4b063961c67c5d85ec33`
+without changing naming source. Runtime policy and independent pending fixtures
+pin these bytes; historical merged-main fixtures are retained unchanged. Focused
+actual-byte checks cover both complete current pin maps, not activation approval.
+
 PR57 extends the assembled starter/consumer authority contract with the exact
 head/issue/body-digest command and a final prepared-scan admission fence. Its new
 `deploy/pull_handoff_binding.py` leaf is explicitly required, independently pinned,

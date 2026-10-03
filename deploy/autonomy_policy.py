@@ -173,7 +173,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/native_controls_release.py': '0887a6ad4fa0bb5c1351089cc6c53fc8ff7be4c609f42d956d3a51642256dba5',
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': 'bf01500fb253f7d41ce49d375bba63a9e4d80569eb376a6aeae50f56cf71923f',
-    'deploy/public_http.py': '5d1be7c9e55ff3ab357b53745860a6983131aa21d414c57eb4bc219359db751f',
+    'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
     'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
     'deploy/self_deploy.py': '04036a85d2abba0cf38e7717c30d5e6b6f04da2fd7efcea16bbf21086f2ab68a',
     'deploy/ci_selection.py': '07493f74bc4b932e26342e0d27fee8c3c38601af8211e0a950920935173b2f16',
@@ -213,7 +213,8 @@ SOURCE_FINGERPRINTS = {
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
     'backend/runs.py': 'f8ee1d2547a794f277c5dc6b52e491e17ada1bda65acba9f3083eee8522de04e',
-    'backend/app.py': 'fad986aa3fd601041e9f2926dd8c128292e796ca75dac9613c3c5592128e9e67',
+    # Accepted PR45 naming bytes in this assembly; no naming-source rewrite.
+    'backend/app.py': '5f0d210cb24b6b49cbf30a4286e6b256c42baa1f552f4b063961c67c5d85ec33',
     'backend/auth.py': '411529a1d53bdcd01eae4bf5e35c44d3d5099e4dc9e77eb9dbbe67df6433f335',
     'backend/auth_store.py': '8827856de744de03648924b0ff83011bdb70417781620724acd84078181c193e',
     'backend/background_delivery.py': '2da2bdd89d27f18beee0e0099d1bb39b325a9f70dcba099d55ceb3dea2e88629',

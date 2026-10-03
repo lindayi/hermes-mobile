@@ -1,7 +1,12 @@
 """Whole HTTP deadline and TLS/credential guard tests for public static checks."""
 import gzip
+import json
 import os
+from pathlib import Path
 import signal
+import subprocess
+import sys
+import textwrap
 import socket
 import time
 from datetime import datetime, timedelta, timezone
@@ -194,13 +199,19 @@ def test_redirect_bodies_are_not_buffered_before_policy_check(
         https_fixture, path):
     from deploy.public_http import PublicHTTPSession, public_asset_matches
 
-    url, ca_bundle, _, _ = https_fixture
+    url, ca_bundle, requests, _ = https_fixture
     with PublicHTTPSession(ca_bundle=ca_bundle) as session:
+        # Startup/import/TLS have their own budget; the .3s proof below isolates
+        # redirect-body consumption against the fixture's unchanged .5s pause.
+        assert public_asset_matches(url + 'canonical', b'expected bytes', 3, session=session)
+        requests.clear()
         if path == 'redirect-external-large':
             with pytest.raises(RuntimeError, match='redirect rejected'):
                 public_asset_matches(url + path, b'expected bytes', .3, session=session)
         else:
             assert public_asset_matches(url + path, b'expected bytes', .3, session=session)
+    assert [requested for requested, _ in requests] == (
+        ['/' + path] if path == 'redirect-external-large' else ['/' + path, '/canonical'])
 
 
 def test_reused_session_never_replays_server_cookies(https_fixture):
@@ -228,7 +239,7 @@ def test_large_ipc_send_is_bounded_when_worker_stalls(https_fixture):
 
         def resume_after_watchdog():
             if not released.wait(1):
-                if process.is_alive():
+                if process.poll() is None:
                     os.kill(process.pid, signal.SIGCONT)
 
         watchdog = Thread(target=resume_after_watchdog, daemon=True)
@@ -244,6 +255,69 @@ def test_large_ipc_send_is_bounded_when_worker_stalls(https_fixture):
         assert session._process is None
 
 
+def test_stalled_bootstrap_does_not_transfer_parent_preparation(tmp_path):
+    if not hasattr(signal, 'SIGSTOP'):
+        pytest.skip('requires POSIX process signals')
+    pid_file = tmp_path / 'worker.pid'
+    executable = tmp_path / 'paused-python'
+    # A real executable stops before Python's multiprocessing bootstrap can read
+    # its pipe (or before the isolated worker can read its socket). Resource
+    # tracker startup is left alone. Only the private subprocess tree is affected.
+    executable.write_text(f'#!{sys.executable}\n' + textwrap.dedent(f'''
+        import os, signal, sys
+        if not any('resource_tracker' in arg for arg in sys.argv):
+            with open({str(pid_file)!r}, 'w') as handle:
+                handle.write(str(os.getpid()))
+            os.kill(os.getpid(), signal.SIGSTOP)
+        os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])
+    '''))
+    executable.chmod(0o700)
+    probe = textwrap.dedent(f'''
+        import faulthandler, json, multiprocessing, sys, time
+        from deploy.public_http import PublicHTTPSession
+        sys.path.append('x' * (8 * 1024 * 1024))
+        sys.executable = {str(executable)!r}
+        multiprocessing.set_executable(sys.executable)
+        faulthandler.dump_traceback_later(.6)
+        started = time.monotonic()
+        with PublicHTTPSession() as session:
+            try:
+                # No HTTP request can be reached while the child is stopped.
+                session.matches('https://127.0.0.1:1/', b'', .15)
+            except TimeoutError:
+                pass
+            else:
+                raise AssertionError('stopped startup must time out')
+            assert session._process is None
+        faulthandler.cancel_dump_traceback_later()
+        print(json.dumps({{'elapsed': time.monotonic() - started}}), flush=True)
+    ''')
+    process = subprocess.Popen(
+        [sys.executable, '-c', probe], cwd=Path(__file__).resolve().parents[1],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            # Bounded independent watchdog: release the old blocking start so
+            # it can reap its own worker; an outer process-group kill is backup.
+            assert pid_file.exists(), 'startup executable was not reached'
+            os.kill(int(pid_file.read_text()), signal.SIGCONT)
+            stdout, stderr = process.communicate(timeout=3)
+        assert process.returncode == 0, stderr
+        assert pid_file.exists(), 'the actual child must have been stopped'
+        worker_pid = int(pid_file.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(worker_pid, 0)
+        assert json.loads(stdout)['elapsed'] < .75, stderr
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=3)
+
+
 def test_expired_startup_budget_does_not_leave_a_worker(https_fixture):
     from deploy.public_http import PublicHTTPSession
 
@@ -251,7 +325,7 @@ def test_expired_startup_budget_does_not_leave_a_worker(https_fixture):
     session = PublicHTTPSession(ca_bundle=ca_bundle)
     with pytest.raises(TimeoutError):
         session.matches(url + 'canonical', b'expected bytes', 1e-6)
-    assert session._process is None or not session._process.is_alive()
+    assert session._process is None or session._process.poll() is not None
     session.close()
 
 

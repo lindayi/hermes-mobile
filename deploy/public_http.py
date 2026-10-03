@@ -1,7 +1,9 @@
 """Public byte checks over a bounded, reusable strict HTTP connection session."""
 import math
-import multiprocessing
+from pathlib import Path
 import pickle
+import subprocess
+import sys
 import selectors
 import socket
 import struct
@@ -190,7 +192,6 @@ class PublicHTTPSession:
 
     def __init__(self, *, ca_bundle=None):
         self._ca_bundle = str(ca_bundle) if ca_bundle is not None else None
-        self._context = multiprocessing.get_context('spawn')
         self._connection = None
         self._process = None
         self._closed = False
@@ -201,24 +202,32 @@ class PublicHTTPSession:
         return self
 
     def _start(self, deadline):
-        if self._process is not None and self._process.is_alive():
+        if self._process is not None and self._process.poll() is None:
             return
         self._stop()
+        if time.monotonic() >= deadline:
+            raise TimeoutError('Public HTTP deadline exceeded')
         parent, child = socket.socketpair()
-        process = self._context.Process(
-            target=_session_worker, args=(child, self._ca_bundle), daemon=True)
         try:
-            process.start()
+            # Fixed isolated entrypoint: no parent __main__/sys.path preparation
+            # pipe, no shell, no Python preexec_fn (safe from threaded callers).
+            # OS exec/scheduling is trusted, not an interruptible real-time API.
+            process = subprocess.Popen(
+                [sys.executable, '-I', str(Path(__file__).resolve()), str(child.fileno())],
+                pass_fds=(child.fileno(),), stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except BaseException:
             parent.close()
             child.close()
-            process.close()
             raise
         child.close()
         parent.setblocking(False)
         self._connection = parent
         self._process = process
         try:
+            # All variable bootstrap data uses the same bounded socket as HTTP
+            # commands. A child stalled during imports cannot block this send.
+            _send_frame(parent, self._ca_bundle, deadline)
             kind, value = _receive_frame(parent, deadline, _MAX_RESPONSE_FRAME)
             if time.monotonic() >= deadline:
                 raise TimeoutError('Public HTTP deadline exceeded')
@@ -231,21 +240,26 @@ class PublicHTTPSession:
     def _stop(self, *, graceful=False):
         connection, process = self._connection, self._process
         self._connection = self._process = None
-        if connection is not None and graceful and process is not None and process.is_alive():
+        if connection is not None and graceful and process is not None and process.poll() is None:
             try:
                 _send_frame(connection, None, time.monotonic() + 0.1)
-            except (BrokenPipeError, ConnectionError, EOFError, OSError, TimeoutError):
+                process.wait(timeout=0.1)
+            except (BrokenPipeError, ConnectionError, EOFError, OSError,
+                    TimeoutError, subprocess.TimeoutExpired):
                 pass
-            process.join(timeout=0.1)
         if process is not None:
-            if process.is_alive():
+            if process.poll() is None:
                 process.terminate()
-                process.join(timeout=0.1)
-            if process.is_alive():
-                process.kill()
-                process.join(timeout=0.25)
-            if not process.is_alive():
-                process.close()
+                try:
+                    process.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        process.wait(timeout=0.25)
+                    except subprocess.TimeoutExpired:
+                        # Do not wait indefinitely on an unresponsive kernel.
+                        # Popen retains unreaped children for later collection.
+                        pass
         if connection is not None:
             connection.close()
 
@@ -295,3 +309,10 @@ def public_asset_matches(url, expected, timeout, *, session=None):
         return session.matches(url, expected, timeout)
     with PublicHTTPSession() as temporary_session:
         return temporary_session.matches(url, expected, timeout)
+
+
+if __name__ == '__main__':
+    # -I executes this reviewed file directly, not caller-controlled import paths
+    # or __main__. The private inherited socket carries only trusted local data.
+    with socket.socket(fileno=int(sys.argv[1])) as connection:
+        _session_worker(connection, _receive_frame(connection))

@@ -154,7 +154,13 @@ _PENDING_ISSUE50_RECEIPT_FIXTURE = {
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
-    'deploy/public_http.py': '5d1be7c9e55ff3ab357b53745860a6983131aa21d414c57eb4bc219359db751f',
+    'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
+}
+
+
+# Accepted PR45 candidate overlay; historical merged-main fixture stays intact.
+_PENDING_PR45_NAMING_FIXTURE = {
+    'backend/app.py': '5f0d210cb24b6b49cbf30a4286e6b256c42baa1f552f4b063961c67c5d85ec33',
 }
 
 
@@ -163,7 +169,8 @@ def _source_files():
             | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
             | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE
             | _ISSUE46_OBSERVER_FIXTURE | _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
-            | _PENDING_ISSUE50_RECEIPT_FIXTURE | _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE)
+            | _PENDING_ISSUE50_RECEIPT_FIXTURE | _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
+            | _PENDING_PR45_NAMING_FIXTURE)
 
 
 def _source_ci():
@@ -514,6 +521,15 @@ def test_static_python_closure_accepts_declared_initializer_attributes(tmp_path,
     assert not unresolved_imports
 
 
+@pytest.mark.parametrize('pins', [
+    SOURCE_FINGERPRINTS, _source_files(),
+], ids=['policy', 'independent-fixture'])
+@pytest.mark.parametrize('path', sorted(REQUIRED_FILES))
+def test_current_source_pins_match_actual_candidate_bytes(path, pins):
+    source = Path(__file__).resolve().parents[1] / path
+    assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
 def test_reviewed_source_fixture_matches_complete_required_contract():
     pending = {'deploy/cloud_coordinator.py', 'deploy/native_notification_release.py',
                'deploy/review_evidence.py'} | set(_PENDING_PR40_LIFECYCLE_FIXTURE)
@@ -522,6 +538,9 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE)
     pending |= set(_PENDING_ISSUE50_RECEIPT_FIXTURE)
     pending |= set(_PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE)
+    pending |= set(_PENDING_PR45_NAMING_FIXTURE)
+    assert {path: SOURCE_FINGERPRINTS[path] for path in _PENDING_PR45_NAMING_FIXTURE
+            } == _PENDING_PR45_NAMING_FIXTURE
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
