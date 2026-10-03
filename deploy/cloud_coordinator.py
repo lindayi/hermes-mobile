@@ -60,7 +60,6 @@ HANDOFF_ACTIVE_STATES = frozenset({
 COMPUTED_MERGEABLE_STATES = frozenset({
     "clean", "unstable", "has_hooks", "blocked", "behind", "dirty", "draft",
 })
-COPILOT_REVIEWER_LOGIN = "copilot-pull-request-reviewer[bot]"
 CURRENT_REQUIRED_CHECKS = frozenset({
     ("source-ci", 15368), ("integration-tests", None),
     ("agent-review", None), ("issue-link", 15368),
@@ -1578,7 +1577,6 @@ class Coordinator:
                 )
             )
             or action.get("ready_state") in {"sending", "ready_uncertain"}
-            or action.get("review_request_state") in {"sending", "uncertain"}
             or action.get("receipt_result") != "ready"
             or action.get("receipt_head") != snapshot["head"]
             or not isinstance(base, dict)
@@ -1944,118 +1942,8 @@ class Coordinator:
         else:
             return self._handoff_wait(key, action, snapshot)
 
-        route = f"repos/{REPOSITORY}/pulls/{action['issue']}/requested_reviewers"
-        try:
-            requested = self.api.get(route)
-            reviews = _rest_list(
-                self.api,
-                f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
-            )
-        except CoordinatorError:
-            return self._handoff_wait(key, action, snapshot)
-        if not isinstance(requested, dict) or not isinstance(requested.get("users"), list):
-            return self._handoff_wait(key, action, snapshot)
-        has_request = any(
-            _github_identity(item, COPILOT_REVIEWER_ID) for item in requested["users"]
-        )
-        submitted_reviews = [
-            review for review in reviews
-            if isinstance(review, dict)
-            and review.get("commit_id") == head
-            and review.get("state") in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
-            and _github_identity(review.get("user"), COPILOT_REVIEWER_ID)
-            and _valid_timestamp(review.get("submitted_at"))
-            and completed < datetime.fromisoformat(
-                review["submitted_at"].replace("Z", "+00:00")
-            ) <= now
-        ]
-        has_submitted_review = bool(submitted_reviews)
-        if has_submitted_review:
-            self.store.update_action(
-                key, "completed", handoff_state="done",
-                review_request_state="observed",
-            )
-            return False
-        has_pending_review = any(
-            isinstance(review, dict)
-            and review.get("commit_id") == head
-            and review.get("state") == "PENDING"
-            and _github_identity(review.get("user"), COPILOT_REVIEWER_ID)
-            for review in reviews
-        )
-        if has_request or has_pending_review:
-            self.store.update_action(
-                key, "completed", handoff_state="waiting_review",
-                review_request_state="sent" if has_request else "observed",
-            )
-            return self._handoff_wait(
-                key, action | {"handoff_state": "waiting_review"}, snapshot,
-            )
-
-        request_state = action.get("review_request_state")
-        if request_state in {"sending", "uncertain", "sent"}:
-            self.store.update_action(
-                key, "completed", handoff_state="review_request_uncertain",
-                review_request_state="uncertain",
-            )
-            return self._handoff_wait(
-                key, action | {"handoff_state": "review_request_uncertain"}, snapshot,
-            )
-        if deferred is not None:
-            deferred.append(key)
-            return True
-
-        # Re-fence immediately before the notification-producing reviewer request.
-        current = self._fence_pull(action["issue"], head, base)
-        if (not _pull_identity(current, action)
-                or (snapshot["enrollment"].get("authorized_head") is not None
-                    and not self._authorized_dispatch_head(
-                        action["issue"], head, base, receipt_action=action,
-                    ))):
-            return self._handoff_wait(key, action, snapshot)
-        self.store.update_action(
-            key, "completed", handoff_state="pending",
-            review_request_state="sending",
-        )
-        try:
-            response = self.api.write(route, {
-                "reviewers": [COPILOT_REVIEWER_LOGIN],
-            })
-        except CoordinatorError:
-            self.store.update_action(
-                key, "completed", handoff_state="review_request_uncertain",
-                review_request_state="uncertain",
-            )
-            return self._handoff_wait(
-                key, action | {"handoff_state": "review_request_uncertain"}, snapshot,
-            )
-        response_reviewers = response.get("requested_reviewers") \
-            if isinstance(response, dict) else None
-        if (not _pull_identity(response, action)
-                or not all(isinstance(response.get(field), dict)
-                           and _github_identity(response[field].get("repo"), REPOSITORY_ID)
-                           for field in ("head", "base"))
-                or response["head"].get("sha") != head
-                or response["head"].get("ref") != action["head_ref"]
-                or response["base"].get("sha") != base
-                or response["base"].get("ref") != "main"
-                or not isinstance(response_reviewers, list)
-                or not any(_github_identity(item, COPILOT_REVIEWER_ID)
-                           for item in response_reviewers)):
-            self.store.update_action(
-                key, "completed", handoff_state="review_request_uncertain",
-                review_request_state="uncertain",
-            )
-            return self._handoff_wait(
-                key, action | {"handoff_state": "review_request_uncertain"}, snapshot,
-            )
-        self.store.update_action(
-            key, "completed", handoff_state="waiting_review",
-            review_request_state="sent",
-        )
-        return self._handoff_wait(
-            key, action | {"handoff_state": "waiting_review"}, snapshot,
-        )
+        self.store.update_action(key, "completed", handoff_state="done")
+        return False
 
     def _notification_outcomes(self, snapshot, reasons):
         outcomes = []

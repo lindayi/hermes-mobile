@@ -426,19 +426,32 @@ independent review. Copilot feedback is supplemental; COMMENTED or missing APPRO
 alone does not block acceptance, trigger repeated review requests, or consume fixer
 budget. Actual open findings must still be resolved, and a definite rejection is
 not acceptance.
-For task handoff, an authenticated submitted review on the exact result head
-completes the review request only when its timezone-aware submission instant is
-strictly after the independently validated task session completion and no later
-than the current clock. This also applies when the task leaves the head unchanged;
-an earlier approval cannot shortcut the handoff. The validated completion time,
-session ID and receipt comment ID are persisted with the receipt head/base and
-dispatch claim for restart. The authentic session completion is retained as
-`receipt_session_completed_at` in both the action and the SHA-bound enrollment's
-`receipt_proofs` projection before compaction, alongside the supported
-`receipt_completed_at` metadata. Observation time or mutable task update time is
-not a substitute. Missing or invalid completion proof fails closed. A fresh submitted
-review completes handoff even if unresolved threads keep the approval gate false;
-those threads then remain eligible for the next bounded repair.
+Task receipt handoff and review acceptance are separate. A validated `ready`
+receipt completes the source-writing task handoff after the exact result head,
+repository, base and authorization fences pass; the coordinator does not request
+or wait for an advisory Copilot review. This transition is not review evidence:
+merge still requires the current owner-published independent-agent review above,
+resolved threads, required checks and every other existing guard. Copilot
+`CHANGES_REQUESTED` findings remain actionable and a definite rejection cannot be
+treated as acceptance.
+
+The existing task API exposes task identity, GitHub pull/branch artifacts and
+authenticated session metadata; the existing receipt comment proves task
+completion and result-head handoff only. There is not yet a documented,
+authenticated independent-review report contract bound to a distinct reviewer
+task/session. Until such a producer and report transport are implemented and
+verified, absence of an independent review remains a hard merge blocker. The
+coordinator must not infer a review from task completion, a digest, a Copilot
+review request, or a status, and must not invent a task-result API field.
+
+The validated completion time, session ID and receipt comment ID remain persisted
+with the receipt head/base and dispatch claim for restart. The authentic session
+completion is retained as `receipt_session_completed_at` in both the action and
+the SHA-bound enrollment's `receipt_proofs` projection before compaction, alongside
+the supported `receipt_completed_at` metadata. Observation time or mutable task
+update time is not a substitute. Missing or invalid completion proof fails closed.
+Unresolved findings and threads remain eligible for the existing bounded repair
+path; no fixer attempt is consumed just for awaiting advisory Copilot feedback.
 Preparation stages verified receipt/handoff state in memory. Controller evidence
 is collected against durable lifecycle history plus all newly observed merge
 events in the complete plan. The scan commits those source events, receipt state,

@@ -3916,6 +3916,37 @@ def test_task_handoff_requests_ready_review_once_and_fails_closed_after_wait(tmp
     assert api.fix_attempts == 1
 
 
+def test_completed_task_handoff_does_not_wait_for_copilot_or_bypass_independent_review(
+        tmp_path):
+    api = FakeApi(source_failure=True)
+    api.owner_review_body = "not a structured independent review"
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_state = "PENDING"
+
+    result = coordinator.run(apply=True)
+
+    action = store.action(fix["key"])
+    assert action["handoff_state"] == "done"
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert api.fix_attempts == 1
+    assert result["pull_requests"][0]["review_valid"] is False
+    assert result["pull_requests"][0]["auto_merge_eligible"] is False
+    assert not any("enablePullRequestAutoMerge" in query for query, _ in api.graphql_writes)
+
+    for _ in range(MAX_HANDOFF_POLLS + 1):
+        coordinator.run(apply=True)
+    assert store.action(fix["key"])["handoff_state"] == "done"
+    assert api.fix_attempts == 1
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+
+
 @pytest.mark.parametrize("path_kind", ["draft_ready", "review_request"])
 def test_scan_commit_failure_precedes_every_handoff_mutation(tmp_path, monkeypatch,
                                                               path_kind):
