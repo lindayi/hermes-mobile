@@ -156,8 +156,10 @@ def _independent_review_evidence():
     body_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
     review = {
         "id": review_id, "user": {"id": OWNER}, "commit_id": HEAD,
+        "node_id": "PRR_kwDOU3FvNc8AAAABQehXFA",
         "state": "COMMENTED", "submitted_at": SUBMITTED,
-        "updated_at": SUBMITTED, "body": body,
+        "updatedAt": SUBMITTED, "lastEditedAt": None,
+        "includesCreatedEdit": False, "body": body,
     }
     authorization = {
         "actor_id": OWNER, "head_sha": HEAD, "state": "approved",
@@ -232,10 +234,10 @@ def test_current_independent_review_is_bound_to_latest_exact_unedited_record():
         HEAD, owner_id=OWNER,
     ) is None
     missing_update = dict(review)
-    missing_update.pop("updated_at")
+    missing_update.pop("updatedAt")
     assert current_independent_agent_review(
         [missing_update], HEAD, owner_id=OWNER,
-    ) == targeted
+    ) is None
     assert current_independent_agent_review(
         [dict(review, lastEditedAt="2026-10-01T12:31:00Z")],
         HEAD, owner_id=OWNER,
@@ -243,6 +245,16 @@ def test_current_independent_review_is_bound_to_latest_exact_unedited_record():
     assert current_independent_agent_review(
         [dict(review, includesCreatedEdit=True)],
         HEAD, owner_id=OWNER,
+    ) is None
+    missing_last_edited = dict(review)
+    missing_last_edited.pop("lastEditedAt")
+    assert current_independent_agent_review(
+        [missing_last_edited], HEAD, owner_id=OWNER,
+    ) is None
+    missing_created_edit = dict(review)
+    missing_created_edit.pop("includesCreatedEdit")
+    assert current_independent_agent_review(
+        [missing_created_edit], HEAD, owner_id=OWNER,
     ) is None
     assert body == review["body"]
 

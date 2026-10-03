@@ -127,11 +127,11 @@ _PENDING_PR40_LIFECYCLE_FIXTURE = {
 }
 
 _PENDING_ISSUE43_LAUNCH_FIXTURE = {
-    'deploy/cloud_coordinator.py': '70827cce5c59727f1f6bf63933ed2ca11f1358b598d94025e93c72385ab9daf8',
+    'deploy/cloud_coordinator.py': 'c79bd7c8ec996ade711943905c9b89c4c47f04bf1a821d0feec15fae3733f0ca',
     # PR57 paired proof plus issue #63 fail-closed boundary, independently literal.
     'deploy/issue_starter.py': '20603a350aa4c3972563010035a9faed8fcf086b251af847dbed7e4b32e900ca',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
-    'deploy/review_evidence.py': 'aea997d8f050a89d82daaf5fa778ab6aff9d295ab355707c96311767c080b309',
+    'deploy/review_evidence.py': 'bd391f404a26ebe8b3b1d9c3ba3e0ac18bba0c4b5a4cef563c04a1d7572735b8',
     'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
     'scripts/issue_starter.py': '09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1',
     'scripts/workflow_notifications.py': '03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f',
@@ -150,7 +150,7 @@ _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE = {
 }
 
 _PENDING_ISSUE50_RECEIPT_FIXTURE = {
-    'deploy/cloud_coordinator.py': '70827cce5c59727f1f6bf63933ed2ca11f1358b598d94025e93c72385ab9daf8',
+    'deploy/cloud_coordinator.py': 'c79bd7c8ec996ade711943905c9b89c4c47f04bf1a821d0feec15fae3733f0ca',
     'deploy/task_receipts.py': '60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb',
 }
 
@@ -255,9 +255,11 @@ def _evidence():
                 'id': 2, 'user': {'id': COPILOT_REVIEWER_ID}, 'state': 'COMMENTED',
                 'commit_id': review_head, 'submitted_at': '2026-10-01T21:00:00Z',
             }, {
-                'id': 1, 'user': {'id': OWNER_ID}, 'state': 'COMMENTED',
+                'id': 1, 'node_id': 'PRR_kwDOU3FvNc8AAAABQehXFA',
+                'user': {'id': OWNER_ID, 'login': 'lindayi'}, 'state': 'COMMENTED',
                 'commit_id': review_head, 'submitted_at': '2026-10-01T20:00:00Z',
-                'updated_at': '2026-10-01T20:00:00Z',
+                'updatedAt': '2026-10-01T20:00:00Z',
+                'lastEditedAt': None, 'includesCreatedEdit': False,
                 'body': review_body,
             }],
             'threads': [{'isResolved': True, 'comments_complete': True}],
@@ -298,9 +300,11 @@ def _sensitive_evidence(phase, state='COMMENTED'):
         },
     )
     review['reviews'].append({
-        'id': 3, 'user': {'id': OWNER_ID}, 'commit_id': head, 'state': state,
+        'id': 3, 'node_id': 'PRR_kwDOU3FvNc8AAAABQehXFB',
+        'user': {'id': OWNER_ID, 'login': 'lindayi'}, 'commit_id': head, 'state': state,
         'submitted_at': '2026-10-01T23:00:00Z',
-        'updated_at': '2026-10-01T23:00:00Z', 'body': body,
+        'updatedAt': '2026-10-01T23:00:00Z',
+        'lastEditedAt': None, 'includesCreatedEdit': False, 'body': body,
     })
     review['selected_review'] = review['change']['targeted_review']
     return evidence
@@ -1321,7 +1325,7 @@ def test_targeted_review_timestamp_accepts_valid_aware_record(phase, timestamp):
     evidence = _sensitive_evidence(phase)
     record = evidence['independent_review']['reviews'][-1]
     record['submitted_at'] = timestamp
-    record['updated_at'] = timestamp
+    record['updatedAt'] = timestamp
     assert _blockers(evidence, phase) == set()
 
 

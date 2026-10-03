@@ -413,6 +413,13 @@ before author filtering. All authenticated reviews must have valid timezone-awar
 submission times. Missing, malformed, or naive timestamps fail closed; this
 includes an unsubmitted `PENDING` review, for which GitHub omits `submitted_at`.
 Times are compared as instants, not strings; tied latest owner reviews fail closed.
+Because REST `application/vnd.github.full+json` review payloads do not reliably
+expose edit metadata, the authenticated transport also re-reads the exact REST
+review's GraphQL `PullRequestReview` node and binds node ID, database ID,
+repository, pull number, head commit, author login, body, submission time,
+`updatedAt`, `lastEditedAt`, and `includesCreatedEdit` before treating the review
+as an unedited positive proof. Missing GraphQL metadata, mismatches, or any edit
+signal fail closed.
 Review pagination must be complete and every thread resolved, with complete thread
 pagination. A status, Copilot review, overview, or arbitrary comment is not
 independent review. Copilot feedback is supplemental; COMMENTED or missing APPROVED

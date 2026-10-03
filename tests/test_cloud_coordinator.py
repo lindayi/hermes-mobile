@@ -26,10 +26,12 @@ from deploy.cloud_coordinator import (
     enrollment_from_comment,
     required_checks_pass,
     repair_request,
+    _rest_list,
     _is_owner_sensitive_command,
     _required_checks,
 )
 from deploy.cloud_coordinator import _authorized_result_heads
+from deploy.review_evidence import current_independent_agent_review
 
 
 
@@ -867,10 +869,12 @@ def test_structured_owner_comment_accepts_review_without_copilot_approval():
         "evidence_sha256": "c" * 64,
     }, separators=(",", ":"))
     owner_review = {
-        "id": 64001, "state": "COMMENTED", "commit_id": HEAD,
+        "id": 64001, "node_id": "PRR_kwDOU3FvNc8AAAABQehXFA", "state": "COMMENTED",
+        "commit_id": HEAD,
         "submitted_at": "2026-10-01T12:10:00Z",
-        "updated_at": "2026-10-01T12:10:00Z", "body": owner_body,
-        "user": {"id": OWNER},
+        "updatedAt": "2026-10-01T12:10:00Z", "lastEditedAt": None,
+        "includesCreatedEdit": False, "body": owner_body,
+        "user": {"id": OWNER, "login": "lindayi"},
     }
     copilot_comment = {
         "id": 64002, "state": "COMMENTED", "commit_id": HEAD,
@@ -1012,6 +1016,61 @@ def test_graphql_pagination_rejects_api_errors_without_exposing_payload():
 
     with pytest.raises(ApiError, match="GitHub GraphQL request failed"):
         collect_review_threads(Failed(), 16)
+
+
+def test_review_collection_enriches_owner_review_with_bound_graphql_edit_metadata():
+    api = FakeApi()
+    api.review_state = "COMMENTED"
+    reviews = _rest_list(api, "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100")
+    owner_review = next(review for review in reviews if review["user"]["id"] == OWNER)
+    assert owner_review["updatedAt"] == "2026-10-01T11:00:00Z"
+    assert owner_review["lastEditedAt"] is None
+    assert owner_review["includesCreatedEdit"] is False
+    assert current_independent_agent_review(reviews, HEAD, owner_id=OWNER) is not None
+
+
+@pytest.mark.parametrize("mutation", [
+    "error", "missing-node", "edited", "created-edit", "body", "head",
+    "author", "node", "repository", "pull", "submitted",
+])
+def test_review_collection_blocks_owner_review_when_graphql_metadata_is_untrusted(mutation):
+    class InvalidMetadata(FakeApi):
+        def graphql(self, query, variables):
+            if "PullRequestReview" not in query:
+                return super().graphql(query, variables)
+            if mutation == "error":
+                raise ApiError("GitHub GraphQL request failed", status=503)
+            response = super().graphql(query, variables)
+            if mutation == "missing-node":
+                response["data"]["node"] = None
+                return response
+            review = response["data"]["node"]
+            if mutation == "edited":
+                review["lastEditedAt"] = "2026-10-01T11:01:00Z"
+            elif mutation == "created-edit":
+                review["includesCreatedEdit"] = True
+            elif mutation == "body":
+                review["body"] = self.owner_review_body + " "
+            elif mutation == "head":
+                review["commit"]["oid"] = "c" * 40
+            elif mutation == "author":
+                review["author"]["login"] = "someone-else"
+            elif mutation == "node":
+                review["id"] = "PRR_other"
+            elif mutation == "repository":
+                review["pullRequest"]["repository"]["databaseId"] = 9
+            elif mutation == "pull":
+                review["pullRequest"]["number"] = 17
+            else:
+                review["submittedAt"] = "2026-10-01T11:01:00Z"
+            return response
+
+    reviews = _rest_list(
+        InvalidMetadata(),
+        "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100",
+    )
+    assert isinstance(reviews, list)
+    assert current_independent_agent_review(reviews, HEAD, owner_id=OWNER) is None
 
 
 def test_gh_api_does_not_echo_private_error_text_or_accept_remote_shell_text():
@@ -1161,6 +1220,8 @@ class FakeApi:
         self.review_state = "APPROVED"
         self.review_submitted_at = "2026-10-01T12:00:00Z"
         self.owner_review_id = 64001
+        self.owner_review_node_id = "PRR_kwDOU3FvNc8AAAABQehXFA"
+        self.owner_login = "lindayi"
         self.owner_review_body = json.dumps({
             "schema": "hermes-independent-agent-review-v1",
             "reviewed_head_sha": authorize_sha if authorize_sha is not None else head_sha,
@@ -1277,11 +1338,12 @@ class FakeApi:
                 "user": {"id": COPILOT_REVIEWER},
             }]
             reviews.append({
-                "id": self.owner_review_id, "state": "COMMENTED",
+                "id": self.owner_review_id, "node_id": self.owner_review_node_id,
+                "state": "COMMENTED",
                 "commit_id": self.authorize_sha if self.authorize_sha_review else self.head_sha,
                 "submitted_at": "2026-10-01T11:00:00Z",
-                "updated_at": "2026-10-01T11:00:00Z",
-                "body": self.owner_review_body, "user": {"id": OWNER},
+                "body": self.owner_review_body,
+                "user": {"id": OWNER, "login": self.owner_login},
             })
             return reviews
         if f"/commits/{self.head_sha}/check-runs?" in route:
@@ -1325,6 +1387,32 @@ class FakeApi:
         raise AssertionError(f"Unexpected API list: {route}")
 
     def graphql(self, query, variables):
+        if "PullRequestReview" in query:
+            return {
+                "data": {
+                    "node": {
+                        "id": self.owner_review_node_id,
+                        "databaseId": self.owner_review_id,
+                        "submittedAt": "2026-10-01T11:00:00Z",
+                        "updatedAt": "2026-10-01T11:00:00Z",
+                        "lastEditedAt": None,
+                        "includesCreatedEdit": False,
+                        "state": "COMMENTED",
+                        "body": self.owner_review_body,
+                        "commit": {"oid": (
+                            self.authorize_sha if self.authorize_sha_review else self.head_sha
+                        )},
+                        "author": {"login": self.owner_login},
+                        "pullRequest": {
+                            "number": 16,
+                            "repository": {
+                                "nameWithOwner": "lindayi/hermes-mobile",
+                                "databaseId": 1399942965,
+                            },
+                        },
+                    },
+                },
+            }
         self.thread_reads += 1
         unresolved = self.unresolved or (
             self.reopen_after_first and self.thread_reads > 1
@@ -2175,7 +2263,8 @@ def test_sensitive_owner_review_is_revalidated_at_planning_status_and_merge_fenc
         body.get("context") == "cloud-review" and body.get("state") == "success"
         for route, body in api.writes if "/statuses/" in route
     )
-    assert "sensitive" in result["pull_requests"][0]["reasons"]
+    reason = "review" if invalid_on_read == 4 else "sensitive"
+    assert reason in result["pull_requests"][0]["reasons"]
 
 
 @pytest.mark.parametrize("merged", [False, True])
@@ -4728,10 +4817,10 @@ def test_reenrollment_keeps_generation_boundary_when_resetting_terminal_status(t
 def test_failed_fresh_repair_collection_never_claims_or_dispatches(tmp_path, failure):
     class IncompleteFreshEvidence(FakeApi):
         def graphql(self, query, variables):
-            if self.thread_reads and failure == "thread-error":
+            if "reviewThreads" in query and self.thread_reads and failure == "thread-error":
                 raise ApiError("fresh threads unavailable", status=429)
             response = super().graphql(query, variables)
-            if self.thread_reads > 1 and failure == "incomplete-threads":
+            if "reviewThreads" in query and self.thread_reads > 1 and failure == "incomplete-threads":
                 response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0][
                     "comments"]["pageInfo"] = {"hasNextPage": True, "endCursor": "next"}
             return response
@@ -4797,13 +4886,13 @@ def test_repair_fences_changes_during_fresh_evidence_collection(tmp_path, race):
 def test_fresh_repair_evidence_supersedes_plan_without_replacement_or_budget(tmp_path, change):
     class ChangedEvidence(FakeApi):
         def graphql(self, query, variables):
-            if self.thread_reads:
+            if "reviewThreads" in query and self.thread_reads:
                 if change in {"resolved", "replacement-evidence"}:
                     self.unresolved = False
                 if change == "replacement-evidence":
                     self.source_failure = True
             response = super().graphql(query, variables)
-            if self.thread_reads > 1 and change == "edited":
+            if "reviewThreads" in query and self.thread_reads > 1 and change == "edited":
                 response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0][
                     "comments"]["nodes"][0]["body"] = "Different finding"
             return response

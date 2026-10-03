@@ -75,13 +75,25 @@ def _review_submission(review):
     submitted = review_timestamp(review.get("submitted_at"))
     if submitted is None:
         return None
+    updated = review_timestamp(review.get("updatedAt"))
+    if updated is None or updated != submitted:
+        return None
+    if "lastEditedAt" not in review:
+        return None
+    edited = review.get("lastEditedAt")
+    if edited not in (None, ""):
+        if review_timestamp(edited) is None:
+            return None
+        return None
+    if review.get("includesCreatedEdit") is not False:
+        return None
     for key in ("updated_at", "updatedAt"):
-        if key in review:
+        if key != "updatedAt" and key in review:
             updated = review_timestamp(review.get(key))
             if updated is None or updated != submitted:
                 return None
     for key in ("last_edited_at", "lastEditedAt"):
-        if key in review:
+        if key != "lastEditedAt" and key in review:
             edited = review.get(key)
             if edited in (None, ""):
                 continue
@@ -89,7 +101,7 @@ def _review_submission(review):
                 return None
             return None
     for key in ("includes_created_edit", "includesCreatedEdit"):
-        if key in review and review.get(key) is not False:
+        if key != "includesCreatedEdit" and key in review and review.get(key) is not False:
             return None
     return submitted
 

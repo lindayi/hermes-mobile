@@ -114,6 +114,34 @@ query($number: Int!, $cursor: String) {
   }
 }
 """
+GRAPHQL_REVIEW_METADATA = """
+query($id: ID!) {
+  node(id: $id) {
+    ... on PullRequestReview {
+      id
+      databaseId
+      submittedAt
+      updatedAt
+      lastEditedAt
+      includesCreatedEdit
+      state
+      body
+      commit { oid }
+      author { login }
+      pullRequest {
+        number
+        repository {
+          nameWithOwner
+          databaseId
+        }
+      }
+    }
+  }
+}
+"""
+REVIEW_ROUTE_RE = re.compile(
+    r"repos/lindayi/hermes-mobile/pulls/([1-9][0-9]*)/reviews(?:/([1-9][0-9]*))?(?:\?[^#]*)?\Z"
+)
 
 
 class CoordinatorError(RuntimeError):
@@ -761,7 +789,73 @@ def _is_owner_sensitive_command(comment):
 
 
 def _rest_list(api, route, collection=None):
-    return api.get_all(route, collection=collection)
+    values = api.get_all(route, collection=collection)
+    return _enrich_pull_reviews(api, route, values)
+
+
+def _enrich_pull_reviews(api, route, reviews):
+    match = REVIEW_ROUTE_RE.fullmatch(route)
+    if match is None or not isinstance(reviews, list):
+        return reviews
+    pull_number = int(match.group(1))
+    selected_review_id = int(match.group(2)) if match.group(2) is not None else None
+    enriched = []
+    for review in reviews:
+        if (not isinstance(review, dict)
+                or selected_review_id is not None and review.get("id") != selected_review_id):
+            enriched.append(review)
+            continue
+        user = review.get("user")
+        if not isinstance(user, dict) or user.get("id") != OWNER_ID:
+            enriched.append(review)
+            continue
+        enriched.append(_bound_owner_review_metadata(api, pull_number, review))
+    return enriched
+
+
+def _bound_owner_review_metadata(api, pull_number, review):
+    node_id = review.get("node_id")
+    user = review.get("user")
+    if not isinstance(node_id, str) or not node_id:
+        return review
+    if not isinstance(user, dict) or not isinstance(user.get("login"), str) or not user["login"]:
+        return review
+    try:
+        response = api.graphql(GRAPHQL_REVIEW_METADATA, {"id": node_id})
+    except ApiError:
+        return review
+    node = response.get("data", {}).get("node") if isinstance(response, dict) else None
+    commit = node.get("commit") if isinstance(node, dict) else None
+    author = node.get("author") if isinstance(node, dict) else None
+    pull = node.get("pullRequest") if isinstance(node, dict) else None
+    repository = pull.get("repository") if isinstance(pull, dict) else None
+    if (
+            not isinstance(node, dict)
+            or node.get("id") != node_id
+            or node.get("databaseId") != review.get("id")
+            or node.get("submittedAt") != review.get("submitted_at")
+            or node.get("state") != review.get("state")
+            or node.get("body") != review.get("body")
+            or not isinstance(commit, dict)
+            or commit.get("oid") != review.get("commit_id")
+            or not isinstance(author, dict)
+            or author.get("login") != user.get("login")
+            or not isinstance(pull, dict)
+            or pull.get("number") != pull_number
+            or not isinstance(repository, dict)
+            or repository.get("databaseId") != REPOSITORY_ID
+            or not isinstance(repository.get("nameWithOwner"), str)
+            or repository["nameWithOwner"].casefold() != REPOSITORY.casefold()
+            or node.get("updatedAt") in (None, "")
+            or "lastEditedAt" not in node
+            or type(node.get("includesCreatedEdit")) is not bool
+    ):
+        return review
+    enriched = dict(review)
+    enriched["updatedAt"] = node["updatedAt"]
+    enriched["lastEditedAt"] = node.get("lastEditedAt")
+    enriched["includesCreatedEdit"] = node["includesCreatedEdit"]
+    return enriched
 
 
 def _all_review_comments(api, issue_number, cursor):

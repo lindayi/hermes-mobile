@@ -418,7 +418,10 @@ different GitHub identity. The selected record must remain the sole latest owner
 review; a missing, malformed, edited, removed, dismissed, duplicate, stale, negative,
 or conflicting record blocks with `sensitive-review-authorization`. Both the owner
 authorization and selected review are re-read during planning and the fresh status
-and merge fences. A later head clears the authorization; approval is not blanket
+and merge fences. The positive proof also requires authenticated GraphQL
+`PullRequestReview` edit metadata bound to the same REST review identity/body/head;
+missing metadata, mismatches, or any edit signal block exactly like an edited
+record. A later head clears the authorization; approval is not blanket
 consent for future commits.
 
 ## Policy phases and activation
