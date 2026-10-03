@@ -188,7 +188,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/cloud_coordinator.py': '4a94bd43f7d350cb8aaee08650726893e6775872e8af20f3a0c8f7f61127345d',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
-    'deploy/issue_starter.py': '47a22f89240682168e3aedcc0ba5d47010587ebaaa0b93049a6144f7003fcece',
+    'deploy/issue_starter.py': '20603a350aa4c3972563010035a9faed8fcf086b251af847dbed7e4b32e900ca',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see

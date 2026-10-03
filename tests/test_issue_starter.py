@@ -792,6 +792,107 @@ def test_reserved_pull_body_digest_is_immutable(tmp_path):
     assert store.snapshot()["commands"]["28:9001"]["pull_body_sha256"] == accepted_digest
 
 
+@pytest.fixture(params=[
+    ([issue_reference(number=29)], None),
+    ([issue_reference(), issue_reference(number=29)], None),
+    ([issue_reference()], [issue_reference(number=29)]),
+    ([], [issue_reference(number=29)]),
+    ([issue_reference(number=29, repository={
+        "id": "R_other", "nameWithOwner": "someone/else",
+    })], None),
+], ids=["other-only", "target-and-other", "conflicting-page-two",
+        "other-only-page-two", "other-repository"])
+def conflicting_closing_api(request):
+    first, second = request.param
+    pull = pull_request(body="Provider report must remain untouched.")
+    api = FakeApi(pulls=[pull])
+    api.closing_issues = copy.deepcopy(first)
+    if second is not None:
+        for cursor, nodes, page_info in [
+            (None, first, {"hasNextPage": True, "endCursor": "next"}),
+            ("next", second, {"hasNextPage": False, "endCursor": None}),
+        ]:
+            response = closing_issue_response(pull, nodes=nodes, page_info=page_info)
+            response["data"]["repository"]["issue"] = {
+                "id": api.issue_node_id, "number": ISSUE_NUMBER,
+                "repository": GRAPHQL_REPOSITORY.copy(),
+            }
+            api.closing_pages[cursor] = response
+    return api
+
+
+def test_conflicting_canonical_refs_are_neither_absent_nor_linked(
+    tmp_path, conflicting_closing_api,
+):
+    api = conflicting_closing_api
+    assert make_coordinator(tmp_path, api)._closing_issue_status(
+        api.pulls[0], ISSUE_NUMBER, api.issue_node_id,
+    ) is None
+
+
+def test_conflicting_canonical_refs_block_starter_without_writes(
+    tmp_path, conflicting_closing_api,
+):
+    api = conflicting_closing_api
+    original_pull = copy.deepcopy(api.pulls[0])
+
+    result = _run_completed_handoff(tmp_path, api)
+
+    assert not any("addCloseIssueReferences" in call["query"]
+                   for call in api.graphql_calls)
+    assert not any("markPullRequestReadyForReview" in call["query"]
+                   for call in api.graphql_calls)
+    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
+    assert api.patches == []
+    assert api.pulls[0] == original_pull
+    assert result["handed_off"] == 0
+    assert result["blocked"] == 1
+
+
+@pytest.mark.parametrize("initially_linked", [False, True], ids=["empty-recovery", "sole-target"])
+@pytest.mark.parametrize("target_page", [1, 2])
+def test_complete_paginated_closing_refs_preserve_safe_handoff(
+    tmp_path, initially_linked, target_page,
+):
+    class PaginatedApi(FakeApi):
+        def post(self, route, body):
+            response = super().post(route, body)
+            if route == "graphql" and "closingIssuesReferences" in body.get("query", ""):
+                connection = response["data"]["repository"]["pullRequest"][
+                    "closingIssuesReferences"
+                ]
+                page = 2 if body["variables"].get("after") == "next" else 1
+                if page != target_page:
+                    connection["nodes"] = []
+                connection["pageInfo"] = {
+                    "hasNextPage": page == 1,
+                    "endCursor": "next" if page == 1 else None,
+                }
+            return response
+
+    api = PaginatedApi(pulls=[pull_request(body="Unchanged provider report.")])
+    api.closing_issues = [issue_reference()] if initially_linked else []
+    original_body = api.pulls[0]["body"]
+    coordinator = make_coordinator(tmp_path, api)
+    assert coordinator._closing_issue_status(
+        api.pulls[0], ISSUE_NUMBER, api.issue_node_id,
+    ) is initially_linked
+    assert [call["variables"].get("after") for call in api.graphql_calls] == [None, "next"]
+    assert api.pull_detail_reads == 1
+
+    result = _run_completed_handoff(tmp_path, api)
+
+    assert result["handed_off"] == 1
+    assert len([call for call in api.graphql_calls
+                if "addCloseIssueReferences" in call["query"]]) == int(not initially_linked)
+    assert len([call for call in api.graphql_calls
+                if "markPullRequestReadyForReview" in call["query"]]) == 1
+    assert len([route for route, _ in api.posts if route.endswith("/issues/41/comments")]) == 1
+    assert api.closing_issues == [issue_reference()]
+    assert api.pulls[0]["body"] == original_body
+    assert api.patches == []
+
+
 def test_existing_canonical_edge_takes_zero_write_path(tmp_path):
     body = "Provider-authored report, left untouched."
     api = FakeApi(pulls=[pull_request(body=body)])
@@ -1070,25 +1171,18 @@ def test_closing_looking_body_without_edge_uses_mutation_not_description_proof(t
     [{"number": ISSUE_NUMBER, "repository": None}],
 ])
 def test_wrong_or_ambiguous_closing_issue_edges_never_handoff(tmp_path, references):
-    safely_absent = (
-        len(references) == 1 and isinstance(references[0], dict)
-        and references[0].get("number") == 29
-        and references[0].get("repository", {}).get("id") == GRAPHQL_REPOSITORY_ID
-    )
+    # A different issue is conflicting evidence, not safe absence (issue #63).
     api = FakeApi(pulls=[pull_request(body="Any plain text and command $HOME")])
     api.closing_issues = references
 
     result = _run_completed_handoff(tmp_path, api)
 
-    if safely_absent:
-        assert result["handed_off"] == 1
-        assert len([call for call in api.graphql_calls
-                    if "addCloseIssueReferences" in call["query"]]) == 1
-    else:
-        assert result["handed_off"] == 0
-        assert not any("addCloseIssueReferences" in call["query"]
-                       for call in api.graphql_calls)
-        assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
+    assert result["handed_off"] == 0
+    assert not any("addCloseIssueReferences" in call["query"]
+                   for call in api.graphql_calls)
+    assert not any("markPullRequestReadyForReview" in call["query"]
+                   for call in api.graphql_calls)
+    assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
 
 
 def test_closing_issue_api_failure_never_hands_off(tmp_path):

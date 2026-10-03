@@ -268,7 +268,7 @@ source consistency only, not independent review, runtime evidence, or activation
 permission.
 
 Issue #63 updates the current starter candidate pin to
-`47a22f89240682168e3aedcc0ba5d47010587ebaaa0b93049a6144f7003fcece` for its
+`20603a350aa4c3972563010035a9faed8fcf086b251af847dbed7e4b32e900ca` for its
 durable one-shot canonical issue-link recovery with complete readback.
 The PR57 digest above remains historical. The refreshed current pin is source
 consistency only, not independent review, runtime evidence, or activation permission.

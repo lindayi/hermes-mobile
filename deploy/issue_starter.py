@@ -1240,7 +1240,8 @@ class Coordinator:
             cursor = end_cursor
         else:
             return None
-        if linked > 1:
+        # Only an empty connection proves absence; any competing edge is unsafe.
+        if linked > 1 or len(seen_issues) != linked:
             return None
         fresh = self.api.get(f"repos/{REPOSITORY}/pulls/{pull['number']}")
         if _pull_snapshot(fresh) != snapshot:
