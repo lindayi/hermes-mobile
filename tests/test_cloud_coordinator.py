@@ -75,10 +75,10 @@ def test_accepted_receipt_handoff_uses_fresh_scanned_main(tmp_path, monkeypatch,
     action = store.action(fix["key"])
     if hazard is None:
         assert action["handoff_state"] == "done"
-        assert api.fix_attempts == 2
+        assert api.fix_attempts == 1
         assert action["receipt_base"] == BASE
     else:
-        assert api.fix_attempts == 1
+        assert api.fix_attempts == 2
         assert api.graphql_writes == graphql
 
 
@@ -137,17 +137,20 @@ def enrolled_record(**changes):
 
 
 def refresh_owner_review(api, head_sha, *, review_id=None, evidence_sha256=None):
-    api.owner_review_id = api.owner_review_id + 1 if review_id is None else review_id
-    api.owner_review_body = json.dumps({
+    review_id = api.owner_review_id + 1 if review_id is None else review_id
+    body = json.dumps({
         "schema": "hermes-independent-agent-review-v1",
         "reviewed_head_sha": head_sha,
         "review_method": "independent-agent",
         "verdict": "pass",
         "evidence_sha256": evidence_sha256 or "c" * 64,
     }, separators=(",", ":"))
-    api.owner_review_digest = hashlib.sha256(
-        api.owner_review_body.encode("utf-8"),
-    ).hexdigest()
+    api.set_owner_review(
+        review_id=review_id,
+        head_sha=head_sha,
+        body=body,
+        submitted_at="2026-10-01T12:06:00Z",
+    )
 
 
 def test_enrollment_requires_an_authenticated_owner_command_and_main_pr():
@@ -275,15 +278,19 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
     assert completed["receipt_nonce"] == fix["dispatch_nonce"]
     assert store.snapshot()["enrollments"]["16"]["authorized_head"] == HEAD
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
-    assert api.fix_attempts == 1
+    assert api.fix_attempts == 2
     assert "Hermes-Task-Receipt: v2" in fix["body"]
-    api.comments[-1]["updated_at"] = "2026-10-01T12:04:01Z"
+    receipt_comment = next(
+        comment for comment in api.comments
+        if comment.get("id") == completed["receipt_comment_id"]
+    )
+    receipt_comment["updated_at"] = "2026-10-01T12:04:01Z"
 
     result = Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
 
     assert "unauthorized-continuation" in result["pull_requests"][0]["reasons"]
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] != result_head
-    assert api.fix_attempts == 1
+    assert api.fix_attempts == 2
 
 
 def test_sha_bound_enrollment_rejects_unproven_or_unrelated_result_heads(tmp_path):
@@ -421,7 +428,7 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     assert first_proof["receipt_result"] == "ready"
     assert first_proof["receipt_start_head"] == HEAD
     assert first_proof["receipt_head"] == result_head
-    assert api.fix_attempts == 2
+    assert api.fix_attempts == 1
     assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     durable = store.snapshot()["enrollments"]["16"]["receipt_proofs"][0]
     assert durable["receipt_start_head"] == HEAD
@@ -442,7 +449,7 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     assert store.snapshot()["enrollments"]["16"]["authorized_head"] == HEAD
     coordinator().run(apply=True)
     assert len(api.graphql_writes) == 1
-    assert api.fix_attempts == 2
+    assert api.fix_attempts == 1
 
 
 @pytest.mark.parametrize("change", [
@@ -1209,6 +1216,8 @@ class FakeApi:
         self.review_submitted_at = "2026-10-01T12:00:00Z"
         self.owner_review_id = 64001
         self.owner_review_node_id = "PRR_kwDOU3FvNc8AAAABQehXFA"
+        self.owner_review_head_sha = authorize_sha if authorize else head_sha
+        self.owner_review_submitted_at = "2026-10-01T11:00:00Z"
         self.owner_login = "lindayi"
         self.owner_review_body = json.dumps({
             "schema": "hermes-independent-agent-review-v1",
@@ -1220,7 +1229,10 @@ class FakeApi:
         self.owner_review_digest = hashlib.sha256(
             self.owner_review_body.encode("utf-8"),
         ).hexdigest()
+        self.owner_reviews = []
         self.graphql_writes = []
+        self.next_issue_comment_id = 1000
+        self.next_review_id = 65000
         self.pull = valid_pr() | {
             "node_id": "PR_node_16", "auto_merge": None,
             "state": pull_state, "merged": merged,
@@ -1243,6 +1255,41 @@ class FakeApi:
                 ),
                 "updated_at": "2026-10-01T11:30:00Z",
             })
+        self._sync_owner_reviews()
+
+    def _current_owner_review_record(self, *, graphql=False):
+        record = {
+            "id": self.owner_review_id,
+            "node_id": self.owner_review_node_id,
+            "state": "COMMENTED",
+            "commit_id": self.owner_review_head_sha,
+            "submitted_at": self.owner_review_submitted_at,
+            "body": self.owner_review_body,
+            "user": {"id": OWNER, "login": self.owner_login},
+        }
+        if graphql:
+            record.update(
+                updatedAt=self.owner_review_submitted_at,
+                lastEditedAt=None,
+                includesCreatedEdit=False,
+            )
+        return record
+
+    def _sync_owner_reviews(self):
+        self.owner_reviews = []
+
+    def set_owner_review(self, *, review_id, head_sha, body, submitted_at):
+        current = self._current_owner_review_record()
+        if current["id"] != review_id:
+            self.owner_reviews.append(current)
+        self.owner_review_id = review_id
+        self.owner_review_node_id = f"PRR_kwDOU3FvNc8AAAAB{review_id}"
+        self.owner_review_head_sha = head_sha
+        self.owner_review_submitted_at = submitted_at
+        self.owner_review_body = body
+        self.owner_review_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        self.owner_reviews = [review for review in self.owner_reviews
+                              if review.get("id") != review_id]
 
     def get(self, route):
         if route == "repos/lindayi/hermes-mobile":
@@ -1250,7 +1297,10 @@ class FakeApi:
         if route == "user":
             return {"id": OWNER}
         if route.startswith("agents/repos/lindayi/hermes-mobile/tasks/"):
-            return self.tasks[route.rsplit("/", 1)[-1]]
+            task_id = route.rsplit("/", 1)[-1]
+            if task_id not in self.tasks:
+                raise ApiError("task not found", status=404)
+            return self.tasks[task_id]
         if route == "repos/lindayi/hermes-mobile/commits/main":
             self.main_reads += 1
             if self.current_main_sha is not None:
@@ -1325,14 +1375,8 @@ class FakeApi:
                 "submitted_at": self.review_submitted_at,
                 "user": {"id": COPILOT_REVIEWER},
             }]
-            reviews.append({
-                "id": self.owner_review_id, "node_id": self.owner_review_node_id,
-                "state": "COMMENTED",
-                "commit_id": self.authorize_sha if self.authorize_sha_review else self.head_sha,
-                "submitted_at": "2026-10-01T11:00:00Z",
-                "body": self.owner_review_body,
-                "user": {"id": OWNER, "login": self.owner_login},
-            })
+            reviews.extend(self.owner_reviews)
+            reviews.append(self._current_owner_review_record())
             return reviews
         if f"/commits/{self.head_sha}/check-runs?" in route:
             return [
@@ -1376,20 +1420,30 @@ class FakeApi:
 
     def graphql(self, query, variables):
         if "PullRequestReview" in query:
+            requested = variables.get("id")
+            review = next((item for item in self.owner_reviews
+                           if item["node_id"] == requested), None)
+            if review is None and self._current_owner_review_record()["node_id"] == requested:
+                review = self._current_owner_review_record()
+            assert review is not None, requested
+            review = {
+                **review,
+                "updatedAt": review["submitted_at"],
+                "lastEditedAt": None,
+                "includesCreatedEdit": False,
+            }
             return {
                 "data": {
                     "node": {
-                        "id": self.owner_review_node_id,
-                        "databaseId": self.owner_review_id,
-                        "submittedAt": "2026-10-01T11:00:00Z",
-                        "updatedAt": "2026-10-01T11:00:00Z",
-                        "lastEditedAt": None,
-                        "includesCreatedEdit": False,
-                        "state": "COMMENTED",
-                        "body": self.owner_review_body,
-                        "commit": {"oid": (
-                            self.authorize_sha if self.authorize_sha_review else self.head_sha
-                        )},
+                        "id": review["node_id"],
+                        "databaseId": review["id"],
+                        "submittedAt": review["submitted_at"],
+                        "updatedAt": review["updatedAt"],
+                        "lastEditedAt": review["lastEditedAt"],
+                        "includesCreatedEdit": review["includesCreatedEdit"],
+                        "state": review["state"],
+                        "body": review["body"],
+                        "commit": {"oid": review["commit_id"]},
                         "author": {"login": self.owner_login},
                         "pullRequest": {
                             "number": 16,
@@ -1422,6 +1476,24 @@ class FakeApi:
         if route == "repos/lindayi/hermes-mobile/pulls/16/requested_reviewers":
             self.requested_reviewers = [{"id": COPILOT_REVIEWER}]
             return self.pull | {"requested_reviewers": self.requested_reviewers}
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews":
+            submitted_at = f"2026-10-01T12:{self.next_review_id % 60:02d}:00Z"
+            self.set_owner_review(
+                review_id=self.next_review_id,
+                head_sha=body["commit_id"],
+                body=body["body"],
+                submitted_at=submitted_at,
+            )
+            self.next_review_id += 1
+            return {
+                "id": self.owner_review_id,
+                "node_id": self.owner_review_node_id,
+                "state": "COMMENTED",
+                "commit_id": body["commit_id"],
+                "submitted_at": submitted_at,
+                "body": body["body"],
+                "user": {"id": OWNER, "login": self.owner_login},
+            }
         if route == "agents/repos/lindayi/hermes-mobile/tasks":
             self.fix_attempts += 1
             if self.fail_fix:
@@ -1443,7 +1515,16 @@ class FakeApi:
         if body.get("context") == "cloud-review":
             response.update(state=body["state"], creator={"id": OWNER})
         if route.endswith("/comments"):
-            response.update(user={"id": OWNER}, body=body["body"])
+            comment = {
+                "id": self.next_issue_comment_id,
+                "user": {"id": OWNER},
+                "body": body["body"],
+                "created_at": "2026-10-01T12:06:00Z",
+                "updated_at": "2026-10-01T12:06:00Z",
+            }
+            self.next_issue_comment_id += 1
+            self.comments.append(comment)
+            response.update(comment)
         return response
 
     def complete_task(self, task_id, action, *, result="ready", head_sha=None,
@@ -1491,6 +1572,60 @@ class FakeApi:
             "updated_at": comment_created,
         })
 
+    def complete_review_task(self, task_id, action, *, source_action, verdict="pass",
+                             findings=None, files=None, report="Independent review complete."):
+        task = self.tasks[task_id]
+        session_id = f"session-{task_id}"
+        created = "2026-10-01T12:07:00Z"
+        completed = "2026-10-01T12:09:00Z"
+        task.update(
+            state="completed",
+            updated_at=completed,
+            sessions=[{
+                "id": session_id,
+                "task_id": task_id,
+                "state": "completed",
+                "user": {"id": OWNER},
+                "owner": {"id": OWNER},
+                "repository": {"id": 1399942965},
+                "created_at": created,
+                "completed_at": completed,
+                "prompt": action["body"],
+                "head_ref": action["head_ref"],
+                "base_ref": "main",
+            }],
+        )
+        payload = {
+            "schema": "hermes-independent-review-report-v1",
+            "nonce": action["dispatch_nonce"],
+            "session_id": session_id,
+            "repository": "lindayi/hermes-mobile",
+            "repository_id": 1399942965,
+            "pr": 16,
+            "head": action["head"],
+            "base": action["main_sha"],
+            "source_start_head": source_action["head"],
+            "source_session_id": source_action["receipt_session_id"],
+            "source_comment_id": source_action["receipt_comment_id"],
+            "verdict": verdict,
+            "summary": "Independent review completed.",
+            "findings": findings or [],
+            "files": files or {"deploy/cloud_coordinator.py": "a" * 64},
+            "report": report,
+        }
+        self.comments.append({
+            "id": self.next_issue_comment_id,
+            "user": {"id": COPILOT_AGENT},
+            "body": (
+                f"\n> {action['anchor_prefix']}\n"
+                "> \n"
+                f"{json.dumps(payload, separators=(',', ':'))}"
+            ),
+            "created_at": completed,
+            "updated_at": completed,
+        })
+        self.next_issue_comment_id += 1
+
     def graphql_write(self, query, variables):
         self.graphql_writes.append((query, variables))
         if "markPullRequestReadyForReview" in query:
@@ -1535,7 +1670,13 @@ def _ready_sha_bound_handoff(tmp_path):
     api.complete_task(first["task_id"], first, head_sha=RESULT_HEAD)
     api.head_sha = RESULT_HEAD
     api.pull["head"]["sha"] = RESULT_HEAD
-    api.comments[-1]["body"] = (
+    receipt_comment = next(
+        comment for comment in reversed(api.comments)
+        if isinstance(comment.get("body"), str)
+        and first["dispatch_nonce"] in comment["body"]
+        and comment.get("user", {}).get("id") == 198982749
+    )
+    receipt_comment["body"] = (
         "Hermes-Task-Receipt: v2\n"
         f"nonce={first['dispatch_nonce']}\n"
         "pr=16\n"
@@ -1584,7 +1725,7 @@ def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
                if action.get("task_type") == "neutral"]
 
     assert len(neutral) == 1
-    assert api.fix_attempts == 2
+    assert api.fix_attempts == 1
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
     first_proof = next(
         proof for proof in store.snapshot()["enrollments"]["16"]["receipt_proofs"]
@@ -1601,7 +1742,7 @@ def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
     Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
     before_writes = list(api.writes)
     Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
-    assert api.fix_attempts == 2
+    assert api.fix_attempts == 1
     assert api.writes == before_writes
 
 
@@ -1629,7 +1770,7 @@ def test_stale_base_reconciliation_releases_exhausted_review_handoff(tmp_path):
     coordinator.run(apply=True)
 
     assert store.action(first["key"])["handoff_state"] == "superseded"
-    assert api.fix_attempts == 2
+    assert api.fix_attempts == 1
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
 
 
@@ -1721,7 +1862,7 @@ def test_stale_base_reconciliation_accepts_a_validated_new_head_handoff(tmp_path
     assert updated["receipt_head"] == NEXT_RESULT_HEAD
     assert updated["receipt_base"] == CURRENT_MAIN
     assert updated["receipt_body"] == api.comments[-1]["body"]
-    assert api.fix_attempts == 2
+    assert api.fix_attempts == 1
     assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
 
 
@@ -1998,8 +2139,14 @@ def test_stale_base_reconciliation_fails_closed(tmp_path, hazard):
             "status": "ahead", "ahead_by": 21, "behind_by": 0,
         }
     elif hazard == "edited-receipt":
-        api.comments[-1]["body"] += "\nedited"
-        api.comments[-1]["updated_at"] = "2026-10-01T12:06:00Z"
+        receipt_comment = next(
+            comment for comment in api.comments
+            if isinstance(comment.get("body"), str)
+            and first["dispatch_nonce"] in comment["body"]
+            and comment.get("user", {}).get("id") == 198982749
+        )
+        receipt_comment["body"] += "\nedited"
+        receipt_comment["updated_at"] = "2026-10-01T12:06:00Z"
 
     attempts_before = store.snapshot()["enrollments"]["16"]["attempts"]
     try:
@@ -3028,7 +3175,7 @@ def test_normalized_source_identity_survives_snapshot_and_final_dispatch(tmp_pat
     # Even an exact copy of normalized evidence in raw check-runs is untrusted.
     assert repair_request(HEAD, 0, [], [expected], pull_number=16) is None
     result = coordinator.run(apply=True)
-    assert api.fix_attempts == 1
+    assert api.fix_attempts == 2
     assert api.workflow_reads >= 3  # snapshot, plan, final dispatch
     prompt = next(body["prompt"] for route, body in api.writes if route.endswith("/tasks"))
     assert prompt.startswith(planned["body"] + "\n\n")
@@ -3879,7 +4026,7 @@ def test_waiting_independent_review_handoff_survives_restart_without_budget(
     assert persisted["actions"][fix["key"]]["handoff_state"] == "waiting_review"
     assert persisted["enrollments"]["16"]["attempts"] == 1
     assert persisted["lifecycle_events"] == events
-    assert api.fix_attempts == 1
+    assert api.fix_attempts == (1 if result_head == HEAD else 2)
     assert api.writes == writes and api.graphql_writes == graphql_writes
 
     api.unresolved = False
@@ -3952,7 +4099,7 @@ def test_completed_task_handoff_does_not_wait_for_copilot_or_bypass_independent_
         coordinator.run(apply=True)
     assert store.action(fix["key"])["handoff_state"] == "waiting_review"
     assert store.action(fix["key"]).get("handoff_waits", 0) == 0
-    assert api.fix_attempts == 1
+    assert api.fix_attempts == 2
     assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
@@ -3976,6 +4123,110 @@ def test_current_independent_review_completes_handoff_without_copilot(tmp_path):
     assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     assert api.fix_attempts == 1
     assert not api.graphql_writes
+
+
+def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
+    api = FakeApi(source_failure=True)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    source_fix = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    api.review_state = "PENDING"
+
+    first = coordinator.run(apply=True)["pull_requests"][0]
+    second = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    review = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "review"
+    )
+    assert review["status"] == "sent"
+    assert review["anchor_comment_id"] > 0
+    assert first["review_valid"] is False
+    assert second["review_valid"] is False
+    assert StateStore(path).action(source_fix["key"])["handoff_state"] == "waiting_review"
+
+    api.complete_review_task(
+        review["task_id"], review, source_action=StateStore(path).action(source_fix["key"]),
+    )
+
+    second = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+    third = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    assert StateStore(path).action(source_fix["key"])["handoff_state"] == "done"
+    assert second["review_valid"] is False
+    assert third["review_valid"] is True
+    assert any(
+        review_row.get("body", "").startswith('{"schema":"hermes-independent-agent-review-v1"')
+        for review_row in api.owner_reviews + [api._current_owner_review_record()]
+    )
+
+
+def test_review_report_findings_publish_and_trigger_bounded_followup(tmp_path):
+    api = FakeApi(source_failure=True)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    source_fix = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    coordinator.run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    review = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "review"
+    )
+    api.complete_review_task(
+        review["task_id"],
+        review,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="changes_requested",
+        findings=[{
+            "path": "deploy/cloud_coordinator.py",
+            "comment": "Handle the bounded quoted reply report and publish the owner review.",
+        }],
+        report="One bounded follow-up is required before approval.",
+    )
+
+    summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+    next_summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+    final_summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    actions = StateStore(path).actions().values()
+    follow_up = next(
+        action for action in actions
+        if action.get("kind") == "fix" and action.get("task_id") != source_fix["task_id"]
+    )
+    assert follow_up["status"] == "sent"
+    assert summary["review_valid"] is False
+    assert next_summary["review_valid"] is False
+    assert final_summary["review_valid"] is False
+    assert StateStore(path).action(source_fix["key"])["handoff_state"] == "done"
+    assert api.fix_attempts == 3
 
 
 @pytest.mark.parametrize("path_kind", ["draft_ready", "copilot_pending"])
@@ -4887,7 +5138,7 @@ def test_failed_fresh_repair_collection_never_claims_or_dispatches(tmp_path, fai
             return response
 
         def get_all(self, route, *, collection=None):
-            if self.thread_reads > 1 and (
+            if self.thread_reads and (
                     (failure == "checks-error" and "/check-runs?" in route)
                     or (failure == "workflows-error" and "/actions/runs?" in route)):
                 raise ApiError("fresh checks unavailable", status=503)
@@ -4902,7 +5153,7 @@ def test_failed_fresh_repair_collection_never_claims_or_dispatches(tmp_path, fai
             _managed_cycle(api, path)
     assert api.fix_attempts == 0 and not api.graphql_writes
     state = StateStore(path).snapshot()
-    assert state["enrollments"]["16"]["attempts"] == 0
+    assert state["enrollments"].get("16", {}).get("attempts", 0) == 0
     assert not any(action["kind"] == "fix" for action in state["actions"].values())
 
 

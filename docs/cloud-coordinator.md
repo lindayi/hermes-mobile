@@ -121,11 +121,20 @@ independent-agent formal `COMMENT` review on the exact current head and complete
 review/thread evidence with every thread resolved. Copilot feedback is
 supplemental; missing approval alone never delays task handoff or consumes a fixer
 attempt. Actual unresolved findings and definite rejection still block acceptance.
-The task API currently has no documented authenticated independent-review report
-contract or producer bound to a separate reviewer task/session. After a source
-change, the coordinator retains the completed task lock until an independent
-review appears; it does not manufacture review evidence or blindly dispatch a
-second task. Every configured required check must independently succeed.
+After a source task reaches a verified `ready` receipt without current
+independent evidence, the coordinator posts one owner-authored review anchor
+comment and dispatches one reserved read-only reviewer task on that exact
+head/base. The reviewer replies to the saved anchor with
+`engine-tools-reply_to_comment`; the accepted transport is the observed quoted
+blockquote preamble plus one compact JSON
+`hermes-independent-review-report-v1` object outside the quote. The parent
+binds that report to the saved nonce, distinct reviewer session, repository,
+PR, head/base and source receipt evidence, then publishes the owner COMMENT
+review on the exact head. Positive reports publish `verdict:"pass"`; bounded
+findings publish `verdict:"changes_requested"` and feed one bounded fixer
+follow-up for that exact head. The completed source task lock is retained until
+that verified reviewer lifecycle completes, and every configured required check
+must still independently succeed.
 Sensitive changes additionally need owner authorization bound to that exact SHA
 and the documented targeted independent review; neither approval nor authorization
 carries to a later head.

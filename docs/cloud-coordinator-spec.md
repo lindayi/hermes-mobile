@@ -438,13 +438,29 @@ a handoff is not merge evidence: merge still requires the valid independent-agen
 review, resolved threads, required checks and every other existing guard.
 
 The existing task API exposes task identity, GitHub pull/branch artifacts and
-authenticated session metadata; the existing receipt comment proves task
-completion and result-head handoff only. There is not yet a documented,
-authenticated independent-review report contract bound to a distinct reviewer
-task/session. Until such a producer and report transport are implemented and
-verified, absence of an independent review remains a hard merge blocker. The
-coordinator must not infer a review from task completion, a digest, a Copilot
-review request, or a status, and must not invent a task-result API field.
+authenticated session metadata. After a source task reaches a verified `ready`
+receipt, the coordinator publishes one owner-authored anchor issue comment for
+that exact head and dispatches one distinct read-only reviewer task on the same
+frozen PR head/base. The reviewer must reply to the saved anchor with
+`engine-tools-reply_to_comment`; the observed transport prepends a quoted
+blockquote excerpt of the anchor, a blank separator line, and then one compact
+JSON `hermes-independent-review-report-v1` object outside the quote. The report
+binds the saved nonce, reviewer session, repository, PR, reviewed head/base,
+source start head, source session, source receipt comment, bounded verdict,
+bounded findings, reviewed file hashes, and bounded narrative report. The child
+does not echo its review-task UUID; the parent authenticates the saved task ID
+and session through the task API.
+
+The parser accepts only that bounded quoted-reply envelope. Edited, oversized,
+ambiguous, foreign, stale, wrong-session, wrong-binding, or duplicate reports
+fail closed, and a report inside the quote is never evidence. A verified report
+triggers one owner-published formal COMMENT review on the exact head using the
+existing `hermes-independent-agent-review-v1` body schema, with its
+`evidence_sha256` bound to the canonical compact report JSON. Positive reports
+produce `verdict:"pass"`; bounded findings produce `verdict:"changes_requested"`
+and feed one bounded fixer follow-up for that exact head. The coordinator never
+infers review acceptance from task completion, a digest alone, a Copilot review
+request, or a status, and never invents a task-result API field.
 
 The validated completion time, session ID and receipt comment ID remain persisted
 with the receipt head/base and dispatch claim for restart. The authentic session
