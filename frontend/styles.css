@@ -134,6 +134,7 @@ select.model-control-button{display:block;appearance:auto;width:auto;min-height:
 .tool-preview,.tool-activity{--tool-success:#287345}
 :root[data-theme=dark] .tool-preview,:root[data-theme=dark] .tool-activity{--tool-success:#8dcca0}
 @media(prefers-color-scheme:dark){:root[data-theme=system] .tool-preview,:root[data-theme=system] .tool-activity{--tool-success:#8dcca0}}
+.clarification-card{margin:12px 0;padding:14px;border:1px solid var(--border);border-radius:12px;background:var(--surface);overflow-wrap:anywhere}.clarification-card h3{margin:0 0 8px;font-size:15px}.clarification-question,.clarification-answer{white-space:pre-wrap;overflow-wrap:anywhere}.clarification-form{display:grid;gap:12px}.clarification-options{display:grid;gap:8px;min-width:0;margin:0;padding:10px;border:1px solid var(--border);border-radius:8px}.clarification-options legend{padding:0 4px;font-weight:600}.clarification-option{display:flex;align-items:center;gap:10px;min-height:44px;overflow-wrap:anywhere}.clarification-option input{flex:none;width:22px;height:22px;accent-color:var(--accent)}.clarification-recommended{margin-left:auto;color:var(--muted);font-size:12px}.clarification-option input[type=text],.clarification-free-text textarea{flex:1;min-width:0;min-height:44px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}.clarification-free-text{display:grid;gap:6px}.clarification-free-text textarea{width:100%;resize:vertical}.clarification-form .primary{min-height:44px;justify-self:start}.clarification-feedback{margin:0;min-height:1.4em;overflow-wrap:anywhere}.clarification-state{overflow-wrap:anywhere}.clarification-state p{white-space:pre-wrap}
 .tool-preview[data-status=success],.tool-activity[data-status=success]>summary{color:var(--tool-success)}
 .tool-preview[data-status=failed],.tool-activity[data-status=failed]>summary{color:var(--danger)}
 .tool-preview[data-status=running],.tool-activity[data-status=running]>summary{color:var(--focus)}
@@ -188,4 +189,3 @@ details[open]>summary .disclosure-icon{transform:rotate(90deg)}
  overscroll-behavior:contain;
 }
 .technical-strip{--disclosure-surface:var(--bg)}
-

@@ -66,6 +66,31 @@ class GatewayClient:
                 or controls.get('live_commentary') is not True):
             raise IntegrationUnavailable('Native durable steering controls are unavailable')
 
+    async def require_clarifications(self):
+        self.require_execution()
+        result = await self.request('GET', '/v1/capabilities')
+        controls = result.get('mobile_run_controls') if isinstance(result, dict) else None
+        if (not isinstance(controls, dict) or type(controls.get('version')) is not int
+                or controls['version'] != 1 or controls.get('clarifications') is not True):
+            raise IntegrationUnavailable('Native clarification controls are unavailable')
+
+    async def answer_clarification(self, run_id, question_id, answer, other):
+        from urllib.parse import quote
+        self.require_execution()
+        try:
+            response = await self.client.post(
+                '/v1/runs/' + quote(run_id, safe='') + '/clarifications/' + quote(question_id, safe=''),
+                json={'answer': answer, 'other': other})
+            reply = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise IntegrationUnavailable('Clarification acknowledgement is unresolved') from exc
+        if (response.status_code != 200 or not isinstance(reply, dict)
+                or reply.get('object') != 'hermes.run.clarification'
+                or reply.get('run_id') != run_id or reply.get('question_id') != question_id
+                or reply.get('status') != 'answered' or reply.get('answer') != answer):
+            raise IntegrationUnavailable('Clarification acknowledgement is unresolved')
+        return reply
+
     async def steer(self, run_id, text, key):
         from urllib.parse import quote
         self.require_execution()

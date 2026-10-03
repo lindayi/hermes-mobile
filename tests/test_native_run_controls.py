@@ -18,6 +18,11 @@ class Base:
         self._stopping_run_ids = set()
     async def _handle_capabilities(self, request):
         return web.json_response({'features': {'runs': True}})
+    def _http_route_table(self):
+        return []
+    async def _handle_get_run(self, request):
+        run_id = request.match_info['run_id']
+        return web.json_response(self._run_statuses.get(run_id, {}))
     def _check_auth(self, request):
         return None
     async def _read_json_body(self, request):
@@ -69,7 +74,8 @@ def test_capabilities_are_explicit_and_base_unchanged():
     async def check():
         a = adapter()
         caps = json.loads((await a._handle_capabilities(None)).text)
-        assert caps['mobile_run_controls'] == {'version': 1, 'steering': True, 'live_commentary': True}
+        assert caps['mobile_run_controls'] == {
+            'version': 1, 'steering': True, 'live_commentary': True, 'clarifications': True}
         assert 'mobile_run_controls' not in json.loads((await Base()._handle_capabilities(None)).text)
     asyncio.run(check())
 
@@ -141,6 +147,115 @@ def attach(a, agent):
     result = a._create_agent(tool_progress_callback=callback, stream_delta_callback=lambda text: None)
     a._active_run_agents['r'] = result
     return result
+
+
+def test_clarification_callback_waits_for_answer_and_returns_tool_result(registry):
+    async def check():
+        a = adapter()
+        agent = SimpleNamespace(steer=lambda text: True, clear_interrupt=lambda: True,
+                                run_conversation=lambda: {})
+        attach(a, agent)
+        assert callable(agent.clarify_callback)
+        result = {}
+        started = threading.Event()
+
+        def tool_call():
+            started.set()
+            answer = agent.clarify_callback(
+                'Which option?', ['Keep current', 'Change it'], multi_select=False)
+            result['value'] = json.dumps({
+                'question': 'Which option?', 'choices_offered': ['Keep current', 'Change it'],
+                'user_response': answer})
+
+        worker = threading.Thread(target=tool_call)
+        worker.start()
+        assert started.wait(1)
+        q = a._run_streams['r']
+        event = await asyncio.wait_for(q.get(), timeout=1)
+        assert event['event'] == 'run.clarification'
+        assert event['status'] == 'pending'
+        assert event['question'] == 'Which option?'
+        assert event['choices'] == ['Keep current', 'Change it']
+        assert not result
+        response = await a._handle_clarification_answer(SimpleNamespace(
+            match_info={'run_id': 'r', 'question_id': event['question_id']},
+            body={'answer': 'Change it', 'other': False}))
+        assert json.loads(response.text)['status'] == 'answered'
+        await asyncio.to_thread(worker.join, 1)
+        assert not worker.is_alive()
+        assert json.loads(result['value'])['user_response'] == 'Change it'
+        assert a._run_statuses['r']['status'] == 'running'
+        duplicate = await a._handle_clarification_answer(SimpleNamespace(
+            match_info={'run_id': 'r', 'question_id': event['question_id']},
+            body={'answer': 'Change it', 'other': False}))
+        assert duplicate.status == 200
+        assert json.loads(duplicate.text)['answer'] == 'Change it'
+        conflict = await a._handle_clarification_answer(SimpleNamespace(
+            match_info={'run_id': 'r', 'question_id': event['question_id']},
+            body={'answer': 'Keep current', 'other': False}))
+        assert conflict.status == 409
+        assert len(a._run_streams) == 1
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize(('ending', 'expected'), [('timeout', 'expired'), ('stop', 'cancelled')])
+def test_clarification_timeout_and_stop_release_waiter_truthfully(registry, ending, expected):
+    async def check():
+        a = adapter()
+        agent = SimpleNamespace(steer=lambda text: True, clear_interrupt=lambda: True,
+                                run_conversation=lambda: {}, clarify_timeout=0.02)
+        attach(a, agent)
+        failure = []
+
+        def ask():
+            try:
+                agent.clarify_callback('Question?', ['A', 'B'])
+            except RuntimeError as exc:
+                failure.append(str(exc))
+
+        worker = threading.Thread(target=ask)
+        worker.start()
+        event = await asyncio.wait_for(a._run_streams['r'].get(), timeout=1)
+        if ending == 'stop':
+            a._set_run_status('r', 'stopping')
+        await asyncio.to_thread(worker.join, 1)
+        assert not worker.is_alive()
+        item = a._controls['r']['clarifications'][event['question_id']]
+        assert item['status'] == expected
+        assert failure == [f'Clarification {expected}.']
+        assert a._run_statuses['r']['status'] == ('running' if ending == 'timeout' else 'stopping')
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize(('choices', 'multi_select', 'answer', 'other'), [
+    (['A', 'B'], True, ['A', 'B'], False),
+    (['A', 'B'], True, ['A', 'typed answer'], True),
+    (None, False, 'typed answer', False),
+])
+def test_clarification_answer_validates_single_multi_other_and_open_ended(
+        registry, choices, multi_select, answer, other):
+    async def check():
+        a = adapter()
+        agent = SimpleNamespace(steer=lambda text: True, clear_interrupt=lambda: True,
+                                run_conversation=lambda: {})
+        attach(a, agent)
+        result = {}
+
+        def ask():
+            result['answer'] = agent.clarify_callback(
+                'Choose or write an answer', choices, multi_select=multi_select)
+
+        worker = threading.Thread(target=ask)
+        worker.start()
+        request = await asyncio.wait_for(a._run_streams['r'].get(), timeout=1)
+        body = {'answer': answer, 'other': other}
+        response = await a._handle_clarification_answer(SimpleNamespace(
+            match_info={'run_id': 'r', 'question_id': request['question_id']}, body=body))
+        assert response.status == 200
+        await asyncio.to_thread(worker.join, 1)
+        assert not worker.is_alive()
+        assert result['answer'] == answer
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize('ending', ['completed', 'failed', 'cancelled', 'exception'])

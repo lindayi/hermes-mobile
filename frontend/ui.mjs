@@ -556,11 +556,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const rowRevision=requestVersion;
       const rowCurrent=()=>current() && rowRevision===requestVersion && control.isConnected;
       const control = button('',()=>{if(current() && control.isConnected)void action(null,()=>openSession(session));},'session-row',{'aria-label':session.title || 'Untitled conversation'});
-      const statuses={queued:['◷','Queued'],running:['◔','Running'],waiting_for_approval:['!','Waiting for approval'],stopping:['■','Stopping'],failed:['×','Last run failed'],unknown:['?','Status unavailable'],idle:['−','Idle'],completed:['−','Idle'],cancelled:['■','Stopped']};
+      const statuses={queued:['◷','Queued'],running:['◔','Running'],waiting_for_approval:['!','Waiting for approval'],waiting_for_clarification:['?','Waiting for an answer'],stopping:['■','Stopping'],failed:['×','Last run failed'],unknown:['?','Status unavailable'],idle:['−','Idle'],completed:['−','Idle'],cancelled:['■','Stopped']};
       const status=Object.hasOwn(statuses,session.run_status)?session.run_status:'unknown';
       control.append(h('span',{class:'session-info'},h('strong',{},session.title || 'Untitled conversation'),h('span',{class:'session-meta'},h('span',{class:'source'},session.source || 'unknown'),date(session.updated_at))),h('span',{class:'session-run-status','data-state':status,role:'img','aria-label':statuses[status][1],title:statuses[status][1]},['running','queued'].includes(status)?statusSymbol(status):statuses[status][0]));
       if(result.deletion_available!==true)return control;
-      const runBusy=['queued','running','waiting_for_approval','stopping'].includes(status) || status==='unknown' && Boolean(session.run?.id);
+      const runBusy=['queued','running','waiting_for_approval','waiting_for_clarification','stopping'].includes(status) || status==='unknown' && Boolean(session.run?.id);
       const deletionBusy=deletions.has(deletionKey(state.user?.id,session.id)) || runBusy;
       const remove=button('Delete',e=>{const target=e.currentTarget;void action(target,()=>deleteSession(session,version,rowCurrent)).finally(()=>{if(version===routeVersion && target.isConnected && doc.activeElement===doc.body)target.focus();});},'session-delete',{'aria-label':`Delete conversation: ${session.title || 'Untitled conversation'}`,'data-delete-id':session.id,title:deletionBusy?'Finish or resolve this run or deletion before deleting':'Delete conversation',disabled:deletionBusy,hidden:true});
       remove.dataset.runBusy=String(runBusy);remove.dataset.locked=String(deletionBusy);
@@ -665,7 +665,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const owner=state.user?.id;
     let disposed=false,revision=0,offline=win.navigator.onLine===false,transport='connecting',activity='idle',timer=null,controller=null,deadline=null,refreshBackground=null;
     let titleRevision=0,renaming=false,queuedProbe=null;
-    const labels={connecting:'Connecting…',idle:'Connected · Idle',sending:'Sending',submitted:'Queued',queued:'Queued',running:'Running',waiting_for_approval:'Waiting for approval',stopping:'Stopping',stopped:'Stopped',cancelled:'Stopped',failed:'Failed',unknown:'Outcome unknown',reconnecting:'Reconnecting',disconnected:'Disconnected'};
+    const labels={connecting:'Connecting…',idle:'Connected · Idle',sending:'Sending',submitted:'Queued',queued:'Queued',running:'Running',waiting_for_approval:'Waiting for approval',waiting_for_clarification:'Waiting for an answer',stopping:'Stopping',stopped:'Stopped',cancelled:'Stopped',failed:'Failed',unknown:'Outcome unknown',reconnecting:'Reconnecting',disconnected:'Disconnected'};
     const active=()=>!disposed && version===routeVersion && owner===state.user?.id;
     const render=()=>{if(!active())return;const value=offline?'disconnected':transport==='connected'?activity:transport;const label=labels[value] || 'Recovering';if(node.dataset.state!==value){node.dataset.state=value;node.textContent=label;}};
     const schedule=()=>{if(active() && timer===null && !doc.hidden)timer=win.setTimeout(()=>{timer=null;void probe();},30000);};
@@ -974,7 +974,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const send = button(icon('send'),activate,'send',{'aria-label':'Send message',title:'Send message'});
     const composerAction={activity(heading,place){stopHeading=heading;placeGuidance=place;},receive(attempt,previouslyAccepted=false){if(version!==routeVersion || state.user?.id!==steeringOwner || attempt.run_id && attempt.run_id!==steeringRun || attempt.session_id && attempt.session_id!==session.id || attempt.user_id && attempt.user_id!==steeringOwner || !attempt.idempotency_key || !attempt.input)return;displayAttempt(reconcileSteering(attempt),previouslyAccepted,true);renderSteerRetries();},attach(run){currentSteer=null;steeringOutcomes.clear();steerRetries.replaceChildren();steeringRun=run.id;steeringEnabled=false;steeringBusy=false;clearedSteer=null;steerStatus.hidden=true;void refreshSteering();},refresh:refreshSteering,set(status,stop){
       steeringStatus=status;steeringStop=stop;renderSteerRetries();
-      const active=['queued','submitted','running','waiting_for_approval','stopping'].includes(status);
+      const active=['queued','submitted','running','waiting_for_approval','waiting_for_clarification','stopping'].includes(status);
       const idle=['idle','completed','done','failed','cancelled','stopped'].includes(status);
       const supported=steeringEnabled && (active || status==='unknown');
       if(active)stopHeading?.append(separateStop);else separateStop.remove();
@@ -1254,7 +1254,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const pendingTools=[];
     let currentStatus=run.status || 'submitted',stopPending=false;
     const stop=async()=>{
-      if(version!==routeVersion || !article.isConnected || stopPending || !['queued','submitted','running','waiting_for_approval'].includes(currentStatus))return;
+      if(version!==routeVersion || !article.isConnected || stopPending || !['queued','submitted','running','waiting_for_approval','waiting_for_clarification'].includes(currentStatus))return;
       stopPending=true;composerAction.set('stopping');
       try{
         const result=await api.request(`/runs/${encodeURIComponent(run.id)}/stop`,{method:'POST',body:{}});
@@ -1267,6 +1267,158 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }
     };
     const article=h('article',{class:'message assistant-message live-message','data-history-run':run.id,'data-history-session':run.session_id},h('div',{class:'message-author'},'Hermes',messageTime(run.created_at,'Started')),h('div',{class:'live-activity-heading'},h('strong',{},'Activity'),status),tools,output);
+    const clarificationOwner=state.user?.id;
+    const clarificationCards=new Map(),clarificationTimes=new Map();
+    let clarificationAvailable=false,clarificationUnavailable=false;
+    const renderClarification=data=>{
+      if(!data || data.run_id!==run.id || data.session_id!==sessionId
+          || typeof data.question_id!=='string' || !/^[a-f0-9]{32}$/.test(data.question_id)
+          || typeof data.question!=='string' || !data.question.trim()
+          || !['pending','sending','answered','cancelled','expired','unknown'].includes(data.status)
+          || !Number.isFinite(data.updated_at))return;
+      const previous=clarificationTimes.get(data.question_id);
+      if(Number.isFinite(previous?.updated_at)
+          && (previous.updated_at>data.updated_at
+              || previous.updated_at===data.updated_at
+                  && ['answered','cancelled','expired','unknown'].includes(previous.status)
+                  && data.status==='pending'))return;
+      const followTail=messages.scrollHeight-messages.scrollTop-messages.clientHeight<100
+        && !win.getSelection()?.toString();
+      clarificationTimes.set(data.question_id,{updated_at:data.updated_at,status:data.status});
+      let card=clarificationCards.get(data.question_id);
+      if(!card){
+        flushPublic();
+        card=h('section',{class:'clarification-card','data-clarification-id':data.question_id,'aria-labelledby':`clarification-title-${data.question_id}`});
+        clarificationCards.set(data.question_id,card);output.before(card);
+      }
+      const heading=h('h3',{id:`clarification-title-${data.question_id}`},'Question');
+      const question=h('p',{class:'clarification-question'},data.question);
+      let body;
+      if(data.status==='pending' && clarificationAvailable){
+        const form=h('form',{class:'clarification-form',onsubmit:event=>{event.preventDefault();void sendClarification(data,form,submit,feedback);}});
+        const inputs=[];
+        let otherInput=null,otherText=null,freeText=null;
+        if(Array.isArray(data.choices) && data.choices.length){
+          const fieldset=h('fieldset',{class:'clarification-options'});
+          fieldset.append(h('legend',{},data.multi_select?'Select one or more answers':'Choose an answer'));
+          for(const [index,choice] of data.choices.entries()){
+            if(typeof choice!=='string' || !choice.trim() || choice.length>512)continue;
+            const input=h('input',{type:data.multi_select?'checkbox':'radio',
+              name:`clarification-${data.question_id}`,value:choice});
+            inputs.push(input);
+            fieldset.append(h('label',{class:'clarification-option'},input,
+              h('span',{},choice),index===0?h('span',{class:'clarification-recommended'},'Recommended'):null));
+          }
+          const otherType=data.multi_select?'checkbox':'radio';
+          otherInput=h('input',{type:otherType,name:`clarification-${data.question_id}`,
+            value:'__other__'});
+          if(!data.multi_select)inputs.push(otherInput);
+          otherText=h('input',{type:'text',maxlength:32768,autocomplete:'off',
+            'aria-label':'Other answer',placeholder:'Write another answer'});
+          otherText.addEventListener('focus',()=>{otherInput.checked=true;});
+          inputs.push(...(data.multi_select?[otherInput]:[]));
+          fieldset.append(h('label',{class:'clarification-option'},otherInput,
+            h('span',{},'Other'),otherText));
+          form.append(fieldset);
+        }else{
+          freeText=h('textarea',{rows:2,maxlength:32768,
+            'aria-label':'Your answer',placeholder:'Write your answer'});
+          form.append(h('label',{class:'clarification-free-text'},h('span',{},'Your answer'),freeText));
+        }
+        const feedback=h('p',{class:'clarification-feedback',role:'status','aria-live':'polite'});
+        const submit=button('Submit answer',null,'primary',{type:'submit'});
+        form.append(submit,feedback);
+        body=form;
+        const sendClarification=async(item,currentForm,control,statusNode)=>{
+          const selected=[...currentForm.querySelectorAll('input[type=radio]:checked,input[type=checkbox]:checked')];
+          let answer,other=false;
+          if(freeText)answer=freeText.value.trim();
+          else if(data.multi_select){
+            const choices=selected.filter(input=>input.value!=='__other__').map(input=>input.value);
+            if(otherInput.checked){const value=otherText.value.trim();if(value)choices.push(value);other=true;}
+            answer=choices;
+          }else{
+            const choice=selected[0];
+            if(choice?.value==='__other__'){answer=otherText.value.trim();other=true;}
+            else answer=choice?.value;
+          }
+          if((typeof answer==='string' && !answer) || (Array.isArray(answer) && !answer.length)
+              || answer===undefined || (typeof answer==='string' && answer.length>32768)
+              || (Array.isArray(answer) && (answer.length>5 || answer.some(value=>value.length>32768)))){
+            statusNode.textContent='Choose or enter an answer before submitting.';
+            return;
+          }
+          if(other && !otherText.value.trim()){
+            statusNode.textContent='Enter your other answer before submitting.';
+            otherText.focus();return;
+          }
+          control.disabled=true;statusNode.textContent='Submitting answer…';
+          const pending={...item,status:'sending',answer,other,updated_at:item.updated_at+0.001};
+          renderClarification(pending);
+          try{
+            const result=await api.request(`/runs/${encodeURIComponent(run.id)}/clarifications/${encodeURIComponent(item.question_id)}/answer`,
+              {method:'POST',body:{answer,other}});
+            if(version!==routeVersion || state.user?.id!==clarificationOwner)return;
+            if(result?.question_id!==item.question_id || result?.run_id!==run.id
+                || !['answered','unknown'].includes(result.status))throw new Error('Clarification acknowledgement was invalid.');
+            if(result.status==='answered'){
+              renderClarification({...item,status:'answered',answer,other,updated_at:item.updated_at+0.001});
+              apply({status:'running'});connection?.run('running');
+            }else renderClarification({...item,status:'unknown',answer,other,updated_at:item.updated_at+0.001});
+          }catch(error){
+            if(version!==routeVersion || state.user?.id!==clarificationOwner)return;
+            if(error.status===401)expiredSession();
+            renderClarification({...item,status:error.status===409?'unknown':'sending',answer,other,updated_at:item.updated_at+0.001});
+            const latest=clarificationCards.get(item.question_id);
+            latest?.querySelector('.clarification-feedback')?.replaceChildren(
+              doc.createTextNode(error.status===409?'Answer status changed. Reopen the session to check it; do not submit again.':'Answer status is unresolved. Reopen the session to check it; it will not be sent again automatically.'));
+          }
+        };
+      }else{
+        const labels={sending:'Submitting answer…',answered:'Answered',cancelled:'Cancelled',expired:'Expired',unknown:'Answer status unknown'};
+        body=h('div',{class:'clarification-state',role:'status','aria-live':'polite'},
+          h('strong',{},labels[data.status] || 'Clarification unavailable'));
+        if(data.status==='answered' && (typeof data.answer==='string' || Array.isArray(data.answer)))
+          body.append(h('p',{class:'clarification-answer'},'Answer: ',
+            Array.isArray(data.answer)?data.answer.join(', '):data.answer));
+        if(['sending','unknown'].includes(data.status)
+            && (typeof data.answer==='string' || Array.isArray(data.answer)))
+          body.append(h('p',{class:'clarification-answer'},'Attempted answer: ',
+            Array.isArray(data.answer)?data.answer.join(', '):data.answer));
+        if(data.status==='sending')body.append(h('p',{},'Checking the answer acknowledgement. Do not submit again.'));
+        if(data.status==='unknown')body.append(h('p',{},'The answer cannot be confirmed. Reopen the session to check; it will not be resent automatically.'));
+        if(data.status==='expired')body.append(h('p',{},'The question expired before an answer was accepted.'));
+        if(data.status==='cancelled')body.append(h('p',{},'The question was cancelled with the run.'));
+        if(data.status==='pending' && clarificationUnavailable)
+          body.append(h('p',{},'Clarification controls are unavailable. No answer was sent.'));
+      }
+      card.replaceChildren(heading,question,body);
+      if(followTail)messages.scrollTop=messages.scrollHeight;
+    };
+    const reconcileClarifications=async()=>{
+      try{
+        const result=await api.request(`/runs/${encodeURIComponent(run.id)}/clarifications`);
+        if(version!==routeVersion || state.user?.id!==clarificationOwner || !Array.isArray(result?.items))return;
+        clarificationAvailable=result.available===true;
+        clarificationUnavailable=!clarificationAvailable;
+        for(const item of result.items)renderClarification(item);
+        if(!clarificationAvailable && currentStatus==='waiting_for_clarification'){
+          const notice=h('section',{class:'clarification-card clarification-unavailable',role:'status'},
+            h('strong',{},'Clarification unavailable'),
+            h('p',{},'This native runtime cannot confirm or answer the pending question. No answer was sent.'));
+          article.append(notice);
+        }
+      }catch(error){
+        if(version!==routeVersion || state.user?.id!==clarificationOwner)return;
+        clarificationUnavailable=true;
+        if(error.status===401)expiredSession();
+        if(currentStatus==='waiting_for_clarification'){
+          article.append(h('section',{class:'clarification-card clarification-unavailable',role:'status'},
+            h('strong',{},'Clarification status unavailable'),
+            h('p',{},'The pending question could not be verified. Reopen this session to check; no answer was sent.')));
+        }
+      }
+    };
     article.backgroundPlaced=()=>{tools=[...article.children].filter(node=>node.matches('.tool-activity')).at(-1) || tools;splitTools=output.previousElementSibling!==tools;};
     article.prepareBackground=(time,fresh)=>{
       const crossing=Number.isFinite(time) && deltaChunks.some(chunk=>Number.isFinite(chunk.observed_at) && chunk.observed_at<=time) && deltaChunks.some(chunk=>Number.isFinite(chunk.observed_at) && chunk.observed_at>time);
@@ -1320,6 +1472,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       else if(event.name==='commentary')renderCommentary(data);
       else if(event.name==='delta')renderDelta(data);
       else if(event.name==='steering')composerAction.receive?.(event.data,true);
+      else if(event.name==='clarification')renderClarification({...event.data,observed_at:event.observed_at});
     }
     seeding=false;
     if(seeded)for(const card of article.querySelectorAll('.tool-activity'))refreshToolActivity(card);
@@ -1364,6 +1517,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(atBottom)messages.scrollTop=messages.scrollHeight;
     };
     apply(run);
+    void reconcileClarifications();
     if(wasAtBottom && version===routeVersion && messages.isConnected && !win.getSelection()?.toString())messages.scrollTop=messages.scrollHeight;
     initialRestore.finish?.();
     if(finalStates.has(run.status))return;
@@ -1435,6 +1589,16 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     on('delta',renderDelta);
     on('tool',renderTool);
     on('approval',data=>{if(!approvalState?.event(data,run.id))return;apply({status:'waiting_for_approval'});connection?.run('waiting_for_approval');status.textContent='Waiting for approval';if(data.id || data.request_id)void approvalState.reconcile();});
+    on('clarification',data=>{
+      renderClarification(data);
+      if(data.status==='pending'){
+        apply({status:'waiting_for_clarification'});
+        connection?.run('waiting_for_clarification');
+      }else if(data.status==='answered'){
+        apply({status:'running'});
+        connection?.run('running');
+      }
+    });
     on('done',data=>apply({...data,status:data.status || 'completed'}));
     on('error',data=>{apply({...data,status:'failed'});inform(data.message || data.error || 'The run failed.',true);});
     events.onerror=()=>{if(events===stream){
@@ -1584,6 +1748,26 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         return h('details',{class:'delegation-result'},h('summary',{},disclosure(),toolPreview({...message,name:'Subagent result'}),messageTime(message.timestamp)),renderMarkdown(doc,message.content));
       }
       return toolActivity([message]);
+    }
+    if(message.role==='assistant' && message.kind==='clarification'){
+      const labels={pending:'Pending',sending:'Submitting answer',answered:'Answered',
+        cancelled:'Cancelled',expired:'Expired',unknown:'Answer status unknown'};
+      const card=h('section',{class:'clarification-card clarification-history'},
+        h('h3',{},'Question'),h('p',{class:'clarification-question'},message.content),
+        h('p',{class:'clarification-state'},labels[message.clarification_status] || 'Clarification'),
+        message.clarification_status==='answered' && (typeof message.clarification_answer==='string'
+          || Array.isArray(message.clarification_answer))
+          ? h('p',{class:'clarification-answer'},'Answer: ',
+              Array.isArray(message.clarification_answer)
+                ? message.clarification_answer.join(', '):message.clarification_answer)
+          : null);
+      if(['sending','unknown'].includes(message.clarification_status)
+          && (typeof message.clarification_answer==='string' || Array.isArray(message.clarification_answer)))
+        card.append(h('p',{class:'clarification-answer'},'Attempted answer: ',
+          Array.isArray(message.clarification_answer)
+            ? message.clarification_answer.join(', '):message.clarification_answer));
+      card.append(messageTime(message.timestamp));
+      return card;
     }
     const text=typeof message.content==='string' ? message.content : message.content == null ? '' : JSON.stringify(message.content);
     const tools=(message.tool_calls || []).map(tool=>({...tool,name:tool.function?.name || tool.name}));

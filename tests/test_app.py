@@ -13,12 +13,20 @@ def test_app_requires_auth_and_reads_native_sessions_without_mutations(tmp_path)
     with TestClient(create_app(settings),base_url=ORIGIN) as client:
         client.headers['Origin']=ORIGIN
         assert client.get(BASE+'/sessions').status_code==401
+        assert client.get(BASE+'/runs/missing/clarifications').status_code==401
+        assert client.post(BASE+'/runs/missing/clarifications/'+('a'*32)+'/answer',
+                           json={'answer':'A','other':False}).status_code==401
         enroll(client)
         response=client.get(BASE+'/sessions')
         assert response.status_code==200, response.text
         assert response.json()['total']==2
         assert client.get(BASE+'/sessions/wa-1/messages').json()['items'][0]['content']=='Retained answer'
         assert client.get(BASE+'/sessions/not-found/messages').status_code==404
+        answer_path=BASE+'/runs/missing/clarifications/'+('a'*32)+'/answer'
+        client.headers.pop('X-CSRF-Token')
+        assert client.post(answer_path,json={'answer':'A','other':False}).status_code==403
+        client.headers['X-CSRF-Token']=client.get(BASE+'/auth/me').json()['csrf_token']
+        assert client.post(answer_path,json={'answer':'A','other':False}).status_code==404
         assert client.post(BASE+'/runs',json={'session_id':'wa-1','input':'hello','idempotency_key':'key'}).status_code==503
         assert client.get(BASE+'/sessions').headers['cache-control']=='no-store'
 

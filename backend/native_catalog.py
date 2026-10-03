@@ -242,6 +242,14 @@ def _journal_turn(run, events):
                               idempotency_key=data['idempotency_key'], steer_id=data.get('steer_id'),
                               steering_status=data['status'], turn_boundary=False))
             continue
+        if event['name'] == 'clarification':
+            flush_text()
+            data = event['data']
+            items.append(dict(common, id=prefix + 'clarification:' + data['question_id'],
+                              role='assistant', kind='clarification', content=data['question'],
+                              clarification_status=data['status'], clarification_answer=data.get('answer'),
+                              timestamp=event.get('observed_at') or data.get('created_at')))
+            continue
         if event['name'] != 'tool':
             continue
         data = event['data']

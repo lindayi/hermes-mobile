@@ -31,6 +31,9 @@ class Orchestrator:
         self.run_timeout = max(0.001, min(float(run_timeout), 3600))
         from .steering import SteeringJournal
         self.steering = SteeringJournal(journal)
+        from .clarifications import ClarificationJournal
+        self.clarifications = ClarificationJournal(journal)
+        self.clarifications.recover()
         with closing(journal.connect()) as c, c:
             c.execute('''CREATE TABLE IF NOT EXISTS orchestration_approvals(
                 id TEXT PRIMARY KEY, run_id TEXT NOT NULL, request_id TEXT NOT NULL,
@@ -125,6 +128,52 @@ class Orchestrator:
             raise KeyError(rid)
         return run
 
+    async def clarifications_for_run(self, user, rid):
+        run = self.get(user, rid)
+        if user.get('role') != 'owner' or user.get('profile') != 'default':
+            raise KeyError(rid)
+        result = await self.clarifications.rehydrate(user, rid, self.gateway, run)
+        native_status = result.get('native_status')
+        if native_status == 'waiting_for_clarification':
+            pending = any(item['status'] == 'pending' for item in result['items'])
+            if pending:
+                self.journal.set_active_status(
+                    user['id'], rid, 'waiting_for_clarification', upstream_id=run['upstream_id'])
+        elif native_status == 'running' and run['status'] == 'waiting_for_clarification':
+            self.journal.set_active_status(user['id'], rid, 'running', upstream_id=run['upstream_id'])
+        return {'available': result['available'], 'items': result['items']}
+
+    async def answer_clarification(self, user, rid, question_id, body):
+        run = self.get(user, rid)
+        if user.get('role') != 'owner' or user.get('profile') != 'default':
+            raise KeyError(rid)
+        records = self.clarifications.list(user, rid)
+        record = next((item for item in records if item['question_id'] == question_id), None)
+        if record is None:
+            raise KeyError(question_id)
+        if not self.clarifications.validate_answer(record, body):
+            raise ValueError('Invalid clarification answer')
+        if run['status'] != 'waiting_for_clarification' or not run['upstream_id']:
+            raise RunConflict('Clarification is stale')
+        if not hasattr(self.gateway, 'require_clarifications'):
+            raise IntegrationUnavailable('Native clarification controls are unavailable')
+        await self.gateway.require_clarifications()
+        claimed, fresh = self.clarifications.claim(user, run, question_id, body)
+        if not fresh:
+            return claimed
+        try:
+            async with asyncio.timeout(30):
+                await self.gateway.answer_clarification(
+                    run['upstream_id'], question_id, body['answer'], body['other'])
+        except (Exception, asyncio.CancelledError) as exc:
+            result = self.clarifications.finish(user, rid, question_id, 'unknown')
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return result
+        result = self.clarifications.finish(user, rid, question_id, 'answered')
+        self.journal.set_active_status(user['id'], rid, 'running', upstream_id=run['upstream_id'])
+        return result
+
     async def refresh(self, user, rid):
         self.get(user, rid)  # Authorize before consulting shared observation state.
         lock = self._observation_locks.get(rid)
@@ -151,7 +200,8 @@ class Orchestrator:
                 with closing(self.journal.connect()) as c:
                     rows = c.execute("""SELECT id,user_id,profile FROM runs WHERE profile=?
                         AND upstream_id IS NOT NULL AND status IN
-                        ('queued','running','stopping','waiting_for_approval','unknown') LIMIT 1000""",
+                        ('queued','running','stopping','waiting_for_approval',
+                         'waiting_for_clarification','unknown') LIMIT 1000""",
                         (self.profile,)).fetchall()
                 for row in rows:
                     # Live streams own their observer; disconnected ones poll themselves.
@@ -335,12 +385,22 @@ class Orchestrator:
                     self.journal.event(user['id'], run['id'], 'commentary' if commentary else 'delta', {'text': text})
             elif event['event'] == 'run.steer_receipts':
                 self.steering.observe(user, self.get(user, run['id']), event)
+            elif event['event'] == 'run.clarification':
+                result = self.clarifications.event(user, self.get(user, run['id']), event)
+                if result and result['status'] == 'pending':
+                    self.journal.set_active_status(
+                        user['id'], run['id'], 'waiting_for_clarification',
+                        upstream_id=run['upstream_id'])
+                elif result and result['status'] in ('answered', 'expired'):
+                    self.journal.set_active_status(
+                        user['id'], run['id'], 'running', upstream_id=run['upstream_id'])
             elif event['event'] in ('run.completed', 'run.failed', 'run.cancelled'):
                 current = self.get(user, run['id'])
                 self.gateway.require_execution()
                 if not self._can_observe(user) or not self._matches(current, event):
                     raise IntegrationUnavailable('Unbound native terminal event')
                 self.steering.observe(user, current, event)
+                self.clarifications.observe(user, current, event)
                 self.journal.finish(user['id'], run['id'], event['event'].split('.')[1], output=event.get('output'),
                                     expected={k: current[k] for k in ('profile', 'upstream_id')})
                 return
@@ -380,6 +440,7 @@ class Orchestrator:
                     raise IntegrationUnavailable('Mismatched native run snapshot')
                 if isinstance(result, dict) and result.get('run_id') == run['upstream_id']:
                     self.steering.observe(user, run, result)
+                    self.clarifications.observe(user, run, result)
                 if result.get('run_id') == run['upstream_id'] and result.get('status') in ('completed', 'failed', 'cancelled'):
                     self.journal.finish(user['id'], rid, result['status'], output=result.get('output'),
                                         expected={k: run[k] for k in ('profile', 'upstream_id')})
@@ -433,9 +494,32 @@ class Orchestrator:
                         if action['request_id'] not in known:
                             self._missing_approval(user, run, action['request_id'])
                     return
+                if result.get('status') == 'waiting_for_clarification':
+                    pending = result.get('clarifications')
+                    if (not isinstance(pending, list) or not pending or len(pending) > 256
+                            or any(self.clarifications._normalize(item, run['upstream_id']) is None
+                                   for item in pending)):
+                        raise IntegrationUnavailable('Pending clarification identity is unavailable')
+                    self.clarifications.observe(user, run, result)
+                    saved_pending = [item for item in self.clarifications.list(user, rid)
+                                     if item['status'] == 'pending']
+                    if not saved_pending:
+                        raise IntegrationUnavailable('Pending clarification identity is unavailable')
+                    self.journal.set_active_status(
+                        user['id'], rid, 'waiting_for_clarification', upstream_id=run['upstream_id'])
+                    return
                 if result.get('status') == 'running':
                     if 'pending_approvals' in result and result['pending_approvals'] != []:
                         raise IntegrationUnavailable('Contradictory native approval snapshot')
+                    clarification_clear = (
+                        isinstance(result.get('clarifications'), list)
+                        and len(result['clarifications']) <= 256
+                        and all(self.clarifications._normalize(item, run['upstream_id']) is not None
+                                and item.get('status') != 'pending'
+                                for item in result['clarifications']))
+                    if (run['status'] == 'waiting_for_clarification'
+                            and not clarification_clear):
+                        raise IntegrationUnavailable('Native clarification outcome is unavailable')
                     with closing(self.journal.connect()) as c, c:
                         c.execute('BEGIN IMMEDIATE')
                         current = self.journal._require_run(c, user['id'], rid)
@@ -445,12 +529,14 @@ class Orchestrator:
                             c.execute("UPDATE orchestration_approvals SET status='resolved_external' WHERE run_id=? AND status IN ('pending','details_unavailable')", (rid,))
                         c.execute("""UPDATE runs SET status='running',error=NULL,updated_at=?
                             WHERE id=? AND user_id=? AND profile=? AND upstream_id=?
-                            AND (status IN ('running','unknown') OR (status='waiting_for_approval' AND ?))
+                            AND (status IN ('running','unknown')
+                                 OR (status='waiting_for_approval' AND ?)
+                                 OR (status='waiting_for_clarification' AND ?))
                             AND NOT EXISTS(SELECT 1 FROM orchestration_approvals WHERE run_id=?
                              AND status IN ('pending','sending','unknown','details_unavailable'))
                             AND NOT EXISTS(SELECT 1 FROM run_stop_intents WHERE run_id=?)""",
                             (time.time(), rid, user['id'], self.profile, run['upstream_id'],
-                             result.get('pending_approvals') == [], rid, rid))
+                             result.get('pending_approvals') == [], clarification_clear, rid, rid))
                     return
             except Exception:
                 pass
