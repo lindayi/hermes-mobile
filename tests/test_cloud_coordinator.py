@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -1201,6 +1202,7 @@ class FakeApi:
         self.review_sha = None
         self.status_id = 1
         self.status_created_at = "2026-10-01T12:01:00Z"
+        self.status_log = {}
         self.workflow_runs = workflow_runs
         self.pull_state = pull_state
         self.merged = merged
@@ -1238,6 +1240,14 @@ class FakeApi:
         self.owner_review_digest = hashlib.sha256(
             self.owner_review_body.encode("utf-8"),
         ).hexdigest()
+        blob_sha = "e" * 40 if sensitive else "d" * 40
+        blob_bytes = b"backend auth bytes" if sensitive else b"cloud coordinator bytes"
+        self.pull_files = [{
+            "filename": "backend/auth.py" if sensitive else "deploy/cloud_coordinator.py",
+            "status": "modified",
+            "sha": blob_sha,
+        }]
+        self.blob_contents = {blob_sha: blob_bytes}
         self.owner_reviews = []
         self.graphql_writes = []
         self.next_issue_comment_id = 1000
@@ -1324,6 +1334,15 @@ class FakeApi:
             return {"required_conversation_resolution": {
                 "enabled": self.conversation_resolution,
             }}
+        if route.startswith("repos/lindayi/hermes-mobile/git/blobs/"):
+            sha = route.rsplit("/", 1)[-1]
+            data = self.blob_contents[sha]
+            return {
+                "sha": sha,
+                "encoding": "base64",
+                "size": len(data),
+                "content": base64.b64encode(data).decode("ascii"),
+            }
         if route == "repos/lindayi/hermes-mobile/pulls/16":
             self.pull_reads += 1
             if self.race and self.pull_reads >= 3:
@@ -1374,9 +1393,7 @@ class FakeApi:
                           if comment.get("updated_at", "") >= since]
             return values
         if route.endswith("/pulls/16/files?per_page=100"):
-            if self.sensitive:
-                return [{"filename": "backend/auth.py"}]
-            return [{"filename": "frontend/styles.css"}]
+            return list(self.pull_files)
         if route.endswith("/pulls/16/reviews?per_page=100"):
             reviews = [{
                 "id": 63001, "state": self.review_state,
@@ -1402,14 +1419,18 @@ class FakeApi:
                     ("agent-review", None), ("issue-link", 15368),
                 )
             ]
-        if route.endswith("/commits/" + self.head_sha + "/statuses?per_page=100"):
-            if not self.review_status_present:
-                return []
-            return [{
-                "id": self.status_id,
-                "context": "cloud-review", "state": self.status_state,
-                "creator": {"id": self.status_author_id}, "created_at": self.status_created_at,
-            }]
+        if "/statuses?per_page=100" in route:
+            sha = route.split("/commits/", 1)[1].split("/", 1)[0]
+            values = list(self.status_log.get(sha, []))
+            if (sha == self.head_sha and self.review_status_present
+                    and not any(item.get("context") == "cloud-review" for item in values)):
+                values.append({
+                    "id": self.status_id,
+                    "context": "cloud-review", "state": self.status_state,
+                    "creator": {"id": self.status_author_id},
+                    "created_at": self.status_created_at,
+                })
+            return values
         if "/actions/runs?" in route:
             self.workflow_reads += 1
             self.workflow_routes.append(route)
@@ -1525,7 +1546,7 @@ class FakeApi:
             self.tasks[task_id] = task
             return task
         response = {"id": len(self.writes), "context": body.get("context")}
-        if body.get("context") == "cloud-review":
+        if body.get("context") in {"cloud-review", "agent-review"}:
             response.update(state=body["state"], creator={"id": OWNER})
         if route.endswith("/comments"):
             comment = {
@@ -1538,7 +1559,28 @@ class FakeApi:
             self.next_issue_comment_id += 1
             self.comments.append(comment)
             response.update(comment)
+        elif "/statuses/" in route:
+            sha = route.rsplit("/", 1)[-1]
+            self.status_log.setdefault(sha, []).append({
+                "id": response["id"],
+                "context": body["context"],
+                "state": body["state"],
+                "creator": {"id": OWNER},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
         return response
+
+    def review_file_digests(self):
+        digests = {}
+        for item in self.pull_files:
+            filename = item["filename"]
+            if item.get("status") == "removed":
+                digests[filename] = None
+            else:
+                digests[filename] = hashlib.sha256(
+                    self.blob_contents[item["sha"]],
+                ).hexdigest()
+        return digests
 
     def complete_task(self, task_id, action, *, result="ready", head_sha=None,
                       base_sha=BASE):
@@ -1625,7 +1667,7 @@ class FakeApi:
             "verdict": verdict,
             "summary": "Independent review completed.",
             "findings": findings or [],
-            "files": files or {"deploy/cloud_coordinator.py": "a" * 64},
+            "files": self.review_file_digests() if files is None else files,
             "report": report,
         }
         self.comments.append({
@@ -4150,7 +4192,14 @@ def test_current_independent_review_completes_handoff_without_copilot(tmp_path):
 
 
 def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
-    api = FakeApi(source_failure=True)
+    class ColdStartAgentReviewApi(FakeApi):
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if f"/commits/{self.head_sha}/check-runs?" in route:
+                return [run for run in values if run.get("name") != "agent-review"]
+            return values
+
+    api = ColdStartAgentReviewApi(source_failure=True, review_status_present=False)
     api.owner_reviews = []
     api.owner_review_body = "not a structured independent review"
     path = tmp_path / "state.json"
@@ -4193,9 +4242,52 @@ def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
     assert StateStore(path).action(source_fix["key"])["handoff_state"] == "done"
     assert second["review_valid"] is False
     assert third["review_valid"] is True
+    assert third["required_checks_green"] is True
+    assert any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for status in api.status_log.get(HEAD, [])
+    )
     assert any(
         review_row.get("body", "").startswith('{"schema":"hermes-independent-agent-review-v1"')
         for review_row in api.owner_reviews + [api._current_owner_review_record()]
+    )
+
+
+def test_review_report_rejects_forged_file_sha256_inventory(tmp_path):
+    api = FakeApi(source_failure=True)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    source_fix = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    coordinator.run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    review = next(
+        action for action in store.actions().values() if action["kind"] == "review"
+    )
+    api.complete_review_task(
+        review["task_id"],
+        review,
+        source_action=StateStore(path).action(source_fix["key"]),
+        files={"deploy/cloud_coordinator.py": "f" * 64},
+    )
+
+    summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    assert summary["review_valid"] is False
+    assert StateStore(path).action(source_fix["key"])["handoff_state"] == "waiting_review"
+    assert StateStore(path).action(review["key"])["status"] == "sent"
+    assert not any(
+        status.get("context") == "agent-review"
+        for status in api.status_log.get(HEAD, [])
     )
 
 

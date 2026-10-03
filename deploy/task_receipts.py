@@ -326,7 +326,11 @@ def _valid_review_report(report, *, nonce, session_id, pull_number, head_sha, ba
                 or not _nonblank_string(finding.get("comment"), limit=MAX_REVIEW_REPORT_TEXT)):
             return None
     for path, digest in report["files"].items():
-        if not _bounded_path(path) or not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
+        if (not _bounded_path(path)
+                or digest is not None and (
+                    not isinstance(digest, str)
+                    or SHA256_RE.fullmatch(digest) is None
+                )):
             return None
     if report["verdict"] == "pass" and report["findings"]:
         return None

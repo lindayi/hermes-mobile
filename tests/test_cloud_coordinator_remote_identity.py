@@ -156,6 +156,37 @@ def test_task_handoff_never_requests_or_waits_for_copilot(tmp_path, monkeypatch)
     assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
 
 
+@pytest.mark.parametrize("field,invalid", [
+    ("user", 999999),
+    ("owner", 999999),
+    ("repository", 123),
+])
+def test_review_report_requires_expected_reviewer_session_principal_ids(
+        tmp_path, field, invalid):
+    api = FakeApi(source_failure=True)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(a for a in store.actions().values() if a["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    coordinator.run(apply=True)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+    review = next(a for a in store.actions().values() if a["kind"] == "review")
+    api.complete_review_task(review["task_id"], review, source_action=store.action(fix["key"]))
+    api.tasks[review["task_id"]]["sessions"][0][field]["id"] = invalid
+
+    summary = Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    assert summary["review_valid"] is False
+    assert StateStore(store.path).action(fix["key"])["handoff_state"] == "waiting_review"
+    assert StateStore(store.path).action(review["key"])["status"] == "sent"
+
+
 @pytest.mark.parametrize("stage", ["enrollment", "snapshot", "authorization"])
 @pytest.mark.parametrize("field", ["number", "id", "head_repo", "base_repo"])
 @pytest.mark.parametrize("kind", KINDS)

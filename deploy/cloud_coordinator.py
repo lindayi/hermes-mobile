@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -666,7 +668,7 @@ def review_task_request(snapshot, source_action, anchor_comment_id, anchor_prefi
         "\"verdict\":\"pass|changes_requested\","
         "\"summary\":\"bounded summary\","
         "\"findings\":[],"
-        "\"files\":{\"path\":\"sha256\"},"
+        "\"files\":{\"path\":\"sha256|null\"},"
         "\"report\":\"bounded report\"}"
     )
     return {
@@ -1432,6 +1434,53 @@ def _github_identity(value, expected):
             and value["id"] == expected)
 
 
+def _blob_bytes(api, blob_sha):
+    if not _is_sha(blob_sha):
+        raise ReceiptError("Independent review blob identity is incomplete")
+    blob = api.get(f"repos/{REPOSITORY}/git/blobs/{blob_sha}")
+    if not isinstance(blob, dict):
+        raise ReceiptError("Independent review blob data is unavailable")
+    content = blob.get("content")
+    if (blob.get("sha") != blob_sha
+            or blob.get("encoding") != "base64"
+            or not isinstance(content, str)):
+        raise ReceiptError("Independent review blob data is malformed")
+    try:
+        data = base64.b64decode(content, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ReceiptError("Independent review blob data is malformed") from exc
+    if type(blob.get("size")) is int and blob.get("size") != len(data):
+        raise ReceiptError("Independent review blob size is malformed")
+    return data
+
+
+def _review_report_expected_files(api, snapshot, head_sha):
+    if (not isinstance(snapshot, dict)
+            or snapshot.get("head") != head_sha
+            or snapshot.get("files_complete") is not True
+            or not isinstance(snapshot.get("files"), list)):
+        raise ReceiptError("Independent review file inventory is incomplete")
+    expected = {}
+    for item in snapshot["files"]:
+        if not isinstance(item, dict):
+            raise ReceiptError("Independent review file inventory is incomplete")
+        path = item.get("filename")
+        if (not isinstance(path, str) or not path
+                or path.startswith("/") or ".." in PurePosixPath(path).parts):
+            raise ReceiptError("Independent review file inventory is malformed")
+        if path in expected:
+            raise ReceiptError("Independent review file inventory is malformed")
+        if item.get("status") == "removed":
+            expected[path] = None
+            continue
+        expected[path] = hashlib.sha256(
+            _blob_bytes(api, item.get("sha")),
+        ).hexdigest()
+    if not expected:
+        raise ReceiptError("Independent review file inventory is incomplete")
+    return expected
+
+
 def _pull_identity(pull, binding):
     """Match live REST numeric IDs without bool/float equality aliases."""
     return (_github_identity(pull, binding.get("pull_id"))
@@ -1744,7 +1793,7 @@ class Coordinator:
             "issue": number, "enrollment": enrollment, "pull": pull, "head": sha,
             "main_sha": main_sha, "scoped": scoped,
             "historical_base": historical_base, "files": files,
-            "files_complete": len(files) < 300, "reviews": reviews,
+            "files_complete": True, "reviews": reviews,
             "reviews_complete": True,
             "threads": threads, "threads_complete": threads_complete,
             "required": required, "policy_complete": policy_complete,
@@ -1895,11 +1944,17 @@ class Coordinator:
                             review_report=report["report"],
                             report_verdict=report["report"]["verdict"],
                             publication_state="pending",
+                            agent_review_state=(
+                                "pending" if report["report"]["verdict"] == "pass" else "done"
+                            ),
                         )
                         review_publications.append(key)
                     busy = True
                     continue
-                if status == "completed" and action.get("publication_state") != "done":
+                if (status == "completed" and (
+                        action.get("publication_state") != "done"
+                        or action.get("agent_review_state") not in {None, "done"}
+                )):
                     if apply:
                         review_publications.append(key)
                     busy = True
@@ -2207,7 +2262,16 @@ class Coordinator:
                 return True
             self.store.update_action(key, "completed", handoff_state="done")
             return False
-
+        review_action = _current_review_followup(self.store.actions(), action["issue"], head)
+        if (isinstance(review_action, dict)
+                and review_action.get("report_verdict") == "pass"
+                and review_action.get("publication_state") == "done"
+                and review_action.get("agent_review_state") != "done"):
+            self.store.update_action(
+                key, "completed", handoff_state="waiting_review",
+                review_requirement="missing_agent_review",
+            )
+            return True
         self.store.update_action(key, "completed", handoff_state="done")
         return False
 
@@ -2225,7 +2289,10 @@ class Coordinator:
                 or not isinstance(session.get("id"), str)
                 or session.get("prompt") != action.get("body")
                 or session.get("head_ref") != action.get("head_ref")
-                or session.get("base_ref") != MAIN_BRANCH):
+                or session.get("base_ref") != MAIN_BRANCH
+                or not _github_identity(session.get("user"), OWNER_ID)
+                or not _github_identity(session.get("owner"), OWNER_ID)
+                or not _github_identity(session.get("repository"), REPOSITORY_ID)):
             raise ReceiptError("Independent review session evidence is incomplete")
         report = find_review_report(
             snapshot["comments"],
@@ -2246,45 +2313,91 @@ class Coordinator:
         )
         if report is None:
             raise ReceiptError("Independent review report is unavailable")
+        expected_files = _review_report_expected_files(self.api, snapshot, action["head"])
+        if report["report"].get("files") != expected_files:
+            raise ReceiptError("Independent review report files do not match the exact head")
         return report, session
+
+    def _advance_agent_review_publication(self, key, action):
+        statuses = _rest_list(
+            self.api, f"repos/{REPOSITORY}/commits/{action['head']}/statuses?per_page=100",
+        )
+        existing, owned = _status_owned(statuses, "agent-review", OWNER_ID)
+        if owned and existing and existing.get("state") == "success":
+            self.store.update_action(
+                key, "completed", agent_review_state="done",
+                agent_review_status_id=existing.get("id"),
+            )
+            return "done"
+        if action.get("agent_review_state") == "uncertain":
+            return "uncertain"
+        try:
+            response = self.api.write(
+                f"repos/{REPOSITORY}/statuses/{action['head']}",
+                {
+                    "state": "success",
+                    "context": "agent-review",
+                    "description": "Verified exact-head independent-agent review evidence",
+                },
+            )
+        except CoordinatorError:
+            self.store.update_action(key, "completed", agent_review_state="uncertain")
+            return "uncertain"
+        creator = response.get("creator") if isinstance(response, dict) else None
+        if (not isinstance(response, dict)
+                or response.get("context") != "agent-review"
+                or response.get("state") != "success"
+                or not isinstance(creator, dict)
+                or creator.get("id") != OWNER_ID):
+            self.store.update_action(key, "completed", agent_review_state="uncertain")
+            return "uncertain"
+        self.store.update_action(
+            key, "completed", agent_review_state="done",
+            agent_review_status_id=response.get("id"),
+        )
+        return "done"
 
     def _advance_review_publication(self, key, action, snapshot):
         body = _published_review_body(action["review_report"], action["head"])
-        reviews = _rest_list(
-            self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
-        )
-        existing = _matching_owner_review(reviews, head_sha=action["head"], body=body)
-        if existing is not None:
-            self.store.update_action(
-                key, "completed", publication_state="done",
-                published_review_id=existing.get("id"),
-                published_review_body=body,
+        if action.get("publication_state") != "done":
+            reviews = _rest_list(
+                self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
             )
-            return "done"
-        state = action.get("publication_state")
-        if state == "uncertain":
-            return "uncertain"
-        self.store.update_action(key, "completed", publication_state="sending")
-        try:
-            response = self.api.write(
-                f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews",
-                {"event": "COMMENT", "commit_id": action["head"], "body": body},
-            )
-        except CoordinatorError:
-            self.store.update_action(key, "completed", publication_state="uncertain")
-            return "uncertain"
-        if (not isinstance(response, dict)
-                or response.get("body") != body
-                or response.get("commit_id") != action["head"]
-                or response.get("state") != "COMMENTED"
-                or not isinstance(response.get("user"), dict)
-                or response["user"].get("id") != OWNER_ID):
-            self.store.update_action(key, "completed", publication_state="uncertain")
-            return "uncertain"
-        self.store.update_action(
-            key, "completed", publication_state="done",
-            published_review_id=response.get("id"), published_review_body=body,
-        )
+            existing = _matching_owner_review(reviews, head_sha=action["head"], body=body)
+            if existing is not None:
+                self.store.update_action(
+                    key, "completed", publication_state="done",
+                    published_review_id=existing.get("id"),
+                    published_review_body=body,
+                )
+            else:
+                state = action.get("publication_state")
+                if state == "uncertain":
+                    return "uncertain"
+                self.store.update_action(key, "completed", publication_state="sending")
+                try:
+                    response = self.api.write(
+                        f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews",
+                        {"event": "COMMENT", "commit_id": action["head"], "body": body},
+                    )
+                except CoordinatorError:
+                    self.store.update_action(key, "completed", publication_state="uncertain")
+                    return "uncertain"
+                if (not isinstance(response, dict)
+                        or response.get("body") != body
+                        or response.get("commit_id") != action["head"]
+                        or response.get("state") != "COMMENTED"
+                        or not isinstance(response.get("user"), dict)
+                        or response["user"].get("id") != OWNER_ID):
+                    self.store.update_action(key, "completed", publication_state="uncertain")
+                    return "uncertain"
+                self.store.update_action(
+                    key, "completed", publication_state="done",
+                    published_review_id=response.get("id"), published_review_body=body,
+                )
+            action = self.store.action(key) or action
+        if action.get("report_verdict") == "pass" and action.get("agent_review_state") != "done":
+            return self._advance_agent_review_publication(key, action)
         return "done"
 
     def _notification_outcomes(self, snapshot, reasons):
@@ -2904,7 +3017,7 @@ class Coordinator:
                     action["issue"], action["head"], snapshot["main_sha"],
                 )
                 pull_user = current_pull.get("user") if isinstance(current_pull, dict) else None
-                sensitive = classify_sensitive_paths(files, complete=len(files) < 300)
+                sensitive = classify_sensitive_paths(files, complete=True)
                 if (not isinstance(current_pull, dict)
                         or not independent_review_valid(
                             action["head"], reviews, threads,
@@ -3183,7 +3296,8 @@ class Coordinator:
                 action = self.store.action(key)
                 if (action and action.get("kind") == "review"
                         and action.get("status") == "completed"
-                        and action.get("publication_state") != "done"):
+                        and (action.get("publication_state") != "done"
+                             or action.get("agent_review_state") not in {None, "done"})):
                     self._advance_review_publication(key, action, snapshot)
             review_action = pr_plan.get("review_action")
             if review_action:
