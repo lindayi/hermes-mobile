@@ -1240,14 +1240,11 @@ class FakeApi:
         self.owner_review_digest = hashlib.sha256(
             self.owner_review_body.encode("utf-8"),
         ).hexdigest()
-        blob_sha = "e" * 40 if sensitive else "d" * 40
-        blob_bytes = b"backend auth bytes" if sensitive else b"cloud coordinator bytes"
-        self.pull_files = [{
-            "filename": "backend/auth.py" if sensitive else "deploy/cloud_coordinator.py",
-            "status": "modified",
-            "sha": blob_sha,
-        }]
-        self.blob_contents = {blob_sha: blob_bytes}
+        self.pull_files = None
+        self.blob_contents = {
+            "d" * 40: b"frontend style bytes",
+            "e" * 40: b"backend auth bytes",
+        }
         self.owner_reviews = []
         self.graphql_writes = []
         self.next_issue_comment_id = 1000
@@ -1393,7 +1390,7 @@ class FakeApi:
                           if comment.get("updated_at", "") >= since]
             return values
         if route.endswith("/pulls/16/files?per_page=100"):
-            return list(self.pull_files)
+            return list(self.review_pull_files())
         if route.endswith("/pulls/16/reviews?per_page=100"):
             reviews = [{
                 "id": 63001, "state": self.review_state,
@@ -1572,7 +1569,7 @@ class FakeApi:
 
     def review_file_digests(self):
         digests = {}
-        for item in self.pull_files:
+        for item in self.review_pull_files():
             filename = item["filename"]
             if item.get("status") == "removed":
                 digests[filename] = None
@@ -1581,6 +1578,15 @@ class FakeApi:
                     self.blob_contents[item["sha"]],
                 ).hexdigest()
         return digests
+
+    def review_pull_files(self):
+        if self.pull_files is not None:
+            return self.pull_files
+        return [{
+            "filename": "backend/auth.py" if self.sensitive else "frontend/styles.css",
+            "status": "modified",
+            "sha": "e" * 40 if self.sensitive else "d" * 40,
+        }]
 
     def complete_task(self, task_id, action, *, result="ready", head_sha=None,
                       base_sha=BASE):
@@ -4202,6 +4208,12 @@ def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
     api = ColdStartAgentReviewApi(source_failure=True, review_status_present=False)
     api.owner_reviews = []
     api.owner_review_body = "not a structured independent review"
+    api.pull_files = [{
+        "filename": "deploy/cloud_coordinator.py",
+        "status": "modified",
+        "sha": "f" * 40,
+    }]
+    api.blob_contents = {"f" * 40: b"coordinator review bytes"}
     path = tmp_path / "state.json"
     store = StateStore(path)
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
@@ -4257,6 +4269,12 @@ def test_review_report_rejects_forged_file_sha256_inventory(tmp_path):
     api = FakeApi(source_failure=True)
     api.owner_reviews = []
     api.owner_review_body = "not a structured independent review"
+    api.pull_files = [{
+        "filename": "deploy/cloud_coordinator.py",
+        "status": "modified",
+        "sha": "f" * 40,
+    }]
+    api.blob_contents = {"f" * 40: b"coordinator review bytes"}
     path = tmp_path / "state.json"
     store = StateStore(path)
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
@@ -4907,13 +4925,6 @@ class RecordingApi(FakeApi):
         if route.endswith("/issues/16/comments"):
             self.comments.append({"id": 10_000 + len(self.writes), "user": {"id": OWNER},
                                   "body": body["body"], "updated_at": "2026-10-01T11:00:00Z"})
-        elif "/statuses/" in route:
-            self.status_log.setdefault(route.rsplit("/", 1)[-1], []).append({
-                "id": response["id"],
-                "context": body["context"], "state": body["state"],
-                "creator": {"id": OWNER},
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            })
         return response
 
     def move_head(self, sha):
