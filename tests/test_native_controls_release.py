@@ -957,6 +957,7 @@ def test_authorized_controls_delta_allowed_but_legacy_still_protected(tmp_path, 
     monkeypatch.setattr(release, 'APPROVED_CONTROL_HASHES', approved)
     (paths.source / 'backend/model_controls.py').write_text(
         '_CONTROL_HASHES = ' + repr(approved)
+        + '\n_PRE_CLARIFICATION_CONTROL_HASHES = ' + repr(release.PRE_CLARIFICATION_CONTROL_HASHES)
         + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(release.PRE_ROUTING_CONTROL_HASHES)
         + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(release.PREVIOUS_CONTROL_HASHES)
         + '\n_TIMEOUT_BASELINE_CONTROL_HASHES = ' + repr(release.TIMEOUT_BASELINE_CONTROL_HASHES))

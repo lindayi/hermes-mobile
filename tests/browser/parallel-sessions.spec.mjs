@@ -90,12 +90,13 @@ async function fixture({steering = false} = {}) {
           r.run = {id:runId(r.session.id.slice(-1)), session_id:r.session.id, input:call.body.input, status:'running', output:''};
           return json(res, r.run, 202);
         }
-        const runMatch = api.match(/^\/runs\/(parallel-run-[AB])(?:\/(events|controls|steer|stop))?$/);
+        const runMatch = api.match(/^\/runs\/(parallel-run-[AB])(?:\/(events|controls|clarifications|steer|stop))?$/);
         if (runMatch) {
           const r = record(runMatch[1].slice(-1)); assert.ok(r.run, 'run exists');
           const operation = runMatch[2];
           if (!operation && req.method === 'GET') return reply(api, res, r.run);
           if (operation === 'controls' && req.method === 'GET') return reply(api, res, {steering:r.steering, attempts:r.attempts});
+          if (operation === 'clarifications' && req.method === 'GET') return reply(api, res, {available:true, items:[]});
           if (operation === 'steer' && req.method === 'POST') {
             assert.ok(r.steering && r.run.status === 'running', 'guidance targets a capable running run');
             const receipt = {...call.body, id:`guidance-${r.attempts.length}`, run_id:r.run.id, session_id:r.session.id, user_id:'fixture-owner', status:'accepted_unconfirmed', updated_at:1700000001};

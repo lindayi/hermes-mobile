@@ -23,6 +23,7 @@ def test_app_requires_auth_and_reads_native_sessions_without_mutations(tmp_path)
         assert client.get(BASE+'/sessions/wa-1/messages').json()['items'][0]['content']=='Retained answer'
         assert client.get(BASE+'/sessions/not-found/messages').status_code==404
         answer_path=BASE+'/runs/missing/clarifications/'+('a'*32)+'/answer'
+        client.headers.pop('X-CSRF-Token')
         assert client.post(answer_path,json={'answer':'A','other':False}).status_code==403
         client.headers['X-CSRF-Token']=client.get(BASE+'/auth/me').json()['csrf_token']
         assert client.post(answer_path,json={'answer':'A','other':False}).status_code==404

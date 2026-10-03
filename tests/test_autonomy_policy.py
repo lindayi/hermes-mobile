@@ -178,6 +178,17 @@ _PENDING_PR45_NAMING_FIXTURE = {
     'backend/app.py': '5f0d210cb24b6b49cbf30a4286e6b256c42baa1f552f4b063961c67c5d85ec33',
 }
 
+_PENDING_ISSUE77_CLARIFICATION_FIXTURE = {
+    'backend/app.py': '7fee54ea8d210be56ef5608400a1ef3ee3de3437ea1119192ff228817b102798',
+    'backend/clarifications.py': '924df6c148da579325c84f8fe9774d76d3dd848ab6c22a2353d6eda4607c42cb',
+    'backend/hermes_client.py': '149de5a3b0d60620aa9f1cffeead3193ccfd669d6249393751411a2cb7ad66a2',
+    'backend/model_controls.py': '4eb166facb84650bcbc0d40f2da6562b322ccdc293a424b2d90373c910e4ef97',
+    'backend/native_catalog.py': '8b3c398f52388e0e334d6d64381b677b651b9337ece2d1868a14d3de069c5ed6',
+    'backend/orchestration.py': '40f059219cc8397542ee074f2acd597641b13cd57a28c5a126ae64d44a2c4fc5',
+    'backend/runs.py': '99297aef3ecf899d40b77d76de26132701596672dd6af432cdf16ecba1aaac93',
+    'deploy/native_controls_release.py': '842c3f6073ae2a5a8b823788154fd8cbc53c8b1af54472ba7fd3ac0d612a058c',
+}
+
 
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _ISSUE52_MERGED_MAIN_BASE_FIXTURE
@@ -187,7 +198,7 @@ def _source_files():
             | _PENDING_ISSUE50_RECEIPT_FIXTURE | _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
             | _PENDING_ISSUE67_WORKFLOW_FIXTURE | _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
             | _PENDING_PR45_NAMING_FIXTURE
-            | _ISSUE65_RECEIPT_PRODUCER_FIXTURE)
+            | _ISSUE65_RECEIPT_PRODUCER_FIXTURE | _PENDING_ISSUE77_CLARIFICATION_FIXTURE)
 
 
 def _source_ci():
@@ -567,8 +578,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_PENDING_ISSUE67_WORKFLOW_FIXTURE)
     pending |= set(_PENDING_ISSUE75_HOSTED_GATE_FIXTURE)
     pending |= set(_PENDING_PR45_NAMING_FIXTURE)
-    assert {path: SOURCE_FINGERPRINTS[path] for path in _PENDING_PR45_NAMING_FIXTURE
-            } == _PENDING_PR45_NAMING_FIXTURE
+    pending |= set(_PENDING_ISSUE77_CLARIFICATION_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
@@ -578,7 +588,11 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     }
     assert {
         path: SOURCE_FINGERPRINTS[path] for path in _ISSUE46_OBSERVER_FIXTURE
-    } == _ISSUE46_OBSERVER_FIXTURE
+        if path not in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
+    } == {
+        path: digest for path, digest in _ISSUE46_OBSERVER_FIXTURE.items()
+        if path not in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
+    }
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in {'deploy/cloud_coordinator.py', 'deploy/review_evidence.py'}
@@ -620,8 +634,20 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
-    } == _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
+        and path not in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
+    } == {
+        path: digest for path, digest in _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE.items()
+        if path not in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
+    }
     for path, digest in _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE.items():
+        if path in _PENDING_ISSUE77_CLARIFICATION_FIXTURE:
+            continue
+        source = Path(__file__).resolve().parents[1] / path
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
+    assert {
+        path: SOURCE_FINGERPRINTS[path] for path in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
+    } == _PENDING_ISSUE77_CLARIFICATION_FIXTURE
+    for path, digest in _PENDING_ISSUE77_CLARIFICATION_FIXTURE.items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
@@ -651,7 +677,9 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _ISSUE46_OBSERVER_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
-@pytest.mark.parametrize('path', sorted(_ISSUE46_OBSERVER_FIXTURE))
+@pytest.mark.parametrize(
+    'path', sorted(set(_ISSUE46_OBSERVER_FIXTURE) - set(_PENDING_ISSUE77_CLARIFICATION_FIXTURE)),
+)
 def test_issue46_observer_pin_matches_exact_candidate_bytes(pins, path):
     source = Path(__file__).resolve().parents[1] / path
     assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
@@ -772,7 +800,7 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
     shared = {
         'backend/app.py', 'backend/auth.py', 'backend/auth_store.py',
         'backend/background_delivery.py', 'backend/catalog_search.py',
-        'backend/chat_snapshot.py', 'backend/configuration.py',
+        'backend/chat_snapshot.py', 'backend/clarifications.py', 'backend/configuration.py',
         'backend/context_compression_presentation.py', 'backend/delivery.py',
         'backend/hermes_client.py', 'backend/jobs.py', 'backend/model_controls.py',
         'backend/native_catalog.py', 'backend/notification_policy.py',
@@ -792,7 +820,7 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
         'deploy/workflow_notifications.py',
     }
     assert closure == shared | coordinator
-    assert len(closure) == 37
+    assert len(closure) == 38
     assert closure <= set(REQUIRED_FILES)
     assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in coordinator)
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract' for path in shared)
