@@ -160,10 +160,20 @@ jobs:
           print(json.dumps(results, indent=2))
           sys.exit(bool(failed) or set(results) != {'build','checks','js','python','browser','native'})
           PY
+  integration-tests:
+    if: ${{ always() }}
+    needs: source-ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the complete hosted source-ci result
+        env:
+          SOURCE_CI_RESULT: ${{ needs.source-ci.result }}
+        run: test "${SOURCE_CI_RESULT:-}" = success
   attest:
     # PRs and manual runs can test bundles but can never sign a production release.
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'lindayi/hermes-mobile' }}
-    needs: source-ci
+    needs: [source-ci, integration-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

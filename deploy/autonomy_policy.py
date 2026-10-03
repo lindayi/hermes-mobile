@@ -62,7 +62,7 @@ HOSTED_JOBS = frozenset({'build', 'checks', 'js', 'python', 'browser', 'native'}
 RUN_JOBS = frozenset({
     'build', 'checks', 'js', 'python (0)', 'python (1)',
     'browser (0)', 'browser (1)', 'browser (2)', 'browser (3)',
-    'native', 'source-ci', 'attest',
+    'native', 'source-ci', 'integration-tests', 'attest',
 })
 REQUIRED_CHECKS = {
     phase: {
@@ -154,7 +154,7 @@ REQUIRED_FILES = (
     'deploy/native_notification_release.py',
 )
 SOURCE_FINGERPRINTS = {
-    '.github/workflows/ci.yml': '39110e6f940fc59ef3aec9846f07616a86a2e07335d2aaed6c6cd0ab444ff195',
+    '.github/workflows/ci.yml': '5a1b1a694d286d5f8a1a4188802af7e8f6ab46855d278224d9f248cccec844d9',
     '.github/workflows/issue-link.yml': 'dd722de884fba6c9d613a72baee43f3b81d2d6816954f6a8e77d972b0fd1eafc',
     '.github/native-tests.json': 'b97ddb088e595197cf65d97b0b4af89f4f83f5c4ad25463c566df7099817209f',
     '.github/host-tests.json': '8af5fc30188f81ba95d3d7c11ba6801f52795175c2cac7f634424f906947ce5a',
@@ -172,7 +172,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': 'bf01500fb253f7d41ce49d375bba63a9e4d80569eb376a6aeae50f56cf71923f',
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
-    'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
+    'deploy/release_artifact.py': 'ef47db3b7fa3e4805488ea4c941e770f26b6256842ad26ffb210476e5f86e721',
     'deploy/self_deploy.py': '04036a85d2abba0cf38e7717c30d5e6b6f04da2fd7efcea16bbf21086f2ab68a',
     'deploy/ci_selection.py': '07493f74bc4b932e26342e0d27fee8c3c38601af8211e0a950920935173b2f16',
     'deploy/test_workspace.py': 'baeb1103608ff15db3903677fa8ec9c80c9c8b9a0246ce18ada27bf7c04a486a',

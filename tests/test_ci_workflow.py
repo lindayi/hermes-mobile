@@ -1,6 +1,8 @@
 """Hosted gate must cover every suite; cancellations are not a passing result."""
 import json
+import os
 from pathlib import Path
+import subprocess
 
 import pytest
 import yaml
@@ -31,7 +33,8 @@ def test_hosted_gate_requires_every_suite_without_optional_failures():
     gate = jobs['source-ci']['steps'][0]
     assert gate['env']['RESULTS'] == '${{ toJSON(needs) }}'
     assert "!= 'success'" in gate['run']
-    for name in ('build','checks','js','python','browser','native','source-ci','attest'):
+    for name in ('build','checks','js','python','browser','native','source-ci',
+                 'integration-tests','attest'):
         assert jobs[name]['runs-on'] == 'ubuntu-24.04'
         assert 'continue-on-error' not in jobs[name]
         for step in jobs[name]['steps']:
@@ -116,7 +119,7 @@ def test_build_once_bundle_is_attested_only_after_trusted_main_gate():
     assert upload['with']['path'] == '${{ runner.temp }}/release.tar'
     assert upload['with']['if-no-files-found'] == 'error'
     attest = jobs['attest']
-    assert attest['needs'] == 'source-ci'
+    assert attest['needs'] == ['source-ci', 'integration-tests']
     assert attest['if'] == "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'lindayi/hermes-mobile' }}"
     assert attest['permissions'] == {'contents': 'read', 'id-token': 'write', 'attestations': 'write'}
     for name, job in jobs.items():
@@ -127,6 +130,28 @@ def test_build_once_bundle_is_attested_only_after_trusted_main_gate():
     assert download['with'] == {'name': upload['with']['name'], 'path': '${{ runner.temp }}/bundle'}
     provenance = next(step for step in attest['steps'] if step.get('uses', '').startswith('actions/attest-build-provenance@'))
     assert provenance['with']['subject-path'] == '${{ runner.temp }}/bundle/release.tar'
+
+
+def test_integration_gate_requires_successful_source_ci_in_the_same_run():
+    workflow = yaml.load((ROOT / '.github/workflows/ci.yml').read_text(), Loader=yaml.BaseLoader)
+    jobs = workflow['jobs']
+    gate = jobs['integration-tests']
+    assert gate['if'] == '${{ always() }}'
+    assert gate['needs'] == 'source-ci'
+    assert gate['runs-on'] == 'ubuntu-24.04'
+    assert gate.get('permissions', workflow['permissions']) == {'contents': 'read'}
+    assert all('uses' not in step for step in gate['steps'])
+    command = '\n'.join(step.get('run', '') for step in gate['steps'])
+    assert command
+    assert jobs['attest']['needs'] == ['source-ci', 'integration-tests']
+
+    for source_result in ('success', 'failure', 'cancelled', 'skipped', ''):
+        result = subprocess.run(
+            ['bash', '-eu', '-c', command],
+            env={**os.environ, 'SOURCE_CI_RESULT': source_result},
+            capture_output=True, text=True, timeout=10,
+        )
+        assert (result.returncode == 0) == (source_result == 'success'), source_result
 
 
 def test_hosted_setup_uses_pinned_dependencies_without_deploy_access():

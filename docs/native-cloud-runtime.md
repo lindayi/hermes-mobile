@@ -45,9 +45,10 @@ not persisted; the job runs only on disposable GitHub-hosted Ubuntu and has no
 private state, deployment credential or operator upload.
 
 Hosted native success demonstrates repeatable behavior against reconstructed
-public source only. It does not replace the required installed/private host
-compatibility run, prove the deployed bytes or live services, or justify reporting
-the `integration-tests` status.
+public source only. Along with the other complete same-run hosted jobs it can
+satisfy `source-ci`, after which the automatic `integration-tests` gate may succeed.
+Neither hosted check replaces installed/private host compatibility, proves the
+deployed bytes or live services, or authorizes activation.
 
 ## Public provenance
 

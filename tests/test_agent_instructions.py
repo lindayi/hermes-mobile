@@ -199,7 +199,7 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
             'Copilot feedback is supplemental',
             'missing APPROVED or COMMENTED alone',
             'Publish `agent-review` only after verifying the independent review',
-            'Publish `integration-tests` only after verifying complete final integration',
+            'Verify the automatically emitted `integration-tests` result is bound to that',
             'exact head SHA',
             'resolved review threads',
             'current with freshly fetched `origin/main`',
@@ -213,9 +213,10 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         'The active required contexts are',
         'scripts/ci_tests.py',
         '`.github/host-tests.json`',
-        'complete matching hosted results plus all residual host tests',
+        'The automatic `integration-tests` job succeeds only when the same-run `source-ci` aggregate',
+        'The complete `.github/host-tests.json` partition must run through',
+        'inside guarded deployment before activation',
         'same exact head SHA',
-        'If the documented partition is unavailable, conservatively use the existing managed `all` suite',
         'Final integration is a merge gate, not a full local suite per edit',
         'changed scope needs one independent delta review',
         'final authority/status is freshly bound to the current head',
@@ -238,6 +239,9 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         'resolved review threads',
         'current with freshly fetched origin/main',
         'No owner or administrator bypass',
+        'The exact-head integration-tests job and its same-run complete hosted source-ci aggregate pass',
+        'Host-only compatibility is not PR-head evidence',
+        'guarded exact-main deployment gate before activation',
     ):
         assert clause in template, clause
 
@@ -270,21 +274,19 @@ def test_agent_instructions_use_the_available_hosted_partition_portably():
     assert 'when the documented partition is available, otherwise' not in text
     assert '/home/lindayi/' not in agents
     assert not re.search(r'^(<<<<<<<|=======|>>>>>>>)', agents, re.MULTILINE)
-    assert agents.count('python3 scripts/ci_tests.py host') == 1
-    assert (
-        'HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" '
-        '\\ python3 scripts/ci_tests.py host'
-    ) in text
+    assert agents.count('scripts/ci_tests.py host') == 1
+    assert 'run `scripts/ci_tests.py host` against verified exact-main staged' in text
     for clause in (
-        'all portable Python, JS and generated-assets browser shards',
-        '`.github/host-tests.json`; new files default to hosted execution',
+        'which requires every hosted suite',
+        '`.github/host-tests.json`',
+        'New tests default to hosted execution',
         'Do not repeat hosted suites on the production server routinely',
         'The full managed `all` remains an opt-in diagnostic and the conservative '
         'release-stage gate',
-        'the entire residual host-compatibility suite and the matching hosted '
-        '`source-ci` aggregate must succeed on the same exact head SHA',
-        'Record both results and the workflow URL',
-        'Never use only a hosted subset or only local host tests to claim full coverage',
+        'The hosted `integration-tests` check is merge evidence only when the same-run',
+        'The complete `.github/host-tests.json` partition remains a mandatory guarded',
+        'any failure blocks activation',
+        'the host-only compatibility suite is verified during guarded deployment, not',
         'The active required contexts are `source-ci` (Actions app 15368)',
         '`cloud-review` as a required status',
         'installed/private host-compatibility suite remains required at guarded exact-main deployment',
