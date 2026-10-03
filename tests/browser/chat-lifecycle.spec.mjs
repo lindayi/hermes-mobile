@@ -40,6 +40,7 @@ async function fixture() {
         if(api==='/auth/me') return json(res,{user:{id:'fixture-owner',role:'owner',status:'ready'},csrf_token:'fixture'});
         if(api==='/runs/fixture-run/controls')return json(res,{steering:false,attempts:[]});
         if(api==='/sessions') return json(res,{items:[session],total:1});
+        if(api===`/sessions/${session.id}` && req.method==='GET')return json(res,session);
         if(api===`/sessions/${session.id}/telemetry`)return json(res,{model:null,provider:null,context:{used_tokens:null,limit_tokens:null,source:null,observed_at:null,estimated:false},usage:{scope:'session_lifetime',input_tokens:null,output_tokens:null}});
         if(api===`/sessions/${session.id}/model-options`)return json(res,{available:false,models:[],default:null});
         if(api===`/sessions/${session.id}/background` && req.method==='GET')return json(res,{items:[]});

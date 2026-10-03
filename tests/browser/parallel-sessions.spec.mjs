@@ -69,6 +69,8 @@ async function fixture({steering = false} = {}) {
         if (api === '/auth/me' && req.method === 'GET') return json(res, {user:{id:'fixture-owner', role:'owner', status:'ready'}, csrf_token:'fixture'});
         if (api === '/push/preferences' && req.method === 'GET') return json(res, {revision:0, enabled:true, categories:{completion:true, approval:true, attention:true, scheduled:true, operational:true}, hide_details:false});
         if (api === '/sessions' && req.method === 'GET') return json(res, {items:[...state.records.values()].map(r => ({...r.session, run:r.persisted ? null : r.run})), total:2});
+        const metadata = req.method === 'GET' && sessions.find(session => api === `/sessions/${session.id}`);
+        if (metadata) return json(res, metadata);
         const match = api.match(/^\/sessions\/([^/]+)\/(messages|telemetry|model-options|background)$/);
         if (match && req.method === 'GET') {
           const r = state.records.get(match[1]); assert.ok(r, 'known synthetic session');

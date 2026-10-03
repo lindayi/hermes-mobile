@@ -571,7 +571,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     }));
     if(!visibleItems.length)list.append(empty('No conversations',state.query ? 'No conversations match this search and filter.' : 'No conversations in this filter.'));
     }
-    content.replaceChildren(h('div',{class:'page-heading conversation-list-heading'},h('div',{},h('h1',{},'Sessions')),h('div',{class:'history-toolbar'},searchToggle,filterToggle,button(icon('newchat'),e=>action(e.currentTarget,async()=>{if(!current())return;const session=await api.request('/sessions',{method:'POST',body:{title:'New conversation'}});if(current())await openSession(session);}),'primary icon-button',{'aria-label':'New chat',title:'New chat'}),filter)),searchForm,
+    content.replaceChildren(h('div',{class:'page-heading conversation-list-heading'},h('div',{},h('h1',{},'Sessions')),h('div',{class:'history-toolbar'},searchToggle,filterToggle,button(icon('newchat'),e=>action(e.currentTarget,async()=>{if(!current())return;const session=await api.request('/sessions',{method:'POST',body:{title:'New chat'}});if(current())await openSession(session);}),'primary icon-button',{'aria-label':'New chat',title:'New chat'}),filter)),searchForm,
       h('p',{id:'session-action-help',class:'sr-only'},'Swipe left to reveal Delete, or use Conversation actions, right-click, or Shift+F10. Deletion requires confirmation.'),pendingDeletionPanel(version),results,
       h('div',{class:'pagination'},previous,count,next));
     await refresh();
@@ -661,9 +661,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     }
   }
   // Header transport observation is independent of run recovery and never submits work.
-  function watchConversation(session,version,node) {
+  function watchConversation(session,version,node,refreshTitle) {
     const owner=state.user?.id;
     let disposed=false,revision=0,offline=win.navigator.onLine===false,transport='connecting',activity='idle',timer=null,controller=null,deadline=null,refreshBackground=null;
+    let titleRevision=0,renaming=false,queuedProbe=null;
     const labels={connecting:'Connecting…',idle:'Connected · Idle',sending:'Sending',submitted:'Queued',queued:'Queued',running:'Running',waiting_for_approval:'Waiting for approval',stopping:'Stopping',stopped:'Stopped',cancelled:'Stopped',failed:'Failed',unknown:'Outcome unknown',reconnecting:'Reconnecting',disconnected:'Disconnected'};
     const active=()=>!disposed && version===routeVersion && owner===state.user?.id;
     const render=()=>{if(!active())return;const value=offline?'disconnected':transport==='connected'?activity:transport;const label=labels[value] || 'Recovering';if(node.dataset.state!==value){node.dataset.state=value;node.textContent=label;}};
@@ -672,10 +673,16 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const failure=(token=revision,value='disconnected')=>{if(!active() || token!==revision)return;revision++;transport=value;render();};
     const run=value=>{if(!active() || !value)return;revision++;activity=['completed','done'].includes(value)?'idle':Object.hasOwn(labels,value)?value:'unknown';render();};
     const snapshot=(data,token)=>{if(!active() || token!==revision)return;success(token);run(data.run?.status || data.last_run?.status || session.run_status || 'idle');};
-    async function probe(backgroundOnly=false){
-      if(!active() || controller || offline){schedule();return;}
+    async function probe(backgroundOnly=false,includeTitle=true){
+      if(!active() || offline){schedule();return;}
+      if(controller){
+        // Coalesce refresh intent, retaining the strongest requested read scope.
+        queuedProbe={backgroundOnly:backgroundOnly && (queuedProbe?.backgroundOnly ?? true),includeTitle:includeTitle || (queuedProbe?.includeTitle ?? false)};
+        return;
+      }
       // Share this bounded watcher with receipts, even while the run stream is healthy.
       const token=revision;controller=new win.AbortController();
+      const titleToken=titleRevision;
       deadline=win.setTimeout(()=>controller?.abort(),10000);
       const failed=error=>{if(active() && token===revision){if(error.status===401)expiredSession();else failure(token);}};
       try{
@@ -683,10 +690,15 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         // guard while the independent receipt request is still outstanding.
         await Promise.all([
           refreshBackground?.(controller.signal),
+          !includeTitle || renaming ? null : refreshTitle(controller.signal,()=>active() && !renaming && titleToken===titleRevision),
           backgroundOnly || stream && transport==='connected' ? null : api.request(`/sessions/${encodeURIComponent(session.id)}/messages?latest=true&limit=1`,{signal:controller.signal}).then(data=>{if(!Array.isArray(data.items))throw new Error('Invalid conversation snapshot');snapshot(data,token);}).catch(failed)
         ]);
       }catch(error){failed(error);}
-      finally{win.clearTimeout(deadline);deadline=null;controller=null;schedule();}
+      finally{
+        win.clearTimeout(deadline);deadline=null;controller=null;
+        const queued=queuedProbe;queuedProbe=null;
+        if(queued)void probe(queued.backgroundOnly,queued.includeTitle);else schedule();
+      }
     }
     const onOffline=()=>{offline=true;revision++;transport='disconnected';render();controller?.abort();};
     const onOnline=()=>{offline=false;revision++;transport='reconnecting';render();void probe();};
@@ -694,7 +706,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const focus=()=>{void probe(true);};
     win.addEventListener('offline',onOffline);win.addEventListener('online',onOnline);win.addEventListener('focus',focus);doc.addEventListener('visibilitychange',visible);
     render();schedule();
-    return {token:()=>revision,success,failure,run,snapshot,background(callback){refreshBackground=callback;void probe(true);},refresh:focus,destroy(){disposed=true;controller?.abort();win.clearTimeout(timer);win.clearTimeout(deadline);win.removeEventListener('offline',onOffline);win.removeEventListener('online',onOnline);win.removeEventListener('focus',focus);doc.removeEventListener('visibilitychange',visible);}};
+    return {token:()=>revision,success,failure,run,snapshot,rename(pending){titleRevision++;renaming=pending;},background(callback,includeTitle=true){refreshBackground=callback;void probe(true,includeTitle);},refresh:focus,destroy(){disposed=true;queuedProbe=null;controller?.abort();win.clearTimeout(timer);win.clearTimeout(deadline);win.removeEventListener('offline',onOffline);win.removeEventListener('online',onOnline);win.removeEventListener('focus',focus);doc.removeEventListener('visibilitychange',visible);}};
   }
   function releasePresenceIdentity() {releasePushIdentity?.();releasePushIdentity=null;pushIdentityKey=null;}
   async function preparePresenceIdentity(data,current) {
@@ -788,7 +800,15 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         return;
       }
     }
-    const connection=watchConversation(session,version,header.querySelector('.conversation-status'));headerState=connection;
+    const refreshTitle=async(signal,latest)=>{
+      try {
+        const metadata=await api.request(`/sessions/${encodeURIComponent(session.id)}`,{signal});
+        if(!current() || !latest() || signal.aborted || metadata?.id!==session.id || (metadata.title!==null && typeof metadata.title!=='string'))return;
+        session.title=metadata.title;
+        const heading=header.querySelector('h1');heading.textContent=heading.title=session.title?.trim() ? session.title : 'Untitled conversation';
+      } catch(error) {if(current() && latest() && !signal.aborted && error.status===401)expiredSession();}
+    };
+    const connection=watchConversation(session,version,header.querySelector('.conversation-status'),refreshTitle);headerState=connection;
     const initial=connection.token();
     let result;
     try {result=await api.request(`/sessions/${encodeURIComponent(session.id)}/messages?latest=true&turn_boundary=true`);}
@@ -857,7 +877,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         messages.scrollTop=previousTop+messages.scrollHeight-previousHeight;
       }),'secondary');messages.prepend(more);
     }
-    if (!result.items?.length) messages.append(empty('New conversation',''));
+    if (!result.items?.length) messages.append(empty('New chat',''));
     const draftKey=key(`draft:${session.id}`);
     const textarea = h('textarea',{name:'message',rows:2,placeholder:'Message Hermes…','aria-label':'Message Hermes',maxlength:32000});
     textarea.value=drafts.get(session.id) ?? storage.get(draftKey) ?? '';
@@ -1161,7 +1181,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         else if([403,404,410].includes(error.status))clearBackground();
       }
     };
-    connection.background(refreshBackground);
+    // Opening already resolved missing metadata; only the initial receipt read reuses it.
+    connection.background(refreshBackground,!resolveTitle);
     void api.request(`/sessions/${encodeURIComponent(session.id)}/telemetry`).then(renderTelemetry).catch(error=>{if(version===routeVersion && error.status===401)expiredSession();});
     content.classList.add('conversation');
     messages.scrollTop=messages.scrollHeight;
@@ -1307,6 +1328,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         }
         for(const card of article.querySelectorAll('.tool-activity'))refreshToolActivity(card);
         disconnect();
+        connection?.refresh();
         if(current.status==='unknown')inform('Outcome unknown. Check the conversation before submitting again; Hermes will not replay this action.',true);
         else storage.set(key(`run:${sessionId}`),null,true);
       }
@@ -1396,7 +1418,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     schedule();
   }
   function renameSession(session) {
-    const version=routeVersion,owner=state.user?.id,previous=doc.activeElement;
+    const version=routeVersion,owner=state.user?.id,previous=doc.activeElement,connection=headerState;
     const current=()=>version===routeVersion && owner===state.user?.id && state.session===session && overlay.isConnected;
     const close=()=>{overlay.remove();if(previous?.isConnected)previous.focus();};
     const input=h('input',{name:'title',value:session.title || '',required:true,maxlength:200,'aria-label':'Title'});
@@ -1406,6 +1428,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       e.preventDefault();if(save.disabled || !current())return;
       const title=input.value.trim();if(!title || title.length>200){error.hidden=false;error.textContent='Enter a title between 1 and 200 characters.';return;}
       save.disabled=true;error.hidden=true;
+      connection?.rename(true);
       try{
         const result=await api.request(`/sessions/${encodeURIComponent(session.id)}`,{method:'PATCH',body:{title}});
         if(!current())return;
@@ -1413,7 +1436,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         session.title=result.title;
         const heading=content.querySelector('.conversation-head h1');heading.textContent=result.title;heading.title=result.title;close();
       }catch(reason){if(current()){if(reason.status===401){close();expiredSession();return;}error.hidden=false;error.textContent=errorMessage(reason);}}
-      finally{save.disabled=false;}
+      finally{connection?.rename(false);save.disabled=false;}
     }},h('h2',{},'Rename session'),h('label',{class:'field'},h('span',{},'Title'),input),error,h('div',{class:'actions'},button('Cancel',close),save));
     const dialog=h('section',{class:'dialog',role:'dialog','aria-modal':'true','aria-label':'Rename session'},form);
     const overlay=h('div',{class:'dialog-overlay','data-rename-dialog':true},dialog);
