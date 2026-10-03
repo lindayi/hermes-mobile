@@ -54,4 +54,23 @@ Result: 33 passed, including active replay, completed output, delayed fallback,
 late prior-session response, selected text, upward reading, no composer focus,
 and no document scrolling.
 
-Adjacent managed checks also passed: `python3 scripts/test.py js -- tests/browser/ui.test.mjs tests/browser/chat-iteration.test.mjs tests/browser/background-notifications.test.mjs tests/browser/turn-history.test.mjs tests/browser/public-progress.test.mjs` (119 passed), and `python3 scripts/test.py browser -- tests/browser/keyboard-viewport.spec.mjs tests/browser/background-notifications.spec.mjs` with the managed Python/Node/private Playwright environment above (23 passed). Viewport/keyboard evidence uses synthetic VisualViewport fixtures and Chromium window resizing, not physical Safari or device proof.
+Adjacent managed checks also passed:
+
+```sh
+HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
+HERMES_TEST_NODE="${HERMES_TEST_NODE:-$(command -v node)}" \
+python3 scripts/test.py js -- tests/browser/ui.test.mjs tests/browser/chat-iteration.test.mjs tests/browser/background-notifications.test.mjs tests/browser/turn-history.test.mjs tests/browser/public-progress.test.mjs
+```
+
+Result: 119 passed.
+
+```sh
+HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
+HERMES_TEST_NODE="${HERMES_TEST_NODE:-$(command -v node)}" \
+PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/hermes-mobile-playwright}" \
+PLAYWRIGHT_SKIP_BROWSER_GC=1 \
+python3 scripts/test.py browser -- tests/browser/keyboard-viewport.spec.mjs tests/browser/background-notifications.spec.mjs
+```
+
+Result: 23 passed. Viewport/keyboard evidence uses synthetic VisualViewport
+fixtures and Chromium window resizing, not physical Safari or device proof.
