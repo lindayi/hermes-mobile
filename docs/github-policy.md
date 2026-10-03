@@ -39,9 +39,11 @@ Success still requires all pending outputs, complete canonical-reference validat
 and fresh REST/GraphQL checks
 that the PR identity, head, base, body, issue set, and open issue states remain
 unchanged. Failed, cancelled, skipped, malformed, incomplete, or stale validation
-cannot produce success. The check run is finalized before its compatibility status;
-if status publication fails, the check run is changed to failure. Runs serialize
-per PR and do not cancel an in-flight publisher.
+cannot produce success. Successful finalization publishes compatibility status
+success first and authoritative app-check success last. Any publication failure
+attempts a blocking check and then a blocking compatibility status independently;
+a failed cleanup write does not suppress the other attempt. Runs serialize per PR
+and do not cancel an in-flight publisher.
 
 The documented pull-request workflow events do not include a dedicated action for
 manually adding or removing an issue link through the Development panel. The workflow therefore
