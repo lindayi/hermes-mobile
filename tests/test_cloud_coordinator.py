@@ -4302,7 +4302,9 @@ def test_review_report_rejects_forged_file_sha256_inventory(tmp_path):
 
     assert summary["review_valid"] is False
     assert StateStore(path).action(source_fix["key"])["handoff_state"] == "waiting_review"
-    assert StateStore(path).action(review["key"])["status"] == "sent"
+    rejected = StateStore(path).action(review["key"])
+    assert rejected["status"] == "completed"
+    assert "files do not match the exact head" in rejected["report_error"]
     assert not any(
         status.get("context") == "agent-review"
         for status in api.status_log.get(HEAD, [])
@@ -4310,7 +4312,14 @@ def test_review_report_rejects_forged_file_sha256_inventory(tmp_path):
 
 
 def test_completed_partial_review_report_persists_error_and_retries_once(tmp_path):
-    api = FakeApi(source_failure=True, review_status_present=False)
+    class ColdStartAgentReviewApi(FakeApi):
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if f"/commits/{self.head_sha}/check-runs?" in route:
+                return [run for run in values if run.get("name") != "agent-review"]
+            return values
+
+    api = ColdStartAgentReviewApi(source_failure=True, review_status_present=False)
     api.owner_reviews = []
     api.owner_review_body = "not a structured independent review"
     api.pull_files = [
@@ -4364,10 +4373,11 @@ def test_completed_partial_review_report_persists_error_and_retries_once(tmp_pat
     assert recovered["task_id"] == original_review["task_id"]
     assert recovered["dispatch_nonce"] == original_review["dispatch_nonce"]
     assert malformed_comment["body"] == malformed_body
-    assert sum(
-        comment.get("body", "").count("hermes-coordinator-outcome:")
-        for comment in api.comments
-    ) == 1
+    outcomes = [
+        comment["body"] for comment in api.comments
+        if "usable bound report" in comment.get("body", "")
+    ]
+    assert len(outcomes) == 1, outcomes
 
     for _ in range(3):
         Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
@@ -4385,14 +4395,173 @@ def test_completed_partial_review_report_persists_error_and_retries_once(tmp_pat
     assert correction["anchor_comment_id"] != original_review["anchor_comment_id"]
     assert StateStore(path).action(source_fix["key"])["task_id"] == source_fix["task_id"]
     assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert StateStore(path).action(original_review["key"])["report_retry_state"] == "reserved"
     assert not any(
         status.get("context") == "agent-review" and status.get("state") == "success"
         for status in api.status_log.get(HEAD, [])
     )
-    assert sum(
-        comment.get("body", "").count("hermes-coordinator-outcome:")
-        for comment in api.comments
-    ) == 1
+    outcomes = [
+        comment["body"] for comment in api.comments
+        if "usable bound report" in comment.get("body", "")
+    ]
+    assert len(outcomes) == 1, outcomes
+
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="changes_requested",
+        findings=[{
+            "path": "src/module_00.py",
+            "comment": "Keep this correction bounded and preserve the current behavior.",
+        }],
+        files=api.review_file_digests(),
+    )
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    recovered = StateStore(path).action(original_review["key"])
+    correction = StateStore(path).action(correction["key"])
+    followups = [
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "fix"
+        and action.get("task_type") == "review-followup"
+    ]
+    assert recovered["report_retry_state"] == "recovered"
+    assert correction["status"] == "completed"
+    assert correction["report_verdict"] == "changes_requested"
+    assert correction["publication_state"] == "done"
+    assert len(followups) == 1 and followups[0]["status"] == "sent"
+    assert api.fix_attempts == 2
+    assert not any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for status in api.status_log.get(HEAD, [])
+    )
+
+
+@pytest.mark.parametrize("evidence", [
+    "active", "unknown", "wrong_task_id", "missing_session",
+    "missing_session_task_id", "missing_task_owner",
+])
+def test_review_report_correction_requires_authenticated_terminal_task_metadata(
+        tmp_path, evidence):
+    api = FakeApi(source_failure=True, review_status_present=False)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    source_fix = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    original = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "review"
+    )
+    api.complete_review_task(
+        original["task_id"], original,
+        source_action=StateStore(path).action(source_fix["key"]),
+    )
+    remote_task = api.tasks[original["task_id"]]
+    if evidence == "active":
+        remote_task["state"] = "in_progress"
+    elif evidence == "unknown":
+        remote_task["state"] = "waiting_for_unknown_state"
+    elif evidence == "wrong_task_id":
+        remote_task.update(state="completed", id="another-task")
+    elif evidence == "missing_session":
+        remote_task.update(state="completed", sessions=[])
+    elif evidence == "missing_session_task_id":
+        remote_task["state"] = "completed"
+        remote_task["sessions"][0]["task_id"] = "another-task"
+    else:
+        remote_task.update(state="completed", owner=None)
+
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    persisted = StateStore(path).action(original["key"])
+
+    assert not [
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]
+    assert api.review_attempts == 1
+    if evidence in {"active", "unknown", "wrong_task_id"}:
+        assert persisted["status"] == "sent"
+        assert "report_error" not in persisted
+    else:
+        assert persisted["status"] == "completed"
+        assert persisted["report_retry_allowed"] is False
+        assert persisted["report_error"]
+        assert persisted["report_retry_state"] == "blocked"
+        for _ in range(2):
+            Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+                apply=True,
+            )
+        blockers = [
+            comment["body"] for comment in api.comments
+            if "single safe correction is unavailable or exhausted"
+            in comment.get("body", "")
+        ]
+        assert len(blockers) == 1
+
+
+def test_ambiguous_corrective_review_creation_is_never_reposted(tmp_path):
+    class LostCorrectionResponseApi(FakeApi):
+        def write(self, route, body):
+            if (route == "agents/repos/lindayi/hermes-mobile/tasks"
+                    and "new, bounded corrective review task" in body["prompt"]):
+                super().write(route, body)
+                raise ApiError("response lost", status=503)
+            return super().write(route, body)
+
+    api = LostCorrectionResponseApi(source_failure=True, review_status_present=False)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    source_fix = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    api.review_state = "PENDING"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    original = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "review"
+    )
+    api.complete_review_task(
+        original["task_id"], original,
+        source_action=StateStore(path).action(source_fix["key"]),
+        files={"frontend/styles.css": "a" * 64},
+    )
+    api.review_status_present = False
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    posts_before_reconcile = api.task_posts
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    assert correction["status"] == "uncertain"
+    assert "task_id" not in correction
+
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    assert api.task_posts == posts_before_reconcile
+    assert api.review_attempts == 2
+    assert StateStore(path).action(original["key"])["task_id"] == original["task_id"]
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "reserved"
+    assert len([
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]) == 1
 
 
 def test_review_report_findings_publish_and_trigger_bounded_followup(tmp_path):

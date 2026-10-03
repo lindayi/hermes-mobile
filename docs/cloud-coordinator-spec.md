@@ -462,6 +462,38 @@ and feed one bounded fixer follow-up for that exact head. The coordinator never
 infers review acceptance from task completion, a digest alone, a Copilot review
 request, or a status, and never invents a task-result API field.
 
+The task prompt is generated from this exact report contract. Top-level keys are
+`schema`, `nonce`, `session_id`, `repository`, `repository_id`, `pr`,
+`anchor_comment_id`, `role`, `head`, `base`, `source_start_head`,
+`source_session_id`, `source_comment_id`, `verdict`, `summary`, `findings`,
+`files`, and `report`. Each finding has exactly `path` and `comment`; paths must
+be reviewed changed paths and comments must be nonblank and at most 1,000
+characters. A `pass` has no findings; `changes_requested` has one through eight.
+Summary and report text are nonblank and at most 1,000 characters. The prompt
+includes the complete changed-path inventory, including deleted paths. `files`
+must map every inventory path exactly once: for each non-deleted path the reviewer
+independently computes lowercase SHA-256 over the exact Git-blob file bytes, and
+for a deleted path supplies JSON `null`. The coordinator independently fetches
+and hashes every non-deleted blob and accepts only an exact map; it never trusts
+the prompt or report to prove completeness.
+
+If a task returned by the saved task ID is positively terminal but its report is
+missing, malformed, or incomplete, apply mode durably records a bounded diagnostic
+and posts a deduplicated blocked outcome. A single corrective review may be
+reserved for that source report only after task ID/time, task and repository
+identities, scope, the unique terminal session, session owner/repository/user,
+prompt, branch, and session chronology are authenticated. The correction has a
+separate action, anchor, task, session, and nonce; it cannot replace or edit the
+old report and does not reset or consume the source-fixer budget. The durable
+reservation is made before task creation. An ambiguous creation, active or unknown
+task/session, or missing authentication metadata is never retried; terminal correction
+failure exhausts this separate one-attempt budget and remains a clear blocker.
+Repeated polls reuse the same deduplicated outcome. A valid corrected
+`changes_requested` report is published through the existing formal COMMENT path
+and can feed the existing bounded fixer. A valid `pass` can publish `agent-review`
+only after the full report, exact-head bindings, and independently verified file
+inventory pass the same strict checks.
+
 The validated completion time, session ID and receipt comment ID remain persisted
 with the receipt head/base and dispatch claim for restart. The authentic session
 completion is retained as `receipt_session_completed_at` in both the action and

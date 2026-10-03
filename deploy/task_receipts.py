@@ -18,6 +18,13 @@ REVIEW_REPORT_SCHEMA = "hermes-independent-review-report-v1"
 REVIEW_REPORT_HEADER = "Hermes-Review-Anchor: "
 REVIEW_REPORT_ROLE = "independent-reviewer"
 REVIEW_REPORT_VERDICTS = {"pass", "changes_requested"}
+REVIEW_REPORT_REQUIRED_FIELDS = (
+    "schema", "nonce", "session_id", "repository", "repository_id", "pr",
+    "anchor_comment_id", "role", "head", "base", "source_start_head",
+    "source_session_id", "source_comment_id", "verdict", "summary", "findings",
+    "files", "report",
+)
+REVIEW_REPORT_FINDING_FIELDS = ("path", "comment")
 MAX_REVIEW_REPORT_BYTES = 8192
 MAX_REVIEW_REPORT_LINES = 64
 MAX_REVIEW_REPORT_FINDINGS = 8
@@ -289,12 +296,7 @@ def _valid_review_report(report, *, nonce, session_id, pull_number, head_sha, ba
                          anchor_comment_id):
     if not isinstance(report, dict):
         return None
-    if set(report) != {
-        "schema", "nonce", "session_id", "repository", "repository_id", "pr",
-        "anchor_comment_id", "role",
-        "head", "base", "source_start_head", "source_session_id",
-        "source_comment_id", "verdict", "summary", "findings", "files", "report",
-    }:
+    if set(report) != set(REVIEW_REPORT_REQUIRED_FIELDS):
         return None
     if (
             report.get("schema") != REVIEW_REPORT_SCHEMA
@@ -321,7 +323,7 @@ def _valid_review_report(report, *, nonce, session_id, pull_number, head_sha, ba
         return None
     for finding in report["findings"]:
         if (not isinstance(finding, dict)
-                or set(finding) != {"path", "comment"}
+                or set(finding) != set(REVIEW_REPORT_FINDING_FIELDS)
                 or not _bounded_path(finding.get("path"))
                 or not _nonblank_string(finding.get("comment"), limit=MAX_REVIEW_REPORT_TEXT)):
             return None
