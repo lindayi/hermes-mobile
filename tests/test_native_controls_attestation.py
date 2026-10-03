@@ -34,6 +34,7 @@ def test_timeout_recovery_sources_have_exact_matching_release_pins():
     from deploy import native_controls_release as release
     root = Path(__file__).resolve().parents[1]
     assert controls._CONTROL_HASHES == release.APPROVED_CONTROL_HASHES
+    assert controls._PRE_CLARIFICATION_CONTROL_HASHES == release.PRE_CLARIFICATION_CONTROL_HASHES
     for name, digest in controls._CONTROL_HASHES.items():
         assert hashlib.sha256((root/name).read_bytes()).hexdigest() == digest, name
     assert release.approved_controls(root) == controls._CONTROL_HASHES
@@ -43,6 +44,7 @@ def test_timeout_baseline_remains_exactly_attested_for_drain_and_rollback(tmp_pa
     from deploy import native_controls_release as release
     import pytest
     baseline = getattr(controls, '_TIMEOUT_BASELINE_CONTROL_HASHES', None)
+    assert controls._PRE_CLARIFICATION_CONTROL_HASHES == release.PRE_CLARIFICATION_CONTROL_HASHES
     assert controls._PRE_ROUTING_CONTROL_HASHES == release.PRE_ROUTING_CONTROL_HASHES
     assert baseline is not None, 'The immediate pre-fix listener must remain attestable'
     assert baseline == release.TIMEOUT_BASELINE_CONTROL_HASHES

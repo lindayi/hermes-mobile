@@ -188,9 +188,11 @@ def fixture(tmp_path):
     (paths.source / 'backend/native_maintenance.py').write_text('maintenance')
     (paths.source / 'backend/native_session_deletion.py').write_text('deletion')
     (paths.source / 'backend/native_notifications.py').write_text('notifications')
-    from backend.model_controls import _CONTROL_HASHES, _PRE_ROUTING_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES
+    from backend.model_controls import (_CONTROL_HASHES, _PRE_CLARIFICATION_CONTROL_HASHES,
+                                        _PRE_ROUTING_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES)
     (paths.source / 'backend/model_controls.py').write_text(
         '_CONTROL_HASHES = ' + repr(_CONTROL_HASHES)
+        + '\n_PRE_CLARIFICATION_CONTROL_HASHES = ' + repr(_PRE_CLARIFICATION_CONTROL_HASHES)
         + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(_PRE_ROUTING_CONTROL_HASHES)
         + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(_PREVIOUS_CONTROL_HASHES)
         + '\n_TIMEOUT_BASELINE_CONTROL_HASHES = ' + repr(release.TIMEOUT_BASELINE_CONTROL_HASHES))

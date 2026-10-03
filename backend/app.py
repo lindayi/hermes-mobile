@@ -632,6 +632,23 @@ def create_app(settings=None, *, gateway_client=None):
     async def run_controls(rid:str,user=Depends(ready_user)):
         return await runtime_for(user).controls(user,rid)
 
+    @app.get(BASE+'/runs/{rid}/clarifications')
+    async def run_clarifications(rid:str,user=Depends(ready_user)):
+        return await runtime_for(user).clarifications_for_run(user,rid)
+
+    @app.post(BASE+'/runs/{rid}/clarifications/{question_id}/answer')
+    async def answer_clarification(rid:str,question_id:str,request:Request,user=Depends(ready_user)):
+        auth.require_mutation(request,user)
+        try:
+            body=await request.json()
+            return await runtime_for(user).answer_clarification(user,rid,question_id,body)
+        except RunConflict:
+            raise
+        except KeyError:
+            raise HTTPException(404,'Clarification unavailable') from None
+        except ValueError as exc:
+            raise HTTPException(422,'Invalid clarification answer') from exc
+
     @app.post(BASE+'/runs/{rid}/steer')
     async def steer_run(rid:str,request:Request,user=Depends(ready_user)):
         auth.require_mutation(request,user)
