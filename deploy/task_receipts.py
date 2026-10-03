@@ -1,17 +1,28 @@
 """Exact, bounded Copilot task completion receipts."""
 
 from datetime import datetime, timezone
+import json
 import re
 
 
 COPILOT_AGENT_ID = 198982749
 RECEIPT_RESULTS = {"ready", "conflict_incompatible", "policy_broken"}
 SHA_RE = re.compile(r"[0-9a-f]{40}")
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
 V2_RECEIPT_HEADER = "Hermes-Task-Receipt: v2"
 V2_RECEIPT_FIELDS = {"nonce", "session", "pr", "start_head", "head", "base", "result"}
 # Whole-comment limits leave room for a short quoted report and eight-line receipt.
 V2_TRANSPORT_MAX_BYTES = 8192
 V2_TRANSPORT_MAX_LINES = 64
+REVIEW_REPORT_SCHEMA = "hermes-independent-review-report-v1"
+REVIEW_REPORT_HEADER = "Hermes-Review-Anchor: "
+REVIEW_REPORT_ROLE = "independent-reviewer"
+REVIEW_REPORT_VERDICTS = {"pass", "changes_requested"}
+MAX_REVIEW_REPORT_BYTES = 8192
+MAX_REVIEW_REPORT_LINES = 64
+MAX_REVIEW_REPORT_FINDINGS = 8
+MAX_REVIEW_REPORT_FILES = 64
+MAX_REVIEW_REPORT_TEXT = 1000
 
 
 class ReceiptError(ValueError):
@@ -73,6 +84,16 @@ def _identity(value, expected):
 
 def _nonblank_string(value, *, limit=256):
     return isinstance(value, str) and bool(value.strip()) and len(value) <= limit
+
+
+def _bounded_path(value):
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= 200
+        and re.fullmatch(r"[A-Za-z0-9_./-]+", value) is not None
+        and not value.startswith("/")
+        and ".." not in value.split("/")
+    )
 
 
 def _expected_body(nonce, task_id, session_id, pull_number, start_head,
@@ -215,6 +236,171 @@ def find_receipt(comments, *, complete, nonce, task_id, session_id,
                       **({"version": "v2"} if version == "v2" else {})})
     if len(found) > 1:
         raise ReceiptError("Conflicting or duplicate task receipts")
+    return found[0] if found else None
+
+
+def _reply_transport_json(body, *, anchor_prefix):
+    if not isinstance(body, str):
+        raise ReceiptError("Review report body is missing")
+    try:
+        byte_count = len(body.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ReceiptError("Review report is not valid UTF-8") from error
+    if (byte_count > MAX_REVIEW_REPORT_BYTES or body.count("\n") >= MAX_REVIEW_REPORT_LINES
+            or "\r" in body):
+        raise ReceiptError("Review report exceeds the transport safety bounds")
+    lines = body.split("\n")
+    json_index = None
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip():
+            json_index = index
+            break
+    if json_index is None:
+        raise ReceiptError("Review report body is empty")
+    separator = lines[json_index - 1]
+    if json_index == 0 or (
+            separator.strip(" \t")
+            and not (_is_blockquote(separator)
+                     and not re.sub(r"^ {0,3}> ?", "", separator).strip(" \t"))):
+        raise ReceiptError("Review report is not separated from its quoted prefix")
+    prefix_lines = lines[:json_index]
+    if not prefix_lines or not any(_is_blockquote(line) for line in prefix_lines):
+        raise ReceiptError("Review report is missing the quoted anchor preamble")
+    if any(line.strip(" \t") and not _is_blockquote(line) for line in prefix_lines):
+        raise ReceiptError("Review report has untrusted text outside the quote")
+    unquoted = [
+        re.sub(r"^ {0,3}> ?", "", line)
+        for line in prefix_lines if line.strip(" \t")
+    ]
+    if not unquoted or unquoted[0] != anchor_prefix:
+        raise ReceiptError("Review report quote does not match the saved owner anchor")
+    payload = lines[json_index].strip()
+    try:
+        report = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise ReceiptError("Review report JSON is malformed") from error
+    if json.dumps(report, separators=(",", ":")) != payload:
+        raise ReceiptError("Review report JSON must be a single exact compact object")
+    return report, payload
+
+
+def _valid_review_report(report, *, nonce, session_id, pull_number, head_sha, base_sha,
+                         source_start_head, source_session_id, source_comment_id,
+                         anchor_comment_id):
+    if not isinstance(report, dict):
+        return None
+    if set(report) != {
+        "schema", "nonce", "session_id", "repository", "repository_id", "pr",
+        "anchor_comment_id", "role",
+        "head", "base", "source_start_head", "source_session_id",
+        "source_comment_id", "verdict", "summary", "findings", "files", "report",
+    }:
+        return None
+    if (
+            report.get("schema") != REVIEW_REPORT_SCHEMA
+            or report.get("nonce") != nonce
+            or report.get("session_id") != session_id
+            or report.get("repository") != "lindayi/hermes-mobile"
+            or report.get("repository_id") != 1399942965
+            or report.get("pr") != pull_number
+            or report.get("anchor_comment_id") != anchor_comment_id
+            or report.get("role") != REVIEW_REPORT_ROLE
+            or report.get("head") != head_sha
+            or report.get("base") != base_sha
+            or report.get("source_start_head") != source_start_head
+            or report.get("source_session_id") != source_session_id
+            or report.get("source_comment_id") != source_comment_id
+            or report.get("verdict") not in REVIEW_REPORT_VERDICTS
+            or not _nonblank_string(report.get("summary"), limit=MAX_REVIEW_REPORT_TEXT)
+            or not _nonblank_string(report.get("report"), limit=MAX_REVIEW_REPORT_TEXT)
+            or not isinstance(report.get("findings"), list)
+            or len(report["findings"]) > MAX_REVIEW_REPORT_FINDINGS
+            or not isinstance(report.get("files"), dict)
+            or not 1 <= len(report["files"]) <= MAX_REVIEW_REPORT_FILES
+    ):
+        return None
+    for finding in report["findings"]:
+        if (not isinstance(finding, dict)
+                or set(finding) != {"path", "comment"}
+                or not _bounded_path(finding.get("path"))
+                or not _nonblank_string(finding.get("comment"), limit=MAX_REVIEW_REPORT_TEXT)):
+            return None
+    for path, digest in report["files"].items():
+        if (not _bounded_path(path)
+                or digest is not None and (
+                    not isinstance(digest, str)
+                    or SHA256_RE.fullmatch(digest) is None
+                )):
+            return None
+    if report["verdict"] == "pass" and report["findings"]:
+        return None
+    if report["verdict"] == "changes_requested" and not report["findings"]:
+        return None
+    return report
+
+
+def find_review_report(comments, *, complete, anchor_prefix, nonce, session_id,
+                       pull_number, head_sha, base_sha, source_start_head,
+                       source_session_id, source_comment_id, anchor_comment_id,
+                       session_created_at, session_completed_at, now):
+    if (complete is not True or not isinstance(comments, list)
+            or len(comments) > 10000
+            or not all(isinstance(comment, dict) for comment in comments)
+            or not _nonblank_string(anchor_prefix, limit=256)
+            or not all(_nonblank_string(value) for value in (
+                nonce, session_id, source_session_id,
+            ))
+            or type(source_comment_id) is not int or source_comment_id <= 0
+            or type(anchor_comment_id) is not int or anchor_comment_id <= 0
+            or type(pull_number) is not int or pull_number < 1
+            or any(not isinstance(value, str) or SHA_RE.fullmatch(value) is None
+                   for value in (head_sha, base_sha, source_start_head))):
+        raise ReceiptError("Review report identity is incomplete")
+    if not isinstance(now, datetime) or now.tzinfo is None:
+        raise ReceiptError("Review report clock must include a timezone")
+    now = now.astimezone(timezone.utc)
+    session_time = _time(session_created_at)
+    completed_time = _time(session_completed_at)
+    if not session_time <= completed_time <= now:
+        raise ReceiptError("Review session chronology is invalid")
+    found = []
+    for comment in comments:
+        author, body = comment.get("user"), comment.get("body")
+        if (not _identity(author, COPILOT_AGENT_ID)
+                or not isinstance(body, str) or nonce not in body):
+            continue
+        if comment.get("updated_at") != comment.get("created_at"):
+            raise ReceiptError("Review report was edited")
+        created = _time(comment.get("created_at"))
+        if not session_time <= created <= completed_time or created > now:
+            raise ReceiptError("Review report is outside the documented session interval")
+        report, payload = _reply_transport_json(body, anchor_prefix=anchor_prefix)
+        report = _valid_review_report(
+            report,
+            nonce=nonce,
+            session_id=session_id,
+            pull_number=pull_number,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            source_start_head=source_start_head,
+            source_session_id=source_session_id,
+            source_comment_id=source_comment_id,
+            anchor_comment_id=anchor_comment_id,
+        )
+        if report is None:
+            raise ReceiptError("Review report fields or bindings do not match")
+        comment_id = comment.get("id")
+        if type(comment_id) is not int or comment_id <= 0:
+            raise ReceiptError("Review report comment identity is malformed")
+        found.append({
+            "comment_id": comment_id,
+            "created_at": comment["created_at"],
+            "body": body,
+            "payload": payload,
+            "report": report,
+        })
+    if len(found) > 1:
+        raise ReceiptError("Conflicting or duplicate review reports")
     return found[0] if found else None
 
 

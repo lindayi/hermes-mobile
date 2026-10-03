@@ -50,7 +50,7 @@ def test_bound_proof_is_durable_before_compaction_and_survives_restart(tmp_path,
     api, store, worker, action = bound_worker(tmp_path)
     finish(api, action)
     api.unresolved = False
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    refresh_owner_review(api, RESULT_HEAD)
     original_retire = store.retire
     observed = []
 
@@ -166,11 +166,7 @@ def test_bound_result_head_clears_sensitive_authorization(tmp_path):
     # Publish a new structured owner review for the result head, then select its
     # exact raw body digest in a fresh authorization command.
     api.authorize_sha = RESULT_HEAD
-    api.owner_review_id += 1
-    api.owner_review_body = json.dumps({
-        **json.loads(api.owner_review_body), "reviewed_head_sha": RESULT_HEAD,
-    }, separators=(",", ":"))
-    api.owner_review_digest = hashlib.sha256(api.owner_review_body.encode("utf-8")).hexdigest()
+    refresh_owner_review(api, RESULT_HEAD, review_id=api.owner_review_id + 1)
     api.comments.append({
         "id": 10001,
         "body": (f"/hermes authorize-sensitive {RESULT_HEAD} review "
@@ -253,13 +249,12 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     first = next(a for a in store.actions().values() if a["kind"] == "fix")
     finish(api, first)
     api.pending_required = True
-    api.review_sha = RESULT_HEAD
     api.review_state = stale_review_state
-    # Same result head is insufficient: this review predates task completion.
+    # A stale-head owner report is not evidence for the changed result head.
     waiting = run()
     assert not waiting["auto_merge_requested"] and api.fix_attempts == 1
     assert store.action(first["key"])["handoff_state"] == "waiting_review"
-    assert sum(route.endswith("/requested_reviewers") for route, _ in api.writes) == 1
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     saved = store.action(first["key"])
     assert saved["receipt_session_completed_at"] == "2026-10-01T12:05:30Z"
     assert saved["receipt_completed_at"] == saved["receipt_session_completed_at"]
@@ -271,38 +266,80 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     assert store.action(first["key"])["handoff_state"] == "waiting_review"
     assert not waiting["repair_requested"] and not waiting["auto_merge_requested"]
     assert api.fix_attempts == 1
-    assert sum(route.endswith("/requested_reviewers") for route, _ in api.writes) == 1
+    assert api.review_attempts == 1
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    api.unresolved = False
+    api.review_state = "PENDING"
+    review = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "review"
+    )
+    api.complete_review_task(
+        review["task_id"],
+        review,
+        source_action=StateStore(store.path).action(first["key"]),
+        verdict="changes_requested",
+        findings=[{
+            "path": "deploy/cloud_coordinator.py",
+            "comment": "Publish a bounded follow-up fixer request before approval.",
+        }],
+        report="One bounded follow-up is required before approval.",
+    )
+    first_review = run()
+    second_review = run()
+    third_review = run()
+    assert not first_review["review_valid"]
+    assert not second_review["review_valid"]
+    assert not third_review["review_valid"]
     api.review_sha = RESULT_HEAD
-    api.review_state = "COMMENTED"
-    api.review_submitted_at = "2026-10-01T08:05:31-04:00"
-    assert run()["repair_requested"]
-    second = next(a for a in store.actions().values() if a.get("task_id") == "task-2")
+    second = next(
+        a for a in store.actions().values()
+        if (a.get("kind") == "fix"
+            and a.get("task_id") != first["task_id"]
+            and a.get("head") == RESULT_HEAD)
+    )
     assert second["head"] == RESULT_HEAD
     assert store.action(first["key"]) is None
     assert store.snapshot()["enrollments"]["16"]["receipt_proofs"][0]["receipt_head"] == RESULT_HEAD
     durable = StateStore(store.path).snapshot()["enrollments"]["16"]["receipt_proofs"][0]
     assert durable["receipt_session_completed_at"] == "2026-10-01T12:05:30Z"
-    api.complete_task(second["task_id"], second)
-    # The second task keeps the same head but completes after the earlier review.
+    final_head = "d" * 40
+    api.complete_task(second["task_id"], second, head_sha=final_head)
+    api.head_sha = final_head
+    api.pull["head"]["sha"] = final_head
+    # The second task advances the PR head after the earlier review findings.
     api.tasks[second["task_id"]]["sessions"][0]["completed_at"] = "2026-10-01T12:07:00Z"
     api.tasks[second["task_id"]]["updated_at"] = "2026-10-01T12:10:00Z"
     api.unresolved = False
-    api.review_state = "APPROVED"
+    api.source_failure = False
+    api.review_state = "PENDING"
     waiting = run()
     assert store.action(second["key"])["handoff_state"] == "waiting_review"
     assert not waiting["auto_merge_requested"] and api.fix_attempts == 2
     api.tasks.clear()
     assert not run()["auto_merge_requested"]
-    api.review_submitted_at = "2026-10-01T12:07:01Z"
+    final_review = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "review" and action.get("source_task_id") == second["task_id"]
+    )
+    api.complete_review_task(
+        final_review["task_id"],
+        final_review,
+        source_action=StateStore(store.path).action(second["key"]),
+        verdict="pass",
+        findings=[],
+        report="No further bounded follow-up required.",
+    )
+    assert not run()["auto_merge_requested"]
     assert not run()["auto_merge_requested"]  # Required checks remain pending.
     api.pending_required = False
-    refresh_owner_review(api, RESULT_HEAD)
+    refresh_owner_review(api, final_head, submitted_at="2026-10-01T12:07:02Z")
     assert run()["auto_merge_requested"]
-    assert api.graphql_writes[-1][1]["expectedHeadOid"] == RESULT_HEAD
+    assert api.graphql_writes[-1][1]["expectedHeadOid"] == final_head
     run()
     assert len(api.graphql_writes) == 1 and api.fix_attempts == 2
     assert store.snapshot()["enrollments"]["16"]["authorized_head"] == HEAD
-    api.head_sha = "d" * 40
+    api.head_sha = "e" * 40
     api.pull["head"]["sha"] = api.head_sha
     assert "unauthorized-continuation" in run()["reasons"]
     assert len(api.graphql_writes) == 1 and api.fix_attempts == 2
@@ -360,7 +397,7 @@ def test_actual_paired_v2_main_advance_keeps_authority_but_requires_neutral_repa
     api, store, first = actual_starter_consumer(tmp_path)
     finish_v2(api, first)
     api.unresolved = False
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    refresh_owner_review(api, RESULT_HEAD)
     api.pending_required = True
 
     def run():
@@ -379,11 +416,17 @@ def test_actual_paired_v2_main_advance_keeps_authority_but_requires_neutral_repa
     assert "unauthorized-continuation" not in result["reasons"]
     assert not result["auto_merge_requested"] and not api.graphql_writes
     assert result["repair_requested"]
-    second = next(a for a in store.actions().values() if a.get("task_id") == "task-2")
+    second = next(
+        a for a in store.actions().values()
+        if (a.get("kind") == "fix"
+            and a.get("task_id") != first["task_id"]
+            and a.get("task_type") == "neutral")
+    )
     assert second["head"] == RESULT_HEAD and second["main_sha"] == moved_main
     assert second["task_type"] == "neutral"
     assert f"base={moved_main}\n" in second["body"]
     assert api.fix_attempts == 2
+    assert api.review_attempts == 0
     assert store.action(first["key"]) is None
     proof = store.snapshot()["enrollments"]["16"]["receipt_proofs"][0]
     assert proof["receipt_base"] == BASE and proof["main_sha"] == BASE
@@ -404,8 +447,17 @@ def test_actual_paired_v2_main_advance_keeps_authority_but_requires_neutral_repa
     api.strict_protection = False
     assert not run()["auto_merge_requested"]  # Never bypass strict current-main policy.
     api.strict_protection = True
-    refresh_owner_review(api, repaired_head)
-    assert run()["auto_merge_requested"]
+    review = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "review"
+    )
+    api.complete_review_task(
+        review["task_id"], review, source_action=StateStore(store.path).action(second["key"]),
+    )
+    published = run()
+    assert not published["review_valid"]
+    merged = run()
+    assert merged["auto_merge_requested"]
     assert api.graphql_writes[-1][1]["expectedHeadOid"] == repaired_head
     run()
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
@@ -459,8 +511,8 @@ def test_compacted_receipt_metadata_must_match_canonical_body(tmp_path, version,
     api, store, worker, action = bound_worker(tmp_path)
     (finish_v2 if version == "v2" else finish)(api, action)
     api.unresolved = False
+    refresh_owner_review(api, RESULT_HEAD)
     api.pending_required = True
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
     worker.run(apply=True)
     assert store.action(action["key"]) is None
     enrollment = store.snapshot()["enrollments"]["16"]
@@ -504,8 +556,8 @@ def test_restart_revalidates_unique_unchanged_strict_numeric_receipt(tmp_path, v
     api, store, worker, action = bound_worker(tmp_path)
     (finish_v2 if version == "v2" else finish)(api, action)
     api.unresolved = False
+    refresh_owner_review(api, RESULT_HEAD)
     api.pending_required = True
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
     worker.run(apply=True)
     assert store.action(action["key"]) is None
     api.tasks.clear()
@@ -754,8 +806,8 @@ def test_admitted_starter_body_report_and_v2_receipt_survive_restart_and_manual_
     api.closing_issues = []  # The starter proof is not lifetime PR authority.
     finish_v2(api, action)
     api.unresolved = False
+    refresh_owner_review(api, RESULT_HEAD)
     api.pending_required = True
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
 
     def run():
         return Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)["pull_requests"][0]
@@ -779,6 +831,7 @@ def test_admitted_starter_body_report_and_v2_receipt_survive_restart_and_manual_
     assert enrollment["authorized_head"] == HEAD and enrollment["attempts"] == 1
     assert enrollment["owner_authorized_head"] == RESULT_HEAD
     api.pending_required = False
-    refresh_owner_review(api, RESULT_HEAD)
+    refresh_owner_review(api, RESULT_HEAD, submitted_at="2026-10-01T12:07:00Z")
     assert run()["auto_merge_requested"]
     assert len(api.graphql_writes) == 1 and api.fix_attempts == 1
+    assert api.review_attempts == 0

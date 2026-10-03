@@ -426,19 +426,50 @@ independent review. Copilot feedback is supplemental; COMMENTED or missing APPRO
 alone does not block acceptance, trigger repeated review requests, or consume fixer
 budget. Actual open findings must still be resolved, and a definite rejection is
 not acceptance.
-For task handoff, an authenticated submitted review on the exact result head
-completes the review request only when its timezone-aware submission instant is
-strictly after the independently validated task session completion and no later
-than the current clock. This also applies when the task leaves the head unchanged;
-an earlier approval cannot shortcut the handoff. The validated completion time,
-session ID and receipt comment ID are persisted with the receipt head/base and
-dispatch claim for restart. The authentic session completion is retained as
-`receipt_session_completed_at` in both the action and the SHA-bound enrollment's
-`receipt_proofs` projection before compaction, alongside the supported
-`receipt_completed_at` metadata. Observation time or mutable task update time is
-not a substitute. Missing or invalid completion proof fails closed. A fresh submitted
-review completes handoff even if unresolved threads keep the approval gate false;
-those threads then remain eligible for the next bounded repair.
+Task receipt handoff and review acceptance are separate. After the exact result
+head, repository, base and authorization fences pass, the coordinator completes
+the source-writing task handoff only when the existing independent-review gate
+accepts a current owner-published review on that head, with complete review and
+thread collection and all threads resolved. Otherwise the task stays in
+`waiting_review`, retaining its lock without consuming fixer or handoff-wait
+budgets. Unresolved findings and definite rejection are not treated as acceptance.
+The coordinator never requests or waits for an advisory Copilot review. Completing
+a handoff is not merge evidence: merge still requires the valid independent-agent
+review, resolved threads, required checks and every other existing guard.
+
+The existing task API exposes task identity, GitHub pull/branch artifacts and
+authenticated session metadata. After a source task reaches a verified `ready`
+receipt, the coordinator publishes one owner-authored anchor issue comment for
+that exact head and dispatches one distinct read-only reviewer task on the same
+frozen PR head/base. The reviewer must reply to the saved anchor with
+`engine-tools-reply_to_comment`; the observed transport prepends a quoted
+blockquote excerpt of the anchor, a blank separator line, and then one compact
+JSON `hermes-independent-review-report-v1` object outside the quote. The report
+binds the saved nonce, reviewer session, repository, PR, reviewed head/base,
+source start head, source session, source receipt comment, bounded verdict,
+bounded findings, reviewed file hashes, and bounded narrative report. The child
+does not echo its review-task UUID; the parent authenticates the saved task ID
+and session through the task API.
+
+The parser accepts only that bounded quoted-reply envelope. Edited, oversized,
+ambiguous, foreign, stale, wrong-session, wrong-binding, or duplicate reports
+fail closed, and a report inside the quote is never evidence. A verified report
+triggers one owner-published formal COMMENT review on the exact head using the
+existing `hermes-independent-agent-review-v1` body schema, with its
+`evidence_sha256` bound to the canonical compact report JSON. Positive reports
+produce `verdict:"pass"`; bounded findings produce `verdict:"changes_requested"`
+and feed one bounded fixer follow-up for that exact head. The coordinator never
+infers review acceptance from task completion, a digest alone, a Copilot review
+request, or a status, and never invents a task-result API field.
+
+The validated completion time, session ID and receipt comment ID remain persisted
+with the receipt head/base and dispatch claim for restart. The authentic session
+completion is retained as `receipt_session_completed_at` in both the action and
+the SHA-bound enrollment's `receipt_proofs` projection before compaction, alongside
+the supported `receipt_completed_at` metadata. Observation time or mutable task
+update time is not a substitute. Missing or invalid completion proof fails closed.
+Unresolved findings and threads remain eligible for the existing bounded repair
+path; no fixer attempt is consumed just for awaiting advisory Copilot feedback.
 Preparation stages verified receipt/handoff state in memory. Controller evidence
 is collected against durable lifecycle history plus all newly observed merge
 events in the complete plan. The scan commits those source events, receipt state,
@@ -466,8 +497,9 @@ deployment-policy docs are sensitive too. This PR classification concerns merge
 authorization; the separate release policy still classifies the complete diff
 from the deployed base before deployment.
 
-The coordinator does not publish or require `cloud-review`; a status is not a
-substitute for reading the structured independent review. The current protected
+The coordinator may publish its existing owned advisory `cloud-review` status,
+but does not require it; a status is not a substitute for reading the structured
+independent review. The current protected
 policy is exactly `source-ci` (Actions app 15368), `integration-tests`,
 `agent-review`, and `issue-link` (Actions app 15368), with strict/up-to-date checks
 and required conversation resolution. Missing, extra, or differently app-bound

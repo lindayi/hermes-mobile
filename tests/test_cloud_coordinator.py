@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -43,6 +44,7 @@ def test_accepted_receipt_handoff_uses_fresh_scanned_main(tmp_path, monkeypatch,
     coordinator.run(apply=True)
     fix = next(a for a in store.actions().values() if a["kind"] == "fix")
     api.complete_task(fix["task_id"], fix)
+    api.unresolved = False
     api.review_state = "PENDING"
     coordinator.run(apply=True)
     assert store.action(fix["key"])["receipt_base"] == BASE
@@ -75,9 +77,11 @@ def test_accepted_receipt_handoff_uses_fresh_scanned_main(tmp_path, monkeypatch,
     if hazard is None:
         assert action["handoff_state"] == "done"
         assert api.fix_attempts == 2
+        assert api.review_attempts == 0
         assert action["receipt_base"] == BASE
     else:
         assert api.fix_attempts == 1
+        assert api.review_attempts == 0
         assert api.graphql_writes == graphql
 
 
@@ -135,18 +139,22 @@ def enrolled_record(**changes):
     return enrollment
 
 
-def refresh_owner_review(api, head_sha, *, review_id=None, evidence_sha256=None):
-    api.owner_review_id = api.owner_review_id + 1 if review_id is None else review_id
-    api.owner_review_body = json.dumps({
+def refresh_owner_review(api, head_sha, *, review_id=None, evidence_sha256=None,
+                         submitted_at="2026-10-01T12:06:00Z"):
+    review_id = api.owner_review_id + 1 if review_id is None else review_id
+    body = json.dumps({
         "schema": "hermes-independent-agent-review-v1",
         "reviewed_head_sha": head_sha,
         "review_method": "independent-agent",
         "verdict": "pass",
         "evidence_sha256": evidence_sha256 or "c" * 64,
     }, separators=(",", ":"))
-    api.owner_review_digest = hashlib.sha256(
-        api.owner_review_body.encode("utf-8"),
-    ).hexdigest()
+    api.set_owner_review(
+        review_id=review_id,
+        head_sha=head_sha,
+        body=body,
+        submitted_at=submitted_at,
+    )
 
 
 def test_enrollment_requires_an_authenticated_owner_command_and_main_pr():
@@ -259,6 +267,7 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
         "updated_at": "2026-10-01T12:04:00Z",
     })
     api.unresolved = False
+    refresh_owner_review(api, result_head)
     api.review_submitted_at = "2026-10-01T12:04:01Z"
 
     Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
@@ -274,8 +283,13 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
     assert store.snapshot()["enrollments"]["16"]["authorized_head"] == HEAD
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
     assert api.fix_attempts == 1
+    assert api.review_attempts == 0
     assert "Hermes-Task-Receipt: v2" in fix["body"]
-    api.comments[-1]["updated_at"] = "2026-10-01T12:04:01Z"
+    receipt_comment = next(
+        comment for comment in api.comments
+        if comment.get("id") == completed["receipt_comment_id"]
+    )
+    receipt_comment["updated_at"] = "2026-10-01T12:04:01Z"
 
     result = Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
 
@@ -406,49 +420,38 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     api.head_sha = result_head
     api.pull["head"]["sha"] = result_head
     finish_task(first_fix, result_head, 900, transported=True)
+    api.unresolved = False
+    refresh_owner_review(api, result_head)
+    api.source_failure = True
+    api.source_failure_sha = result_head
     coordinator().run(apply=True)
 
-    first_proof = store.action(first_fix["key"])
+    first_proof = store.action(first_fix["key"]) or next(
+        proof for proof in store.snapshot()["enrollments"]["16"]["receipt_proofs"]
+        if proof["task_id"] == first_fix["task_id"]
+    )
     assert first_proof["receipt_result"] == "ready"
     assert first_proof["receipt_start_head"] == HEAD
     assert first_proof["receipt_head"] == result_head
-    assert api.fix_attempts == 1  # PR33 awaits a current-head review before another repair.
-    assert first_proof["handoff_state"] == "waiting_review"
-    review_requests = [route for route, _ in api.writes
-                       if route.endswith("/requested_reviewers")]
-    assert len(review_requests) == 1
-    coordinator().run(apply=True)
-    assert store.action(first_fix["key"])["handoff_state"] == "waiting_review"
-    assert len([route for route, _ in api.writes
-                if route.endswith("/requested_reviewers")]) == 1
-    assert api.fix_attempts == 1
-    api.review_sha = result_head
-    api.review_state = "COMMENTED"
-    api.review_submitted_at = "2026-10-01T12:04:01Z"
-    coordinator().run(apply=True)
-    assert store.action(first_fix["key"]) is None
+    assert api.fix_attempts == 2
+    assert api.review_attempts == 0
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     durable = store.snapshot()["enrollments"]["16"]["receipt_proofs"][0]
     assert durable["receipt_start_head"] == HEAD
     assert durable["receipt_head"] == result_head
-    assert api.fix_attempts == 2
     second_fix = next(
         action for action in store.actions().values()
-        if action.get("kind") == "fix" and action.get("task_id") == "task-2"
+        if (action.get("kind") == "fix"
+            and action.get("task_id") != first_fix["task_id"]
+            and action.get("head") == result_head)
     )
     assert second_fix["head"] == result_head
 
     finish_task(second_fix, result_head, 901)
     api.unresolved = False
-    coordinator().run(apply=True)
-    assert not api.graphql_writes
-    assert store.action(second_fix["key"])["receipt_head"] == result_head
-
-    api.review_sha = result_head
-    api.review_state = "APPROVED"
-    api.review_submitted_at = "2026-10-01T12:04:02Z"
-    refresh_owner_review(api, result_head)
+    api.source_failure = False
     result = coordinator().run(apply=True)
-
+    assert store.action(second_fix["key"])["receipt_head"] == result_head
     assert api.graphql_writes[-1][1]["expectedHeadOid"] == result_head
     assert result["pull_requests"][0]["auto_merge_requested"] is True
     assert store.snapshot()["enrollments"]["16"]["authorized_head"] == HEAD
@@ -1199,6 +1202,7 @@ class FakeApi:
         self.review_sha = None
         self.status_id = 1
         self.status_created_at = "2026-10-01T12:01:00Z"
+        self.status_log = {}
         self.workflow_runs = workflow_runs
         self.pull_state = pull_state
         self.merged = merged
@@ -1214,13 +1218,17 @@ class FakeApi:
         self.workflow_routes = []
         self.pull_reads = 0
         self.writes = []
+        self.task_posts = 0
         self.fix_attempts = 0
+        self.review_attempts = 0
         self.tasks = {}
         self.requested_reviewers = []
         self.review_state = "APPROVED"
         self.review_submitted_at = "2026-10-01T12:00:00Z"
         self.owner_review_id = 64001
         self.owner_review_node_id = "PRR_kwDOU3FvNc8AAAABQehXFA"
+        self.owner_review_head_sha = authorize_sha if authorize else head_sha
+        self.owner_review_submitted_at = "2026-10-01T11:00:00Z"
         self.owner_login = "lindayi"
         self.owner_review_body = json.dumps({
             "schema": "hermes-independent-agent-review-v1",
@@ -1232,7 +1240,15 @@ class FakeApi:
         self.owner_review_digest = hashlib.sha256(
             self.owner_review_body.encode("utf-8"),
         ).hexdigest()
+        self.pull_files = None
+        self.blob_contents = {
+            "d" * 40: b"frontend style bytes",
+            "e" * 40: b"backend auth bytes",
+        }
+        self.owner_reviews = []
         self.graphql_writes = []
+        self.next_issue_comment_id = 1000
+        self.next_review_id = 65000
         self.pull = valid_pr() | {
             "node_id": "PR_node_16", "auto_merge": None,
             "state": pull_state, "merged": merged,
@@ -1255,6 +1271,41 @@ class FakeApi:
                 ),
                 "updated_at": "2026-10-01T11:30:00Z",
             })
+        self._sync_owner_reviews()
+
+    def _current_owner_review_record(self, *, graphql=False):
+        record = {
+            "id": self.owner_review_id,
+            "node_id": self.owner_review_node_id,
+            "state": "COMMENTED",
+            "commit_id": self.owner_review_head_sha,
+            "submitted_at": self.owner_review_submitted_at,
+            "body": self.owner_review_body,
+            "user": {"id": OWNER, "login": self.owner_login},
+        }
+        if graphql:
+            record.update(
+                updatedAt=self.owner_review_submitted_at,
+                lastEditedAt=None,
+                includesCreatedEdit=False,
+            )
+        return record
+
+    def _sync_owner_reviews(self):
+        self.owner_reviews = []
+
+    def set_owner_review(self, *, review_id, head_sha, body, submitted_at):
+        current = self._current_owner_review_record()
+        if current["id"] != review_id:
+            self.owner_reviews.append(current)
+        self.owner_review_id = review_id
+        self.owner_review_node_id = f"PRR_kwDOU3FvNc8AAAAB{review_id}"
+        self.owner_review_head_sha = head_sha
+        self.owner_review_submitted_at = submitted_at
+        self.owner_review_body = body
+        self.owner_review_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        self.owner_reviews = [review for review in self.owner_reviews
+                              if review.get("id") != review_id]
 
     def get(self, route):
         if route == "repos/lindayi/hermes-mobile":
@@ -1262,7 +1313,10 @@ class FakeApi:
         if route == "user":
             return {"id": OWNER}
         if route.startswith("agents/repos/lindayi/hermes-mobile/tasks/"):
-            return self.tasks[route.rsplit("/", 1)[-1]]
+            task_id = route.rsplit("/", 1)[-1]
+            if task_id not in self.tasks:
+                raise ApiError("task not found", status=404)
+            return self.tasks[task_id]
         if route == "repos/lindayi/hermes-mobile/commits/main":
             self.main_reads += 1
             if self.current_main_sha is not None:
@@ -1277,6 +1331,15 @@ class FakeApi:
             return {"required_conversation_resolution": {
                 "enabled": self.conversation_resolution,
             }}
+        if route.startswith("repos/lindayi/hermes-mobile/git/blobs/"):
+            sha = route.rsplit("/", 1)[-1]
+            data = self.blob_contents[sha]
+            return {
+                "sha": sha,
+                "encoding": "base64",
+                "size": len(data),
+                "content": base64.b64encode(data).decode("ascii"),
+            }
         if route == "repos/lindayi/hermes-mobile/pulls/16":
             self.pull_reads += 1
             if self.race and self.pull_reads >= 3:
@@ -1327,9 +1390,7 @@ class FakeApi:
                           if comment.get("updated_at", "") >= since]
             return values
         if route.endswith("/pulls/16/files?per_page=100"):
-            if self.sensitive:
-                return [{"filename": "backend/auth.py"}]
-            return [{"filename": "frontend/styles.css"}]
+            return list(self.review_pull_files())
         if route.endswith("/pulls/16/reviews?per_page=100"):
             reviews = [{
                 "id": 63001, "state": self.review_state,
@@ -1337,14 +1398,8 @@ class FakeApi:
                 "submitted_at": self.review_submitted_at,
                 "user": {"id": COPILOT_REVIEWER},
             }]
-            reviews.append({
-                "id": self.owner_review_id, "node_id": self.owner_review_node_id,
-                "state": "COMMENTED",
-                "commit_id": self.authorize_sha if self.authorize_sha_review else self.head_sha,
-                "submitted_at": "2026-10-01T11:00:00Z",
-                "body": self.owner_review_body,
-                "user": {"id": OWNER, "login": self.owner_login},
-            })
+            reviews.extend(self.owner_reviews)
+            reviews.append(self._current_owner_review_record())
             return reviews
         if f"/commits/{self.head_sha}/check-runs?" in route:
             return [
@@ -1361,14 +1416,18 @@ class FakeApi:
                     ("agent-review", None), ("issue-link", 15368),
                 )
             ]
-        if route.endswith("/commits/" + self.head_sha + "/statuses?per_page=100"):
-            if not self.review_status_present:
-                return []
-            return [{
-                "id": self.status_id,
-                "context": "cloud-review", "state": self.status_state,
-                "creator": {"id": self.status_author_id}, "created_at": self.status_created_at,
-            }]
+        if "/statuses?per_page=100" in route:
+            sha = route.split("/commits/", 1)[1].split("/", 1)[0]
+            values = list(self.status_log.get(sha, []))
+            if (sha == self.head_sha and self.review_status_present
+                    and not any(item.get("context") == "cloud-review" for item in values)):
+                values.append({
+                    "id": self.status_id,
+                    "context": "cloud-review", "state": self.status_state,
+                    "creator": {"id": self.status_author_id},
+                    "created_at": self.status_created_at,
+                })
+            return values
         if "/actions/runs?" in route:
             self.workflow_reads += 1
             self.workflow_routes.append(route)
@@ -1388,20 +1447,30 @@ class FakeApi:
 
     def graphql(self, query, variables):
         if "PullRequestReview" in query:
+            requested = variables.get("id")
+            review = next((item for item in self.owner_reviews
+                           if item["node_id"] == requested), None)
+            if review is None and self._current_owner_review_record()["node_id"] == requested:
+                review = self._current_owner_review_record()
+            assert review is not None, requested
+            review = {
+                **review,
+                "updatedAt": review["submitted_at"],
+                "lastEditedAt": None,
+                "includesCreatedEdit": False,
+            }
             return {
                 "data": {
                     "node": {
-                        "id": self.owner_review_node_id,
-                        "databaseId": self.owner_review_id,
-                        "submittedAt": "2026-10-01T11:00:00Z",
-                        "updatedAt": "2026-10-01T11:00:00Z",
-                        "lastEditedAt": None,
-                        "includesCreatedEdit": False,
-                        "state": "COMMENTED",
-                        "body": self.owner_review_body,
-                        "commit": {"oid": (
-                            self.authorize_sha if self.authorize_sha_review else self.head_sha
-                        )},
+                        "id": review["node_id"],
+                        "databaseId": review["id"],
+                        "submittedAt": review["submitted_at"],
+                        "updatedAt": review["updatedAt"],
+                        "lastEditedAt": review["lastEditedAt"],
+                        "includesCreatedEdit": review["includesCreatedEdit"],
+                        "state": review["state"],
+                        "body": review["body"],
+                        "commit": {"oid": review["commit_id"]},
                         "author": {"login": self.owner_login},
                         "pullRequest": {
                             "number": 16,
@@ -1434,11 +1503,33 @@ class FakeApi:
         if route == "repos/lindayi/hermes-mobile/pulls/16/requested_reviewers":
             self.requested_reviewers = [{"id": COPILOT_REVIEWER}]
             return self.pull | {"requested_reviewers": self.requested_reviewers}
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews":
+            submitted_at = f"2026-10-01T12:{self.next_review_id % 60:02d}:00Z"
+            self.set_owner_review(
+                review_id=self.next_review_id,
+                head_sha=body["commit_id"],
+                body=body["body"],
+                submitted_at=submitted_at,
+            )
+            self.next_review_id += 1
+            return {
+                "id": self.owner_review_id,
+                "node_id": self.owner_review_node_id,
+                "state": "COMMENTED",
+                "commit_id": body["commit_id"],
+                "submitted_at": submitted_at,
+                "body": body["body"],
+                "user": {"id": OWNER, "login": self.owner_login},
+            }
         if route == "agents/repos/lindayi/hermes-mobile/tasks":
-            self.fix_attempts += 1
+            self.task_posts += 1
+            if body.get("prompt", "").startswith("Independent review for PR #"):
+                self.review_attempts += 1
+            else:
+                self.fix_attempts += 1
             if self.fail_fix:
                 raise ApiError("response lost", status=503)
-            task_id = f"task-{self.fix_attempts}"
+            task_id = f"task-{self.task_posts}"
             task = {"id": task_id, "state": "queued",
                     "created_at": "2026-10-01T12:00:00Z",
                     "updated_at": "2026-10-01T12:00:00Z",
@@ -1452,11 +1543,50 @@ class FakeApi:
             self.tasks[task_id] = task
             return task
         response = {"id": len(self.writes), "context": body.get("context")}
-        if body.get("context") == "cloud-review":
+        if body.get("context") in {"cloud-review", "agent-review"}:
             response.update(state=body["state"], creator={"id": OWNER})
         if route.endswith("/comments"):
-            response.update(user={"id": OWNER}, body=body["body"])
+            comment = {
+                "id": self.next_issue_comment_id,
+                "user": {"id": OWNER},
+                "body": body["body"],
+                "created_at": "2026-10-01T12:06:00Z",
+                "updated_at": "2026-10-01T12:06:00Z",
+            }
+            self.next_issue_comment_id += 1
+            self.comments.append(comment)
+            response.update(comment)
+        elif "/statuses/" in route:
+            sha = route.rsplit("/", 1)[-1]
+            self.status_log.setdefault(sha, []).append({
+                "id": response["id"],
+                "context": body["context"],
+                "state": body["state"],
+                "creator": {"id": OWNER},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
         return response
+
+    def review_file_digests(self):
+        digests = {}
+        for item in self.review_pull_files():
+            filename = item["filename"]
+            if item.get("status") == "removed":
+                digests[filename] = None
+            else:
+                digests[filename] = hashlib.sha256(
+                    self.blob_contents[item["sha"]],
+                ).hexdigest()
+        return digests
+
+    def review_pull_files(self):
+        if self.pull_files is not None:
+            return self.pull_files
+        return [{
+            "filename": "backend/auth.py" if self.sensitive else "frontend/styles.css",
+            "status": "modified",
+            "sha": "e" * 40 if self.sensitive else "d" * 40,
+        }]
 
     def complete_task(self, task_id, action, *, result="ready", head_sha=None,
                       base_sha=BASE):
@@ -1503,6 +1633,62 @@ class FakeApi:
             "updated_at": comment_created,
         })
 
+    def complete_review_task(self, task_id, action, *, source_action, verdict="pass",
+                             findings=None, files=None, report="Independent review complete."):
+        task = self.tasks[task_id]
+        session_id = f"session-{task_id}"
+        created = "2026-10-01T12:07:00Z"
+        completed = "2026-10-01T12:09:00Z"
+        task.update(
+            state="completed",
+            updated_at=completed,
+            sessions=[{
+                "id": session_id,
+                "task_id": task_id,
+                "state": "completed",
+                "user": {"id": OWNER},
+                "owner": {"id": OWNER},
+                "repository": {"id": 1399942965},
+                "created_at": created,
+                "completed_at": completed,
+                "prompt": action["body"],
+                "head_ref": action["head_ref"],
+                "base_ref": "main",
+            }],
+        )
+        payload = {
+            "schema": "hermes-independent-review-report-v1",
+            "nonce": action["dispatch_nonce"],
+            "session_id": session_id,
+            "repository": "lindayi/hermes-mobile",
+            "repository_id": 1399942965,
+            "pr": 16,
+            "anchor_comment_id": action["anchor_comment_id"],
+            "role": "independent-reviewer",
+            "head": action["head"],
+            "base": action["main_sha"],
+            "source_start_head": source_action["head"],
+            "source_session_id": source_action["receipt_session_id"],
+            "source_comment_id": source_action["receipt_comment_id"],
+            "verdict": verdict,
+            "summary": "Independent review completed.",
+            "findings": findings or [],
+            "files": self.review_file_digests() if files is None else files,
+            "report": report,
+        }
+        self.comments.append({
+            "id": self.next_issue_comment_id,
+            "user": {"id": COPILOT_AGENT},
+            "body": (
+                f"\n> {action['anchor_prefix']}\n"
+                "> \n"
+                f"{json.dumps(payload, separators=(',', ':'))}"
+            ),
+            "created_at": completed,
+            "updated_at": completed,
+        })
+        self.next_issue_comment_id += 1
+
     def graphql_write(self, query, variables):
         self.graphql_writes.append((query, variables))
         if "markPullRequestReadyForReview" in query:
@@ -1547,7 +1733,13 @@ def _ready_sha_bound_handoff(tmp_path):
     api.complete_task(first["task_id"], first, head_sha=RESULT_HEAD)
     api.head_sha = RESULT_HEAD
     api.pull["head"]["sha"] = RESULT_HEAD
-    api.comments[-1]["body"] = (
+    receipt_comment = next(
+        comment for comment in reversed(api.comments)
+        if isinstance(comment.get("body"), str)
+        and first["dispatch_nonce"] in comment["body"]
+        and comment.get("user", {}).get("id") == 198982749
+    )
+    receipt_comment["body"] = (
         "Hermes-Task-Receipt: v2\n"
         f"nonce={first['dispatch_nonce']}\n"
         "pr=16\n"
@@ -1597,6 +1789,7 @@ def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
 
     assert len(neutral) == 1
     assert api.fix_attempts == 2
+    assert api.review_attempts == 0
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
     first_proof = next(
         proof for proof in store.snapshot()["enrollments"]["16"]["receipt_proofs"]
@@ -1614,6 +1807,7 @@ def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
     before_writes = list(api.writes)
     Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
     assert api.fix_attempts == 2
+    assert api.review_attempts == 0
     assert api.writes == before_writes
 
 
@@ -1642,6 +1836,7 @@ def test_stale_base_reconciliation_releases_exhausted_review_handoff(tmp_path):
 
     assert store.action(first["key"])["handoff_state"] == "superseded"
     assert api.fix_attempts == 2
+    assert api.review_attempts == 0
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
 
 
@@ -1721,21 +1916,21 @@ def test_stale_base_reconciliation_accepts_a_validated_new_head_handoff(tmp_path
     api.pull["head"]["sha"] = NEXT_RESULT_HEAD
     api.pull["base"]["sha"] = CURRENT_MAIN
     api.pull["mergeable_state"] = "clean"
-    api.requested_reviewers.clear()
-    api.review_state = "DISMISSED"
+    api.unresolved = False
+    refresh_owner_review(api, NEXT_RESULT_HEAD)
 
     coordinator.run(apply=True)
-    updated = store.action(neutral["key"])
+    updated = next(
+        proof for proof in store.snapshot()["enrollments"]["16"]["receipt_proofs"]
+        if proof["task_id"] == neutral["task_id"]
+    )
     assert updated["status"] == "completed"
     assert updated["receipt_head"] == NEXT_RESULT_HEAD
     assert updated["receipt_base"] == CURRENT_MAIN
-    assert updated["handoff_state"] == "waiting_review"
-    assert store.action(next(
-        action["key"] for action in store.actions().values()
-        if action.get("task_id") == neutral["task_id"]
-    ))["receipt_body"] == api.comments[-1]["body"]
+    assert updated["receipt_body"] == api.comments[-1]["body"]
     assert api.fix_attempts == 2
-    assert len(api.requested_reviewers) == 1
+    assert api.review_attempts == 0
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
 
 
 def test_neutral_acceptance_and_predecessor_supersession_are_atomic(tmp_path):
@@ -1759,6 +1954,7 @@ def test_neutral_acceptance_and_predecessor_supersession_are_atomic(tmp_path):
     assert neutral["status"] == "sent"
     assert store.action(first["key"]) is None
     assert api.fix_attempts == 2
+    assert api.review_attempts == 0
 
     Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
 
@@ -2011,8 +2207,14 @@ def test_stale_base_reconciliation_fails_closed(tmp_path, hazard):
             "status": "ahead", "ahead_by": 21, "behind_by": 0,
         }
     elif hazard == "edited-receipt":
-        api.comments[-1]["body"] += "\nedited"
-        api.comments[-1]["updated_at"] = "2026-10-01T12:06:00Z"
+        receipt_comment = next(
+            comment for comment in api.comments
+            if isinstance(comment.get("body"), str)
+            and first["dispatch_nonce"] in comment["body"]
+            and comment.get("user", {}).get("id") == 198982749
+        )
+        receipt_comment["body"] += "\nedited"
+        receipt_comment["updated_at"] = "2026-10-01T12:06:00Z"
 
     attempts_before = store.snapshot()["enrollments"]["16"]["attempts"]
     try:
@@ -2517,9 +2719,9 @@ def test_completed_comment_review_on_new_head_releases_handoff_for_repair(tmp_pa
     result_head = "c" * 40
     api.head_sha = result_head
     api.pull["head"]["sha"] = result_head
-    api.review_state = "COMMENTED"
     api.complete_task(action["task_id"], action, head_sha=result_head)
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.unresolved = False
+    refresh_owner_review(api, result_head)
 
     coordinator.run(apply=True)
 
@@ -2540,20 +2742,22 @@ def test_approved_review_on_exact_result_head_releases_handoff_for_repair(tmp_pa
     api.head_sha = result_head
     api.pull["head"]["sha"] = result_head
     api.complete_task(action["task_id"], action, head_sha=result_head)
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.unresolved = False
+    refresh_owner_review(api, result_head)
+    api.source_failure = True
+    api.source_failure_sha = result_head
 
     coordinator.run(apply=True)
 
     assert api.fix_attempts == 2
     assert store.action(action["key"]) is None
-    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     assert any(item.get("attempt") == 2 for item in store.actions().values())
     assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
 
 
 def test_running_last_allowed_task_is_not_reported_as_exhausted(tmp_path):
-    api = FakeApi(unresolved=True)
+    api = FakeApi(source_failure=True)
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
     for attempt in range(2):
@@ -2563,7 +2767,7 @@ def test_running_last_allowed_task_is_not_reported_as_exhausted(tmp_path):
             if item["kind"] == "fix" and item.get("status") == "sent"
         )
         api.complete_task(action["task_id"], action)
-        api.review_submitted_at = "2026-10-01T12:06:00Z"
+        api.unresolved = False
     coordinator.run(apply=True)
     assert api.fix_attempts == 3
 
@@ -3040,6 +3244,7 @@ def test_normalized_source_identity_survives_snapshot_and_final_dispatch(tmp_pat
     assert repair_request(HEAD, 0, [], [expected], pull_number=16) is None
     result = coordinator.run(apply=True)
     assert api.fix_attempts == 1
+    assert api.review_attempts == 0
     assert api.workflow_reads >= 3  # snapshot, plan, final dispatch
     prompt = next(body["prompt"] for route, body in api.writes if route.endswith("/tasks"))
     assert prompt.startswith(planned["body"] + "\n\n")
@@ -3609,7 +3814,7 @@ def test_reenrollment_preserves_unresolved_fixer_with_empty_task_list(
 
 
 def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
-    api = FakeApi(unresolved=True)
+    api = FakeApi(source_failure=True)
     path = tmp_path / "state.json"
     store = StateStore(path)
 
@@ -3624,7 +3829,7 @@ def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
             action = next(item for item in store.actions().values()
                           if item.get("task_id") == task_id)
             api.complete_task(task_id, action)
-            api.review_submitted_at = "2026-10-01T12:06:00Z"
+            api.unresolved = False
     old_fix = next(action for action in store.actions().values()
                    if action.get("task_id") == "task-3")
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
@@ -3655,7 +3860,7 @@ def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
 
 
 def test_task_api_identity_reconciles_across_head_changes(tmp_path):
-    api = FakeApi(unresolved=True)
+    api = FakeApi(source_failure=True)
     store = StateStore(tmp_path / "state.json")
     store.enroll(enrolled_record())
     coordinator = Coordinator(api, store)
@@ -3668,19 +3873,24 @@ def test_task_api_identity_reconciles_across_head_changes(tmp_path):
     assert all("@copilot" not in body.get("body", "") for _, body in api.writes)
     api.head_sha = "c" * 40
     api.pull["head"]["sha"] = api.head_sha
+    api.source_failure_sha = api.head_sha
     api.complete_task("task-1", fix)
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.unresolved = False
+    refresh_owner_review(api, api.head_sha)
     coordinator.run(apply=True)
     assert api.fix_attempts == 2
+    assert api.review_attempts == 0
     second = next(item for item in store.actions().values()
-                  if item.get("kind") == "fix" and item.get("task_id") == "task-2")
+                  if (item.get("kind") == "fix"
+                      and item.get("task_id") != fix["task_id"]
+                      and item.get("head") == api.head_sha))
     assert second["head"] == api.head_sha
 
 
 @pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
-def test_same_head_handoff_rejects_pre_task_review(tmp_path, review_state):
-    # No unresolved threads: APPROVED also exercises the early review_ok shortcut.
+def test_same_head_handoff_uses_independent_review_not_copilot(tmp_path, review_state):
     api = FakeApi(source_failure=True)
+    api.pending_required = True
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
     coordinator.run(apply=True)
@@ -3691,10 +3901,12 @@ def test_same_head_handoff_rejects_pre_task_review(tmp_path, review_state):
 
     summary = coordinator.run(apply=True)["pull_requests"][0]
 
-    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
-    assert len([route for route, _ in api.writes
-                if route.endswith("/requested_reviewers")]) == 1
-    assert "agent" in summary["reasons"]
+    expected = review_state != "CHANGES_REQUESTED"
+    assert store.action(fix["key"])["handoff_state"] == (
+        "done" if expected else "waiting_review"
+    )
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert summary["review_valid"] is expected
     assert summary["auto_merge_eligible"] is False
     assert api.fix_attempts == 1
     assert not any("enablePullRequestAutoMerge" in query for query, _ in api.graphql_writes)
@@ -3702,7 +3914,7 @@ def test_same_head_handoff_rejects_pre_task_review(tmp_path, review_state):
 
 @pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
 @pytest.mark.parametrize("restart", [False, True])
-def test_post_task_review_completes_handoff_with_durable_session_proof(
+def test_independent_review_completes_handoff_without_copilot(
         tmp_path, review_state, restart):
     api = FakeApi(source_failure=True)
     path = tmp_path / "state.json"
@@ -3718,38 +3930,35 @@ def test_post_task_review_completes_handoff_with_durable_session_proof(
     if restart:
         coordinator.run(apply=True)
         saved = store.action(fix["key"])
-        assert saved["handoff_state"] == "waiting_review"
+        assert saved["handoff_state"] == (
+            "waiting_review" if review_state == "CHANGES_REQUESTED" else "done"
+        )
         assert saved["receipt_completed_at"] == "2026-10-01T12:05:30Z"
         assert saved["receipt_session_id"] == "session-task-1"
         assert saved["receipt_comment_id"] == 9001
         # Restart cannot reconstruct chronology from a now-absent task response.
         api.tasks.clear()
         coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
-    # An earlier-looking wall clock is strictly later as an aware instant.
-    api.review_submitted_at = "2026-10-01T08:05:31-04:00"
-    refresh_owner_review(api, HEAD)
-
     summary = coordinator.run(apply=True)["pull_requests"][0]
 
-    assert StateStore(path).action(fix["key"])["handoff_state"] == "done"
-    assert "agent" not in summary["reasons"]
+    assert StateStore(path).action(fix["key"])["handoff_state"] == (
+        "waiting_review" if review_state == "CHANGES_REQUESTED" else "done"
+    )
     assert summary["review_valid"] is (review_state != "CHANGES_REQUESTED")
-    assert len([route for route, _ in api.writes
-                if route.endswith("/requested_reviewers")]) == int(restart)
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     assert api.fix_attempts == 1
 
 
 @pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
 @pytest.mark.parametrize("submitted_at", [
     None, 123, "invalid", "2026-10-01T12:06:00",
-    "2026-10-01T12:05:15Z",  # After receipt, but before session completion.
-    "2026-10-01T12:05:30Z",  # Ties do not establish post-task chronology.
-    "2026-10-01T13:05:29+01:00",  # Later wall clock, earlier instant.
-    "2026-10-01T12:11:01Z",  # Future to the independently supplied clock.
+    "2026-10-01T12:05:15Z", "2026-10-01T12:05:30Z",
+    "2026-10-01T13:05:29+01:00", "2026-10-01T12:11:01Z",
 ])
-def test_post_task_review_rejects_unproven_submission_time(
+def test_copilot_review_timing_does_not_control_handoff(
         tmp_path, review_state, submitted_at):
     api = FakeApi(source_failure=True)
+    api.pending_required = True
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
     coordinator.run(apply=True)
@@ -3761,11 +3970,19 @@ def test_post_task_review_rejects_unproven_submission_time(
 
     summary = coordinator.run(apply=True)["pull_requests"][0]
 
-    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
-    assert "agent" in summary["reasons"]
+    expected = not (
+        review_state == "CHANGES_REQUESTED"
+        and submitted_at in {
+            "2026-10-01T12:05:15Z", "2026-10-01T12:05:30Z",
+            "2026-10-01T13:05:29+01:00", "2026-10-01T12:11:01Z",
+        }
+    )
+    assert store.action(fix["key"])["handoff_state"] == (
+        "done" if expected else "waiting_review"
+    )
+    assert summary["review_valid"] is expected
     assert summary["auto_merge_eligible"] is False
-    assert len([route for route, _ in api.writes
-                if route.endswith("/requested_reviewers")]) == 1
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     assert api.fix_attempts == 1
 
 
@@ -3798,8 +4015,7 @@ def test_post_task_review_still_requires_exact_head_and_authenticated_identity(
     assert store.action(fix["key"])["handoff_state"] == "waiting_review"
     assert "agent" in summary["reasons"]
     assert summary["auto_merge_eligible"] is False
-    assert len([route for route, _ in api.writes
-                if route.endswith("/requested_reviewers")]) == 1
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
 
 
 @pytest.mark.parametrize("completed_at", [
@@ -3808,6 +4024,7 @@ def test_post_task_review_still_requires_exact_head_and_authenticated_identity(
 def test_post_task_review_cannot_replace_invalid_persisted_completion_proof(
         tmp_path, completed_at):
     api = FakeApi(source_failure=True)
+    api.owner_review_body = "not a structured independent review"
     path = tmp_path / "state.json"
     store = StateStore(path)
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
@@ -3826,11 +4043,16 @@ def test_post_task_review_cannot_replace_invalid_persisted_completion_proof(
 
     assert StateStore(path).action(fix["key"])["handoff_state"] != "done"
     assert "agent" in summary["pull_requests"][0]["reasons"]
-    assert api.writes == writes and api.graphql_writes == graphql_writes
+    new_writes = api.writes[len(writes):]
+    assert all("/statuses/" in route and body.get("context") == "cloud-review"
+               for route, body in new_writes)
+    assert api.graphql_writes == graphql_writes
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
 
 
 @pytest.mark.parametrize("result_head", [HEAD, "c" * 40], ids=["same-head", "new-head"])
-def test_exhausted_review_handoff_survives_compaction_and_restart(tmp_path, result_head):
+def test_waiting_independent_review_handoff_survives_restart_without_budget(
+        tmp_path, result_head):
     api = RecordingApi(unresolved=True)
     path = tmp_path / "state.json"
     store = StateStore(path)
@@ -3846,20 +4068,19 @@ def test_exhausted_review_handoff_survives_compaction_and_restart(tmp_path, resu
         coordinator.run(apply=True)
 
     action = store.action(fix["key"])
-    assert action is not None, "Compaction must retain the result-head owner blocker"
-    assert action["status"] == "completed" and action["handoff_state"] == "failed"
-    assert action["blocker"] == "review_handoff_exhausted"
+    assert action is not None, "Compaction must retain the current-head review lock"
+    assert action["status"] == "completed" and action["handoff_state"] == "waiting_review"
+    assert action.get("handoff_waits", 0) == 0
+    assert action.get("blocker") != "review_handoff_exhausted"
     assert action["head"] == HEAD and action["receipt_head"] == result_head
     assert action["receipt_base"] == BASE
     assert action["receipt_comment_id"] == 9001
     assert action["receipt_session_id"] == "session-task-1"
     assert action["receipt_completed_at"] == "2026-10-01T12:05:30Z"
     events = store.snapshot()["lifecycle_events"]
-    assert [event["reason"] for event in events] == ["execution_exhausted"]
-    assert events[0]["head_sha"] == result_head
-    export = (tmp_path / "workflow-events.json").read_bytes()
+    assert not any(event["reason"] == "execution_exhausted" for event in events)
 
-    # Neither live task inventory nor a later review replaces the exhausted claim.
+    # Neither live task inventory nor advisory Copilot feedback releases the lock.
     api.tasks.clear()
     api.review_state = "APPROVED"
     api.review_submitted_at = "2026-10-01T12:06:00Z"
@@ -3874,20 +4095,27 @@ def test_exhausted_review_handoff_survives_compaction_and_restart(tmp_path, resu
         assert not item["repair_requested"] and not item["auto_merge_eligible"]
     StateStore(path).retire(16, result_head)
     persisted = StateStore(path).snapshot()
-    assert persisted["actions"][fix["key"]] == action
+    assert persisted["actions"][fix["key"]]["handoff_state"] == "waiting_review"
     assert persisted["enrollments"]["16"]["attempts"] == 1
     assert persisted["lifecycle_events"] == events
-    assert (tmp_path / "workflow-events.json").read_bytes() == export
     assert api.fix_attempts == 1
     assert api.writes == writes and api.graphql_writes == graphql_writes
 
-    # Once positively non-current, this terminal blocker remains compactable.
+    api.unresolved = False
+    refresh_owner_review(api, result_head)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    if result_head == HEAD:
+        assert StateStore(path).action(fix["key"])["handoff_state"] == "done"
+    else:
+        assert StateStore(path).action(fix["key"]) is None
+
+    # Once positively non-current, the terminal record remains compactable.
     StateStore(path).retire(16, "d" * 40)
     assert StateStore(path).action(fix["key"]) is None
     assert StateStore(path).snapshot()["lifecycle_events"] == events
 
 
-def test_task_handoff_requests_ready_review_once_and_fails_closed_after_wait(tmp_path):
+def test_task_handoff_marks_draft_ready_without_waiting_for_copilot(tmp_path):
     api = FakeApi(unresolved=True)
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store)
@@ -3906,17 +4134,236 @@ def test_task_handoff_requests_ready_review_once_and_fails_closed_after_wait(tmp
     assert not any(route.endswith("/requested_reviewers")
                    for route, _ in api.writes)
 
-    for _ in range(MAX_HANDOFF_POLLS - 1):
+    for _ in range(MAX_HANDOFF_POLLS + 1):
         coordinator.run(apply=True)
     action = store.action(fix["key"])
-    assert action["handoff_state"] == "failed"
-    assert action["blocker"] == "review_handoff_exhausted"
+    assert action["handoff_state"] == "waiting_review"
+    assert action.get("handoff_waits", 0) == 0
     events = store.snapshot()["lifecycle_events"]
-    assert [event["reason"] for event in events] == ["execution_exhausted"]
+    assert not any(event["reason"] == "execution_exhausted" for event in events)
     assert api.fix_attempts == 1
 
 
-@pytest.mark.parametrize("path_kind", ["draft_ready", "review_request"])
+def test_completed_task_handoff_does_not_wait_for_copilot_or_bypass_independent_review(
+        tmp_path):
+    api = FakeApi(source_failure=True)
+    api.owner_review_body = "not a structured independent review"
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_state = "PENDING"
+
+    result = coordinator.run(apply=True)
+
+    action = store.action(fix["key"])
+    assert action["handoff_state"] == "waiting_review"
+    assert action.get("handoff_waits", 0) == 0
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert api.fix_attempts == 1
+    assert result["pull_requests"][0]["review_valid"] is False
+    assert result["pull_requests"][0]["auto_merge_eligible"] is False
+    assert not any("enablePullRequestAutoMerge" in query for query, _ in api.graphql_writes)
+
+    for _ in range(MAX_HANDOFF_POLLS + 1):
+        coordinator.run(apply=True)
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert store.action(fix["key"]).get("handoff_waits", 0) == 0
+    assert api.fix_attempts == 1
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in store.snapshot()["lifecycle_events"])
+
+
+def test_current_independent_review_completes_handoff_without_copilot(tmp_path):
+    api = FakeApi(source_failure=True)
+    api.pending_required = True
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_state = "PENDING"
+
+    result = coordinator.run(apply=True)
+
+    assert store.action(fix["key"])["handoff_state"] == "done"
+    assert result["pull_requests"][0]["review_valid"] is True
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert api.fix_attempts == 1
+    assert not api.graphql_writes
+
+
+def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
+    class ColdStartAgentReviewApi(FakeApi):
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if f"/commits/{self.head_sha}/check-runs?" in route:
+                return [run for run in values if run.get("name") != "agent-review"]
+            return values
+
+    api = ColdStartAgentReviewApi(source_failure=True, review_status_present=False)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    api.pull_files = [{
+        "filename": "deploy/cloud_coordinator.py",
+        "status": "modified",
+        "sha": "f" * 40,
+    }]
+    api.blob_contents = {"f" * 40: b"coordinator review bytes"}
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    source_fix = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    api.review_state = "PENDING"
+
+    first = coordinator.run(apply=True)["pull_requests"][0]
+    second = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    review = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "review"
+    )
+    assert review["status"] == "sent"
+    assert review["anchor_comment_id"] > 0
+    assert first["review_valid"] is False
+    assert second["review_valid"] is False
+    assert StateStore(path).action(source_fix["key"])["handoff_state"] == "waiting_review"
+
+    api.complete_review_task(
+        review["task_id"], review, source_action=StateStore(path).action(source_fix["key"]),
+    )
+
+    second = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+    third = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    assert StateStore(path).action(source_fix["key"])["handoff_state"] == "done"
+    assert second["review_valid"] is False
+    assert third["review_valid"] is True
+    assert third["required_checks_green"] is True
+    assert any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for status in api.status_log.get(HEAD, [])
+    )
+    assert any(
+        review_row.get("body", "").startswith('{"schema":"hermes-independent-agent-review-v1"')
+        for review_row in api.owner_reviews + [api._current_owner_review_record()]
+    )
+
+
+def test_review_report_rejects_forged_file_sha256_inventory(tmp_path):
+    api = FakeApi(source_failure=True)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    api.pull_files = [{
+        "filename": "deploy/cloud_coordinator.py",
+        "status": "modified",
+        "sha": "f" * 40,
+    }]
+    api.blob_contents = {"f" * 40: b"coordinator review bytes"}
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    source_fix = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    coordinator.run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    review = next(
+        action for action in store.actions().values() if action["kind"] == "review"
+    )
+    api.complete_review_task(
+        review["task_id"],
+        review,
+        source_action=StateStore(path).action(source_fix["key"]),
+        files={"deploy/cloud_coordinator.py": "f" * 64},
+    )
+
+    summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    assert summary["review_valid"] is False
+    assert StateStore(path).action(source_fix["key"])["handoff_state"] == "waiting_review"
+    assert StateStore(path).action(review["key"])["status"] == "sent"
+    assert not any(
+        status.get("context") == "agent-review"
+        for status in api.status_log.get(HEAD, [])
+    )
+
+
+def test_review_report_findings_publish_and_trigger_bounded_followup(tmp_path):
+    api = FakeApi(source_failure=True)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    source_fix = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    coordinator.run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    review = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "review"
+    )
+    api.complete_review_task(
+        review["task_id"],
+        review,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="changes_requested",
+        findings=[{
+            "path": "deploy/cloud_coordinator.py",
+            "comment": "Handle the bounded quoted reply report and publish the owner review.",
+        }],
+        report="One bounded follow-up is required before approval.",
+    )
+
+    summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+    next_summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+    final_summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    actions = StateStore(path).actions().values()
+    follow_up = next(
+        action for action in actions
+        if action.get("kind") == "fix" and action.get("task_id") != source_fix["task_id"]
+    )
+    assert follow_up["status"] == "sent"
+    assert summary["review_valid"] is False
+    assert next_summary["review_valid"] is False
+    assert final_summary["review_valid"] is False
+    assert StateStore(path).action(source_fix["key"])["handoff_state"] == "done"
+    assert api.fix_attempts == 2
+
+
+@pytest.mark.parametrize("path_kind", ["draft_ready", "copilot_pending"])
 def test_scan_commit_failure_precedes_every_handoff_mutation(tmp_path, monkeypatch,
                                                               path_kind):
     import deploy.cloud_coordinator as coordinator_module
@@ -3961,7 +4408,7 @@ def test_scan_commit_failure_precedes_every_handoff_mutation(tmp_path, monkeypat
     action = state["actions"][fix["key"]]
     assert action["ready_state"] == "done"
     assert action["handoff_state"] == "waiting_review"
-    assert action["handoff_waits"] == 1
+    assert action.get("handoff_waits", 0) == 0
     ready = [query for query, _ in api.graphql_writes[len(graphql_writes):]
              if "markPullRequestReadyForReview" in query]
     requests = [route for route, _ in api.writes[len(writes):]
@@ -3969,8 +4416,7 @@ def test_scan_commit_failure_precedes_every_handoff_mutation(tmp_path, monkeypat
     if path_kind == "draft_ready":
         assert len(ready) == 1 and requests == []
     else:
-        assert ready == [] and len(requests) == 1
-        assert action["review_request_state"] == "sent"
+        assert ready == [] and requests == []
     assert api.fix_attempts == 1
     assert result["pull_requests"][0]["repair_requested"] is False
     assert "agent" in result["pull_requests"][0]["reasons"]
@@ -4118,7 +4564,7 @@ def test_crash_after_reservation_cannot_replay_task_post(tmp_path):
 
 
 def test_task_dispatch_is_bounded_to_three_after_verified_completion(tmp_path):
-    api = FakeApi(unresolved=True)
+    api = FakeApi(source_failure=True)
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store)
     for attempt in range(3):
@@ -4128,7 +4574,7 @@ def test_task_dispatch_is_bounded_to_three_after_verified_completion(tmp_path):
         action = next(item for item in store.actions().values()
                       if item.get("task_id") == task_id)
         api.complete_task(task_id, action)
-        api.review_submitted_at = "2026-10-01T12:06:00Z"
+        api.unresolved = False
     result = coordinator.run(apply=True)
     assert api.fix_attempts == 3
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
@@ -4479,13 +4925,6 @@ class RecordingApi(FakeApi):
         if route.endswith("/issues/16/comments"):
             self.comments.append({"id": 10_000 + len(self.writes), "user": {"id": OWNER},
                                   "body": body["body"], "updated_at": "2026-10-01T11:00:00Z"})
-        elif "/statuses/" in route:
-            self.status_log.setdefault(route.rsplit("/", 1)[-1], []).append({
-                "id": response["id"],
-                "context": body["context"], "state": body["state"],
-                "creator": {"id": OWNER},
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            })
         return response
 
     def move_head(self, sha):
@@ -4826,7 +5265,7 @@ def test_failed_fresh_repair_collection_never_claims_or_dispatches(tmp_path, fai
             return response
 
         def get_all(self, route, *, collection=None):
-            if self.thread_reads > 1 and (
+            if self.thread_reads and (
                     (failure == "checks-error" and "/check-runs?" in route)
                     or (failure == "workflows-error" and "/actions/runs?" in route)):
                 raise ApiError("fresh checks unavailable", status=503)
@@ -4841,7 +5280,7 @@ def test_failed_fresh_repair_collection_never_claims_or_dispatches(tmp_path, fai
             _managed_cycle(api, path)
     assert api.fix_attempts == 0 and not api.graphql_writes
     state = StateStore(path).snapshot()
-    assert state["enrollments"]["16"]["attempts"] == 0
+    assert state["enrollments"].get("16", {}).get("attempts", 0) == 0
     assert not any(action["kind"] == "fix" for action in state["actions"].values())
 
 

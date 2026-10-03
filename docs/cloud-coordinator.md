@@ -78,9 +78,10 @@ targeted independent review.
   deployment outcomes. Export is written to the configured application state
   directory and bound to its sole ready default-profile owner, not the GitHub
   account ID. Source readers never dispatch tasks or modify source state.
-- Current-head Copilot review and resolved-thread validation, fail-closed check
-  collection, owned `cloud-review` status updates, and protected auto-merge
-  eligibility.
+- Current-head owner-published independent-agent review and resolved-thread
+  validation, fail-closed check collection, and protected auto-merge eligibility.
+  Copilot feedback is supplemental; the coordinator does not request Copilot review
+  or treat its owned advisory `cloud-review` status as required review evidence.
 - Failure to read the required-check policy or to prove complete/current evidence
   blocks auto-merge. The coordinator never reports tests as successful.
 
@@ -106,31 +107,45 @@ release was deployed. The parent continues to require fresh evidence on the
 result head.
 
 Accepted task IDs are reconciled by GET, including when the PR head advances.
-Queued, running, waiting, or uncertain tasks retain the serialization lock. An
-ambiguous task-creation response is never blindly resent; preserve the durable
-claim and state for verified recovery rather than resetting state or assuming a
-new enrollment stopped the earlier task. A receipt, task comment, or completed
-session never triggers a second dispatch by itself.
+Queued, running, waiting, uncertain, and completed tasks awaiting independent
+review retain the serialization lock; review waits consume neither handoff nor
+fixer budgets. An ambiguous task-creation response is never blindly resent;
+preserve the durable claim and state for verified recovery rather than resetting
+state or assuming a new enrollment stopped the earlier task. A receipt, task
+comment, or completed session never triggers a second dispatch by itself.
 
 ## Review, merge, delivery, and Inbox are separate
 
-The coordinator requires the latest authenticated Copilot `APPROVED` review on
-the exact current head and complete review-thread evidence with every thread
-resolved. Every configured required check must independently succeed. Sensitive
-changes additionally need owner authorization bound to that exact SHA and the
-documented targeted independent review; neither approval nor authorization
+The coordinator requires the latest authenticated owner-published structured
+independent-agent formal `COMMENT` review on the exact current head and complete
+review/thread evidence with every thread resolved. Copilot feedback is
+supplemental; missing approval alone never delays task handoff or consumes a fixer
+attempt. Actual unresolved findings and definite rejection still block acceptance.
+After a source task reaches a verified `ready` receipt without current
+independent evidence, the coordinator posts one owner-authored review anchor
+comment and dispatches one reserved read-only reviewer task on that exact
+head/base. The reviewer replies to the saved anchor with
+`engine-tools-reply_to_comment`; the accepted transport is the observed quoted
+blockquote preamble plus one compact JSON
+`hermes-independent-review-report-v1` object outside the quote. The parent
+binds that report to the saved nonce, distinct reviewer session, repository,
+PR, head/base and source receipt evidence, then publishes the owner COMMENT
+review on the exact head. Positive reports publish `verdict:"pass"`; bounded
+findings publish `verdict:"changes_requested"` and feed one bounded fixer
+follow-up for that exact head. The completed source task lock is retained until
+that verified reviewer lifecycle completes, and every configured required check
+must still independently succeed.
+Sensitive changes additionally need owner authorization bound to that exact SHA
+and the documented targeted independent review; neither approval nor authorization
 carries to a later head.
 
-Until an owner-verified policy transition is actually applied, the existing
-pre-cutover contexts `source-ci`, `integration-tests`, `agent-review`, and
-`issue-link` remain required. The independent formal `COMMENT` review remains
-required under the current workflow. Any future transition is staged and
-owner-controlled: staging adds the verified `cloud-review` status without
-retiring legacy contexts; only independently verified staging evidence and an
-authorized settings change can retire `integration-tests` and `agent-review`.
-Documentation, validator success, or this change does not activate that
-transition. See [`autonomy-policy.md`](autonomy-policy.md) for the exact phases
-and prerequisites.
+The active required contexts are exactly `source-ci` (Actions app 15368),
+`integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), with
+strict/up-to-date checks and resolved review conversations. The coordinator may
+publish an owned advisory `cloud-review` status, but it is not required and never
+replaces the structured independent review. No repository settings or protections
+are changed by this source behavior. See [`autonomy-policy.md`](autonomy-policy.md)
+for the owner-controlled deployment boundary.
 
 When eligible, the coordinator requests GitHub protected auto-merge; branch
 protection and fresh current-head review, thread, check, and policy fences remain
@@ -166,11 +181,13 @@ check, merge, deployment, or Inbox gates are automatically satisfied.
 
 Separate owner/policy work still required:
 
-- Verify the configured Copilot reviewer identity and require `cloud-review` in
-  repository branch protection/rules and require branches to be up to date.
-  Require resolved review conversations as a protected merge rule as well.
-  This PR intentionally makes no settings or protection changes and preserves
-  `agent-review` unchanged.
+- Keep the active required contexts and protections owner-controlled. The
+  coordinator does not configure Copilot reviewer requirements, publish
+  `cloud-review` as a required status, or change repository settings. Its owned
+  `cloud-review` status remains advisory and never substitutes for independent
+  review. Exact current required contexts and independent-review evidence are documented in
+  [`AGENTS.md`](../AGENTS.md) and
+  [`cloud-coordinator-spec.md`](cloud-coordinator-spec.md).
 - Install and enable the service/timer only after exact-head review and policy
   wiring. They remain disabled templates in this repository change.
 - Keep Inbox ingestion as a separate explicit apply operation; coordinator
