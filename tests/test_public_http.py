@@ -41,7 +41,8 @@ def https_fixture(tmp_path):
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption()))
     ca_path.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
-    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.load_cert_chain(cert_path, key_path)
     requests = []
     reset_paths = set()
