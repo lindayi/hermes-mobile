@@ -77,8 +77,9 @@ contents prove issue linkage. Optional rich evidence belongs in comments, not
 the description.
 
 The worker polls only the persisted task ID. It requires the task's repository
-and owner/creator identity, a completed task with a bounded positive
-`session_count`, and the task's unique GitHub branch/PR artifacts. The documented
+and owner/creator identity, a completed task with exactly one authenticated,
+completed session matching its task/user/owner/repository IDs, and the task's
+unique GitHub branch/PR artifacts. The documented
 [task-detail GET endpoint](https://docs.github.com/rest/agent-tasks/agent-tasks#get-a-task-by-repo)
 includes `sessions` (in the second `allOf` member of its OpenAPI response schema),
 unlike the task-list summary. Coordinator continuation binds the persisted task
@@ -105,17 +106,33 @@ renderer or additional runtime dependency is introduced.
 
 The documented [Start a task](https://docs.github.com/en/rest/agent-tasks/agent-tasks#start-a-task)
 request accepts a prompt and task/branch options, but no originating issue binding.
-The documented [Update a pull request](https://docs.github.com/en/rest/pulls/pulls#update-a-pull-request)
-operation can replace the body, but its inputs provide no atomic precondition tying
-that write to an expected body, head, base, or draft snapshot. Therefore the starter
-does not rewrite a provider-generated report to add a closing directive: a completed
-task with a missing or unverifiable canonical issue edge is durably blocked with
-`canonical_issue_link_unverified_no_safe_recovery`. The original report is preserved,
-and readiness and enrollment remain blocked. Reconciliation by reads alone cannot
-make a later body write conditional; do not add a blind retry or treat prompt text as
-linkage. Revisit automatic recovery only if GitHub exposes a supported conditional
-metadata write or task-origin binding. The paired consumer's authenticated canonical
-link requirement is unchanged.
+For a completed task whose PR has no canonical closing edge, the starter may use
+GitHub's documented GraphQL
+[`addCloseIssueReferences`](https://docs.github.com/en/graphql/reference/issues#addcloseissuereferences)
+mutation. It first requires a complete, coherent read proving the exact authorized
+issue edge is absent; malformed, partial, paginated-incompletely, conflicting, or
+changed evidence never proves absence. It binds the issue and PR node IDs from
+authenticated API readback, the one uniquely authenticated completed task session,
+the exact GitHub task artifacts, and the complete REST PR snapshot. It durably
+reserves the one-shot write before sending it. An already-present original edge is
+the zero-write path.
+
+Before and after the mutation, the starter revalidates the owner issue/comment
+authority, completed task and session, task artifacts, PR identity, head, base,
+body, and draft state. It then independently reads the complete canonical
+`closingIssuesReferences` connection and fresh REST snapshot. A lost or malformed
+mutation response is reconciled only from that read; an uncertain write is never
+retried. If that evidence is incomplete or changed, readiness and enrollment stay
+blocked, and the provider-generated PR body remains byte-for-byte unchanged. The
+shared consumer's authenticated canonical-link requirement is unchanged.
+
+`addCloseIssueReferences` has no expected-head, expected-body, expected-base, or
+expected-draft input. There is an unavoidable remote race between final validation
+and the mutation; this operation is not an atomic handoff or compare-and-swap. The
+post-mutation checks detect observed changes and block downstream readiness or
+enrollment, but cannot undo the issue relation. The mutation is restricted to the
+single issue and PR already bound to this authorized task; no arbitrary PR links,
+body rewrites, credential changes, or consumer guard relaxations are permitted.
 
 If the task leaves the PR as a draft, a durable one-time
 readiness reservation invokes GitHub's `markPullRequestReadyForReview` GraphQL

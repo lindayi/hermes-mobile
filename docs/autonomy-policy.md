@@ -254,8 +254,8 @@ source consistency only, not independent review, runtime evidence, or activation
 permission.
 
 Issue #63 updates the current starter candidate pin to
-`f5d006b2f90b2b8200363bd7f13487eed722b724c87632a66b2c22235bf7999c` for its
-durable fail-closed handling of missing or unverifiable canonical issue linkage.
+`47a22f89240682168e3aedcc0ba5d47010587ebaaa0b93049a6144f7003fcece` for its
+durable one-shot canonical issue-link recovery with complete readback.
 The PR57 digest above remains historical. The refreshed current pin is source
 consistency only, not independent review, runtime evidence, or activation permission.
 

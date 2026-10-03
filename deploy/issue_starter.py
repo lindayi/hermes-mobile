@@ -40,6 +40,15 @@ MAX_TEXT_CHARS = 60_000
 MAX_EDIT_EVIDENCE_PAGES = 20
 MAX_SHA_RE = re.compile(r"[0-9a-f]{40}")
 TASK_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+SESSION_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,256}")
+LINK_STATES = {"reserved", "started", "uncertain", "verified"}
+LINK_STATE_TRANSITIONS = {
+    None: {"reserved"},
+    "reserved": {"started", "uncertain", "verified"},
+    "started": {"uncertain", "verified"},
+    "uncertain": {"verified"},
+    "verified": {"verified"},
+}
 ACTIVE_STATES = {
     "queued", "in_progress", "idle", "waiting_for_user", "requested", "pending",
 }
@@ -47,7 +56,7 @@ FAILED_STATES = {"failed", "timed_out", "cancelled"}
 TERMINAL_PHASES = {"failed", "handed_off", "stale_authorization", "handoff_failed"}
 IMMUTABLE_FIELDS = {
     "issue", "command_id", "accepted_title_body_sha256", "accepted_at",
-    "pull_body_sha256",
+    "pull_body_sha256", "pull_base_sha", "link_intent",
 }
 PHASES = {
     "reserved", "dispatch_started", "unknown", "task_created", "failed",
@@ -62,10 +71,6 @@ class CoordinatorError(RuntimeError):
 
 class ApiError(CoordinatorError):
     """An authenticated GitHub API operation failed."""
-
-
-class CanonicalIssueLinkUnverified(CoordinatorError):
-    """A task pull lacks a safely verified canonical issue-closing edge."""
 
 
 def _is_sha(value):
@@ -128,6 +133,45 @@ def _valid_state_record(key, item):
             and (not isinstance(pull_body_sha, str)
                  or re.fullmatch(r"[0-9a-f]{64}", pull_body_sha) is None)):
         return False
+    pull_base_sha = item.get("pull_base_sha")
+    if pull_base_sha is not None and not _is_sha(pull_base_sha):
+        return False
+    link_state = item.get("link_state")
+    link_intent = item.get("link_intent")
+    if link_state is None:
+        if link_intent is not None:
+            return False
+    else:
+        if (not isinstance(link_state, str) or link_state not in LINK_STATES
+                or not isinstance(link_intent, dict)
+                or not isinstance(link_intent.get("issue_node_id"), str)
+                or not link_intent["issue_node_id"]
+                or not isinstance(link_intent.get("pull_node_id"), str)
+                or not link_intent["pull_node_id"]
+                or not isinstance(link_intent.get("session_id"), str)
+                or not SESSION_ID_RE.fullmatch(link_intent["session_id"])
+                or type(link_intent.get("pull_number")) is not int
+                or link_intent["pull_number"] <= 0):
+            return False
+        snapshot = link_intent.get("pull_snapshot")
+        if (not isinstance(snapshot, list) or len(snapshot) != 14
+                or type(snapshot[0]) is not int or snapshot[0] <= 0
+                or type(snapshot[1]) is not int
+                or snapshot[1] != link_intent["pull_number"]
+                or not isinstance(snapshot[2], str) or not snapshot[2]
+                or snapshot[2] != link_intent["pull_node_id"]
+                or snapshot[3] != "open" or snapshot[4] is not False
+                or type(snapshot[5]) is not bool
+                or not isinstance(snapshot[6], str) or not snapshot[6]
+                or not _is_sha(snapshot[7])
+                or type(snapshot[8]) is not int or snapshot[8] != REPOSITORY_ID
+                or snapshot[9] != MAIN_BRANCH
+                or type(snapshot[10]) is not int or snapshot[10] != REPOSITORY_ID
+                or not isinstance(snapshot[11], str) or not snapshot[11]
+                or not isinstance(snapshot[12], str)
+                or re.fullmatch(r"[0-9a-f]{64}", snapshot[12]) is None
+                or not _is_sha(snapshot[13])):
+            return False
     for name in ("preflight_read_failures", "poll_read_failures",
                  "handoff_read_failures", "receipt_lookup_failures"):
         value = item.get(name, 0)
@@ -381,6 +425,11 @@ class StateStore:
                 if (field in changes and field in item
                         and changes[field] != item[field]):
                     raise CoordinatorError("Issue-starter authorization record is immutable")
+            if "link_state" in changes and changes["link_state"] != item.get("link_state"):
+                target = changes["link_state"]
+                allowed = LINK_STATE_TRANSITIONS.get(item.get("link_state"), set())
+                if not isinstance(target, str) or target not in allowed:
+                    raise CoordinatorError("Canonical-link reservation cannot be reset")
             item.update(changes)
 
         self._mutate(update_command)
@@ -1008,17 +1057,204 @@ class Coordinator:
 
     @staticmethod
     def _successful_task_completion(task):
-        session_count = task.get("session_count")
+        if not isinstance(task, dict):
+            return False
+        session = Coordinator._authenticated_task_session(task)
         return (
             task.get("state") == "completed"
-            and type(session_count) is int
-            and 0 < session_count <= 100
+            and type(task.get("session_count")) is int
+            and task["session_count"] == 1
+            and session is not None
         )
+
+    @staticmethod
+    def _authenticated_task_session(task):
+        sessions = task.get("sessions") if isinstance(task, dict) else None
+        if (not isinstance(sessions, list) or len(sessions) != 1
+                or type(task.get("session_count")) is not int
+                or task["session_count"] != 1):
+            return None
+        session = sessions[0]
+        user = session.get("user") if isinstance(session, dict) else None
+        owner = session.get("owner") if isinstance(session, dict) else None
+        repository = session.get("repository") if isinstance(session, dict) else None
+        session_id = session.get("id") if isinstance(session, dict) else None
+        completed_at = session.get("completed_at") if isinstance(session, dict) else None
+        if (not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id)
+                or session.get("task_id") != task.get("id")
+                or session.get("state") != "completed"
+                or (completed_at is not None and _parse_time(completed_at) is None)
+                or not isinstance(user, dict) or type(user.get("id")) is not int
+                or user["id"] != OWNER_ID
+                or not isinstance(owner, dict) or type(owner.get("id")) is not int
+                or owner["id"] != OWNER_ID
+                or not isinstance(repository, dict)
+                or type(repository.get("id")) is not int
+                or repository["id"] != REPOSITORY_ID):
+            return None
+        return session_id
 
     _pull_snapshot = staticmethod(_pull_snapshot)
 
     def _closing_issue_linked(self, pull, issue_number):
         return _closing_issue_linked(self.api, pull, issue_number)
+
+    def _closing_issue_status(self, pull, issue_number, issue_node_id):
+        """Return linked/absent only after complete, snapshot-bound API readback."""
+        snapshot = _pull_snapshot(pull)
+        if (snapshot is None or type(issue_number) is not int or issue_number <= 0
+                or not isinstance(issue_node_id, str) or not issue_node_id):
+            return None
+        query = """
+          query PullRequestClosingIssues($number: Int!, $issueNumber: Int!, $after: String) {
+            repository(owner: "lindayi", name: "hermes-mobile") {
+              id
+              nameWithOwner
+              issue(number: $issueNumber) {
+                id
+                number
+                repository { id nameWithOwner }
+              }
+              pullRequest(number: $number) {
+                id
+                number
+                headRefName
+                headRefOid
+                baseRefName
+                body
+                closingIssuesReferences(first: 100, after: $after) {
+                  nodes { number repository { id nameWithOwner } }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }
+          }
+        """
+        cursor = None
+        seen_cursors = set()
+        seen_issues = set()
+        linked = 0
+        graph_snapshot = None
+        issue_snapshot = None
+        repository_id = None
+        for _ in range(MAX_PAGES):
+            variables = {"number": pull["number"], "issueNumber": issue_number}
+            if cursor is not None:
+                variables["after"] = cursor
+            response = self.api.graphql(query, variables)
+            if (not isinstance(response, dict)
+                    or ("errors" in response and response["errors"] != [])):
+                return None
+            data = response.get("data")
+            repository = data.get("repository") if isinstance(data, dict) else None
+            issue_value = repository.get("issue") if isinstance(repository, dict) else None
+            issue_repository = (
+                issue_value.get("repository") if isinstance(issue_value, dict) else None
+            )
+            node = repository.get("pullRequest") if isinstance(repository, dict) else None
+            if (not isinstance(repository, dict)
+                    or not isinstance(repository.get("id"), str)
+                    or repository["id"] != pull["base"]["repo"]["node_id"]
+                    or not isinstance(repository.get("nameWithOwner"), str)
+                    or repository["nameWithOwner"].casefold() != REPOSITORY.casefold()
+                    or not isinstance(issue_value, dict)
+                    or issue_value.get("id") != issue_node_id
+                    or type(issue_value.get("number")) is not int
+                    or issue_value["number"] != issue_number
+                    or not isinstance(issue_repository, dict)
+                    or issue_repository.get("id") != repository["id"]
+                    or issue_repository.get("nameWithOwner") != repository["nameWithOwner"]
+                    or not isinstance(node, dict)
+                    or not isinstance(node.get("id"), str) or not node["id"]
+                    or type(node.get("number")) is not int
+                    or not isinstance(node.get("headRefName"), str)
+                    or not isinstance(node.get("headRefOid"), str)
+                    or not isinstance(node.get("baseRefName"), str)
+                    or not isinstance(node.get("body"), str)
+                    or len(node["body"]) > MAX_TEXT_CHARS):
+                return None
+            current_graph_snapshot = (
+                repository["id"], repository["nameWithOwner"].casefold(),
+                node["id"], node["number"], node["headRefName"],
+                node["headRefOid"], node["baseRefName"], node["body"],
+            )
+            current_issue_snapshot = (
+                issue_value["id"], issue_value["number"], issue_repository["id"],
+                issue_repository["nameWithOwner"].casefold(),
+            )
+            if graph_snapshot is None:
+                graph_snapshot = current_graph_snapshot
+                issue_snapshot = current_issue_snapshot
+                repository_id = repository["id"]
+            elif (current_graph_snapshot != graph_snapshot
+                  or current_issue_snapshot != issue_snapshot):
+                return None
+            head = pull["head"]
+            base = pull["base"]
+            if (node["id"] != pull["node_id"]
+                    or node["number"] != pull["number"]
+                    or node["headRefName"] != head["ref"]
+                    or node["headRefOid"] != head["sha"]
+                    or node["baseRefName"] != base["ref"]
+                    or node["body"] != pull["body"]):
+                return None
+            connection = node.get("closingIssuesReferences")
+            nodes = connection.get("nodes") if isinstance(connection, dict) else None
+            page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
+            if (not isinstance(nodes, list) or len(nodes) > MAX_ITEMS_PER_PAGE
+                    or not isinstance(page_info, dict)
+                    or type(page_info.get("hasNextPage")) is not bool):
+                return None
+            for reference in nodes:
+                reference_repository = (
+                    reference.get("repository") if isinstance(reference, dict) else None
+                )
+                number = reference.get("number") if isinstance(reference, dict) else None
+                if (type(number) is not int or number <= 0
+                        or not isinstance(reference_repository, dict)
+                        or not isinstance(reference_repository.get("id"), str)
+                        or not reference_repository["id"]
+                        or not isinstance(reference_repository.get("nameWithOwner"), str)
+                        or not reference_repository["nameWithOwner"]):
+                    return None
+                issue_key = (reference_repository["id"], number)
+                if issue_key in seen_issues:
+                    return None
+                seen_issues.add(issue_key)
+                if number == issue_number:
+                    if (reference_repository["id"] != repository_id
+                            or reference_repository["nameWithOwner"].casefold()
+                            != REPOSITORY.casefold()):
+                        return None
+                    linked += 1
+            end_cursor = page_info.get("endCursor")
+            if (end_cursor is not None
+                    and (not isinstance(end_cursor, str) or len(end_cursor) > 2048)):
+                return None
+            if not page_info["hasNextPage"]:
+                break
+            if (not isinstance(end_cursor, str) or not end_cursor
+                    or end_cursor in seen_cursors):
+                return None
+            seen_cursors.add(end_cursor)
+            cursor = end_cursor
+        else:
+            return None
+        if linked > 1:
+            return None
+        fresh = self.api.get(f"repos/{REPOSITORY}/pulls/{pull['number']}")
+        if _pull_snapshot(fresh) != snapshot:
+            return None
+        return linked == 1
+
+    @staticmethod
+    def _link_pull_snapshot(pull):
+        snapshot = _pull_snapshot(pull)
+        if snapshot is None or not _is_sha(snapshot[13]):
+            return None
+        result = list(snapshot)
+        result[12] = _pull_body_digest(pull)
+        return result
 
     def _find_task_pull(self, task, issue_number):
         artifacts = task.get("artifacts")
@@ -1082,13 +1318,181 @@ class Coordinator:
                 or not isinstance(base, dict) or base.get("ref") != MAIN_BRANCH
                 or not isinstance(base_repo, dict) or type(base_repo.get("id")) is not int
                 or base_repo.get("id") != REPOSITORY_ID
+                or not _is_sha(base.get("sha"))
                 or _pull_snapshot(pull) is None):
             return None
-        if not self._closing_issue_linked(pull, issue_number):
-            raise CanonicalIssueLinkUnverified(
-                "Canonical issue-closing edge is missing or unverifiable",
-            )
         return pull
+
+    def _read_link_context(self, record, *, allow_ready=False):
+        issue = self._fresh_issue(record)
+        task = self._task(record["task_id"])
+        session_id = self._authenticated_task_session(task)
+        if not self._successful_task_completion(task) or session_id is None:
+            raise CoordinatorError("Completed task session identity did not match")
+        pull = self._find_task_pull(task, record["issue"])
+        if pull is None:
+            raise CoordinatorError("Completed task pull identity did not match")
+        issue_node_id = issue.get("node_id") if isinstance(issue, dict) else None
+        if not isinstance(issue_node_id, str) or not issue_node_id:
+            raise CoordinatorError("Authorized issue node identity was unavailable")
+        intent = record.get("link_intent")
+        if intent is not None:
+            expected_snapshot = intent.get("pull_snapshot")
+            current_snapshot = self._link_pull_snapshot(pull)
+            snapshot_matches = expected_snapshot == current_snapshot
+            if (allow_ready and isinstance(expected_snapshot, list)
+                    and expected_snapshot[5] is True and current_snapshot is not None):
+                ready_snapshot = list(expected_snapshot)
+                ready_snapshot[5] = False
+                snapshot_matches = ready_snapshot == current_snapshot
+            if (intent.get("issue_node_id") != issue_node_id
+                    or intent.get("pull_node_id") != pull.get("node_id")
+                    or intent.get("pull_number") != pull.get("number")
+                    or intent.get("session_id") != session_id
+                    or not snapshot_matches):
+                raise CoordinatorError("Canonical-link authority or pull snapshot changed")
+        status = self._closing_issue_status(
+            pull, record["issue"], issue_node_id,
+        )
+        return issue, task, session_id, pull, status
+
+    def _verified_link_context(self, record, *, allow_ready=False):
+        _, task, _, pull, status = self._read_link_context(record, allow_ready=allow_ready)
+        base = pull.get("base") if isinstance(pull, dict) else None
+        if (not self._successful_task_completion(task) or status is not True
+                or (record.get("pull_base_sha") is not None
+                    and (not isinstance(base, dict)
+                         or base.get("sha") != record["pull_base_sha"]))):
+            raise CoordinatorError("Canonical issue link or task identity changed")
+        return task, pull
+
+    def _block_link(self, key, record, blocker, *, uncertain=False):
+        changes = {"blocker": blocker}
+        if uncertain:
+            changes["link_state"] = "uncertain"
+        if not isinstance(record.get("receipt"), dict):
+            changes["receipt"] = self._receipt("blocked", record)
+        self.store.update(key, changes)
+        return False
+
+    def _ensure_canonical_link(self, key, record, initial_pull):
+        initial_snapshot = self._link_pull_snapshot(initial_pull)
+        try:
+            issue, task, session_id, pull, status = self._read_link_context(record)
+        except ApiError:
+            return self._block_link(key, record, "canonical_issue_link_read_unavailable",
+                                    uncertain=record.get("link_state") in {"started", "uncertain"})
+        except CoordinatorError:
+            return self._block_link(key, record, "canonical_issue_link_evidence_unverified",
+                                    uncertain=record.get("link_state") in {"started", "uncertain"})
+        if initial_snapshot != self._link_pull_snapshot(pull):
+            return self._block_link(key, record, "canonical_issue_link_snapshot_changed",
+                                    uncertain=record.get("link_state") in {"started", "uncertain"})
+        if status is None:
+            return self._block_link(key, record, "canonical_issue_link_evidence_unverified",
+                                    uncertain=record.get("link_state") in {"started", "uncertain"})
+        intent = record.get("link_intent")
+        state = record.get("link_state")
+        if status is True:
+            if intent is not None:
+                self.store.update(key, {"link_state": "verified"})
+            return True
+        if intent is None:
+            snapshot = self._link_pull_snapshot(pull)
+            if snapshot is None:
+                return self._block_link(key, record, "canonical_issue_link_snapshot_invalid")
+            intent = {
+                "issue_node_id": issue["node_id"],
+                "pull_node_id": pull["node_id"],
+                "pull_number": pull["number"],
+                "session_id": session_id,
+                "pull_snapshot": snapshot,
+            }
+            self.store.update(key, {
+                "link_state": "reserved",
+                "link_intent": intent,
+            })
+            state = "reserved"
+            record = self.store.snapshot()["commands"][key]
+        if state != "reserved":
+            return self._block_link(
+                key, record, "canonical_issue_link_mutation_uncertain",
+                uncertain=state in {"started", "uncertain"},
+            )
+        return self._send_canonical_link(key, record, intent)
+
+    def _send_canonical_link(self, key, record, intent):
+        try:
+            _, task, session_id, pull, status = self._read_link_context(record)
+            if (not self._successful_task_completion(task)
+                    or session_id != intent["session_id"]
+                    or status is not False):
+                raise CoordinatorError("Canonical-link precondition changed")
+        except ApiError:
+            return self._block_link(key, record, "canonical_issue_link_read_unavailable")
+        except CoordinatorError:
+            return self._block_link(key, record, "canonical_issue_link_precondition_changed")
+        mutation_id = (
+            f"hermes-issue-starter:{record['issue']}:"
+            f"{record['command_id']}:close-link"
+        )
+        self.store.update(key, {"link_state": "started"})
+        query = """
+          mutation AddCloseIssueReferences(
+            $issueId: ID!,
+            $pullRequestIds: [ID!]!,
+            $clientMutationId: String
+          ) {
+            addCloseIssueReferences(input: {
+              issueId: $issueId,
+              pullRequestIds: $pullRequestIds,
+              clientMutationId: $clientMutationId
+            }) {
+              clientMutationId
+              issue {
+                id
+                number
+                repository { id nameWithOwner }
+              }
+            }
+          }
+        """
+        try:
+            self.api.graphql(
+                query,
+                {
+                    "issueId": intent["issue_node_id"],
+                    "pullRequestIds": [intent["pull_node_id"]],
+                    "clientMutationId": mutation_id,
+                },
+                mutation=True,
+            )
+        except Exception:
+            # The write may have reached GitHub. Only independent complete readback
+            # can reconcile it; this reservation is never resent.
+            pass
+        current = self.store.snapshot()["commands"][key]
+        try:
+            _, task, session_id, fresh_pull, status = self._read_link_context(current)
+            verified = (
+                status is True
+                and self._successful_task_completion(task)
+                and session_id == intent["session_id"]
+                and self._link_pull_snapshot(fresh_pull) == intent["pull_snapshot"]
+            )
+        except Exception:
+            verified = False
+        if not verified:
+            self.store.update(key, {
+                "link_state": "uncertain",
+                "blocker": "canonical_issue_link_mutation_unverified",
+            })
+            return False
+        self.store.update(key, {
+            "link_state": "verified",
+            "blocker": None,
+        })
+        return True
 
     def _pr_comments(self, pull_number):
         return _all_pages(
@@ -1160,21 +1564,28 @@ class Coordinator:
                 self._publish_receipt(key, updated)
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
-            try:
-                pull = self._find_task_pull(task, record["issue"])
-            except CanonicalIssueLinkUnverified:
+            pull = self._find_task_pull(task, record["issue"])
+            if pull is None:
                 self.store.update(key, {
                     "phase": "failed",
-                    "blocker": "canonical_issue_link_unverified_no_safe_recovery",
+                    "blocker": "task_pull_unverified",
                     "receipt": self._receipt("blocked", record),
                 })
                 updated = self.store.snapshot()["commands"][key]
                 self._publish_receipt(key, updated)
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
+            if not self._ensure_canonical_link(key, record, pull):
+                updated = self.store.snapshot()["commands"][key]
+                if updated.get("receipt", {}).get("state") == "reserved":
+                    self._publish_receipt(key, updated)
+                return {"planned": 0, "pending": 0, "dispatched": 0,
+                        "handed_off": 0, "blocked": 1}
+            record = self.store.snapshot()["commands"][key]
+            pull = self._find_task_pull(task, record["issue"])
             if pull is None:
                 self.store.update(key, {
-                    "phase": "failed",
+                    "phase": "handoff_failed",
                     "blocker": "task_pull_unverified",
                     "receipt": self._receipt("blocked", record),
                 })
@@ -1192,6 +1603,7 @@ class Coordinator:
                 "head_sha": pull["head"]["sha"],
                 "branch": pull["head"]["ref"],
                 "pull_body_sha256": _pull_body_digest(pull),
+                "pull_base_sha": pull["base"]["sha"],
                 "ready_state": "done" if pull.get("draft") is False else "reserved",
                 "enrollment_state": "reserved",
                 "comment_high_water": max(
@@ -1237,6 +1649,8 @@ class Coordinator:
                 or not isinstance(base.get("repo"), dict)
                 or type(base["repo"].get("id")) is not int
                 or base["repo"].get("id") != REPOSITORY_ID
+                or not _is_sha(base.get("sha"))
+                or base.get("sha") != record.get("pull_base_sha")
                 or _pull_body_digest(pull) != record.get("pull_body_sha256")
                 or not self._closing_issue_linked(pull, record["issue"])):
             raise CoordinatorError("Task pull request identity or head changed")
@@ -1244,14 +1658,27 @@ class Coordinator:
 
     def _advance_handoff(self, key, record, task):
         try:
-            if not self._successful_task_completion(task):
-                raise CoordinatorError("Completed task identity changed")
-            linked_pull = self._find_task_pull(task, record["issue"])
+            task, linked_pull = self._verified_link_context(
+                record,
+                allow_ready=record.get("ready_state") in {"started", "uncertain", "done"},
+            )
             if (linked_pull is None
                     or linked_pull.get("number") != record["pull_number"]
                     or linked_pull.get("head", {}).get("sha") != record["head_sha"]
                     or _pull_body_digest(linked_pull) != record.get("pull_body_sha256")):
                 raise CoordinatorError("Completed task pull binding changed")
+            if record.get("pull_base_sha") is None:
+                base = linked_pull.get("base")
+                if not isinstance(base, dict) or not _is_sha(base.get("sha")):
+                    raise CoordinatorError("Task pull base identity changed")
+                self.store.update(key, {"pull_base_sha": base["sha"]})
+                record = self.store.snapshot()["commands"][key]
+                task, linked_pull = self._verified_link_context(
+                    record,
+                    allow_ready=record.get("ready_state") in {
+                        "started", "uncertain", "done",
+                    },
+                )
             pull = self._current_pull(record)
         except ApiError:
             return self._read_failure(key, record, handoff=True)
@@ -1315,10 +1742,7 @@ class Coordinator:
                         "handed_off": 0, "blocked": 1}
             try:
                 self.store.update(key, {"ready_state": "uncertain"})
-                fresh_task = self._task(record["task_id"])
-                if not self._successful_task_completion(fresh_task):
-                    raise CoordinatorError("Completed task identity changed after readiness")
-                linked_pull = self._find_task_pull(fresh_task, record["issue"])
+                _, linked_pull = self._verified_link_context(record, allow_ready=True)
                 if (linked_pull is None
                         or linked_pull.get("number") != record["pull_number"]
                         or linked_pull.get("head", {}).get("sha") != record["head_sha"]
@@ -1357,6 +1781,11 @@ class Coordinator:
             return {"planned": 0, "pending": 0, "dispatched": 0,
                     "handed_off": 0, "blocked": 1}
         try:
+            _, linked_pull = self._verified_link_context(record, allow_ready=True)
+            if (linked_pull.get("number") != record["pull_number"]
+                    or linked_pull.get("head", {}).get("sha") != record["head_sha"]
+                    or _pull_body_digest(linked_pull) != record.get("pull_body_sha256")):
+                raise CoordinatorError("Task pull changed before enrollment")
             pull = self._current_pull(record)
             if pull.get("draft") is not False:
                 raise CoordinatorError("Task pull request is no longer ready for enrollment")
@@ -1405,6 +1834,7 @@ class Coordinator:
                 return {"planned": 0, "pending": 0, "dispatched": 0,
                         "handed_off": 0, "blocked": 1}
             try:
+                self._verified_link_context(record, allow_ready=True)
                 if self._current_pull(record).get("draft") is not False:
                     raise CoordinatorError("Task pull request is no longer ready after enrollment")
             except Exception:
@@ -1436,6 +1866,7 @@ class Coordinator:
             )
             if eligible:
                 try:
+                    self._verified_link_context(record, allow_ready=True)
                     if self._current_pull(record).get("draft") is not False:
                         raise CoordinatorError("Task pull request is no longer ready after enrollment")
                 except Exception:

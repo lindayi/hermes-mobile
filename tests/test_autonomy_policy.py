@@ -128,7 +128,7 @@ _PENDING_PR40_LIFECYCLE_FIXTURE = {
 _PENDING_ISSUE43_LAUNCH_FIXTURE = {
     'deploy/cloud_coordinator.py': '3f351989201ccbd87d13943ecbf819a1e871b6dede6e1257150f7c37abf6170c',
     # PR57 paired proof plus issue #63 fail-closed boundary, independently literal.
-    'deploy/issue_starter.py': 'f5d006b2f90b2b8200363bd7f13487eed722b724c87632a66b2c22235bf7999c',
+    'deploy/issue_starter.py': '47a22f89240682168e3aedcc0ba5d47010587ebaaa0b93049a6144f7003fcece',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
