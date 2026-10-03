@@ -175,9 +175,14 @@ test('opening long sessions lands on latest replay or terminal output in a narro
    await page.goto(url);
    await page.locator('.session-row').first().click();
    await page.locator('.messages').waitFor();
+   let fallbackBefore;
    if(next.status==='fallback'){
     await fallbackRequest;
-    await page.locator('.messages').evaluate(el=>el.scrollTop=0);
+    const messages=page.locator('.messages');
+    await messages.hover();
+    await page.mouse.wheel(0,-50);
+    await page.waitForTimeout(50);
+    fallbackBefore=await messages.evaluate(el=>({top:el.scrollTop,gap:el.scrollHeight-el.clientHeight-el.scrollTop}));
    }
    const latest=next.status==='running'?'Latest live progress from restored activity.':next.status==='completed'?'Latest terminal output.':'Latest fallback output.';
    await page.locator('.live-message').waitFor();
@@ -187,8 +192,12 @@ test('opening long sessions lands on latest replay or terminal output in a narro
     const tail=[...live.querySelectorAll('.activity-summary,.message-body')].filter(node=>node.textContent.trim()).at(-1),box=messages.getBoundingClientRect(),tailBox=tail.getBoundingClientRect();
     return {gap:messages.scrollHeight-messages.clientHeight-messages.scrollTop,scrollY,focusedComposer:composer.contains(document.activeElement),messagesBottom:box.bottom,composerTop:composer.getBoundingClientRect().top,tailBottom:tailBox.bottom,tailTop:tailBox.top,text:live.textContent,tailText:tail.textContent};
    });
-   evidence.cases.push({scenario:next.status,state,calls:[...calls]});
-   if(next.status==='fallback')assert.equal(await page.locator('.messages').evaluate(el=>el.scrollTop),0,'delayed fallback preserves intentional upward reading');
+   evidence.cases.push({scenario:next.status,state,before:fallbackBefore,calls:[...calls]});
+   if(next.status==='fallback'){
+    const after=await page.locator('.messages').evaluate(el=>({top:el.scrollTop,gap:el.scrollHeight-el.clientHeight-el.scrollTop}));
+    assert.equal(after.top,fallbackBefore.top,'delayed fallback preserves a deliberate small upward reading position near the bottom');
+    assert.ok(after.gap>=fallbackBefore.gap,'preserving the viewport may increase the remaining gap when delayed output renders below it');
+   }
    else assert.ok(state.gap<=4,`opening ${next.status} run should land at the transcript bottom; gap=${state.gap}`);
    assert.ok(state.text.includes(latest),`latest ${next.status} progress is rendered`);
    assert.ok(state.tailText.includes(latest),'newest progress/output is the final run segment');
