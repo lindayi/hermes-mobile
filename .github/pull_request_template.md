@@ -54,19 +54,19 @@ Deployment and operator gates not exercised:
 
 Review and integration
 
-Copilot review was requested for this PR and re-requested after follow-up commits, or automatic review was verified enabled in repository settings:
+Copilot review was supplemental feedback only; no approval was inferred from a comment or status:
 
 Copilot suggestions were judged against the code and tests. Comments are not approvals or passing review status:
 
-Before gate cutover, an independent formal COMMENT review is verified on the exact head and agent-review is published only after that verification. The post-cutover cloud-review requires an actual authenticated Copilot APPROVED review on the exact head with complete resolved threads. A COMMENTED overview is not approval:
+The latest authenticated owner-published structured independent-agent formal COMMENT review is verified on the exact head, with positive verdict and evidence binding, complete pagination, and resolved threads. Copilot is advisory; actual findings and definite rejection remain blockers:
 
 Findings have follow-up fix commits and test evidence, and resolved review threads were checked before resolution:
 
 The branch is current with freshly fetched origin/main. Any conflicts preserve both PRs' intents and are retested and reviewed on the resulting head:
 
-Required contexts for the active policy phase are verified on the exact head. Before cutover source-ci, integration-tests, agent-review, and issue-link are required. Staging retains those four plus cloud-review; after cutover source-ci, issue-link, and cloud-review are required. New commits invalidate old-head evidence:
+The exact required contexts source-ci (Actions app 15368), integration-tests, agent-review, and issue-link (Actions app 15368) are verified on the exact head. cloud-review is advisory, not required or synthesized. New commits invalidate old-head authority and status evidence:
 
-Before cutover, complete hosted source-ci and residual host coverage pass on the same head. After cutover, installed and private host compatibility remains a guarded exact-main deployment gate, not PR execution:
+Complete hosted source-ci and residual host coverage pass on the same head. Installed and private host compatibility remains a guarded exact-main deployment gate, not PR execution:
 
 No owner or administrator bypass, self-approval, fabricated approvals, statuses, or identities, or direct writes to main:
 

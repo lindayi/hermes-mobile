@@ -400,23 +400,25 @@ repair or fall back to auto-merge in the same cycle.
 
 ## Review, checks, and merge
 
-The `cloud-review` gate accepts only a latest `APPROVED` review authored by the
-authenticated Copilot review identity (GitHub ID `175728472`) on the exact current
-head SHA, plus fully paginated review threads that are all resolved. A `COMMENTED`
-review, arbitrary comment, stale approval, author assertion, or truncated thread
-list does not pass. Every review record must be an object with positive integer
-user and review IDs (not booleans or strings), and review IDs must be unique.
-These are validated across the complete collection before author filtering, so a
-malformed later record cannot be skipped to reuse an earlier approval. All
-authenticated reviews must have valid timezone-aware
+Technical review acceptance requires the latest authenticated owner-published
+structured independent-agent formal COMMENT review on the exact current head.
+The existing `hermes-independent-agent-review-v1` contract requires a positive
+`pass` verdict and a bound lowercase evidence SHA-256. The selected record's ID and
+raw-body SHA-256 are checked against the current complete review collection using
+`selected_independent_agent_review`; edited, removed, stale, malformed, or
+superseded evidence cannot reuse an earlier review. Every review record must be an
+object with positive integer user and review IDs (not booleans or strings), and
+review IDs must be unique. These are validated across the complete collection
+before author filtering. All authenticated reviews must have valid timezone-aware
 submission times. Missing, malformed, or naive timestamps fail closed; this
 includes an unsubmitted `PENDING` review, for which GitHub omits `submitted_at`.
-Times are compared as instants, not strings. Every review tied at the latest
-instant must approve the current head; conflicting states or heads fail closed
-regardless of response order. This same gate controls planning, status publication
-and revocation, and the final merge recheck. If the authenticated reviewer
-identity differs, the check fails closed and requires policy review rather than
-inferring approval.
+Times are compared as instants, not strings; tied latest owner reviews fail closed.
+Review pagination must be complete and every thread resolved, with complete thread
+pagination. A status, Copilot review, overview, or arbitrary comment is not
+independent review. Copilot feedback is supplemental; COMMENTED or missing APPROVED
+alone does not block acceptance, trigger repeated review requests, or consume fixer
+budget. Actual open findings must still be resolved, and a definite rejection is
+not acceptance.
 For task handoff, an authenticated submitted review on the exact result head
 completes the review request only when its timezone-aware submission instant is
 strictly after the independently validated task session completion and no later
@@ -457,28 +459,27 @@ deployment-policy docs are sensitive too. This PR classification concerns merge
 authorization; the separate release policy still classifies the complete diff
 from the deployed base before deployment.
 
-The coordinator publishes only its own `cloud-review` commit status, and only
-when that context is already required by branch protection/rules. Its success
-means current Copilot approval, resolved threads, and any required sensitive
-authorization were verified; it does **not** mean tests passed. It never writes
-`integration-tests`, `source-ci`, or `agent-review` statuses. A status transition
-has a durable generation bound to the PR and head SHA; an ambiguous write is
-reconciled against a newer owned status on that same SHA, not assumed successful
-from a previous matching state. A later change in review evidence may revoke
-and restore success on the same SHA. All configured
-required checks must independently report success; skipped, cancelled, missing,
-pending, failed, or incomplete checks are not green. Branch rules are collected
+The coordinator does not publish or require `cloud-review`; a status is not a
+substitute for reading the structured independent review. The current protected
+policy is exactly `source-ci` (Actions app 15368), `integration-tests`,
+`agent-review`, and `issue-link` (Actions app 15368), with strict/up-to-date checks
+and required conversation resolution. Missing, extra, or differently app-bound
+required contexts fail closed. All four required checks must independently report
+success; skipped, cancelled, missing, pending, failed, or incomplete checks are not
+green. The coordinator never writes `integration-tests`, `source-ci`, or
+`agent-review` statuses. Branch rules are collected
 with explicit `per_page=100` and `page` pagination, bounded to 100 pages; only a
 short final page proves completion. Errors (including an unavailable rules
 endpoint), malformed pages/policy fields, or exhaustion of the bound fail closed.
 The policy retains the union of classic and all ruleset requirements, including
-separate app bindings for the same check context.
+separate app bindings for the same check context, and validates that union against
+the four active required contexts.
 
 Auto-merge is requested through GitHub's protected `enablePullRequestAutoMerge`
 operation only when the same-repository main base is current, the PR is not a
-draft or conflict, all required checks including `cloud-review` are green, the
-review gate passes, no fixer may be running, and sensitive authorization is
-current. Both the PR head and the current `main` SHA are re-read before enabling
+draft or conflict, all four required checks are green, the independent review gate
+passes, no fixer may be running, and any sensitive authorization is current. Both
+the PR head and the current `main` SHA are re-read before enabling
 auto-merge; the mutation supplies `expectedHeadOid` as the server-side head
 fence. The owner-managed branch rule must also require the PR branch to be
 up to date (strict required checks) and require conversation resolution, either
@@ -486,9 +487,8 @@ through classic protection or a ruleset `pull_request` rule's
 `parameters.required_review_thread_resolution`; a malformed `pull_request` rule
 leaves the policy unproven and blocks status publication and auto-merge. The
 coordinator cannot alter branch protection. Current review, thread, check, and policy evidence is fetched again
-immediately before the merge request. A new head has no inherited
-`cloud-review` success, so required branch protection must keep it blocked until
-the new head is evaluated. Ambiguous writes are reconciled from GitHub state and
+immediately before the merge request. A new head has no inherited review or check
+acceptance; all evidence is freshly bound to that head. Ambiguous writes are reconciled from GitHub state and
 are never blindly repeated. An auto-merge request is recorded as sent only when
 the mutation returns the exact pull-request node ID and a valid, nonempty
 `autoMergeRequest.enabledAt`; any other response remains uncertain until
@@ -712,13 +712,10 @@ activation approval.
 
 ## External policy boundary
 
-This change does not edit repository settings, required-check protection, Actions
-permissions, deployment workflows, the deployment controller, or running
-services. Before unattended use, an owner must separately review the numeric
-Copilot reviewer identity and configure `cloud-review` as a required status while
-preserving existing required checks (including `integration-tests` when required),
-`agent-review`, strict up-to-date checks, and required conversation resolution.
-If this policy is absent or unreadable, auto-merge remains disabled.
+The current source policy requires the exact four protected contexts above and
+independent structured review evidence; advisory `cloud-review` is neither required
+nor synthesized. Any later protection change requires separate owner authorization
+and new verification. The coordinator cannot alter branch protection.
 
 Native compatibility gating and routine deployment policy remain follow-ups under
 issue #5. This slice does not change the current global `AGENTS.md` review,

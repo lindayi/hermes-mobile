@@ -763,6 +763,31 @@ def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
     )
 
 
+def test_auto_merge_uses_current_four_checks_without_cloud_review():
+    pr = valid_pr()
+    required = [
+        {"context": "source-ci", "app_id": 15368},
+        {"context": "integration-tests", "app_id": None},
+        {"context": "agent-review", "app_id": None},
+        {"context": "issue-link", "app_id": 15368},
+    ]
+    runs = [
+        {"name": name, "app": {"id": app_id} if app_id else {},
+         "status": "completed", "conclusion": "success"}
+        for name, app_id in (
+            ("source-ci", 15368), ("integration-tests", None),
+            ("agent-review", None), ("issue-link", 15368),
+        )
+    ]
+    assert eligible_for_auto_merge(
+        pr, current_main_sha=BASE, required_checks=required, check_runs=runs,
+        statuses=[], checks_complete=True, review_valid=True,
+        sensitive_authorized=True, cloud_review_required=False,
+        cloud_review_status_owned=False, up_to_date_required=True,
+        conversation_resolution_required=True, agent_running=False,
+    )
+
+
 def test_repair_request_is_bounded_deduplicable_and_uses_only_actionable_evidence():
     threads = [{
         "id": "PRRT_kw1",

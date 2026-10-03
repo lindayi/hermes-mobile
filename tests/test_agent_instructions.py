@@ -189,14 +189,15 @@ def test_product_preferences_remain_explicit_in_canonical_instructions():
 
 
 def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
-    # Normalize wrapping, but keep the mandatory policy clauses under regression.
     for path in ('AGENTS.md', 'docs/development-workflow.md'):
         text = ' '.join((ROOT / path).read_text().split())
         for clause in (
             'docs/git-development-spec.md',
-            'the exact pre-cutover contexts `source-ci`, `integration-tests`, '
-            '`agent-review`, and `issue-link` must pass',
-            'independent formal COMMENT review',
+            'source-ci` (Actions app 15368)',
+            'integration-tests`, `agent-review`, and `issue-link` (Actions app 15368)',
+            'owner-published structured independent-agent formal COMMENT review',
+            'Copilot feedback is supplemental',
+            'missing APPROVED or COMMENTED alone',
             'Publish `agent-review` only after verifying the independent review',
             'Publish `integration-tests` only after verifying complete final integration',
             'exact head SHA',
@@ -209,13 +210,15 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
 
     workflow = ' '.join((ROOT / 'docs/development-workflow.md').read_text().split())
     for clause in (
-        'Until the parent operator verifies the dependencies and exact-head replacement evidence',
+        'The active required contexts are',
         'scripts/ci_tests.py',
         '`.github/host-tests.json`',
         'complete matching hosted results plus all residual host tests',
         'same exact head SHA',
         'If the documented partition is unavailable, conservatively use the existing managed `all` suite',
         'Final integration is a merge gate, not a full local suite per edit',
+        'changed scope needs one independent delta review',
+        'final authority/status is freshly bound to the current head',
         'fresh Linux',
         'Playwright OS dependencies',
         'playwright install-deps chromium',
@@ -228,10 +231,10 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
     assert 'Full managed integration result, if required' not in template
     for clause in (
         'Mandatory final integration evidence',
-        'Before cutover source-ci, integration-tests, agent-review, and issue-link',
-        'Staging retains those four plus cloud-review',
-        'after cutover source-ci, issue-link, and cloud-review',
-        'actual authenticated Copilot APPROVED review',
+        'The latest authenticated owner-published structured independent-agent formal COMMENT review',
+        'Copilot is advisory',
+        'source-ci (Actions app 15368), integration-tests, agent-review, and issue-link (Actions app 15368)',
+        'cloud-review is advisory, not required or synthesized',
         'resolved review threads',
         'current with freshly fetched origin/main',
         'No owner or administrator bypass',
@@ -239,8 +242,7 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         assert clause in template, clause
 
 
-def test_all_pre_cutover_context_lists_include_issue_link():
-    context_list = '`source-ci`, `integration-tests`, `agent-review`, and `issue-link`'
+def test_all_active_context_lists_include_issue_link():
     for path in (
         'AGENTS.md',
         '.github/copilot-instructions.md',
@@ -251,16 +253,14 @@ def test_all_pre_cutover_context_lists_include_issue_link():
         'README.md',
     ):
         text = ' '.join((ROOT / path).read_text().split())
-        expected = (
-            'source-ci, integration-tests, agent-review, and issue-link'
-            if path == '.github/pull_request_template.md' else context_list
-        )
-        assert expected in text, path
+        assert all(context in text for context in (
+            'source-ci', 'integration-tests', 'agent-review', 'issue-link',
+        )), path
 
     policy = ' '.join((ROOT / 'docs/autonomy-policy.md').read_text().split())
     assert (
         '| `staging` | `source-ci`, `integration-tests`, `agent-review`, '
-        '`issue-link`, `cloud-review` |'
+        '`issue-link` |'
     ) in policy
 
 
@@ -285,8 +285,8 @@ def test_agent_instructions_use_the_available_hosted_partition_portably():
         '`source-ci` aggregate must succeed on the same exact head SHA',
         'Record both results and the workflow URL',
         'Never use only a hosted subset or only local host tests to claim full coverage',
-        'The target routine premerge gate is the complete hosted `source-ci` aggregate',
-        'This target is not active because its documentation or validator exists',
+        'The active required contexts are `source-ci` (Actions app 15368)',
+        '`cloud-review` as a required status',
         'installed/private host-compatibility suite remains required at guarded exact-main deployment',
     ):
         assert clause in text, clause
@@ -294,7 +294,7 @@ def test_agent_instructions_use_the_available_hosted_partition_portably():
     assert (ROOT / '.github/host-tests.json').is_file()
 
 
-def test_gate_transition_is_conditional_and_preserves_exact_head_review():
+def test_active_gate_contract_preserves_exact_head_review():
     paths = (
         'AGENTS.md',
         '.github/copilot-instructions.md',
@@ -305,28 +305,29 @@ def test_gate_transition_is_conditional_and_preserves_exact_head_review():
     )
     for path in paths:
         text = ' '.join((ROOT / path).read_text().split())
-        assert 'post-cutover' in text or 'After activation' in text or 'after cutover' in text
         assert 'source-ci' in text and 'issue-link' in text and 'cloud-review' in text
         assert 'exact' in text and ('head' in text or 'SHA' in text)
+        assert 'independent-agent' in text
+        assert 'COMMENT' in text
 
     policy = ' '.join((ROOT / 'docs/autonomy-policy.md').read_text().split())
     for clause in (
         'The CLI performs no network calls, writes, status publication, settings changes',
         'does not authenticate the JSON file',
-        'A `COMMENTED` review, body text, empty overview, or a status without the authenticated review is not approval',
-        'private installed-runtime compatibility remains an exact-main guarded deployment gate',
+        'A status or Copilot review alone is not independent review',
+        'Installed-runtime compatibility remains an exact-main guarded deployment gate',
         'pre-cutover',
         'post-cutover',
     ):
         assert clause in policy, clause
 
 
-def test_additive_staging_policy_documents_bounded_maps_and_ordered_operator_gates():
+def test_policy_documents_bounded_four_check_maps_and_independent_review():
     policy = (ROOT / 'docs/autonomy-policy.md').read_text()
     expected = {
         'pre-cutover': ('source-ci', 'integration-tests', 'agent-review', 'issue-link'),
-        'staging': ('source-ci', 'integration-tests', 'agent-review', 'issue-link', 'cloud-review'),
-        'post-cutover': ('source-ci', 'issue-link', 'cloud-review'),
+        'staging': ('source-ci', 'integration-tests', 'agent-review', 'issue-link'),
+        'post-cutover': ('source-ci', 'integration-tests', 'agent-review', 'issue-link'),
     }
     for phase, contexts in expected.items():
         assert f'--phase {phase} /private/path/evidence.json' in policy
@@ -336,16 +337,10 @@ def test_additive_staging_policy_documents_bounded_maps_and_ordered_operator_gat
     for clause in (
         'No arbitrary supersets or unknown contexts',
         'app_id must be explicitly present as a JSON integer or null',
-        'source-ci may be unbound (null) or already bound to Actions app 15368',
-        'staging and post-cutover require source-ci bound to Actions app 15368',
-        'issue-link remains bound to Actions app 15368 in every phase',
-        'Only pre-cutover permits omission of cloud_review.status',
-        'An explicitly supplied null or malformed status blocks',
-        'creator ID 5164171',
-        'the genuinely merged coordinator',
-        'before retiring either legacy context',
-        'A pre-cutover pass is permission to consider additive staging, not to retire legacy gates',
-        'Do not synthesize a status to bridge this gap',
+        '`source-ci` and `issue-link` are bound to Actions app 15368',
+        '`integration-tests` and `agent-review` remain unbound',
+        'Phase names remain for compatibility',
+        'advisory `cloud-review`',
     ):
         assert clause in text, clause
 
