@@ -1,116 +1,609 @@
 name: Issue-first policy
 on:
   pull_request_target:
+    branches: [main]
     types: [opened, edited, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pull_number:
+        description: Open pull request number
+        required: true
+        type: string
+      head_sha:
+        description: Expected current pull head SHA
+        required: true
+        type: string
 permissions: {}
 concurrency:
-  group: issue-link-${{ github.event.pull_request.number }}
-  # Let publication finish; queued edits are revalidated before a success is sent.
+  group: issue-link-${{ github.event.pull_request.number || github.event.inputs.pull_number }}
   cancel-in-progress: false
 jobs:
-  issue-link-pending:
-    name: Invalidate previous issue result
-    permissions:
-      statuses: write
-    runs-on: ubuntu-24.04
-    timeout-minutes: 3
-    steps:
-      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
-        with:
-          script: |
-            await github.rest.repos.createCommitStatus({
-              ...context.repo, sha: context.payload.pull_request.head.sha,
-              context: 'issue-link', state: 'pending',
-              description: 'Validating issue-closing metadata.',
-              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
-            });
   issue-link:
     name: Validate issue metadata
-    needs: issue-link-pending
     permissions:
+      checks: write
       issues: read
+      pull-requests: read
+      statuses: write
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
-      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+      - id: pending
+        name: Invalidate previous result and start exact-head check
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
         with:
           script: |
-            const pr = context.payload.pull_request;
-            if (pr.base.ref !== context.payload.repository.default_branch) {
-              core.setFailed('Delivery PRs must target the default branch for automatic issue closure.');
-              return;
+            const crypto = require('crypto');
+            const REPOSITORY = 'lindayi/hermes-mobile';
+            const REPOSITORY_ID = 1399942965;
+            const SHA = /^[0-9a-f]{40}$/;
+            const validNumber = value => Number.isSafeInteger(value) && value > 0 && value <= 2147483647;
+            const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+            function snapshot(pull) {
+              const head = pull?.head;
+              const base = pull?.base;
+              const headRepo = head?.repo;
+              const baseRepo = base?.repo;
+              if (!Number.isSafeInteger(pull?.id) || pull.id <= 0 ||
+                  !validNumber(pull?.number) || typeof pull.node_id !== 'string' || !pull.node_id ||
+                  pull.state !== 'open' || pull.merged !== false || typeof pull.draft !== 'boolean' ||
+                  typeof pull.body !== 'string' && pull.body !== null ||
+                  (pull.body !== null && pull.body.length > 60000) ||
+                  typeof head?.ref !== 'string' || !head.ref || !SHA.test(head.sha || '') ||
+                  !Number.isSafeInteger(headRepo?.id) || headRepo.id <= 0 ||
+                  typeof headRepo.full_name !== 'string' || !headRepo.full_name ||
+                  typeof base?.ref !== 'string' || !base.ref || !SHA.test(base.sha || '') ||
+                  baseRepo?.id !== REPOSITORY_ID ||
+                  baseRepo?.full_name?.toLowerCase() !== REPOSITORY ||
+                  typeof baseRepo.node_id !== 'string' || !baseRepo.node_id) {
+                throw new Error('Pull request identity or metadata is malformed, closed, or unsupported.');
+              }
+              return [
+                pull.id, pull.number, pull.node_id, pull.state, pull.merged, pull.draft,
+                pull.body, head.ref, head.sha, headRepo.id, headRepo.full_name,
+                base.ref, base.sha, baseRepo.id, baseRepo.node_id, baseRepo.full_name,
+              ];
             }
-            // Replace excluded examples with a non-whitespace barrier: deleting them
-            // could manufacture a closing phrase from text on either side.
-            let fence = null;
-            let inComment = false;
-            const body = (pr.body || '').split(/\r?\n/).map(line => {
-                if (fence) {
-                  const closing = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
-                  if (closing && closing[1][0] === fence[0] &&
-                      closing[1].length >= fence.length) fence = null;
-                  return '\0';
-                }
-                if (/^(?: {4}| {0,3}\t|\s*>)/.test(line)) return '\0';
-                // Comments inside a fence are literal code, not Markdown comments.
-                if (inComment) {
-                  const end = line.indexOf('-->');
-                  if (end < 0) return '\0';
-                  inComment = false;
-                  line = '\0' + line.slice(end + 3);
-                }
-                line = line.replace(/<!--.*?(?:-->|$)/g, comment => {
-                  inComment = !comment.endsWith('-->');
-                  return '\0';
-                });
-                const marker = line.match(/^ {0,3}(?:(?:[-+*]|\d+[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/);
-                // Backtick fence info cannot contain a backtick (it may be an inline span).
-                if (marker && (marker[1][0] === '~' || !marker[2].includes('`'))) {
-                  fence = marker[1];
-                  return '\0';
-                }
-                return line;
-              }).join('\n')
-              .replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, '\0');
-            const refs = [...body.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:([\w.-]+\/[\w.-]+))?#([1-9]\d*)\b/gi)];
-            const repository = `${context.repo.owner}/${context.repo.repo}`.toLowerCase();
-            const ids = [...new Set(refs.filter(m => !m[1] || m[1].toLowerCase() === repository)
-              .map(m => Number(m[2])))];
-            if (!ids.length || ids.length > 10 || ids.some(id => !Number.isSafeInteger(id))) {
-              core.setFailed('Link an actionable issue with Closes #NUMBER in the PR description (maximum ten).');
-              return;
+            if (context.repo.owner.toLowerCase() !== 'lindayi' ||
+                context.repo.repo.toLowerCase() !== 'hermes-mobile' ||
+                context.payload.repository?.id !== REPOSITORY_ID ||
+                context.payload.repository?.default_branch !== 'main') {
+              throw new Error('Issue-link checks are restricted to the fixed repository and default branch.');
             }
-            for (const issue_number of ids) {
-              const {data: issue} = await github.rest.issues.get({...context.repo, issue_number});
-              if (issue.pull_request || issue.state !== 'open') {
-                core.setFailed(`Closing reference #${issue_number} must name an open issue, not a PR.`);
-                return;
+            let number;
+            let expectedHead;
+            let eventPull = null;
+            if (context.eventName === 'pull_request_target') {
+              eventPull = context.payload.pull_request;
+              number = eventPull?.number;
+              expectedHead = eventPull?.head?.sha;
+            } else if (context.eventName === 'workflow_dispatch') {
+              if (context.ref !== 'refs/heads/main') {
+                throw new Error('Manual rechecks must run from trusted main.');
+              }
+              const rawNumber = context.payload.inputs?.pull_number;
+              expectedHead = context.payload.inputs?.head_sha;
+              if (typeof rawNumber !== 'string' || !/^[1-9]\d*$/.test(rawNumber)) {
+                throw new Error('Manual rechecks require a canonical positive pull number.');
+              }
+              number = Number(rawNumber);
+            } else {
+              throw new Error('Unsupported issue-link trigger.');
+            }
+            if (!validNumber(number) || !SHA.test(expectedHead || '')) {
+              throw new Error('Pull number or expected head SHA is invalid.');
+            }
+            let current;
+            if (eventPull) {
+              // The authenticated event authorizes invalidation, not success.
+              if (eventPull.base?.ref !== 'main' ||
+                  eventPull.base?.repo?.id !== REPOSITORY_ID ||
+                  eventPull.base?.repo?.full_name?.toLowerCase() !== REPOSITORY) {
+                throw new Error('Event pull does not target the trusted default branch.');
+              }
+            } else {
+              // Dispatch inputs alone never authorize writes to an arbitrary SHA.
+              ({data: current} = await github.rest.pulls.get({
+                ...context.repo, pull_number: number,
+              }));
+              snapshot(current);
+              if (current.number !== number || current.head.sha !== expectedHead || current.base.ref !== 'main') {
+                throw new Error('Pull request changed or does not target the default branch.');
               }
             }
-            core.info(`Validated ${ids.length} closing issue reference(s). Merge is not deployment.`);
-  issue-link-result:
-    name: Publish issue policy result
-    needs: [issue-link-pending, issue-link]
-    if: ${{ always() }}
-    permissions:
-      statuses: write
-      pull-requests: read
-    runs-on: ubuntu-24.04
-    timeout-minutes: 3
-    steps:
-      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+            core.setOutput('pull_number', String(number));
+            core.setOutput('head_sha', expectedHead);
+            const runUrl = `${context.serverUrl}/${REPOSITORY}/actions/runs/${context.runId}`;
+            let invalidationError;
+            try {
+              await github.rest.repos.createCommitStatus({
+                ...context.repo,
+                sha: expectedHead,
+                context: 'issue-link',
+                state: 'pending',
+                description: 'Validating canonical issue linkage.',
+                target_url: runUrl,
+              });
+            } catch (error) {
+              invalidationError = error;
+            }
+            try {
+              const {data: check} = await github.rest.checks.create({
+                ...context.repo,
+                name: 'issue-link',
+                head_sha: expectedHead,
+                status: 'in_progress',
+                started_at: new Date().toISOString(),
+                details_url: runUrl,
+                output: {
+                  title: 'Issue-link policy is being validated',
+                  summary: 'Checking complete authenticated canonical issue references.',
+                },
+              });
+              if (!Number.isSafeInteger(check?.id) || check.id <= 0) {
+                throw new Error('GitHub did not return a valid issue-link check-run ID.');
+              }
+              core.setOutput('check_run_id', String(check.id));
+            } catch (error) {
+              invalidationError = error;
+            }
+            if (invalidationError) throw invalidationError;
+            if (!current) {
+              ({data: current} = await github.rest.pulls.get({
+                ...context.repo, pull_number: number,
+              }));
+            }
+            const currentSnapshot = snapshot(current);
+            if (current.number !== number || current.head.sha !== expectedHead || current.base.ref !== 'main' ||
+                (eventPull && digest(snapshot(eventPull)) !== digest(currentSnapshot))) {
+              throw new Error('Pull request changed or does not target the default branch.');
+            }
+            core.setOutput('snapshot_digest', digest(currentSnapshot));
+      - id: validate
+        name: Validate complete canonical issue references
+        if: ${{ success() }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
         env:
-          VALIDATION_RESULT: ${{ needs.issue-link.result }}
+          PULL_NUMBER: ${{ steps.pending.outputs.pull_number }}
+          HEAD_SHA: ${{ steps.pending.outputs.head_sha }}
+          SNAPSHOT_DIGEST: ${{ steps.pending.outputs.snapshot_digest }}
         with:
           script: |
-            const pr = context.payload.pull_request;
-            const {data: current} = await github.rest.pulls.get({...context.repo, pull_number: pr.number});
-            const unchanged = current.state === 'open' && current.head.sha === pr.head.sha &&
-              current.base.ref === pr.base.ref && current.body === pr.body;
-            const passed = process.env.VALIDATION_RESULT === 'success' && unchanged;
-            await github.rest.repos.createCommitStatus({
-              ...context.repo, sha: context.payload.pull_request.head.sha,
-              context: 'issue-link', state: passed ? 'success' : 'failure',
-              description: passed ? 'Issue-closing policy passed.' : 'Issue-closing policy failed; inspect this run.',
-              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            const crypto = require('crypto');
+            const REPOSITORY = 'lindayi/hermes-mobile';
+            const REPOSITORY_ID = 1399942965;
+            const SHA = /^[0-9a-f]{40}$/;
+            const MAX_PAGES = 20;
+            const MAX_REFERENCES = 10;
+            const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+            const fail = message => { throw new Error(message); };
+            function snapshot(pull) {
+              const head = pull?.head;
+              const base = pull?.base;
+              const headRepo = head?.repo;
+              const baseRepo = base?.repo;
+              if (!Number.isSafeInteger(pull?.id) || pull.id <= 0 ||
+                  !Number.isSafeInteger(pull?.number) || pull.number <= 0 || pull.number > 2147483647 ||
+                  typeof pull.node_id !== 'string' || !pull.node_id ||
+                  pull.state !== 'open' || pull.merged !== false || typeof pull.draft !== 'boolean' ||
+                  typeof pull.body !== 'string' && pull.body !== null ||
+                  (pull.body !== null && pull.body.length > 60000) ||
+                  typeof head?.ref !== 'string' || !head.ref || !SHA.test(head.sha || '') ||
+                  !Number.isSafeInteger(headRepo?.id) || headRepo.id <= 0 ||
+                  typeof headRepo.full_name !== 'string' || !headRepo.full_name ||
+                  typeof base?.ref !== 'string' || !base.ref || !SHA.test(base.sha || '') ||
+                  baseRepo?.id !== REPOSITORY_ID ||
+                  baseRepo?.full_name?.toLowerCase() !== REPOSITORY ||
+                  typeof baseRepo.node_id !== 'string' || !baseRepo.node_id) {
+                fail('Pull request identity or metadata is malformed, closed, or unsupported.');
+              }
+              return [
+                pull.id, pull.number, pull.node_id, pull.state, pull.merged, pull.draft,
+                pull.body, head.ref, head.sha, headRepo.id, headRepo.full_name,
+                base.ref, base.sha, baseRepo.id, baseRepo.node_id, baseRepo.full_name,
+              ];
+            }
+            async function closingReferences(pull) {
+              const query = `
+                query IssueLinkReferences($number: Int!, $after: String) {
+                  repository(owner: "lindayi", name: "hermes-mobile") {
+                    id
+                    nameWithOwner
+                    defaultBranchRef { name }
+                    pullRequest(number: $number) {
+                      id
+                      number
+                      headRefName
+                      headRefOid
+                      baseRefName
+                      baseRefOid
+                      body
+                      baseRepository { id nameWithOwner defaultBranchRef { name } }
+                      closingIssuesReferences(first: 100, after: $after, userLinkedOnly: false) {
+                        totalCount
+                        nodes { __typename id number state repository { id nameWithOwner } }
+                        pageInfo { hasNextPage endCursor }
+                      }
+                    }
+                  }
+                }`;
+              const expected = digest(snapshot(pull));
+              const issues = [];
+              const seenIds = new Set();
+              const seenNumbers = new Set();
+              const cursors = new Set();
+              let cursor = null;
+              let total = null;
+              for (let page = 0; page < MAX_PAGES; page++) {
+                const data = await github.graphql(query, {
+                  number: pull.number, after: cursor,
+                });
+                const repository = data?.repository;
+                const node = repository?.pullRequest;
+                const baseRepository = node?.baseRepository;
+                if (repository?.id !== pull.base.repo.node_id ||
+                    repository?.nameWithOwner?.toLowerCase() !== REPOSITORY ||
+                    repository?.defaultBranchRef?.name !== 'main' ||
+                    node?.id !== pull.node_id || node.number !== pull.number ||
+                    node.headRefName !== pull.head.ref || node.headRefOid !== pull.head.sha ||
+                    node.baseRefName !== pull.base.ref || node.baseRefOid !== pull.base.sha ||
+                    node.body !== (pull.body || '') ||
+                    baseRepository?.id !== repository.id ||
+                    baseRepository?.nameWithOwner?.toLowerCase() !== REPOSITORY ||
+                    baseRepository?.defaultBranchRef?.name !== 'main') {
+                  fail('Canonical issue-reference page does not match the current pull snapshot.');
+                }
+                if (digest(snapshot(pull)) !== expected) {
+                  fail('Pull request metadata changed during canonical reference collection.');
+                }
+                const connection = node.closingIssuesReferences;
+                const nodes = connection?.nodes;
+                const info = connection?.pageInfo;
+                if (!Number.isSafeInteger(connection?.totalCount) || connection.totalCount < 0 ||
+                    connection.totalCount > MAX_REFERENCES ||
+                    !Array.isArray(nodes) || nodes.length > 100 ||
+                    typeof info?.hasNextPage !== 'boolean' ||
+                    info.endCursor !== null && (typeof info.endCursor !== 'string' || info.endCursor.length > 2048) ||
+                    total !== null && connection.totalCount !== total) {
+                  fail('Canonical issue-reference connection is malformed or exceeds policy bounds.');
+                }
+                total = connection.totalCount;
+                for (const reference of nodes) {
+                  const repository = reference?.repository;
+                  if (reference?.__typename !== 'Issue' ||
+                      typeof reference.id !== 'string' || !reference.id ||
+                      !Number.isSafeInteger(reference.number) || reference.number <= 0 ||
+                      reference.number > 2147483647 || reference.state !== 'OPEN' ||
+                      repository?.id !== pull.base.repo.node_id ||
+                      repository?.nameWithOwner?.toLowerCase() !== REPOSITORY) {
+                    fail('Every canonical reference must be an open same-repository issue, not a pull request.');
+                  }
+                  if (seenIds.has(reference.id) || seenNumbers.has(reference.number)) {
+                    fail('Canonical issue references contain a duplicate.');
+                  }
+                  seenIds.add(reference.id);
+                  seenNumbers.add(reference.number);
+                  issues.push([reference.id, reference.number]);
+                }
+                if (!info.hasNextPage) {
+                  if (issues.length !== total) fail('Canonical issue-reference pagination is incomplete.');
+                  break;
+                }
+                if (typeof info.endCursor !== 'string' || !info.endCursor || cursors.has(info.endCursor)) {
+                  fail('Canonical issue-reference pagination cursor is malformed or repeated.');
+                }
+                cursors.add(info.endCursor);
+                cursor = info.endCursor;
+                if (page === MAX_PAGES - 1) fail('Canonical issue-reference pagination exceeded its bound.');
+              }
+              if (!total) fail('Link at least one open issue through GitHub canonical issue references.');
+              issues.sort((left, right) => left[1] - right[1] || left[0].localeCompare(right[0]));
+              return digest(issues);
+            }
+            const number = Number(process.env.PULL_NUMBER);
+            const head = process.env.HEAD_SHA;
+            const expectedSnapshot = process.env.SNAPSHOT_DIGEST;
+            if (!Number.isSafeInteger(number) || number <= 0 || number > 2147483647 ||
+                !SHA.test(head || '') || !/^[0-9a-f]{64}$/.test(expectedSnapshot || '') ||
+                context.repo.owner.toLowerCase() !== 'lindayi' ||
+                context.repo.repo.toLowerCase() !== 'hermes-mobile' ||
+                context.payload.repository?.id !== REPOSITORY_ID ||
+                context.payload.repository?.default_branch !== 'main' ||
+                context.eventName === 'workflow_dispatch' && context.ref !== 'refs/heads/main') {
+              fail('Issue-link validation is not bound to the trusted repository and expected head.');
+            }
+            const {data: current} = await github.rest.pulls.get({
+              ...context.repo, pull_number: number,
             });
+            if (digest(snapshot(current)) !== expectedSnapshot ||
+                current.head.sha !== head || current.base.ref !== 'main') {
+              fail('Pull request changed after issue-link validation was queued.');
+            }
+            const relationDigest = await closingReferences(current);
+            const {data: fresh} = await github.rest.pulls.get({
+              ...context.repo, pull_number: number,
+            });
+            if (digest(snapshot(fresh)) !== expectedSnapshot) {
+              fail('Pull request changed during canonical issue-reference validation.');
+            }
+            core.setOutput('relation_digest', relationDigest);
+            core.info('Validated every open canonical issue reference. Merge is not deployment.');
+      - id: publish
+        name: Publish exact-head check and compatibility status
+        if: ${{ always() }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          PULL_NUMBER: ${{ steps.pending.outputs.pull_number }}
+          HEAD_SHA: ${{ steps.pending.outputs.head_sha }}
+          SNAPSHOT_DIGEST: ${{ steps.pending.outputs.snapshot_digest }}
+          CHECK_RUN_ID: ${{ steps.pending.outputs.check_run_id }}
+          RELATION_DIGEST: ${{ steps.validate.outputs.relation_digest }}
+          VALIDATION_RESULT: ${{ steps.validate.outcome }}
+        with:
+          script: |
+            const crypto = require('crypto');
+            const REPOSITORY = 'lindayi/hermes-mobile';
+            const REPOSITORY_ID = 1399942965;
+            const SHA = /^[0-9a-f]{40}$/;
+            const MAX_PAGES = 20;
+            const MAX_REFERENCES = 10;
+            const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+            function snapshot(pull) {
+              const head = pull?.head;
+              const base = pull?.base;
+              const headRepo = head?.repo;
+              const baseRepo = base?.repo;
+              if (!Number.isSafeInteger(pull?.id) || pull.id <= 0 ||
+                  !Number.isSafeInteger(pull?.number) || pull.number <= 0 || pull.number > 2147483647 ||
+                  typeof pull.node_id !== 'string' || !pull.node_id ||
+                  pull.state !== 'open' || pull.merged !== false || typeof pull.draft !== 'boolean' ||
+                  typeof pull.body !== 'string' && pull.body !== null ||
+                  (pull.body !== null && pull.body.length > 60000) ||
+                  typeof head?.ref !== 'string' || !head.ref || !SHA.test(head.sha || '') ||
+                  !Number.isSafeInteger(headRepo?.id) || headRepo.id <= 0 ||
+                  typeof headRepo.full_name !== 'string' || !headRepo.full_name ||
+                  typeof base?.ref !== 'string' || !base.ref || !SHA.test(base.sha || '') ||
+                  baseRepo?.id !== REPOSITORY_ID ||
+                  baseRepo?.full_name?.toLowerCase() !== REPOSITORY ||
+                  typeof baseRepo.node_id !== 'string' || !baseRepo.node_id) {
+                throw new Error('Pull request identity or metadata is malformed, closed, or unsupported.');
+              }
+              return [
+                pull.id, pull.number, pull.node_id, pull.state, pull.merged, pull.draft,
+                pull.body, head.ref, head.sha, headRepo.id, headRepo.full_name,
+                base.ref, base.sha, baseRepo.id, baseRepo.node_id, baseRepo.full_name,
+              ];
+            }
+            async function closingReferences(pull) {
+              const query = `
+                query IssueLinkReferences($number: Int!, $after: String) {
+                  repository(owner: "lindayi", name: "hermes-mobile") {
+                    id
+                    nameWithOwner
+                    defaultBranchRef { name }
+                    pullRequest(number: $number) {
+                      id
+                      number
+                      headRefName
+                      headRefOid
+                      baseRefName
+                      baseRefOid
+                      body
+                      baseRepository { id nameWithOwner defaultBranchRef { name } }
+                      closingIssuesReferences(first: 100, after: $after, userLinkedOnly: false) {
+                        totalCount
+                        nodes { __typename id number state repository { id nameWithOwner } }
+                        pageInfo { hasNextPage endCursor }
+                      }
+                    }
+                  }
+                }`;
+              const expected = digest(snapshot(pull));
+              const issues = [];
+              const seenIds = new Set();
+              const seenNumbers = new Set();
+              const cursors = new Set();
+              let cursor = null;
+              let total = null;
+              for (let page = 0; page < MAX_PAGES; page++) {
+                const data = await github.graphql(query, {
+                  number: pull.number, after: cursor,
+                });
+                const repository = data?.repository;
+                const node = repository?.pullRequest;
+                const baseRepository = node?.baseRepository;
+                if (repository?.id !== pull.base.repo.node_id ||
+                    repository?.nameWithOwner?.toLowerCase() !== REPOSITORY ||
+                    repository?.defaultBranchRef?.name !== 'main' ||
+                    node?.id !== pull.node_id || node.number !== pull.number ||
+                    node.headRefName !== pull.head.ref || node.headRefOid !== pull.head.sha ||
+                    node.baseRefName !== pull.base.ref || node.baseRefOid !== pull.base.sha ||
+                    node.body !== (pull.body || '') ||
+                    baseRepository?.id !== repository.id ||
+                    baseRepository?.nameWithOwner?.toLowerCase() !== REPOSITORY ||
+                    baseRepository?.defaultBranchRef?.name !== 'main') {
+                  throw new Error('Canonical issue-reference page does not match the current pull snapshot.');
+                }
+                if (digest(snapshot(pull)) !== expected) {
+                  throw new Error('Pull request metadata changed during canonical reference collection.');
+                }
+                const connection = node.closingIssuesReferences;
+                const nodes = connection?.nodes;
+                const info = connection?.pageInfo;
+                if (!Number.isSafeInteger(connection?.totalCount) || connection.totalCount < 0 ||
+                    connection.totalCount > MAX_REFERENCES ||
+                    !Array.isArray(nodes) || nodes.length > 100 ||
+                    typeof info?.hasNextPage !== 'boolean' ||
+                    info.endCursor !== null && (typeof info.endCursor !== 'string' || info.endCursor.length > 2048) ||
+                    total !== null && connection.totalCount !== total) {
+                  throw new Error('Canonical issue-reference connection is malformed or exceeds policy bounds.');
+                }
+                total = connection.totalCount;
+                for (const reference of nodes) {
+                  const repository = reference?.repository;
+                  if (reference?.__typename !== 'Issue' ||
+                      typeof reference.id !== 'string' || !reference.id ||
+                      !Number.isSafeInteger(reference.number) || reference.number <= 0 ||
+                      reference.number > 2147483647 || reference.state !== 'OPEN' ||
+                      repository?.id !== pull.base.repo.node_id ||
+                      repository?.nameWithOwner?.toLowerCase() !== REPOSITORY) {
+                    throw new Error('Every canonical reference must be an open same-repository issue, not a pull request.');
+                  }
+                  if (seenIds.has(reference.id) || seenNumbers.has(reference.number)) {
+                    throw new Error('Canonical issue references contain a duplicate.');
+                  }
+                  seenIds.add(reference.id);
+                  seenNumbers.add(reference.number);
+                  issues.push([reference.id, reference.number]);
+                }
+                if (!info.hasNextPage) {
+                  if (issues.length !== total) throw new Error('Canonical issue-reference pagination is incomplete.');
+                  break;
+                }
+                if (typeof info.endCursor !== 'string' || !info.endCursor || cursors.has(info.endCursor)) {
+                  throw new Error('Canonical issue-reference pagination cursor is malformed or repeated.');
+                }
+                cursors.add(info.endCursor);
+                cursor = info.endCursor;
+                if (page === MAX_PAGES - 1) throw new Error('Canonical issue-reference pagination exceeded its bound.');
+              }
+              if (!total) throw new Error('Link at least one open issue through GitHub canonical issue references.');
+              issues.sort((left, right) => left[1] - right[1] || left[0].localeCompare(right[0]));
+              return digest(issues);
+            }
+            if (context.repo.owner.toLowerCase() !== 'lindayi' ||
+                context.repo.repo.toLowerCase() !== 'hermes-mobile' ||
+                context.payload.repository?.id !== REPOSITORY_ID ||
+                context.payload.repository?.default_branch !== 'main') {
+              throw new Error('Cannot publish outside the trusted repository and default branch.');
+            }
+            let number;
+            let head;
+            if (context.eventName === 'pull_request_target') {
+              const eventPull = context.payload.pull_request;
+              number = eventPull?.number;
+              head = eventPull?.head?.sha;
+              if (eventPull?.base?.ref !== 'main' ||
+                  eventPull.base?.repo?.id !== REPOSITORY_ID ||
+                  eventPull.base?.repo?.full_name?.toLowerCase() !== REPOSITORY) {
+                throw new Error('Event pull does not target the trusted default branch.');
+              }
+            } else if (context.eventName === 'workflow_dispatch') {
+              const rawNumber = context.payload.inputs?.pull_number;
+              if (context.ref !== 'refs/heads/main' ||
+                  typeof rawNumber !== 'string' || !/^[1-9]\d*$/.test(rawNumber)) {
+                throw new Error('Manual rechecks require trusted main and a canonical pull number.');
+              }
+              number = Number(rawNumber);
+              head = context.payload.inputs?.head_sha;
+            } else {
+              throw new Error('Unsupported issue-link trigger.');
+            }
+            if (!Number.isSafeInteger(number) || number <= 0 || number > 2147483647 || !SHA.test(head || '')) {
+              throw new Error('Pull number or expected head SHA is invalid.');
+            }
+            const bound = process.env.PULL_NUMBER === String(number) && process.env.HEAD_SHA === head;
+            if (!bound) {
+              if ((process.env.PULL_NUMBER && process.env.PULL_NUMBER !== String(number)) ||
+                  (process.env.HEAD_SHA && process.env.HEAD_SHA !== head)) {
+                throw new Error('Pending outputs do not match the authenticated trigger.');
+              }
+              // A missing pending step authorizes only failure, and dispatch must
+              // first bind its caller-supplied SHA to the actual current PR.
+              if (context.eventName === 'workflow_dispatch') {
+                const {data: current} = await github.rest.pulls.get({
+                  ...context.repo, pull_number: number,
+                });
+                snapshot(current);
+                if (current.number !== number || current.head.sha !== head || current.base.ref !== 'main') {
+                  throw new Error('Manual recheck does not match the current pull request.');
+                }
+              }
+            }
+            const snapshotDigest = process.env.SNAPSHOT_DIGEST;
+            const checkRunId = bound ? Number(process.env.CHECK_RUN_ID) : 0;
+            const hasCheck = Number.isSafeInteger(checkRunId) && checkRunId > 0;
+            let passed = bound && hasCheck && /^[0-9a-f]{64}$/.test(snapshotDigest || '') &&
+              process.env.VALIDATION_RESULT === 'success';
+            let reason = passed ? 'Issue-link policy passed.' :
+              'Issue-link validation failed, was cancelled, or did not complete.';
+            if (passed) {
+              try {
+                const {data: current} = await github.rest.pulls.get({
+                  ...context.repo, pull_number: number,
+                });
+                if (current.head.sha !== head || current.base.ref !== 'main' ||
+                    digest(snapshot(current)) !== snapshotDigest) {
+                  throw new Error('Pull request head, base, body, or identity changed before publication.');
+                }
+                const relationDigest = await closingReferences(current);
+                if (relationDigest !== process.env.RELATION_DIGEST) {
+                  throw new Error('Canonical issue references changed before publication.');
+                }
+                const {data: fresh} = await github.rest.pulls.get({
+                  ...context.repo, pull_number: number,
+                });
+                if (digest(snapshot(fresh)) !== snapshotDigest) {
+                  throw new Error('Pull request metadata changed during final publication checks.');
+                }
+              } catch (error) {
+                passed = false;
+                reason = String(error.message || error);
+              }
+            }
+            const runUrl = `${context.serverUrl}/${REPOSITORY}/actions/runs/${context.runId}`;
+            try {
+              const check = {
+                ...context.repo,
+                status: 'completed',
+                conclusion: passed ? 'success' : 'failure',
+                completed_at: new Date().toISOString(),
+                details_url: runUrl,
+                output: {
+                  title: passed ? 'Canonical issue linkage passed' : 'Canonical issue linkage failed',
+                  summary: reason,
+                  text: 'Success requires complete authenticated references and final exact-head freshness checks.',
+                },
+              };
+              if (hasCheck) {
+                await github.rest.checks.update({...check, check_run_id: checkRunId});
+              } else {
+                // No check ID/snapshot is needed to publish failure on an authorized head.
+                await github.rest.checks.create({...check, name: 'issue-link', head_sha: head});
+              }
+            } catch (error) {
+              passed = false;
+              reason = `Could not publish the issue-link check: ${error.message || error}`;
+            }
+            try {
+              await github.rest.repos.createCommitStatus({
+                ...context.repo,
+                sha: head,
+                context: 'issue-link',
+                state: passed ? 'success' : 'failure',
+                description: passed ? 'Canonical issue-link policy passed.' :
+                  'Canonical issue-link policy failed; inspect this run.',
+                target_url: runUrl,
+              });
+            } catch (error) {
+              if (passed) {
+                reason = `Could not publish the compatibility status: ${error.message || error}`;
+                await github.rest.checks.update({
+                  ...context.repo,
+                  check_run_id: checkRunId,
+                  status: 'completed',
+                  conclusion: 'failure',
+                  completed_at: new Date().toISOString(),
+                  details_url: runUrl,
+                  output: {
+                    title: 'Canonical issue-link publication failed',
+                    summary: reason,
+                    text: 'The compatibility status could not be published; this check must remain blocking.',
+                  },
+                });
+                core.setFailed(reason);
+                return;
+              }
+              throw error;
+            }
+            if (!passed) core.setFailed(reason);

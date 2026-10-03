@@ -153,6 +153,15 @@ bytes and focused synthetic tests are consistency evidence only: final exact-hea
 independent review and integration gates remain required, with no activation,
 deployment, installed-service qualification, or operational approval implied.
 
+Issue #67 refreshes the current issue-link workflow candidate and its independent
+literal fixture. The historical merged-main fixture retains the previous workflow
+digest; the candidate pin describes only these proposed workflow bytes, not an
+observed Actions check run or activation approval.
+
+| Issue #67 candidate path | SHA-256 |
+| --- | --- |
+| `.github/workflows/issue-link.yml` | `9130c197576fda4f16435cd1e490cbf0d942d025f24a2a0529301adad46c83a4` |
+
 The coordinator's exact 37-file static closure includes the PR57 shared canonical
 handoff proof leaf; the fixed 80-file dependency inventory remains explicit. Shared backend
 dependencies keep their existing blocker labels. The five
