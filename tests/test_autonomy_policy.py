@@ -167,6 +167,11 @@ _PENDING_ISSUE67_WORKFLOW_FIXTURE = {
     '.github/workflows/issue-link.yml': 'dd722de884fba6c9d613a72baee43f3b81d2d6816954f6a8e77d972b0fd1eafc',
 }
 
+_PENDING_ISSUE75_HOSTED_GATE_FIXTURE = {
+    '.github/workflows/ci.yml': '5a1b1a694d286d5f8a1a4188802af7e8f6ab46855d278224d9f248cccec844d9',
+    'deploy/release_artifact.py': 'ef47db3b7fa3e4805488ea4c941e770f26b6256842ad26ffb210476e5f86e721',
+}
+
 
 # Accepted PR45 candidate overlay; historical merged-main fixture stays intact.
 _PENDING_PR45_NAMING_FIXTURE = {
@@ -180,7 +185,8 @@ def _source_files():
             | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE
             | _ISSUE46_OBSERVER_FIXTURE | _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
             | _PENDING_ISSUE50_RECEIPT_FIXTURE | _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
-            | _PENDING_ISSUE67_WORKFLOW_FIXTURE | _PENDING_PR45_NAMING_FIXTURE
+            | _PENDING_ISSUE67_WORKFLOW_FIXTURE | _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
+            | _PENDING_PR45_NAMING_FIXTURE
             | _ISSUE65_RECEIPT_PRODUCER_FIXTURE)
 
 
@@ -559,6 +565,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_PENDING_ISSUE50_RECEIPT_FIXTURE)
     pending |= set(_PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE)
     pending |= set(_PENDING_ISSUE67_WORKFLOW_FIXTURE)
+    pending |= set(_PENDING_ISSUE75_HOSTED_GATE_FIXTURE)
     pending |= set(_PENDING_PR45_NAMING_FIXTURE)
     assert {path: SOURCE_FINGERPRINTS[path] for path in _PENDING_PR45_NAMING_FIXTURE
             } == _PENDING_PR45_NAMING_FIXTURE
@@ -607,6 +614,9 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE67_WORKFLOW_FIXTURE
     } == _PENDING_ISSUE67_WORKFLOW_FIXTURE
+    assert {
+        path: SOURCE_FINGERPRINTS[path] for path in _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
+    } == _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
@@ -922,6 +932,17 @@ def test_failed_skipped_or_stale_native_job_blocks(field, value):
     assert 'source-ci-jobs' in _blockers(evidence)
 
 
+@pytest.mark.parametrize('conclusion', ['failure', 'cancelled', 'skipped'])
+def test_failed_or_skipped_integration_job_blocks_attestation(conclusion):
+    evidence = _evidence()
+    integration_job = next(
+        job for job in evidence['source_ci']['jobs'] if job['name'] == 'integration-tests'
+    )
+    integration_job['conclusion'] = conclusion
+
+    assert _blockers(evidence) == {'source-ci-jobs'}
+
+
 def test_missing_native_job_record_and_truncated_review_block():
     evidence = _evidence()
     evidence['source_ci']['jobs'] = [
@@ -1006,9 +1027,9 @@ def test_removed_private_host_manifest_entry_blocks():
 
 
 def test_workflow_identity_uses_reviewed_release_source_fingerprint():
-    assert SOURCE_FINGERPRINTS['deploy/release_artifact.py'] == _MERGED_MAIN_SOURCE_FIXTURE[
-        'deploy/release_artifact.py'
-    ]
+    assert SOURCE_FINGERPRINTS['deploy/release_artifact.py'] == (
+        _PENDING_ISSUE75_HOSTED_GATE_FIXTURE['deploy/release_artifact.py']
+    )
     assert SOURCE_BLOCKERS['deploy/release_artifact.py'] == 'release-artifact-provenance'
 
 

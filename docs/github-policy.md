@@ -100,9 +100,11 @@ targeted independent review and exact-SHA owner authorization.
 
 Main protection requires the exact contexts `source-ci` (Actions app 15368),
 `integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), strict
-up-to-date checks, owner enforcement, and thread resolution. Report
-`integration-tests` only after matching complete hosted and residual host results.
-Do not let an untrusted PR publish these privileged verdicts. Auto-merge can wait
+up-to-date checks, owner enforcement, and thread resolution. The automatic
+`integration-tests` job depends on `source-ci` in the same run and succeeds only
+when that complete hosted aggregate succeeds. Host-only compatibility is a separate
+guarded exact-main deployment gate before activation, not PR-head evidence. Do not
+let an untrusted PR publish these privileged verdicts. Auto-merge can wait
 for these gates; use an exact-head merge precondition for operator-driven merges.
 No admin bypass. A native merge queue would require organization ownership;
 this rollout does not transfer the personal repository.
