@@ -36,7 +36,10 @@ APPROVED alone does not block acceptance, repeat review requests, or consume fix
 budget. Actual open findings must be resolved, and definite rejection is not
 acceptance. Sensitive changes still require separate exact-SHA owner authorization
 and targeted independent review.
-Installed/private host compatibility remains a guarded exact-main deployment gate.
+The automatic `integration-tests` job succeeds only when the same-run complete
+hosted `source-ci` aggregate succeeds. Installed/private host compatibility is not
+PR-head evidence; the complete host partition remains a guarded exact-main
+deployment gate before activation.
 See [`docs/autonomy-policy.md`](../docs/autonomy-policy.md). Coding agents and the
 read-only validator never change settings, publish statuses, activate services, or
 execute untrusted PR code on the host.

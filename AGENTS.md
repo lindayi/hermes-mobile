@@ -22,20 +22,15 @@ For behavior changes, preserve existing assertions and demonstrate a real RED te
 
 Use the managed test runner with explicit test paths for focused local checks; choose Python through HERMES_TEST_PYTHON or the repository .venv, never a fixed owner-specific path.
 
-Until the owner-verified gate transition is activated, final PR coverage combines
-required hosted `source-ci` (all portable Python, JS and generated-assets browser
-shards) with the entire residual host-compatibility suite, using the same selected
-Python:
-
-```sh
-HERMES_TEST_PYTHON="${HERMES_TEST_PYTHON:-$PWD/.venv/bin/python}" \
-  python3 scripts/ci_tests.py host
-```
-
-Run only focused regressions locally during iteration. Do not repeat hosted suites
-on the production server routinely. The explicit host manifest is
-`.github/host-tests.json`; new files default to hosted execution. The full managed
-`all` remains an opt-in diagnostic and the conservative release-stage gate.
+The hosted `integration-tests` check is merge evidence only when the same-run
+`source-ci` aggregate succeeds, which requires every hosted suite. Do not run the
+private host-only compatibility partition on PR heads or treat it as PR evidence.
+The complete `.github/host-tests.json` partition remains a mandatory guarded
+deployment gate: run `scripts/ci_tests.py host` against verified exact-main staged
+source and artifact before activation; any failure blocks activation. Do not repeat
+hosted suites on the production server routinely. New tests default to hosted
+execution. The full managed `all` remains an opt-in diagnostic and the conservative
+release-stage gate.
 
 The active required contexts are `source-ci` (Actions app 15368),
 `integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), with
@@ -126,13 +121,12 @@ commits and reply to their actual GitHub threads. Never self-approve, bypass
 protections, or write directly to `main`.
 
 The exact four active contexts above must pass on the exact head SHA. Publish
-`agent-review` only after verifying the independent review of that head. Publish
-`integration-tests` only after verifying complete final integration under the
-linked development workflow:
-the entire residual host-compatibility suite and the matching hosted `source-ci`
-aggregate must succeed on the same exact head SHA. Record both results and the
-workflow URL. Never use only a hosted subset or only local host tests to claim full
-coverage. Focused checks or dependency setup alone are not final integration.
+`agent-review` only after verifying the independent review of that head. Verify the
+automatically emitted `integration-tests` result is bound to that head and its
+same-run complete hosted `source-ci` aggregate succeeded. Record the workflow URL;
+the host-only compatibility suite is verified during guarded deployment, not
+claimed as PR-head evidence. Focused checks or dependency setup alone are not final
+integration.
 Require all four active contexts, resolved review threads, and a branch current with
 freshly fetched `origin/main` before GitHub merge. Never fabricate advisory status
 success, retire a required context, or use No owner/admin bypass shortcuts.
