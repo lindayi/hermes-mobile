@@ -156,11 +156,16 @@ deployment, installed-service qualification, or operational approval implied.
 Issue #67 refreshes the current issue-link workflow candidate and its independent
 literal fixture. The historical merged-main fixture retains the previous workflow
 digest; the candidate pin describes only these proposed workflow bytes, not an
-observed Actions check run or activation approval.
+observed Actions check run or activation approval. The publication-ordering follow-up
+creates the blocking app check before its compatibility status and publishes final
+app success only after compatibility success. Failure cleanup attempts the blocking
+check and status independently. These are ordered best-effort writes, not atomic:
+a total outage can preserve prior success, and an uncertain successful app write
+can remain eligible if app cleanup fails even when the legacy failure lands.
 
 | Issue #67 candidate path | SHA-256 |
 | --- | --- |
-| `.github/workflows/issue-link.yml` | `9130c197576fda4f16435cd1e490cbf0d942d025f24a2a0529301adad46c83a4` |
+| `.github/workflows/issue-link.yml` | `dd722de884fba6c9d613a72baee43f3b81d2d6816954f6a8e77d972b0fd1eafc` |
 
 The coordinator's exact 37-file static closure includes the PR57 shared canonical
 handoff proof leaf; the fixed 80-file dependency inventory remains explicit. Shared backend

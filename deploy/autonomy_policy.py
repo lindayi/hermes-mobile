@@ -157,7 +157,7 @@ REQUIRED_FILES = (
 )
 SOURCE_FINGERPRINTS = {
     '.github/workflows/ci.yml': '39110e6f940fc59ef3aec9846f07616a86a2e07335d2aaed6c6cd0ab444ff195',
-    '.github/workflows/issue-link.yml': '9130c197576fda4f16435cd1e490cbf0d942d025f24a2a0529301adad46c83a4',
+    '.github/workflows/issue-link.yml': 'dd722de884fba6c9d613a72baee43f3b81d2d6816954f6a8e77d972b0fd1eafc',
     '.github/native-tests.json': 'b97ddb088e595197cf65d97b0b4af89f4f83f5c4ad25463c566df7099817209f',
     '.github/host-tests.json': '8af5fc30188f81ba95d3d7c11ba6801f52795175c2cac7f634424f906947ce5a',
     '.github/actions/test-environment/action.yml': '638ed56955c8c8202fdd41640abe3be8b8065129e2965b8dc67b69f024017604',

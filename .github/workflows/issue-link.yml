@@ -115,18 +115,7 @@ jobs:
             core.setOutput('head_sha', expectedHead);
             const runUrl = `${context.serverUrl}/${REPOSITORY}/actions/runs/${context.runId}`;
             let invalidationError;
-            try {
-              await github.rest.repos.createCommitStatus({
-                ...context.repo,
-                sha: expectedHead,
-                context: 'issue-link',
-                state: 'pending',
-                description: 'Validating canonical issue linkage.',
-                target_url: runUrl,
-              });
-            } catch (error) {
-              invalidationError = error;
-            }
+            // Block the app-bound gate before touching the compatibility status.
             try {
               const {data: check} = await github.rest.checks.create({
                 ...context.repo,
@@ -144,6 +133,18 @@ jobs:
                 throw new Error('GitHub did not return a valid issue-link check-run ID.');
               }
               core.setOutput('check_run_id', String(check.id));
+            } catch (error) {
+              invalidationError = error;
+            }
+            try {
+              await github.rest.repos.createCommitStatus({
+                ...context.repo,
+                sha: expectedHead,
+                context: 'issue-link',
+                state: 'pending',
+                description: 'Validating canonical issue linkage.',
+                target_url: runUrl,
+              });
             } catch (error) {
               invalidationError = error;
             }
@@ -552,7 +553,7 @@ jobs:
               }
             }
             const runUrl = `${context.serverUrl}/${REPOSITORY}/actions/runs/${context.runId}`;
-            try {
+            async function publishCheck() {
               const check = {
                 ...context.repo,
                 status: 'completed',
@@ -571,11 +572,8 @@ jobs:
                 // No check ID/snapshot is needed to publish failure on an authorized head.
                 await github.rest.checks.create({...check, name: 'issue-link', head_sha: head});
               }
-            } catch (error) {
-              passed = false;
-              reason = `Could not publish the issue-link check: ${error.message || error}`;
             }
-            try {
+            async function publishStatus() {
               await github.rest.repos.createCommitStatus({
                 ...context.repo,
                 sha: head,
@@ -585,25 +583,28 @@ jobs:
                   'Canonical issue-link policy failed; inspect this run.',
                 target_url: runUrl,
               });
-            } catch (error) {
-              if (passed) {
-                reason = `Could not publish the compatibility status: ${error.message || error}`;
-                await github.rest.checks.update({
-                  ...context.repo,
-                  check_run_id: checkRunId,
-                  status: 'completed',
-                  conclusion: 'failure',
-                  completed_at: new Date().toISOString(),
-                  details_url: runUrl,
-                  output: {
-                    title: 'Canonical issue-link publication failed',
-                    summary: reason,
-                    text: 'The compatibility status could not be published; this check must remain blocking.',
-                  },
-                });
-                core.setFailed(reason);
-                return;
-              }
-              throw error;
             }
-            if (!passed) core.setFailed(reason);
+            if (passed) {
+              try {
+                // The app-bound check is authoritative: publish its success last.
+                await publishStatus();
+                await publishCheck();
+              } catch (error) {
+                passed = false;
+                reason = `Could not publish the issue-link result: ${error.message || error}`;
+              }
+            }
+            if (!passed) {
+              // Independent best-effort blocking writes, not an atomic transaction.
+              try {
+                await publishCheck();
+              } catch (error) {
+                reason += ` Could not publish the blocking check: ${error.message || error}`;
+              }
+              try {
+                await publishStatus();
+              } catch (error) {
+                reason += ` Could not publish the blocking status: ${error.message || error}`;
+              }
+              core.setFailed(reason);
+            }

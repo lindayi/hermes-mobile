@@ -107,6 +107,11 @@ const outputs = {}, errors = [], events = [];
 const clone = value => JSON.parse(JSON.stringify(value));
 const state = clone(payload.state || {checks: [], statuses: {}, nextCheckId: 9981});
 let statusAttempts = 0;
+const writeEvent = (api, args) => {
+  const event = {api, args, before: clone(state), after: clone(state)};
+  events.push(event);
+  return event;
+};
 const pr = payload.pull;
 const repo = {owner: "lindayi", repo: "hermes-mobile"};
 const context = {
@@ -174,32 +179,40 @@ const github = {rest: {
   }},
   checks: {
     create: async args => {
-      events.push({api: 'checks.create', args});
+      const event = writeEvent('checks.create', args);
       if (payload.check_create_error) throw new Error("check create unavailable");
       calls.checkCreates.push(args);
       const id = state.nextCheckId++;
       state.checks.push({...args, id});
+      event.after = clone(state);
       return {data: {id: payload.check_create_bad_id ? null : id}};
     },
     update: async args => {
-      events.push({api: 'checks.update', args});
-      if (payload.check_update_error) throw new Error("check update unavailable");
+      const event = writeEvent('checks.update', args);
+      if (payload.check_update_error === true || payload.check_update_error === args.conclusion) {
+        throw new Error("check update unavailable");
+      }
       calls.checkUpdates.push(args);
       const check = state.checks.find(check => check.id === args.check_run_id);
       if (check) Object.assign(check, args);
+      event.after = clone(state);
+      if (payload.check_update_error_after_write === args.conclusion) {
+        throw new Error("check update outcome unknown after write");
+      }
       return {data: {id: args.check_run_id}};
     },
   },
   repos: {createCommitStatus: async args => {
-    events.push({api: 'statuses.create', args});
+    const event = writeEvent('statuses.create', args);
     const attempt = statusAttempts++;
-    if (payload.status_error === true ||
+    if (payload.status_error === true || payload.status_error === args.state ||
         payload.status_error === "final" && phase === "publish" ||
         payload.status_error === "pending" && phase === "pending" && attempt === 0) {
       throw new Error("status API unavailable");
     }
     calls.statuses.push(args);
     state.statuses[args.sha] = args.state;
+    event.after = clone(state);
     return {data: {}};
   }},
 }, graphql: async (query, variables) => {
@@ -295,6 +308,97 @@ def prior_success():
     }
 
 
+def app_bound_gate(state):
+    # Replay script-written state at each API boundary. Only the server-assigned
+    # GitHub Actions app identity and status timestamp are synthetic metadata.
+    checks = [{**check, "app": {"id": 15368}} for check in state["checks"]
+              if check["head_sha"] == HEAD_SHA]
+    statuses = [{"context": "issue-link", "state": value,
+                 "created_at": "2026-10-03T02:00:00Z"}
+                for sha, value in state["statuses"].items() if sha == HEAD_SHA]
+    return required_checks_pass(
+        [{"context": "issue-link", "app_id": 15368}], checks, statuses, complete=True)
+
+
+@pytest.mark.parametrize("event", ["pull_request_target", "workflow_dispatch"])
+@pytest.mark.parametrize("phase,status_error", [
+    ("pending", None), ("pending", "pending"),
+    ("publish", None), ("publish", "final"),
+])
+def test_app_gate_blocks_at_publication_api_boundaries(event, phase, status_error):
+    payload = make_payload(state=prior_success(), eventName=event,
+                           inputs={"pull_number": "12", "head_sha": HEAD_SHA},
+                           status_error=status_error)
+    assert app_bound_gate(payload["state"]), "Reproduce an eligible prior app check"
+    if phase == "pending":
+        result = run_script("pending", payload)
+    else:
+        pending, validation, result = run_pipeline(payload)
+        assert pending["errors"] == validation["errors"] == []
+        assert not app_bound_gate(pending["state"])
+    writes = [entry for entry in result["events"] if "after" in entry]
+    assert writes
+    for index, entry in enumerate(writes):
+        allowed = phase == "publish" and status_error is None and index == len(writes) - 1
+        assert app_bound_gate(entry["after"]) is allowed, (phase, index, entry)
+        if allowed:
+            # The compatibility write must already have succeeded before the
+            # authoritative check is even attempted, not be repaired afterward.
+            assert entry["api"] == "checks.update"
+            assert entry["before"]["statuses"][HEAD_SHA] == "success"
+            assert not app_bound_gate(entry["before"])
+    assert bool(result["errors"]) is (status_error is not None)
+
+
+@pytest.mark.parametrize("options", [
+    {"status_error": "success"},
+    {"check_update_error": "success"},
+    {"status_error": "success", "check_update_error": True},
+    {"check_update_error": True},
+    {"check_update_error": True, "status_error": "final"},
+])
+def test_failed_final_publication_attempts_both_blocking_artifacts(options):
+    pending, validation, published = run_pipeline(make_payload(
+        state=prior_success(), **options))
+    assert pending["errors"] == validation["errors"] == []
+    assert published["errors"]
+    writes = [entry for entry in published["events"] if "after" in entry]
+    assert any(entry["api"] == "checks.update" and
+               entry["args"]["conclusion"] == "failure" for entry in writes)
+    assert any(entry["api"] == "statuses.create" and
+               entry["args"]["state"] == "failure" for entry in writes)
+    assert all(not app_bound_gate(entry["after"]) for entry in writes)
+    if not options.get("check_update_error") or options["check_update_error"] == "success":
+        assert published["state"]["checks"][-1]["conclusion"] == "failure"
+    if options.get("status_error") != "final":
+        assert published["state"]["statuses"][HEAD_SHA] == "failure"
+
+
+@pytest.mark.parametrize("cleanup_error", [None, "check", "status", "both"])
+def test_uncertain_success_write_attempts_each_rollback_independently(cleanup_error):
+    pending, validation, published = run_pipeline(make_payload(
+        state=prior_success(), check_update_error_after_write="success",
+        check_update_error="failure" if cleanup_error in {"check", "both"} else None,
+        status_error="failure" if cleanup_error in {"status", "both"} else None))
+    assert pending["errors"] == validation["errors"] == []
+    assert published["errors"]
+    writes = [entry for entry in published["events"] if "after" in entry]
+    assert [(entry["api"], entry["args"].get("conclusion", entry["args"].get("state")))
+            for entry in writes] == [
+        ("statuses.create", "success"), ("checks.update", "success"),
+        ("checks.update", "failure"), ("statuses.create", "failure"),
+    ]
+    assert not app_bound_gate(writes[0]["after"])
+    assert writes[1]["before"]["statuses"][HEAD_SHA] == "success"
+    # A committed success followed by a lost response is observable. Ordering is
+    # not atomic rollback: a failed app cleanup leaves that success eligible even
+    # if the compatibility failure lands (the app-bound predicate ignores it).
+    assert app_bound_gate(writes[1]["after"])
+    assert app_bound_gate(published["state"]) is (cleanup_error in {"check", "both"})
+    assert published["state"]["statuses"][HEAD_SHA] == (
+        "success" if cleanup_error in {"status", "both"} else "failure")
+
+
 def assert_check_blocks(state):
     latest = [check for check in state["checks"] if check["head_sha"] == HEAD_SHA][-1]
     assert latest["status"] != "completed" or latest.get("conclusion") != "success"
@@ -371,6 +475,12 @@ def test_always_without_pending_outputs_invalidates_only_authenticated_event_hea
     if not options.get("check_create_error"):
         assert_check_blocks(published["state"])
         assert published["state"]["checks"][-1]["conclusion"] == "failure"
+        # Missing pending evidence must invalidate the app first, not introduce
+        # the same stale-success window in the always/failure path.
+        assert all(not app_bound_gate(entry["after"]) for entry in published["events"]
+                   if "after" in entry)
+    else:
+        assert app_bound_gate(published["state"]), "Legacy failure cannot block an app-only gate"
 
 
 def test_final_check_update_error_still_invalidates_legacy_status():
@@ -761,10 +871,19 @@ def test_api_errors_never_produce_success(step, options):
             validation_result=verdict),
     })
     assert published["errors"]
-    assert all(status["state"] != "success" for status in published["calls"]["statuses"])
+    if step == "publish" and options == {"check_update_error": True}:
+        # Compatibility success precedes the authoritative write, then is cleared
+        # if that write fails. No intermediate app-bound state may pass.
+        assert [status["state"] for status in published["calls"]["statuses"]] == [
+            "success", "failure"]
+        assert published["state"]["statuses"][HEAD_SHA] == "failure"
+    else:
+        assert all(status["state"] != "success" for status in published["calls"]["statuses"])
+    assert all(not app_bound_gate(entry["after"]) for entry in published["events"]
+               if "after" in entry)
     if step == "publish" and options == {"status_error": "final"}:
         assert [run["conclusion"] for run in published["calls"]["checkUpdates"]] == [
-            "success", "failure"]
+            "failure"]
 
 
 def test_workflow_check_run_interoperates_with_app_bound_coordinator_gate():
