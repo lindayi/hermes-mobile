@@ -7,7 +7,7 @@ import pytest
 
 from deploy.cloud_coordinator import _authorized_result_heads
 from test_cloud_coordinator import (
-    BASE, HEAD, OWNER, Coordinator, FakeApi, StateStore,
+    BASE, HEAD, OWNER, Coordinator, FakeApi, StateStore, refresh_owner_review,
 )
 
 NOW = 1790856660
@@ -296,6 +296,7 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     api.review_submitted_at = "2026-10-01T12:07:01Z"
     assert not run()["auto_merge_requested"]  # Required checks remain pending.
     api.pending_required = False
+    refresh_owner_review(api, RESULT_HEAD)
     assert run()["auto_merge_requested"]
     assert api.graphql_writes[-1][1]["expectedHeadOid"] == RESULT_HEAD
     run()
@@ -403,6 +404,7 @@ def test_actual_paired_v2_main_advance_keeps_authority_but_requires_neutral_repa
     api.strict_protection = False
     assert not run()["auto_merge_requested"]  # Never bypass strict current-main policy.
     api.strict_protection = True
+    refresh_owner_review(api, repaired_head)
     assert run()["auto_merge_requested"]
     assert api.graphql_writes[-1][1]["expectedHeadOid"] == repaired_head
     run()
@@ -777,5 +779,6 @@ def test_admitted_starter_body_report_and_v2_receipt_survive_restart_and_manual_
     assert enrollment["authorized_head"] == HEAD and enrollment["attempts"] == 1
     assert enrollment["owner_authorized_head"] == RESULT_HEAD
     api.pending_required = False
+    refresh_owner_review(api, RESULT_HEAD)
     assert run()["auto_merge_requested"]
     assert len(api.graphql_writes) == 1 and api.fix_attempts == 1

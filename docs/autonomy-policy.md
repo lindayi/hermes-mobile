@@ -1,9 +1,18 @@
 # Autonomy gate transition
 
-This policy defines the evidence required before the repository owner may replace
-the manual premerge statuses with the cloud-first routine gate. It does not activate
-the transition. Until the parent operator verifies the dependencies and changes the
-repository rules, the existing required checks remain authoritative.
+This policy defines the evidence required by its read-only gate validator. It does
+not change or activate repository settings. The active protected checks are exactly
+`source-ci` (Actions app 15368), `integration-tests`, `agent-review`, and `issue-link`
+(Actions app 15368), with strict/up-to-date checks and conversation resolution.
+Advisory `cloud-review` is not required or synthesized.
+
+Every PR also requires the latest authenticated owner-published structured
+independent-agent formal COMMENT review on its exact head, a positive verdict and
+bound evidence digest, complete review/thread pagination, and resolved threads.
+Copilot feedback is supplemental; actual findings and definite rejection remain
+blockers. Unchanged reviewed blobs, configuration, and dependencies may retain
+verifiable acceptance; changed scope needs one independent delta review, while final
+current-head authority and statuses are freshly bound and never copied blindly.
 
 ## Read-only validator
 
@@ -381,18 +390,19 @@ current-main readback. Readiness requires:
 - The fixed repository/coordinator identities and a complete exact-head review
   contract. The reviewed PR must be open, non-draft, based on current main, and its
   changed-file classification must be complete for that exact head. Evidence binds
-  the positive numeric PR-author ID. Every authenticated Copilot review (ID
-  `175728472`) must have a positive review ID and a valid timezone-aware timestamp;
-  all review IDs are unique. Malformed review records block. Latest is selected by
-  chronological timestamp; every Copilot review tied at that instant must be an
-  actual `APPROVED` review on the current PR head. Offsets compare as instants, not
-  strings or review-ID order. Every review thread and page must be complete and
-  resolved. A `COMMENTED` review, body text, empty overview, or a status without the
-  authenticated review is not approval.
+  the positive numeric PR-author ID. Every review record must have a positive unique
+  ID, valid authenticated author identity, and valid timezone-aware timestamp;
+  malformed review records block. The latest owner review is selected by chronological
+  timestamp, and its current COMMENT body must exactly match the selected review ID
+  and body digest, contain a valid positive structured independent-agent verdict on
+  the current PR head, and bind the reviewed evidence digest. Offsets compare as
+  instants, not strings or review-ID order. Every review and thread page must be
+  complete and every thread resolved. A status or Copilot review alone is not
+  independent review.
 
 If the PR under review changes sensitive files, readiness additionally requires
 owner ID `5164171` authorization for that exact head, bound to one owner-published
-independent-agent review in the complete authenticated `cloud_review.reviews`
+independent-agent review in the complete authenticated `independent_review.reviews`
 collection. The existing command is extended to
 `/hermes authorize-sensitive <head-sha> review <positive-review-id> <body-sha256>`;
 the former head-only command cannot authorize sensitive work. The review must be a
@@ -408,85 +418,34 @@ different GitHub identity. The selected record must remain the sole latest owner
 review; a missing, malformed, edited, removed, dismissed, duplicate, stale, negative,
 or conflicting record blocks with `sensitive-review-authorization`. Both the owner
 authorization and selected review are re-read during planning and the fresh status
-and merge fences. A later head clears the authorization; approval is not blanket
+and merge fences. The positive proof also requires authenticated GraphQL
+`PullRequestReview` edit metadata bound to the same REST review identity/body/head;
+missing metadata, mismatches, or any edit signal block exactly like an edited
+record. A later head clears the authorization; approval is not blanket
 consent for future commits.
 
 ## Policy phases and activation
 
 | Phase | Required main protection checks | Meaning |
 | --- | --- | --- |
-| `pre-cutover` | `source-ci`, `integration-tests`, `agent-review`, `issue-link` | Existing manual policy, with issue-link retained. Genuine complete exact-head APPROVED review is required, but its not-yet-published cloud-review status may be absent. |
-| `staging` | `source-ci`, `integration-tests`, `agent-review`, `issue-link`, `cloud-review` | Additive policy: bind source-ci to Actions and add cloud-review without retiring legacy gates. Require actual coordinator-published exact-head success and its genuine approved review. |
-| `post-cutover` | `source-ci`, `issue-link`, `cloud-review` | Target routine policy, only after the owner has verified staging replacement evidence on actual current heads and authorized retirement of the two legacy contexts. |
+| `pre-cutover` | `source-ci`, `integration-tests`, `agent-review`, `issue-link` | Current four-check policy; independent exact-head structured COMMENT review is separately required. |
+| `staging` | `source-ci`, `integration-tests`, `agent-review`, `issue-link` | Same four-check policy; no advisory `cloud-review` status is required. |
+| `post-cutover` | `source-ci`, `integration-tests`, `agent-review`, `issue-link` | Same four-check policy; installed/private host compatibility remains a guarded exact-main deployment gate. |
 
 These are exact context maps, not minimum subsets. No arbitrary supersets or unknown
 contexts are accepted, and duplicate contexts block. Each check's app_id must be
-explicitly present as a JSON integer or null. In pre-cutover, source-ci may be
-unbound (null) or already bound to Actions app 15368; staging and post-cutover
-require source-ci bound to Actions app 15368. The issue-link remains bound to
-Actions app 15368 in every phase. The legacy integration-tests and agent-review
-bindings remain null in pre-cutover and staging; cloud-review's app binding is
-null in staging and post-cutover. Its separate status creator identity is checked
-below. No other app-binding variants are accepted.
+explicitly present as a JSON integer or null. `source-ci` and `issue-link` are bound
+to Actions app 15368; `integration-tests` and `agent-review` remain unbound. No other
+app-binding variants are accepted.
 
 All three phases require strict main protection, administrator enforcement and
 conversation resolution. In every phase, complete `source-ci` includes the public
-native suite. After cutover, private
-installed-runtime compatibility remains an exact-main guarded deployment gate,
-not a premerge host task. The validator never publishes `integration-tests`,
-`agent-review`, `cloud-review`, or any other status and cannot perform the settings
-transition.
-
-Only pre-cutover permits omission of cloud_review.status. An explicitly supplied
-null or malformed status blocks; if supplied, it must meet the same success,
-exact-head, context and creator checks as the later phases. Staging and post-cutover
-require an actual `cloud-review` success on the reviewed PR head, with creator ID
-5164171, published by the genuinely merged coordinator. The operator must verify
-that provenance independently; a supplied status record or fixed creator ID alone
-does not authenticate who ran which source. Review approval, complete pagination,
-resolved threads, source/run/artifact provenance, changed-file classification and
-sensitive owner authorization remain mandatory even when pre-cutover status is
-absent. A pre-cutover pass is permission to consider additive staging, not to retire
-legacy gates.
-
-The coordinator publishes cloud-review only when that context is required. Requiring
-its status before adding the context would deadlock. Do not synthesize a status to
-bridge this gap. The owner-controlled sequence is:
-
-1. Merge the independently reviewed dependencies through the existing protected
-   process. Pre-cutover remains blocked if PR #19/PR20's native aggregate/release
-   provenance or PR #15/PR16's fixed-identity coordinator and exact-head review
-   contract are absent from current main. A PR branch or expected merge is not a
-   dependency proof. Once the final merged core (and later PR33 changes) is known,
-   deliberately review and replace any changed fingerprint and provenance fixture;
-   never auto-pin candidate evidence or expand a whitelist. Issue #43 accepts the
-   assembled source prerequisites and separately authorizes historical hold removal;
-   issue #35 retains operational acceptance. Neither source change establishes the
-   authenticated current-main or runtime evidence required by this sequence.
-2. Collect authenticated current-main source, successful complete hosted results,
-   release provenance, retained installed-host gate and genuine complete exact-head
-   APPROVED review evidence, including sensitive authorization where required.
-   Run pre-cutover validation against the actual four-context readback. Keep existing
-   issue-link and both legacy gates; exact-head hosted plus full residual host
-   coverage and the independent formal COMMENT/legacy publication obligations in
-   the development workflow remain in force until final cutover.
-3. Only the owner may authorize and apply the reversible additive settings change:
-   tighten source-ci to Actions app 15368 and add cloud-review, retaining issue-link,
-   integration-tests, agent-review and all strict/admin/conversation protections.
-   This is staging, not final activation. Read back the exact five-context map.
-4. Under that staging policy, verify the genuinely merged coordinator publishes
-   cloud-review success from actual exact-head APPROVED review with complete resolved
-   threads and any required sensitive authorization. Recollect fresh evidence and
-   pass staging validation before retiring either legacy context. Missing status,
-   stale heads, fake approval, or mismatched source remain blockers, not reasons to
-   fabricate success or bypass protection.
-5. Only after that verification may the owner authorize the final reversible change
-   retiring integration-tests and agent-review. Retain exactly source-ci/app15368,
-   issue-link/app15368 and cloud-review/unbound plus all protections. Recollect actual
-   readback, main and PR-head evidence and pass post-cutover validation. New heads
-   invalidate old evidence; re-read current main and PR head to fence collection
-   races. A post-cutover snapshot does not prove the earlier staging verification;
-   the parent operator must retain and independently verify that record.
+native suite. Installed-runtime compatibility remains an exact-main guarded
+deployment gate, not a premerge host task. The validator never publishes statuses
+or performs a settings transition. It requires complete source/run/artifact
+provenance, changed-file classification, current structured independent review, and
+sensitive owner authorization where applicable. Phase names remain for compatibility;
+they do not authorize changing the active four-check map.
 
 No coding task or validator performs settings changes or service activation. Do not
 equate synthetic unit-test success with live readiness, a merge, or a deployment.
@@ -494,7 +453,7 @@ equate synthetic unit-test success with live readiness, a merge, or a deployment
 ## Evidence fields
 
 The JSON root contains `repository`, `main`, `protection`, `source_ci`, and
-`cloud_review` records. `main.files` maps the exact required source paths to their
+`independent_review` records. `main.files` maps the exact required source paths to their
 SHA-256 digests and is bound to `main.sha`, `main.ref` and the fixed repository ID.
 `source_ci.jobs` carries every unique GitHub job ID, name, run ID, attempt, head
 SHA, completion status and conclusion. The artifact record carries its run/attempt,
@@ -502,12 +461,11 @@ repository IDs, expiration state, size and SHA-256. Its attestation record carri
 the verified certificate identity, issuer, repository ID, ref, source/signer SHA,
 run invocation URI, trigger and runner environment.
 
-`cloud_review` identifies the current PR repository, base ref/SHA and head SHA,
+`independent_review` identifies the current PR repository, base ref/SHA and head SHA,
 positive `pull_author_id`, open/draft state, complete changed-file classification
 for its exact head, complete review/thread pagination, review IDs, authors, valid
-timestamps, states and commit SHAs, resolved thread state, and the `cloud-review`
-status context, state, head and creator ID
-(status may be omitted only in pre-cutover, as described above).
+timestamps, states and commit SHAs, resolved thread state, and the selected review
+ID, current raw-body digest, and evidence digest.
 For a sensitive change it also carries the exact-head owner authorization and
 targeted-review identities. Consult `deploy/autonomy_policy.py` for the executable
 field contract; missing fields block rather than defaulting to success.

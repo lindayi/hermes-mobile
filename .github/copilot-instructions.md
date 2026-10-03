@@ -23,15 +23,19 @@ Write PR descriptions as plain paragraphs using the repository template; include
 
 For task handoff, a literal Closes #N is a readability convention; verify linkage from authenticated GitHub closing-issue references, never PR body text.
 
-The autonomous gate transition is conditional, not active by documentation alone.
-Until the parent operator verifies dependencies and actual current-head evidence and
-changes repository protection, require the exact pre-cutover contexts `source-ci`,
-`integration-tests`, `agent-review`, and `issue-link`, plus independent formal
-COMMENT review. After
-activation, routine premerge requires complete hosted `source-ci` (including native),
-`issue-link`, a successful `cloud-review` status, and an actual authenticated Copilot `APPROVED` review on the exact
-current head with complete resolved threads; `COMMENTED` is never approval. Sensitive
-changes still require exact-SHA owner authorization and targeted independent review.
+The active required contexts are `source-ci` (Actions app 15368),
+`integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), with
+strict/up-to-date checks and resolved conversations. Do not require, synthesize, or
+publish `cloud-review` as a required status. Independent technical acceptance
+requires the latest authenticated, exact-head owner-published structured
+independent-agent formal COMMENT review, a valid positive verdict and evidence
+binding, complete review/thread pagination, and resolved conversations. Stale,
+edited, removed, malformed, superseded, or unbound evidence fails closed; status
+alone is not a review. Copilot feedback is supplemental: COMMENTED or missing
+APPROVED alone does not block acceptance, repeat review requests, or consume fixer
+budget. Actual open findings must be resolved, and definite rejection is not
+acceptance. Sensitive changes still require separate exact-SHA owner authorization
+and targeted independent review.
 Installed/private host compatibility remains a guarded exact-main deployment gate.
 See [`docs/autonomy-policy.md`](../docs/autonomy-policy.md). Coding agents and the
 read-only validator never change settings, publish statuses, activate services, or

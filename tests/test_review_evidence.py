@@ -156,7 +156,10 @@ def _independent_review_evidence():
     body_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
     review = {
         "id": review_id, "user": {"id": OWNER}, "commit_id": HEAD,
-        "state": "COMMENTED", "submitted_at": SUBMITTED, "body": body,
+        "node_id": "PRR_kwDOU3FvNc8AAAABQehXFA",
+        "state": "COMMENTED", "submitted_at": SUBMITTED,
+        "updatedAt": SUBMITTED, "lastEditedAt": None,
+        "includesCreatedEdit": False, "body": body,
     }
     authorization = {
         "actor_id": OWNER, "head_sha": HEAD, "state": "approved",
@@ -189,6 +192,71 @@ def test_owner_published_independent_review_requires_bounded_structured_positive
         assert not sensitive_review_authorized(
             [invalid_review], HEAD, authorization, targeted, owner_id=OWNER,
         )
+
+
+def test_current_independent_review_is_bound_to_latest_exact_unedited_record():
+    from deploy.review_evidence import current_independent_agent_review
+
+    _, body, review, _, targeted = _independent_review_evidence()
+    assert current_independent_agent_review(
+        [review], HEAD, owner_id=OWNER, expected=targeted,
+    ) == targeted
+    assert current_independent_agent_review(
+        [review], HEAD, owner_id=OWNER, expected=targeted, complete=False,
+    ) is None
+    assert current_independent_agent_review(
+        [review], HEAD, owner_id=OWNER, expected=targeted | {"body_sha256": "d" * 64},
+    ) is None
+    assert current_independent_agent_review([], HEAD, owner_id=OWNER) is None
+
+    edited_body = json.dumps({
+        "schema": INDEPENDENT_REVIEW_SCHEMA,
+        "reviewed_head_sha": HEAD,
+        "review_method": "independent-agent",
+        "verdict": "pass",
+        "evidence_sha256": "d" * 64,
+    }, separators=(",", ":"))
+    assert current_independent_agent_review(
+        [dict(review, body=edited_body)], HEAD, owner_id=OWNER, expected=targeted,
+    ) is None
+    assert current_independent_agent_review(
+        [dict(review, commit_id="b" * 40)], HEAD, owner_id=OWNER,
+    ) is None
+    superseded = dict(
+        review, id=review["id"] + 1, state="CHANGES_REQUESTED",
+        submitted_at="2026-10-01T13:00:00Z",
+    )
+    assert current_independent_agent_review(
+        [review, superseded], HEAD, owner_id=OWNER,
+    ) is None
+    assert current_independent_agent_review(
+        [dict(review, updated_at="2026-10-01T12:31:00Z")],
+        HEAD, owner_id=OWNER,
+    ) is None
+    missing_update = dict(review)
+    missing_update.pop("updatedAt")
+    assert current_independent_agent_review(
+        [missing_update], HEAD, owner_id=OWNER,
+    ) is None
+    assert current_independent_agent_review(
+        [dict(review, lastEditedAt="2026-10-01T12:31:00Z")],
+        HEAD, owner_id=OWNER,
+    ) is None
+    assert current_independent_agent_review(
+        [dict(review, includesCreatedEdit=True)],
+        HEAD, owner_id=OWNER,
+    ) is None
+    missing_last_edited = dict(review)
+    missing_last_edited.pop("lastEditedAt")
+    assert current_independent_agent_review(
+        [missing_last_edited], HEAD, owner_id=OWNER,
+    ) is None
+    missing_created_edit = dict(review)
+    missing_created_edit.pop("includesCreatedEdit")
+    assert current_independent_agent_review(
+        [missing_created_edit], HEAD, owner_id=OWNER,
+    ) is None
+    assert body == review["body"]
 
 
 @pytest.mark.parametrize("mutation", [

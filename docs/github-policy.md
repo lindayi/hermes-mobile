@@ -84,30 +84,23 @@ bypasses protection. Missing cloud entitlement/quota uses this explicit local pa
 
 ## Review
 
-The repository ruleset `Copilot cloud review` targets `refs/heads/main`, requests
-Copilot on ready PRs and new pushes, and excludes draft reviews to avoid needless
-review churn. Push coherent changes rather than one commit per keystroke. Request
-`@copilot` explicitly for a PR already open when the ruleset was introduced.
+Copilot code review is supplemental feedback, not an approval gate. Batch coherent
+changes rather than repeatedly requesting review for COMMENTED or missing APPROVED
+feedback. Follow-up review is appropriate after actual fixes, not solely because no
+approval was issued.
 
-Copilot is independent cloud feedback, not automatic acceptance of its suggestions.
-Address real findings with follow-up commits and evidence; explain false positives.
-A completed review, no comments, a resolved thread or prose saying "approved" is
-not an approving review. Existing required `agent-review` remains an explicit
-exact-head assessment and disposition of findings. Auth/security, migrations,
-deployment, CI/review-policy and agent-instruction changes retain targeted
-independent review. Review the complete paginated diff under trusted policy.
+Address actual Copilot findings with follow-up commits and evidence; explain false
+positives. Independent technical acceptance for every PR requires the latest
+authenticated owner-published structured independent-agent formal COMMENT review,
+exact-head evidence binding, complete review/thread pagination, and resolved
+conversations. A status, Copilot review, or arbitrary comment is not a substitute.
+The authoring task and authoritative independent review run in separate cloud
+contexts; never claim an author reviewed their own changes. Sensitive changes retain
+targeted independent review and exact-SHA owner authorization.
 
-GitHub currently documents optional Copilot native approvals in public preview.
-They are controlled through Settings → Copilot → Code review → Auto-approval;
-the public REST/GraphQL APIs audited here do not expose these toggles. Do not
-invent API settings or remove an existing gate on the assumption they are on.
-If enabled later, first observe an actual undismissed `APPROVED` review for the
-current head and prove merge-rule recognition. Retain high-risk independent
-review and a usable local fallback. New commits invalidate prior-head evidence.
-
-Main protection remains strict/up-to-date, owner-enforced and thread-resolution
-required, with pre-cutover contexts `source-ci`, `integration-tests`, `agent-review`,
-and `issue-link`. Report
+Main protection requires the exact contexts `source-ci` (Actions app 15368),
+`integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), strict
+up-to-date checks, owner enforcement, and thread resolution. Report
 `integration-tests` only after matching complete hosted and residual host results.
 Do not let an untrusted PR publish these privileged verdicts. Auto-merge can wait
 for these gates; use an exact-head merge precondition for operator-driven merges.

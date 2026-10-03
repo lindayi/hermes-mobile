@@ -11,21 +11,18 @@ source import and subsequent changes use protected pull requests.
 ## Required observable outcomes
 
 1. Repository `lindayi/hermes-mobile` exists; remote source readback matches commits.
-2. Until an owner-verified gate transition is activated, main requires the exact
-   pre-cutover contexts `source-ci`, `integration-tests`, `agent-review`, and
-   `issue-link`, an up-to-date branch and resolved review conversations; protections
-   apply to administrators. The target
-   post-cutover routine premerge policy is `source-ci`, `issue-link`, and
-   exact-head `cloud-review`, with strict/up-to-date main and resolved
-   conversations. The target is not active merely because it is specified or validated.
-3. The current policy requires an independent formal COMMENT review on the exact
-   commit; a passing status does not claim a different GitHub identity or a human
-   approval. After the parent operator verifies replacement evidence on actual
-   current heads and performs the authorized protection change, `cloud-review`
-   requires an actual authenticated Copilot `APPROVED` review on the exact current
-   head, complete review/thread pagination, and resolved threads. A `COMMENTED`
-   review or overview text is not approval. Sensitive changes retain exact-SHA
-   owner authorization and targeted independent review.
+2. Main requires the exact contexts `source-ci` (Actions app 15368),
+   `integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), an
+   up-to-date branch and resolved review conversations; protections apply to
+   administrators. `cloud-review` is advisory and is not a required context.
+3. Every PR requires the latest authenticated owner-published structured
+   independent-agent formal COMMENT review on its exact head, a positive verdict
+   with evidence binding, complete review/thread pagination, and resolved threads.
+   A status alone is not independent review. Copilot feedback is supplemental;
+   COMMENTED or missing APPROVED alone does not block or consume fixer budget when
+   there are no findings. Actual open findings and definite rejection still block.
+   Sensitive changes retain separate exact-SHA owner authorization and targeted
+   independent review.
 4. At least one real PR review is published; genuine findings receive follow-up
    commits and checked thread resolution. Do not invent findings for a demo.
 5. Task worktrees isolate edits. Conflict reconciliation preserves both compatible

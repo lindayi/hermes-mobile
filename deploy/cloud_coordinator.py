@@ -21,6 +21,7 @@ from urllib.parse import quote, unquote, urlencode
 from deploy.review_evidence import (
     FINDING_KINDS,
     body_findings,
+    current_independent_agent_review,
     latest_reviews,
     positive_id,
     selected_independent_agent_review,
@@ -60,6 +61,10 @@ COMPUTED_MERGEABLE_STATES = frozenset({
     "clean", "unstable", "has_hooks", "blocked", "behind", "dirty", "draft",
 })
 COPILOT_REVIEWER_LOGIN = "copilot-pull-request-reviewer[bot]"
+CURRENT_REQUIRED_CHECKS = frozenset({
+    ("source-ci", 15368), ("integration-tests", None),
+    ("agent-review", None), ("issue-link", 15368),
+})
 MAX_PAGES = 100
 MAX_FINDINGS = 8
 MAX_FINDING_CHARS = 1000
@@ -109,6 +114,34 @@ query($number: Int!, $cursor: String) {
   }
 }
 """
+GRAPHQL_REVIEW_METADATA = """
+query($id: ID!) {
+  node(id: $id) {
+    ... on PullRequestReview {
+      id
+      databaseId
+      submittedAt
+      updatedAt
+      lastEditedAt
+      includesCreatedEdit
+      state
+      body
+      commit { oid }
+      author { login }
+      pullRequest {
+        number
+        repository {
+          nameWithOwner
+          databaseId
+        }
+      }
+    }
+  }
+}
+"""
+REVIEW_ROUTE_RE = re.compile(
+    r"repos/lindayi/hermes-mobile/pulls/([1-9][0-9]*)/reviews(?:/([1-9][0-9]*))?(?:\?[^#]*)?\Z"
+)
 
 
 class CoordinatorError(RuntimeError):
@@ -318,6 +351,25 @@ def copilot_review_valid(head_sha, reviews, threads, *, threads_complete=True,
     )
 
 
+def independent_review_valid(head_sha, reviews, threads, *, pull_author_id,
+                             threads_complete=True, reviews_complete=True):
+    """Require current owner-published independent evidence, not Copilot approval."""
+    if (not _is_sha(head_sha) or type(pull_author_id) is not int
+            or pull_author_id <= 0 or pull_author_id == OWNER_ID
+            or reviews_complete is not True
+            or not _complete_resolved_threads(threads, complete=threads_complete)):
+        return False
+    if current_independent_agent_review(
+            reviews, head_sha, owner_id=OWNER_ID, complete=reviews_complete) is None:
+        return False
+    latest_copilot = latest_reviews(reviews, COPILOT_REVIEWER_ID)
+    return not latest_copilot or not any(
+        review.get("state") == "CHANGES_REQUESTED"
+        and review.get("commit_id") == head_sha
+        for review in latest_copilot
+    )
+
+
 def _required_contexts(required):
     if not isinstance(required, list):
         return []
@@ -399,18 +451,16 @@ def _pull_merge_eligible(pull, current_main_sha):
 
 def eligible_for_auto_merge(pull, *, current_main_sha, required_checks, check_runs,
                             statuses, checks_complete, review_valid, sensitive_authorized,
-                            cloud_review_required, cloud_review_status_owned,
                             up_to_date_required, conversation_resolution_required,
                             agent_running):
     """Pure eligibility gate; GitHub still enforces protected auto-merge."""
     if (not _pull_merge_eligible(pull, current_main_sha)
             or not review_valid or not sensitive_authorized
-            or not cloud_review_required or not cloud_review_status_owned
             or not up_to_date_required or not conversation_resolution_required
             or agent_running):
         return False
     contexts = _required_contexts(required_checks)
-    if "cloud-review" not in {entry["context"] for entry in contexts}:
+    if {(entry["context"], entry["app_id"]) for entry in contexts} != CURRENT_REQUIRED_CHECKS:
         return False
     return required_checks_pass(
         required_checks, check_runs, statuses, complete=checks_complete,
@@ -739,7 +789,73 @@ def _is_owner_sensitive_command(comment):
 
 
 def _rest_list(api, route, collection=None):
-    return api.get_all(route, collection=collection)
+    values = api.get_all(route, collection=collection)
+    return _enrich_pull_reviews(api, route, values)
+
+
+def _enrich_pull_reviews(api, route, reviews):
+    match = REVIEW_ROUTE_RE.fullmatch(route)
+    if match is None or not isinstance(reviews, list):
+        return reviews
+    pull_number = int(match.group(1))
+    selected_review_id = int(match.group(2)) if match.group(2) is not None else None
+    enriched = []
+    for review in reviews:
+        if (not isinstance(review, dict)
+                or selected_review_id is not None and review.get("id") != selected_review_id):
+            enriched.append(review)
+            continue
+        user = review.get("user")
+        if not isinstance(user, dict) or user.get("id") != OWNER_ID:
+            enriched.append(review)
+            continue
+        enriched.append(_bound_owner_review_metadata(api, pull_number, review))
+    return enriched
+
+
+def _bound_owner_review_metadata(api, pull_number, review):
+    node_id = review.get("node_id")
+    user = review.get("user")
+    if not isinstance(node_id, str) or not node_id:
+        return review
+    if not isinstance(user, dict) or not isinstance(user.get("login"), str) or not user["login"]:
+        return review
+    try:
+        response = api.graphql(GRAPHQL_REVIEW_METADATA, {"id": node_id})
+    except ApiError:
+        return review
+    node = response.get("data", {}).get("node") if isinstance(response, dict) else None
+    commit = node.get("commit") if isinstance(node, dict) else None
+    author = node.get("author") if isinstance(node, dict) else None
+    pull = node.get("pullRequest") if isinstance(node, dict) else None
+    repository = pull.get("repository") if isinstance(pull, dict) else None
+    if (
+            not isinstance(node, dict)
+            or node.get("id") != node_id
+            or node.get("databaseId") != review.get("id")
+            or node.get("submittedAt") != review.get("submitted_at")
+            or node.get("state") != review.get("state")
+            or node.get("body") != review.get("body")
+            or not isinstance(commit, dict)
+            or commit.get("oid") != review.get("commit_id")
+            or not isinstance(author, dict)
+            or author.get("login") != user.get("login")
+            or not isinstance(pull, dict)
+            or pull.get("number") != pull_number
+            or not isinstance(repository, dict)
+            or repository.get("databaseId") != REPOSITORY_ID
+            or not isinstance(repository.get("nameWithOwner"), str)
+            or repository["nameWithOwner"].casefold() != REPOSITORY.casefold()
+            or node.get("updatedAt") in (None, "")
+            or "lastEditedAt" not in node
+            or type(node.get("includesCreatedEdit")) is not bool
+    ):
+        return review
+    enriched = dict(review)
+    enriched["updatedAt"] = node["updatedAt"]
+    enriched["lastEditedAt"] = node.get("lastEditedAt")
+    enriched["includesCreatedEdit"] = node["includesCreatedEdit"]
+    return enriched
 
 
 def _all_review_comments(api, issue_number, cursor):
@@ -860,6 +976,8 @@ def _required_checks(api):
         if normalized:
             item = normalized[0]
             unique[(item["context"], item["app_id"])] = item
+    if set(unique) != CURRENT_REQUIRED_CHECKS:
+        available = False
     return (list(unique.values()), available, up_to_date_required,
             conversation_resolution_required)
 
@@ -1428,14 +1546,12 @@ class Coordinator:
         source_failure = _latest_source_failure(
             workflows, sha, head.get("ref", ""), number,
         )
-        latest_status, status_is_owned = _status_owned(
-            statuses, "cloud-review", OWNER_ID,
-        )
         return {
             "issue": number, "enrollment": enrollment, "pull": pull, "head": sha,
             "main_sha": main_sha, "scoped": scoped,
             "historical_base": historical_base, "files": files,
             "files_complete": len(files) < 300, "reviews": reviews,
+            "reviews_complete": True,
             "threads": threads, "threads_complete": threads_complete,
             "required": required, "policy_complete": policy_complete,
             "up_to_date_required": up_to_date_required,
@@ -1444,7 +1560,6 @@ class Coordinator:
             "source_failure": source_failure,
             "comments": comments, "workflows": workflows, "tasks": tasks,
             "pull_workflows": pull_workflows,
-            "status": latest_status, "status_owned": status_is_owned,
         }
 
     def _verified_stale_ready_handoff(self, action, snapshot):
@@ -2018,9 +2133,12 @@ class Coordinator:
                 "reasons": ["terminal"], "outcomes": [],
                 "lifecycle_events": lifecycle,
             }
-        review_ok = copilot_review_valid(
+        pull_user = snapshot["pull"].get("user")
+        review_ok = independent_review_valid(
             head, snapshot["reviews"], snapshot["threads"],
+            pull_author_id=pull_user.get("id") if isinstance(pull_user, dict) else None,
             threads_complete=snapshot["threads_complete"],
+            reviews_complete=snapshot["reviews_complete"],
         )
         sensitive = classify_sensitive_paths(
             snapshot["files"], complete=snapshot["files_complete"],
@@ -2035,13 +2153,13 @@ class Coordinator:
             )
         )
         required = snapshot["required"]
-        review_context_required = any(
-            item.get("context") == "cloud-review" for item in required
-        )
         checks_ok = required_checks_pass(
             required, snapshot["check_runs"], snapshot["statuses"],
             complete=snapshot["policy_complete"],
         )
+        status_state = "success" if review_ok and authorized else "pending"
+        status, status_owned = _status_owned(snapshot["statuses"], "cloud-review", OWNER_ID)
+        status_action = None
         handoffs = []
         agent_busy = self._reconcile_actions(
             snapshot, actions, apply=apply, handoffs=handoffs,
@@ -2142,9 +2260,11 @@ class Coordinator:
         if sensitive and not authorized:
             reasons.append(("sensitive", "Owner exact-head authorization is required for sensitive changes."))
         if not review_ok:
-            reasons.append(("review", "A current authenticated Copilot approval and resolved review threads are required."))
+            reasons.append(("review", "A current structured independent-agent review and resolved conversations are required."))
         if not checks_ok:
             reasons.append(("checks", "Every configured required check must complete successfully."))
+        if status and not status_owned:
+            reasons.append(("status-owner", "The cloud-review status is owned by another identity."))
         if agent_busy:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
         budget_needed = (
@@ -2158,45 +2278,37 @@ class Coordinator:
         )
         if snapshot["enrollment"].get("attempts", 0) >= REPAIR_LIMIT and budget_needed:
             reasons.append(("budget", "The three-repair limit is exhausted; owner attention is required."))
-        status_state = "success" if review_ok and authorized else "pending"
-        status_action = None
-        if snapshot["scoped"] and review_context_required:
-            status = snapshot.get("status")
-            if status and not snapshot["status_owned"]:
-                reasons.append(("status-owner", "The cloud-review status is owned by another identity."))
-            elif not status or status.get("state") != status_state:
-                prior = [item for item in actions.values()
-                         if item.get("kind") == "status" and item.get("issue") == number
-                         and item.get("head") == head]
-                ambiguous = any(item.get("status") in {"sending", "uncertain"}
-                                for item in prior)
-                # Retirement can compact any head of this PR before the claim.
-                # Reserve above all live generations as well as its tombstone.
-                generation = max(
-                    [item.get("generation", 0) for item in actions.values()
-                     if item.get("kind") == "status" and item.get("issue") == number]
-                    + [self.store.status_generation_floor(number)]
-                ) + 1
-                if not ambiguous:
-                    status_action = {
-                        "kind": "status", "issue": number, "head": head,
-                        "state": status_state, "generation": generation,
-                        "key": f"status:{number}:{head}:{generation}",
-                    }
         merge = snapshot["scoped"] and eligible_for_auto_merge(
             snapshot["pull"], current_main_sha=snapshot["main_sha"],
             required_checks=required, check_runs=snapshot["check_runs"],
             statuses=snapshot["statuses"], checks_complete=snapshot["policy_complete"],
             review_valid=review_ok, sensitive_authorized=authorized,
-            cloud_review_required=review_context_required,
-            cloud_review_status_owned=(
-                snapshot["status_owned"] and snapshot["status"] is not None
-                and snapshot["status"].get("state") == "success"
-            ),
             up_to_date_required=snapshot["up_to_date_required"],
             conversation_resolution_required=snapshot["conversation_resolution_required"],
-            agent_running=agent_busy or repair is not None or bool(neutral_blocker),
+            agent_running=(agent_busy or repair is not None or bool(neutral_blocker)
+                           or budget_needed),
         )
+        if status and not status_owned:
+            merge = False
+        if (snapshot["scoped"] and not (status and not status_owned)
+                and ((status is not None and status.get("state") != status_state)
+                     or (status is None and not merge))):
+            prior = [item for item in actions.values()
+                     if item.get("kind") == "status" and item.get("issue") == number
+                     and item.get("head") == head]
+            ambiguous = any(item.get("status") in {"sending", "uncertain"}
+                            for item in prior)
+            generation = max(
+                [item.get("generation", 0) for item in actions.values()
+                 if item.get("kind") == "status" and item.get("issue") == number]
+                + [self.store.status_generation_floor(number)]
+            ) + 1
+            if not ambiguous:
+                status_action = {
+                    "kind": "status", "issue": number, "head": head,
+                    "state": status_state, "generation": generation,
+                    "key": f"status:{number}:{head}:{generation}",
+                }
         merge_key = f"auto-merge:{number}:{head}:{snapshot['main_sha']}"
         merge_requested = bool(snapshot["pull"].get("auto_merge")) or (
             actions.get(merge_key, {}).get("status") == "sent"
@@ -2469,8 +2581,6 @@ class Coordinator:
         existing = self.store.action(key)
         if existing and existing.get("status") != "blocked":
             return existing.get("status")
-        # Capture all existing same-context IDs before the durable claim, not a
-        # wall-clock approximation. Never retrofit proof onto an ambiguous claim.
         statuses = _rest_list(
             self.api, f"repos/{REPOSITORY}/commits/{action['head']}/statuses?per_page=100",
         )
@@ -2497,10 +2607,10 @@ class Coordinator:
                 return "superseded"
             current_required, current_policy_complete, _, _ = _required_checks(self.api)
             if (not current_policy_complete
-                    or not any(item.get("context") == "cloud-review"
-                               for item in current_required)):
-                self.store.update_action(key, "superseded")
-                return "not-required"
+                    or {(item.get("context"), item.get("app_id"))
+                        for item in current_required} != CURRENT_REQUIRED_CHECKS):
+                self.store.update_action(key, "blocked")
+                return "blocked"
             if action["state"] == "success":
                 reviews = _rest_list(
                     self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
@@ -2512,11 +2622,13 @@ class Coordinator:
                 current_pull = self._fence_pull(
                     action["issue"], action["head"], snapshot["main_sha"],
                 )
+                pull_user = current_pull.get("user") if isinstance(current_pull, dict) else None
                 sensitive = classify_sensitive_paths(files, complete=len(files) < 300)
                 if (not isinstance(current_pull, dict)
-                        or not copilot_review_valid(
+                        or not independent_review_valid(
                             action["head"], reviews, threads,
-                            threads_complete=threads_complete,
+                            pull_author_id=pull_user.get("id") if isinstance(pull_user, dict) else None,
+                            threads_complete=threads_complete, reviews_complete=True,
                         )
                         or (sensitive
                             and (
@@ -2542,9 +2654,9 @@ class Coordinator:
             self.store.update_action(key, "superseded")
             return "foreign-status"
         description = (
-            "Verified current Copilot approval and resolved review threads"
+            "Verified current independent review and resolved conversations"
             if action["state"] == "success"
-            else "Awaiting current Copilot approval and resolved review threads"
+            else "Awaiting current independent review and resolved conversations"
         )
         try:
             response = self.api.write(
@@ -2598,10 +2710,6 @@ class Coordinator:
         if (not current_plan["merge_action"]
                 or current_plan["merge_action"]["key"] != key):
             self.store.update_action(key, "blocked")
-            status_action = current_plan["status_action"]
-            if status_action:
-                actor = self.api.get("user")
-                self._publish_status(status_action, current, actor.get("id"))
             return current_plan
         try:
             pull = self._fence_pull(
@@ -2629,9 +2737,13 @@ class Coordinator:
                 self.api,
                 f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
             )
-            if not copilot_review_valid(
+            current_user = current["pull"].get("user")
+            if not independent_review_valid(
                     action["head"], final_reviews, current["threads"],
-                    threads_complete=current["threads_complete"]):
+                    pull_author_id=(current_user.get("id")
+                                    if isinstance(current_user, dict) else None),
+                    threads_complete=current["threads_complete"],
+                    reviews_complete=True):
                 self.store.update_action(key, "blocked")
                 current_plan["auto_merge_eligible"] = False
                 current_plan["merge_action"] = None
