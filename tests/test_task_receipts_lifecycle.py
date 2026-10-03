@@ -61,7 +61,7 @@ def parse(comments, *, complete=True, nonce=NONCE, task_id=TASK_ID, session_id=S
 def test_receipt_is_full_exact_and_bound_to_task_session_pr_and_heads():
     assert parse([receipt()])["result"] == "ready"
     assert "nonce=" in receipt_instruction(NONCE, pull_number=16, start_head=HEAD, base_sha=BASE)
-    assert "session=<COPILOT_AGENT_SESSION_ID>" in receipt_instruction(NONCE, pull_number=16, start_head=HEAD, base_sha=BASE)
+    assert "session=SESSION_ID_REPLACE_ME" in receipt_instruction(NONCE, pull_number=16, start_head=HEAD, base_sha=BASE)
 
 
 @pytest.mark.parametrize("field", [

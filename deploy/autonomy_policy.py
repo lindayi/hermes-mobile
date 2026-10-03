@@ -193,7 +193,8 @@ SOURCE_FINGERPRINTS = {
     'deploy/review_evidence.py': 'c097e5ddb38119c992b8f5fac6581434a494242f48fdec6d07f037da18f188ae',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
-    'deploy/task_receipts.py': '60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb',
+    # Issue #65 producer-only overlay; historical receipt hashes remain documented.
+    'deploy/task_receipts.py': '50a3a2177ce9bce3ac6626cae36c245aab72f1fa14b342d788e0ffc80e06b90c',
     'deploy/workflow_events.py': '5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af',
     'deploy/workflow_lifecycle.py': '71be9101223f40511818bde2db9f6bd6b021736f35152e16cb3e1c9c3e2085a3',
     'deploy/workflow_lifecycle_sources.py': 'dfff5b5ec33b9bd1756a67150827541ea86193b87e6de5b5c3a965f02f19b837',

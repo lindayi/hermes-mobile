@@ -268,9 +268,28 @@ The historical PR40 and issue #43 table hashes above remain unchanged:
 | `deploy/cloud_coordinator.py` | `0935088cb9e3429b83dcc7daa8552cf2c58830e5494549270ec276a076e3193b` |
 | `deploy/task_receipts.py` | `60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb` |
 
-PR55 (issue #54) now overlays only the coordinator entry from that historical
-candidate; `deploy/task_receipts.py` retains the Issue #50 bytes above. This
-restart-ordering follow-up starts at `00f47230596fd68649088823268b8b76ac2dc884`
+Issue #65 overlays only the current `deploy/task_receipts.py` source pin and its
+independent literal fixture with the producer-only instruction change. The
+historical PR40 and issue #50 receipt digests above remain provenance, not current
+bytes:
+
+| Issue #65 producer candidate path | SHA-256 |
+| --- | --- |
+| `deploy/task_receipts.py` | `50a3a2177ce9bce3ac6626cae36c245aab72f1fa14b342d788e0ffc80e06b90c` |
+
+Only `receipt_instruction` changes: complete-binding/session preflight before
+source edits, contiguous fixed dispatch fields before plain ASCII replacement
+labels, and explicit replacement instructions. The receipt consumer and all
+identity, chronology, grammar and replay checks are unchanged. Focused synthetic
+checks exercise the actual `GhApi.write` JSON request representation and reject
+unreplaced labels at first acceptance and persisted-proof validation. They do not
+establish provider-delivered model bytes, task compliance with the preflight, or
+operational readiness. Exact-head review/integration and an owner-controlled real
+task trial remain separate gates; no task history or service state is rewritten.
+
+PR55 (issue #54) overlaid only the coordinator entry from the historical issue #50
+candidate; issue #65 now supersedes its receipt producer bytes as recorded above.
+The PR55 restart-ordering follow-up starts at `00f47230596fd68649088823268b8b76ac2dc884`
 (coordinator SHA-256 `a3d011e97862aa76b07fb88ae40b5307db77d3cd9f46bf170a2cf5b78ec3b7d8`).
 Review 5396963413 reproduced pending neutral recovery resurrecting a superseded
 predecessor after remote head advancement. The follow-up resolves ownership before

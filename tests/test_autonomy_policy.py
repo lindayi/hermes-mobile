@@ -153,6 +153,11 @@ _PENDING_ISSUE50_RECEIPT_FIXTURE = {
     'deploy/task_receipts.py': '60f8596f0cc336cab4ed1484ba67101d7884ff20f68c39634df210cf476541bb',
 }
 
+# Current producer overlay only; preserve the independent historical issue50 literal.
+_ISSUE65_RECEIPT_PRODUCER_FIXTURE = {
+    'deploy/task_receipts.py': '50a3a2177ce9bce3ac6626cae36c245aab72f1fa14b342d788e0ffc80e06b90c',
+}
+
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
 }
@@ -170,7 +175,7 @@ def _source_files():
             | _PENDING_PR40_LIFECYCLE_FIXTURE | _PENDING_ISSUE43_LAUNCH_FIXTURE
             | _ISSUE46_OBSERVER_FIXTURE | _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
             | _PENDING_ISSUE50_RECEIPT_FIXTURE | _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
-            | _PENDING_PR45_NAMING_FIXTURE)
+            | _PENDING_PR45_NAMING_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE)
 
 
 def _source_ci():
@@ -577,7 +582,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
-    } == _PENDING_ISSUE50_RECEIPT_FIXTURE
+    } == (_PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
@@ -635,10 +640,10 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
 
 
 @pytest.mark.parametrize('pins', [
-    SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE,
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
-def test_issue50_receipt_pin_matches_actual_candidate_bytes(path, pins):
+def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
     source = Path(__file__).resolve().parents[1] / path
     assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
 

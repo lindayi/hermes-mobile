@@ -186,6 +186,94 @@ def test_v2_transport_caps_before_encoding_counting_or_splitting():
             _v2_fields(body)
 
 
+def test_v2_instruction_fixed_bindings_survive_actual_adapter_json_request():
+    import json
+    from types import SimpleNamespace
+    from deploy.cloud_coordinator import GhApi
+
+    captured = []
+
+    def capture_request(command, **kwargs):
+        captured.append((command, kwargs["input"]))
+        return SimpleNamespace(returncode=0, stdout='{"id":"synthetic-task"}', stderr="")
+
+    instruction = receipt_instruction(NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE)
+    prompt = 'Synthetic repair "quoted" \\ path.\n\n' + instruction
+    body = {"prompt": prompt, "base_ref": "main", "head_ref": "synthetic-topic"}
+    # Exercise the production adapter up to subprocess stdin, without invoking gh
+    # or a provider. This is request representation, not model-input evidence.
+    response = GhApi(run=capture_request).write("agents/repos/lindayi/hermes-mobile/tasks", body)
+    assert response == {"id": "synthetic-task"}
+    assert len(captured) == 1
+    command, payload = captured[0]
+    assert command == [
+        "gh", "api", "--hostname", "github.com", "--method", "POST",
+        "agents/repos/lindayi/hermes-mobile/tasks", "--input", "-",
+    ]
+    decoded = json.loads(payload)
+    assert decoded == body
+    transported = decoded["prompt"].removeprefix('Synthetic repair "quoted" \\ path.\n\n')
+    assert transported == instruction
+    assert instruction.isascii()
+    assert "<" not in instruction and ">" not in instruction
+    assert instruction.index(f"base={BASE}") < instruction.index("SESSION_ID_REPLACE_ME")
+    assert instruction.index(f"base={BASE}") < instruction.index("PUSHED_PULL_HEAD_SHA_REPLACE_ME")
+    block = transported[transported.index("Hermes-Task-Receipt: v2\n"):]
+    assert block.splitlines() == [
+        "Hermes-Task-Receipt: v2",
+        f"nonce={NONCE}", "pr=16", f"start_head={START_HEAD}", f"base={BASE}",
+        "session=SESSION_ID_REPLACE_ME", "head=PUSHED_PULL_HEAD_SHA_REPLACE_ME",
+        "result=ready|conflict_incompatible|policy_broken",
+    ]
+
+
+def test_v2_instruction_requires_complete_context_before_source_edits():
+    instruction = receipt_instruction(NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE)
+    preflight, _ = instruction.split("After pushing your result", 1)
+    assert preflight.startswith("Before any source edits, ")
+    assert "nonce, pr, start_head and base are all present and complete" in preflight
+    assert "nonblank COPILOT_AGENT_SESSION_ID from your exposed environment" in preflight
+    assert "If any fixed binding is missing or incomplete, or the session variable is missing or blank" in preflight
+    assert "stop without source edits and report an explicit blocker" in preflight
+    assert "do not guess, substitute values, or emit any receipt" in preflight
+    assert "Replace the session label with that exact session ID" in instruction
+    assert "the head label with the pushed PR head SHA" in instruction
+    assert "replacement labels are not receipt values" in instruction
+    assert "one result from the closed list" in instruction
+
+
+@pytest.mark.parametrize("result", ["ready", "conflict_incompatible", "policy_broken"])
+@pytest.mark.parametrize("unreplaced", [None, "session", "head", "result", "all"])
+def test_v2_instruction_labels_require_actual_bound_values(result, unreplaced):
+    from deploy.cloud_coordinator import _valid_receipt_proof
+
+    task, action, pull, comments = v2_binding(result)
+    proof = validate_task_receipt(task, action, pull, comments, now=NOW)
+    action.update(status="completed", **{f"receipt_{key}": value for key, value in proof.items()})
+    assert _valid_receipt_proof(action, comments)
+    instruction = receipt_instruction(NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE)
+    body = instruction[instruction.index("Hermes-Task-Receipt: v2\n"):]
+    replacements = {
+        "session": ("SESSION_ID_REPLACE_ME", SESSION_ID),
+        "head": ("PUSHED_PULL_HEAD_SHA_REPLACE_ME", RESULT_HEAD),
+        "result": ("ready|conflict_incompatible|policy_broken", result),
+    }
+    for field, (label, value) in replacements.items():
+        assert body.count(f"{field}={label}") == 1
+        if unreplaced not in (field, "all"):
+            body = body.replace(f"{field}={label}", f"{field}={value}")
+    # Both first acceptance and replay validation must reject even one untouched
+    # label. Filling every value still works for each closed result.
+    comments[0]["body"] = body
+    if unreplaced is None:
+        assert validate_task_receipt(task, action, pull, comments, now=NOW)["result"] == result
+    else:
+        with pytest.raises(ReceiptError):
+            validate_task_receipt(task, action, pull, comments, now=NOW)
+    action["receipt_body"] = body
+    assert _valid_receipt_proof(action, comments) is (unreplaced is None)
+
+
 def test_v2_transport_instruction_documents_boundary_and_budget():
     instruction = receipt_instruction(NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE)
     assert "ASCII blank line (empty or only spaces/tabs)" in instruction
