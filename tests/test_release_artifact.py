@@ -135,7 +135,8 @@ class GitHub:
                       'head_sha': 'a' * 40, 'status': 'completed', 'conclusion': 'success'}
                      for n, name in enumerate(['build', 'checks', 'js', 'python (0)', 'python (1)',
                                               'browser (0)', 'browser (1)', 'browser (2)',
-                                              'browser (3)', 'native', 'source-ci', 'attest'], 100)]
+                                              'browser (3)', 'native', 'source-ci',
+                                              'integration-tests', 'attest'], 100)]
         self.record = {'id': 61, 'name': 'release-51-2', 'expired': False,
             'size_in_bytes': len(self.zip), 'digest': 'sha256:' + hashlib.sha256(self.zip).hexdigest(),
             'workflow_run': {'id': 51, 'head_sha': 'a' * 40, 'head_branch': 'main',
@@ -226,15 +227,22 @@ def test_acquire_rejects_untrusted_run(tmp_path, monkeypatch, field, value):
 
 @pytest.mark.parametrize('change', [
     'missing', 'missing-native', 'duplicate', 'extra', 'skipped', 'wrong-attempt',
-    'wrong-sha', 'wrong-run'
+    'wrong-sha', 'wrong-run', 'missing-integration', 'failed-integration',
+    'cancelled-integration'
 ])
 def test_acquire_requires_every_job_in_same_attempt(tmp_path, monkeypatch, change):
     fake = GitHub(tmp_path, monkeypatch)
     if change == 'missing': fake.jobs.pop()
     elif change == 'missing-native': fake.jobs = [job for job in fake.jobs if job['name'] != 'native']
+    elif change == 'missing-integration':
+        fake.jobs = [job for job in fake.jobs if job['name'] != 'integration-tests']
     elif change == 'duplicate': fake.jobs[-1] = fake.jobs[0]
     elif change == 'extra': fake.jobs.append(dict(fake.jobs[0], id=999, name='other'))
     elif change == 'skipped': fake.jobs[0]['conclusion'] = 'skipped'
+    elif change == 'failed-integration':
+        next(job for job in fake.jobs if job['name'] == 'integration-tests')['conclusion'] = 'failure'
+    elif change == 'cancelled-integration':
+        next(job for job in fake.jobs if job['name'] == 'integration-tests')['conclusion'] = 'cancelled'
     elif change == 'wrong-attempt': fake.jobs[0]['run_attempt'] = 1
     elif change == 'wrong-sha': fake.jobs[0]['head_sha'] = 'b' * 40
     elif change == 'wrong-run': fake.jobs[0]['run_id'] = 52
