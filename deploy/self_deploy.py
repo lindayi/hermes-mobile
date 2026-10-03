@@ -529,28 +529,30 @@ def verify_release(paths, stage, backend, *, assets=None, run=subprocess.run, sl
     # A readable index.html is insufficient: directory authorization can deny
     # the actual launch URL before Apache performs DirectoryIndex resolution.
     deadline = time.monotonic() + 90
-    for name, data in [('', expected['index.html']), *expected.items()]:
-        for attempt in range(6):
-            matches = True
-            # Check what browsers actually request as well as a cache-busted URL.
-            # CDNs may return stale bytes while revalidating either cache key.
-            for suffix in ('', '?deploy=' + uuid.uuid4().hex):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RuntimeError('Public asset verification timed out: ' + (name or '/'))
-                from deploy.public_http import public_asset_matches
-                try:
-                    matches = public_asset_matches(public_url + quote(name) + suffix,
-                                                   data, min(10, remaining)) and matches
-                except (TimeoutError, ConnectionError):
-                    matches = False
-                if time.monotonic() >= deadline:
-                    raise RuntimeError('Public asset verification timed out: ' + (name or '/'))
-            if matches:
-                break
-            if attempt == 5:
-                raise RuntimeError('Public asset verification failed: ' + (name or '/'))
-            sleep(min(2 ** attempt, 8, max(0, deadline - time.monotonic())))
+    from deploy.public_http import PublicHTTPSession, public_asset_matches
+    with PublicHTTPSession() as public_session:
+        for name, data in [('', expected['index.html']), *expected.items()]:
+            for attempt in range(6):
+                matches = True
+                # Check what browsers actually request as well as a cache-busted URL.
+                # CDNs may return stale bytes while revalidating either cache key.
+                for suffix in ('', '?deploy=' + uuid.uuid4().hex):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError('Public asset verification timed out: ' + (name or '/'))
+                    try:
+                        matches = public_asset_matches(
+                            public_url + quote(name) + suffix, data, min(10, remaining),
+                            session=public_session) and matches
+                    except (TimeoutError, ConnectionError):
+                        matches = False
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('Public asset verification timed out: ' + (name or '/'))
+                if matches:
+                    break
+                if attempt == 5:
+                    raise RuntimeError('Public asset verification failed: ' + (name or '/'))
+                sleep(min(2 ** attempt, 8, max(0, deadline - time.monotonic())))
 
 
 def main(argv=None, *, paths=None, run=subprocess.run):

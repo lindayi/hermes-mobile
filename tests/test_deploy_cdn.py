@@ -22,6 +22,9 @@ def fixture(tmp_path, mode):
         def do_GET(self):
             path=urlsplit(self.path);kind='query' if path.query else 'canonical'
             counts[(path.path,kind)]+=1
+            if mode=='reset' and not reset_seen[0]:
+                reset_seen[0]=True
+                self.connection.shutdown(2);self.connection.close();return
             if path.path=='/sw.js':
                 stale=(mode=='permanent' or (mode=='refresh' and sum(v for (p,_),v in counts.items() if p=='/sw.js')==1)
                        or (mode=='canonical_stale' and kind=='canonical'))
@@ -31,6 +34,7 @@ def fixture(tmp_path, mode):
             super().do_GET()
     server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
     thread=Thread(target=server.serve_forever,daemon=True);thread.start()
+    reset_seen=[False]
     try:yield module,paths,stage,'http://127.0.0.1:'+str(server.server_port)+'/',counts
     finally:server.shutdown();server.server_close();thread.join()
 
@@ -40,28 +44,24 @@ def test_matching_final_response_after_aggregate_deadline_is_rejected(tmp_path, 
     import deploy.public_http as transport
     with fixture(tmp_path,'fresh') as (module,paths,stage,url,counts):
         clock=[0]
+        sessions=[]
         monkeypatch.setattr(module,'time',SimpleNamespace(monotonic=lambda:clock[0]))
-        def late_match(address,expected,timeout):
+        def late_match(address,expected,timeout,*,session=None):
+            sessions.append(session)
             if '/sw.js?' in address:clock[0]=91
             return True
         monkeypatch.setattr(transport,'public_asset_matches',late_match)
         with pytest.raises(RuntimeError,match='timed out'):
             module.verify_release(paths,stage,False,public_url=url,sleep=lambda _:None)
+        assert sessions and sessions[0] is not None
+        assert len({id(session) for session in sessions}) == 1
 
 
-def test_transient_read_timeout_is_retried_without_skipping_byte_checks(tmp_path, monkeypatch):
-    import subprocess
-    with fixture(tmp_path,'fresh') as (module,paths,stage,url,counts):
-        real_run=subprocess.run
-        attempts=[]
-        def run(command,**kwargs):
-            attempts.append(command)
-            if len(attempts)==1:raise subprocess.TimeoutExpired(command,kwargs['timeout'])
-            return real_run(command,**kwargs)
-        monkeypatch.setattr(subprocess,'run',run)
+def test_transient_connection_reset_is_retried_without_skipping_byte_checks(tmp_path):
+    with fixture(tmp_path,'reset') as (module,paths,stage,url,counts):
         delays=[]
         module.verify_release(paths,stage,False,public_url=url,sleep=delays.append)
-        assert delays and counts[('/','canonical')]==1
+        assert delays and counts[('/','canonical')]==2
         assert counts[('/sw.js','canonical')]==1
 
 

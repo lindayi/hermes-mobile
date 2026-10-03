@@ -93,14 +93,26 @@ they do not assert independent review, merge, deployment, or gate activation.
 | Issue #52 candidate path | SHA-256 |
 | --- | --- |
 | `deploy/native_controls_release.py` | `0887a6ad4fa0bb5c1351089cc6c53fc8ff7be4c609f42d956d3a51642256dba5` |
-| `deploy/self_deploy.py` | `592cc957ad79a1f020a02ec1ca72b53d68bbbd49a8800c16af8cdead13d45469` |
+| `deploy/self_deploy.py` | `04036a85d2abba0cf38e7717c30d5e6b6f04da2fd7efcea16bbf21086f2ab68a` |
 
 The native-controller hash in both candidate tables and independent fixtures is
 the integrated issue #46 + #52 source: operational busy observation remains
 separate from idle-required maintenance with verified hosted artifacts. It replaces
 the separate PR47 and PR53 controller candidate hashes, not historical-main pins.
-The observer, self-deploy, and issue #48 starter/unit pins retain their accepted
-source bytes. This local assembly does not authorize activation or deployment.
+Issue #59 updates the self-deploy candidate with reusable public HTTPS transport;
+the new source pin records that change, not operational approval. This local
+assembly does not authorize activation or deployment.
+
+The PR60 second transport follow-up replaces multiprocessing preparation transfer
+with a fixed isolated child entrypoint in the already inventoried
+`deploy/public_http.py`; the source closure and blockers do not change. Its
+current candidate SHA-256 is
+`a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295`.
+This PR60 + accepted PR45 assembly also overlays the existing `backend/app.py`
+pin with `5f0d210cb24b6b49cbf30a4286e6b256c42baa1f552f4b063961c67c5d85ec33`
+without changing naming source. Runtime policy and independent pending fixtures
+pin these bytes; historical merged-main fixtures are retained unchanged. Focused
+actual-byte checks cover both complete current pin maps, not activation approval.
 
 PR57 extends the assembled starter/consumer authority contract with the exact
 head/issue/body-digest command and a final prepared-scan admission fence. Its new
