@@ -78,12 +78,12 @@ The authoritative [Git development contract](git-development-spec.md)
 (`docs/git-development-spec.md`) governs required gates; use the contract and
 runner capabilities on the revision being integrated, not a pending PR's promises.
 
-Until the parent operator verifies the dependencies and exact-head replacement
-evidence and changes repository protection, the exact pre-cutover contexts
-`source-ci`, `integration-tests`, `agent-review`, and `issue-link` remain required.
-In this pre-cutover policy, integration requires complete matching hosted results plus all
-residual host tests listed in `.github/host-tests.json` through
-`scripts/ci_tests.py host` on the same exact head SHA.
+The active required contexts are `source-ci` (Actions app 15368),
+`integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), with
+strict/up-to-date checks and required conversation resolution. `cloud-review` is
+advisory and is not a substitute for any required context. Integration requires
+complete matching hosted results plus all residual host tests listed in
+`.github/host-tests.json` through `scripts/ci_tests.py host` on the same exact head SHA.
 Verify coverage, configuration and successful results against that revision's
 documented partition; file presence, dependency setup, selected tests, or a partial
 hosted pass alone are not full integration. If the documented partition is
@@ -91,15 +91,17 @@ unavailable, conservatively use the existing managed `all` suite on a compatible
 isolated host (`python3 scripts/test.py all`, with Python selected through
 `HERMES_TEST_PYTHON` or the repository `.venv`).
 
-The target routine premerge policy is complete hosted `source-ci` (portable Python,
-JavaScript, generated-assets browser shards and the required native suite),
-`issue-link`, and exact-head `cloud-review`. This policy is conditional, not active
-from documentation or validator changes alone. After the owner activates it,
-installed/private compatibility remains required at guarded exact-main deployment;
-do not execute public PR code on a production-host self-hosted runner. See
-[`autonomy-policy.md`](autonomy-policy.md) for the read-only evidence contract and
-pre/post-cutover requirements. Final integration is a merge gate, not a full local
-suite per edit; focused local RED/GREEN checks remain the development loop.
+The four active contexts above govern protected auto-merge and source consistency.
+Independent technical acceptance additionally requires the latest authenticated,
+exact-head owner-published structured independent-agent formal COMMENT review, a
+valid positive verdict and evidence binding, complete review/thread pagination, and
+resolved conversations. Copilot feedback is supplemental: COMMENTED or missing
+APPROVED feedback alone does not block acceptance; actionable findings and definite
+rejection still block. See [`autonomy-policy.md`](autonomy-policy.md) for the
+read-only evidence contract. Installed/private compatibility remains required at
+guarded exact-main deployment; do not execute public PR code on a production-host
+self-hosted runner. Final integration is a merge gate, not a full local suite per
+edit; focused local RED/GREEN checks remain the development loop.
 
 ## Cloud dependency setup
 
@@ -119,27 +121,20 @@ See [GitHub's setup workflow documentation](https://docs.github.com/en/copilot/h
 For behavior changes, record a real focused RED followed by GREEN and preserve
 existing assertions. Describe the baseline, linked issue, acceptance cases,
 scope, risks, exact commands/results, and any unrun checks in the pull request.
-Until cutover, the exact pre-cutover contexts `source-ci`, `integration-tests`,
-`agent-review`, and `issue-link` must pass on the exact head SHA before GitHub merge.
-Require an independent formal COMMENT review
-for every PR, with actionable inline findings where needed. Publish `agent-review`
-only after verifying the independent review of that head; a COMMENT review alone
-is neither an approval nor a passing status, and does not claim a human approval
-or a separate GitHub identity. Publish `integration-tests` only after verifying
-complete final integration under the compatibility rules above; hosted `source-ci`
-remains a separate mandatory gate. New commits invalidate all old-head review/test
-evidence.
-
-After the parent operator has verified replacements on actual current heads and
-activated post-cutover protection, require `source-ci`, `issue-link`, and
-`cloud-review` on the exact head. Cloud review is valid only for the latest
-authenticated Copilot `APPROVED` review on that SHA with complete review/thread
-pagination and resolved threads; a `COMMENTED` review, overview text, or status
-alone is insufficient. Do not publish the retired `agent-review` or
-`integration-tests` contexts as substitutes. Sensitive changes still require
-explicit owner authorization for the exact SHA, bound to the selected current
-owner-published structured independent-agent review as specified in
-[`autonomy-policy.md`](autonomy-policy.md).
+All four active contexts must pass on the exact head SHA before GitHub merge.
+Independent review must be the latest authenticated owner-published structured
+independent-agent formal COMMENT on that SHA, with a positive verdict and bound
+evidence digest, complete review/thread pagination, and resolved conversations.
+Malformed, edited, removed, stale, superseded, or unbound evidence fails closed.
+`agent-review` remains evidence-backed and is not a substitute for reading the
+review. Copilot is supplemental: missing APPROVED or COMMENTED alone is not a
+blocker and does not justify repeat requests or fixer attempts without findings.
+Resolve actual findings; do not treat a definite rejection as acceptance. New
+commits invalidate final head-bound authority and status evidence; unchanged reviewed
+blobs/configuration/dependencies may retain verifiable review acceptance, while
+changed scope needs one independent delta review and final authority/status is freshly
+bound to the current head. Sensitive changes still require separate exact-SHA owner
+authorization.
 
 Use follow-up fix commits, reply in actual GitHub threads with the fix SHA and test
 evidence, and check findings before resolving them. Require resolved review threads
@@ -148,15 +143,13 @@ GitHub. No owner/admin bypass; never self-approve, fabricate approvals, review/t
 statuses or identities, bypass protections, or write directly to `main`. Report
 unrun or blocked checks honestly. Merging is not deployment.
 
-Copilot code review and re-review should be requested on the PR when available,
-including after follow-up commits. Automatic review is a GitHub repository setting,
-not something these files can enable. Verify that the setting is actually
-configured before describing review as automatic. If the capability is unavailable
-or its plan/permissions block it, report that limitation and request review
-manually. Copilot can submit an independent formal COMMENT review, but that is
-not an approval or passing `agent-review` status. Keep targeted review for authentication,
-deployment, migration, and semantic conflict changes. Review and test evidence is
-valid only for its exact head SHA.
+Copilot code review is optional supplemental feedback. Do not repeat requests merely
+because a review is COMMENTED or lacks APPROVED; batch any real fixes before a
+follow-up review. Automatic review is a GitHub repository setting, not something
+these files can enable. Verify configuration before describing review as automatic.
+Independent technical review runs separately from the authoring task. Keep targeted
+review for authentication, deployment, migration, and semantic conflict changes.
+Review and test evidence is valid only for its exact head SHA.
 
 ## Parallel integration
 

@@ -37,17 +37,14 @@ on the production server routinely. The explicit host manifest is
 `.github/host-tests.json`; new files default to hosted execution. The full managed
 `all` remains an opt-in diagnostic and the conservative release-stage gate.
 
-The target routine premerge gate is the complete hosted `source-ci` aggregate
-(including portable Python, JavaScript, generated-assets browser shards and the
-required native suite), issue-link validation, and exact-head `cloud-review`. This
-target is not active because its documentation or validator exists: until the
-parent operator verifies every dependency and actual current-head evidence and
-changes repository protection, the exact pre-cutover contexts `source-ci`,
-`integration-tests`, `agent-review`, and `issue-link` remain authoritative. See
-[`docs/autonomy-policy.md`](docs/autonomy-policy.md). After an authorized cutover,
-the installed/private host-compatibility suite remains required at guarded
-exact-main deployment; never execute untrusted PR code on a production or
-self-hosted runner.
+The active required contexts are `source-ci` (Actions app 15368),
+`integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), with
+strict/up-to-date checks and resolved conversations. Do not require, synthesize, or
+publish `cloud-review` as a required status. Any future policy change needs a
+separate owner-authorized protection change and verified current-head evidence.
+See [`docs/autonomy-policy.md`](docs/autonomy-policy.md). The installed/private
+host-compatibility suite remains required at guarded exact-main deployment; never
+execute untrusted PR code on a production or self-hosted runner.
 
 ## Develop and test
 
@@ -112,12 +109,15 @@ Body-only review evidence uses authenticated full-media `body_html`, never a raw
 Markdown fallback. Keep rendered code/pre/blockquote inert and entity-decoded text
 literal; see [docs/cloud-coordinator-spec.md](docs/cloud-coordinator-spec.md).
 
-Until the owner-verified transition is activated, require an independent formal
-COMMENT review and the current required checks on each PR. After activation,
-`cloud-review` requires the latest authenticated Copilot reviewer APPROVED review
-on the exact current head, complete pagination, and resolved threads; COMMENTED,
-overview text, or a status alone never qualifies. Sensitive changes still require
-explicit owner authorization for the exact SHA and targeted independent review.
+Every PR requires the latest authenticated, exact-head owner-published structured
+independent-agent formal COMMENT review, a valid positive verdict and evidence
+binding, complete review/thread pagination, and resolved conversations. Stale,
+edited, removed, malformed, superseded, or unbound evidence fails closed; status
+alone is not a review. Copilot feedback is supplemental: COMMENTED or missing
+APPROVED alone does not block acceptance, repeat review requests, or consume fixer
+budget. Actual open findings must be resolved, and definite rejection is not
+acceptance. Sensitive changes still require separate exact-SHA owner authorization
+and targeted independent review.
 
 Required checks and protections are authoritative. Do not fabricate reviews,
 approvals, check results, or identities. Review and test evidence applies only to
@@ -125,19 +125,17 @@ the exact head SHA; any new commit invalidates it. Address findings with follow-
 commits and reply to their actual GitHub threads. Never self-approve, bypass
 protections, or write directly to `main`.
 
-Until the transition is activated, the exact pre-cutover contexts `source-ci`,
-`integration-tests`, `agent-review`, and `issue-link` must pass on the exact head
-SHA. Publish `agent-review` only after verifying the independent review of that
-head. Publish `integration-tests` only after verifying complete final integration
-under the linked development workflow:
+The exact four active contexts above must pass on the exact head SHA. Publish
+`agent-review` only after verifying the independent review of that head. Publish
+`integration-tests` only after verifying complete final integration under the
+linked development workflow:
 the entire residual host-compatibility suite and the matching hosted `source-ci`
 aggregate must succeed on the same exact head SHA. Record both results and the
 workflow URL. Never use only a hosted subset or only local host tests to claim full
 coverage. Focused checks or dependency setup alone are not final integration.
-After activation, require `source-ci`, `issue-link`, and `cloud-review` on the exact
-head; do not publish retired legacy statuses as substitutes. Require resolved
-review threads and a branch current with freshly fetched `origin/main` before
-GitHub merge. No owner/admin bypass.
+Require all four active contexts, resolved review threads, and a branch current with
+freshly fetched `origin/main` before GitHub merge. Never fabricate advisory status
+success, retire a required context, or use owner/admin bypass.
 
 Merge and deploy one revision at a time. Merge updated `origin/main` into the PR branch;
 never rebase or force-push reviewed history. Gather both PR intents, the common base,
