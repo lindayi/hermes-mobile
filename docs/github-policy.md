@@ -25,8 +25,18 @@ then updates that same run and retains the matching legacy commit status. The
 workflow's Actions identity is the app-bound producer; app identity is not inferred
 from or attached to a commit status.
 
-The check run and compatibility status start pending. Publication is successful
-only after complete canonical-reference validation and fresh REST/GraphQL checks
+For authenticated PR events, the compatibility status and check run are invalidated
+on the event-bound head before any fallible PR metadata read. Both writes are
+attempted independently; a failure prevents validation from succeeding. Dispatch
+must first authenticate its supplied PR/head against the current open PR on main;
+untrusted refs, mismatched heads, or unavailable authorization reads permit no writes.
+
+The `always()` publisher can finalize failure without a snapshot digest or create a
+failure check when no check ID was returned. Missing pending outputs use only the
+authenticated event head, or a freshly authenticated dispatch PR/head, never arbitrary
+inputs. Check publication failure still attempts the blocking compatibility status.
+Success still requires all pending outputs, complete canonical-reference validation
+and fresh REST/GraphQL checks
 that the PR identity, head, base, body, issue set, and open issue states remain
 unchanged. Failed, cancelled, skipped, malformed, incomplete, or stale validation
 cannot produce success. The check run is finalized before its compatibility status;
@@ -44,12 +54,17 @@ dispatch nor a passing check changes branch protection. After the workflow reach
 protected main, verify real passing and failing exact-head check runs, including
 manual links, a body edit, and a fork PR, before treating live publication as proven.
 Metadata reads and check/status writes are not an atomic merge-time transaction;
-an absent event, failed pending write, or update racing after the final read needs
-attention. Merge closes the implementation issue; it does not assert deployment.
+an absent event, unavailable check/status APIs, dispatch authorization that cannot
+be read, or an update racing after the final read still needs attention. In particular,
+if both publication APIs remain unavailable no workflow can guarantee overwriting
+prior success; API errors are not proof that invalidation reached GitHub. Merge
+closes the implementation issue; it does not assert deployment.
 
 The workflow uses documented GitHub inputs only: the
 [PullRequest GraphQL schema](https://docs.github.com/en/graphql/reference/objects#pullrequest)
-defines `closingIssuesReferences` and its `userLinkedOnly` filter; the checks
+defines `closingIssuesReferences` and its `userLinkedOnly` filter. The pinned
+Octokit `github.graphql` resolves direct data (not an HTTP `data` envelope) and
+throws on GraphQL errors, including partial-data errors. The checks
 [create](https://docs.github.com/en/rest/checks/runs#create-a-check-run) and
 [update](https://docs.github.com/en/rest/checks/runs#update-a-check-run) endpoints
 publish the exact-head check run. Manual rechecks use the documented

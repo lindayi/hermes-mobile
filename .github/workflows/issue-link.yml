@@ -93,42 +93,72 @@ jobs:
             if (!validNumber(number) || !SHA.test(expectedHead || '')) {
               throw new Error('Pull number or expected head SHA is invalid.');
             }
-            const {data: current} = await github.rest.pulls.get({
-              ...context.repo, pull_number: number,
-            });
+            let current;
+            if (eventPull) {
+              // The authenticated event authorizes invalidation, not success.
+              if (eventPull.base?.ref !== 'main' ||
+                  eventPull.base?.repo?.id !== REPOSITORY_ID ||
+                  eventPull.base?.repo?.full_name?.toLowerCase() !== REPOSITORY) {
+                throw new Error('Event pull does not target the trusted default branch.');
+              }
+            } else {
+              // Dispatch inputs alone never authorize writes to an arbitrary SHA.
+              ({data: current} = await github.rest.pulls.get({
+                ...context.repo, pull_number: number,
+              }));
+              snapshot(current);
+              if (current.number !== number || current.head.sha !== expectedHead || current.base.ref !== 'main') {
+                throw new Error('Pull request changed or does not target the default branch.');
+              }
+            }
+            core.setOutput('pull_number', String(number));
+            core.setOutput('head_sha', expectedHead);
+            const runUrl = `${context.serverUrl}/${REPOSITORY}/actions/runs/${context.runId}`;
+            let invalidationError;
+            try {
+              await github.rest.repos.createCommitStatus({
+                ...context.repo,
+                sha: expectedHead,
+                context: 'issue-link',
+                state: 'pending',
+                description: 'Validating canonical issue linkage.',
+                target_url: runUrl,
+              });
+            } catch (error) {
+              invalidationError = error;
+            }
+            try {
+              const {data: check} = await github.rest.checks.create({
+                ...context.repo,
+                name: 'issue-link',
+                head_sha: expectedHead,
+                status: 'in_progress',
+                started_at: new Date().toISOString(),
+                details_url: runUrl,
+                output: {
+                  title: 'Issue-link policy is being validated',
+                  summary: 'Checking complete authenticated canonical issue references.',
+                },
+              });
+              if (!Number.isSafeInteger(check?.id) || check.id <= 0) {
+                throw new Error('GitHub did not return a valid issue-link check-run ID.');
+              }
+              core.setOutput('check_run_id', String(check.id));
+            } catch (error) {
+              invalidationError = error;
+            }
+            if (invalidationError) throw invalidationError;
+            if (!current) {
+              ({data: current} = await github.rest.pulls.get({
+                ...context.repo, pull_number: number,
+              }));
+            }
             const currentSnapshot = snapshot(current);
-            if (current.head.sha !== expectedHead || current.base.ref !== 'main' ||
+            if (current.number !== number || current.head.sha !== expectedHead || current.base.ref !== 'main' ||
                 (eventPull && digest(snapshot(eventPull)) !== digest(currentSnapshot))) {
               throw new Error('Pull request changed or does not target the default branch.');
             }
-            core.setOutput('pull_number', String(number));
-            core.setOutput('head_sha', current.head.sha);
             core.setOutput('snapshot_digest', digest(currentSnapshot));
-            const runUrl = `${context.serverUrl}/${REPOSITORY}/actions/runs/${context.runId}`;
-            const {data: check} = await github.rest.checks.create({
-              ...context.repo,
-              name: 'issue-link',
-              head_sha: current.head.sha,
-              status: 'in_progress',
-              started_at: new Date().toISOString(),
-              details_url: runUrl,
-              output: {
-                title: 'Issue-link policy is being validated',
-                summary: 'Checking complete authenticated canonical issue references.',
-              },
-            });
-            if (!Number.isSafeInteger(check?.id) || check.id <= 0) {
-              throw new Error('GitHub did not return a valid issue-link check-run ID.');
-            }
-            core.setOutput('check_run_id', String(check.id));
-            await github.rest.repos.createCommitStatus({
-              ...context.repo,
-              sha: current.head.sha,
-              context: 'issue-link',
-              state: 'pending',
-              description: 'Validating canonical issue linkage.',
-              target_url: runUrl,
-            });
       - id: validate
         name: Validate complete canonical issue references
         if: ${{ success() }}
@@ -205,10 +235,9 @@ jobs:
               let cursor = null;
               let total = null;
               for (let page = 0; page < MAX_PAGES; page++) {
-                const {data, errors} = await github.graphql(query, {
+                const data = await github.graphql(query, {
                   number: pull.number, after: cursor,
                 });
-                if (errors?.length) fail('Canonical issue references could not be read completely.');
                 const repository = data?.repository;
                 const node = repository?.pullRequest;
                 const baseRepository = node?.baseRepository;
@@ -377,10 +406,9 @@ jobs:
               let cursor = null;
               let total = null;
               for (let page = 0; page < MAX_PAGES; page++) {
-                const {data, errors} = await github.graphql(query, {
+                const data = await github.graphql(query, {
                   number: pull.number, after: cursor,
                 });
-                if (errors?.length) throw new Error('Canonical issue references could not be read completely.');
                 const repository = data?.repository;
                 const node = repository?.pullRequest;
                 const baseRepository = node?.baseRepository;
@@ -443,21 +471,60 @@ jobs:
               issues.sort((left, right) => left[1] - right[1] || left[0].localeCompare(right[0]));
               return digest(issues);
             }
-            const number = Number(process.env.PULL_NUMBER);
-            const head = process.env.HEAD_SHA;
-            const snapshotDigest = process.env.SNAPSHOT_DIGEST;
-            const checkRunId = Number(process.env.CHECK_RUN_ID);
-            if (!Number.isSafeInteger(number) || number <= 0 || number > 2147483647 ||
-                !SHA.test(head || '') || !/^[0-9a-f]{64}$/.test(snapshotDigest || '') ||
-                !Number.isSafeInteger(checkRunId) || checkRunId <= 0 ||
-                context.repo.owner.toLowerCase() !== 'lindayi' ||
+            if (context.repo.owner.toLowerCase() !== 'lindayi' ||
                 context.repo.repo.toLowerCase() !== 'hermes-mobile' ||
                 context.payload.repository?.id !== REPOSITORY_ID ||
-                context.payload.repository?.default_branch !== 'main' ||
-                context.eventName === 'workflow_dispatch' && context.ref !== 'refs/heads/main') {
-              throw new Error('Cannot publish without a trusted exact-head issue-link check run.');
+                context.payload.repository?.default_branch !== 'main') {
+              throw new Error('Cannot publish outside the trusted repository and default branch.');
             }
-            let passed = process.env.VALIDATION_RESULT === 'success';
+            let number;
+            let head;
+            if (context.eventName === 'pull_request_target') {
+              const eventPull = context.payload.pull_request;
+              number = eventPull?.number;
+              head = eventPull?.head?.sha;
+              if (eventPull?.base?.ref !== 'main' ||
+                  eventPull.base?.repo?.id !== REPOSITORY_ID ||
+                  eventPull.base?.repo?.full_name?.toLowerCase() !== REPOSITORY) {
+                throw new Error('Event pull does not target the trusted default branch.');
+              }
+            } else if (context.eventName === 'workflow_dispatch') {
+              const rawNumber = context.payload.inputs?.pull_number;
+              if (context.ref !== 'refs/heads/main' ||
+                  typeof rawNumber !== 'string' || !/^[1-9]\d*$/.test(rawNumber)) {
+                throw new Error('Manual rechecks require trusted main and a canonical pull number.');
+              }
+              number = Number(rawNumber);
+              head = context.payload.inputs?.head_sha;
+            } else {
+              throw new Error('Unsupported issue-link trigger.');
+            }
+            if (!Number.isSafeInteger(number) || number <= 0 || number > 2147483647 || !SHA.test(head || '')) {
+              throw new Error('Pull number or expected head SHA is invalid.');
+            }
+            const bound = process.env.PULL_NUMBER === String(number) && process.env.HEAD_SHA === head;
+            if (!bound) {
+              if ((process.env.PULL_NUMBER && process.env.PULL_NUMBER !== String(number)) ||
+                  (process.env.HEAD_SHA && process.env.HEAD_SHA !== head)) {
+                throw new Error('Pending outputs do not match the authenticated trigger.');
+              }
+              // A missing pending step authorizes only failure, and dispatch must
+              // first bind its caller-supplied SHA to the actual current PR.
+              if (context.eventName === 'workflow_dispatch') {
+                const {data: current} = await github.rest.pulls.get({
+                  ...context.repo, pull_number: number,
+                });
+                snapshot(current);
+                if (current.number !== number || current.head.sha !== head || current.base.ref !== 'main') {
+                  throw new Error('Manual recheck does not match the current pull request.');
+                }
+              }
+            }
+            const snapshotDigest = process.env.SNAPSHOT_DIGEST;
+            const checkRunId = bound ? Number(process.env.CHECK_RUN_ID) : 0;
+            const hasCheck = Number.isSafeInteger(checkRunId) && checkRunId > 0;
+            let passed = bound && hasCheck && /^[0-9a-f]{64}$/.test(snapshotDigest || '') &&
+              process.env.VALIDATION_RESULT === 'success';
             let reason = passed ? 'Issue-link policy passed.' :
               'Issue-link validation failed, was cancelled, or did not complete.';
             if (passed) {
@@ -485,19 +552,29 @@ jobs:
               }
             }
             const runUrl = `${context.serverUrl}/${REPOSITORY}/actions/runs/${context.runId}`;
-            await github.rest.checks.update({
-              ...context.repo,
-              check_run_id: checkRunId,
-              status: 'completed',
-              conclusion: passed ? 'success' : 'failure',
-              completed_at: new Date().toISOString(),
-              details_url: runUrl,
-              output: {
-                title: passed ? 'Canonical issue linkage passed' : 'Canonical issue linkage failed',
-                summary: reason,
-                text: 'Validated against authenticated GitHub issue references on the exact pull-request head.',
-              },
-            });
+            try {
+              const check = {
+                ...context.repo,
+                status: 'completed',
+                conclusion: passed ? 'success' : 'failure',
+                completed_at: new Date().toISOString(),
+                details_url: runUrl,
+                output: {
+                  title: passed ? 'Canonical issue linkage passed' : 'Canonical issue linkage failed',
+                  summary: reason,
+                  text: 'Success requires complete authenticated references and final exact-head freshness checks.',
+                },
+              };
+              if (hasCheck) {
+                await github.rest.checks.update({...check, check_run_id: checkRunId});
+              } else {
+                // No check ID/snapshot is needed to publish failure on an authorized head.
+                await github.rest.checks.create({...check, name: 'issue-link', head_sha: head});
+              }
+            } catch (error) {
+              passed = false;
+              reason = `Could not publish the issue-link check: ${error.message || error}`;
+            }
             try {
               await github.rest.repos.createCommitStatus({
                 ...context.repo,

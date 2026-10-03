@@ -70,29 +70,27 @@ def graph_page(pr, refs, *, total=None, has_next=False, cursor=None,
                repository_id=REPOSITORY_NODE_ID, repository="lindayi/hermes-mobile",
                pull_id="PR_node_12", pull_number=12, head=None, base=None, body=None):
     return {
-        "data": {
-            "repository": {
-                "id": repository_id,
-                "nameWithOwner": repository,
-                "defaultBranchRef": {"name": "main"},
-                "pullRequest": {
-                    "id": pull_id,
-                    "number": pull_number,
-                    "headRefName": pr["head"]["ref"],
-                    "headRefOid": head if head is not None else pr["head"]["sha"],
-                    "baseRefName": pr["base"]["ref"],
-                    "baseRefOid": pr["base"]["sha"],
-                    "body": pr["body"] or "",
-                    "baseRepository": {
-                        "id": repository_id,
-                        "nameWithOwner": repository,
-                        "defaultBranchRef": {"name": "main"},
-                    },
-                    "closingIssuesReferences": {
-                        "totalCount": len(refs) if total is None else total,
-                        "nodes": refs,
-                        "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
-                    },
+        "repository": {
+            "id": repository_id,
+            "nameWithOwner": repository,
+            "defaultBranchRef": {"name": "main"},
+            "pullRequest": {
+                "id": pull_id,
+                "number": pull_number,
+                "headRefName": pr["head"]["ref"],
+                "headRefOid": head if head is not None else pr["head"]["sha"],
+                "baseRefName": pr["base"]["ref"],
+                "baseRefOid": pr["base"]["sha"],
+                "body": pr["body"] or "",
+                "baseRepository": {
+                    "id": repository_id,
+                    "nameWithOwner": repository,
+                    "defaultBranchRef": {"name": "main"},
+                },
+                "closingIssuesReferences": {
+                    "totalCount": len(refs) if total is None else total,
+                    "nodes": refs,
+                    "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
                 },
             },
         },
@@ -105,7 +103,9 @@ const payload = input.payload;
 const script = input.script;
 const phase = input.phase;
 const calls = {pulls: [], graphql: [], statuses: [], checkCreates: [], checkUpdates: []};
-const outputs = {}, errors = [];
+const outputs = {}, errors = [], events = [];
+const clone = value => JSON.parse(JSON.stringify(value));
+const state = clone(payload.state || {checks: [], statuses: {}, nextCheckId: 9981});
 let statusAttempts = 0;
 const pr = payload.pull;
 const repo = {owner: "lindayi", repo: "hermes-mobile"};
@@ -135,7 +135,7 @@ const defaultGraph = () => {
 function graphPayload(refs) {
   const graphPull = payload.graph_pull || pr;
   return {
-    data: {repository: {
+    repository: {
       id: payload.graph_repository_id || "R_kgDOExample",
       nameWithOwner: payload.graph_repository || "lindayi/hermes-mobile",
       defaultBranchRef: {name: "main"},
@@ -156,7 +156,7 @@ function graphPayload(refs) {
             endCursor: payload.end_cursor || null},
         },
       },
-    }},
+    },
   };
 }
 const core = {
@@ -168,22 +168,30 @@ const github = {rest: {
   pulls: {get: async args => {
     const index = calls.pulls.length;
     calls.pulls.push(args);
+    events.push({api: 'pulls.get', state: clone(state)});
     if (payload.pull_error) throw new Error("pull API unavailable");
     return {data: JSON.parse(JSON.stringify(currentPull(index)))};
   }},
   checks: {
     create: async args => {
+      events.push({api: 'checks.create', args});
       if (payload.check_create_error) throw new Error("check create unavailable");
       calls.checkCreates.push(args);
-      return {data: {id: 9981}};
+      const id = state.nextCheckId++;
+      state.checks.push({...args, id});
+      return {data: {id: payload.check_create_bad_id ? null : id}};
     },
     update: async args => {
+      events.push({api: 'checks.update', args});
       if (payload.check_update_error) throw new Error("check update unavailable");
       calls.checkUpdates.push(args);
+      const check = state.checks.find(check => check.id === args.check_run_id);
+      if (check) Object.assign(check, args);
       return {data: {id: args.check_run_id}};
     },
   },
   repos: {createCommitStatus: async args => {
+    events.push({api: 'statuses.create', args});
     const attempt = statusAttempts++;
     if (payload.status_error === true ||
         payload.status_error === "final" && phase === "publish" ||
@@ -191,12 +199,21 @@ const github = {rest: {
       throw new Error("status API unavailable");
     }
     calls.statuses.push(args);
+    state.statuses[args.sha] = args.state;
     return {data: {}};
   }},
 }, graphql: async (query, variables) => {
   calls.graphql.push({query, variables});
   if (payload.graphql_error) throw new Error("GraphQL unavailable");
-  return defaultGraph();
+  const result = defaultGraph();
+  if (result?.errors?.length) {
+    const error = new Error(result.errors.map(item => item.message).join('; '));
+    error.name = 'GraphqlResponseError';
+    error.errors = result.errors;
+    error.data = result.data;
+    throw error;
+  }
+  return result;
 }};
 for (const [key, value] of Object.entries(payload.env || {})) process.env[key] = value;
 (async () => {
@@ -208,7 +225,7 @@ for (const [key, value] of Object.entries(payload.env || {})) process.env[key] =
     thrown = error.message;
     core.setFailed(error.message);
   }
-  console.log(JSON.stringify({calls, outputs, errors, thrown}));
+  console.log(JSON.stringify({calls, outputs, errors, thrown, state, events}));
 })().catch(error => { console.error(error); process.exit(1); });
 """
 
@@ -253,12 +270,12 @@ def run_pipeline(payload, *, validation_result=None, publish_pull=None,
     if not pending["errors"] and validation_result is None:
         validation_payload = {**payload, "pull_reads": [payload.get("pull")]}
         validation = run_script("validate", {
-            **validation_payload,
+            **validation_payload, "state": pending["state"],
             "env": step_environment(pending["outputs"]),
             **({"graph_responses": graph_responses[:1]} if graph_responses else {}),
         })
         validation_result = "success" if not validation["errors"] else "failure"
-    publish_payload = {**payload}
+    publish_payload = {**payload, "state": (validation or pending)["state"]}
     if publish_pull is not None:
         publish_payload["current_pull"] = publish_pull
     if graph_responses:
@@ -268,6 +285,197 @@ def run_pipeline(payload, *, validation_result=None, publish_pull=None,
         outputs, validation_result=validation_result or "failure")
     published = run_script("publish", publish_payload)
     return pending, validation, published
+
+
+def prior_success():
+    return {
+        "checks": [{"id": 9000, "name": "issue-link", "head_sha": HEAD_SHA,
+                    "status": "completed", "conclusion": "success"}],
+        "statuses": {HEAD_SHA: "success"}, "nextCheckId": 9981,
+    }
+
+
+def assert_check_blocks(state):
+    latest = [check for check in state["checks"] if check["head_sha"] == HEAD_SHA][-1]
+    assert latest["status"] != "completed" or latest.get("conclusion") != "success"
+
+
+@pytest.mark.parametrize("case", ["pull_read_error", "body_changed_before_pending"])
+def test_event_head_prior_success_is_invalidated_before_initial_read(case):
+    payload = make_payload(state=prior_success())
+    if case == "pull_read_error":
+        payload["pull_error"] = True
+    else:
+        payload["current_pull"] = pull(body="Canonical link removed while queued")
+    pending = run_script("pending", payload)
+    assert pending["errors"]
+    read = next(event for event in pending["events"] if event["api"] == "pulls.get")
+    assert read["state"]["statuses"][HEAD_SHA] == "pending"
+    assert_check_blocks(read["state"])
+    assert pending["outputs"]["head_sha"] == HEAD_SHA
+    assert pending["outputs"]["pull_number"] == "12"
+    assert "snapshot_digest" not in pending["outputs"]
+
+
+@pytest.mark.parametrize("options", [
+    {"check_create_error": True}, {"check_create_bad_id": True},
+    {"status_error": "pending"},
+])
+def test_pending_independently_attempts_both_invalidation_writes(options):
+    pending = run_script("pending", make_payload(state=prior_success(), **options))
+    assert pending["errors"]
+    assert {event["api"] for event in pending["events"]} >= {
+        "statuses.create", "checks.create"}
+    assert pending["outputs"]["head_sha"] == HEAD_SHA
+    if options.get("status_error"):
+        assert_check_blocks(pending["state"])
+    else:
+        assert pending["state"]["statuses"][HEAD_SHA] == "pending"
+
+
+@pytest.mark.parametrize("case", [
+    "pull_read_error", "body_changed_before_pending", "check_create_error",
+    "check_create_bad_id", "pending_status_error",
+])
+def test_always_finalizes_prior_success_after_pending_failure(case):
+    payload = make_payload(state=prior_success())
+    if case == "pull_read_error":
+        payload["pull_error"] = True
+    elif case == "body_changed_before_pending":
+        payload["current_pull"] = pull(body="Canonical link removed while queued")
+    elif case == "pending_status_error":
+        payload["status_error"] = "pending"
+    else:
+        payload[case] = True
+    pending, validation, published = run_pipeline(payload)
+    assert pending["errors"] and validation is None and published["errors"]
+    assert published["state"]["statuses"][HEAD_SHA] == "failure"
+    if case != "check_create_error":
+        assert_check_blocks(published["state"])
+        assert published["state"]["checks"][-1]["conclusion"] == "failure"
+    assert not any(status["state"] == "success" for status in published["calls"]["statuses"])
+
+
+@pytest.mark.parametrize("options", [
+    {}, {"check_create_error": True}, {"status_error": True},
+])
+def test_always_without_pending_outputs_invalidates_only_authenticated_event_head(options):
+    published = run_script("publish", make_payload(
+        state=prior_success(), pull_error=True, env={}, **options))
+    assert published["errors"]
+    assert {event["api"] for event in published["events"]} >= {
+        "statuses.create", "checks.create"}
+    assert published["calls"]["pulls"] == []
+    if not options.get("status_error"):
+        assert published["state"]["statuses"][HEAD_SHA] == "failure"
+    if not options.get("check_create_error"):
+        assert_check_blocks(published["state"])
+        assert published["state"]["checks"][-1]["conclusion"] == "failure"
+
+
+def test_final_check_update_error_still_invalidates_legacy_status():
+    payload = make_payload(state=prior_success())
+    pending, validation, _ = run_pipeline(payload)
+    published = run_script("publish", {
+        **payload, "state": pending["state"], "check_update_error": True,
+        "env": step_environment({**pending["outputs"], **validation["outputs"]},
+                                validation_result="success"),
+    })
+    assert published["errors"]
+    assert_check_blocks(published["state"])
+    assert published["state"]["statuses"][HEAD_SHA] == "failure"
+
+
+def test_always_without_dispatch_outputs_reauthenticates_before_failure_writes():
+    published = run_script("publish", make_payload(
+        state=prior_success(), eventName="workflow_dispatch",
+        inputs={"pull_number": "12", "head_sha": HEAD_SHA}, env={}))
+    assert published["errors"]
+    assert published["events"][0]["api"] == "pulls.get"
+    assert published["state"]["statuses"][HEAD_SHA] == "failure"
+    assert_check_blocks(published["state"])
+
+
+@pytest.mark.parametrize("options", [{}, {"check_create_error": True}])
+def test_authorized_dispatch_pending_failure_still_finalizes_status(options):
+    payload = make_payload(state=prior_success(), eventName="workflow_dispatch",
+                           inputs={"pull_number": "12", "head_sha": HEAD_SHA},
+                           status_error="pending", **options)
+    pending, validation, published = run_pipeline(payload)
+    assert pending["errors"] and validation is None and published["errors"]
+    assert pending["events"][0]["api"] == "pulls.get"
+    assert published["state"]["statuses"][HEAD_SHA] == "failure"
+
+
+@pytest.mark.parametrize("options", [
+    {"ref": "refs/heads/feature"},
+    {"inputs": {"pull_number": "12", "head_sha": "c" * 40}},
+    {"inputs": {"pull_number": "012", "head_sha": HEAD_SHA}},
+    {"pull_error": True}, {"repositoryId": 1},
+    {"current_pull": pull(base="release")},
+])
+def test_unauthorized_dispatch_never_writes_even_in_always_fallback(options):
+    payload = make_payload(state=prior_success(), eventName="workflow_dispatch",
+                           inputs={"pull_number": "12", "head_sha": HEAD_SHA})
+    payload.update(options)
+    pending, validation, published = run_pipeline(payload)
+    assert pending["errors"] and validation is None and published["errors"]
+    for result in (pending, published):
+        assert result["state"] == prior_success()
+        assert not result["calls"]["statuses"]
+        assert not result["calls"]["checkCreates"]
+        assert not result["calls"]["checkUpdates"]
+
+
+@pytest.mark.parametrize("event", ["pull_request_target", "workflow_dispatch"])
+@pytest.mark.parametrize("env", [{"PULL_NUMBER": "12"}, {"HEAD_SHA": HEAD_SHA}])
+def test_partial_matching_pending_outputs_recover_only_failure_on_authorized_head(event, env):
+    published = run_script("publish", make_payload(
+        state=prior_success(), eventName=event,
+        inputs={"pull_number": "12", "head_sha": HEAD_SHA}, env=env))
+    assert published["errors"]
+    assert published["state"]["statuses"][HEAD_SHA] == "failure"
+    assert_check_blocks(published["state"])
+    if event == "workflow_dispatch":
+        assert published["events"][0]["api"] == "pulls.get"
+
+
+@pytest.mark.parametrize("missing", ["snapshot_digest", "check_run_id"])
+def test_missing_pending_evidence_never_allows_success_in_fallback(missing):
+    payload = make_payload(state=prior_success())
+    pending, validation, _ = run_pipeline(payload)
+    outputs = {**pending["outputs"], **validation["outputs"]}
+    del outputs[missing]
+    published = run_script("publish", {
+        **payload, "state": pending["state"],
+        "env": step_environment(outputs, validation_result="success"),
+    })
+    assert published["errors"]
+    assert_check_blocks(published["state"])
+    assert published["state"]["statuses"][HEAD_SHA] == "failure"
+    assert published["calls"]["graphql"] == []
+
+
+@pytest.mark.parametrize("options", [
+    {"pull": pull(base="release")}, {"repositoryId": 1},
+    {"defaultBranch": "trunk"}, {"eventName": "push"},
+    {"env": {"PULL_NUMBER": "12", "HEAD_SHA": "c" * 40}},
+])
+def test_always_fallback_does_not_write_outside_authenticated_event_binding(options):
+    published = run_script("publish", make_payload(state=prior_success(), **options))
+    assert published["errors"]
+    assert published["state"] == prior_success()
+    assert published["events"] == []
+
+
+def test_total_write_outage_is_reported_not_claimed_as_successful_invalidation():
+    pending, validation, published = run_pipeline(make_payload(
+        state=prior_success(), check_create_error=True, status_error=True))
+    assert pending["errors"] and validation is None and published["errors"]
+    for phase in (pending, published):
+        assert {event["api"] for event in phase["events"]} == {
+            "checks.create", "statuses.create"}
+        assert phase["state"] == prior_success()
 
 
 def test_workflow_uses_trusted_exact_head_check_runs_and_bounded_manual_rechecks():
@@ -326,6 +534,44 @@ def test_canonical_manual_link_without_body_keyword_passes_and_publishes_head_ch
     assert published["calls"]["statuses"][0]["state"] == "success"
     assert all("app" not in status for status in published["calls"]["statuses"])
     assert validation["calls"]["graphql"][0]["variables"]["number"] == 12
+
+
+@pytest.mark.parametrize("step", ["validate", "publish"])
+def test_octokit_direct_result_accepts_valid_canonical_link_in_each_reader(step):
+    import hashlib
+
+    payload = make_payload(body="Manual canonical link; no keyword.")
+    pending = run_script("pending", payload)
+    outputs = {**pending["outputs"], "relation_digest": hashlib.sha256(
+        json.dumps([["Issue_node_7", 7]], separators=(",", ":")).encode()).hexdigest()}
+    result = run_script(step, {
+        **payload, "graph_responses": [graph_page(payload["pull"], [issue(7)])],
+        "env": step_environment(outputs, validation_result="success"),
+    })
+    assert result["errors"] == []
+    assert len(result["calls"]["graphql"]) == 1
+    if step == "publish":
+        assert result["calls"]["checkUpdates"][-1]["conclusion"] == "success"
+        assert result["calls"]["statuses"][-1]["state"] == "success"
+
+
+@pytest.mark.parametrize("step", ["validate", "publish"])
+def test_octokit_partial_data_with_graphql_errors_throws_and_blocks(step):
+    payload = make_payload()
+    pending = run_script("pending", payload)
+    result = run_script(step, {
+        **payload,
+        "graph_responses": [{"data": graph_page(payload["pull"], [issue(7)]),
+                             "errors": [{"message": "Canonical references unavailable"}]}],
+        "env": step_environment(pending["outputs"], validation_result="success"),
+    })
+    assert result["errors"] == ["Canonical references unavailable"]
+    if step == "publish":
+        assert result["calls"]["checkUpdates"][-1]["conclusion"] == "failure"
+        assert result["calls"]["statuses"][-1]["state"] == "failure"
+    else:
+        assert result["thrown"] == "Canonical references unavailable"
+        assert "relation_digest" not in result["outputs"]
 
 
 def test_closing_keyword_without_canonical_edge_does_not_pass():
@@ -398,7 +644,7 @@ def test_excessive_incomplete_and_malformed_graphql_connections_fail():
     assert result["errors"]
 
     malformed = make_payload(refs=[issue(7)])
-    malformed["graph_responses"] = [{"data": {"repository": {}}}]
+    malformed["graph_responses"] = [{"repository": {}}]
     result = run_script("validate", {
         **malformed,
         "env": step_environment(pending["outputs"]),
@@ -524,19 +770,15 @@ def test_api_errors_never_produce_success(step, options):
 def test_workflow_check_run_interoperates_with_app_bound_coordinator_gate():
     pending, validation, published = run_pipeline(make_payload())
     assert validation["errors"] == published["errors"] == []
-    check_run = {
-        "name": "issue-link",
-        "head_sha": HEAD_SHA,
-        "status": "completed",
-        "conclusion": "success",
-        "app": {"id": 15368, "name": "GitHub Actions"},
-    }
-    legacy_status = {
-        "context": "issue-link", "state": "success",
-        "sha": HEAD_SHA,
-        "created_at": "2026-10-03T02:00:00Z",
-    }
+    # Replay actual script writes; only GitHub's returned app identity is synthetic.
+    check_run = {**published["state"]["checks"][-1],
+                 "app": {"id": 15368, "name": "GitHub Actions"}}
+    legacy_status = {**published["calls"]["statuses"][-1],
+                     "created_at": "2026-10-03T02:00:00Z"}
+    assert check_run["head_sha"] == legacy_status["sha"] == HEAD_SHA
     required = [{"context": "issue-link", "app_id": 15368}]
     assert required_checks_pass(required, [check_run], [legacy_status], complete=True)
     assert not required_checks_pass(required, [], [legacy_status], complete=True)
+    assert not required_checks_pass(required, [{**check_run, "app": {"id": 1}}],
+                                    [legacy_status], complete=True)
     assert "app" not in legacy_status

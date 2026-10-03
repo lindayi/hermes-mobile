@@ -158,7 +158,7 @@ _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
 }
 
 _PENDING_ISSUE67_WORKFLOW_FIXTURE = {
-    '.github/workflows/issue-link.yml': '730d21e8281ec2b06c736b6d3088a594c544257d256848f1bc32c12b9eb79340',
+    '.github/workflows/issue-link.yml': '9130c197576fda4f16435cd1e490cbf0d942d025f24a2a0529301adad46c83a4',
 }
 
 
