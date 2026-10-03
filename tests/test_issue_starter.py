@@ -1205,14 +1205,22 @@ def test_malformed_or_inconsistent_closing_issue_responses_block(tmp_path, inval
 ])
 def test_closing_repository_is_bound_to_fixed_rest_identity(tmp_path, invalid):
     # Independent review R2: self-consistent GraphQL IDs are not a REST anchor.
+    fresh_rest_repository_ids = []
+
     class SnapshotApi(FakeApi):
+        closing_graph_read = False
+
         def get(self, route):
-            return copy.deepcopy(super().get(route))
+            response = copy.deepcopy(super().get(route))
+            if self.closing_graph_read and route == f"repos/{REPOSITORY}/pulls/41":
+                fresh_rest_repository_ids.append(response["base"]["repo"]["node_id"])
+            return response
 
         def post(self, route, body):
             response = copy.deepcopy(super().post(route, body))
             if (invalid == "changed_rest_node_id" and route == "graphql"
                     and "closingIssuesReferences" in body.get("query", "")):
+                self.closing_graph_read = True
                 self.pulls[0]["base"]["repo"]["node_id"] = "R_other"
             return response
 
@@ -1227,7 +1235,13 @@ def test_closing_repository_is_bound_to_fixed_rest_identity(tmp_path, invalid):
         ]["id"] = "R_other"
     elif invalid == "missing_rest_node_id":
         del pull["base"]["repo"]["node_id"]
-    elif invalid != "changed_rest_node_id":
+    elif invalid == "changed_rest_node_id":
+        repository["issue"] = {
+            "id": api.issue_node_id,
+            "number": ISSUE_NUMBER,
+            "repository": GRAPHQL_REPOSITORY.copy(),
+        }
+    else:
         pull["base"]["repo"]["node_id"] = {
             "empty_rest_node_id": "", "null_rest_node_id": None,
             "nonstring_rest_node_id": REPOSITORY_ID,
@@ -1241,6 +1255,9 @@ def test_closing_repository_is_bound_to_fixed_rest_identity(tmp_path, invalid):
     assert not any("markPullRequestReadyForReview" in call["query"]
                    for call in api.graphql_calls)
     assert not any(route.endswith("/issues/41/comments") for route, _ in api.posts)
+    if invalid == "changed_rest_node_id":
+        # Reach the fresh REST comparison, not an earlier GraphQL shape rejection.
+        assert fresh_rest_repository_ids == ["R_other"]
 
 
 def test_unbounded_closing_issue_pagination_fails_closed(tmp_path):
