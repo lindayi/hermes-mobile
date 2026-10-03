@@ -51,10 +51,11 @@ public closing text alone does not prove issue linkage or authorize coordinator
 work.
 
 The coordinator accepts only an owner-authored enrollment for an open,
-non-draft, same-repository PR based on `main`, at its exact current head. Starter
-enrollment additionally proves the originating issue, unchanged command, PR
-identity, body digest, and canonical closing edge. Manual enrollment remains
-available under its documented owner-command contract. Enrollment is not merge
+same-repository PR based on `main`. Starter enrollment additionally requires a
+non-draft PR at its exact current head and proves the originating issue, unchanged
+command, PR identity, body digest, and canonical closing edge. Manual bare and
+SHA-bound enrollment can admit draft PRs under the documented owner-command
+contract; repair and merge are deferred until the PR is ready. Enrollment is not merge
 approval; sensitive changes require separate exact-head owner authorization and
 targeted independent review.
 
