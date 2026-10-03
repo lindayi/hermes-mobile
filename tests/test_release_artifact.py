@@ -342,7 +342,7 @@ def test_workflow_builds_once_browser_consumes_and_main_only_attests():
         transfer = next(s for s in steps if 'artifact@' in s.get('uses', ''))
         assert transfer['with']['name'] == 'release-${{ github.run_id }}-${{ github.run_attempt }}'
     attest = jobs['attest']
-    assert attest['needs'] == 'source-ci'
+    assert attest['needs'] == ['source-ci', 'integration-tests']
     assert "github.event_name == 'push'" in attest['if']
     assert "github.ref == 'refs/heads/main'" in attest['if']
     assert "github.repository == 'lindayi/hermes-mobile'" in attest['if']

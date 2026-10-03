@@ -141,7 +141,7 @@ WORKFLOW_ID = 372155405
 REF = 'refs/heads/main'
 EXPECTED_JOBS = frozenset({'build', 'checks', 'js', 'python (0)', 'python (1)',
                           'browser (0)', 'browser (1)', 'browser (2)', 'browser (3)',
-                          'native', 'source-ci', 'attest'})
+                          'native', 'source-ci', 'integration-tests', 'attest'})
 
 @dataclass(frozen=True)
 class VerifiedBundle:

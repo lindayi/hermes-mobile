@@ -33,7 +33,8 @@ def test_hosted_gate_requires_every_suite_without_optional_failures():
     gate = jobs['source-ci']['steps'][0]
     assert gate['env']['RESULTS'] == '${{ toJSON(needs) }}'
     assert "!= 'success'" in gate['run']
-    for name in ('build','checks','js','python','browser','native','source-ci','attest'):
+    for name in ('build','checks','js','python','browser','native','source-ci',
+                 'integration-tests','attest'):
         assert jobs[name]['runs-on'] == 'ubuntu-24.04'
         assert 'continue-on-error' not in jobs[name]
         for step in jobs[name]['steps']:
@@ -118,7 +119,7 @@ def test_build_once_bundle_is_attested_only_after_trusted_main_gate():
     assert upload['with']['path'] == '${{ runner.temp }}/release.tar'
     assert upload['with']['if-no-files-found'] == 'error'
     attest = jobs['attest']
-    assert attest['needs'] == 'source-ci'
+    assert attest['needs'] == ['source-ci', 'integration-tests']
     assert attest['if'] == "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'lindayi/hermes-mobile' }}"
     assert attest['permissions'] == {'contents': 'read', 'id-token': 'write', 'attestations': 'write'}
     for name, job in jobs.items():
