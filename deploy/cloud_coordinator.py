@@ -2063,6 +2063,9 @@ class Coordinator:
             required, snapshot["check_runs"], snapshot["statuses"],
             complete=snapshot["policy_complete"],
         )
+        status_state = "success" if review_ok and authorized else "pending"
+        status, status_owned = _status_owned(snapshot["statuses"], "cloud-review", OWNER_ID)
+        status_action = None
         handoffs = []
         agent_busy = self._reconcile_actions(
             snapshot, actions, apply=apply, handoffs=handoffs,
@@ -2166,6 +2169,8 @@ class Coordinator:
             reasons.append(("review", "A current structured independent-agent review and resolved conversations are required."))
         if not checks_ok:
             reasons.append(("checks", "Every configured required check must complete successfully."))
+        if status and not status_owned:
+            reasons.append(("status-owner", "The cloud-review status is owned by another identity."))
         if agent_busy:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
         budget_needed = (
@@ -2189,6 +2194,27 @@ class Coordinator:
             agent_running=(agent_busy or repair is not None or bool(neutral_blocker)
                            or budget_needed),
         )
+        if status and not status_owned:
+            merge = False
+        if (snapshot["scoped"] and not (status and not status_owned)
+                and ((status is not None and status.get("state") != status_state)
+                     or (status is None and not merge))):
+            prior = [item for item in actions.values()
+                     if item.get("kind") == "status" and item.get("issue") == number
+                     and item.get("head") == head]
+            ambiguous = any(item.get("status") in {"sending", "uncertain"}
+                            for item in prior)
+            generation = max(
+                [item.get("generation", 0) for item in actions.values()
+                 if item.get("kind") == "status" and item.get("issue") == number]
+                + [self.store.status_generation_floor(number)]
+            ) + 1
+            if not ambiguous:
+                status_action = {
+                    "kind": "status", "issue": number, "head": head,
+                    "state": status_state, "generation": generation,
+                    "key": f"status:{number}:{head}:{generation}",
+                }
         merge_key = f"auto-merge:{number}:{head}:{snapshot['main_sha']}"
         merge_requested = bool(snapshot["pull"].get("auto_merge")) or (
             actions.get(merge_key, {}).get("status") == "sent"
@@ -2216,7 +2242,7 @@ class Coordinator:
                 "terminal": False,
                 "review_valid": review_ok, "required_checks_green": checks_ok,
                 "auto_merge_eligible": merge, "reasons": [item[0] for item in reasons],
-                "repair": repair, "status_action": None,
+                "repair": repair, "status_action": status_action,
                 "merge_action": merge_action, "auto_merge_requested": merge_requested,
                 "outcomes": notification_outcomes,
                 "lifecycle_events": lifecycle_events, "handoffs": handoffs}
@@ -2456,6 +2482,106 @@ class Coordinator:
         self.store.accept_task(key, task_id, response["created_at"])
         return "sent"
 
+    def _publish_status(self, action, snapshot, actor_id):
+        key = action["key"]
+        existing = self.store.action(key)
+        if existing and existing.get("status") != "blocked":
+            return existing.get("status")
+        statuses = _rest_list(
+            self.api, f"repos/{REPOSITORY}/commits/{action['head']}/statuses?per_page=100",
+        )
+        if (not isinstance(statuses, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get("context"), str)
+                or (item["context"] == "cloud-review"
+                    and (type(item.get("id")) is not int or item["id"] <= 0))
+                for item in statuses)):
+            raise CoordinatorError("Preclaim status identity inventory was incomplete")
+        watermark = max((item["id"] for item in statuses
+                         if item["context"] == "cloud-review"), default=0)
+        if not self.store.claim_action(key, action | {"status_id_watermark": watermark}):
+            existing = self.store.action(key)
+            if not existing:
+                raise CoordinatorError("Planned status generation could not be claimed")
+            return existing.get("status")
+        try:
+            fence_main = snapshot["main_sha"] if action["state"] == "success" else None
+            current_pull = self._fence_pull(
+                action["issue"], action["head"], fence_main,
+            )
+            if not current_pull:
+                self.store.update_action(key, "superseded")
+                return "superseded"
+            current_required, current_policy_complete, _, _ = _required_checks(self.api)
+            if (not current_policy_complete
+                    or {(item.get("context"), item.get("app_id"))
+                        for item in current_required} != CURRENT_REQUIRED_CHECKS):
+                self.store.update_action(key, "blocked")
+                return "blocked"
+            if action["state"] == "success":
+                reviews = _rest_list(
+                    self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
+                )
+                threads, threads_complete = collect_review_threads(self.api, action["issue"])
+                files = _rest_list(
+                    self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/files?per_page=100",
+                )
+                current_pull = self._fence_pull(
+                    action["issue"], action["head"], snapshot["main_sha"],
+                )
+                pull_user = current_pull.get("user") if isinstance(current_pull, dict) else None
+                sensitive = classify_sensitive_paths(files, complete=len(files) < 300)
+                if (not isinstance(current_pull, dict)
+                        or not independent_review_valid(
+                            action["head"], reviews, threads,
+                            pull_author_id=pull_user.get("id") if isinstance(pull_user, dict) else None,
+                            threads_complete=threads_complete, reviews_complete=True,
+                        )
+                        or (sensitive
+                            and (
+                                snapshot["enrollment"].get("sensitive_sha") != action["head"]
+                                or not sensitive_review_authorized(
+                                    reviews, action["head"],
+                                    snapshot["enrollment"].get("sensitive_authorization"),
+                                    snapshot["enrollment"].get("targeted_review"),
+                                    owner_id=OWNER_ID,
+                                )
+                            ))):
+                    self.store.update_action(key, "blocked")
+                    return "blocked"
+            current_statuses = _rest_list(
+                self.api,
+                f"repos/{REPOSITORY}/commits/{action['head']}/statuses?per_page=100",
+            )
+        except CoordinatorError:
+            self.store.update_action(key, "blocked")
+            raise
+        existing, owned = _status_owned(current_statuses, "cloud-review", actor_id)
+        if existing and not owned:
+            self.store.update_action(key, "superseded")
+            return "foreign-status"
+        description = (
+            "Verified current independent review and resolved conversations"
+            if action["state"] == "success"
+            else "Awaiting current independent review and resolved conversations"
+        )
+        try:
+            response = self.api.write(
+                f"repos/{REPOSITORY}/statuses/{action['head']}",
+                {"state": action["state"], "context": "cloud-review",
+                 "description": description},
+            )
+        except CoordinatorError:
+            self.store.mark_uncertain(key)
+            return "uncertain"
+        creator = response.get("creator") if isinstance(response, dict) else None
+        if (not isinstance(response, dict) or response.get("context") != "cloud-review"
+                or response.get("state") != action["state"]
+                or not isinstance(creator, dict) or creator.get("id") != actor_id):
+            self.store.mark_uncertain(key)
+            return "uncertain"
+        self.store.update_action(key, "sent")
+        return "sent"
+
     def _enable_auto_merge(self, action, snapshot):
         key = action["key"]
         self._identity()
@@ -2686,6 +2812,10 @@ class Coordinator:
                         pr_plan["reasons"] = list(dict.fromkeys(
                             pr_plan["reasons"] + [reason],
                         ))
+            status_action = pr_plan["status_action"]
+            if status_action:
+                actor = self.api.get("user")
+                self._publish_status(status_action, snapshot, actor.get("id"))
             merge_action = pr_plan["merge_action"]
             if merge_action and not action:
                 current_plan = self._enable_auto_merge(merge_action, snapshot)

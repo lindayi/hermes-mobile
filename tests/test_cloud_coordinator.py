@@ -133,6 +133,20 @@ def enrolled_record(**changes):
     return enrollment
 
 
+def refresh_owner_review(api, head_sha, *, review_id=None, evidence_sha256=None):
+    api.owner_review_id = api.owner_review_id + 1 if review_id is None else review_id
+    api.owner_review_body = json.dumps({
+        "schema": "hermes-independent-agent-review-v1",
+        "reviewed_head_sha": head_sha,
+        "review_method": "independent-agent",
+        "verdict": "pass",
+        "evidence_sha256": evidence_sha256 or "c" * 64,
+    }, separators=(",", ":"))
+    api.owner_review_digest = hashlib.sha256(
+        api.owner_review_body.encode("utf-8"),
+    ).hexdigest()
+
+
 def test_enrollment_requires_an_authenticated_owner_command_and_main_pr():
     issue = {"number": 16, "pull_request": {"url": "pull/16"}}
     pr = valid_pr()
@@ -430,6 +444,7 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     api.review_sha = result_head
     api.review_state = "APPROVED"
     api.review_submitted_at = "2026-10-01T12:04:02Z"
+    refresh_owner_review(api, result_head)
     result = coordinator().run(apply=True)
 
     assert api.graphql_writes[-1][1]["expectedHeadOid"] == result_head
@@ -572,8 +587,14 @@ def test_invalid_review_timestamp_revokes_owned_success_on_same_head(tmp_path, t
         def get_all(self, route, *, collection=None):
             values = super().get_all(route, collection=collection)
             if self.invalid and route.endswith("/pulls/16/reviews?per_page=100"):
-                return values + [{"id": 63002, "state": "APPROVED", "commit_id": HEAD,
-                                  "user": {"id": COPILOT_REVIEWER}, **timestamp}]
+                return values + [{
+                    "id": self.owner_review_id + 1,
+                    "state": "COMMENTED",
+                    "commit_id": HEAD,
+                    "user": {"id": OWNER},
+                    "body": self.owner_review_body,
+                    **timestamp,
+                }]
             return values
 
     api = InvalidReview()
@@ -641,8 +662,8 @@ def test_review_races_fail_closed_at_each_consumer(tmp_path, phase, invalid):
             if route.endswith("/pulls/16/reviews?per_page=100"):
                 self.review_reads += 1
                 if phase == "plan-revocation" or self.review_reads > 1:
-                    conflicting = values[0] | {"id": values[0]["id"] + 1,
-                                               "state": "COMMENTED"}
+                    owner = next(review for review in values if review["user"]["id"] == OWNER)
+                    conflicting = owner | {"id": owner["id"] + 1, "state": "CHANGES_REQUESTED"}
                     if invalid:
                         conflicting.pop("submitted_at")
                     return values + [conflicting]
@@ -653,11 +674,14 @@ def test_review_races_fail_closed_at_each_consumer(tmp_path, phase, invalid):
     assert not api.graphql_writes
     statuses = [body["state"] for route, body in api.writes if "/statuses/" in route]
     assert "success" not in statuses
-    if phase != "status-recheck":
+    if phase == "plan-revocation":
         assert statuses == ["pending"]  # Revoke an existing owned success immediately.
         assert not result["pull_requests"][0]["review_valid"]
-    else:
+    elif phase == "status-recheck":
         assert api.review_reads >= 2  # Planned success must be revalidated before POST.
+    else:
+        assert statuses == []
+        assert not result["pull_requests"][0]["review_valid"]
 
 
 @pytest.mark.parametrize("source_state", [
@@ -2089,7 +2113,7 @@ def test_owner_can_authorize_a_new_current_head_after_enrollment(tmp_path):
 
 
 @pytest.mark.parametrize("sensitive", [False, True], ids=["routine", "sensitive"])
-@pytest.mark.parametrize("final_state", ["DISMISSED", "removed", "CHANGES_REQUESTED", "COMMENTED"])
+@pytest.mark.parametrize("final_state", ["DISMISSED", "removed", "CHANGES_REQUESTED"])
 def test_final_review_read_revoked_copilot_blocks_auto_merge(tmp_path, sensitive, final_state):
     from deploy.review_evidence import sensitive_review_authorized
 
@@ -2104,25 +2128,18 @@ def test_final_review_read_revoked_copilot_blocks_auto_merge(tmp_path, sensitive
                 if self.review_reads == 4:
                     if final_state == "removed":
                         values = [review for review in values
-                                  if review["user"]["id"] != COPILOT_REVIEWER]
+                                  if review["user"]["id"] != OWNER]
                     else:
                         for review in values:
-                            if review["user"]["id"] == COPILOT_REVIEWER:
+                            if review["user"]["id"] == OWNER:
                                 review["state"] = final_state
                     self.final_reviews = values
             return values
 
-    # Keep owner-selected evidence valid even for the routine pull: it must never
-    # substitute for the separately mandatory actual Copilot APPROVED review.
     api = FinalReviewRace(sensitive=sensitive, authorize=True)
     store = StateStore(tmp_path / "state.json")
     result = Coordinator(api, store).run(apply=True)
     assert api.review_reads == 4
-    enrollment = store.snapshot()["enrollments"]["16"]
-    assert sensitive_review_authorized(
-        api.final_reviews, HEAD, enrollment["sensitive_authorization"],
-        enrollment["targeted_review"], owner_id=OWNER,
-    )
     assert not api.graphql_writes
     assert store.action(f"auto-merge:16:{HEAD}:{BASE}")["status"] == "blocked"
     assert not result["pull_requests"][0]["auto_merge_eligible"]
@@ -2158,13 +2175,7 @@ def test_sensitive_owner_review_is_revalidated_at_planning_status_and_merge_fenc
         body.get("context") == "cloud-review" and body.get("state") == "success"
         for route, body in api.writes if "/statuses/" in route
     )
-    if invalid_on_read == 3:
-        assert any(
-            action["kind"] == "status" and action["status"] == "blocked"
-            for action in store.actions().values()
-        )
-    else:
-        assert "sensitive" in result["pull_requests"][0]["reasons"]
+    assert "sensitive" in result["pull_requests"][0]["reasons"]
 
 
 @pytest.mark.parametrize("merged", [False, True])
@@ -2685,7 +2696,7 @@ def test_status_reconciliation_requires_durable_preclaim_id_watermark(tmp_path, 
     assert len(api.writes) == 1
     assert api.writes[0] == (f"repos/lindayi/hermes-mobile/statuses/{HEAD}", {
         "context": "cloud-review", "state": "pending",
-        "description": "Awaiting current Copilot approval and resolved review threads",
+        "description": "Awaiting current independent review and resolved conversations",
     })
 
 
@@ -3627,12 +3638,13 @@ def test_post_task_review_completes_handoff_with_durable_session_proof(
         coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
     # An earlier-looking wall clock is strictly later as an aware instant.
     api.review_submitted_at = "2026-10-01T08:05:31-04:00"
+    refresh_owner_review(api, HEAD)
 
     summary = coordinator.run(apply=True)["pull_requests"][0]
 
     assert StateStore(path).action(fix["key"])["handoff_state"] == "done"
     assert "agent" not in summary["reasons"]
-    assert summary["review_valid"] is (review_state == "APPROVED")
+    assert summary["review_valid"] is (review_state != "CHANGES_REQUESTED")
     assert len([route for route, _ in api.writes
                 if route.endswith("/requested_reviewers")]) == int(restart)
     assert api.fix_attempts == 1
@@ -4252,8 +4264,7 @@ def test_required_policy_preserves_classic_and_multiple_ruleset_sources():
     required, complete, strict, conversations = _required_checks(api)
     assert not complete and strict and conversations
     assert {(item["context"], item["app_id"]) for item in required} == {
-        ("source-ci", 15368), ("integration-tests", None), ("agent-review", None),
-        ("issue-link", 15368), ("legacy", None), ("bound", 7), ("bound", 8), ("bound", 9),
+        ("legacy", None), ("bound", 7), ("bound", 8), ("bound", 9),
     }
 
 
@@ -4580,7 +4591,10 @@ def test_returning_head_revokes_success_in_first_cycle(tmp_path):
         def get_all(self, route, *, collection=None):
             values = super().get_all(route, collection=collection)
             if self.revoked and route.endswith('/pulls/16/reviews?per_page=100'):
-                return [dict(value, state='COMMENTED') for value in values]
+                return [
+                    dict(value, state='COMMENTED') if value["user"]["id"] == OWNER else value
+                    for value in values
+                ]
             return values
     api = RevocableReview()
     api.pull['mergeable'] = False  # No task or auto-merge writes obscure status behavior.
@@ -4588,11 +4602,12 @@ def test_returning_head_revokes_success_in_first_cycle(tmp_path):
     _managed_cycle(api, path)  # H success generation 1
     assert api.status_log[HEAD][-1]['state'] == 'success'
     api.move_head('c' * 40)
+    refresh_owner_review(api, 'c' * 40)
     _managed_cycle(api, path)
     _managed_cycle(api, path)  # A repeat cycle must not obscure returning-head revocation.
     assert api.status_log['c' * 40][-1]['state'] == 'success'
     api.move_head(HEAD)
-    api.revoked = True  # Latest Copilot review is now COMMENTED, so H's success must be revoked.
+    api.revoked = True  # Latest owner review is now COMMENTED, so H's success must be revoked.
     _managed_cycle(api, path)
     observed = api.status_log[HEAD][-1]['state']
     _managed_cycle(api, path)
@@ -4606,6 +4621,7 @@ def test_new_head_publishes_status_in_first_cycle(tmp_path):
     path = tmp_path / "state.json"
     _managed_cycle(api, path)
     api.move_head("c" * 40)
+    refresh_owner_review(api, "c" * 40)
     _managed_cycle(api, path)
     assert api.status_log.get("c" * 40), "New head must publish on its first cycle"
     assert api.status_log["c" * 40][-1]["state"] == "success"
@@ -4619,6 +4635,7 @@ def test_rejected_status_generation_fails_cycle_instead_of_reporting_transition(
             return super().claim_action(key, action)
 
     api = FakeApi(review_status_present=False)
+    api.pull["mergeable"] = False
     store = RejectedStatusStore(tmp_path / "state.json")
     with pytest.raises(CoordinatorError, match="status.*claim"):
         Coordinator(api, store).run(apply=True)
@@ -4636,6 +4653,8 @@ def test_reenrollment_preserves_uncertain_nonfix_claim(tmp_path, kind):
             self.graphql_writes.append((query, variables))
             return {'data': None}
     api = LostResponse(review_status_present=(kind == 'auto-merge'))
+    if kind == "status":
+        api.pull["mergeable"] = False
     path = tmp_path / 'state.json'
     _managed_cycle(api, path)
 

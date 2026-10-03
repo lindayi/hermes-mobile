@@ -71,6 +71,29 @@ def parse_independent_review_body(body, head_sha):
     return report
 
 
+def _review_submission(review):
+    submitted = review_timestamp(review.get("submitted_at"))
+    if submitted is None:
+        return None
+    for key in ("updated_at", "updatedAt"):
+        if key in review:
+            updated = review_timestamp(review.get(key))
+            if updated is None or updated != submitted:
+                return None
+    for key in ("last_edited_at", "lastEditedAt"):
+        if key in review:
+            edited = review.get(key)
+            if edited in (None, ""):
+                continue
+            if review_timestamp(edited) is None:
+                return None
+            return None
+    for key in ("includes_created_edit", "includesCreatedEdit"):
+        if key in review and review.get(key) is not False:
+            return None
+    return submitted
+
+
 def selected_independent_agent_review(reviews, head_sha, review_id, body_sha256, *, owner_id):
     """Return the exact latest owner-published positive COMMENT review, if valid."""
     if (not positive_id(owner_id) or not isinstance(head_sha, str)
@@ -82,13 +105,11 @@ def selected_independent_agent_review(reviews, head_sha, review_id, body_sha256,
     if not latest or len(latest) != 1:
         return None
     review = latest[0]
-    submitted = review_timestamp(review.get("submitted_at"))
-    updated_at = review_timestamp(review.get("updated_at"))
     body = review.get("body")
     if (review.get("id") != review_id or review.get("state") != "COMMENTED"
             or review.get("commit_id") != head_sha or not isinstance(body, str)
             or len(body) > MAX_INDEPENDENT_REVIEW_CHARS
-            or submitted is None or updated_at is None or updated_at != submitted
+            or _review_submission(review) is None
             or review.get("dismissed") is True
             or review.get("dismissed_at") not in (None, "")):
         return None
@@ -117,9 +138,7 @@ def current_independent_agent_review(
     if not latest or len(latest) != 1:
         return None
     review = latest[0]
-    submitted = review_timestamp(review.get("submitted_at"))
-    updated_at = review_timestamp(review.get("updated_at"))
-    if submitted is None or updated_at is None or updated_at != submitted:
+    if _review_submission(review) is None:
         return None
     body = review.get("body")
     if not isinstance(body, str):

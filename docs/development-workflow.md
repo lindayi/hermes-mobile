@@ -95,10 +95,11 @@ The four active contexts above govern protected auto-merge and source consistenc
 Independent technical acceptance additionally requires the latest authenticated,
 exact-head owner-published structured independent-agent formal COMMENT review, a
 valid positive verdict and evidence binding, complete review/thread pagination, and
-resolved conversations. Copilot feedback is supplemental: COMMENTED or missing
-APPROVED feedback alone does not block acceptance; actionable findings and definite
-rejection still block. See [`autonomy-policy.md`](autonomy-policy.md) for the
-read-only evidence contract. Installed/private compatibility remains required at
+resolved conversations. Copilot feedback is supplemental: missing APPROVED or
+COMMENTED alone does not block acceptance, repeat review requests, or consume
+fixer budget; actionable findings and definite rejection still block. See
+[`autonomy-policy.md`](autonomy-policy.md) for the read-only evidence contract.
+Installed/private compatibility remains required at
 guarded exact-main deployment; do not execute public PR code on a production-host
 self-hosted runner. Final integration is a merge gate, not a full local suite per
 edit; focused local RED/GREEN checks remain the development loop.
@@ -137,7 +138,9 @@ bound to the current head. Sensitive changes still require separate exact-SHA ow
 authorization.
 
 Use follow-up fix commits, reply in actual GitHub threads with the fix SHA and test
-evidence, and check findings before resolving them. Require resolved review threads
+evidence, and check findings before resolving them. Publish `agent-review` only
+after verifying the independent review of that head. Publish
+`integration-tests` only after verifying complete final integration. Require resolved review threads
 and a branch current with freshly fetched `origin/main` before merging through
 GitHub. No owner/admin bypass; never self-approve, fabricate approvals, review/test
 statuses or identities, bypass protections, or write directly to `main`. Report

@@ -235,6 +235,14 @@ def test_current_independent_review_is_bound_to_latest_exact_unedited_record():
     missing_update.pop("updated_at")
     assert current_independent_agent_review(
         [missing_update], HEAD, owner_id=OWNER,
+    ) == targeted
+    assert current_independent_agent_review(
+        [dict(review, lastEditedAt="2026-10-01T12:31:00Z")],
+        HEAD, owner_id=OWNER,
+    ) is None
+    assert current_independent_agent_review(
+        [dict(review, includesCreatedEdit=True)],
+        HEAD, owner_id=OWNER,
     ) is None
     assert body == review["body"]
 

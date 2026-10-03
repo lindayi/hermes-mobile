@@ -113,11 +113,11 @@ Every PR requires the latest authenticated, exact-head owner-published structure
 independent-agent formal COMMENT review, a valid positive verdict and evidence
 binding, complete review/thread pagination, and resolved conversations. Stale,
 edited, removed, malformed, superseded, or unbound evidence fails closed; status
-alone is not a review. Copilot feedback is supplemental: COMMENTED or missing
-APPROVED alone does not block acceptance, repeat review requests, or consume fixer
-budget. Actual open findings must be resolved, and definite rejection is not
-acceptance. Sensitive changes still require separate exact-SHA owner authorization
-and targeted independent review.
+alone is not a review. Copilot feedback is supplemental: missing APPROVED or
+COMMENTED alone does not block acceptance, repeat review requests, or consume
+fixer budget. Actual open findings must be resolved, and definite rejection is
+not acceptance. Sensitive changes still require separate exact-SHA owner
+authorization and targeted independent review.
 
 Required checks and protections are authoritative. Do not fabricate reviews,
 approvals, check results, or identities. Review and test evidence applies only to
@@ -135,7 +135,7 @@ workflow URL. Never use only a hosted subset or only local host tests to claim f
 coverage. Focused checks or dependency setup alone are not final integration.
 Require all four active contexts, resolved review threads, and a branch current with
 freshly fetched `origin/main` before GitHub merge. Never fabricate advisory status
-success, retire a required context, or use owner/admin bypass.
+success, retire a required context, or use No owner/admin bypass shortcuts.
 
 Merge and deploy one revision at a time. Merge updated `origin/main` into the PR branch;
 never rebase or force-push reviewed history. Gather both PR intents, the common base,
