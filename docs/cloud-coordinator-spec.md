@@ -589,15 +589,24 @@ existing exact merged event when the current delivery ledger, successful
 controller status, current release, and git provenance validate for that merge
 SHA. A merge alone is never treated as a deployment.
 
-Task receipt v2 is the default generated dispatch contract. The host supplies
-literal nonce, PR number, start head and **dispatch-time main SHA** in the prompt;
-the child copies those values, reads `COPILOT_AGENT_SESSION_ID` from its exposed
-environment, and reports the pushed result head. Missing session environment is an
-honest blocker: never guess an ID, emit a ready receipt, obtain extra credentials,
-or request an owner-comment handshake. The child is not asked to discover or echo
-the separate Task UUID. The read-only cloud probe established session-environment
-identity, not a source for the Task UUID (and not proof that such a source cannot
-exist).
+Task receipt v2 is the default generated dispatch contract. The host supplies the
+literal nonce, PR number, start head and **dispatch-time main SHA** together at the
+start of the receipt template. The prompt is placed in the JSON task-create request
+as its `prompt` string. Source and synthetic JSON-round-trip tests can verify that
+producer/request representation, but cannot establish the bytes ultimately supplied
+to a model. A reported missing field is evidence of a delivery/interpretation
+failure, not proof of downstream transformation; provider transformation and
+agent-side misreading/context loss remain hypotheses until an owner-controlled real
+task trial verifies the boundary.
+
+Before any source edits, the child must verify that all four fixed bindings appear
+complete and read a nonblank `COPILOT_AGENT_SESSION_ID` from its exposed environment.
+If any required context is absent, it must stop without source edits, report an
+explicit blocker, and not guess, substitute a value, or emit a receipt. Never obtain
+extra credentials or request an owner-comment handshake. The child is not asked to
+discover or echo the separate Task UUID. The read-only cloud probe established
+session-environment identity, not a source for the Task UUID (and not proof that
+such a source cannot exist).
 
 Post exactly one unchanged authenticated Copilot issue comment containing one
 contiguous v2 receipt block as its final unquoted lines. The posting transport may
@@ -620,19 +629,22 @@ within these limits; the exact-body v1 contract is unchanged.
 
 ```text
 Hermes-Task-Receipt: v2
-nonce=<fixed-dispatch-nonce>
-pr=<fixed-pull-number>
-session=<COPILOT_AGENT_SESSION_ID>
-start_head=<fixed-dispatched-head-sha>
-base=<fixed-dispatch-time-main-sha>
-head=<pushed-current-pull-head-sha>
-result=<ready|conflict_incompatible|policy_broken>
+nonce=FIXED_DISPATCH_NONCE
+pr=FIXED_PULL_NUMBER
+start_head=FIXED_DISPATCHED_HEAD_SHA
+base=FIXED_DISPATCH_TIME_MAIN_SHA
+session=SESSION_ID_REPLACE_ME
+head=PUSHED_PULL_HEAD_SHA_REPLACE_ME
+result=ready|conflict_incompatible|policy_broken
 ```
 
-Each field appears exactly once; field order may vary under the documented transport.
-Choose exactly one closed result value. After pushing and focused checks, the coding
-task must not idle waiting for CI/review: the parent controller handles those phases.
-`ready` is not passing CI, approval, merge or deployment success.
+The uppercase replacement labels are plain ASCII instructional tokens, never valid
+receipt values; replace both dynamic tokens with the exact session ID and pushed
+pull-head SHA before posting. Each field appears exactly once; field order may vary
+under the documented transport. Choose exactly one closed result value. After
+pushing and focused checks, the coding task must not idle waiting for CI/review: the
+parent controller handles those phases. `ready` is not passing CI, approval, merge
+or deployment success.
 
 Task identity still comes solely from the durable saved task ID and authenticated
 Task API response, never from a comment. The host validates exact returned task ID,
