@@ -53,6 +53,13 @@ an initially unknown run after authenticated clarification rehydration. It does
 not change native activation, unrelated controls or orchestration behavior
 outside this correction, or terminal unknown outcomes.
 
+Snapshot reconciliation, clarification SSE updates, answer acknowledgements, and
+terminal observations for one owned run are serialized by a lock bound to the
+owner, profile, local run, and native run identity. The lock may span a bounded
+native request, but no network wait is held inside a SQLite write transaction.
+This prevents a stale snapshot or late answer acknowledgement from replacing a
+newer question or run state; journal stop and terminal fences remain authoritative.
+
 Acceptance cases: (1) A multi-select answer containing literal Unicode remains
 idempotent when the answered native event arrives before the POST acknowledgement,
 including rows written with legacy default JSON encoding; a changed answer or
@@ -65,6 +72,12 @@ clarification reconciliation before choosing terminal return versus live trackin
 The same-run answer can complete through the existing event/status path, while
 navigation, account changes, teardown, unavailable snapshots, and terminal
 unknown runs cannot be reopened or tracked as live.
+(4) While a native GET is held, a newer clarification event remains pending and
+answerable after a stale empty/running snapshot returns. (5) While an answer POST
+acknowledgement is held, the next clarification remains pending and answerable,
+the first accepted answer stays immutable, and the same native run continues
+without duplicate answer or run dispatch. Overlapping snapshots serialize, and
+stale waiting evidence cannot reopen a stopping or terminal run.
 
 ## Acceptance cases
 

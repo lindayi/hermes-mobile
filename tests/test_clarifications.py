@@ -391,6 +391,130 @@ async def test_late_answer_ack_preserves_next_question_and_same_run_continuation
 
 
 @pytest.mark.asyncio
+async def test_stale_waiting_snapshot_cannot_reopen_a_terminal_run(tmp_path):
+    from backend.orchestration import Orchestrator
+
+    journal, run = run_state(tmp_path)
+    question = pending('e' * 32)
+
+    class Gateway:
+        def __init__(self):
+            self.event_queue = asyncio.Queue()
+            self.started = asyncio.Event()
+            self.event_delivered = asyncio.Event()
+            self.get_started = asyncio.Event()
+            self.release_get = asyncio.Event()
+
+        def require_execution(self):
+            return None
+
+        async def require_clarifications(self):
+            return None
+
+        async def start(self, *args, **kwargs):
+            self.started.set()
+            return {'run_id': 'native-run'}
+
+        async def events(self, run_id):
+            while True:
+                event = await self.event_queue.get()
+                self.event_delivered.set()
+                yield event
+
+        async def request(self, method, path, **kwargs):
+            self.get_started.set()
+            await self.release_get.wait()
+            return {
+                'run_id': 'native-run', 'status': 'waiting_for_clarification',
+                'clarifications': [question],
+            }
+
+    gateway = Gateway()
+    runtime = Orchestrator(journal, gateway, SimpleNamespace(profiles={'default': 'fixture'}))
+    stream = asyncio.create_task(runtime._stream(OWNER, run, []))
+    try:
+        await gateway.started.wait()
+        runtime.clarifications.event(OWNER, runtime.get(OWNER, run['id']), question)
+        journal.set_active_status('owner', run['id'], 'waiting_for_clarification',
+                                  upstream_id='native-run')
+        snapshot = asyncio.create_task(runtime.clarifications_for_run(OWNER, run['id']))
+        await gateway.get_started.wait()
+        await gateway.event_queue.put({
+            'event': 'run.completed', 'run_id': 'native-run', 'output': 'finished'})
+        await gateway.event_delivered.wait()
+        await asyncio.sleep(0)
+        gateway.release_get.set()
+
+        await snapshot
+        await asyncio.wait_for(stream, 1)
+        assert journal.get('owner', run['id'])['status'] == 'completed'
+        with pytest.raises(RunConflict, match='stale'):
+            await runtime.answer_clarification(
+                OWNER, run['id'], question['question_id'],
+                {'answer': 'Change it', 'other': False})
+    finally:
+        gateway.release_get.set()
+        if not stream.done():
+            await gateway.event_queue.put({
+                'event': 'run.completed', 'run_id': 'native-run', 'output': 'finished'})
+        await asyncio.gather(stream, return_exceptions=True)
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_clarification_snapshots_are_serialized_per_owned_run(tmp_path):
+    from backend.orchestration import Orchestrator
+
+    journal, run = run_state(tmp_path)
+
+    class Gateway:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.requests = 0
+            self.active = 0
+            self.max_active = 0
+
+        def require_execution(self):
+            return None
+
+        async def require_clarifications(self):
+            return None
+
+        async def request(self, method, path, **kwargs):
+            self.requests += 1
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.requests == 1:
+                self.started.set()
+                await self.release.wait()
+            try:
+                return {'run_id': 'native-run', 'status': 'running', 'clarifications': []}
+            finally:
+                self.active -= 1
+
+    gateway = Gateway()
+    runtime = Orchestrator(journal, gateway, SimpleNamespace(profiles={'default': 'fixture'}))
+    first = asyncio.create_task(runtime.clarifications_for_run(OWNER, run['id']))
+    second = None
+    try:
+        await gateway.started.wait()
+        second = asyncio.create_task(runtime.clarifications_for_run(OWNER, run['id']))
+        await asyncio.sleep(0.01)
+        assert gateway.requests == 1
+        gateway.release.set()
+        await asyncio.gather(first, second)
+        assert gateway.requests == 2
+        assert gateway.max_active == 1
+        assert journal.get('owner', run['id'])['status'] == 'running'
+    finally:
+        gateway.release.set()
+        await asyncio.gather(first, *(task for task in (second,) if task is not None),
+                             return_exceptions=True)
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_recovery_restores_only_verified_unanswered_waiters(tmp_path):
     journal, run = run_state(tmp_path)
     bridge = ClarificationJournal(journal)

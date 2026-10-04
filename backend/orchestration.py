@@ -22,6 +22,7 @@ class Orchestrator:
         self._dispatching = set()
         from weakref import WeakValueDictionary
         self._control_locks = WeakValueDictionary()
+        self._clarification_locks = WeakValueDictionary()
         self._closed = False
         self.recovery_interval = 5.0
         self.observation_timeout = 10.0
@@ -53,6 +54,7 @@ class Orchestrator:
         busy = set(self._dispatching)
         busy.update(run['id'] for task, (_, run) in self._tasks.items() if not task.done())
         busy.update(rid for rid, lock in self._control_locks.items() if lock.locked())
+        busy.update(key[2] for key, lock in self._clarification_locks.items() if lock.locked())
         busy.update(rid for rid, lock in self._observation_locks.items() if lock.locked())
         return self.journal.claim_deletion(user['id'], user['profile'], session_id, busy_run_ids=busy)
 
@@ -129,25 +131,31 @@ class Orchestrator:
         return run
 
     async def clarifications_for_run(self, user, rid):
-        run = self.get(user, rid)
-        if user.get('role') != 'owner' or user.get('profile') != 'default':
-            raise KeyError(rid)
-        result = await self.clarifications.rehydrate(user, rid, self.gateway, run)
-        native_status = result.get('native_status')
-        if native_status == 'waiting_for_clarification':
-            pending = any(item['status'] == 'pending' for item in result['items'])
-            if pending:
+        async with self._clarification_lock(user, rid):
+            run = self.get(user, rid)
+            if user.get('role') != 'owner' or user.get('profile') != 'default':
+                raise KeyError(rid)
+            result = await self.clarifications.rehydrate(user, rid, self.gateway, run)
+            native_status = result.get('native_status')
+            if native_status == 'waiting_for_clarification':
+                pending = any(item['status'] == 'pending' for item in result['items'])
+                if pending:
+                    self.journal.set_active_status(
+                        user['id'], rid, 'waiting_for_clarification', upstream_id=run['upstream_id'])
+            elif native_status == 'running' and run['status'] in ('waiting_for_clarification', 'unknown'):
                 self.journal.set_active_status(
-                    user['id'], rid, 'waiting_for_clarification', upstream_id=run['upstream_id'])
-        elif native_status == 'running' and run['status'] in ('waiting_for_clarification', 'unknown'):
-            self.journal.set_active_status(user['id'], rid, 'running', upstream_id=run['upstream_id'])
-        current = self.get(user, rid)
-        return {
-            'run_id': current['id'], 'status': current['status'],
-            'available': result['available'], 'items': result['items'],
-        }
+                    user['id'], rid, 'running', upstream_id=run['upstream_id'])
+            current = self.get(user, rid)
+            return {
+                'run_id': current['id'], 'status': current['status'],
+                'available': result['available'], 'items': result['items'],
+            }
 
     async def answer_clarification(self, user, rid, question_id, body):
+        async with self._clarification_lock(user, rid):
+            return await self._answer_clarification(user, rid, question_id, body)
+
+    async def _answer_clarification(self, user, rid, question_id, body):
         run = self.get(user, rid)
         if user.get('role') != 'owner' or user.get('profile') != 'default':
             raise KeyError(rid)
@@ -249,6 +257,14 @@ class Orchestrator:
         lock = self._control_locks.get(rid)
         if lock is None:
             lock = self._control_locks[rid] = asyncio.Lock()
+        return lock
+
+    def _clarification_lock(self, user, rid):
+        run = self.get(user, rid)
+        key = (user['id'], user['profile'], rid, run['upstream_id'])
+        lock = self._clarification_locks.get(key)
+        if lock is None:
+            lock = self._clarification_locks[key] = asyncio.Lock()
         return lock
 
     async def steer(self, user, rid, body):
@@ -393,25 +409,34 @@ class Orchestrator:
             elif event['event'] == 'run.steer_receipts':
                 self.steering.observe(user, self.get(user, run['id']), event)
             elif event['event'] == 'run.clarification':
-                result = self.clarifications.event(user, self.get(user, run['id']), event)
-                if result and result['status'] == 'pending':
-                    self.journal.set_active_status(
-                        user['id'], run['id'], 'waiting_for_clarification',
-                        upstream_id=run['upstream_id'])
-                elif result and result['status'] in ('answered', 'expired'):
-                    self.journal.set_active_status(
-                        user['id'], run['id'], 'running', upstream_id=run['upstream_id'])
+                await self._observe_clarification_event(user, run['id'], event)
             elif event['event'] in ('run.completed', 'run.failed', 'run.cancelled'):
-                current = self.get(user, run['id'])
-                self.gateway.require_execution()
-                if not self._can_observe(user) or not self._matches(current, event):
-                    raise IntegrationUnavailable('Unbound native terminal event')
-                self.steering.observe(user, current, event)
-                self.clarifications.observe(user, current, event)
-                self.journal.finish(user['id'], run['id'], event['event'].split('.')[1], output=event.get('output'),
-                                    expected={k: current[k] for k in ('profile', 'upstream_id')})
+                await self._observe_terminal_event(user, run['id'], event)
                 return
         raise IntegrationUnavailable('Upstream stream ended without a terminal event')
+
+    async def _observe_clarification_event(self, user, rid, event):
+        async with self._clarification_lock(user, rid):
+            run = self.get(user, rid)
+            result = self.clarifications.event(user, run, event)
+            if result and result['status'] == 'pending':
+                self.journal.set_active_status(
+                    user['id'], rid, 'waiting_for_clarification',
+                    upstream_id=run['upstream_id'])
+            elif result and result['status'] in ('answered', 'expired'):
+                self.journal.set_active_status(
+                    user['id'], rid, 'running', upstream_id=run['upstream_id'])
+
+    async def _observe_terminal_event(self, user, rid, event):
+        async with self._clarification_lock(user, rid):
+            current = self.get(user, rid)
+            self.gateway.require_execution()
+            if not self._can_observe(user) or not self._matches(current, event):
+                raise IntegrationUnavailable('Unbound native terminal event')
+            self.steering.observe(user, current, event)
+            self.clarifications.observe(user, current, event)
+            self.journal.finish(user['id'], rid, event['event'].split('.')[1], output=event.get('output'),
+                                expected={k: current[k] for k in ('profile', 'upstream_id')})
 
     def _matches(self, run, result):
         if (not isinstance(result, dict) or result.get('run_id') != run['upstream_id']
@@ -430,6 +455,10 @@ class Orchestrator:
                 and (validator is None or validator(user) is True))
 
     async def _reconcile(self, user, rid):
+        async with self._clarification_lock(user, rid):
+            await self._reconcile_locked(user, rid)
+
+    async def _reconcile_locked(self, user, rid):
         run = self.get(user, rid)
         if not self._can_observe(user) or run['status'] in ('completed', 'failed', 'cancelled'):
             return
