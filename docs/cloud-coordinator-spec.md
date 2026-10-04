@@ -490,8 +490,11 @@ and posts a deduplicated blocked outcome. A single corrective review may be
 reserved for that source report only after task ID/time, task and repository
 identities, scope, the unique terminal session, session owner/repository/user,
 prompt, branch, and session chronology are authenticated. The correction has a
-separate action, anchor, task, session, and nonce; it cannot replace or edit the
-old report and does not reset or consume the source-fixer budget. The durable
+separate action, anchor, task, session, and nonce; both its authenticated task ID
+and session ID must differ from the saved parent report's task and session IDs.
+Missing or reused identities fail closed before report acceptance or publication.
+It cannot replace or edit the old report and does not reset or consume the
+source-fixer budget. The durable
 reservation is made before task creation. An ambiguous creation, active or unknown
 task/session, or missing authentication metadata is never retried; terminal correction
 failure exhausts this separate one-attempt budget and remains a clear blocker.

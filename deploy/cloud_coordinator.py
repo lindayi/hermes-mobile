@@ -2580,6 +2580,7 @@ class Coordinator:
         session = sessions[0]
         if (not isinstance(session, dict)
                 or not isinstance(session.get("id"), str)
+                or not session.get("id") or len(session["id"]) > 128
                 or session.get("task_id") != action.get("task_id")
                 or session.get("state") != "completed"
                 or session.get("prompt") != action.get("body")
@@ -2611,6 +2612,35 @@ class Coordinator:
         expected_files = _review_report_expected_files(self.api, snapshot, action["head"])
         if report["report"].get("files") != expected_files:
             raise ReceiptError("Independent review report files do not match the exact head")
+        if any(finding["path"] not in expected_files for finding in report["report"]["findings"]):
+            raise ReceiptError("Independent review finding paths do not match the exact head")
+        if action.get("task_type") == "report-correction":
+            parent = self.store.action(action.get("correction_of"))
+            parent_task_id = parent.get("task_id") if isinstance(parent, dict) else None
+            parent_session_id = (
+                parent.get("report_session_id") if isinstance(parent, dict) else None
+            )
+            if (
+                    not isinstance(parent, dict)
+                    or parent.get("key") != action.get("correction_of")
+                    or parent.get("kind") != "review"
+                    or parent.get("status") != "completed"
+                    or not parent.get("report_error")
+                    or parent.get("report_retry_state") != "reserved"
+                    or any(parent.get(field) != action.get(field) for field in (
+                        "issue", "head", "main_sha", "source_task_id",
+                        "source_comment_id", "source_session_id", "source_start_head",
+                    ))
+                    or not isinstance(parent_task_id, str)
+                    or not parent_task_id or len(parent_task_id) > 128
+                    or not isinstance(parent_session_id, str)
+                    or not parent_session_id or len(parent_session_id) > 128
+                    or action.get("task_id") == parent_task_id
+                    or task.get("id") == parent_task_id
+            ):
+                raise ReceiptError("Independent review correction task identity is not distinct")
+            if session["id"] == parent_session_id:
+                raise ReceiptError("Independent review correction session identity is not distinct")
         return report, session
 
     def _advance_agent_review_publication(self, key, action):
@@ -3315,6 +3345,21 @@ class Coordinator:
                 blocker="execution_uncertain", task_id=task_id,
             )
             return "uncertain"
+        if action.get("task_type") == "report-correction":
+            parent = self.store.action(action.get("correction_of"))
+            if (not isinstance(parent, dict)
+                    or not isinstance(parent.get("task_id"), str)
+                    or not parent.get("task_id")
+                    or not isinstance(parent.get("report_session_id"), str)
+                    or not parent.get("report_session_id")
+                    or task_id == parent.get("task_id")):
+                event = self._record_uncertain_task(claimed_action)
+                self.store.update_action_with_lifecycle(
+                    key, "uncertain", event, now=self.clock(),
+                    blocker="execution_uncertain", task_id=task_id,
+                    task_created_at=response["created_at"],
+                )
+                return "uncertain"
         if response.get("artifacts") and not _task_scoped(response, {"pull": current}):
             event = self._record_uncertain_task(claimed_action)
             self.store.update_action_with_lifecycle(
@@ -4371,6 +4416,12 @@ class StateStore:
                         or claimed.get("source_comment_id") != parent.get("source_comment_id")
                         or claimed.get("source_session_id") != parent.get("source_session_id")
                         or claimed.get("source_start_head") != parent.get("source_start_head")
+                        or not isinstance(parent.get("task_id"), str)
+                        or not parent.get("task_id")
+                        or len(parent["task_id"]) > 128
+                        or not isinstance(parent.get("report_session_id"), str)
+                        or not parent.get("report_session_id")
+                        or len(parent["report_session_id"]) > 128
                         or any(
                             action.get("kind") == "review"
                             and action.get("task_type") == "report-correction"

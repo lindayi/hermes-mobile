@@ -164,6 +164,7 @@ def test_report_correction_reservation_is_distinct_single_use_and_budget_free(tm
     store.accept_task(parent["key"], "review-task", "2026-10-01T12:00:00Z")
     store.update_action(
         parent["key"], "completed", report_error="invalid report",
+        report_session_id="original-session",
         report_retry_allowed=True, report_retry_state="available",
     )
     correction = {
@@ -200,6 +201,56 @@ def test_report_correction_reservation_is_distinct_single_use_and_budget_free(tm
     assert store.action(parent["key"])["report_error"] == "invalid report"
     assert store.action(correction["key"])["status"] == "uncertain"
     assert set(store.actions()) == {parent["key"], correction["key"]}
+
+
+@pytest.mark.parametrize("missing_identity", ["task_id", "report_session_id"])
+def test_report_correction_requires_proven_parent_task_and_session(
+        tmp_path, missing_identity):
+    store = StateStore(tmp_path / "state.json")
+    parent = {
+        "key": f"review:16:{HEAD}:original",
+        "kind": "review",
+        "issue": 16,
+        "head": HEAD,
+        "main_sha": BASE,
+        "source_task_id": "source-task",
+        "source_comment_id": 777,
+        "source_session_id": "source-session",
+        "source_start_head": HEAD,
+        "anchor_comment_id": 888,
+        "anchor_prefix": "original-anchor",
+        "dispatch_nonce": "original-nonce",
+        "body": "original reviewer task",
+    }
+    assert store.claim_action(parent["key"], parent)
+    store.accept_task(parent["key"], "review-task", "2026-10-01T12:00:00Z")
+    store.update_action(
+        parent["key"], "completed", report_error="invalid report",
+        report_session_id="original-session",
+        report_retry_allowed=True, report_retry_state="available",
+    )
+    store.update_action(parent["key"], "completed", **{missing_identity: None})
+    correction = {
+        "key": f"review-correction:16:{HEAD}:new",
+        "kind": "review",
+        "task_type": "report-correction",
+        "correction_of": parent["key"],
+        "issue": 16,
+        "head": HEAD,
+        "main_sha": BASE,
+        "source_task_id": "source-task",
+        "source_comment_id": 777,
+        "source_session_id": "source-session",
+        "source_start_head": HEAD,
+        "anchor_comment_id": 889,
+        "anchor_prefix": "correction-anchor",
+        "dispatch_nonce": "new-nonce",
+        "body": "new reviewer task",
+    }
+
+    assert not store.claim_action(correction["key"], correction)
+    assert store.action(parent["key"])["report_retry_state"] == "available"
+    assert correction["key"] not in store.actions()
 
 
 @pytest.mark.parametrize("change", ["authorized", "head_changed", "retired", "unobserved", "wrong_decision"])
