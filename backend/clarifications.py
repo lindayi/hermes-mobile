@@ -133,6 +133,7 @@ class ClarificationJournal:
                         return self._view(existing)
                 confirmed_attempt = (
                     existing['status'] in ('sending', 'unknown')
+                    and existing['answer'] is not None
                     and item['status'] == 'answered'
                 )
                 if confirmed_attempt:
@@ -145,14 +146,13 @@ class ClarificationJournal:
                 if (existing['status'] in ('cancelled', 'expired')
                         and item['status'] != existing['status']):
                     return self._view(existing)
-                restore_pending = (existing['status'] == 'unknown'
-                                  and existing['answer'] is None
-                                  and item['status'] == 'pending')
+                restore_unattempted = (existing['status'] == 'unknown'
+                                       and existing['answer'] is None)
                 if (existing['status'] == 'sending' and item['status'] == 'pending'
                         or existing['status'] == 'unknown' and item['status'] == 'pending'
-                        and not restore_pending):
+                        and not restore_unattempted):
                     return self._view(existing)
-                if restore_pending:
+                if restore_unattempted and item['status'] != 'unknown':
                     item = {**item, 'updated_at': max(
                         item['updated_at'], math.nextafter(existing['updated_at'], math.inf))}
                 elif item['updated_at'] < existing['updated_at']:
@@ -322,12 +322,14 @@ class ClarificationJournal:
                                 json.dumps({**view, 'observed_at': now}), now))
             return view, True
 
-    def finish(self, user, run_id, question_id, status):
+    def finish(self, user, run_id, question_id, status, *, rejected=False):
         with closing(self.journal.connect()) as connection, connection:
             now = time.time()
-            connection.execute('''UPDATE clarifications SET status=?,updated_at=?
+            connection.execute('''UPDATE clarifications SET status=?,updated_at=?,
+                answer=CASE WHEN ? THEN NULL ELSE answer END,
+                other=CASE WHEN ? THEN NULL ELSE other END
                 WHERE user_id=? AND profile=? AND run_id=? AND question_id=? AND status='sending' ''',
-                (status, now, user['id'], user['profile'], run_id, question_id))
+                (status, now, rejected, rejected, user['id'], user['profile'], run_id, question_id))
             row = connection.execute('''SELECT c.*,r.session_id FROM clarifications c
                 JOIN runs r ON r.id=c.run_id WHERE c.user_id=? AND c.profile=? AND c.run_id=?
                 AND c.question_id=?''', (user['id'], user['profile'], run_id, question_id)).fetchone()
@@ -361,7 +363,7 @@ class ClarificationJournal:
             return not other
         return answer not in choices if other else answer in choices
 
-    async def rehydrate(self, user, run_id, gateway, run):
+    async def rehydrate(self, user, run_id, gateway, run, *, validate_snapshot=None):
         if not run.get('upstream_id') or run['status'] in ('completed', 'failed', 'cancelled'):
             return {'available': False, 'items': self.list(user, run_id), 'native_status': None}
         try:
@@ -393,6 +395,8 @@ class ClarificationJournal:
             if (result['status'] == 'waiting_for_clarification' and len(pending) != 1
                     or result['status'] == 'running' and pending):
                 raise IntegrationUnavailable('Native clarification state is contradictory')
+            if validate_snapshot is not None and not validate_snapshot(result):
+                raise IntegrationUnavailable('Native clarification snapshot is unbound')
         except NativeRunNotFound:
             self.mark_run_not_found_unknown(user, run)
             return {'available': False, 'items': self.list(user, run_id), 'native_status': 'unknown'}
@@ -403,4 +407,4 @@ class ClarificationJournal:
                         if result['status'] == 'waiting_for_clarification' else set())
         self.mark_pending_unknown(user, run_id, keep_pending)
         return {'available': True, 'items': self.list(user, run_id),
-                'native_status': result['status']}
+                'native_status': result['status'], 'native_snapshot': result}

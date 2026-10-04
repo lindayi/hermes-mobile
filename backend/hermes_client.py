@@ -11,6 +11,10 @@ class NativeRunNotFound(IntegrationUnavailable):
     """An authenticated lookup proved that this process no longer owns the run."""
 
 
+class NativeClarificationRejected(IntegrationUnavailable):
+    """The bound native waiter definitively rejected this answer dispatch."""
+
+
 class GatewayClient:
     def __init__(self, base_url, token, execution_ready=False, transport=None):
         u=urlparse(base_url)
@@ -93,6 +97,15 @@ class GatewayClient:
             reply = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise IntegrationUnavailable('Clarification acknowledgement is unresolved') from exc
+        if (response.status_code == 409 and isinstance(reply, dict)
+                and set(reply) == {'object', 'run_id', 'question_id', 'status', 'error'}
+                and reply.get('object') == 'hermes.run.clarification'
+                and reply.get('run_id') == run_id and reply.get('question_id') == question_id
+                and reply.get('status') == 'rejected'
+                and isinstance(reply.get('error'), dict)
+                and set(reply['error']) == {'code'}
+                and reply['error'].get('code') in ('clarification_conflict', 'clarification_stale')):
+            raise NativeClarificationRejected('Native clarification answer was rejected')
         if (response.status_code != 200 or not isinstance(reply, dict)
                 or reply.get('object') != 'hermes.run.clarification'
                 or reply.get('run_id') != run_id or reply.get('question_id') != question_id

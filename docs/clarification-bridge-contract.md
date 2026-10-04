@@ -147,6 +147,35 @@ transient uncertainty and Stop/terminal races without altering prior assertions.
 
 ## Acceptance cases
 
+The supervised native-seam correction starts from PR #78 head
+`709ecdcea72b28b1314ee3cd9f6564cd33fd70dd`, retaining the accepted rejection UI,
+Stop, first-answer, uncertainty, and replay behavior. Native answer conflicts now
+carry `object: hermes.run.clarification`, the exact native run and question IDs,
+`status: rejected`, and the bounded `clarification_conflict` or
+`clarification_stale` error code. Only this positively bound HTTP 409 is a typed
+dispatch rejection. Bare legacy errors, mismatched identities, answer-bearing
+conflicts, network loss, and 5xx remain unresolved; they never authorize acceptance
+or automatic resend. Rejection clears only that still-sending claim, preserves
+its historical event, and reconciles the authenticated snapshot before returning
+bridge 409. A different first accepted answer may then be restored without
+overwriting it with the rejected draft; a replacement question remains current.
+
+Reopen applies a validated bound approval, stopping, or terminal snapshot through
+the existing reconciliation path while holding the owned clarification lock,
+without reacquiring that lock or issuing a second GET. Terminal output is retained;
+Stop, owner/profile/session/native-run fences and newer terminal authority remain
+effective. Repeated snapshots and fresh-store replay do not repeat durable
+lifecycle events. Unavailable transport remains unresolved.
+
+The composed native adapter releases pending waiters before serializing an early
+terminal queue frame: completed/failed expire them; cancelled cancels them.
+The first terminal frame fences late status publication and duplicate frames.
+Later status publication and callback cleanup cannot change the release reason,
+release again, acknowledge a late answer, or resurrect a question. The bridge
+can stop at that terminal frame with honest same-run clarification history.
+These are supervised source repairs, not pristine autonomous workflow completion,
+independent review acceptance, or native activation evidence.
+
 1. A synthetic API-server agent calls the pinned clarification tool on a worker
    thread; the run emits a pending question, remains blocked, receives an
    authenticated answer for that exact question, and returns the actual answer

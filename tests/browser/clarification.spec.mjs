@@ -5,8 +5,88 @@ import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createRequire} from 'node:module';
+import {spawn} from 'node:child_process';
+import {createInterface} from 'node:readline';
+import {fileURLToPath} from 'node:url';
 import {generatedAssets} from './generated-assets.mjs';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
+
+test('generated browser reconciles a real native 409 through authenticated API transport',{timeout:60000},async()=>{
+  const repo=fileURLToPath(new URL('../../',import.meta.url));
+  const child=spawn(process.env.HERMES_TEST_PYTHON||join(repo,'.venv/bin/python'),
+    ['-B',join(repo,'tests/browser/clarification_transport_fixture.py')],{cwd:repo,stdio:['pipe','pipe','pipe']});
+  const lines=createInterface({input:child.stdout})[Symbol.asyncIterator]();
+  let diagnostic='';child.stderr.on('data',value=>{diagnostic+=value;});
+  const next=async()=>{
+    const value=await lines.next();
+    assert.equal(value.done,false,diagnostic);
+    return JSON.parse(value.value);
+  };
+  const temporary=await mkdtemp(join(tmpdir(),'hermes-native-conflict-browser-'));
+  const root=generatedAssets(temporary);
+  const startup=await next(),calls=[];
+  let answerResponse;
+  const server=createServer(async(request,response)=>{
+    const url=new URL(request.url,'http://fixture');
+    const path=url.pathname.replace('/hermes/app-api','');
+    const json=(body,status=200)=>{
+      response.writeHead(status,{'Content-Type':'application/json'});
+      response.end(JSON.stringify(body));
+    };
+    if(url.pathname.startsWith('/hermes/app-api/')){
+      if(path==='/sessions')return json({items:[{id:'wa-1',title:'Native seam fixture'}],total:1});
+      if(path.endsWith('/messages'))return json({items:[],run:startup.run});
+      if(path.endsWith('/controls'))return json({steering:false,attempts:[]});
+      if(path.endsWith('/events')){
+        response.writeHead(200,{'Content-Type':'text/event-stream'});
+        response.write(': synthetic missed native event\n\n');return;
+      }
+      let body='';
+      for await(const chunk of request)body+=chunk;
+      child.stdin.write(JSON.stringify({method:request.method,path,
+        ...(body?{body:JSON.parse(body)}:{})})+'\n');
+      const result=await next();
+      calls.splice(0,calls.length,...result.calls);
+      if(path.endsWith('/answer'))answerResponse=result;
+      return json(result.body,result.status);
+    }
+    try{
+      const relative=url.pathname.replace(/^\/hermes\//,'')||'index.html';
+      const content=await readFile(join(root,relative));
+      response.writeHead(200,{'Content-Type':relative.endsWith('.html')?'text/html':
+        relative.endsWith('.css')?'text/css':'text/javascript'});
+      response.end(content);
+    }catch{response.writeHead(404).end();}
+  });
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  try{
+    await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);
+    await page.getByRole('button',{name:'Native seam fixture'}).click();
+    const oldCard=page.locator('[data-clarification-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]');
+    await oldCard.getByLabel('Change it').check();
+    await oldCard.getByRole('button',{name:'Submit answer'}).click();
+    await oldCard.getByText('Answered',{exact:true}).waitFor();
+    assert.equal(answerResponse.status,409);
+    assert.match(await oldCard.textContent(),/Answer: Keep current/);
+    assert.doesNotMatch(await oldCard.textContent(),/Attempted answer: Change it/);
+    await page.locator('[data-clarification-id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]')
+      .getByRole('button',{name:'Submit answer'}).waitFor();
+    assert.equal(calls.filter(([method])=>method==='POST').length,1);
+    assert.equal(calls.some(([,path])=>path==='/v1/runs'),false);
+    await page.waitForTimeout(100);
+    assert.equal(calls.filter(([method])=>method==='POST').length,1);
+    await page.close();
+  }finally{
+    server.closeAllConnections();
+    await new Promise(resolve=>server.close(resolve));
+    child.stdin.end();child.kill();lines.return();
+    await browser.close();
+    await rm(temporary,{recursive:true,force:true});
+  }
+});
 
 const questionFixture=question_id=>({
   question_id,run_id:'r',session_id:'s',question:'Choose safely?',

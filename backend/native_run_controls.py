@@ -65,7 +65,7 @@ def run_controls_adapter(base):
             with self._controls_lock:
                 state = self._controls.get(run_id)
                 current = self._run_statuses.get(run_id, {})
-                previous = current.get('status')
+                previous = (state.get('terminal_status') if state else None) or current.get('status')
                 terminal = {'completed', 'failed', 'cancelled'}
                 if (previous in terminal and status != previous
                         or previous == 'stopping' and status not in terminal | {'stopping'}):
@@ -114,7 +114,16 @@ def run_controls_adapter(base):
                         # Native terminal frames can precede status publication.
                         if isinstance(event, dict) and event.get('event') in {
                                 'run.completed', 'run.failed', 'run.cancelled'}:
+                            if state.get('terminal_status'):
+                                return
+                            status = event['event'].split('.')[1]
+                            published = self._run_statuses.get(run_id, {}).get('status')
+                            if published in {'completed', 'failed', 'cancelled'} and published != status:
+                                return
+                            state['terminal_status'] = status
                             state['closed'] = True
+                            self._release_clarifications(
+                                run_id, state, 'cancelled' if status == 'cancelled' else 'expired')
                             agent = self._active_run_agents.get(run_id)
                             if agent is not None and hasattr(agent, '_drain_pending_steer'):
                                 self._retain(state, agent._drain_pending_steer())
@@ -287,10 +296,16 @@ def run_controls_adapter(base):
                         return web.json_response({
                             'object': 'hermes.run.clarification', 'run_id': run_id,
                             'question_id': question_id, 'status': 'answered', 'answer': item['answer']})
-                    return web.json_response({'error': {'code': 'clarification_conflict'}}, status=409)
+                    return web.json_response({
+                        'object': 'hermes.run.clarification', 'run_id': run_id,
+                        'question_id': question_id, 'status': 'rejected',
+                        'error': {'code': 'clarification_conflict'}}, status=409)
                 if (state['closed'] or self._run_statuses.get(run_id, {}).get('status')
                         != 'waiting_for_clarification'):
-                    return web.json_response({'error': {'code': 'clarification_stale'}}, status=409)
+                    return web.json_response({
+                        'object': 'hermes.run.clarification', 'run_id': run_id,
+                        'question_id': question_id, 'status': 'rejected',
+                        'error': {'code': 'clarification_stale'}}, status=409)
                 item.update(status='answered', answer=answer, other=body['other'], updated_at=time.time())
                 item['signal'].set()
                 self._set_run_status(run_id, 'running')

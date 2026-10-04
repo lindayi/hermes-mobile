@@ -9,7 +9,7 @@ from contextlib import closing
 
 from .runs import RunConflict
 
-from .hermes_client import IntegrationUnavailable, NativeRunNotFound
+from .hermes_client import IntegrationUnavailable, NativeRunNotFound, NativeClarificationRejected
 
 
 class ClarificationNotSent(IntegrationUnavailable):
@@ -136,20 +136,31 @@ class Orchestrator:
 
     async def clarifications_for_run(self, user, rid):
         async with self._clarification_lock(user, rid):
-            run = self.get(user, rid)
-            if user.get('role') != 'owner' or user.get('profile') != 'default':
-                raise KeyError(rid)
-            result = await self.clarifications.rehydrate(user, rid, self.gateway, run)
-            native_status = result.get('native_status')
-            if native_status == 'unknown':
-                self._native_run_lost(user, run)
-            elif native_status in ('waiting_for_clarification', 'running'):
-                self._clarification_status(user, run, resume=native_status == 'running')
-            current = self.get(user, rid)
-            return {
-                'run_id': current['id'], 'status': current['status'],
-                'available': result['available'], 'items': result['items'],
-            }
+            return await self._clarifications_for_run_locked(user, rid)
+
+    async def _clarifications_for_run_locked(self, user, rid):
+        run = self.get(user, rid)
+        if user.get('role') != 'owner' or user.get('profile') != 'default':
+            raise KeyError(rid)
+        result = await self.clarifications.rehydrate(
+            user, rid, self.gateway, run,
+            validate_snapshot=lambda snapshot: (
+                self._can_observe(user) and self._matches(run, snapshot)
+                and self.get(user, rid)['upstream_id'] == run['upstream_id']))
+        native_status = result.get('native_status')
+        if native_status == 'unknown':
+            self._native_run_lost(user, run)
+        elif native_status in ('waiting_for_clarification', 'running'):
+            self._clarification_status(user, run, resume=native_status == 'running')
+        elif result.get('native_snapshot') is not None:
+            await self._reconcile_locked(user, rid, run=run, result=result['native_snapshot'])
+        current = self.get(user, rid)
+        return {
+            'run_id': current['id'], 'status': current['status'],
+            'available': (result['available']
+                          and current['status'] not in ('completed', 'failed', 'cancelled')),
+            'items': result['items'],
+        }
 
     async def answer_clarification(self, user, rid, question_id, body):
         async with self._clarification_lock(user, rid):
@@ -184,6 +195,10 @@ class Orchestrator:
             async with asyncio.timeout(30):
                 await self.gateway.answer_clarification(
                     run['upstream_id'], question_id, body['answer'], body['other'])
+        except NativeClarificationRejected as exc:
+            self.clarifications.finish(user, rid, question_id, 'unknown', rejected=True)
+            await self._clarifications_for_run_locked(user, rid)
+            raise RunConflict('Native clarification answer was rejected') from exc
         except (Exception, asyncio.CancelledError) as exc:
             result = self.clarifications.finish(user, rid, question_id, 'unknown')
             if isinstance(exc, asyncio.CancelledError):
@@ -216,6 +231,8 @@ class Orchestrator:
         elif resume and not any(item['status'] == 'unknown' for item in items):
             status = 'running'
         else:
+            return
+        if self.get(user, run['id'])['status'] == status:
             return
         self.journal.set_active_status(user['id'], run['id'], status, upstream_id=run['upstream_id'])
 
@@ -487,16 +504,17 @@ class Orchestrator:
         async with self._clarification_lock(user, rid):
             await self._reconcile_locked(user, rid)
 
-    async def _reconcile_locked(self, user, rid):
-        run = self.get(user, rid)
+    async def _reconcile_locked(self, user, rid, *, run=None, result=None):
+        run = run or self.get(user, rid)
         if not self._can_observe(user) or run['status'] in ('completed', 'failed', 'cancelled'):
             return
         if run['upstream_id']:
             try:
                 from urllib.parse import quote
                 self.gateway.require_execution()
-                async with asyncio.timeout(self.observation_timeout):
-                    result = await self.gateway.request('GET', '/v1/runs/' + quote(run['upstream_id'], safe=''))
+                if result is None:
+                    async with asyncio.timeout(self.observation_timeout):
+                        result = await self.gateway.request('GET', '/v1/runs/' + quote(run['upstream_id'], safe=''))
                 self.gateway.require_execution()
                 if (not self._can_observe(user)
                         or self.get(user, rid)['upstream_id'] != run['upstream_id']):
@@ -511,8 +529,9 @@ class Orchestrator:
                                         expected={k: run[k] for k in ('profile', 'upstream_id')})
                     return
                 if result.get('status') == 'stopping':
-                    self.journal.finish(user['id'], rid, 'stopping',
-                        expected={k: run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at')})
+                    if run['status'] != 'stopping':
+                        self.journal.finish(user['id'], rid, 'stopping',
+                            expected={k: run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at')})
                     return
                 if result.get('status') == 'waiting_for_approval':
                     pending = result.get('pending_approvals')
@@ -553,8 +572,9 @@ class Orchestrator:
                         known = {r[0] for r in c.execute('SELECT request_id FROM orchestration_approvals WHERE run_id=?', (rid,))}
                     if fenced or current['status'] == 'stopping':
                         return
-                    self.journal.finish(user['id'], rid, 'waiting_for_approval',
-                        expected={k: run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at')})
+                    if run['status'] != 'waiting_for_approval':
+                        self.journal.finish(user['id'], rid, 'waiting_for_approval',
+                            expected={k: run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at')})
                     for action in pending:
                         if action['request_id'] not in known:
                             self._missing_approval(user, run, action['request_id'])

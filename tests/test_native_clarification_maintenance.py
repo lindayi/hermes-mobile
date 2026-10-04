@@ -72,6 +72,70 @@ def _composed_listener(monkeypatch, timeout):
     return adapter, agent, outcome
 
 
+@pytest.mark.parametrize('status', ['completed', 'failed', 'cancelled'])
+def test_terminal_queue_frame_releases_waiter_before_status_publication(
+        status, monkeypatch, tmp_path):
+    from backend.orchestration import Orchestrator
+    from backend.runs import RunJournal
+    from test_clarifications import OWNER
+
+    async def check():
+        adapter, agent, outcome = _composed_listener(monkeypatch, timeout=5)
+        journal = RunJournal(tmp_path / 'runs.sqlite')
+        run, _ = journal.submit('owner', 'default', 'session', 'Original', 'original')
+        journal.set_upstream('owner', run['id'], 'native-run')
+        gateway = SimpleNamespace(require_execution=lambda: None)
+        runtime = Orchestrator(journal, gateway, SimpleNamespace(profiles={'default': tmp_path}))
+        worker = threading.Thread(target=agent.run_conversation, daemon=True)
+        worker.start()
+        try:
+            queue = adapter._run_streams['native-run']
+            question = await asyncio.wait_for(queue.get(), 1)
+            await runtime._observe_clarification_event(OWNER, run['id'], question)
+            queue.put_nowait({'event': 'run.' + status, 'run_id': 'native-run',
+                              'output': 'Synthetic terminal output'})
+            terminal = await asyncio.wait_for(queue.get(), 1)
+            assert terminal['event'] == 'run.' + status
+            expected = 'cancelled' if status == 'cancelled' else 'expired'
+            assert terminal['clarifications'][0]['status'] == expected
+            assert adapter._controls['native-run']['clarifications'][
+                question['question_id']]['signal'].is_set()
+            # The bridge consumes this frame and never reads the subsequent release event.
+            await runtime._observe_terminal_event(OWNER, run['id'], terminal)
+            await asyncio.to_thread(worker.join, 1)
+            assert not worker.is_alive()
+            assert outcome == {'error': f'Clarification {expected}.'}
+            assert runtime.clarifications.list(OWNER, run['id'])[0]['status'] == expected
+            events = journal.events('owner', run['id'])
+            adapter._set_run_status('native-run', 'running')
+            assert adapter._run_statuses['native-run']['status'] == 'waiting_for_clarification'
+            adapter._set_run_status('native-run', status)
+            adapter._set_run_status('native-run', 'running')
+            await runtime._observe_terminal_event(OWNER, run['id'], terminal)
+            assert journal.events('owner', run['id']) == events
+            assert adapter._run_statuses['native-run']['status'] == status
+            response = await adapter._handle_clarification_answer(SimpleNamespace(
+                match_info={'run_id': 'native-run', 'question_id': question['question_id']},
+                body={'answer': 'Change', 'other': False}))
+            assert response.status == 409
+            with pytest.raises(RuntimeError, match='unavailable'):
+                agent.clarify_callback('Late question', ['Keep', 'Change'])
+            await asyncio.sleep(0)
+            releases = []
+            while not queue.empty():
+                event = queue.get_nowait()
+                if event['event'] == 'run.clarification':
+                    releases.append(event)
+            assert len(releases) == 1
+            assert releases[0]['status'] == expected
+        finally:
+            adapter._set_run_status('native-run', status)
+            await asyncio.to_thread(worker.join, 1)
+            assert not worker.is_alive()
+
+    asyncio.run(check())
+
+
 @pytest.mark.parametrize('ending', ['answer', 'timeout', 'stopping', 'completed'])
 def test_composed_listener_serializes_clarification_and_lifecycle(ending, monkeypatch):
     async def check():

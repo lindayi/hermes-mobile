@@ -135,21 +135,29 @@ deployment.
 
 | Issue #77 candidate path | SHA-256 |
 | --- | --- |
-| `backend/app.py` | `7fee54ea8d210be56ef5608400a1ef3ee3de3437ea1119192ff228817b102798` |
-| `backend/clarifications.py` | `5ad4b7c382f60355ef1eff1e73ec8c967221dbe632c954637608bc6d369d6a53` |
-| `backend/hermes_client.py` | `6dfc387cab67e8186af3cac8eba4fbf974fb74bb658008efa83dad8b5deec12d` |
-| `backend/model_controls.py` | `06a1dc3be87f9d81515157ba19de62de043e7f75491587eabb02aac3d5a406e3` |
+| `backend/app.py` | `3fbab2ca8c8d47dffdd1775d67026fbd537f7350aa6ec68f830cc9be87c266c5` |
+| `backend/clarifications.py` | `38f624f85812a65c757c656462b9366700c04b385530d92d5b5a56ff8b92eab0` |
+| `backend/hermes_client.py` | `8c018cc4c6e566d481ffcecd87905f2c6dc40bd1fdc67980cb18e5438cdbdf4f` |
+| `backend/model_controls.py` | `c35c6e7ed5c92715ef1bd5af236268d1ef080bbcef2a4069a647dbd04bc4e217` |
 | `backend/native_maintenance.py` | `e79cfee2bf8d32c3f51dd3ee9247e23029376e10c5e55ea21aa373d6d72535c5` |
 | `backend/native_catalog.py` | `8b3c398f52388e0e334d6d64381b677b651b9337ece2d1868a14d3de069c5ed6` |
-| `backend/orchestration.py` | `0b792d3a0d88204cf37bbec7c51fa47c6122d77cb3676a4378365b9420f96065` |
+| `backend/native_run_controls.py` | `564f0ab912a1d138f2ac5b1271935ef5aa2c99cdd2ab48d0527363f1a031e65c` |
+| `backend/orchestration.py` | `b0d3eb27ed0d41c0d0157f9a580148d49974b48adc8f85242cf48453ca3aba03` |
 | `backend/runs.py` | `99297aef3ecf899d40b77d76de26132701596672dd6af432cdf16ecba1aaac93` |
-| `deploy/native_controls_release.py` | `7e8769dd79f1d5c44ec33cd19216e67a9e939d26e4d386a4f4a7fc164e3dd47e` |
+| `deploy/native_controls_release.py` | `905e5b0f163e92383b7a72d9215a5ebd903751eca908500a48abe6251c1a9fb9` |
 | `deploy/self_deploy.py` | `1a72fcf9ac6018a449bcac7bb76764af3f144817e8f6e764eb49aa5a95241363` |
 
 The current native-controls source map binds the clarification-capable
 `backend/native_maintenance.py` bytes, while its pre-clarification and rollback
 maps retain their original hashes. A clarification wait is known active work;
-maintenance and release drains cannot treat it as idle.
+maintenance and release drains cannot treat it as idle. This current table also
+includes the bounded supervised native-409, lifecycle-reopen, and early-terminal
+snapshot repairs from head `709ecdcea72b28b1314ee3cd9f6564cd33fd70dd`.
+The adapter digest is bound by both current native-controls maps; only derived
+pin literals change in `backend/model_controls.py` and
+`deploy/native_controls_release.py`. Historical accepted reports and rollback
+maps remain unchanged. Source consistency is not a new independent delta review,
+pristine autonomous completion, merge authorization, or deployment evidence.
 
 PR57 extends the assembled starter/consumer authority contract with the exact
 head/issue/body-digest command and a final prepared-scan admission fence. Its new
