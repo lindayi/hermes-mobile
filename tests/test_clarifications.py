@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from contextlib import closing
 from types import SimpleNamespace
@@ -11,6 +12,353 @@ from backend.runs import RunConflict, RunJournal
 
 
 OWNER = {'id': 'owner', 'profile': 'default', 'role': 'owner'}
+
+
+@pytest.fixture
+def authenticated_clarification_app(tmp_path):
+    import httpx
+    from fastapi.testclient import TestClient
+    from backend.app import Settings, create_app
+    from backend.hermes_client import GatewayClient
+    from test_auth import BASE, BOOTSTRAP, ORIGIN, enroll
+    from test_native_catalog import create_native_db
+
+    native = SimpleNamespace(mode='waiting', items=[], calls=[], answer_entered=None,
+                             answer_release=None, get_entered=None, get_release=None)
+
+    async def handle(request):
+        native.calls.append((request.method, request.url.path))
+        assert request.headers['Authorization'] == 'Bearer ' + gateway.token
+        if request.url.path == '/v1/capabilities':
+            return httpx.Response(200, json={'mobile_run_controls': {
+                'version': 1, 'clarifications': native.mode != 'unsupported'}})
+        if request.method == 'GET':
+            assert request.url.path == '/v1/runs/native-run'
+            if native.get_entered:
+                native.get_entered.set()
+                await native.get_release.wait()
+            if native.mode == 'timeout':
+                raise httpx.ReadTimeout('synthetic timeout', request=request)
+            if native.mode in ('missing', 'unavailable'):
+                return httpx.Response(404 if native.mode == 'missing' else 503)
+            status = ('waiting_for_clarification'
+                      if any(item['status'] == 'pending' for item in native.items) else 'running')
+            return httpx.Response(200, json={'run_id': 'native-run', 'status': status,
+                                            'clarifications': native.items})
+        assert request.method == 'POST'
+        question_id = request.url.path.rsplit('/', 1)[-1]
+        item = next(item for item in native.items if item['question_id'] == question_id)
+        body = json.loads(request.content)
+        item.update(status='answered', **body, updated_at=time.time())
+        if native.answer_entered:
+            native.answer_entered.set()
+            await native.answer_release.wait()
+        return httpx.Response(200, json={'object': 'hermes.run.clarification',
+            'run_id': 'native-run', 'question_id': question_id,
+            'status': 'answered', 'answer': body['answer']})
+
+    home = tmp_path / 'synthetic-home'
+    home.mkdir()
+    create_native_db(home / 'state.db')
+    gateway = GatewayClient('http://127.0.0.1:8642', 'synthetic-token',
+                            execution_ready=True, transport=httpx.MockTransport(handle))
+    app = create_app(Settings(state_dir=tmp_path / 'app-state', profiles={'default': home},
+                              bootstrap_secret=BOOTSTRAP), gateway_client=gateway)
+    with TestClient(app, base_url=ORIGIN) as client:
+        client.headers['Origin'] = ORIGIN
+        enroll(client)
+        owner = client.get(BASE + '/auth/me').json()['user']
+        runtime = app.state.orchestrator
+        runtime.recovery_interval = 3600
+        client.portal.call(runtime._recovery_task.cancel)
+        run, _ = app.state.journal.submit(owner['id'], 'default', 'wa-1', 'Original', 'original')
+        app.state.journal.set_upstream(owner['id'], run['id'], 'native-run')
+        app.state.journal.set_active_status(owner['id'], run['id'], 'waiting_for_clarification',
+                                           upstream_id='native-run')
+        yield app, client, owner, app.state.journal.get(owner['id'], run['id']), native
+
+
+def test_authenticated_native_loss_fences_run_and_stabilizes_replay(authenticated_clarification_app):
+    from backend.orchestration import Orchestrator
+    from test_auth import BASE
+
+    app, client, owner, run, native = authenticated_clarification_app
+    runtime, journal = app.state.orchestrator, app.state.journal
+    old = pending('c' * 32, created_at=1, updated_at=2, status='answered',
+                  answer='Keep current', other=False)
+    unanswered = pending(created_at=3, updated_at=3)
+    attempted = pending('b' * 32, created_at=4, updated_at=4)
+    for item in (old, unanswered, attempted):
+        runtime.clarifications.event(owner, run, item)
+    runtime.clarifications.claim(owner, run, attempted['question_id'],
+                                 {'answer': 'Change it', 'other': False})
+    native.mode = 'missing'
+    path = BASE + '/runs/' + run['id'] + '/clarifications'
+    response = client.get(path)
+    assert response.status_code == 200
+    state = response.json()
+    assert state['status'] == 'unknown'
+    assert state['available'] is False
+    assert [item['status'] for item in state['items']] == ['answered', 'unknown', 'unknown']
+    assert state['items'][2]['answer'] == 'Change it'
+    events = journal.events(owner['id'], run['id'])
+    assert len([event for event in events if event['name'] == 'done']) == 1
+    for _ in range(3):
+        assert client.get(path).json() == state
+        client.portal.call(runtime._reconcile, owner, run['id'])
+        assert journal.events(owner['id'], run['id']) == events
+    reopened = RunJournal(journal.path)
+    client.portal.call(reopened.recover)
+    fresh = Orchestrator(reopened, runtime.gateway, runtime.catalog)
+    client.portal.call(fresh._reconcile, owner, run['id'])
+    assert client.portal.call(fresh.clarifications_for_run, owner, run['id']) == state
+    assert reopened.events(owner['id'], run['id']) == events
+    with closing(reopened.connect()) as connection:
+        replay = reopened._replay_events(connection, run['id'])
+        assert [event['data']['status'] for event in replay] == ['answered', 'unknown', 'unknown']
+        assert connection.execute('SELECT count(*) FROM runs').fetchone()[0] == 1
+    answer = client.post(path + '/' + unanswered['question_id'] + '/answer',
+                         json={'answer': 'Keep current', 'other': False})
+    assert answer.status_code == 409
+    assert all(method == 'GET' for method, _ in native.calls)
+
+
+@pytest.mark.parametrize('mode', ['timeout', 'unavailable', 'unsupported'])
+def test_authenticated_uncertainty_does_not_fence_live_waiter(authenticated_clarification_app, mode):
+    from test_auth import BASE
+
+    app, client, owner, run, native = authenticated_clarification_app
+    app.state.orchestrator.clarifications.event(owner, run, pending())
+    before = app.state.journal.events(owner['id'], run['id'])
+    native.mode = mode
+    state = client.get(BASE + '/runs/' + run['id'] + '/clarifications').json()
+    assert state['available'] is False
+    assert state['status'] == 'waiting_for_clarification'
+    assert state['items'][0]['status'] == 'pending'
+    assert app.state.journal.events(owner['id'], run['id']) == before
+
+
+@pytest.mark.parametrize('late_status', ['answered', 'expired'])
+@pytest.mark.parametrize('current_status', ['pending', 'sending', 'unknown'])
+def test_older_terminal_observations_preserve_current_waiter(
+        authenticated_clarification_app, late_status, current_status):
+    from backend.orchestration import Orchestrator
+    from test_auth import BASE
+
+    app, client, owner, run, native = authenticated_clarification_app
+    runtime, journal = app.state.orchestrator, app.state.journal
+    old = pending(created_at=1, updated_at=1)
+    current = pending('b' * 32, created_at=2, updated_at=2)
+    native.items = [current, old]  # Native history need not be chronological.
+    for item in native.items:
+        runtime.clarifications.event(owner, run, item)
+    body = {'answer': 'Change it', 'other': False}
+    if current_status != 'pending':
+        runtime.clarifications.claim(owner, run, current['question_id'], body)
+        if current_status == 'unknown':
+            runtime.clarifications.finish(owner, run['id'], current['question_id'], 'unknown')
+    terminal = {**old, 'status': late_status, 'updated_at': 3}
+    if late_status == 'answered':
+        terminal.update(answer='Keep current', other=False)
+    native.items = [current, terminal]
+    for item in (terminal, current, terminal, old):
+        client.portal.call(runtime._observe_clarification_event, owner, run['id'], item)
+        assert journal.get(owner['id'], run['id'])['status'] == 'waiting_for_clarification'
+    records = runtime.clarifications.list(owner, run['id'])
+    assert records[0]['status'] == late_status
+    assert records[1]['status'] == current_status
+    if current_status == 'pending':
+        reopened = RunJournal(journal.path)
+        fresh = Orchestrator(reopened, runtime.gateway, runtime.catalog)
+        client.portal.call(fresh._reconcile, owner, run['id'])
+        assert reopened.get(owner['id'], run['id'])['status'] == 'waiting_for_clarification'
+        client.portal.call(runtime._reconcile, owner, run['id'])
+        path = BASE + '/runs/' + run['id'] + '/clarifications/' + current['question_id'] + '/answer'
+        response = client.post(path, json=body)
+        assert response.status_code == 200, response.text
+        assert response.json()['status'] == 'answered'
+        assert journal.get(owner['id'], run['id'])['status'] == 'running'
+        assert client.post(path, json=body).json()['status'] == 'answered'
+        assert client.post(path, json={'answer': 'Keep current', 'other': False}).status_code == 409
+        client.portal.call(runtime._observe_clarification_event, owner, run['id'], terminal)
+        assert journal.get(owner['id'], run['id'])['status'] == 'running'
+        assert native.calls.count(('POST', '/v1/runs/native-run/clarifications/' +
+                                   current['question_id'])) == 1
+    assert not any(path == '/v1/runs' for _, path in native.calls)
+
+
+@pytest.mark.parametrize('progress', ['stopping', 'unknown', 'completed', 'failed', 'cancelled'])
+def test_authenticated_loss_preserves_bound_progress_during_get(
+        authenticated_clarification_app, progress):
+    import httpx
+    from test_auth import BASE, ORIGIN
+
+    app, client, owner, run, native = authenticated_clarification_app
+    runtime, journal = app.state.orchestrator, app.state.journal
+    runtime.clarifications.event(owner, run, pending())
+    native.mode = 'missing'
+
+    async def race():
+        native.get_entered, native.get_release = asyncio.Event(), asyncio.Event()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN,
+                                     cookies=dict(client.cookies), headers=dict(client.headers)) as api:
+            authenticated = await api.get(BASE + '/auth/me')
+            assert authenticated.status_code == 200, authenticated.text
+            request = asyncio.create_task(api.get(BASE + '/runs/' + run['id'] + '/clarifications'))
+            await asyncio.wait_for(native.get_entered.wait(), 1)
+            if progress == 'unknown':
+                journal.finish(owner['id'], run['id'], 'stopping')
+            journal.finish(owner['id'], run['id'], progress)
+            if progress in ('stopping', 'unknown'):
+                runtime.clarifications.mark_pending_unknown(owner, run['id'])
+            events = journal.events(owner['id'], run['id'])
+            native.get_release.set()
+            response = await asyncio.wait_for(request, 1)
+            assert response.status_code == 200
+            assert response.json()['status'] == progress
+            assert journal.events(owner['id'], run['id']) == events
+            await runtime._reconcile(owner, run['id'])
+            assert journal.get(owner['id'], run['id'])['status'] == progress
+            assert journal.events(owner['id'], run['id']) == events
+
+    client.portal.call(race)
+    assert all(method == 'GET' for method, _ in native.calls)
+
+
+@pytest.mark.parametrize('late_status', ['answered', 'expired'])
+def test_authenticated_answer_serializes_late_history_and_other_session_progress(
+        authenticated_clarification_app, late_status):
+    import httpx
+    from test_auth import BASE, ORIGIN
+
+    app, client, owner, run, native = authenticated_clarification_app
+    runtime, journal = app.state.orchestrator, app.state.journal
+    old = pending(created_at=1, updated_at=1, status='expired')
+    current = pending('b' * 32, created_at=2, updated_at=2)
+    next_question = pending('c' * 32, created_at=3, updated_at=3)
+    native.items = [old, current]
+    for item in native.items:
+        runtime.clarifications.event(owner, run, item)
+    other, _ = journal.submit(owner['id'], 'default', 'cli-1', 'Unrelated', 'unrelated')
+    journal.set_upstream(owner['id'], other['id'], 'other-native')
+    journal.set_active_status(owner['id'], other['id'], 'waiting_for_clarification',
+                              upstream_id='other-native')
+    other = journal.get(owner['id'], other['id'])
+    unrelated = pending('d' * 32, run_id='other-native')
+    runtime.clarifications.event(owner, other, unrelated)
+
+    async def race():
+        native.answer_entered, native.answer_release = asyncio.Event(), asyncio.Event()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN,
+                                     cookies=dict(client.cookies), headers=dict(client.headers)) as api:
+            authenticated = await api.get(BASE + '/auth/me')
+            assert authenticated.status_code == 200, authenticated.text
+            path = BASE + '/runs/' + run['id'] + '/clarifications/'
+            body = {'answer': 'Change it', 'other': False}
+            answer = asyncio.create_task(api.post(path + current['question_id'] + '/answer', json=body))
+            await asyncio.wait_for(native.answer_entered.wait(), 1)
+            newer_event = asyncio.create_task(runtime._observe_clarification_event(
+                owner, run['id'], next_question))
+            late = {**old, 'status': late_status, 'updated_at': 4}
+            if late_status == 'answered':
+                late.update(answer='Keep current', other=False)
+            late_event = asyncio.create_task(runtime._observe_clarification_event(owner, run['id'], late))
+            await asyncio.sleep(0)
+            assert not newer_event.done() and not late_event.done()
+            unrelated.update(status='answered', answer='Keep current', other=False,
+                             updated_at=unrelated['updated_at'] + 1)
+            await asyncio.wait_for(runtime._observe_clarification_event(owner, other['id'], unrelated), 1)
+            assert journal.get(owner['id'], other['id'])['status'] == 'running'
+            native.answer_release.set()
+            response = await asyncio.wait_for(answer, 1)
+            assert response.status_code == 200
+            await asyncio.wait_for(asyncio.gather(newer_event, late_event), 1)
+            assert journal.get(owner['id'], run['id'])['status'] == 'waiting_for_clarification'
+            current_saved = runtime.clarifications.list(owner, run['id'])[1]
+            assert current_saved['status'] == 'answered' and current_saved['answer'] == 'Change it'
+            native.items.append(next_question)
+            assert (await api.post(path + next_question['question_id'] + '/answer', json=body)).status_code == 200
+            assert journal.get(owner['id'], run['id'])['status'] == 'running'
+
+    client.portal.call(race)
+    assert len([call for call in native.calls if call[0] == 'POST']) == 2
+    assert not any(path == '/v1/runs' for _, path in native.calls)
+
+
+def test_replayed_older_pending_history_does_not_reopen_resolved_current_question(
+        authenticated_clarification_app):
+    from test_auth import BASE
+
+    app, client, owner, run, native = authenticated_clarification_app
+    runtime, journal = app.state.orchestrator, app.state.journal
+    current = pending('b' * 32, created_at=2, updated_at=2, status='answered',
+                      answer='Change it', other=False)
+    client.portal.call(runtime._observe_clarification_event, owner, run['id'], current)
+    assert journal.get(owner['id'], run['id'])['status'] == 'running'
+    old = pending(created_at=1, updated_at=1)
+    for item in (old, current, old):
+        client.portal.call(runtime._observe_clarification_event, owner, run['id'], item)
+        assert journal.get(owner['id'], run['id'])['status'] == 'running'
+    native.items = [current, old]
+    # A newer live waiter remains answerable even with unresolved historical evidence.
+    newest = pending('c' * 32, created_at=3, updated_at=3)
+    native.items.append(newest)
+    client.portal.call(runtime._observe_clarification_event, owner, run['id'], newest)
+    path = BASE + '/runs/' + run['id'] + '/clarifications/' + newest['question_id'] + '/answer'
+    response = client.post(path, json={'answer': 'Keep current', 'other': False})
+    assert response.status_code == 200, response.text
+    assert journal.get(owner['id'], run['id'])['status'] == 'running'
+    assert runtime.clarifications.list(owner, run['id'])[0]['status'] == 'pending'
+
+
+@pytest.mark.parametrize('binding', [
+    {'run_id': 'foreign-native'}, {'profile': 'foreign-profile'}, {'session_id': 'cli-1'},
+])
+def test_late_clarification_event_requires_owned_native_binding(
+        authenticated_clarification_app, binding):
+    app, client, owner, run, native = authenticated_clarification_app
+    before = app.state.journal.events(owner['id'], run['id'])
+    event = pending(status='expired', **binding)
+    client.portal.call(app.state.orchestrator._observe_clarification_event, owner, run['id'], event)
+    assert app.state.journal.events(owner['id'], run['id']) == before
+    assert app.state.journal.get(owner['id'], run['id'])['status'] == 'waiting_for_clarification'
+
+
+@pytest.mark.parametrize('current_status', ['sending', 'unknown'])
+@pytest.mark.parametrize('observe', ['api', 'reconcile'])
+def test_running_history_snapshot_cannot_resume_unresolved_current_question(
+        authenticated_clarification_app, current_status, observe):
+    from test_auth import BASE
+
+    app, client, owner, run, native = authenticated_clarification_app
+    runtime, journal = app.state.orchestrator, app.state.journal
+    old = pending(created_at=1, updated_at=2, status='expired')
+    current = pending('b' * 32, created_at=3, updated_at=3)
+    for item in (current, old):
+        runtime.clarifications.event(owner, run, item)
+    runtime.clarifications.claim(owner, run, current['question_id'],
+                                 {'answer': 'Change it', 'other': False})
+    if current_status == 'unknown':
+        runtime.clarifications.finish(owner, run['id'], current['question_id'], 'unknown')
+    native.items = [old]
+    if observe == 'api':
+        state = client.get(BASE + '/runs/' + run['id'] + '/clarifications').json()
+        assert state['status'] == 'waiting_for_clarification'
+    else:
+        client.portal.call(runtime._reconcile, owner, run['id'])
+    assert journal.get(owner['id'], run['id'])['status'] == 'waiting_for_clarification'
+    assert runtime.clarifications.list(owner, run['id'])[1]['status'] == current_status
+    assert all(method == 'GET' for method, _ in native.calls)
+
+
+def test_equal_question_creation_times_remain_conservative(authenticated_clarification_app):
+    app, client, owner, run, native = authenticated_clarification_app
+    runtime = app.state.orchestrator
+    resolved = pending(created_at=1, updated_at=2, status='expired')
+    unresolved = pending('b' * 32, created_at=1, updated_at=1)
+    runtime.clarifications.event(owner, run, unresolved)
+    client.portal.call(runtime._observe_clarification_event, owner, run['id'], resolved)
+    assert app.state.journal.get(owner['id'], run['id'])['status'] == 'waiting_for_clarification'
 
 
 def pending(question_id='a' * 32, **overrides):

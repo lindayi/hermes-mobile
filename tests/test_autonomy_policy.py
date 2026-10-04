@@ -186,11 +186,11 @@ _PENDING_PR45_NAMING_FIXTURE = {
 
 _PENDING_ISSUE77_CLARIFICATION_FIXTURE = {
     'backend/app.py': '7fee54ea8d210be56ef5608400a1ef3ee3de3437ea1119192ff228817b102798',
-    'backend/clarifications.py': '936847ca9aae9f871180ff623b75a774ae981d657d246102f824113238e81252',
+    'backend/clarifications.py': '5ad4b7c382f60355ef1eff1e73ec8c967221dbe632c954637608bc6d369d6a53',
     'backend/hermes_client.py': '6dfc387cab67e8186af3cac8eba4fbf974fb74bb658008efa83dad8b5deec12d',
     'backend/model_controls.py': '06a1dc3be87f9d81515157ba19de62de043e7f75491587eabb02aac3d5a406e3',
     'backend/native_catalog.py': '8b3c398f52388e0e334d6d64381b677b651b9337ece2d1868a14d3de069c5ed6',
-    'backend/orchestration.py': '40466b80a8176cc1efec01ff63ec2e797614600ff074c5bf8eb147b65f675e1a',
+    'backend/orchestration.py': '0b792d3a0d88204cf37bbec7c51fa47c6122d77cb3676a4378365b9420f96065',
     'backend/runs.py': '99297aef3ecf899d40b77d76de26132701596672dd6af432cdf16ecba1aaac93',
     'deploy/native_controls_release.py': '7e8769dd79f1d5c44ec33cd19216e67a9e939d26e4d386a4f4a7fc164e3dd47e',
     'deploy/self_deploy.py': '1a72fcf9ac6018a449bcac7bb76764af3f144817e8f6e764eb49aa5a95241363',

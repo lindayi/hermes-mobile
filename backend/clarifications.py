@@ -240,9 +240,15 @@ class ClarificationJournal:
                     item.update(status='unknown', updated_at=updated_at)
                     self._record_event(connection, run_id, item)
 
-    def mark_run_not_found_unknown(self, user, run_id):
+    def mark_run_not_found_unknown(self, user, run):
+        run_id = run['id']
         with closing(self.journal.connect()) as connection, connection:
             connection.execute('BEGIN IMMEDIATE')
+            current = self.journal._require_run(connection, user['id'], run_id)
+            if (current['profile'] != user['profile']
+                    or current['upstream_id'] != run['upstream_id']
+                    or current['status'] in ('completed', 'failed', 'cancelled')):
+                return
             rows = connection.execute('''SELECT c.*,r.session_id FROM clarifications c
                 JOIN runs r ON r.id=c.run_id WHERE c.user_id=? AND c.profile=?
                 AND c.run_id=? AND c.status IN ('pending','sending')''',
@@ -388,8 +394,8 @@ class ClarificationJournal:
                     or result['status'] == 'running' and pending):
                 raise IntegrationUnavailable('Native clarification state is contradictory')
         except NativeRunNotFound:
-            self.mark_run_not_found_unknown(user, run_id)
-            return {'available': False, 'items': self.list(user, run_id), 'native_status': None}
+            self.mark_run_not_found_unknown(user, run)
+            return {'available': False, 'items': self.list(user, run_id), 'native_status': 'unknown'}
         except Exception:
             return {'available': False, 'items': self.list(user, run_id), 'native_status': None}
         observed_pending = self.observe(user, run, result)

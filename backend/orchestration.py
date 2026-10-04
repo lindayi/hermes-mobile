@@ -9,7 +9,7 @@ from contextlib import closing
 
 from .runs import RunConflict
 
-from .hermes_client import IntegrationUnavailable
+from .hermes_client import IntegrationUnavailable, NativeRunNotFound
 
 
 class Orchestrator:
@@ -137,14 +137,10 @@ class Orchestrator:
                 raise KeyError(rid)
             result = await self.clarifications.rehydrate(user, rid, self.gateway, run)
             native_status = result.get('native_status')
-            if native_status == 'waiting_for_clarification':
-                pending = any(item['status'] == 'pending' for item in result['items'])
-                if pending:
-                    self.journal.set_active_status(
-                        user['id'], rid, 'waiting_for_clarification', upstream_id=run['upstream_id'])
-            elif native_status == 'running' and run['status'] in ('waiting_for_clarification', 'unknown'):
-                self.journal.set_active_status(
-                    user['id'], rid, 'running', upstream_id=run['upstream_id'])
+            if native_status == 'unknown':
+                self._native_run_lost(user, run)
+            elif native_status in ('waiting_for_clarification', 'running'):
+                self._clarification_status(user, run, resume=native_status == 'running')
             current = self.get(user, rid)
             return {
                 'run_id': current['id'], 'status': current['status'],
@@ -186,8 +182,34 @@ class Orchestrator:
                 raise
             return result
         result = self.clarifications.finish(user, rid, question_id, 'answered')
-        self.journal.set_active_status(user['id'], rid, 'running', upstream_id=run['upstream_id'])
+        self._clarification_status(user, run, resume=True)
         return result
+
+    def _native_run_lost(self, user, run):
+        current = self.get(user, run['id'])
+        if (not self._can_observe(user)
+                or any(current[k] != run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at'))
+                or current['status'] in ('unknown', 'stopping', 'completed', 'failed', 'cancelled')):
+            return
+        with closing(self.journal.connect()) as connection:
+            if connection.execute('SELECT 1 FROM run_stop_intents WHERE run_id=?',
+                                  (run['id'],)).fetchone():
+                return
+        self.journal.finish(user['id'], run['id'], 'unknown',
+                            error='Native run no longer exists; automatic retry is disabled',
+                            expected={k: run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at')})
+
+    def _clarification_status(self, user, run, *, resume):
+        items = self.clarifications.list(user, run['id'])
+        latest = max((item['created_at'] for item in items), default=None)
+        items = [item for item in items if item['created_at'] == latest]
+        if any(item['status'] in ('pending', 'sending') for item in items):
+            status = 'waiting_for_clarification'
+        elif resume and not any(item['status'] == 'unknown' for item in items):
+            status = 'running'
+        else:
+            return
+        self.journal.set_active_status(user['id'], run['id'], status, upstream_id=run['upstream_id'])
 
     async def refresh(self, user, rid):
         self.get(user, rid)  # Authorize before consulting shared observation state.
@@ -419,14 +441,12 @@ class Orchestrator:
     async def _observe_clarification_event(self, user, rid, event):
         async with self._clarification_lock(user, rid):
             run = self.get(user, rid)
+            if not self._can_observe(user) or not self._matches(run, event):
+                return
             result = self.clarifications.event(user, run, event)
-            if result and result['status'] == 'pending':
-                self.journal.set_active_status(
-                    user['id'], rid, 'waiting_for_clarification',
-                    upstream_id=run['upstream_id'])
-            elif result and result['status'] in ('answered', 'expired'):
-                self.journal.set_active_status(
-                    user['id'], rid, 'running', upstream_id=run['upstream_id'])
+            if result:
+                self._clarification_status(
+                    user, run, resume=result['status'] in ('answered', 'expired'))
 
     async def _observe_terminal_event(self, user, rid, event):
         async with self._clarification_lock(user, rid):
@@ -542,11 +562,10 @@ class Orchestrator:
                                      (rid,)).fetchone():
                             return
                     saved_pending = [item for item in self.clarifications.list(user, rid)
-                                     if item['status'] == 'pending']
+                                     if item['status'] in ('pending', 'sending')]
                     if not saved_pending:
                         raise IntegrationUnavailable('Pending clarification identity is unavailable')
-                    self.journal.set_active_status(
-                        user['id'], rid, 'waiting_for_clarification', upstream_id=run['upstream_id'])
+                    self._clarification_status(user, run, resume=False)
                     return
                 if result.get('status') == 'running':
                     if 'pending_approvals' in result and result['pending_approvals'] != []:
@@ -574,10 +593,17 @@ class Orchestrator:
                                  OR (status='waiting_for_clarification' AND ?))
                             AND NOT EXISTS(SELECT 1 FROM orchestration_approvals WHERE run_id=?
                              AND status IN ('pending','sending','unknown','details_unavailable'))
+                            AND NOT EXISTS(SELECT 1 FROM clarifications WHERE run_id=?
+                             AND status IN ('pending','sending','unknown')
+                             AND created_at=(SELECT MAX(created_at) FROM clarifications WHERE run_id=?))
                             AND NOT EXISTS(SELECT 1 FROM run_stop_intents WHERE run_id=?)""",
                             (time.time(), rid, user['id'], self.profile, run['upstream_id'],
-                             result.get('pending_approvals') == [], clarification_clear, rid, rid))
+                             result.get('pending_approvals') == [], clarification_clear, rid, rid, rid, rid))
                     return
+            except NativeRunNotFound:
+                self.clarifications.mark_run_not_found_unknown(user, run)
+                self._native_run_lost(user, run)
+                return
             except Exception:
                 pass
         self.journal.finish(user['id'], rid, 'unknown', error='Upstream outcome is unresolved; automatic retry is disabled',

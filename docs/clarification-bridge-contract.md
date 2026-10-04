@@ -109,6 +109,29 @@ even when the snapshot observation timestamp changes or the store is reopened.
 They preserve the recorded Stop outcome; genuine native terminal evidence and
 positive matching receipts for attempted answers still advance the saved state.
 
+The bounded lifecycle follow-up starts from head
+`097722a114f08808713bc455ccc368073ce69334` over the same main baseline.
+A positively authenticated GET for the bound native run returning 404 preserves
+question/attempt history as unknown and fences the owning local run as unknown
+using the existing recovery semantics, never completion or resumption. Transport
+timeouts, 5xx, and unavailable capabilities do not establish native loss.
+The owner/profile/native identity, Stop intent, and actual terminal progress
+remain authoritative. Repeated GET, reconciliation, store reopen, and fresh
+Orchestrator replay must stabilize clarification/done events without redispatch.
+
+Run-state derivation under the existing clarification lock uses the aggregate
+persisted question state, not the arriving event or incidental history order.
+The newest creation time identifies the current question; ties are conservative.
+Pending, sending, and unresolved unknown current questions prevent resumption
+from an older answered/expired observation. Only resolution of all current
+questions allows same-run continuation; the first accepted answer remains
+immutable. Replayed older pending history cannot reopen a newer resolved waiter.
+Acceptance covers authenticated route/event flows for late answered and expired
+history, duplicate/reordered observations and snapshots, legitimate answers to
+the newer waiter, fresh-store reconciliation, concurrent answer/event sequencing,
+and independent other-session progress. Synthetic native loss tests also cover
+transient uncertainty and Stop/terminal races without altering prior assertions.
+
 ## Acceptance cases
 
 1. A synthetic API-server agent calls the pinned clarification tool on a worker
