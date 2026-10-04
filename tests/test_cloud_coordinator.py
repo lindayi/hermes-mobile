@@ -4663,6 +4663,85 @@ def _prepare_malformed_review_report(tmp_path):
     return api, path, source_fix, original
 
 
+def test_failed_correction_child_write_recovers_reserved_parent_after_reload(
+        tmp_path, monkeypatch):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="changes_requested",
+        findings=[{
+            "path": "frontend/styles.css",
+            "comment": "Preserve the existing behavior.",
+        }],
+        files={},
+    )
+    update_action = StateStore.update_action
+
+    def crash_after_child_write(store, key, status, **fields):
+        result = update_action(store, key, status, **fields)
+        if (store.path == path and key == correction["key"]
+                and fields.get("report_error")):
+            store._save(store.snapshot())
+            raise RuntimeError("injected crash after failed correction child")
+        return result
+
+    monkeypatch.setattr(StateStore, "update_action", crash_after_child_write)
+    with pytest.raises(
+            RuntimeError, match="injected crash after failed correction child"):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )
+    monkeypatch.setattr(StateStore, "update_action", update_action)
+
+    after_crash = StateStore(path)
+    failed = after_crash.action(correction["key"])
+    assert failed["status"] == "completed"
+    assert "Review report fields or bindings do not match" in failed["report_error"]
+    assert failed["report_session_id"] == f"session-{correction['task_id']}"
+    assert after_crash.action(original["key"])["report_retry_state"] == "reserved"
+    tasks = (api.task_posts, api.review_attempts, api.fix_attempts)
+    publications = len([
+        route for route, _ in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ])
+    successes = sum(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for rows in api.status_log.values() for status in rows
+    )
+
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )
+        assert StateStore(path).action(original["key"])[
+            "report_retry_state"
+        ] == "exhausted"
+        assert StateStore(path).action(correction["key"])["report_error"]
+
+    assert (api.task_posts, api.review_attempts, api.fix_attempts) == tasks
+    assert len([
+        route for route, _ in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ]) == publications
+    assert sum(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for rows in api.status_log.values() for status in rows
+    ) == successes
+    assert len([
+        comment for comment in api.comments
+        if "single safe correction is unavailable or exhausted" in comment.get("body", "")
+    ]) == 1
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+
+
 @pytest.mark.parametrize("superseding_review", [False, True])
 def test_stale_pass_cannot_complete_handoff_after_reload(
         tmp_path, monkeypatch, superseding_review):
@@ -4802,9 +4881,13 @@ def test_stale_correction_rejection_binds_exact_selected_publication(unrelated):
     ) is (unrelated is not None)
 
 
+@pytest.mark.parametrize(
+    "crash_after_terminal_child", [False, True],
+    ids=["normal", "reload-after-child-write"],
+)
 @pytest.mark.parametrize("replay_state", ["uncertain", "sending"])
 def test_lost_correction_post_is_rejected_after_delayed_readback_and_reload(
-        tmp_path, monkeypatch, replay_state):
+        tmp_path, monkeypatch, replay_state, crash_after_terminal_child):
     api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
     _advance_report_recovery_main(api, path)
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
@@ -4827,6 +4910,7 @@ def test_lost_correction_post_is_rejected_after_delayed_readback_and_reload(
             assert response["user"]["id"] == OWNER
             assert response["commit_id"] == HEAD
             assert response["body"] == body["body"]
+            api.owner_review_submitted_at = "2026-10-01T12:09:00Z"
             api.current_main_sha = NEXT_RESULT_HEAD
             api.pull["base"]["sha"] = NEXT_RESULT_HEAD
             api.pull.update(mergeable=True, mergeable_state="clean")
@@ -4842,8 +4926,9 @@ def test_lost_correction_post_is_rejected_after_delayed_readback_and_reload(
     published_id = api.owner_review_id
     assert published_id == 65050
     assert api.owner_review_head_sha == HEAD
-    assert api.owner_review_submitted_at == "2026-10-01T12:10:00Z"
+    assert api.owner_review_submitted_at == "2026-10-01T12:09:00Z"
     uncertain = StateStore(path).action(correction["key"])
+    assert uncertain["review_session_completed_at"] == api.owner_review_submitted_at
     assert uncertain["publication_state"] == "uncertain"
     assert uncertain.get("published_review_id") is None
     if replay_state == "sending":
@@ -4864,7 +4949,29 @@ def test_lost_correction_post_is_rejected_after_delayed_readback_and_reload(
         return values
 
     monkeypatch.setattr(api, "get_all", hide_delayed_review)
-    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    update_action = StateStore.update_action
+
+    def crash_before_parent_exhaustion(store, key, status, **fields):
+        if (crash_after_terminal_child and store.path == path
+                and key == original["key"]
+                and fields.get("report_retry_state") == "exhausted"):
+            raise RuntimeError("injected crash after stale correction")
+        return update_action(store, key, status, **fields)
+
+    if crash_after_terminal_child:
+        monkeypatch.setattr(StateStore, "update_action", crash_before_parent_exhaustion)
+        with pytest.raises(RuntimeError, match="injected crash after stale correction"):
+            Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+                apply=True,
+            )
+        monkeypatch.setattr(StateStore, "update_action", update_action)
+        assert StateStore(path).action(correction["key"])[
+            "publication_disposition"
+        ] == "stale"
+        assert StateStore(path).action(original["key"])["report_retry_state"] == "reserved"
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    else:
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     stale = StateStore(path).action(correction["key"])
     assert hidden_reads == 2
     assert stale["publication_disposition"] == "stale"
@@ -6272,7 +6379,7 @@ def test_invalid_formal_review_id_stays_uncertain_until_authenticated_readback(
 
 
 def test_unrepresentable_review_inventory_persists_one_deduplicated_blocker(
-        tmp_path):
+        tmp_path, monkeypatch):
     api = FakeApi(source_failure=True, review_status_present=False)
     api.owner_reviews = []
     api.owner_review_body = "not a structured independent review"
@@ -6289,12 +6396,27 @@ def test_unrepresentable_review_inventory_persists_one_deduplicated_blocker(
         for item in api.pull_files
     }
     path = tmp_path / "state.json"
+    retire = StateStore.retire
+    actions_before_retirement = []
+
+    def capture_before_retirement(store, issue, current_head, current_main_sha=None):
+        if issue == 16:
+            actions_before_retirement.append(store.actions())
+        return retire(store, issue, current_head, current_main_sha)
+
+    monkeypatch.setattr(StateStore, "retire", capture_before_retirement)
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     source_fix = next(
         action for action in StateStore(path).actions().values()
         if action.get("kind") == "fix"
     )
-    api.complete_task(source_fix["task_id"], source_fix)
+    result_head = NEXT_RESULT_HEAD
+    api.complete_task(source_fix["task_id"], source_fix, head_sha=result_head)
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.compare_results[f"{BASE}...{result_head}"] = _compare_result(
+        BASE, ahead_by=1,
+    )
     api.source_failure = False
     api.review_state = "PENDING"
 
@@ -6302,8 +6424,20 @@ def test_unrepresentable_review_inventory_persists_one_deduplicated_blocker(
         apply=True,
     )["pull_requests"][0]
 
+    diagnosed = next(
+        snapshot[source_fix["key"]]
+        for snapshot in reversed(actions_before_retirement)
+        if source_fix["key"] in snapshot
+        and snapshot[source_fix["key"]].get("handoff_state") == "inventory_blocked"
+    )
+    assert diagnosed["handoff_state"] == "inventory_blocked"
+    assert diagnosed["head"] == HEAD
+    assert diagnosed["receipt_head"] == result_head
     blocked = StateStore(path).action(source_fix["key"])
+    assert blocked is not None, "cycle-end retirement removed the current receipt blocker"
     assert blocked["handoff_state"] == "inventory_blocked"
+    assert blocked["head"] == HEAD
+    assert blocked["receipt_head"] == result_head
     assert blocked["review_inventory_error"] == (
         "changed-file inventory has 65 entries; the review limit is 64"
     )
@@ -6322,12 +6456,24 @@ def test_unrepresentable_review_inventory_persists_one_deduplicated_blocker(
             apply=True,
         )["pull_requests"][0]
         assert summary["repair_requested"] is False
+        assert StateStore(path).action(source_fix["key"])["handoff_state"] == (
+            "inventory_blocked"
+        )
     assert api.review_attempts == 0
     assert api.fix_attempts == 1
     assert len([
         comment for comment in api.comments
         if "changed-file inventory has 65 entries" in comment.get("body", "")
     ]) == 1
+
+    superseding_head = "f" * 40
+    api.head_sha = superseding_head
+    api.pull["head"]["sha"] = superseding_head
+    api.compare_results[f"{BASE}...{superseding_head}"] = _compare_result(
+        BASE, ahead_by=2,
+    )
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert StateStore(path).action(source_fix["key"]) is None
 
 
 @pytest.mark.parametrize(("session_id", "eligible"), [
