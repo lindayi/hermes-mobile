@@ -4122,6 +4122,56 @@ def test_waiting_independent_review_handoff_survives_restart_without_budget(
     assert StateStore(path).snapshot()["lifecycle_events"] == events
 
 
+@pytest.mark.parametrize("inactive", [False, True], ids=["head-advance", "closed"])
+def test_inventory_blocked_actions_retire_without_removing_unresolved_work(
+        tmp_path, inactive):
+    api = FakeApi()
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    store = StateStore(path)
+
+    def seed(state):
+        enrollment = state["enrollments"]["16"]
+        enrollment["active"] = not inactive
+        for index in range(100):
+            state["actions"][f"inventory-blocked-{index}"] = {
+                "issue": 16, "kind": "fix", "status": "completed",
+                "head": f"{index + 1:040x}", "handoff_state": "inventory_blocked",
+                "review_inventory_error": "changed-file inventory exceeds its bound",
+            }
+        state["actions"]["inventory-blocked-current"] = {
+            "issue": 16, "kind": "fix", "status": "completed",
+            "head": HEAD, "handoff_state": "inventory_blocked",
+        }
+        state["actions"]["inventory-blocked-uncertain"] = {
+            "issue": 16, "kind": "fix", "status": "uncertain",
+            "head": "f" * 40, "handoff_state": "inventory_blocked",
+        }
+        state["outbox"]["pending-inventory-blocker"] = {
+            "issue": 16, "head": "f" * 40, "status": "pending",
+            "marker": "pending-marker", "body": "pending outcome",
+        }
+
+    store._mutate(seed)
+    StateStore(path).retire(16, HEAD)
+
+    reloaded = StateStore(path)
+    persisted = reloaded.snapshot()
+    assert not any(
+        key.startswith("inventory-blocked-")
+        for key in persisted["actions"]
+        if key != "inventory-blocked-current"
+        and key != "inventory-blocked-uncertain"
+    )
+    assert "inventory-blocked-uncertain" in persisted["actions"]
+    assert "pending-inventory-blocker" in persisted["outbox"]
+    if inactive:
+        assert "inventory-blocked-current" not in persisted["actions"]
+    else:
+        assert persisted["actions"]["inventory-blocked-current"]["head"] == HEAD
+    assert persisted["enrollments"]["16"]["attempts"] == 1
+
+
 def test_task_handoff_marks_draft_ready_without_waiting_for_copilot(tmp_path):
     api = FakeApi(unresolved=True)
     store = StateStore(tmp_path / "state.json")
@@ -4714,6 +4764,53 @@ def test_historical_report_recovery_uses_fresh_main_and_keeps_retry_separate(
     )
 
 
+def test_correction_anchor_identity_changes_if_main_advances_before_claim(tmp_path):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    first_anchor = next(
+        (key, entry) for key, entry in StateStore(path).snapshot()["outbox"].items()
+        if key.startswith(f"review-anchor:16:{HEAD}:correction:")
+    )
+    assert first_anchor[1]["status"] == "sent"
+    assert f"base `{CURRENT_MAIN}`" in first_anchor[1]["body"]
+
+    api.current_main_sha = NEXT_RESULT_HEAD
+    api.compare_results[f"{BASE}...{NEXT_RESULT_HEAD}"] = _compare_result(
+        BASE, ahead_by=2,
+    )
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    anchors = [
+        (key, entry) for key, entry in StateStore(path).snapshot()["outbox"].items()
+        if key.startswith(f"review-anchor:16:{HEAD}:correction:")
+    ]
+    assert len(anchors) == 2
+    assert anchors[0][0] != anchors[1][0]
+    assert anchors[0][1]["marker"] != anchors[1][1]["marker"]
+    assert f"base `{NEXT_RESULT_HEAD}`" in anchors[1][1]["body"]
+    assert all(entry["status"] == "sent" for _, entry in anchors)
+
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    corrections = [
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]
+    assert len(corrections) == 1
+    correction = corrections[0]
+    assert correction["status"] == "sent"
+    assert correction["main_sha"] == NEXT_RESULT_HEAD
+    assert correction["dispatch_nonce"] != original["dispatch_nonce"]
+    unchanged_parent = StateStore(path).action(original["key"])
+    assert unchanged_parent["main_sha"] == BASE
+    assert unchanged_parent["task_id"] == original["task_id"]
+    assert unchanged_parent["dispatch_nonce"] == original["dispatch_nonce"]
+    assert unchanged_parent["report_error"] == original["report_error"]
+    assert unchanged_parent["report_retry_state"] == "reserved"
+    assert StateStore(path).action(source_fix["key"])["task_id"] == source_fix["task_id"]
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+
+
 @pytest.mark.parametrize(("snapshot", "diagnostic"), [
     ({"files_complete": False, "files": []},
      "changed-file inventory is incomplete"),
@@ -4799,6 +4896,133 @@ def test_report_correction_is_not_published_after_its_snapshot_advances(
         status.get("context") == "agent-review" and status.get("state") == "success"
         for statuses in api.status_log.values() for status in statuses
     )
+
+
+@pytest.mark.parametrize("stale_at", [
+    "after-validation", "after-review-history", "between-review-and-status",
+    "after-status-history", "before-parent",
+])
+def test_pending_correction_publication_rechecks_live_reservation(
+        tmp_path, monkeypatch, stale_at):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="pass", files=api.review_file_digests(),
+    )
+
+    def advance(*, head=False):
+        if head:
+            api.head_sha = RESULT_HEAD
+            api.pull["head"]["sha"] = RESULT_HEAD
+        else:
+            api.current_main_sha = NEXT_RESULT_HEAD
+
+    if stale_at == "after-validation":
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+        validate = coordinator._validate_review_report
+
+        def validate_then_advance(*args, **kwargs):
+            result = validate(*args, **kwargs)
+            advance()
+            return result
+
+        monkeypatch.setattr(coordinator, "_validate_review_report", validate_then_advance)
+    elif stale_at == "after-review-history":
+        get_all = api.get_all
+        review_reads = 0
+
+        def review_history_then_advance(route, *, collection=None):
+            nonlocal review_reads
+            rows = get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                review_reads += 1
+                if review_reads == 2:
+                    advance(head=True)
+            return rows
+
+        monkeypatch.setattr(api, "get_all", review_history_then_advance)
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+    elif stale_at == "between-review-and-status":
+        write = api.write
+
+        def review_then_advance(route, body):
+            result = write(route, body)
+            if route == "repos/lindayi/hermes-mobile/pulls/16/reviews":
+                advance()
+            return result
+
+        monkeypatch.setattr(api, "write", review_then_advance)
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+    elif stale_at == "after-status-history":
+        get_all = api.get_all
+        status_reads = 0
+
+        def status_history_then_advance(route, *, collection=None):
+            nonlocal status_reads
+            rows = get_all(route, collection=collection)
+            if route.endswith(f"/commits/{HEAD}/statuses?per_page=100"):
+                status_reads += 1
+                if status_reads == 2:
+                    advance(head=True)
+            return rows
+
+        monkeypatch.setattr(api, "get_all", status_history_then_advance)
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+    else:
+        write = api.write
+
+        def status_then_advance(route, body):
+            result = write(route, body)
+            if ("/statuses/" in route and body.get("context") == "agent-review"):
+                advance()
+            return result
+
+        monkeypatch.setattr(api, "write", status_then_advance)
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+
+    coordinator.run(apply=True)
+
+    persisted = StateStore(path)
+    correction = persisted.action(correction["key"])
+    parent = persisted.action(original["key"])
+    assert correction["publication_disposition"] == "stale"
+    assert len(correction["publication_error"]) <= 256
+    assert parent["report_retry_state"] == "exhausted"
+    assert api.review_attempts == 2
+    formal_reviews = [
+        body for route, body in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ]
+    agent_statuses = [
+        status for statuses in api.status_log.values() for status in statuses
+        if status.get("context") == "agent-review" and status.get("state") == "success"
+    ]
+    if stale_at in {"after-validation", "after-review-history"}:
+        assert formal_reviews == []
+    else:
+        assert len(formal_reviews) == 1
+    if stale_at == "before-parent":
+        assert len(agent_statuses) == 1
+        assert correction["publication_state"] == "done"
+        assert correction["agent_review_state"] == "done"
+    else:
+        assert agent_statuses == []
+    assert parent["report_retry_state"] != "recovered"
+
+    writes, tasks = list(api.writes), api.task_posts
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    reloaded = StateStore(path)
+    assert reloaded.action(original["key"])["report_retry_state"] == "exhausted"
+    assert api.writes == writes
+    assert api.task_posts == tasks
 
 
 def test_unrepresentable_review_inventory_persists_one_deduplicated_blocker(
