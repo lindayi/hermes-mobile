@@ -30,9 +30,10 @@ supports the pinned single-question ABI, not a newer batched-question schema.
   The native clarification tool remains responsible for stripping its
   presentation-only Recommended suffix from its returned answer.
 - The callback has a finite timeout bounded by the runtime's configured
-  clarification timeout. Stop and terminal run states release a pending waiter
-  as cancelled; timeout releases it as expired. None is an approval or changes
-  a permission decision.
+  clarification timeout. Native stopping/cancelled releases a pending waiter as
+  cancelled; completed/failed and timeout release it as expired. A local Stop
+  intent alone makes an unanswered mobile row unknown, not confirmed native
+  cancellation. None is an approval or changes a permission decision.
 - The authenticated mobile bridge binds each request and answer to the local
   owner, profile, session, run, and native run ID. It persists bounded request,
   answer, and lifecycle evidence in the run journal. Reopen/refresh reconciles
@@ -87,6 +88,18 @@ The bounded race follow-up starts from PR #78 head
 `f718cc3ec2f227184d2875a1e7c94047af54c574`. It retains the preceding correction
 and only adds owned-run serialization for native snapshots, answer acknowledgements,
 clarification events, terminal events, and refresh reconciliation.
+
+The Stop/snapshot follow-up starts from head
+`0bcc6cf5a40ec473294638e4b6536158c7754896` over the same main baseline.
+An actual local Stop intent fences delayed pending snapshots and events inside
+the short journal write transaction, without waiting for the clarification
+network lock. Stored pending rows become unknown before Stop transport; attempted
+answers and their possible native consumption remain intact. Reopen and replay
+cannot revive an answerable row after Stop. A later positive matching native
+answer receipt remains valid, and known native terminal mappings are unchanged.
+Acceptance includes a held pending GET across successful or transport-uncertain
+Stop, delayed pending events, replay/reopen, no stale answer POST or new run/tool
+dispatch, immutable first answers, and independent other-session progress.
 
 ## Acceptance cases
 

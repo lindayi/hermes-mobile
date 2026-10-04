@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.clarifications import ClarificationJournal
+from backend.hermes_client import IntegrationUnavailable
 from backend.runs import RunConflict, RunJournal
 
 
@@ -221,6 +222,247 @@ async def test_owned_answer_resolves_the_waiting_native_request_without_new_run(
             assert connection.execute('SELECT count(*) FROM runs').fetchone()[0] == 1
     finally:
         await runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('uncertain_stop', [False, True])
+@pytest.mark.parametrize('stored_pending', [False, True])
+async def test_stop_fences_delayed_pending_snapshot_and_event(
+        tmp_path, uncertain_stop, stored_pending):
+    from backend.orchestration import Orchestrator
+
+    journal, run = run_state(tmp_path)
+    question = pending()
+    other_run, _ = journal.submit('owner', 'default', 'other-session', 'Other', 'other')
+    journal.set_upstream('owner', other_run['id'], 'other-native')
+    journal.set_active_status('owner', other_run['id'], 'waiting_for_clarification',
+                              upstream_id='other-native')
+    other_question = pending('b' * 32, run_id='other-native')
+
+    class Gateway:
+        def __init__(self):
+            self.get_started = asyncio.Event()
+            self.release_get = asyncio.Event()
+            self.requests = []
+            self.stops = []
+            self.answers = []
+            self.starts = []
+
+        def require_execution(self):
+            return None
+
+        async def require_clarifications(self):
+            return None
+
+        async def request(self, method, path, **kwargs):
+            self.requests.append((method, path))
+            if path.endswith('other-native'):
+                return {'run_id': 'other-native', 'status': 'waiting_for_clarification',
+                        'clarifications': [other_question]}
+            snapshot = {'run_id': 'native-run', 'status': 'waiting_for_clarification',
+                        'clarifications': [question]}
+            self.get_started.set()
+            await self.release_get.wait()
+            return snapshot
+
+        async def stop(self, run_id):
+            self.stops.append(run_id)
+            if uncertain_stop:
+                raise IntegrationUnavailable('Synthetic Stop acknowledgement loss')
+
+        async def answer_clarification(self, *args):
+            self.answers.append(args)
+            return {'status': 'answered'}
+
+        async def start(self, *args, **kwargs):
+            self.starts.append(args)
+            raise AssertionError('No new run may be dispatched')
+
+    gateway = Gateway()
+    runtime = Orchestrator(journal, gateway, SimpleNamespace(profiles={'default': 'fixture'}))
+    if stored_pending:
+        runtime.clarifications.event(OWNER, run, question)
+    snapshot = asyncio.create_task(runtime.clarifications_for_run(OWNER, run['id']))
+    try:
+        await asyncio.wait_for(gateway.get_started.wait(), 1)
+        stopped = await asyncio.wait_for(runtime.stop(OWNER, run['id']), 1)
+        assert stopped['status'] == ('unknown' if uncertain_stop else 'stopping')
+        with closing(journal.connect()) as connection:
+            assert connection.execute('SELECT 1 FROM run_stop_intents WHERE run_id=?',
+                                      (run['id'],)).fetchone()
+        if stored_pending:
+            assert runtime.clarifications.list(OWNER, run['id'])[0]['status'] == 'unknown'
+        other = await asyncio.wait_for(
+            runtime.clarifications_for_run(OWNER, other_run['id']), 1)
+        assert other['items'][0]['status'] == 'pending'
+        with pytest.raises(KeyError):
+            await runtime.clarifications_for_run(
+                {**OWNER, 'id': 'foreign'}, run['id'])
+        with pytest.raises(KeyError):
+            await runtime.clarifications_for_run(
+                {**OWNER, 'profile': 'foreign'}, run['id'])
+        gateway.release_get.set()
+        assembled = await asyncio.wait_for(snapshot, 1)
+        assert assembled['status'] == stopped['status']
+        with pytest.raises(RunConflict):
+            await runtime.answer_clarification(
+                OWNER, run['id'], question['question_id'],
+                {'answer': 'Change it', 'other': False})
+        assert gateway.answers == []
+        assert gateway.starts == []
+        assert gateway.stops == ['native-run']
+        assert assembled['items'][0]['status'] == 'unknown'
+        assert assembled['items'][0]['answer'] is None
+
+        await runtime._observe_clarification_event(
+            OWNER, run['id'], {**question, 'updated_at': time.time() + 1})
+        assert runtime.get(OWNER, run['id'])['status'] == stopped['status']
+        assert runtime.clarifications.list(OWNER, run['id'])[0]['status'] == 'unknown'
+        reopened = await runtime.clarifications_for_run(OWNER, run['id'])
+        assert reopened['items'][0]['status'] == 'unknown'
+        with closing(journal.connect()) as connection:
+            cards = [event for event in journal._replay_events(connection, run['id'])
+                     if event['name'] == 'clarification']
+        assert len(cards) == 1
+        assert cards[0]['data']['status'] == 'unknown'
+        late_question = pending('c' * 32)
+        await runtime._observe_clarification_event(OWNER, run['id'], late_question)
+        assert [item['status'] for item in runtime.clarifications.list(OWNER, run['id'])] == [
+            'unknown', 'unknown']
+        assert runtime.get(OWNER, run['id'])['status'] == stopped['status']
+        assert runtime.clarifications.list(OWNER, other_run['id'])[0]['status'] == 'pending'
+        recovered = Orchestrator(
+            journal, gateway, SimpleNamespace(profiles={'default': 'fixture'}))
+        try:
+            restored = await recovered.clarifications_for_run(OWNER, run['id'])
+            assert restored['status'] == stopped['status']
+            assert [item['status'] for item in restored['items']] == ['unknown', 'unknown']
+            other_restored = await recovered.clarifications_for_run(OWNER, other_run['id'])
+            assert other_restored['items'][0]['status'] == 'pending'
+        finally:
+            await recovered.close()
+        assert runtime.clarifications.list(OWNER, other_run['id'])[0]['status'] == 'pending'
+        assert all(method == 'GET' for method, _ in gateway.requests)
+        assert not [event for event in journal.events('owner', run['id'])
+                    if event['name'] == 'tool']
+    finally:
+        gateway.release_get.set()
+        await asyncio.gather(snapshot, return_exceptions=True)
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ack_lost', [False, True])
+async def test_stop_during_slow_answer_preserves_attempt_and_later_native_receipt(tmp_path, ack_lost):
+    from backend.orchestration import Orchestrator
+
+    journal, run = run_state(tmp_path)
+    question = pending()
+    body = {'answer': 'Change it', 'other': False}
+
+    class Gateway:
+        def __init__(self):
+            self.answer_started = asyncio.Event()
+            self.release_answer = asyncio.Event()
+            self.stop_started = asyncio.Event()
+            self.release_stop = asyncio.Event()
+            self.answers = []
+
+        def require_execution(self):
+            return None
+
+        async def require_clarifications(self):
+            return None
+
+        async def answer_clarification(self, *args):
+            self.answers.append(args)
+            self.answer_started.set()
+            await self.release_answer.wait()
+            if ack_lost:
+                raise IntegrationUnavailable('Synthetic answer acknowledgement loss')
+            return {'status': 'answered'}
+
+        async def stop(self, run_id):
+            assert run_id == 'native-run'
+            self.stop_started.set()
+            await self.release_stop.wait()
+            raise IntegrationUnavailable('Synthetic Stop acknowledgement loss')
+
+    gateway = Gateway()
+    runtime = Orchestrator(journal, gateway, SimpleNamespace(profiles={'default': 'fixture'}))
+    runtime.clarifications.event(OWNER, run, question)
+    answer_task = asyncio.create_task(runtime.answer_clarification(
+        OWNER, run['id'], question['question_id'], body))
+    stop_task = None
+    try:
+        await asyncio.wait_for(gateway.answer_started.wait(), 1)
+        stop_task = asyncio.create_task(runtime.stop(OWNER, run['id']))
+        await asyncio.wait_for(gateway.stop_started.wait(), 1)
+        assert runtime.get(OWNER, run['id'])['status'] == 'stopping'
+        attempted = runtime.clarifications.list(OWNER, run['id'])[0]
+        assert attempted['status'] == 'sending'
+        assert attempted['answer'] == body['answer']
+        assert attempted['other'] is False
+        with closing(journal.connect()) as connection:
+            assert connection.execute('SELECT 1 FROM run_stop_intents WHERE run_id=?',
+                                      (run['id'],)).fetchone()
+        gateway.release_stop.set()
+        assert (await asyncio.wait_for(stop_task, 1))['status'] == 'unknown'
+        gateway.release_answer.set()
+        receipt = await asyncio.wait_for(answer_task, 1)
+        assert receipt['status'] == ('unknown' if ack_lost else 'answered')
+        assert receipt['answer'] == body['answer']
+        assert runtime.get(OWNER, run['id'])['status'] == 'unknown'
+        await runtime._observe_clarification_event(OWNER, run['id'], question)
+        assert runtime.clarifications.list(OWNER, run['id'])[0]['status'] == receipt['status']
+
+        confirmed = {**question, 'status': 'answered', **body,
+                     'updated_at': time.time() + 1}
+        await runtime._observe_clarification_event(
+            OWNER, run['id'], {**confirmed, 'run_id': 'foreign-native'})
+        assert runtime.clarifications.list(OWNER, run['id'])[0]['status'] == receipt['status']
+        await runtime._observe_clarification_event(OWNER, run['id'], confirmed)
+        saved = runtime.clarifications.list(OWNER, run['id'])[0]
+        assert saved['status'] == 'answered'
+        assert saved['answer'] == body['answer']
+        assert saved['updated_at'] > attempted['updated_at']
+        await runtime._observe_clarification_event(
+            OWNER, run['id'], {**confirmed, 'answer': 'Keep current',
+                              'updated_at': confirmed['updated_at'] + 1})
+        await runtime._observe_clarification_event(
+            OWNER, run['id'], {**question, 'updated_at': confirmed['updated_at'] + 2})
+        assert runtime.clarifications.list(OWNER, run['id'])[0] == saved
+        duplicate = await runtime.answer_clarification(
+            OWNER, run['id'], question['question_id'], body)
+        assert duplicate['status'] == 'answered'
+        with pytest.raises(RunConflict):
+            await runtime.answer_clarification(
+                OWNER, run['id'], question['question_id'],
+                {'answer': 'Keep current', 'other': False})
+        assert gateway.answers == [('native-run', question['question_id'], 'Change it', False)]
+        assert runtime.get(OWNER, run['id'])['status'] == 'unknown'
+    finally:
+        gateway.release_answer.set()
+        gateway.release_stop.set()
+        await asyncio.gather(answer_task, *([stop_task] if stop_task else []),
+                             return_exceptions=True)
+        await runtime.close()
+
+
+@pytest.mark.parametrize('terminal,expected', [
+    ('cancelled', 'cancelled'), ('completed', 'expired'), ('failed', 'expired'),
+])
+def test_delayed_pending_event_respects_known_terminal_mapping(tmp_path, terminal, expected):
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    question = pending()
+    bridge.event(OWNER, run, question)
+    journal.finish(OWNER['id'], run['id'], terminal)
+    saved = bridge.event(OWNER, run, question)
+    assert saved['status'] == expected
+    assert saved['answer'] is None
+    assert journal.get(OWNER['id'], run['id'])['status'] == terminal
+    assert bridge.list(OWNER, run['id'])[0]['status'] == expected
 
 
 @pytest.mark.asyncio

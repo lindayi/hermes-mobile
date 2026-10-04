@@ -105,12 +105,26 @@ class ClarificationJournal:
             encoded_choices = json.dumps(item['choices']) if item['choices'] is not None else None
             encoded_answer = (self._encode_answer(item['answer'])
                               if item['answer'] is not None else None)
+            if existing and (
+                    existing['upstream_id'], existing['question'], existing['choices'],
+                    existing['multi_select'], existing['created_at']) != (
+                    item['upstream_id'], item['question'], encoded_choices,
+                    int(item['multi_select']), item['created_at']):
+                return None
+            if item['status'] == 'pending':
+                terminal_status = {
+                    'cancelled': 'cancelled', 'completed': 'expired', 'failed': 'expired',
+                }.get(current['status'])
+                stopped = (current['status'] == 'stopping' or connection.execute(
+                    'SELECT 1 FROM run_stop_intents WHERE run_id=?', (run['id'],)).fetchone())
+                if terminal_status or stopped:
+                    if existing and existing['answer'] is not None:
+                        return self._view(existing)
+                    item = {**item, 'status': terminal_status or 'unknown',
+                            'updated_at': max(item['updated_at'], time.time(),
+                                              math.nextafter(existing['updated_at'], math.inf)
+                                              if existing else item['updated_at'])}
             if existing:
-                if (existing['upstream_id'], existing['question'], existing['choices'],
-                        existing['multi_select'], existing['created_at']) != (
-                        item['upstream_id'], item['question'], encoded_choices,
-                        int(item['multi_select']), item['created_at']):
-                    return None
                 if existing['status'] == 'answered':
                     if (item['status'] != 'answered'
                             or not self._same_answer(existing['answer'], item['answer'])

@@ -321,6 +321,7 @@ class Orchestrator:
                 return self.get(user, rid)
             raise RunConflict('Upstream run ID is unresolved')
         self.journal.finish(user['id'], rid, 'stopping')
+        self.clarifications.mark_pending_unknown(user, rid)
         try:
             async with asyncio.timeout(30):
                 await self.gateway.stop(run['upstream_id'])
