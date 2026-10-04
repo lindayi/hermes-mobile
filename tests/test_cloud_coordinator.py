@@ -4917,6 +4917,182 @@ def test_nonobject_review_task_response_stays_unresolved_until_terminal_evidence
     assert len(corrections) == 1
 
 
+@pytest.mark.parametrize("malformed_observation", ["nonobject", "containers"])
+@pytest.mark.parametrize(
+    "legacy_status", [None, "sent", "pending", "sending", "uncertain"],
+)
+def test_review_report_observation_does_not_suppress_terminal_diagnosis(
+        tmp_path, monkeypatch, malformed_observation, legacy_status):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    store = StateStore(path)
+    task_route = (
+        f"agents/repos/lindayi/hermes-mobile/tasks/{original['task_id']}"
+    )
+    task = api.tasks[original["task_id"]]
+    authentic_task = json.loads(json.dumps(task))
+    get = api.get
+    if malformed_observation == "nonobject":
+        def malformed_task_response(route):
+            if route == task_route:
+                return None
+            return get(route)
+
+        monkeypatch.setattr(api, "get", malformed_task_response)
+    else:
+        task["artifacts"] = 17
+
+    legacy_key = f"16:{HEAD}:review-report"
+    legacy_entry = None
+    if legacy_status:
+        legacy_message = (
+            "The independent-review task response was malformed; its identity and "
+            "terminality remain unverified, so recovery is paused."
+            if malformed_observation == "nonobject"
+            else "The independent-review task's scope/session containers were malformed; "
+            "its saved task remains occupied and recovery is paused until authentic "
+            "container metadata is restored."
+        )
+        legacy_key, legacy_entry = Coordinator(api, store)._outcome(
+            {"issue": 16, "head": HEAD}, "review-report", legacy_message,
+        )
+        store.add_outbox(legacy_key, legacy_entry)
+        store.update_outbox(legacy_key, legacy_status)
+        legacy_entry = store.snapshot()["outbox"][legacy_key]
+        if legacy_status == "sent":
+            api.comments.append({
+                "id": 800000, "user": {"id": OWNER},
+                "body": legacy_entry["body"],
+                "created_at": "2026-10-01T12:00:00Z",
+                "updated_at": "2026-10-01T12:00:00Z",
+            })
+
+    task_posts = api.task_posts
+    review_attempts = api.review_attempts
+    fix_attempts = api.fix_attempts
+    publications = [
+        (route, body) for route, body in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ]
+    observation = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    observed = StateStore(path).action(original["key"])
+    assert observed["status"] == "sent"
+    assert observed["task_id"] == original["task_id"]
+    assert observed["report_observation_error"]
+    assert "agent" in observation["reasons"]
+    assert api.task_posts == task_posts
+    assert api.review_attempts == review_attempts
+    assert api.fix_attempts == fix_attempts
+    assert [
+        (route, body) for route, body in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ] == publications
+    assert not any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for statuses in api.status_log.values() for status in statuses
+    )
+    assert api.graphql_writes == []
+    observation_comments = [
+        comment for comment in api.comments
+        if (
+            "identity and terminality remain unverified"
+            if malformed_observation == "nonobject"
+            else "scope/session containers were malformed"
+        )
+        in comment.get("body", "")
+    ]
+    expected_observation_count = (
+        0 if legacy_status in {"sending", "uncertain"} else 1
+    )
+    assert len(observation_comments) == expected_observation_count
+
+    monkeypatch.setattr(api, "get", get)
+    api.tasks[original["task_id"]] = authentic_task
+    for _ in range(3):
+        Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)
+    recovered = StateStore(path).action(original["key"])
+    corrections = [
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]
+    terminal_comments = [
+        comment for comment in api.comments
+        if "terminal independent-review task did not produce a usable bound report"
+        in comment.get("body", "")
+    ]
+    assert recovered["status"] == "completed"
+    assert recovered["report_error"]
+    assert len(observation_comments) == expected_observation_count
+    assert len(terminal_comments) == 1
+    assert len(corrections) <= 1
+    assert api.task_posts == task_posts + len(corrections)
+    assert api.review_attempts == review_attempts + len(corrections)
+    assert all(
+        correction["task_id"] != original["task_id"]
+        and correction["dispatch_nonce"] != original["dispatch_nonce"]
+        for correction in corrections
+    )
+    assert StateStore(path).action(source_fix["key"])["task_id"] == source_fix["task_id"]
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert api.fix_attempts == fix_attempts
+    assert [
+        (route, body) for route, body in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ] == publications
+    assert not any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for statuses in api.status_log.values() for status in statuses
+    )
+    assert api.graphql_writes == []
+    outbox = StateStore(path).snapshot()["outbox"]
+    assert outbox[f"16:{HEAD}:review-report-terminal"]["status"] == "sent"
+    if legacy_status is None:
+        assert outbox[f"16:{HEAD}:review-report-observation"]["status"] == "sent"
+    elif legacy_status in {"sending", "uncertain"}:
+        assert outbox[legacy_key] == legacy_entry
+    elif legacy_status == "sent":
+        assert outbox[legacy_key] == legacy_entry
+    else:
+        assert outbox[legacy_key]["status"] == "sent"
+
+
+def test_legacy_terminal_review_report_outcome_remains_deduplicated(tmp_path):
+    api, path, _source_fix, _original = _prepare_malformed_review_report(tmp_path)
+    store = StateStore(path)
+    legacy_key, legacy_entry = Coordinator(api, store)._outcome(
+        {"issue": 16, "head": HEAD}, "review-report",
+        "The terminal independent-review task did not produce a usable bound "
+        "report. At most one separately authenticated corrective review may be "
+        "reserved; ambiguous task creation is never replayed.",
+    )
+    store.add_outbox(legacy_key, legacy_entry)
+    store.update_outbox(legacy_key, "sent")
+    legacy_entry = store.snapshot()["outbox"][legacy_key]
+    api.comments.append({
+        "id": 800001, "user": {"id": OWNER},
+        "body": legacy_entry["body"],
+        "created_at": "2026-10-01T12:00:00Z",
+        "updated_at": "2026-10-01T12:00:00Z",
+    })
+
+    for _ in range(3):
+        Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)
+
+    assert len([
+        comment for comment in api.comments
+        if "terminal independent-review task did not produce a usable bound report"
+        in comment.get("body", "")
+    ]) == 1
+    outbox = StateStore(path).snapshot()["outbox"]
+    assert legacy_entry == outbox[legacy_key]
+    assert f"16:{HEAD}:review-report-terminal" not in outbox
+
+
 def _advance_report_recovery_main(api, path):
     StateStore(path)._mutate(lambda state: state["enrollments"]["16"].update(
         authorized_head=HEAD,

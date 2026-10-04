@@ -3125,12 +3125,23 @@ class Coordinator:
     def _notification_outcomes(self, snapshot, reasons):
         outcomes = []
         lifecycle = []
+        legacy_key = f"{snapshot['issue']}:{snapshot['head']}:review-report"
+        legacy_report = self.store.snapshot()["outbox"].get(legacy_key)
+        legacy_report_kind = self._legacy_review_report_kind(
+            legacy_key, legacy_report,
+        )
         for code, message in reasons:
             if code not in {"sensitive", "budget", "up-to-date-policy",
                             "conversation-policy", "status-owner", "scope",
                             "conflict-incompatible", "policy-broken",
                             "review-report", "review-report-exhausted",
+                            "review-report-observation", "review-report-terminal",
                             "review-inventory"}:
+                continue
+            if (code == "review-report-observation"
+                    and legacy_report_kind == "observation"):
+                continue
+            if code == "review-report-terminal" and legacy_report_kind == "terminal":
                 continue
             key, entry = self._outcome(snapshot, code, message)
             outcomes.append((key, entry))
@@ -3168,6 +3179,27 @@ class Coordinator:
         body = f"Hermes coordinator: {message} (head `{snapshot['head']}`).\n\n<!-- {marker} -->"
         return key, {"kind": "outcome", "issue": snapshot["issue"],
                      "head": snapshot["head"], "marker": marker, "body": body}
+
+    @staticmethod
+    def _legacy_review_report_kind(key, entry):
+        if (not isinstance(entry, dict) or not key.endswith(":review-report")
+                or entry.get("kind") != "outcome"
+                or not isinstance(entry.get("body"), str)):
+            return None
+        body = entry["body"]
+        if (
+            "The terminal independent-review task did not produce a usable bound report."
+            in body
+        ):
+            return "terminal"
+        if any(
+            phrase in body for phrase in (
+                "The independent-review task response was malformed;",
+                "The independent-review task's scope/session containers were malformed;",
+            )
+        ):
+            return "observation"
+        return None
 
     def _plan_pull(self, snapshot, actions, *, apply):
         number, head = snapshot["issue"], snapshot["head"]
@@ -3461,7 +3493,7 @@ class Coordinator:
                         ))
                     else:
                         reasons.append((
-                            "review-report",
+                            "review-report-terminal",
                             "The terminal independent-review task did not produce a usable bound report. At most one separately authenticated corrective review may be reserved; ambiguous task creation is never replayed.",
                         ))
         elif report_observation_error:
@@ -3477,7 +3509,7 @@ class Coordinator:
                     "The independent-review task response was malformed; its identity and "
                     "terminality remain unverified, so recovery is paused."
                 )
-            reasons.append(("review-report", message))
+            reasons.append(("review-report-observation", message))
         if not checks_ok:
             reasons.append(("checks", "Every configured required check must complete successfully."))
         if status and not status_owned:
@@ -4133,6 +4165,8 @@ class Coordinator:
             for key, entry in self.store.snapshot()["outbox"].items():
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") not in {"sending", "uncertain"}):
+                    continue
+                if self._legacy_review_report_kind(key, entry) == "observation":
                     continue
                 found = _matching_owner_comment(
                     comments, entry.get("marker"), expected_body=entry.get("body"),

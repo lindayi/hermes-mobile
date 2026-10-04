@@ -653,6 +653,13 @@ GitHub's pull-request state proves auto-merge was enabled.
 The durable outbox posts deduplicated, fixed-text outcome/blocker comments on
 public PRs. It carries no logs, credentials, arbitrary issue text, or private
 runtime data. The owner mobile Inbox is not implemented by this adapter.
+Independent-review report observations and terminal unusable-report diagnoses use
+separate stable issue/head keys (`review-report-observation` and
+`review-report-terminal`), so one lifecycle stage cannot consume the other's
+notice. Historical `review-report` entries are classified by their fixed message:
+a pending observation follows normal delivery, sent observations remain deduplicated,
+and sending/uncertain observations are left unchanged and are not retried. A matching
+legacy terminal entry retains the prior terminal deduplication.
 Before posting, an existing marker in the fully read PR comments proves
 publication only when the numeric author ID matches the authenticated owner used
 for writes and the body exactly matches the planned notification. Copied markers
