@@ -1269,6 +1269,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const article=h('article',{class:'message assistant-message live-message','data-history-run':run.id,'data-history-session':run.session_id},h('div',{class:'message-author'},'Hermes',messageTime(run.created_at,'Started')),h('div',{class:'live-activity-heading'},h('strong',{},'Activity'),status),tools,output);
     const clarificationOwner=state.user?.id;
     const clarificationCards=new Map(),clarificationTimes=new Map();
+    let currentClarificationQuestion=null;
     let clarificationAvailable=false,clarificationUnavailable=false;
     const renderClarification=data=>{
       if(!data || data.run_id!==run.id || data.session_id!==sessionId
@@ -1334,12 +1335,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           let answer,other=false;
           if(freeText)answer=freeText.value.trim();
           else if(data.multi_select){
-            const choices=selected.filter(input=>input.value!=='__other__').map(input=>input.value);
+            const choices=selected.filter(input=>input!==otherInput).map(input=>input.value);
             if(otherInput.checked){const value=otherText.value.trim();if(value)choices.push(value);other=true;}
             answer=choices;
           }else{
             const choice=selected[0];
-            if(choice?.value==='__other__'){answer=otherText.value.trim();other=true;}
+            if(choice===otherInput){answer=otherText.value.trim();other=true;}
             else answer=choice?.value;
           }
           if((typeof answer==='string' && !answer) || (Array.isArray(answer) && !answer.length)
@@ -1361,8 +1362,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             if(result?.question_id!==item.question_id || result?.run_id!==run.id
                 || !['answered','unknown'].includes(result.status))throw new Error('Clarification acknowledgement was invalid.');
             if(result.status==='answered'){
+              const continuationIsCurrent=!stopPending
+                && currentStatus==='waiting_for_clarification'
+                && currentClarificationQuestion===item.question_id;
               renderClarification({...item,status:'answered',answer,other,updated_at:item.updated_at+0.001});
-              apply({status:'running'});connection?.run('running');
+              if(continuationIsCurrent){
+                currentClarificationQuestion=null;
+                apply({status:'running'});connection?.run('running');
+              }
             }else renderClarification({...item,status:'unknown',answer,other,updated_at:item.updated_at+0.001});
           }catch(error){
             if(version!==routeVersion || state.user?.id!==clarificationOwner)return;
@@ -1402,7 +1409,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(version!==routeVersion || state.user?.id!==clarificationOwner || !Array.isArray(result?.items))return;
         clarificationAvailable=result.available===true;
         clarificationUnavailable=!clarificationAvailable;
-        for(const item of result.items)renderClarification(item);
+        for(const item of result.items){
+          renderClarification(item);
+          if(item.status==='pending')currentClarificationQuestion=item.question_id;
+          else if(currentClarificationQuestion===item.question_id)currentClarificationQuestion=null;
+        }
         if(!clarificationAvailable && currentStatus==='waiting_for_clarification'){
           const notice=h('section',{class:'clarification-card clarification-unavailable',role:'status'},
             h('strong',{},'Clarification unavailable'),
@@ -1593,11 +1604,18 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     on('clarification',data=>{
       renderClarification(data);
       if(data.status==='pending'){
+        currentClarificationQuestion=data.question_id;
         apply({status:'waiting_for_clarification'});
         connection?.run('waiting_for_clarification');
       }else if(data.status==='answered'){
-        apply({status:'running'});
-        connection?.run('running');
+        const continuationIsCurrent=!stopPending
+          && currentStatus==='waiting_for_clarification'
+          && currentClarificationQuestion===data.question_id;
+        if(continuationIsCurrent){
+          currentClarificationQuestion=null;
+          apply({status:'running'});
+          connection?.run('running');
+        }
       }
     });
     on('done',data=>apply({...data,status:data.status || 'completed'}));

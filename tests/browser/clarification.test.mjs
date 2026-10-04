@@ -12,6 +12,8 @@ const question=(overrides={})=>({
   choices:['Keep current','Change it'],multi_select:false,status:'pending',
   answer:null,other:null,created_at:1,updated_at:2,...overrides,
 });
+const choicesFor=mode=>mode.endsWith('-sentinel')
+  ? ['__other__','A separate choice']:['Keep current','Change it'];
 async function setup({item=question(),answerResult,waitForAnswer=false,history=[]}={}) {
   const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/',pretendToBeVisual:true});
   const {window:win}=dom,doc=win.document,calls=[],streams=[],gate=deferred();
@@ -26,7 +28,8 @@ async function setup({item=question(),answerResult,waitForAnswer=false,history=[
     calls.push({path,options});
     if(path==='/auth/me')return {user:{id:'owner',status:'ready'}};
     if(path.startsWith('/sessions?'))return {items:[{id:'s',title:'Fixture'}],total:1};
-    if(path.includes('/messages'))return {items:history,run:{id:'r',session_id:'s',status:'running',input:'Original'}};
+    if(path.includes('/messages'))return {items:history,run:{id:'r',session_id:'s',
+      status:item?.status==='pending'?'waiting_for_clarification':'running',input:'Original'}};
     if(path.endsWith('/clarifications') && options.method!=='POST')
       return {available:true,items:item?[item]:[]};
     if(path.endsWith('/answer') && options.method==='POST') {
@@ -70,6 +73,45 @@ test('multi-select and Other return the selected list after explicit submit',asy
     assert.deepEqual(h.calls.find(call=>call.path.endsWith('/answer')).options.body,
       {answer:['Keep current','A third option'],other:true});
   } finally {h.close();}
+});
+
+test('literal __other__ choices and the dedicated Other control submit distinctly',async()=>{
+  for(const mode of ['single','multi']){
+    const h=await setup({item:question({
+      choices:choicesFor(`${mode}-sentinel`),multi_select:mode==='multi',
+    })});
+    try{
+      const card=h.doc.querySelector('.clarification-card');
+      assert.equal(card.querySelectorAll('input:checked').length,0);
+      const offered=[...card.querySelectorAll(
+        `input[type=${mode==='multi'?'checkbox':'radio'}][value="__other__"]`)][0];
+      offered.click();
+      button(card,'Submit answer').click();await tick();
+      const post=h.calls.find(call=>call.path.endsWith('/answer'));
+      assert.ok(post,'a literal offered choice must be submitted as a native choice');
+      assert.deepEqual(post.options.body,{
+        answer:mode==='multi'?['__other__']:'__other__',other:false,
+      });
+      assert.equal(h.calls.filter(call=>call.path==='/runs').length,0);
+    }finally{h.close();}
+
+    const other=await setup({item:question({
+      choices:choicesFor(`${mode}-sentinel`),multi_select:mode==='multi',
+    })});
+    try{
+      const card=other.doc.querySelector('.clarification-card');
+      const otherControl=[...card.querySelectorAll('label.clarification-option')]
+        .at(-1).querySelector('input');
+      otherControl.click();
+      card.querySelector('input[aria-label="Other answer"]').value='A typed answer';
+      button(card,'Submit answer').click();await tick();
+      const post=other.calls.find(call=>call.path.endsWith('/answer'));
+      assert.deepEqual(post.options.body,{
+        answer:mode==='multi'?['A typed answer']:'A typed answer',other:true,
+      });
+      assert.equal(other.calls.filter(call=>call.path==='/runs').length,0);
+    }finally{other.close();}
+  }
 });
 
 test('a rejected multi-select answer keeps the choices and Other draft correctable in place',async()=>{
@@ -151,6 +193,37 @@ test('answer retry is not automatic and reopened sessions rehydrate pending ques
     assert.equal(h.doc.querySelectorAll('.clarification-card').length,1);
     assert.equal(h.calls.filter(call=>call.path.endsWith('/answer')).length,1);
   } finally {h.close();}
+});
+
+test('late answer acknowledgement preserves newer run and clarification state',async()=>{
+  for(const scenario of ['completed','stopping','new-question']){
+    const first=question(),h=await setup({item:first,waitForAnswer:true});
+    try{
+      const card=h.doc.querySelector('.clarification-card');
+      card.querySelector('input[value="Keep current"]').click();
+      button(card,'Submit answer').click();
+      await tick();
+      const stream=h.streams[0];
+      if(scenario==='completed')stream.emit('done',{status:'completed'});
+      else if(scenario==='stopping')stream.emit('status',{status:'stopping'});
+      else stream.emit('clarification',question({
+        question_id:'b'.repeat(32),question:'Choose another plan?',updated_at:3,
+      }));
+      await tick();
+      const status=()=>h.doc.querySelector('.live-activity-heading [role=status]').textContent;
+      const expected=scenario==='new-question'?'waiting_for_clarification':scenario;
+      assert.equal(status(),expected);
+      h.gate.resolve();
+      await tick();
+      assert.equal(status(),expected);
+      assert.match(card.textContent,/Answered/);
+      assert.equal(h.calls.filter(call=>call.path.endsWith('/answer')).length,1);
+      assert.equal(h.calls.filter(call=>call.path==='/runs').length,0);
+      if(scenario==='new-question')
+        assert.ok(h.doc.querySelector(`[data-clarification-id="${'b'.repeat(32)}"]`)
+          ?.querySelector('.clarification-form'));
+    }finally{h.close();}
+  }
 });
 
 test('replayed clarification stays between surrounding public messages',async()=>{
