@@ -390,10 +390,7 @@ def independent_review_valid(head_sha, reviews, threads, *, pull_author_id,
             and action.get("publication_disposition") == "stale"
             and action.get("issue") == issue
             and action.get("head") == head_sha
-            and _review_publication_proven(action)
-            and action["published_review_id"] == selected["review_id"]
-            and hashlib.sha256(action["published_review_body"].encode("utf-8")).hexdigest()
-            == selected["body_sha256"]
+            and _stale_report_correction_matches_review(action, selected, reviews)
             for action in (review_actions or {}).values()):
         return False
     latest_copilot = latest_reviews(reviews, COPILOT_REVIEWER_ID)
@@ -1453,6 +1450,74 @@ def _review_publication_proven(action):
     return action.get("published_review_body") == expected_body
 
 
+def _stale_report_correction_matches_review(action, selected, reviews):
+    if _review_publication_proven(action):
+        return (
+            action["published_review_id"] == selected["review_id"]
+            and hashlib.sha256(
+                action["published_review_body"].encode("utf-8"),
+            ).hexdigest() == selected["body_sha256"]
+        )
+    if (
+            not isinstance(action, dict)
+            or action.get("kind") != "review"
+            or action.get("task_type") != "report-correction"
+            or action.get("status") != "completed"
+            or action.get("publication_state") not in {"sending", "uncertain"}
+            or type(action.get("issue")) is not int
+            or action["issue"] <= 0
+            or not _is_sha(action.get("head"))
+            or not isinstance(action.get("review_report"), dict)
+            or not _valid_timestamp(action.get("review_session_completed_at"))
+            or not isinstance(action.get("publication_intent_body"), str)
+    ):
+        return False
+    report = action["review_report"]
+    if (
+            report.get("schema") != "hermes-independent-review-report-v1"
+            or report.get("nonce") != action.get("dispatch_nonce")
+            or report.get("session_id") != action.get("review_session_id")
+            or report.get("repository") != REPOSITORY
+            or report.get("repository_id") != REPOSITORY_ID
+            or report.get("pr") != action.get("issue")
+            or report.get("anchor_comment_id") != action.get("anchor_comment_id")
+            or report.get("role") != "independent-reviewer"
+            or report.get("head") != action.get("head")
+            or report.get("base") != action.get("main_sha")
+            or report.get("source_start_head") != action.get("source_start_head")
+            or report.get("source_session_id") != action.get("source_session_id")
+            or report.get("source_comment_id") != action.get("source_comment_id")
+            or report.get("verdict") != action.get("report_verdict")
+    ):
+        return False
+    try:
+        expected_body = _published_review_body(report, action["head"])
+        completed = datetime.fromisoformat(
+            action["review_session_completed_at"].replace("Z", "+00:00"),
+        )
+    except (KeyError, TypeError, ValueError, UnicodeError):
+        return False
+    if (action["publication_intent_body"] != expected_body
+            or hashlib.sha256(expected_body.encode("utf-8")).hexdigest()
+            != selected.get("body_sha256")):
+        return False
+    review = next((
+        item for item in reviews
+        if isinstance(item, dict) and item.get("id") == selected.get("review_id")
+    ), None)
+    if (not isinstance(review, dict) or review.get("state") != "COMMENTED"
+            or review.get("commit_id") != action["head"]
+            or not isinstance(review.get("user"), dict)
+            or review["user"].get("id") != OWNER_ID
+            or review.get("body") != expected_body):
+        return False
+    try:
+        submitted = datetime.fromisoformat(review["submitted_at"].replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return submitted > completed
+
+
 def _current_source_handoff(actions, issue, head_sha):
     current = None
     for action in actions.values():
@@ -1627,6 +1692,36 @@ def _review_report_recovery_busy(actions, report_action):
             or correction.get("agent_review_state") not in {None, "done"}
         )
     return False
+
+
+def _later_owner_review_supersedes_report_failure(report_action, reviews, head_sha):
+    if (
+            not isinstance(report_action, dict)
+            or report_action.get("kind") != "review"
+            or report_action.get("status") != "completed"
+            or not report_action.get("report_error")
+            or report_action.get("report_retry_allowed") is not True
+            or report_action.get("head") != head_sha
+            or not _valid_timestamp(report_action.get("report_session_completed_at"))
+    ):
+        return False
+    selected = current_independent_agent_review(
+        reviews, head_sha, owner_id=OWNER_ID, complete=True,
+    )
+    if selected is None:
+        return False
+    review = next((
+        item for item in reviews
+        if isinstance(item, dict) and item.get("id") == selected["review_id"]
+    ), None)
+    try:
+        completed = datetime.fromisoformat(
+            report_action["report_session_completed_at"].replace("Z", "+00:00"),
+        )
+        submitted = datetime.fromisoformat(review["submitted_at"].replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return submitted > completed
 
 
 def _review_task_terminal(action, task):
@@ -2318,6 +2413,7 @@ class Coordinator:
                             and self._review_task_recovery_allowed(action, snapshot, task)
                         )
                         report_session_id = None
+                        report_session_completed_at = None
                         sessions = task.get("sessions")
                         if (isinstance(sessions, list) and len(sessions) == 1
                                 and isinstance(sessions[0], dict)):
@@ -2325,10 +2421,40 @@ class Coordinator:
                             if (isinstance(session_id, str) and session_id
                                     and len(session_id) <= 128):
                                 report_session_id = session_id
+                            if retry_allowed:
+                                report_session_completed_at = sessions[0].get(
+                                    "completed_at",
+                                )
                         message = " ".join(str(error).split())[:256]
                         if not message:
                             message = type(error).__name__
-                        busy = retry_allowed
+                        report_recovery_superseded = False
+                        pull_user = snapshot["pull"].get("user")
+                        failure_with_session = action | {
+                            "report_error": message,
+                            "report_retry_allowed": retry_allowed,
+                            "report_session_completed_at": report_session_completed_at,
+                        }
+                        if retry_allowed and independent_review_valid(
+                                snapshot["head"], snapshot["reviews"],
+                                snapshot["threads"],
+                                pull_author_id=(
+                                    pull_user.get("id")
+                                    if isinstance(pull_user, dict) else None
+                                ),
+                                threads_complete=snapshot["threads_complete"],
+                                reviews_complete=snapshot["reviews_complete"],
+                                issue=number, review_actions=actions,
+                        ):
+                            report_recovery_superseded = (
+                                _later_owner_review_supersedes_report_failure(
+                                    failure_with_session,
+                                    snapshot["reviews"], snapshot["head"],
+                                )
+                            )
+                        if report_recovery_superseded:
+                            snapshot["superseded_report_failure_key"] = key
+                        busy = retry_allowed and not report_recovery_superseded
                         if not apply:
                             continue
                         self.store.update_action(
@@ -2337,6 +2463,7 @@ class Coordinator:
                             report_error_at=self._now_string(),
                             report_observation_error=None,
                             report_session_id=report_session_id,
+                            report_session_completed_at=report_session_completed_at,
                             report_retry_allowed=retry_allowed,
                             report_retry_state=(
                                 "available" if retry_allowed
@@ -2372,7 +2499,9 @@ class Coordinator:
                     continue
                 if status == "completed" and action.get("report_error"):
                     if action.get("task_type") != "report-correction":
-                        busy = _review_report_recovery_busy(actions, action) or busy
+                        if action.get("key") != snapshot.get(
+                                "superseded_report_failure_key"):
+                            busy = _review_report_recovery_busy(actions, action) or busy
                     continue
                 if (status == "completed"
                         and _review_report_correction_parent_needs_recovery(
@@ -3073,16 +3202,26 @@ class Coordinator:
                 )
             else:
                 state = action.get("publication_state")
-                if state == "uncertain":
+                if state in {"sending", "uncertain"}:
                     if (action.get("task_type") == "report-correction"
                             and not self._report_correction_publication_current(action)):
                         return self._stale_report_correction_publication(key, action)
+                    if (state == "sending"
+                            and action.get("task_type") == "report-correction"):
+                        self.store.update_action(
+                            key, "completed", publication_state="uncertain",
+                        )
                     return "uncertain"
                 self.store.update_action(key, "completed", publication_state="sending")
                 action = self.store.action(key) or action
                 if (action.get("task_type") == "report-correction"
                         and not self._report_correction_publication_current(action)):
                     return self._stale_report_correction_publication(key, action)
+                if action.get("task_type") == "report-correction":
+                    self.store.update_action(
+                        key, "completed", publication_intent_body=body,
+                    )
+                    action = self.store.action(key) or action
                 try:
                     response = self.api.write(
                         f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews",
@@ -3240,6 +3379,19 @@ class Coordinator:
             reviews_complete=snapshot["reviews_complete"],
             issue=number, review_actions=actions,
         )
+        report_failure_before_reconcile = _current_review_report_failure(
+            actions, number, head,
+        )
+        report_recovery_superseded = (
+            review_ok
+            and _later_owner_review_supersedes_report_failure(
+                report_failure_before_reconcile, snapshot["reviews"], head,
+            )
+        )
+        if report_recovery_superseded:
+            snapshot["superseded_report_failure_key"] = (
+                report_failure_before_reconcile["key"]
+            )
         sensitive = classify_sensitive_paths(
             snapshot["files"], complete=snapshot["files_complete"],
         )
@@ -3268,6 +3420,20 @@ class Coordinator:
         )
         if apply:
             actions = self.store.actions()
+        if not report_recovery_superseded:
+            report_failure_after_reconcile = _current_review_report_failure(
+                actions, number, head,
+            )
+            report_recovery_superseded = (
+                review_ok
+                and _later_owner_review_supersedes_report_failure(
+                    report_failure_after_reconcile, snapshot["reviews"], head,
+                )
+            )
+            if report_recovery_superseded:
+                snapshot["superseded_report_failure_key"] = (
+                    report_failure_after_reconcile["key"]
+                )
         enrollment = dict(snapshot["enrollment"])
         enrollment["receipt_proofs"] = self.store.snapshot()["enrollments"].get(
             str(number), {},
@@ -3373,7 +3539,8 @@ class Coordinator:
             )
             if report_source is not None else False
         )
-        if (report_failure and report_failure.get("report_retry_allowed") is True
+        if (not report_recovery_superseded
+                and report_failure and report_failure.get("report_retry_allowed") is True
                 and report_correction is None
                 and report_recovery_proven
                 and not inventory_blocked
@@ -3453,7 +3620,7 @@ class Coordinator:
                 f"Independent review was not dispatched because {review_inventory_error}; "
                 "the complete changed-file inventory must fit the supported bounded review contract.",
             ))
-        if report_failure:
+        if report_failure and not report_recovery_superseded:
             correction_publication_pending = (
                 report_correction is not None
                 and report_correction.get("status") == "completed"
@@ -3712,6 +3879,32 @@ class Coordinator:
         if (report_correction
                 and not self._report_correction_dispatch_proven(action, current)):
             return "superseded"
+        if report_correction:
+            reviews = _rest_list(
+                self.api,
+                f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
+            )
+            threads, threads_complete = collect_review_threads(
+                self.api, action["issue"],
+            )
+            pull_user = current.get("user")
+            parent = self.store.action(action.get("correction_of"))
+            if (
+                    independent_review_valid(
+                        action["head"], reviews, threads,
+                        pull_author_id=(
+                            pull_user.get("id") if isinstance(pull_user, dict) else None
+                        ),
+                        threads_complete=threads_complete,
+                        reviews_complete=True,
+                        issue=action["issue"],
+                        review_actions=self.store.actions(),
+                    )
+                    and _later_owner_review_supersedes_report_failure(
+                        parent, reviews, action["head"],
+                    )
+            ):
+                return "superseded"
         if current.get("draft") is not False:
             return "draft"
         if not _pull_identity(current, action):

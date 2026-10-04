@@ -572,9 +572,26 @@ A stale correction's remote COMMENT and success status remain historical
 publications, not rollback targets. Review eligibility, source handoff, and fresh
 status/merge fences reject the selected COMMENT only when its PR, head, positive
 review ID, and exact generated-body digest match that stale correction's durable
-publication. Exhaustion remains recorded and deduplicated; it does not revoke an
+publication. Before a correction COMMENT write, the exact generated body is
+persisted as publication intent. If the response is uncertain and a main/head
+advance makes the action stale before readback, a later authenticated owner
+COMMENT is also rejected only when its exact body matches that intent and its
+submission follows the authenticated completed reviewer session. A different
+later independent review remains eligible. Ambiguous publication is never
+reposted. Exhaustion remains recorded and deduplicated; it does not revoke an
 unrelated legacy review or a later authentic independent review. No new task,
 COMMENT, or success status is emitted to repair this stale publication.
+
+For a positively terminal malformed parent report, the authenticated review
+session completion time is retained with the bounded error and session ID. A
+later positive independent owner COMMENT on the same head supersedes recovery
+only when it is current, unedited, fully authenticated and submitted after that
+session completed. This suppresses the obsolete correction retry, its busy
+state, and its report blocker without deleting or resetting the parent record.
+The same review is rechecked immediately before claiming a correction task. A
+correction already sending, uncertain, sent, or otherwise remotely active keeps
+its separate occupancy lock; later review evidence does not cancel or release
+that task.
 
 The validated completion time, session ID and receipt comment ID remain persisted
 with the receipt head/base and dispatch claim for restart. The authentic session

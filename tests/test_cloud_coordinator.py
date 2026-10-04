@@ -4802,6 +4802,358 @@ def test_stale_correction_rejection_binds_exact_selected_publication(unrelated):
     ) is (unrelated is not None)
 
 
+@pytest.mark.parametrize("replay_state", ["uncertain", "sending"])
+def test_lost_correction_post_is_rejected_after_delayed_readback_and_reload(
+        tmp_path, monkeypatch, replay_state):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    api.next_review_id = 65050
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="pass", files=api.review_file_digests(),
+    )
+    write = api.write
+
+    def lose_comment_response(route, body):
+        response = write(route, body)
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews":
+            assert response["user"]["id"] == OWNER
+            assert response["commit_id"] == HEAD
+            assert response["body"] == body["body"]
+            api.current_main_sha = NEXT_RESULT_HEAD
+            api.pull["base"]["sha"] = NEXT_RESULT_HEAD
+            api.pull.update(mergeable=True, mergeable_state="clean")
+            api.compare_results[f"{BASE}...{NEXT_RESULT_HEAD}"] = _compare_result(
+                BASE, ahead_by=2,
+            )
+            raise ApiError("synthetic response loss", status=503)
+        return response
+
+    monkeypatch.setattr(api, "write", lose_comment_response)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    published_id = api.owner_review_id
+    assert published_id == 65050
+    assert api.owner_review_head_sha == HEAD
+    assert api.owner_review_submitted_at == "2026-10-01T12:10:00Z"
+    uncertain = StateStore(path).action(correction["key"])
+    assert uncertain["publication_state"] == "uncertain"
+    assert uncertain.get("published_review_id") is None
+    if replay_state == "sending":
+        StateStore(path).update_action(
+            correction["key"], "completed", publication_state="sending",
+        )
+
+    get_all = api.get_all
+    hidden_reads = 0
+
+    def hide_delayed_review(route, *, collection=None):
+        nonlocal hidden_reads
+        values = get_all(route, collection=collection)
+        if (route.endswith("/pulls/16/reviews?per_page=100")
+                and hidden_reads < 2):
+            hidden_reads += 1
+            return [item for item in values if item.get("id") != published_id]
+        return values
+
+    monkeypatch.setattr(api, "get_all", hide_delayed_review)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    stale = StateStore(path).action(correction["key"])
+    assert hidden_reads == 2
+    assert stale["publication_disposition"] == "stale"
+    assert stale["publication_state"] == replay_state
+    assert stale.get("published_review_id") is None
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "exhausted"
+    monkeypatch.setattr(api, "get_all", get_all)
+
+    for _ in range(2):
+        result = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )["pull_requests"][0]
+        persisted = StateStore(path)
+        assert result["review_valid"] is False
+        assert result["auto_merge_eligible"] is False
+        assert persisted.action(source_fix["key"])["handoff_state"] != "done"
+        assert persisted.action(original["key"])["report_retry_state"] == "exhausted"
+        assert persisted.action(correction["key"])["publication_disposition"] == "stale"
+    published = next(
+        item for item in _rest_list(
+            api, "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100",
+        ) if item.get("id") == published_id
+    )
+    assert api.owner_review_id == published_id
+    assert api.owner_review_head_sha == HEAD
+    assert api.owner_review_body == stale["publication_intent_body"]
+    assert published["user"]["id"] == OWNER
+    assert published["state"] == "COMMENTED"
+    assert published["commit_id"] == HEAD
+    assert published["updatedAt"] == published["submitted_at"]
+    assert published["lastEditedAt"] is None
+    assert published["includesCreatedEdit"] is False
+    assert sum(
+        route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+        for route, _ in api.writes
+    ) == 1
+    assert api.task_posts == 3
+    assert api.review_attempts == 2
+    assert api.fix_attempts == 1
+    assert not any(
+        item.get("context") == "agent-review" and item.get("state") == "success"
+        for rows in api.status_log.values() for item in rows
+    )
+    assert api.graphql_writes == []
+
+    refresh_owner_review(
+        api, HEAD, review_id=81234, evidence_sha256="d" * 64,
+        submitted_at="2026-10-01T12:12:00Z",
+    )
+    api.active_agent = True
+    later = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+    assert later["review_valid"] is True
+    assert later["auto_merge_eligible"] is False
+    assert StateStore(path).action(source_fix["key"])["handoff_state"] == "done"
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "exhausted"
+    assert api.task_posts == 3
+    assert api.review_attempts == 2
+    assert api.fix_attempts == 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["later-valid", "wrong-head", "wrong-author", "wrong-evidence", "too-early"],
+)
+def test_later_bound_review_supersedes_malformed_parent_without_correction(
+        tmp_path, case):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    review_head = HEAD if case != "wrong-head" else NEXT_RESULT_HEAD
+    evidence = "c" * 64 if case != "wrong-evidence" else "c" * 63
+    submitted = (
+        "2026-10-01T12:08:59Z" if case == "too-early"
+        else "2026-10-01T12:10:00Z"
+    )
+    refresh_owner_review(
+        api, review_head, review_id=81234,
+        evidence_sha256=evidence, submitted_at=submitted,
+    )
+    if case == "later-valid":
+        from deploy.cloud_coordinator import _later_owner_review_supersedes_report_failure
+        parent = StateStore(path).action(original["key"])
+        assert parent["report_session_completed_at"] == "2026-10-01T12:09:00Z"
+        assert _later_owner_review_supersedes_report_failure(
+            parent, _rest_list(api, "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100"),
+            HEAD,
+        )
+    get_all = api.get_all
+
+    def include_green_agent_review(route, *, collection=None):
+        values = get_all(route, collection=collection)
+        if (case == "later-valid"
+                and f"/commits/{api.head_sha}/check-runs?" in route):
+            return values + [{
+                "name": "agent-review", "status": "completed",
+                "conclusion": "success",
+            }]
+        return values
+
+    api.get_all = include_green_agent_review
+    if case == "wrong-author":
+        prior_get_all = api.get_all
+        def change_review_author(route, *, collection=None):
+            values = prior_get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                return [
+                    item | {"user": {"id": 81235, "login": "not-owner"}}
+                    if item.get("id") == 81234 else item
+                    for item in values
+                ]
+            return values
+
+        api.get_all = change_review_author
+
+    task_posts = api.task_posts
+    review_attempts = api.review_attempts
+    expected_superseded = case == "later-valid"
+    summaries = []
+    for _ in range(3):
+        summary = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        summaries.append(summary)
+        if expected_superseded:
+            assert summary["review_valid"] is True
+            assert StateStore(path).action(source_fix["key"])["handoff_state"] == "done"
+        else:
+            assert case != "later-valid" or summary["review_valid"] is False
+
+    corrections = [
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]
+    assert bool(corrections) is not expected_superseded
+    assert api.task_posts == task_posts + (0 if expected_superseded else 1)
+    assert api.review_attempts == review_attempts + (0 if expected_superseded else 1)
+    if expected_superseded:
+        assert all("review-report-terminal" not in summary["reasons"]
+                   for summary in summaries)
+    assert StateStore(path).action(original["key"])["report_retry_state"] == (
+        "available" if expected_superseded else "reserved"
+    )
+    assert api.fix_attempts == 1
+    assert not any(
+        event["reason"] == "execution_exhausted"
+        for event in StateStore(path).snapshot()["lifecycle_events"]
+    )
+
+
+def test_new_bound_review_is_rechecked_before_correction_task_claim(tmp_path):
+    api, path, _, original = _prepare_malformed_review_report(tmp_path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    refresh_owner_review(
+        api, HEAD, review_id=81234, submitted_at="2026-10-01T12:10:00Z",
+    )
+    get_all = api.get_all
+    hidden = False
+    review_reads = 0
+
+    def delay_new_review_until_dispatch(route, *, collection=None):
+        nonlocal hidden, review_reads
+        values = get_all(route, collection=collection)
+        if route.endswith("/pulls/16/reviews?per_page=100"):
+            review_reads += 1
+            if not hidden:
+                hidden = True
+                return [item for item in values if item.get("id") != 81234]
+        if (f"/commits/{api.head_sha}/check-runs?" in route):
+            return values + [{
+                "name": "agent-review", "status": "completed",
+                "conclusion": "success",
+            }]
+        return values
+
+    api.get_all = delay_new_review_until_dispatch
+    task_posts = api.task_posts
+    result = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    assert hidden
+    assert review_reads >= 2
+    assert result["review_valid"] is False
+    assert api.task_posts == task_posts
+    assert api.review_attempts == 1
+    assert not any(
+        action.get("task_type") == "report-correction"
+        for action in StateStore(path).actions().values()
+    )
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "available"
+
+
+def test_later_review_before_malformed_parent_anchor_skips_correction(tmp_path):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    refresh_owner_review(
+        api, HEAD, review_id=81234, submitted_at="2026-10-01T12:10:00Z",
+    )
+    get_all = api.get_all
+
+    def include_green_agent_review(route, *, collection=None):
+        values = get_all(route, collection=collection)
+        if f"/commits/{api.head_sha}/check-runs?" in route:
+            return values + [{
+                "name": "agent-review", "status": "completed",
+                "conclusion": "success",
+            }]
+        return values
+
+    api.get_all = include_green_agent_review
+    task_posts = api.task_posts
+    review_attempts = api.review_attempts
+    result = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    parent = StateStore(path).action(original["key"])
+    correction_anchors = [
+        entry for key, entry in StateStore(path).snapshot()["outbox"].items()
+        if key.startswith(f"review-anchor:16:{HEAD}:correction:")
+    ]
+    assert result["review_valid"] is True
+    assert "review-report-terminal" not in result["reasons"]
+    assert parent["status"] == "completed"
+    assert parent["report_retry_state"] == "available"
+    assert parent["report_session_completed_at"] == "2026-10-01T12:09:00Z"
+    assert StateStore(path).action(source_fix["key"])["handoff_state"] == "done"
+    assert correction_anchors == []
+    assert api.task_posts == task_posts
+    assert api.review_attempts == review_attempts
+    assert api.fix_attempts == 1
+
+
+@pytest.mark.parametrize("occupancy", ["active", "uncertain"])
+def test_later_review_does_not_release_active_or_uncertain_correction(
+        tmp_path, occupancy):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    if occupancy == "active":
+        api.tasks[correction["task_id"]]["state"] = "in_progress"
+    else:
+        StateStore(path).update_action(correction["key"], "uncertain")
+    refresh_owner_review(
+        api, HEAD, review_id=81234, submitted_at="2026-10-01T12:10:00Z",
+    )
+    get_all = api.get_all
+
+    def include_green_agent_review(route, *, collection=None):
+        values = get_all(route, collection=collection)
+        if f"/commits/{api.head_sha}/check-runs?" in route:
+            return values + [{
+                "name": "agent-review", "status": "completed",
+                "conclusion": "success",
+            }]
+        return values
+
+    api.get_all = include_green_agent_review
+    task_posts = api.task_posts
+    review_attempts = api.review_attempts
+    for _ in range(3):
+        summary = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        persisted = StateStore(path)
+        assert summary["review_valid"] is True
+        assert summary["auto_merge_eligible"] is False
+        assert "agent" in summary["reasons"]
+        assert "review-report-terminal" not in summary["reasons"]
+        assert persisted.action(source_fix["key"])["handoff_state"] == "done"
+        assert persisted.action(correction["key"])["status"] == (
+            "sent" if occupancy == "active" else "uncertain"
+        )
+        assert persisted.action(original["key"])["report_retry_state"] == "reserved"
+    assert api.task_posts == task_posts
+    assert api.review_attempts == review_attempts
+    assert api.fix_attempts == 1
+    if occupancy == "active":
+        assert api.tasks[correction["task_id"]]["state"] == "in_progress"
+    assert not any(
+        event["reason"] == "execution_exhausted"
+        for event in StateStore(path).snapshot()["lifecycle_events"]
+    )
+
+
 @pytest.mark.parametrize("stale_on_read", [2, 3], ids=["merge-replan", "final-merge"])
 def test_stale_correction_is_rejected_at_fresh_merge_fences(
         tmp_path, stale_on_read):
