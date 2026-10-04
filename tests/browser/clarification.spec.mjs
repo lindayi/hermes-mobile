@@ -8,15 +8,25 @@ import {createRequire} from 'node:module';
 import {generatedAssets} from './generated-assets.mjs';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
 
-async function fixture(shape,{rejectDuplicate=false,holdAnswer=false}={}) {
+async function fixture(shape,{
+  rejectDuplicate=false,holdAnswer=false,initialRunStatus=null,
+  rehydrateStatus=null,holdRehydrate=false,itemStatus='pending',
+  completeAfterAnswer=false,
+}={}) {
   const temporary=await mkdtemp(join(tmpdir(),'hermes-clarification-browser-'));
   const root=generatedAssets(temporary);
   const answerCalls=[],runCalls=[];
   const streams=[];
+  let currentRunStatus=initialRunStatus;
+  let currentOutput=null;
+  let resolveRehydrateStarted,releaseRehydrate,resolveCompleted;
+  const rehydrateStarted=new Promise(resolve=>{resolveRehydrateStarted=resolve;});
+  const rehydrateGate=new Promise(resolve=>{releaseRehydrate=resolve;});
+  const completed=new Promise(resolve=>{resolveCompleted=resolve;});
   const item={question_id:'a'.repeat(32),run_id:'r',session_id:'s',
     question:'Choose safely?',choices:shape==='open'?null:
       shape.endsWith('-sentinel')?['__other__','A separate choice']:['Keep current','Change it'],
-    multi_select:shape==='multi'||shape==='multi-sentinel',status:'pending',answer:null,other:null,
+    multi_select:shape==='multi'||shape==='multi-sentinel',status:itemStatus,answer:null,other:null,
     created_at:1,updated_at:2};
   let resolveWaiter;
   const waiter=new Promise(resolve=>{resolveWaiter=resolve;});
@@ -49,6 +59,14 @@ async function fixture(shape,{rejectDuplicate=false,holdAnswer=false}={}) {
             return json({detail:'Invalid clarification answer'},422);
           item.status='answered';item.answer=value.answer;item.other=value.other;item.updated_at=3;
           resolveWaiter(value.answer);
+          if(completeAfterAnswer){
+            currentRunStatus='completed';
+            currentOutput=`Native continuation completed: ${value.answer}`;
+            setTimeout(()=>{
+              publish('done',{status:'completed',output:currentOutput});
+              resolveCompleted({status:currentRunStatus,output:currentOutput});
+            },10);
+          }
           if(holdAnswer)await acknowledgement;
           return json({question_id:item.question_id,run_id:'r',status:'answered',answer:value.answer});
         }
@@ -56,8 +74,17 @@ async function fixture(shape,{rejectDuplicate=false,holdAnswer=false}={}) {
       if(path==='/auth/me')return json({user:{id:'owner',status:'ready'}});
       if(path==='/sessions')return json({items:[{id:'s',title:'Clarification fixture'}],total:1});
       if(path.endsWith('/messages'))return json({items:[],run:{id:'r',session_id:'s',
-        status:item.status==='pending'?'waiting_for_clarification':'running',input:'Original'}});
-      if(path.endsWith('/clarifications'))return json({available:true,items:[item]});
+        status:initialRunStatus || (item.status==='pending'?'waiting_for_clarification':'running'),
+        input:'Original'}});
+      if(path.endsWith('/clarifications')){
+        resolveRehydrateStarted();
+        if(holdRehydrate)await rehydrateGate;
+        return json({available:true,items:[item],run_id:'r',
+          ...(rehydrateStatus?{status:rehydrateStatus}:{})});
+      }
+      if(path==='/runs/r'){
+        return json({id:'r',session_id:'s',status:currentRunStatus || 'running',output:currentOutput});
+      }
       if(path.endsWith('/controls'))return json({steering:false,attempts:[]});
       if(path.endsWith('/events')){
         response.writeHead(200,{'Content-Type':'text/event-stream'});
@@ -75,7 +102,8 @@ async function fixture(shape,{rejectDuplicate=false,holdAnswer=false}={}) {
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   return {server,item,answerCalls,runCalls,waiter,answerSubmitted,streamReady,
-    releaseAck:()=>releaseAck(),publish,temporary,
+    rehydrateStarted,completed,streams,releaseAck:()=>releaseAck(),
+    releaseRehydrate:()=>releaseRehydrate(),publish,temporary,
     url:`http://127.0.0.1:${server.address().port}/hermes/`};
 }
 
@@ -127,6 +155,106 @@ test('real mobile browser answers the same synthetic waiting clarification for a
       }
     }
   }finally{await browser.close();}
+});
+
+test('unknown reopened run tracks verified clarification through same-run completion',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const fixtureState=await fixture('single',{
+    initialRunStatus:'unknown',rehydrateStatus:'waiting_for_clarification',
+    holdRehydrate:true,completeAfterAnswer:true,
+  });
+  try{
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(fixtureState.url);
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    await fixtureState.rehydrateStarted;
+    fixtureState.releaseRehydrate();
+    const card=page.locator('.clarification-card');
+    await card.waitFor();
+    await card.getByLabel('Change it').check();
+    await card.getByRole('button',{name:'Submit answer'}).click();
+    assert.equal(await fixtureState.waiter,'Change it');
+    const completion=await fixtureState.completed;
+    assert.equal(completion.status,'completed');
+    assert.equal(fixtureState.streams.length,1);
+    await page.waitForFunction(()=>
+      document.querySelector('.live-activity-heading [role=status]')?.textContent==='completed');
+    assert.match(await page.locator('.live-message .message-body').textContent(),
+      /Native continuation completed: Change it/);
+    assert.equal(fixtureState.answerCalls.length,1);
+    assert.deepEqual(fixtureState.answerCalls,[{answer:'Change it',other:false}]);
+    assert.deepEqual(fixtureState.runCalls,[]);
+    assert.deepEqual(errors,[]);
+    await page.close();
+  }finally{
+    fixtureState.server.closeAllConnections();
+    await new Promise(resolve=>fixtureState.server.close(resolve));
+    await rm(fixtureState.temporary,{recursive:true,force:true});
+    await browser.close();
+  }
+});
+
+test('late clarification reconciliation cannot reconnect after navigation or teardown',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  try{
+    for(const exit of ['navigation','teardown']){
+      const fixtureState=await fixture('single',{
+        initialRunStatus:'unknown',rehydrateStatus:'waiting_for_clarification',
+        holdRehydrate:true,
+      });
+      const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+      try{
+        await page.goto(fixtureState.url);
+        await page.getByRole('button',{name:'Clarification fixture'}).click();
+        await fixtureState.rehydrateStarted;
+        if(exit==='navigation')await page.getByRole('button',{name:'Back to chats'}).click();
+        else await page.close();
+        fixtureState.releaseRehydrate();
+        if(exit==='navigation'){
+          await page.waitForTimeout(50);
+          assert.equal(await page.locator('.clarification-card').count(),0);
+        }else await new Promise(resolve=>setTimeout(resolve,50));
+        assert.equal(fixtureState.streams.length,0);
+        assert.equal(fixtureState.answerCalls.length,0);
+        assert.deepEqual(fixtureState.runCalls,[]);
+      }finally{
+        fixtureState.server.closeAllConnections();
+        await new Promise(resolve=>fixtureState.server.close(resolve));
+        await rm(fixtureState.temporary,{recursive:true,force:true});
+        if(!page.isClosed())await page.close();
+      }
+    }
+  }finally{
+    await browser.close();
+  }
+});
+
+test('terminal unknown remains non-live after clarification rehydration',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const fixtureState=await fixture('single',{
+    initialRunStatus:'unknown',rehydrateStatus:'unknown',itemStatus:'unknown',
+  });
+  try{
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    await page.goto(fixtureState.url);
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    await fixtureState.rehydrateStarted;
+    await page.locator('.clarification-card').waitFor();
+    assert.equal(await page.locator('.clarification-card .clarification-form').count(),0);
+    assert.equal(fixtureState.streams.length,0);
+    assert.equal(fixtureState.answerCalls.length,0);
+    assert.deepEqual(fixtureState.runCalls,[]);
+    await page.close();
+  }finally{
+    fixtureState.server.closeAllConnections();
+    await new Promise(resolve=>fixtureState.server.close(resolve));
+    await rm(fixtureState.temporary,{recursive:true,force:true});
+    await browser.close();
+  }
 });
 
 test('real browser submits literal __other__ choices separately from dedicated Other',{timeout:60000},async()=>{

@@ -1420,6 +1420,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             h('p',{},'This native runtime cannot confirm or answer the pending question. No answer was sent.'));
           article.append(notice);
         }
+        if(result.run_id===run.id && typeof result.status==='string'
+            && ['queued','submitted','running','waiting_for_approval',
+              'waiting_for_clarification','stopping','completed','done','failed',
+              'cancelled','stopped','unknown'].includes(result.status))return result.status;
       }catch(error){
         if(version!==routeVersion || state.user?.id!==clarificationOwner)return;
         clarificationUnavailable=true;
@@ -1528,11 +1532,18 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }
       if(atBottom)messages.scrollTop=messages.scrollHeight;
     };
+    const reconciledStatus=await reconcileClarifications();
+    if(version!==routeVersion || state.user?.id!==clarificationOwner
+        || state.session?.id!==sessionId || run.id!==article.dataset.historyRun
+        || !article.isConnected){
+      initialRestore.finish?.();
+      return;
+    }
+    if(reconciledStatus)run={...run,status:reconciledStatus};
     apply(run);
-    void reconcileClarifications();
     if(wasAtBottom && version===routeVersion && messages.isConnected && !win.getSelection()?.toString())messages.scrollTop=messages.scrollHeight;
     initialRestore.finish?.();
-    if(finalStates.has(run.status))return;
+    if(finalStates.has(currentStatus))return;
     const events=win.EventSource ? new win.EventSource(`/hermes/app-api/runs/${encodeURIComponent(run.id)}/events`) : {addEventListener(){},close(){}};
     stream=events;
     const connectionNotice={};

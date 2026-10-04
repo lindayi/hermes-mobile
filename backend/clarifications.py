@@ -78,6 +78,19 @@ class ClarificationJournal:
             'created_at': row['created_at'], 'updated_at': row['updated_at'],
         }
 
+    @staticmethod
+    def _encode_answer(answer):
+        return json.dumps(answer, separators=(',', ':'), ensure_ascii=False)
+
+    @staticmethod
+    def _same_answer(encoded, answer):
+        if encoded is None:
+            return answer is None
+        try:
+            return json.loads(encoded) == answer
+        except (TypeError, ValueError):
+            return False
+
     def _save(self, user, run, item):
         with closing(self.journal.connect()) as connection, connection:
             connection.execute('BEGIN IMMEDIATE')
@@ -90,7 +103,8 @@ class ClarificationJournal:
                 AND c.question_id=?''',
                 (user['id'], user['profile'], run['id'], item['question_id'])).fetchone()
             encoded_choices = json.dumps(item['choices']) if item['choices'] is not None else None
-            encoded_answer = json.dumps(item['answer']) if item['answer'] is not None else None
+            encoded_answer = (self._encode_answer(item['answer'])
+                              if item['answer'] is not None else None)
             if existing:
                 if (existing['upstream_id'], existing['question'], existing['choices'],
                         existing['multi_select'], existing['created_at']) != (
@@ -98,9 +112,21 @@ class ClarificationJournal:
                         int(item['multi_select']), item['created_at']):
                     return None
                 if existing['status'] == 'answered':
-                    if (item['status'] != 'answered' or existing['answer'] != encoded_answer
+                    if (item['status'] != 'answered'
+                            or not self._same_answer(existing['answer'], item['answer'])
                             or existing['other'] != (int(item['other']) if item['other'] is not None else None)):
                         return self._view(existing)
+                confirmed_attempt = (
+                    existing['status'] in ('sending', 'unknown')
+                    and item['status'] == 'answered'
+                )
+                if confirmed_attempt:
+                    if (existing['answer'] is None
+                            or not self._same_answer(existing['answer'], item['answer'])
+                            or existing['other'] != int(item['other'])):
+                        return self._view(existing)
+                    item = {**item, 'updated_at': max(
+                        item['updated_at'], math.nextafter(existing['updated_at'], math.inf))}
                 if (existing['status'] in ('cancelled', 'expired')
                         and item['status'] != existing['status']):
                     return self._view(existing)
@@ -236,7 +262,7 @@ class ClarificationJournal:
 
     def claim(self, user, run, question_id, body):
         answer = body.get('answer')
-        encoded = json.dumps(answer, separators=(',', ':'), ensure_ascii=False)
+        encoded = self._encode_answer(answer)
         now = time.time()
         with closing(self.journal.connect()) as connection, connection:
             connection.execute('BEGIN IMMEDIATE')
@@ -246,7 +272,8 @@ class ClarificationJournal:
             if row is None:
                 raise KeyError(question_id)
             if row['status'] in ('answered', 'sending'):
-                if row['answer'] != encoded or row['other'] != int(body['other']):
+                if (not self._same_answer(row['answer'], answer)
+                        or row['other'] != int(body['other'])):
                     raise RunConflict('Clarification answer already claimed')
                 if row['status'] in ('answered', 'sending'):
                     return self._view(connection.execute('''SELECT c.*,r.session_id FROM clarifications c

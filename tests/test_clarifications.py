@@ -56,6 +56,41 @@ def test_waiter_answer_is_idempotent_owned_and_replayed_in_original_position(tmp
         bridge.list({'id': 'other-owner', 'profile': 'default'}, run['id'])
 
 
+def test_unicode_multiselect_retry_after_native_answer_event_is_idempotent(tmp_path):
+    import json
+
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    choices = ['Cafe with accented e', 'Tokyo in Japanese']
+    answer = ['Café with accented e', '東京 in Japanese']
+    item = pending(choices=choices, multi_select=True)
+    bridge.event(OWNER, run, item)
+    body = {'answer': answer, 'other': False}
+    claimed, fresh = bridge.claim(OWNER, run, item['question_id'], body)
+    assert fresh and claimed['status'] == 'sending'
+
+    native_answer = {
+        **item, 'status': 'answered', 'answer': answer, 'other': False,
+        'updated_at': claimed['updated_at'] + 1,
+    }
+    observed = bridge.event(OWNER, run, native_answer)
+    assert observed['status'] == 'answered'
+    legacy_answer = json.dumps(answer)
+    assert legacy_answer != bridge._encode_answer(answer)
+    with closing(journal.connect()) as connection, connection:
+        connection.execute('''UPDATE clarifications SET answer=?
+            WHERE user_id=? AND profile=? AND run_id=? AND question_id=?''',
+            (legacy_answer, OWNER['id'], OWNER['profile'], run['id'], item['question_id']))
+
+    duplicate, fresh = bridge.claim(OWNER, run, item['question_id'], body)
+    assert not fresh
+    assert duplicate['status'] == 'answered'
+    assert duplicate['answer'] == answer
+    with pytest.raises(RunConflict):
+        bridge.claim(OWNER, run, item['question_id'],
+                     {'answer': answer, 'other': True})
+
+
 def test_completed_run_history_keeps_question_and_answer_at_the_event_position():
     from backend.native_catalog import _journal_turn
 
@@ -151,6 +186,8 @@ async def test_owned_answer_resolves_the_waiting_native_request_without_new_run(
     try:
         state = await runtime.clarifications_for_run(OWNER, run['id'])
         assert state['available'] is True
+        assert state['run_id'] == run['id']
+        assert state['status'] == 'waiting_for_clarification'
         assert state['items'][0]['status'] == 'pending'
         with pytest.raises(ValueError, match='Invalid clarification'):
             await runtime.answer_clarification(
@@ -323,6 +360,137 @@ async def test_uncertain_answer_is_not_restored_from_pending_native_snapshot(tmp
     state = await bridge.rehydrate(OWNER, run['id'], Gateway(), run)
     assert state['items'][0]['status'] == 'unknown'
     assert state['items'][0]['answer'] == 'Change it'
+
+
+@pytest.mark.asyncio
+async def test_native_confirmation_promotes_recovered_unicode_answer_monotonically(tmp_path):
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    choices = ['Cafe with accented e', 'Tokyo in Japanese']
+    answer = ['Café with accented e', '東京 in Japanese']
+    question = pending(choices=choices, multi_select=True, created_at=20, updated_at=20)
+    bridge.event(OWNER, run, question)
+    body = {'answer': answer, 'other': False}
+    claimed, fresh = bridge.claim(OWNER, run, question['question_id'], body)
+    assert fresh and claimed['status'] == 'sending'
+    bridge.recover()
+    attempted = bridge.list(OWNER, run['id'])[0]
+    assert attempted['status'] == 'unknown'
+
+    native_answer = {
+        **question, 'status': 'answered', 'answer': answer, 'other': False,
+        'updated_at': 25,
+    }
+
+    class Gateway:
+        def require_execution(self):
+            return None
+
+        async def require_clarifications(self):
+            return None
+
+        async def request(self, method, path, **kwargs):
+            assert method == 'GET'
+            assert path == '/v1/runs/native-run'
+            return {'run_id': 'native-run', 'status': 'running',
+                    'clarifications': [native_answer]}
+
+    from backend.orchestration import Orchestrator
+    runtime = Orchestrator(
+        journal, Gateway(), SimpleNamespace(profiles={'default': 'fixture'}))
+    try:
+        state = await runtime.clarifications_for_run(OWNER, run['id'])
+    finally:
+        await runtime.close()
+    confirmed = state['items'][0]
+    assert state['available'] is True
+    assert state['run_id'] == run['id']
+    assert state['status'] == 'running'
+    assert confirmed['status'] == 'answered'
+    assert confirmed['answer'] == answer
+    assert confirmed['other'] is False
+    assert confirmed['updated_at'] >= attempted['updated_at']
+    assert journal.get('owner', run['id'])['status'] == 'running'
+    duplicate, fresh = bridge.claim(OWNER, run, question['question_id'], body)
+    assert not fresh
+    assert duplicate['status'] == 'answered'
+    with pytest.raises(RunConflict):
+        bridge.claim(OWNER, run, question['question_id'],
+                     {'answer': ['Café with accented e', 'Another answer'], 'other': False})
+    with pytest.raises(RunConflict):
+        bridge.claim(OWNER, run, question['question_id'],
+                     {'answer': answer, 'other': True})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('answer', 'other'), [
+    (['Café with accented e', 'A different answer'], False),
+    (['Café with accented e', '東京 in Japanese'], True),
+])
+async def test_conflicting_native_answer_does_not_replace_recovered_attempt(
+        tmp_path, answer, other):
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    choices = ['Cafe with accented e', 'Tokyo in Japanese']
+    attempted_answer = ['Café with accented e', '東京 in Japanese']
+    question = pending(choices=choices, multi_select=True, created_at=20, updated_at=20)
+    bridge.event(OWNER, run, question)
+    bridge.claim(OWNER, run, question['question_id'],
+                 {'answer': attempted_answer, 'other': False})
+    bridge.recover()
+    attempted = bridge.list(OWNER, run['id'])[0]
+
+    class Gateway:
+        def require_execution(self):
+            return None
+
+        async def require_clarifications(self):
+            return None
+
+        async def request(self, method, path, **kwargs):
+            return {'run_id': 'native-run', 'status': 'running',
+                    'clarifications': [{
+                        **question, 'status': 'answered', 'answer': answer,
+                        'other': other, 'updated_at': 25,
+                    }]}
+
+    state = await bridge.rehydrate(OWNER, run['id'], Gateway(), run)
+    retained = state['items'][0]
+    assert retained['status'] == 'unknown'
+    assert retained['answer'] == attempted_answer
+    assert retained['other'] is False
+    assert retained['updated_at'] == attempted['updated_at']
+
+
+def test_recovered_confirmation_cannot_cross_owner_profile_run_or_question(tmp_path):
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    answer = ['Café with accented e', '東京 in Japanese']
+    question = pending(
+        choices=['Cafe with accented e', 'Tokyo in Japanese'],
+        multi_select=True, created_at=20, updated_at=20)
+    bridge.event(OWNER, run, question)
+    bridge.claim(OWNER, run, question['question_id'], {'answer': answer, 'other': False})
+    bridge.recover()
+    confirmed = bridge._normalize({
+        **question, 'status': 'answered', 'answer': answer, 'other': False,
+        'updated_at': 25,
+    }, 'native-run')
+
+    assert bridge._save({**OWNER, 'profile': 'other'}, run, confirmed) is None
+    assert bridge._save(OWNER, run, {**confirmed, 'upstream_id': 'different-upstream'}) is None
+    assert bridge._save(
+        OWNER, {**run, 'upstream_id': 'different-upstream'}, confirmed) is None
+    assert bridge._save(OWNER, run, {**confirmed, 'question': 'Different question'}) is None
+    with pytest.raises(KeyError):
+        bridge._save({**OWNER, 'id': 'other-owner'}, run, confirmed)
+    with pytest.raises(KeyError):
+        bridge._save(OWNER, {**run, 'id': 'other-run'}, confirmed)
+
+    retained = bridge.list(OWNER, run['id'])[0]
+    assert retained['status'] == 'unknown'
+    assert retained['answer'] == answer
+    assert retained['other'] is False
 
 
 @pytest.mark.asyncio

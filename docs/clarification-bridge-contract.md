@@ -43,6 +43,29 @@ supports the pinned single-question ABI, not a newer batched-question schema.
   outcomes do not cause automatic retries. Question and answer text are rendered
   as plain text and remain in the session's chronological activity history.
 
+## Issue #77 reliability correction
+
+The supervised correction baseline is PR #78 head
+`a4ddbb9296b659afea161ab4cca239a81dfe9a34` over `main`
+`f718cc3ec2f227184d2875a1e7c94047af54c574`. Scope is limited to safe Unicode
+answer retries, exact native confirmation after an uncertain send, and tracking
+an initially unknown run after authenticated clarification rehydration. It does
+not change native activation, unrelated controls or orchestration behavior
+outside this correction, or terminal unknown outcomes.
+
+Acceptance cases: (1) A multi-select answer containing literal Unicode remains
+idempotent when the answered native event arrives before the POST acknowledgement,
+including rows written with legacy default JSON encoding; a changed answer or
+Other flag still conflicts. (2) Recovery may promote an attempted answer from
+unknown to answered only when the authenticated snapshot matches its owned
+profile, local/native run, question, exact answer, and Other flag. The observation
+time remains monotonic and no answer is resent; contradictory or unavailable
+evidence leaves the attempt unknown. (3) A reopened unknown run waits for verified
+clarification reconciliation before choosing terminal return versus live tracking.
+The same-run answer can complete through the existing event/status path, while
+navigation, account changes, teardown, unavailable snapshots, and terminal
+unknown runs cannot be reopened or tracked as live.
+
 ## Acceptance cases
 
 1. A synthetic API-server agent calls the pinned clarification tool on a worker

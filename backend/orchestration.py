@@ -139,9 +139,13 @@ class Orchestrator:
             if pending:
                 self.journal.set_active_status(
                     user['id'], rid, 'waiting_for_clarification', upstream_id=run['upstream_id'])
-        elif native_status == 'running' and run['status'] == 'waiting_for_clarification':
+        elif native_status == 'running' and run['status'] in ('waiting_for_clarification', 'unknown'):
             self.journal.set_active_status(user['id'], rid, 'running', upstream_id=run['upstream_id'])
-        return {'available': result['available'], 'items': result['items']}
+        current = self.get(user, rid)
+        return {
+            'run_id': current['id'], 'status': current['status'],
+            'available': result['available'], 'items': result['items'],
+        }
 
     async def answer_clarification(self, user, rid, question_id, body):
         run = self.get(user, rid)
