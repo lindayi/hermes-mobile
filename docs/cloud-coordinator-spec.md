@@ -519,9 +519,12 @@ correction publication but before the parent audit transition, reconciliation
 idempotently changes `report_retry_state` from `reserved` to `recovered` only when
 the completed correction, parent, distinct task/session/nonce/anchor, exact head,
 source bindings, and persisted owner publication all match. A pass also requires
-its `agent-review` publication to be durably complete. This repair does not repeat
-task dispatch, formal review publication, status publication, or fixer work;
-uncertain publication and unbound or mismatched parents remain unresolved.
+its `agent-review` publication to be durably complete; a `changes_requested`
+correction is complete with its durably recorded formal COMMENT publication and
+does not require or publish an `agent-review` success status. This parent-only
+repair does not repeat task dispatch, formal review publication, status
+publication, or fixer work; uncertain publication and unbound or mismatched
+parents remain unresolved.
 
 If main advances after the original malformed report is durably recorded, its
 saved `main_sha` remains unchanged as audit evidence. A retry is eligible only
@@ -535,10 +538,12 @@ without publishing its report or an `agent-review` success status.
 
 The corrective anchor marker, outbox key, and reviewer nonce include the
 reservation's current-main SHA as well as the immutable parent failure identity.
-If main advances before an anchor is claimed, the old sent or uncertain anchor
-remains unchanged and a distinct anchor may be reserved for the new main. Once a
-correction task is claimed, including an uncertain creation, a later main advance
-does not authorize another correction task.
+If main advances before an anchor is claimed, an uncertain anchor remains
+unchanged, while a positively sent obsolete preclaim anchor may be compacted into
+the existing bounded outbox tombstones; its public marker remains the replay
+evidence. A distinct anchor may be reserved for the new main. Claimed/current-needed
+anchors remain retained. Once a correction task is claimed, including an uncertain
+creation, a later main advance does not authorize another correction task.
 
 Every pending correction publication replay freshly checks the live PR identity,
 head, current main, and existing correction authority immediately before a formal
@@ -595,8 +600,11 @@ policy is exactly `source-ci` (Actions app 15368), `integration-tests`,
 and required conversation resolution. Missing, extra, or differently app-bound
 required contexts fail closed. All four required checks must independently report
 success; skipped, cancelled, missing, pending, failed, or incomplete checks are not
-green. The coordinator never writes `integration-tests`, `source-ci`, or
-`agent-review` statuses. Branch rules are collected
+green. The coordinator never writes `integration-tests` or `source-ci` statuses.
+It may write `agent-review` success only after an independent-review report
+passes strict exact-head and authenticated-report validation plus complete,
+independently verified file-inventory checks; that status is not a substitute for
+independent review or any other required context. Branch rules are collected
 with explicit `per_page=100` and `page` pagination, bounded to 100 pages; only a
 short final page proves completion. Errors (including an unavailable rules
 endpoint), malformed pages/policy fields, or exhaustion of the bound fail closed.

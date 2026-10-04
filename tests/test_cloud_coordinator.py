@@ -4801,12 +4801,27 @@ def test_correction_anchor_identity_changes_if_main_advances_before_claim(
         (key, entry) for key, entry in StateStore(path).snapshot()["outbox"].items()
         if key.startswith(f"review-anchor:16:{HEAD}:correction:")
     ]
-    assert len(anchors) == 2
-    assert anchors[0][0] != anchors[1][0]
-    assert anchors[0][1]["marker"] != anchors[1][1]["marker"]
-    assert f"base `{NEXT_RESULT_HEAD}`" in anchors[1][1]["body"]
-    assert anchors[0][1]["status"] == first_publication
-    assert anchors[1][1]["status"] == "sent"
+    assert len(anchors) == (2 if first_publication == "uncertain" else 1)
+    current_anchor = next(
+        item for item in anchors if item[1].get("main_sha") == NEXT_RESULT_HEAD
+    )
+    assert current_anchor[0] != first_anchor[0]
+    assert current_anchor[1]["marker"] != first_anchor[1]["marker"]
+    assert f"base `{NEXT_RESULT_HEAD}`" in current_anchor[1]["body"]
+    assert current_anchor[1]["status"] == "sent"
+    if first_publication == "sent":
+        assert first_anchor[0] not in StateStore(path).snapshot()["outbox"]
+        assert hashlib.sha256(first_anchor[0].encode()).hexdigest()[:32] in (
+            StateStore(path).snapshot()["retired"]["16"]["outbox"]
+        )
+    else:
+        assert StateStore(path).snapshot()["outbox"][first_anchor[0]][
+            "status"
+        ] == "uncertain"
+    assert sum(
+        first_anchor[1]["marker"] in comment.get("body", "")
+        for comment in api.comments
+    ) == (1 if first_publication == "sent" else 0)
     assert len(attempted_anchors) == 2, (attempted_anchors, api.writes)
 
     for _ in range(3):
@@ -4897,6 +4912,12 @@ def test_report_correction_is_not_published_after_its_snapshot_advances(
          if "review-anchor" in comment.get("body", "").lower()],
     )
     correction = corrections[0]
+    claimed_anchor = next(
+        (key, entry) for key, entry in StateStore(path).snapshot()["outbox"].items()
+        if entry.get("kind") == "review-anchor"
+        and entry.get("correction") is True
+        and entry.get("comment_id") == correction["anchor_comment_id"]
+    )
     api.complete_review_task(
         correction["task_id"], correction,
         source_action=StateStore(path).action(source_fix["key"]),
@@ -4916,6 +4937,9 @@ def test_report_correction_is_not_published_after_its_snapshot_advances(
 
     stale = StateStore(path).action(correction["key"])
     if advance == "main":
+        retained_anchor = StateStore(path).snapshot()["outbox"].get(claimed_anchor[0])
+        assert retained_anchor is not None
+        assert retained_anchor["comment_id"] == correction["anchor_comment_id"]
         assert stale["status"] == "completed"
         assert "reservation snapshot is no longer current" in stale["report_error"]
         assert stale.get("review_report") is None
@@ -5131,8 +5155,15 @@ def test_pending_correction_replay_rechecks_fresh_main_before_publication(
     ] == writes
 
 
+@pytest.mark.parametrize(("verdict", "findings"), [
+    ("pass", []),
+    ("changes_requested", [{
+        "path": "frontend/styles.css",
+        "comment": "Keep this correction bounded and preserve the current behavior.",
+    }]),
+], ids=["pass", "negative"])
 def test_uncertain_correction_review_publication_reads_back_without_reposting(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, verdict, findings):
     api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
     _advance_report_recovery_main(api, path)
     for _ in range(3):
@@ -5144,7 +5175,7 @@ def test_uncertain_correction_review_publication_reads_back_without_reposting(
     api.complete_review_task(
         correction["task_id"], correction,
         source_action=StateStore(path).action(source_fix["key"]),
-        verdict="pass", files=api.review_file_digests(),
+        verdict=verdict, findings=findings, files=api.review_file_digests(),
     )
     write = api.write
 
@@ -5168,6 +5199,11 @@ def test_uncertain_correction_review_publication_reads_back_without_reposting(
     assert persisted.action(correction["key"])["publication_state"] == "done"
     assert persisted.action(correction["key"])["agent_review_state"] == "done"
     assert persisted.action(original["key"])["report_retry_state"] == "recovered"
+    if verdict == "changes_requested":
+        assert not any(
+            status.get("context") == "agent-review" and status.get("state") == "success"
+            for statuses in api.status_log.values() for status in statuses
+        )
     assert len([
         route for route, _ in api.writes
         if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
@@ -5283,8 +5319,15 @@ def test_review_report_recovery_bounds_external_session_metadata(
     assert path.stat().st_size <= MAX_STATE_BYTES
 
 
+@pytest.mark.parametrize(("verdict", "findings"), [
+    ("pass", []),
+    ("changes_requested", [{
+        "path": "frontend/styles.css",
+        "comment": "Keep this correction bounded and preserve the current behavior.",
+    }]),
+], ids=["pass", "negative"])
 def test_completed_report_correction_repairs_parent_after_publication_crash(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, verdict, findings):
     api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
     _advance_report_recovery_main(api, path)
     for _ in range(3):
@@ -5296,7 +5339,9 @@ def test_completed_report_correction_repairs_parent_after_publication_crash(
     api.complete_review_task(
         correction["task_id"], correction,
         source_action=StateStore(path).action(source_fix["key"]),
-        verdict="pass",
+        verdict=verdict,
+        findings=findings,
+        files=api.review_file_digests(),
     )
 
     update_action = StateStore.update_action
@@ -5309,7 +5354,9 @@ def test_completed_report_correction_repairs_parent_after_publication_crash(
 
     monkeypatch.setattr(StateStore, "update_action", crash_before_parent_recovery)
     with pytest.raises(RuntimeError, match="injected crash"):
-        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )
     monkeypatch.setattr(StateStore, "update_action", update_action)
 
     after_crash = StateStore(path)
@@ -5352,11 +5399,143 @@ def test_completed_report_correction_repairs_parent_after_publication_crash(
         status for statuses in api.status_log.values() for status in statuses
         if status.get("context") == "agent-review" and status.get("state") == "success"
     ]) == agent_statuses
-    assert (api.task_posts, api.review_attempts, api.fix_attempts) == tasks
+    if verdict == "changes_requested":
+        assert agent_statuses == 0
+    if verdict == "changes_requested":
+        assert (api.task_posts, api.review_attempts, api.fix_attempts) == (
+            tasks[0] + 1, tasks[1], tasks[2] + 1,
+        )
+    else:
+        assert (api.task_posts, api.review_attempts, api.fix_attempts) == tasks
     assert len([
         comment for comment in api.comments
         if "usable bound report" in comment.get("body", "")
     ]) == outcomes == 1
+
+
+def test_obsolete_sent_preclaim_correction_anchors_remain_bounded(
+        tmp_path, monkeypatch):
+    import deploy.cloud_coordinator as coordinator_module
+
+    monkeypatch.setattr(coordinator_module, "TOMBSTONE_LIMIT", 8)
+    api, path, _, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    initial_attempts = api.review_attempts
+
+    main_shas = [CURRENT_MAIN]
+    for index in range(12):
+        main_sha = f"{index + 100:040x}"
+        main_shas.append(main_sha)
+        api.current_main_sha = main_sha
+        api.pull["base"]["sha"] = main_sha
+        api.compare_results[f"{BASE}...{main_sha}"] = _compare_result(
+            BASE, ahead_by=index + 2,
+        )
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )
+        state = StateStore(path).snapshot()
+        anchors = [
+            (key, entry) for key, entry in state["outbox"].items()
+            if key.startswith(f"review-anchor:16:{HEAD}:correction:")
+        ]
+        assert len(anchors) <= 1
+        assert anchors[0][1]["main_sha"] == main_sha
+        assert anchors[0][1]["status"] == "sent"
+        assert len(state["retired"]["16"]["outbox"]) <= 8
+        assert api.review_attempts == initial_attempts
+        assert not any(
+            action.get("task_type") == "report-correction"
+            for action in state["actions"].values()
+        )
+
+    saved_parent = StateStore(path).action(original["key"])
+    assert saved_parent["report_retry_state"] == "available"
+    comment_count = len([
+        comment for comment in api.comments
+        if "Separately reserved corrective independent-review anchor"
+        in comment.get("body", "")
+    ])
+
+    stale_main = main_shas[1]
+    api.current_main_sha = stale_main
+    api.pull["base"]["sha"] = stale_main
+    api.compare_results[f"{BASE}...{stale_main}"] = _compare_result(
+        BASE, ahead_by=2,
+    )
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    state = StateStore(path).snapshot()
+    replayed = [
+        entry for entry in state["outbox"].values()
+        if entry.get("kind") == "review-anchor"
+        and entry.get("correction") is True
+        and entry.get("main_sha") == stale_main
+    ]
+    assert len(replayed) == 1
+    assert replayed[0]["status"] == "sent"
+    assert len([
+        comment for comment in api.comments
+        if "Separately reserved corrective independent-review anchor"
+        in comment.get("body", "")
+    ]) == comment_count
+    corrections = [
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]
+    assert len(corrections) == 1
+    assert api.review_attempts == initial_attempts + 1
+
+
+def test_retirement_preserves_unresolved_and_claimed_correction_anchors(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    statuses = ("pending", "sending", "uncertain")
+    keys = {}
+
+    def seed(state):
+        for index, status in enumerate(statuses):
+            key = f"review-anchor:16:{HEAD}:correction:unresolved-{status}"
+            keys[status] = key
+            state["outbox"][key] = {
+                "kind": "review-anchor", "issue": 16, "head": HEAD,
+                "main_sha": f"{index + 1:040x}", "correction": True,
+                "status": status, "marker": f"marker-{status}",
+                "body": f"anchor {status}",
+            }
+        keys["claimed"] = f"review-anchor:16:{HEAD}:correction:claimed"
+        state["outbox"][keys["claimed"]] = {
+            "kind": "review-anchor", "issue": 16, "head": HEAD,
+            "main_sha": BASE, "correction": True, "comment_id": 1234,
+            "status": "sent", "marker": "claimed-marker", "body": "claimed",
+        }
+        keys["obsolete"] = f"review-anchor:16:{HEAD}:correction:sent"
+        state["outbox"][keys["obsolete"]] = {
+            "kind": "review-anchor", "issue": 16, "head": HEAD,
+            "main_sha": "e" * 40, "correction": True, "status": "sent",
+            "marker": "preclaim-marker", "body": "obsolete preclaim anchor",
+        }
+        state["actions"]["uncertain-correction"] = {
+            "issue": 16, "head": HEAD, "main_sha": BASE,
+            "kind": "review", "task_type": "report-correction",
+            "anchor_comment_id": 1234, "task_id": "unknown-task",
+            "status": "uncertain",
+        }
+
+    store._mutate(seed)
+    store.retire(16, HEAD, current_main_sha=CURRENT_MAIN)
+
+    state = StateStore(store.path).snapshot()
+    for status in statuses:
+        assert state["outbox"][keys[status]]["status"] == status
+    assert state["outbox"][keys["claimed"]]["comment_id"] == 1234
+    obsolete_key = keys["obsolete"]
+    assert obsolete_key not in state["outbox"]
+    assert hashlib.sha256(obsolete_key.encode()).hexdigest()[:32] in (
+        state["retired"]["16"]["outbox"]
+    )
+    assert state["actions"]["uncertain-correction"]["task_id"] == "unknown-task"
 
 
 def test_review_report_correction_rejects_reused_task_id_without_reposting(tmp_path):

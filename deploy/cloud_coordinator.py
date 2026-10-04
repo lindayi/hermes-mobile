@@ -636,6 +636,7 @@ def review_anchor_request(snapshot, source_action, *, retry_of=None):
     )
     return {
         "kind": "review-anchor", "issue": snapshot["issue"], "head": snapshot["head"],
+        "main_sha": snapshot["main_sha"], "correction": retry_of is not None,
         "key": (
             f"review-anchor:{snapshot['issue']}:{snapshot['head']}"
             if retry_of is None else
@@ -2983,9 +2984,12 @@ class Coordinator:
         if action.get("publication_disposition") == "stale":
             return "stale"
         publications_were_durable = (
-            action.get("report_verdict") == "pass"
+            action.get("report_verdict") in {"pass", "changes_requested"}
             and action.get("publication_state") == "done"
             and action.get("agent_review_state") == "done"
+            and _review_report_correction_parent_needs_recovery(
+                self.store.actions(), action,
+            )
         )
         body = _published_review_body(action["review_report"], action["head"])
         if action.get("publication_state") != "done":
@@ -3986,11 +3990,15 @@ class Coordinator:
         summaries = []
         for pr_plan, snapshot in zip(plan["pull_requests"], plan["snapshots"]):
             if pr_plan.get("terminal"):
-                self.store.retire(snapshot["issue"], snapshot["head"])
+                self.store.retire(
+                    snapshot["issue"], snapshot["head"], snapshot["main_sha"],
+                )
                 summaries.append(self._summary(pr_plan))
                 continue
             # Compact first so retired records cannot block new evidence at capacity.
-            self.store.retire(snapshot["issue"], snapshot["head"])
+            self.store.retire(
+                snapshot["issue"], snapshot["head"], snapshot["main_sha"],
+            )
             # Handoff mutations require the successfully committed scan above.
             for key in pr_plan.get("handoffs", ()):
                 handoff = self.store.action(key)
@@ -4012,10 +4020,19 @@ class Coordinator:
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") not in {"sending", "uncertain"}):
                     continue
-                found = _contains_marker(
+                found = _matching_owner_comment(
                     comments, entry.get("marker"), expected_body=entry.get("body"),
                 )
-                self.store.update_outbox(key, "sent" if found else "uncertain")
+                self.store.update_outbox(
+                    key, "sent" if found else "uncertain",
+                    **(
+                        {"comment_id": found["id"]}
+                        if (isinstance(found, dict)
+                            and type(found.get("id")) is int
+                            and found["id"] > 0)
+                        else {}
+                    ),
+                )
             for key, entry in self.store.snapshot()["outbox"].items():
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") != "pending"):
@@ -4024,9 +4041,19 @@ class Coordinator:
                     self.store.update_outbox(key, "superseded")
                     continue
                 marker = entry.get("marker")
-                if _contains_marker(comments, marker, expected_body=entry.get("body")):
+                existing = _matching_owner_comment(
+                    comments, marker, expected_body=entry.get("body"),
+                )
+                if existing is not None:
                     # The authenticated, unaltered comment exists; do not duplicate it.
-                    self.store.update_outbox(key, "sent")
+                    self.store.update_outbox(
+                        key, "sent",
+                        **(
+                            {"comment_id": existing["id"]}
+                            if type(existing.get("id")) is int and existing["id"] > 0
+                            else {}
+                        ),
+                    )
                     continue
                 self.store.update_outbox(key, "sending")
                 try:
@@ -4040,7 +4067,10 @@ class Coordinator:
                 proven = (isinstance(response, dict)
                           and type(response.get("id")) is int and response["id"] > 0
                           and _contains_marker([response], marker, expected_body=entry["body"]))
-                self.store.update_outbox(key, "sent" if proven else "uncertain")
+                self.store.update_outbox(
+                    key, "sent" if proven else "uncertain",
+                    **({"comment_id": response["id"]} if proven else {}),
+                )
             for key in pr_plan.get("review_publications", ()):
                 action = self.store.action(key)
                 if (action and action.get("kind") == "review"
@@ -4092,7 +4122,9 @@ class Coordinator:
                     pr_plan["reasons"] = list(dict.fromkeys(
                         pr_plan["reasons"] + [f"auto-merge-{current_plan}"],
                     ))
-            self.store.retire(snapshot["issue"], snapshot["head"])
+            self.store.retire(
+                snapshot["issue"], snapshot["head"], snapshot["main_sha"],
+            )
             summaries.append(self._summary(pr_plan))
         return summaries
 
@@ -4915,17 +4947,17 @@ class StateStore:
             return True
         return self._mutate(add)
 
-    def update_outbox(self, key, status):
+    def update_outbox(self, key, status, **fields):
         def update(data):
             if key in data["outbox"]:
-                data["outbox"][key]["status"] = status
+                data["outbox"][key].update({"status": status, **fields})
         self._mutate(update)
 
     def status_generation_floor(self, issue):
         tombstone = self._load()["retired"].get(str(issue), {})
         return tombstone.get("status_generation", 0)
 
-    def retire(self, issue, current_head):
+    def retire(self, issue, current_head, current_main_sha=None):
         """Compact positively terminal records into bounded per-PR tombstones.
 
         Unresolved claims, current-head records of an active enrollment, the
@@ -4957,9 +4989,59 @@ class StateStore:
                 elif action.get("kind") != "fix" and action.get("status") != "blocked":
                     tombstone["actions"].append(_tombstone_digest(key))
             for key, entry in list(data["outbox"].items()):
+                anchor_main_sha = entry.get("main_sha")
+                if not _is_sha(anchor_main_sha):
+                    body = entry.get("body")
+                    match = (
+                        re.search(
+                            r" at exact head `([0-9a-f]{40})` against base "
+                            r"`([0-9a-f]{40})`\.\n",
+                            body,
+                        )
+                        if isinstance(body, str) else None
+                    )
+                    anchor_main_sha = (
+                        match.group(2)
+                        if match and match.group(1) == entry.get("head") else None
+                    )
+                claimed_anchor = (
+                    entry.get("kind") == "review-anchor"
+                    and entry.get("correction") is True
+                    and _is_sha(anchor_main_sha)
+                    and any(
+                        action.get("issue") == issue
+                        and action.get("head") == entry.get("head")
+                        and action.get("kind") == "review"
+                        and action.get("task_type") == "report-correction"
+                        and (
+                            action.get("main_sha") == anchor_main_sha
+                            or (
+                                type(entry.get("comment_id")) is int
+                                and action.get("anchor_comment_id")
+                                == entry.get("comment_id")
+                            )
+                        )
+                        for action in data["actions"].values()
+                        if isinstance(action, dict)
+                    )
+                )
+                obsolete_preclaim_anchor = (
+                    not inactive
+                    and entry.get("status") == "sent"
+                    and entry.get("kind") == "review-anchor"
+                    and (
+                        entry.get("correction") is True
+                        or ":correction:" in key
+                    )
+                    and _is_sha(current_main_sha)
+                    and _is_sha(anchor_main_sha)
+                    and anchor_main_sha != current_main_sha
+                    and not claimed_anchor
+                )
                 if (entry.get("issue") != issue
                         or entry.get("status") not in {"sent", "superseded"}
-                        or (not inactive and entry.get("head") == current_head)):
+                        or (not inactive and entry.get("head") == current_head
+                            and not obsolete_preclaim_anchor)):
                     continue
                 del data["outbox"][key]
                 changed = True
