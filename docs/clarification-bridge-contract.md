@@ -79,6 +79,12 @@ the first accepted answer stays immutable, and the same native run continues
 without duplicate answer or run dispatch. Overlapping snapshots serialize, and
 stale waiting evidence cannot reopen a stopping or terminal run.
 
+The bounded race follow-up starts from PR #78 head
+`71dd092fcd55cbcba76b75e740933b6c70167316` over main
+`f718cc3ec2f227184d2875a1e7c94047af54c574`. It retains the preceding correction
+and only adds owned-run serialization for native snapshots, answer acknowledgements,
+clarification events, terminal events, and refresh reconciliation.
+
 ## Acceptance cases
 
 1. A synthetic API-server agent calls the pinned clarification tool on a worker
