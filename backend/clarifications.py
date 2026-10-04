@@ -118,7 +118,8 @@ class ClarificationJournal:
                 stopped = (current['status'] == 'stopping' or connection.execute(
                     'SELECT 1 FROM run_stop_intents WHERE run_id=?', (run['id'],)).fetchone())
                 if terminal_status or stopped:
-                    if existing and existing['answer'] is not None:
+                    if existing and (existing['answer'] is not None
+                                     or existing['status'] == (terminal_status or 'unknown')):
                         return self._view(existing)
                     item = {**item, 'status': terminal_status or 'unknown',
                             'updated_at': max(item['updated_at'], time.time(),

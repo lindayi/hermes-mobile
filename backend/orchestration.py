@@ -537,7 +537,10 @@ class Orchestrator:
                             or any(self.clarifications._normalize(item, run['upstream_id']) is None
                                    for item in pending)):
                         raise IntegrationUnavailable('Pending clarification identity is unavailable')
-                    self.clarifications.observe(user, run, result)
+                    with closing(self.journal.connect()) as c:
+                        if c.execute('SELECT 1 FROM run_stop_intents WHERE run_id=?',
+                                     (rid,)).fetchone():
+                            return
                     saved_pending = [item for item in self.clarifications.list(user, rid)
                                      if item['status'] == 'pending']
                     if not saved_pending:

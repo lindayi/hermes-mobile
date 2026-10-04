@@ -101,6 +101,14 @@ Acceptance includes a held pending GET across successful or transport-uncertain
 Stop, delayed pending events, replay/reopen, no stale answer POST or new run/tool
 dispatch, immutable first answers, and independent other-session progress.
 
+The bounded persistence follow-up starts from head
+`a98a6fcd56f6a1bb9d8319789cc96f6cdb8a3fe7` over the same main baseline.
+Repeated stop-fenced pending snapshots and SSE observations retain the saved
+question timestamp and emit no duplicate clarification or run completion events,
+even when the snapshot observation timestamp changes or the store is reopened.
+They preserve the recorded Stop outcome; genuine native terminal evidence and
+positive matching receipts for attempted answers still advance the saved state.
+
 ## Acceptance cases
 
 1. A synthetic API-server agent calls the pinned clarification tool on a worker

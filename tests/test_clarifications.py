@@ -226,6 +226,165 @@ async def test_owned_answer_resolves_the_waiting_native_request_without_new_run(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('uncertain_stop', [False, True])
+@pytest.mark.parametrize('attempted_answer', [False, True])
+@pytest.mark.parametrize('late_terminal,expected', [
+    ('cancelled', 'cancelled'), ('completed', 'expired'), ('failed', 'expired'),
+])
+async def test_stop_fenced_observations_stabilize_across_reconcile_stream_and_reopen(
+        tmp_path, uncertain_stop, attempted_answer, late_terminal, expected):
+    from backend.orchestration import Orchestrator
+
+    journal, run = run_state(tmp_path)
+    question = pending()
+    body = {'answer': 'Change it', 'other': False}
+
+    class Gateway:
+        def __init__(self):
+            self.item = question
+            self.status = 'waiting_for_clarification'
+            self.answers = []
+            self.stops = []
+            self.requests = []
+
+        def require_execution(self):
+            return None
+
+        async def require_clarifications(self):
+            return None
+
+        async def request(self, method, path, **kwargs):
+            self.requests.append((method, path))
+            return {'run_id': 'native-run', 'status': self.status,
+                    'clarifications': [self.item]}
+
+        async def stop(self, run_id):
+            self.stops.append(run_id)
+            if uncertain_stop:
+                raise IntegrationUnavailable('Synthetic lost Stop acknowledgement')
+
+        async def answer_clarification(self, *args):
+            self.answers.append(args)
+            raise IntegrationUnavailable('Synthetic lost answer acknowledgement')
+
+        async def start(self, *args, **kwargs):
+            raise AssertionError('No new run may be dispatched')
+
+    gateway = Gateway()
+    runtime = Orchestrator(journal, gateway, SimpleNamespace(profiles={'default': 'fixture'}))
+    try:
+        runtime.clarifications.event(OWNER, run, question)
+        if attempted_answer:
+            attempted = await runtime.answer_clarification(
+                OWNER, run['id'], question['question_id'], body)
+            assert attempted['status'] == 'unknown'
+        stopped = await runtime.stop(OWNER, run['id'])
+        assert stopped['status'] == ('unknown' if uncertain_stop else 'stopping')
+        saved = runtime.clarifications.list(OWNER, run['id'])[0]
+        assert saved['status'] == 'unknown'
+
+        def evidence():
+            return (journal.get(OWNER['id'], run['id']),
+                    runtime.clarifications.list(OWNER, run['id']),
+                    journal.events(OWNER['id'], run['id']))
+
+        baseline = evidence()
+        assert sum(event['name'] == 'clarification' for event in baseline[2]) == (
+            3 if attempted_answer else 2)
+        assert sum(event['name'] == 'done' for event in baseline[2]) == int(uncertain_stop)
+        for timestamp in (question['updated_at'], time.time() + 1, time.time() + 2):
+            gateway.item = {**question, 'updated_at': timestamp}
+            await runtime._reconcile(OWNER, run['id'])
+            await runtime._observe_clarification_event(OWNER, run['id'], gateway.item)
+            await runtime.clarifications_for_run(OWNER, run['id'])
+            assert evidence() == baseline
+        with pytest.raises(RunConflict):
+            await runtime.answer_clarification(
+                OWNER, run['id'], question['question_id'], body)
+        await runtime.close()
+
+        journal = RunJournal(tmp_path / 'runs.sqlite')
+        journal.recover()
+        restarted = journal.get(OWNER['id'], run['id'])
+        assert restarted['status'] == 'unknown'
+        runtime = Orchestrator(
+            journal, gateway, SimpleNamespace(profiles={'default': 'fixture'}))
+        baseline = evidence()
+        for _ in range(3):
+            await runtime._reconcile(OWNER, run['id'])
+            await runtime._observe_clarification_event(OWNER, run['id'], gateway.item)
+            await runtime.clarifications_for_run(OWNER, run['id'])
+            assert evidence() == baseline
+        with closing(journal.connect()) as connection:
+            cards = [event for event in journal._replay_events(connection, run['id'])
+                     if event['name'] == 'clarification']
+        assert len(cards) == 1
+        assert cards[0]['data']['status'] == 'unknown'
+
+        if attempted_answer:
+            gateway.item = {**question, 'status': 'answered', **body,
+                            'updated_at': question['updated_at']}
+            await runtime._reconcile(OWNER, run['id'])
+            receipt = runtime.clarifications.list(OWNER, run['id'])[0]
+            assert receipt['status'] == 'answered'
+            assert receipt['answer'] == body['answer']
+            assert receipt['other'] is False
+            assert receipt['updated_at'] > saved['updated_at']
+            assert journal.get(OWNER['id'], run['id'])['status'] == 'unknown'
+            duplicate = await runtime.answer_clarification(
+                OWNER, run['id'], question['question_id'], body)
+            assert duplicate['status'] == 'answered'
+        gateway.status = late_terminal
+        gateway.item = {**question, 'status': expected, 'updated_at': time.time() + 3}
+        await runtime._reconcile(OWNER, run['id'])
+        assert journal.get(OWNER['id'], run['id'])['status'] == late_terminal
+        assert runtime.clarifications.list(OWNER, run['id'])[0]['status'] == (
+            'answered' if attempted_answer else expected)
+        terminal = evidence()
+        assert sum(event['name'] == 'clarification' for event in terminal[2]) == (
+            4 if attempted_answer else 3)
+        assert sum(event['name'] == 'done' for event in terminal[2]) == int(uncertain_stop) + 1
+        await runtime._reconcile(OWNER, run['id'])
+        await runtime._observe_clarification_event(OWNER, run['id'], question)
+        assert evidence() == terminal
+        assert gateway.answers == (
+            [('native-run', question['question_id'], body['answer'], False)]
+            if attempted_answer else [])
+        assert gateway.stops == ['native-run']
+        assert all(method == 'GET' for method, _ in gateway.requests)
+        assert not [event for event in terminal[2] if event['name'] == 'tool']
+        with closing(journal.connect()) as connection:
+            assert connection.execute('SELECT count(*) FROM runs').fetchone()[0] == 1
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.parametrize('terminal,expected', [
+    ('stopping', 'unknown'), ('unknown', 'unknown'),
+    ('cancelled', 'cancelled'), ('completed', 'expired'), ('failed', 'expired'),
+])
+def test_fenced_pending_journal_observations_are_semantically_idempotent(
+        tmp_path, terminal, expected):
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    question = pending()
+    bridge.event(OWNER, run, question)
+    journal.finish(OWNER['id'], run['id'], 'stopping')
+    journal.finish(OWNER['id'], run['id'], terminal)
+    snapshot = {'run_id': 'native-run', 'clarifications': [question]}
+    assert bridge.observe(OWNER, run, snapshot) == set()
+    baseline = journal.events(OWNER['id'], run['id'])
+    saved = bridge.list(OWNER, run['id'])[0]
+    assert saved['status'] == expected
+    for store in (bridge, ClarificationJournal(RunJournal(tmp_path / 'runs.sqlite'))):
+        for timestamp in (question['updated_at'], time.time() + 1, time.time() + 2):
+            item = {**question, 'updated_at': timestamp}
+            assert store.observe(OWNER, run, {**snapshot, 'clarifications': [item]}) == set()
+            assert store.event(OWNER, run, item) == saved
+            assert journal.events(OWNER['id'], run['id']) == baseline
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('uncertain_stop', [False, True])
 @pytest.mark.parametrize('stored_pending', [False, True])
 async def test_stop_fences_delayed_pending_snapshot_and_event(
         tmp_path, uncertain_stop, stored_pending):
