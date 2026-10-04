@@ -1,14 +1,63 @@
 """Direct seam regressions for PR33 review 5388069795."""
+import base64
 import json
 
 import pytest
 
-from deploy.cloud_coordinator import neutral_reconciliation_request
+from deploy.cloud_coordinator import _blob_bytes, neutral_reconciliation_request, review_task_request
+from deploy.task_receipts import ReceiptError
 from deploy.workflow_lifecycle import pull_event
 from test_cloud_coordinator import (
     APP_OWNER_ID, BASE, HEAD, Coordinator, CoordinatorError, FakeApi, StateStore,
     enrolled_record,
 )
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_github_blob_envelope_decodes_exact_bytes(wrapped):
+    data = bytes(range(256))
+    encoded = base64.b64encode(data).decode("ascii")
+    content = (
+        "".join(encoded[index:index + 60] + "\n" for index in range(0, len(encoded), 60))
+        if wrapped else encoded
+    )
+    envelope = json.loads(json.dumps({
+        "sha": "f" * 40, "node_id": "synthetic-blob",
+        "url": f"https://api.github.com/repos/lindayi/hermes-mobile/git/blobs/{'f' * 40}",
+        "content": content, "encoding": "base64", "size": len(data),
+    }))
+
+    class BlobApi:
+        def get(self, route):
+            assert route == f"repos/lindayi/hermes-mobile/git/blobs/{'f' * 40}"
+            return envelope
+
+    assert _blob_bytes(BlobApi(), "f" * 40) == data
+
+
+@pytest.mark.parametrize("change", [
+    {"content": "YQ\n$==\n"},
+    {"content": "YQ=\n"},
+    {"content": "YQ===\n"},
+    {"content": "YQ==\nYQ==\n"},
+    {"content": "Y Q==\n"},
+    {"content": "YQ==\t\n"},
+    {"content": "YQ==\r\n"},
+    {"content": "YQ==\u00a0\n"},
+    {"content": "YQ==\u2028\n"},
+    {"content": None},
+    {"sha": "e" * 40},
+    {"encoding": "utf-8"},
+    {"size": 2},
+])
+def test_github_blob_envelope_rejects_malformed_data(change):
+    class BlobApi:
+        def get(self, route):
+            return {"sha": "f" * 40, "content": "YQ==\n",
+                    "encoding": "base64", "size": 1} | change
+
+    with pytest.raises(ReceiptError, match="Independent review blob .*malformed"):
+        _blob_bytes(BlobApi(), "f" * 40)
 
 
 def test_legacy_enrollment_reports_unsupported_upgrade_without_changing_state(tmp_path):
@@ -42,6 +91,179 @@ def test_neutral_prompt_requires_per_hunk_decisions_before_ready_receipt():
     assert "preserves both branch intents" in prompt
     assert "PR comment" in prompt and "before returning a `ready` receipt" in prompt
     assert "fresh review and checks" in prompt
+
+
+@pytest.mark.parametrize("correction", [False, True])
+def test_review_prompt_matches_report_schema_and_inventories_every_changed_path(correction):
+    api = FakeApi()
+    files = [
+        {
+            "filename": f"src/module_{index:02}.py",
+            "status": "removed" if index == 2 else "modified",
+            "sha": f"{index + 1:040x}",
+        }
+        for index in range(27)
+    ]
+    snapshot = {
+        "issue": 16,
+        "head": HEAD,
+        "main_sha": BASE,
+        "pull": api.pull,
+        "files": files,
+        "files_complete": True,
+    }
+    source_action = {
+        "task_id": "source-task",
+        "head": HEAD,
+        "receipt_session_id": "source-session",
+        "receipt_comment_id": 777,
+    }
+    request = review_task_request(
+        snapshot, source_action, 888,
+        "Hermes-Review-Anchor: hermes-coordinator-review-anchor:synthetic",
+        **({
+            "retry_of": {
+                "key": "prior-review",
+                "task_id": "prior-task",
+                "dispatch_nonce": "a" * 32,
+                "main_sha": BASE,
+            },
+        } if correction else {}),
+    )
+    prompt = request["body"]
+
+    assert "json.dumps(report, ensure_ascii=True, separators=(',', ':'))" in prompt
+    assert "non-ASCII characters represented as JSON `\\u` escapes" in prompt
+    assert "decoding those escapes preserves the original text" in prompt
+    assert ("new, bounded corrective review task" in prompt) is correction
+    assert "exactly the keys `path` and `comment`" in prompt
+    assert "1-8" in prompt and "1000 characters" in prompt
+    assert "independently compute" in prompt
+    assert "Git blob" in prompt and "deleted" in prompt and "`null`" in prompt
+    assert all(item["filename"] in prompt for item in files)
+    template_line = next(
+        line for line in prompt.splitlines()
+        if line.startswith('{"schema":"hermes-independent-review-report-v1"')
+    )
+    template = json.loads(template_line)
+    assert set(template) == {
+        "schema", "nonce", "session_id", "repository", "repository_id", "pr",
+        "anchor_comment_id", "role", "head", "base", "source_start_head",
+        "source_session_id", "source_comment_id", "verdict", "summary",
+        "findings", "files", "report",
+    }
+    assert set(template["findings"][0]) == {"path", "comment"}
+    assert set(template["files"]) == {item["filename"] for item in files}
+
+
+def test_report_correction_reservation_is_distinct_single_use_and_budget_free(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    parent = {
+        "key": f"review:16:{HEAD}:original",
+        "kind": "review",
+        "issue": 16,
+        "head": HEAD,
+        "main_sha": BASE,
+        "source_task_id": "source-task",
+        "source_comment_id": 777,
+        "source_session_id": "source-session",
+        "source_start_head": HEAD,
+        "anchor_comment_id": 888,
+        "anchor_prefix": "original-anchor",
+        "dispatch_nonce": "original-nonce",
+        "body": "original reviewer task",
+    }
+    assert store.claim_action(parent["key"], parent)
+    store.accept_task(parent["key"], "review-task", "2026-10-01T12:00:00Z")
+    store.update_action(
+        parent["key"], "completed", report_error="invalid report",
+        report_session_id="original-session",
+        report_retry_allowed=True, report_retry_state="available",
+    )
+    correction = {
+        "key": f"review-correction:16:{HEAD}:new",
+        "kind": "review",
+        "task_type": "report-correction",
+        "correction_of": parent["key"],
+        "issue": 16,
+        "head": HEAD,
+        "main_sha": BASE,
+        "source_task_id": "source-task",
+        "source_comment_id": 777,
+        "source_session_id": "source-session",
+        "source_start_head": HEAD,
+        "anchor_comment_id": 889,
+        "anchor_prefix": "correction-anchor",
+        "dispatch_nonce": "new-nonce",
+        "body": "new reviewer task",
+    }
+
+    assert store.claim_action(correction["key"], correction)
+    store.update_action(correction["key"], "uncertain")
+    duplicate = correction | {
+        "key": f"review-correction:16:{HEAD}:duplicate",
+        "anchor_comment_id": 890,
+        "anchor_prefix": "duplicate-anchor",
+        "dispatch_nonce": "third-nonce",
+        "body": "third reviewer task",
+    }
+
+    assert not store.claim_action(duplicate["key"], duplicate)
+    assert store.action(parent["key"])["task_id"] == "review-task"
+    assert store.action(parent["key"])["report_retry_state"] == "reserved"
+    assert store.action(parent["key"])["report_error"] == "invalid report"
+    assert store.action(correction["key"])["status"] == "uncertain"
+    assert set(store.actions()) == {parent["key"], correction["key"]}
+
+
+@pytest.mark.parametrize("missing_identity", ["task_id", "report_session_id"])
+def test_report_correction_requires_proven_parent_task_and_session(
+        tmp_path, missing_identity):
+    store = StateStore(tmp_path / "state.json")
+    parent = {
+        "key": f"review:16:{HEAD}:original",
+        "kind": "review",
+        "issue": 16,
+        "head": HEAD,
+        "main_sha": BASE,
+        "source_task_id": "source-task",
+        "source_comment_id": 777,
+        "source_session_id": "source-session",
+        "source_start_head": HEAD,
+        "anchor_comment_id": 888,
+        "anchor_prefix": "original-anchor",
+        "dispatch_nonce": "original-nonce",
+        "body": "original reviewer task",
+    }
+    assert store.claim_action(parent["key"], parent)
+    store.accept_task(parent["key"], "review-task", "2026-10-01T12:00:00Z")
+    store.update_action(
+        parent["key"], "completed", report_error="invalid report",
+        report_session_id="original-session",
+        report_retry_allowed=True, report_retry_state="available",
+    )
+    store.update_action(parent["key"], "completed", **{missing_identity: None})
+    correction = {
+        "key": f"review-correction:16:{HEAD}:new",
+        "kind": "review",
+        "task_type": "report-correction",
+        "correction_of": parent["key"],
+        "issue": 16,
+        "head": HEAD,
+        "main_sha": BASE,
+        "source_task_id": "source-task",
+        "source_comment_id": 777,
+        "source_session_id": "source-session",
+        "source_start_head": HEAD,
+        "anchor_comment_id": 889,
+        "anchor_prefix": "correction-anchor",
+        "dispatch_nonce": "new-nonce",
+        "body": "new reviewer task",
+    }
+
+    assert not store.claim_action(correction["key"], correction)
+    assert store.action(parent["key"])["report_retry_state"] == "available"
+    assert correction["key"] not in store.actions()
 
 
 @pytest.mark.parametrize("change", ["authorized", "head_changed", "retired", "unobserved", "wrong_decision"])

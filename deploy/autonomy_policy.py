@@ -185,7 +185,7 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    'deploy/cloud_coordinator.py': 'cbf3b8ee8ed27f834d3e5dabf8a518406bfefab18b448e1b4820631cc66c46ca',
+    'deploy/cloud_coordinator.py': '43716bc616930d1efb0954c12ee9403272d19b622adcc202bca7994c2568c1a8',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '20603a350aa4c3972563010035a9faed8fcf086b251af847dbed7e4b32e900ca',
@@ -194,7 +194,8 @@ SOURCE_FINGERPRINTS = {
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     # Issue #65 producer-only overlay; historical receipt hashes remain documented.
-    'deploy/task_receipts.py': '9cce2d879fd510c2a8239d1e7f560886370e59de08e21dabc8857d5299e62620',
+    # Issue #79 recovery candidate bytes; not independent acceptance or activation.
+    'deploy/task_receipts.py': 'a7bd1edee10c42c42d992e20d83160095203d792c9a6131b3a915351d2768981',
     'deploy/workflow_events.py': '5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af',
     'deploy/workflow_lifecycle.py': '71be9101223f40511818bde2db9f6bd6b021736f35152e16cb3e1c9c3e2085a3',
     'deploy/workflow_lifecycle_sources.py': 'dfff5b5ec33b9bd1756a67150827541ea86193b87e6de5b5c3a965f02f19b837',

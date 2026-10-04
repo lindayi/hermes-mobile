@@ -133,6 +133,12 @@ test('real browser retains multi-select draft after backend validation rejection
     assert.equal(await boxes.nth(0).isChecked(),true);
     assert.equal(await boxes.nth(2).isChecked(),true);
     assert.equal(await other.inputValue(),'Keep current');
+    await page.getByRole('button',{name:'Back to chats'}).click();
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    await card.locator('.clarification-form').waitFor();
+    assert.equal(fixtureState.answerCalls.length,1);
+    assert.deepEqual(fixtureState.runCalls,[]);
+    await boxes.nth(0).check();await boxes.nth(2).check();
     await other.fill('A different plan');
     await card.getByRole('button',{name:'Submit answer'}).click();
     assert.deepEqual(await fixtureState.waiter,['Keep current','A different plan']);

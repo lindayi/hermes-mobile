@@ -54,14 +54,14 @@ def test_bound_proof_is_durable_before_compaction_and_survives_restart(tmp_path,
     original_retire = store.retire
     observed = []
 
-    def inspect_before_compaction(issue, head):
+    def inspect_before_compaction(issue, head, current_main_sha=None):
         enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
         initial, authorized, blocked = _authorized_result_heads(
             issue, enrollment, {}, api.comments, BASE,
         )
         assert initial == HEAD and RESULT_HEAD in authorized and not blocked
         observed.append(True)
-        original_retire(issue, head)
+        original_retire(issue, head, current_main_sha)
 
     monkeypatch.setattr(store, "retire", inspect_before_compaction)
     worker.run(apply=True)
@@ -280,7 +280,7 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
         source_action=StateStore(store.path).action(first["key"]),
         verdict="changes_requested",
         findings=[{
-            "path": "deploy/cloud_coordinator.py",
+            "path": "frontend/styles.css",
             "comment": "Publish a bounded follow-up fixer request before approval.",
         }],
         report="One bounded follow-up is required before approval.",
