@@ -161,7 +161,7 @@ _ISSUE65_RECEIPT_PRODUCER_FIXTURE = {
 
 # Candidate recovery overlay; retain historical literals and require delta review.
 _ISSUE79_REVIEW_RECOVERY_FIXTURE = {
-    'deploy/cloud_coordinator.py': '933c148eea89f3d9d6017a4519900254b8a000b6dadc435d432b920e329c7dc6',
+    'deploy/cloud_coordinator.py': '10ccae3ba2bf5ecdffebf713d021dc8f9e5c1198232a02958f9c163d9e93746a',
     'deploy/task_receipts.py': 'a7bd1edee10c42c42d992e20d83160095203d792c9a6131b3a915351d2768981',
 }
 

@@ -150,7 +150,13 @@ preserved. Active, unknown, or insufficiently authenticated task/session evidenc
 does not authorize a correction. An ambiguous creation is never replayed, and
 failure of the single correction remains a blocker. A corrected negative verdict
 uses the existing bounded fixer flow; a pass status is still gated by the full
-strict review proof.
+strict review proof. Recovery session IDs are stored and considered for retry only
+when they are nonempty strings no longer than 128 characters; unsafe IDs remain
+out of state while the bounded diagnosis and deduplicated blocker are retained.
+After a corrected report is durably published, reconciliation repairs a still-
+reserved parent to `recovered` only from the positively bound completed correction;
+for a pass, the `agent-review` status must also already be durably complete. This
+restart repair does not repeat publication or dispatch.
 Sensitive changes additionally need owner authorization bound to that exact SHA
 and the documented targeted independent review; neither approval nor authorization
 carries to a later head.

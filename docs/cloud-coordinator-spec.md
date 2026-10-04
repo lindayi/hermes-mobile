@@ -492,6 +492,10 @@ identities, scope, the unique terminal session, session owner/repository/user,
 prompt, branch, and session chronology are authenticated. The correction has a
 separate action, anchor, task, session, and nonce; both its authenticated task ID
 and session ID must differ from the saved parent report's task and session IDs.
+Session IDs used for recovery must be strings of 1 through 128 characters before
+they are persisted or made retry-eligible. Missing, non-string, empty, or oversized
+IDs are not copied into state and block correction, while the bounded report
+diagnostic and deduplicated blocker remain durable.
 Missing or reused identities fail closed before report acceptance or publication.
 It cannot replace or edit the old report and does not reset or consume the
 source-fixer budget. The durable
@@ -502,7 +506,14 @@ Repeated polls reuse the same deduplicated outcome. A valid corrected
 `changes_requested` report is published through the existing formal COMMENT path
 and can feed the existing bounded fixer. A valid `pass` can publish `agent-review`
 only after the full report, exact-head bindings, and independently verified file
-inventory pass the same strict checks.
+inventory pass the same strict checks. If the process stops after a completed
+correction publication but before the parent audit transition, reconciliation
+idempotently changes `report_retry_state` from `reserved` to `recovered` only when
+the completed correction, parent, distinct task/session/nonce/anchor, exact head,
+source bindings, and persisted owner publication all match. A pass also requires
+its `agent-review` publication to be durably complete. This repair does not repeat
+task dispatch, formal review publication, status publication, or fixer work;
+uncertain publication and unbound or mismatched parents remain unresolved.
 
 The validated completion time, session ID and receipt comment ID remain persisted
 with the receipt head/base and dispatch claim for restart. The authentic session
