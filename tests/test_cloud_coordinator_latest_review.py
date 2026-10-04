@@ -93,7 +93,8 @@ def test_neutral_prompt_requires_per_hunk_decisions_before_ready_receipt():
     assert "fresh review and checks" in prompt
 
 
-def test_review_prompt_matches_report_schema_and_inventories_every_changed_path():
+@pytest.mark.parametrize("correction", [False, True])
+def test_review_prompt_matches_report_schema_and_inventories_every_changed_path(correction):
     api = FakeApi()
     files = [
         {
@@ -120,9 +121,21 @@ def test_review_prompt_matches_report_schema_and_inventories_every_changed_path(
     request = review_task_request(
         snapshot, source_action, 888,
         "Hermes-Review-Anchor: hermes-coordinator-review-anchor:synthetic",
+        **({
+            "retry_of": {
+                "key": "prior-review",
+                "task_id": "prior-task",
+                "dispatch_nonce": "a" * 32,
+                "main_sha": BASE,
+            },
+        } if correction else {}),
     )
     prompt = request["body"]
 
+    assert "json.dumps(report, ensure_ascii=True, separators=(',', ':'))" in prompt
+    assert "non-ASCII characters represented as JSON `\\u` escapes" in prompt
+    assert "decoding those escapes preserves the original text" in prompt
+    assert ("new, bounded corrective review task" in prompt) is correction
     assert "exactly the keys `path` and `comment`" in prompt
     assert "1-8" in prompt and "1000 characters" in prompt
     assert "independently compute" in prompt

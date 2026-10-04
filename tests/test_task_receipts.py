@@ -516,6 +516,76 @@ def test_review_report_rejects_observed_quoted_provider_payload_shape():
         )
 
 
+def test_review_report_accepts_only_canonical_ascii_escaped_unicode():
+    anchor = "Hermes-Review-Anchor: hermes-coordinator-review-anchor:unicode"
+    payload = {
+        "schema": "hermes-independent-review-report-v1",
+        "nonce": NONCE,
+        "session_id": SESSION_ID,
+        "repository": "lindayi/hermes-mobile",
+        "repository_id": 1399942965,
+        "pr": 16,
+        "anchor_comment_id": 888,
+        "role": "independent-reviewer",
+        "head": START_HEAD,
+        "base": BASE,
+        "source_start_head": START_HEAD,
+        "source_session_id": "source-session",
+        "source_comment_id": 777,
+        "verdict": "changes_requested",
+        "summary": "Résumé with emoji 🧪",
+        "findings": [{
+            "path": "frontend/ui.mjs",
+            "comment": "The résumé check misses 🧪.",
+        }],
+        "files": {
+            "frontend/ui.mjs": "a" * 64,
+            "backend/clarifications.py": "b" * 64,
+        },
+        "report": "Résumé review of the complete synthetic file inventory.",
+    }
+
+    def transported(body):
+        return {
+            "id": 999,
+            "user": {"id": 198982749},
+            "body": (
+                f"\n> {anchor}\n"
+                "> Reserved independent-review anchor for a synthetic PR.\n"
+                "> \n"
+                f"{body}"
+            ),
+            "created_at": "2026-10-01T12:04:00Z",
+            "updated_at": "2026-10-01T12:04:00Z",
+        }
+
+    report = find_review_report(
+        [transported(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))],
+        complete=True, anchor_prefix=anchor, nonce=NONCE, session_id=SESSION_ID,
+        pull_number=16, head_sha=START_HEAD, base_sha=BASE,
+        source_start_head=START_HEAD, source_session_id="source-session",
+        source_comment_id=777, anchor_comment_id=888,
+        session_created_at="2026-10-01T12:00:00Z",
+        session_completed_at="2026-10-01T12:05:00Z", now=NOW,
+    )
+
+    assert report["report"] == payload
+    assert report["report"]["summary"] == payload["summary"]
+    assert report["report"]["findings"] == payload["findings"]
+    assert report["report"]["files"] == payload["files"]
+
+    with pytest.raises(ReceiptError, match="single exact compact object"):
+        find_review_report(
+            [transported(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))],
+            complete=True, anchor_prefix=anchor, nonce=NONCE, session_id=SESSION_ID,
+            pull_number=16, head_sha=START_HEAD, base_sha=BASE,
+            source_start_head=START_HEAD, source_session_id="source-session",
+            source_comment_id=777, anchor_comment_id=888,
+            session_created_at="2026-10-01T12:00:00Z",
+            session_completed_at="2026-10-01T12:05:00Z", now=NOW,
+        )
+
+
 def test_review_report_transport_accepts_maximum_declared_inventory():
     anchor = "Hermes-Review-Anchor: hermes-coordinator-review-anchor:maximum-inventory"
     paths = [
