@@ -4365,6 +4365,10 @@ def test_completed_partial_review_report_persists_error_and_retries_once(tmp_pat
     )
     malformed_body = malformed_comment["body"]
 
+    state_before_planning = path.read_bytes()
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=False)
+    assert path.read_bytes() == state_before_planning
+
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     recovered = StateStore(path).action(original_review["key"])
 
