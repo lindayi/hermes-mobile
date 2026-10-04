@@ -11,10 +11,10 @@ import {fileURLToPath} from 'node:url';
 import {generatedAssets} from './generated-assets.mjs';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
 
-async function nativeTransport({python=process.env.HERMES_TEST_PYTHON}={}) {
+async function nativeTransport({python=process.env.HERMES_TEST_PYTHON,scenario='conflict',shape='single'}={}) {
   const repo=fileURLToPath(new URL('../../',import.meta.url));
   const child=spawn(python||join(repo,'.venv/bin/python'),
-    ['-B',join(repo,'tests/browser/clarification_transport_fixture.py')],{cwd:repo,stdio:['pipe','pipe','pipe']});
+    ['-B',join(repo,'tests/browser/clarification_transport_fixture.py'),scenario,shape],{cwd:repo,stdio:['pipe','pipe','pipe']});
   const reader=createInterface({input:child.stdout}),lines=reader[Symbol.asyncIterator]();
   let diagnostic='';child.stderr.on('data',value=>{diagnostic=(diagnostic+value).slice(-32768);});
   let launchError;
@@ -93,7 +93,9 @@ test('native transport reports launch and early request failures with exit diagn
   await assert.rejects(access(transport.startup.temporary),{code:'ENOENT'});
 });
 
-async function nativeConflictBrowser(exercise,{launch=options=>chromium.launch(options)}={}) {
+async function nativeConflictBrowser(exercise,{
+  launch=options=>chromium.launch(options),scenario='conflict',shape='single',holdAnswer=false,
+}={}) {
   let transport,temporary,server,browser,fixtureError;
   const active=new Set();
   let rejectFailure;
@@ -101,10 +103,19 @@ async function nativeConflictBrowser(exercise,{launch=options=>chromium.launch(o
   failed.catch(()=>{});
   const calls=[];
   let answerResponse;
+  const streams=[],frames=[];
+  let resolveStream,resolveAnswer,releaseAnswer;
+  const streamReady=new Promise(resolve=>{resolveStream=resolve;});
+  const answerReady=new Promise(resolve=>{resolveAnswer=resolve;});
+  const answerGate=new Promise(resolve=>{releaseAnswer=resolve;});
+  const publishFrames=items=>{
+    for(const frame of items)for(const response of streams)if(!response.destroyed)
+      response.write(`id: ${frame.id}\nevent: ${frame.name}\ndata: ${JSON.stringify(frame.data)}\n\n`);
+  };
   try{
-  transport=await nativeTransport();
+  transport=await nativeTransport({scenario,shape});
   const {startup}=transport;
-  temporary=await mkdtemp(join(tmpdir(),'hermes-native-conflict-browser-'));
+  temporary=await mkdtemp(join(tmpdir(),'hm-c-'));
   const root=generatedAssets(temporary);
   const handle=async(request,response)=>{
     const url=new URL(request.url,'http://fixture');
@@ -119,14 +130,20 @@ async function nativeConflictBrowser(exercise,{launch=options=>chromium.launch(o
       if(path.endsWith('/controls'))return json({steering:false,attempts:[]});
       if(path.endsWith('/events')){
         response.writeHead(200,{'Content-Type':'text/event-stream'});
-        response.write(': synthetic missed native event\n\n');return;
+        response.write(': ready\n\n');streams.push(response);resolveStream();return;
       }
       let body='';
       for await(const chunk of request)body+=chunk;
       const result=await transport.request({method:request.method,path,
         ...(body?{body:JSON.parse(body)}:{})});
       calls.splice(0,calls.length,...result.calls);
-      if(path.endsWith('/answer'))answerResponse=result;
+      if(path.endsWith('/answer')){
+        answerResponse=result;
+        frames.splice(0,frames.length,...result.events.filter(frame=>frame.id>startup.cursor));
+        if(scenario==='conflict')publishFrames(frames);
+        resolveAnswer();
+        if(holdAnswer)await answerGate;
+      }
       return json(result.body,result.status);
     }
     try{
@@ -156,9 +173,17 @@ async function nativeConflictBrowser(exercise,{launch=options=>chromium.launch(o
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
     const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
     await exercise({page,url:`http://127.0.0.1:${server.address().port}/hermes/`,
-      startup,calls,answerResponse:()=>answerResponse});
+      startup,calls,answerResponse:()=>answerResponse,frames,publishFrames,
+      observe:async event=>{
+        const result=await transport.request({method:'POST',path:'/fixture/observe',body:event});
+        publishFrames(result.events.filter(frame=>frame.id>startup.cursor));
+      },
+      streamReady,answerReady,releaseAnswer,disconnect:()=>{
+        for(const response of streams)response.destroy();
+      }});
   })()]);
   }finally{
+    releaseAnswer();
     try{await browser?.close();}
     finally{
       try{
@@ -235,6 +260,125 @@ const questionFixture=question_id=>({
   answer:null,other:null,created_at:1,updated_at:2,
 });
 
+for(const outcome of ['answered','unknown']){
+  test(`journal sending after ${outcome} HTTP acknowledgement cannot regress the visible receipt`,{timeout:60000},async()=>{
+    await nativeConflictBrowser(async({page,url,frames,publishFrames,streamReady,
+      answerReady,answerResponse,disconnect,calls})=>{
+      await page.goto(url);
+      await page.getByRole('button',{name:'Native seam fixture'}).click();
+      const card=page.locator('[data-clarification-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]');
+      await card.getByLabel('Change it').check();
+      await streamReady;
+      await card.getByRole('button',{name:'Submit answer'}).click();
+      await answerReady;
+      const label=outcome==='answered'?'Answered':'Answer status unknown';
+      await card.getByText(label,{exact:true}).waitFor({timeout:3000});
+      const sending=frames.filter(frame=>frame.name==='clarification' && frame.data.status==='sending');
+      assert.equal(sending.length,1);
+      assert.ok(sending[0].data.updated_at<answerResponse().body.updated_at);
+      publishFrames(sending);
+      // Disconnect before the journal's later receipt is delivered.
+      await page.waitForTimeout(100);
+      disconnect();
+      assert.equal(await card.getByText(label,{exact:true}).count(),1);
+      assert.doesNotMatch(await card.textContent(),/Submitting answer/);
+      assert.equal(calls.filter(([method])=>method==='POST').length,1);
+      await page.close();
+    },{scenario:outcome});
+  });
+}
+
+for(const timing of ['before','after'])for(const shape of ['single','multi','open']){
+  test(`real rejected journal SSE ${timing} reconciliation retains ${shape} draft and explicit retry`,{timeout:60000},async()=>{
+    await nativeConflictBrowser(async({page,url,frames,publishFrames,streamReady,
+      answerReady,releaseAnswer,answerResponse,calls})=>{
+      await page.goto(url);
+      await page.getByRole('button',{name:'Native seam fixture'}).click();
+      const card=page.locator('[data-clarification-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]');
+      const text='A safer synthetic plan';
+      if(shape==='single')await card.getByLabel('Change it').check();
+      else if(shape==='multi'){
+        await card.getByLabel('Keep current').check();
+        await card.getByRole('textbox',{name:'Other answer'}).fill(text);
+      }else await card.getByRole('textbox',{name:'Your answer'}).fill(text);
+      await streamReady;
+      await card.getByRole('button',{name:'Submit answer'}).click();
+      await answerReady;
+      assert.equal(answerResponse().status,409);
+      const lifecycle=frames.filter(frame=>frame.name==='clarification');
+      assert.deepEqual(lifecycle.map(frame=>frame.data.status),['sending','unknown','pending']);
+      if(timing==='before'){
+        publishFrames(lifecycle);
+        await page.waitForTimeout(100);
+      }
+      releaseAnswer();
+      await card.getByText(/this question is still waiting/).waitFor({timeout:3000});
+      if(timing==='after'){
+        publishFrames(lifecycle);
+        await page.waitForTimeout(100);
+      }
+      if(shape==='single')assert.equal(await card.getByLabel('Change it').isChecked(),true);
+      else if(shape==='multi'){
+        assert.equal(await card.getByLabel('Keep current').isChecked(),true);
+        assert.equal(await card.getByRole('textbox',{name:'Other answer'}).inputValue(),text);
+      }else assert.equal(await card.getByRole('textbox',{name:'Your answer'}).inputValue(),text);
+      assert.equal(calls.filter(([method])=>method==='POST').length,1,'No automatic retry');
+      await card.getByRole('button',{name:'Submit answer'}).click();
+      await card.getByText('Answered',{exact:true}).waitFor({timeout:3000});
+      const expected=shape==='single'?'Change it':shape==='multi'?['Keep current',text]:text;
+      assert.deepEqual(answerResponse().body.answer,expected);
+      assert.equal(answerResponse().body.other,shape==='multi');
+      assert.deepEqual(answerResponse().native_question.answer,expected);
+      assert.deepEqual(answerResponse().answer_bodies,
+        Array(2).fill({answer:expected,other:shape==='multi'}));
+      assert.equal(calls.filter(([method])=>method==='POST').length,2);
+      assert.equal(calls.some(([,path])=>path==='/v1/runs'),false);
+      await page.close();
+    },{scenario:'rejected',shape,holdAnswer:true});
+  });
+}
+
+for(const [scenario,observation] of [
+  ['rejected','new-question'],['rejected','terminal'],['rejected','accepted-answer'],
+  ['answered','new-question'],['answered','terminal'],
+  ['unknown','new-question'],['unknown','terminal'],
+]){
+  test(`real journal ${observation} supersedes an active ${scenario} clarification`,{timeout:60000},async()=>{
+    await nativeConflictBrowser(async({page,url,startup,streamReady,answerReady,
+      releaseAnswer,answerResponse,observe,calls})=>{
+      await page.goto(url);
+      await page.getByRole('button',{name:'Native seam fixture'}).click();
+      const card=page.locator('[data-clarification-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]');
+      await card.getByRole('textbox',{name:'Other answer'}).fill('Rejected draft');
+      await streamReady;
+      await card.getByRole('button',{name:'Submit answer'}).click();
+      await answerReady;
+      const updated_at=answerResponse().events.at(-1).observed_at+1;
+      if(observation==='terminal'){
+        await observe({event:'run.completed',run_id:'native-run',output:'Synthetic completion'});
+        await page.locator('.live-activity-heading [role=status]').getByText('completed',{exact:true})
+          .waitFor({timeout:3000});
+      }else{
+        await observe({...startup.question,event:'run.clarification',updated_at,
+          ...(observation==='new-question'
+            ?{question_id:'b'.repeat(32),created_at:updated_at}
+            :{status:'answered',answer:'Keep current',other:false})});
+        if(observation==='new-question')
+          await page.locator('[data-clarification-id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]')
+            .getByRole('button',{name:'Submit answer'}).waitFor({timeout:3000});
+        else await card.getByText('Answered',{exact:true}).waitFor({timeout:3000});
+      }
+      releaseAnswer();
+      await page.waitForTimeout(100);
+      assert.equal(await card.locator('.clarification-form').count(),0);
+      if(scenario==='rejected')assert.doesNotMatch(await card.textContent(),/Rejected draft/);
+      if(observation==='accepted-answer')assert.match(await card.textContent(),/Answer: Keep current/);
+      assert.equal(calls.filter(([method])=>method==='POST').length,1);
+      await page.close();
+    },{scenario,holdAnswer:true});
+  });
+}
+
 async function fixture(shape,{
   rejectDuplicate=false,holdAnswer=false,initialRunStatus=null,
   rehydrateStatus=null,holdRehydrate=false,itemStatus='pending',
@@ -309,7 +453,8 @@ async function fixture(shape,{
             },10);
           }
           if(holdAnswer)await acknowledgement;
-          return json({question_id:item.question_id,run_id:'r',status:'answered',answer:value.answer});
+          return json({question_id:item.question_id,run_id:'r',status:'answered',
+            answer:value.answer,updated_at:item.updated_at});
         }
       }
       if(path==='/auth/me')return json({user:{id:'owner',status:'ready'}});

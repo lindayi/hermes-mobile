@@ -36,7 +36,8 @@ async function setup({item=question(),answerResult,waitForAnswer=false,history=[
     if(path.endsWith('/answer') && options.method==='POST') {
       if(waitForAnswer)await gate.promise;
       return (typeof answerResult==='function'?answerResult(options.body):answerResult)
-        || {question_id:item.question_id,run_id:'r',status:'answered',answer:options.body.answer};
+        || {question_id:item.question_id,run_id:'r',status:'answered',
+          answer:options.body.answer,updated_at:item.updated_at+1};
     }
     if(path.endsWith('/controls'))return {steering:false,attempts:[]};
     if(path.endsWith('/stop'))return {status:'stopping'};
@@ -120,7 +121,8 @@ test('a rejected multi-select answer keeps the choices and Other draft correctab
   const h=await setup({item:question({multi_select:true}),answerResult:body=>{
     answers.push(body);
     if(answers.length===1)throw Object.assign(new Error('Invalid clarification answer'),{status:422});
-    return {question_id:'a'.repeat(32),run_id:'r',status:'answered',answer:body.answer};
+    return {question_id:'a'.repeat(32),run_id:'r',status:'answered',
+      answer:body.answer,updated_at:3};
   }});
   try {
     const card=h.doc.querySelector('.clarification-card');

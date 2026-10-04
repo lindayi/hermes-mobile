@@ -150,6 +150,28 @@ transient uncertainty and Stop/terminal races without altering prior assertions.
 
 ## Acceptance cases
 
+The three-seam correction starts from PR #78 head
+`f2787f997a998803d36f91256a633b6ea85f868f` over main
+`f718cc3ec2f227184d2875a1e7c94047af54c574`, preserving the independently accepted
+native-loss fence. A clarification GET observing native running uses the existing
+locked reconciliation path: restart-unknown runs with unresolved approval rows
+cannot resume without authoritative empty pending approvals. Ordinary live-waiter
+recovery remains supported.
+
+HTTP answered and unknown acknowledgements retain the journal's authoritative
+`updated_at`; older buffered sending frames cannot regress them, including when
+the stream disconnects before its receipt. Same-question pending/sending/unknown
+frames during an active submission do not replace its draft or invalidate its
+rejection reconciliation. A verified still-pending reconciliation records a
+timestamp fence without replacing the form, so buffered pre-reconciliation frames
+cannot erase selected choices, Other text, or open-ended text. Retry requires an
+explicit submission with the original question and answer/Other semantics.
+Newer accepted answers, questions, terminal events, Stop, owner/session/run changes,
+and navigation remain authoritative; a draft never replaces another accepted answer.
+Synthetic generated-browser coverage relays actual bridge journal frames for both
+acknowledgement states and before/after rejection reconciliation, alongside newer
+question/terminal/accepted-answer observations.
+
 The supervised native-seam correction starts from PR #78 head
 `709ecdcea72b28b1314ee3cd9f6564cd33fd70dd`, retaining the accepted rejection UI,
 Stop, first-answer, uncertainty, and replay behavior. Native answer conflicts now

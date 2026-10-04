@@ -150,8 +150,8 @@ class Orchestrator:
         native_status = result.get('native_status')
         if native_status == 'unknown':
             self._native_run_lost(user, run)
-        elif native_status in ('waiting_for_clarification', 'running'):
-            self._clarification_status(user, run, resume=native_status == 'running')
+        elif native_status == 'waiting_for_clarification':
+            self._clarification_status(user, run, resume=False)
         elif result.get('native_snapshot') is not None:
             await self._reconcile_locked(user, rid, run=run, result=result['native_snapshot'])
         current = self.get(user, rid)

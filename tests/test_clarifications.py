@@ -123,6 +123,36 @@ def test_actual_native_conflict_reconciles_first_answer_and_replacement(
     assert not any(path == '/v1/runs' for _, path in native.calls)
 
 
+@pytest.mark.parametrize('approvals', [None, [{'run_id': 'native-run', 'request_id': 'action'}], []])
+def test_clarification_get_running_snapshot_retains_restart_approval_fence(
+        authenticated_clarification_app, approvals):
+    from backend.orchestration import Orchestrator
+    from test_auth import BASE
+
+    app, client, owner, run, native = authenticated_clarification_app
+    runtime, journal = app.state.orchestrator, app.state.journal
+    journal.set_active_status(owner['id'], run['id'], 'running', upstream_id='native-run')
+    runtime._approval(owner, run, {'run_id': 'native-run', 'request_id': 'action',
+                                  'command': 'Synthetic approval'})
+    assert journal.get(owner['id'], run['id'])['status'] == 'waiting_for_approval'
+    reopened = RunJournal(journal.path)
+    reopened.recover()
+    app.state.orchestrator = Orchestrator(reopened, runtime.gateway, runtime.catalog)
+    assert reopened.get(owner['id'], run['id'])['status'] == 'unknown'
+    native.snapshot = {'run_id': 'native-run', 'status': 'running', 'clarifications': []}
+    if approvals is not None:
+        native.snapshot['pending_approvals'] = approvals
+    path = BASE + '/runs/' + run['id'] + '/clarifications'
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.json()['status'] == ('running' if approvals == [] else 'unknown')
+    with closing(reopened.connect()) as connection:
+        row = connection.execute('SELECT status FROM orchestration_approvals WHERE run_id=?',
+                                 (run['id'],)).fetchone()
+        assert row['status'] == ('resolved_external' if approvals == [] else 'pending')
+    assert all(method == 'GET' for method, _ in native.calls)
+
+
 @pytest.mark.parametrize('response', [
     'timeout', (503, {'error': {'code': 'clarification_conflict'}}),
     (409, {'error': {'code': 'clarification_conflict'}}),

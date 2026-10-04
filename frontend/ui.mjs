@@ -1278,6 +1278,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     let currentClarificationQuestion=null,currentClarificationCreatedAt=null;
     let clarificationRevision=0,clarificationReconcileSequence=0;
     const clarificationSubmitting=new Set();
+    const clarificationRetryTimes=new Map();
     let clarificationAvailable=false,clarificationUnavailable=false;
     const renderClarification=data=>{
       if(!data || data.run_id!==run.id || data.session_id!==sessionId
@@ -1382,22 +1383,21 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               {method:'POST',body:{answer,other}});
             if(!sameRoute())return;
             if(result?.question_id!==item.question_id || result?.run_id!==run.id
-                || !['answered','unknown'].includes(result.status))throw new Error('Clarification acknowledgement was invalid.');
+                || !['answered','unknown'].includes(result.status)
+                || !Number.isFinite(result.updated_at))throw new Error('Clarification acknowledgement was invalid.');
             if(result.status==='answered'){
               const continuationIsCurrent=answerStillCurrent();
-              const latestTime=clarificationTimes.get(item.question_id)?.updated_at || item.updated_at;
               renderClarification({...item,status:'answered',
                 answer:result.answer ?? answer,other:typeof result.other==='boolean'?result.other:other,
-                updated_at:Math.max(item.updated_at+0.001,latestTime+0.001)});
+                updated_at:result.updated_at});
               if(continuationIsCurrent){
                 currentClarificationQuestion=null;
                 currentClarificationCreatedAt=null;
                 apply({status:'running'});connection?.run('running');
               }
             }else if(answerStillCurrent()){
-              const latestTime=clarificationTimes.get(item.question_id)?.updated_at || item.updated_at;
               renderClarification({...item,status:'unknown',answer,other,
-                updated_at:Math.max(item.updated_at+0.001,latestTime+0.001)});
+                updated_at:result.updated_at});
             }
           }catch(error){
             if(!sameRoute())return;
@@ -1502,7 +1502,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             && status==='waiting_for_clarification' && clarificationAvailable
             && (item.question_id===preserveQuestionId
               || clarificationSubmitting.has(item.question_id));
-          if(!preservePending)renderClarification(item);
+          if(preservePending){
+            clarificationTimes.set(item.question_id,{updated_at:item.updated_at,status:item.status});
+            clarificationRecords.set(item.question_id,item);
+            clarificationRetryTimes.set(item.question_id,item.updated_at);
+          }else renderClarification(item);
         }
         if(!clarificationAvailable && currentStatus==='waiting_for_clarification'){
           const notice=h('section',{class:'clarification-card clarification-unavailable',role:'status'},
@@ -1711,6 +1715,16 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     on('tool',renderTool);
     on('approval',data=>{if(!approvalState?.event(data,run.id))return;apply({status:'waiting_for_approval'});connection?.run('waiting_for_approval');status.textContent='Waiting for approval';if(data.id || data.request_id)void approvalState.reconcile();});
     on('clarification',data=>{
+      if(data.run_id!==run.id || data.session_id!==sessionId
+          || !Number.isFinite(data.updated_at))return;
+      const previous=clarificationTimes.get(data.question_id);
+      if(previous && (data.updated_at<previous.updated_at
+          || data.updated_at===previous.updated_at && data.status!==previous.status))return;
+      if(['pending','sending','unknown'].includes(data.status)
+          && (data.updated_at<=clarificationRetryTimes.get(data.question_id)
+            || clarificationSubmitting.has(data.question_id)
+              && currentClarificationQuestion===data.question_id
+              && currentStatus==='waiting_for_clarification' && !stopPending))return;
       clarificationRevision++;
       if(data.status==='pending'){
         const previousQuestion=currentClarificationQuestion;
