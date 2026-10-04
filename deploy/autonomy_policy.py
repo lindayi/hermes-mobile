@@ -211,11 +211,11 @@ SOURCE_FINGERPRINTS = {
     'deploy/hermes-mobile-issue-starter.service': '1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69',
     'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
-    'backend/clarifications.py': '38f624f85812a65c757c656462b9366700c04b385530d92d5b5a56ff8b92eab0',
+    'backend/clarifications.py': '6a6f042beb98881a482efdd85c20555d88a375156a024481ab18a0d5c80e94fd',
     'backend/model_controls.py': 'c35c6e7ed5c92715ef1bd5af236268d1ef080bbcef2a4069a647dbd04bc4e217',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',  # gitleaks:allow
     'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
-    'backend/runs.py': '99297aef3ecf899d40b77d76de26132701596672dd6af432cdf16ecba1aaac93',
+    'backend/runs.py': 'b2648c509c520189da024a7338b5556b64876e9542dd8b608c9033d1b2f42d29',
     # Accepted PR45 naming bytes in this assembly; no naming-source rewrite.
     'backend/app.py': '3fbab2ca8c8d47dffdd1775d67026fbd537f7350aa6ec68f830cc9be87c266c5',
     'backend/auth.py': '411529a1d53bdcd01eae4bf5e35c44d3d5099e4dc9e77eb9dbbe67df6433f335',  # gitleaks:allow
@@ -230,7 +230,7 @@ SOURCE_FINGERPRINTS = {
     'backend/native_catalog.py': '8b3c398f52388e0e334d6d64381b677b651b9337ece2d1868a14d3de069c5ed6',
     'backend/notification_policy.py': '69c7c6807210dbf9300cd25c5ba14604be75730d06f41879074208d62655684d',
     'backend/operational_notifications.py': '9edbc496bb931a02096bf820d984a4032107e003924492e1120684a0f5cdad31',
-    'backend/orchestration.py': 'b0d3eb27ed0d41c0d0157f9a580148d49974b48adc8f85242cf48453ca3aba03',
+    'backend/orchestration.py': '4312af3cca153ee260d86144abea276df56cc7f54c6878c3efa5e1b12e31d229',
     'backend/profiles.py': '8bf7681b69f6273d6a6f86a9835cc7e2fc0bd6f31fdb59e7934bd8dbb7515f40',
     'backend/public_commentary.py': 'a52a81b0852fdcff13057bcd25ee39836abdc2d8ab658b90a9db7197ca0cf57a',
     'backend/request_notifications.py': '1136806183f7b3cbb51b65691fc5c26b41f22c2d06098d1440bb3c42a869ede8',

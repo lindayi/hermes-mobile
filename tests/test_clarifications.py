@@ -291,6 +291,37 @@ def test_authenticated_native_loss_fences_run_and_stabilizes_replay(authenticate
     assert all(method == 'GET' for method, _ in native.calls)
 
 
+def test_delayed_pending_event_cannot_restore_authenticated_native_loss(
+        authenticated_clarification_app):
+    from backend.orchestration import Orchestrator
+    from test_auth import BASE
+
+    app, client, owner, run, native = authenticated_clarification_app
+    runtime, journal = app.state.orchestrator, app.state.journal
+    question = pending()
+    runtime.clarifications.event(owner, run, question)
+    native.mode = 'missing'
+    response = client.get(BASE + '/runs/' + run['id'] + '/clarifications')
+    assert response.status_code == 200
+    assert response.json()['status'] == 'unknown'
+    assert response.json()['items'][0]['status'] == 'unknown'
+
+    calls = list(native.calls)
+    client.portal.call(runtime._observe_clarification_event, owner, run['id'], question)
+    assert runtime.get(owner, run['id'])['status'] == 'unknown'
+    assert runtime.clarifications.list(owner, run['id'])[0]['status'] == 'unknown'
+    assert native.calls == calls
+
+    reopened = RunJournal(journal.path)
+    reopened.recover()
+    fresh = Orchestrator(reopened, runtime.gateway, runtime.catalog)
+    client.portal.call(fresh._observe_clarification_event, owner, run['id'], question)
+    assert fresh.get(owner, run['id'])['status'] == 'unknown'
+    assert fresh.clarifications.list(owner, run['id'])[0]['status'] == 'unknown'
+    assert native.calls == calls
+    client.portal.call(fresh.close)
+
+
 @pytest.mark.parametrize('mode', ['timeout', 'unavailable', 'unsupported'])
 def test_authenticated_uncertainty_does_not_fence_live_waiter(authenticated_clarification_app, mode):
     from test_auth import BASE

@@ -7,7 +7,7 @@ import uuid
 import sqlite3
 from contextlib import closing
 
-from .runs import RunConflict
+from .runs import NATIVE_RUN_LOST_ERROR, RunConflict
 
 from .hermes_client import IntegrationUnavailable, NativeRunNotFound, NativeClarificationRejected
 
@@ -212,17 +212,20 @@ class Orchestrator:
         current = self.get(user, run['id'])
         if (not self._can_observe(user)
                 or any(current[k] != run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at'))
-                or current['status'] in ('unknown', 'stopping', 'completed', 'failed', 'cancelled')):
+                or current['status'] in ('stopping', 'completed', 'failed', 'cancelled')
+                or current['error'] == NATIVE_RUN_LOST_ERROR):
             return
         with closing(self.journal.connect()) as connection:
             if connection.execute('SELECT 1 FROM run_stop_intents WHERE run_id=?',
                                   (run['id'],)).fetchone():
                 return
         self.journal.finish(user['id'], run['id'], 'unknown',
-                            error='Native run no longer exists; automatic retry is disabled',
+                            error=NATIVE_RUN_LOST_ERROR,
                             expected={k: run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at')})
 
     def _clarification_status(self, user, run, *, resume):
+        if run.get('error') == NATIVE_RUN_LOST_ERROR:
+            return
         items = self.clarifications.list(user, run['id'])
         latest = max((item['created_at'] for item in items), default=None)
         items = [item for item in items if item['created_at'] == latest]
@@ -506,7 +509,8 @@ class Orchestrator:
 
     async def _reconcile_locked(self, user, rid, *, run=None, result=None):
         run = run or self.get(user, rid)
-        if not self._can_observe(user) or run['status'] in ('completed', 'failed', 'cancelled'):
+        if (not self._can_observe(user) or run['status'] in ('completed', 'failed', 'cancelled')
+                or run.get('error') == NATIVE_RUN_LOST_ERROR):
             return
         if run['upstream_id']:
             try:

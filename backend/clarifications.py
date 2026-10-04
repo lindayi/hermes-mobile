@@ -5,7 +5,7 @@ import json
 import math
 import time
 
-from .runs import RunConflict
+from .runs import NATIVE_RUN_LOST_ERROR, RunConflict
 from .hermes_client import IntegrationUnavailable, NativeRunNotFound
 
 
@@ -102,6 +102,8 @@ class ClarificationJournal:
                 JOIN runs r ON r.id=c.run_id WHERE c.user_id=? AND c.profile=? AND c.run_id=?
                 AND c.question_id=?''',
                 (user['id'], user['profile'], run['id'], item['question_id'])).fetchone()
+            native_run_lost = (
+                current['status'] == 'unknown' and current['error'] == NATIVE_RUN_LOST_ERROR)
             encoded_choices = json.dumps(item['choices']) if item['choices'] is not None else None
             encoded_answer = (self._encode_answer(item['answer'])
                               if item['answer'] is not None else None)
@@ -125,6 +127,12 @@ class ClarificationJournal:
                             'updated_at': max(item['updated_at'], time.time(),
                                               math.nextafter(existing['updated_at'], math.inf)
                                               if existing else item['updated_at'])}
+            if native_run_lost and item['status'] == 'pending':
+                if existing and existing['status'] != 'pending':
+                    return self._view(existing)
+                item = {**item, 'status': 'unknown', 'updated_at': max(
+                    item['updated_at'], time.time(),
+                    math.nextafter(existing['updated_at'], math.inf) if existing else item['updated_at'])}
             if existing:
                 if existing['status'] == 'answered':
                     if (item['status'] != 'answered'
@@ -366,6 +374,8 @@ class ClarificationJournal:
     async def rehydrate(self, user, run_id, gateway, run, *, validate_snapshot=None):
         if not run.get('upstream_id') or run['status'] in ('completed', 'failed', 'cancelled'):
             return {'available': False, 'items': self.list(user, run_id), 'native_status': None}
+        if run.get('error') == NATIVE_RUN_LOST_ERROR:
+            return {'available': False, 'items': self.list(user, run_id), 'native_status': 'unknown'}
         try:
             from urllib.parse import quote
             gateway.require_execution()

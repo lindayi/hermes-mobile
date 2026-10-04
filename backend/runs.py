@@ -12,6 +12,9 @@ class RunConflict(ValueError):
     pass
 
 
+NATIVE_RUN_LOST_ERROR = 'Native run no longer exists; automatic retry is disabled'
+
+
 class RunJournal:
     @staticmethod
     def _public_replay(row):

@@ -118,6 +118,9 @@ timeouts, 5xx, and unavailable capabilities do not establish native loss.
 The owner/profile/native identity, Stop intent, and actual terminal progress
 remain authoritative. Repeated GET, reconciliation, store reopen, and fresh
 Orchestrator replay must stabilize clarification/done events without redispatch.
+The persisted definitive-loss reason also fences delayed pending SSE events and
+prevents a later rehydration from reviving the lost waiter; ordinary restart
+unknowns remain restorable only by an authenticated live snapshot.
 
 The answer-rejection correction starts from PR #78 head
 `45ba7773bf7988951eef6e3cdd3e6e66694fb1eb` over main
