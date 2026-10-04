@@ -234,6 +234,9 @@ def maintenance_adapter(base, *, sources=_local_sources):
             self._maintenance_workers = 0
             self._maintenance_uncertain = False
             super().__init__(*args, **kwargs)
+            if hasattr(self, '_controls_lock'):
+                # The composed listener publishes both kinds of state under one lock.
+                self._controls_lock = self._maintenance_lock
 
         def _create_agent(self, *args, **kwargs):
             with self._maintenance_lock:

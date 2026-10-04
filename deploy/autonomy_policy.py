@@ -170,7 +170,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/frontend_release.py': '7749afb862a515fc673712b11278145adfb3d39ba2d012a34ecea257399eade3',
     'deploy/git_source.py': 'c69c7c5a45bc3a16ab26996872c258cc352cf2ec56c19d6256595e18ac713d63',
     'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
-    'deploy/native_controls_release.py': 'fe6c843d1dee42a165e178e06a273c72eb916b9302d5410f6ca02b59fd2ad9de',
+    'deploy/native_controls_release.py': '7e8769dd79f1d5c44ec33cd19216e67a9e939d26e4d386a4f4a7fc164e3dd47e',
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': 'bf01500fb253f7d41ce49d375bba63a9e4d80569eb376a6aeae50f56cf71923f',
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
@@ -212,7 +212,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
     'backend/clarifications.py': '406849aad5c35e8f122623376ef151ff62d796dbe0b5c6bc8c038b349b0c2af1',
-    'backend/model_controls.py': '14ebcd96f4bc77171b0dffdce396905c6ae045aa0c6736b85068873c2ede3fdc',
+    'backend/model_controls.py': '06a1dc3be87f9d81515157ba19de62de043e7f75491587eabb02aac3d5a406e3',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',  # gitleaks:allow
     'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
     'backend/runs.py': '99297aef3ecf899d40b77d76de26132701596672dd6af432cdf16ecba1aaac93',

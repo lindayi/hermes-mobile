@@ -1,6 +1,9 @@
+import asyncio
 import queue
 import threading
 from types import SimpleNamespace
+
+import pytest
 
 from backend.native_maintenance import maintenance_snapshot
 
@@ -28,3 +31,112 @@ def test_pending_clarification_is_counted_as_active_native_work(tmp_path):
 
     assert evidence['status'] == 'ok'
     assert evidence['work']['nonterminal_runs'] == 1
+
+
+def _composed_listener(monkeypatch, timeout):
+    from backend import native_maintenance
+    from backend.native_run_controls import run_controls_adapter
+    from test_native_run_controls import Base
+
+    monkeypatch.setattr(
+        native_maintenance, 'install_delegation_tracking',
+        lambda: SimpleNamespace(count=lambda: 0))
+    adapter = native_maintenance.maintenance_adapter(run_controls_adapter(Base))()
+    adapter._run_streams['native-run'] = asyncio.Queue()
+    adapter._run_approval_sessions['native-run'] = 'native-run'
+    outcome = {}
+    agent = None
+
+    def run():
+        try:
+            outcome['answer'] = agent.clarify_callback(
+                'Which option?', ['Keep', 'Change'])
+        except RuntimeError as exc:
+            outcome['error'] = str(exc)
+
+    agent = SimpleNamespace(
+        steer=lambda text: True, clear_interrupt=lambda: True,
+        run_conversation=run, clarify_timeout=timeout,
+        _drain_pending_steer=lambda: None)
+    callback = adapter._make_run_event_callback(
+        'native-run', asyncio.get_running_loop())
+    adapter._set_run_status('native-run', 'running')
+    adapter.agent_factory = lambda **kwargs: agent
+    agent = adapter._create_agent(
+        tool_progress_callback=callback, stream_delta_callback=lambda text: None)
+    adapter._active_run_agents['native-run'] = agent
+    adapter._active_run_tasks = {}
+    adapter._shutdown_interruptible_agents = {}
+    adapter._pending_agent_requests = 0
+    adapter._inflight_agent_runs = 0
+    return adapter, agent, outcome
+
+
+@pytest.mark.parametrize('ending', ['answer', 'timeout', 'stopping', 'completed'])
+def test_composed_listener_serializes_clarification_and_lifecycle(ending, monkeypatch):
+    async def check():
+        adapter, agent, outcome = _composed_listener(
+            monkeypatch, timeout=0.2 if ending == 'timeout' else 2)
+        assert adapter._controls_lock is adapter._maintenance_lock
+        worker = threading.Thread(target=agent.run_conversation, daemon=True)
+        worker.start()
+        try:
+            question = await asyncio.wait_for(
+                adapter._run_streams['native-run'].get(), timeout=1)
+            assert question['status'] == 'pending'
+            registry = SimpleNamespace(
+                _lock=threading.Lock(), _running={}, completion_queue=queue.Queue())
+            delegations = SimpleNamespace(_records_lock=threading.Lock(), _records={})
+            waiting = maintenance_snapshot(
+                adapter, registry, delegations, 'unused-state.db')
+            assert waiting['status'] == 'ok'
+            assert waiting['work']['nonterminal_runs'] == 1
+            assert waiting['work']['agent_workers'] == 1
+
+            if ending == 'answer':
+                response = await adapter._handle_clarification_answer(SimpleNamespace(
+                    match_info={'run_id': 'native-run', 'question_id': question['question_id']},
+                    body={'answer': 'Change', 'other': False}))
+                assert response.status == 200
+                adapter._set_run_status('native-run', 'completed')
+            elif ending != 'timeout':
+                status = 'stopping' if ending == 'stopping' else 'completed'
+                updater = threading.Thread(
+                    target=adapter._set_run_status, args=('native-run', status))
+                updater.start()
+                updater.join(timeout=1)
+                assert not updater.is_alive()
+
+            await asyncio.to_thread(worker.join, 1)
+            assert not worker.is_alive()
+            if ending == 'answer':
+                assert outcome == {'answer': 'Change'}
+                item = adapter._controls['native-run']['clarifications'][
+                    question['question_id']]
+                assert item['status'] == 'answered'
+                assert item['answer'] == 'Change'
+                assert adapter._run_statuses['native-run']['status'] == 'completed'
+            else:
+                expected = 'expired' if ending in {'timeout', 'completed'} else 'cancelled'
+                assert outcome == {'error': f'Clarification {expected}.'}
+                assert adapter._controls['native-run']['clarifications'][
+                    question['question_id']]['status'] == expected
+            assert adapter._maintenance_workers == 0
+            finished = maintenance_snapshot(
+                adapter, registry, delegations, 'unused-state.db')
+            assert finished['status'] == 'ok'
+            assert finished['work']['agent_workers'] == 0
+            assert finished['work']['nonterminal_runs'] == (
+                1 if ending in {'timeout', 'stopping'} else 0)
+        finally:
+            if worker.is_alive():
+                cleanup = threading.Thread(
+                    target=adapter._set_run_status,
+                    args=('native-run', 'stopping'), daemon=True)
+                cleanup.start()
+                cleanup.join(timeout=1)
+                worker.join(timeout=1)
+                assert not cleanup.is_alive()
+            assert not worker.is_alive()
+
+    asyncio.run(check())

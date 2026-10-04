@@ -16,6 +16,9 @@ supports the pinned single-question ABI, not a newer batched-question schema.
 - The native callback creates a bounded, unpredictable question ID scoped to the
   existing native run, emits the actual question, choices, `multi_select` flag,
   and `pending` state on that run's SSE stream, then blocks the same tool call.
+  In the composed owner listener, run-controls and maintenance state use one
+  reentrant lifecycle lock so clarification and status publication cannot invert
+  lock order or expose a torn maintenance snapshot.
 - `GET /v1/runs/{run_id}` and the run event stream expose the bounded clarification
   records for rehydration. `POST /v1/runs/{run_id}/clarifications/{question_id}`
   is authenticated by the existing native API key and accepts one validated
