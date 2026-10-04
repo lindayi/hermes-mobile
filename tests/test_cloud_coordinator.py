@@ -5305,6 +5305,256 @@ def test_uncertain_correction_review_publication_reads_back_without_reposting(
     ]) == formal_count == 1
 
 
+def test_stale_negative_correction_cannot_dispatch_fixer_after_reload(
+        tmp_path, monkeypatch):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="changes_requested",
+        findings=[{
+            "path": "frontend/styles.css",
+            "comment": "Keep the existing behavior unchanged.",
+        }],
+        files=api.review_file_digests(),
+    )
+
+    write = api.write
+
+    def write_then_advance_main(route, body):
+        response = write(route, body)
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews":
+            api.current_main_sha = NEXT_RESULT_HEAD
+            api.pull["base"]["sha"] = NEXT_RESULT_HEAD
+            api.compare_results[f"{BASE}...{NEXT_RESULT_HEAD}"] = _compare_result(
+                BASE, ahead_by=2,
+            )
+        return response
+
+    monkeypatch.setattr(api, "write", write_then_advance_main)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )
+    stale = StateStore(path).action(correction["key"])
+    assert stale["publication_state"] == "done"
+    assert stale["publication_disposition"] == "stale"
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "exhausted"
+
+    task_posts = api.task_posts
+    review_attempts = api.review_attempts
+    publications = [
+        (route, body) for route, body in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ]
+    agent_statuses = [
+        status for statuses in api.status_log.values() for status in statuses
+        if status.get("context") == "agent-review" and status.get("state") == "success"
+    ]
+    for _ in range(2):
+        result = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        assert "review-report-exhausted" in result["reasons"]
+        actions = StateStore(path).actions()
+        assert StateStore(path).action(original["key"])["report_retry_state"] == "exhausted"
+        assert StateStore(path).action(source_fix["key"])["handoff_state"] != "done"
+        assert not any(
+            action.get("kind") == "fix"
+            and action.get("task_type") == "review-followup"
+            for action in actions.values()
+        )
+        assert api.task_posts == task_posts
+        assert api.review_attempts == review_attempts
+        assert api.fix_attempts == 1
+        assert [
+            (route, body) for route, body in api.writes
+            if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+        ] == publications
+        assert [
+            status for statuses in api.status_log.values() for status in statuses
+            if status.get("context") == "agent-review" and status.get("state") == "success"
+        ] == agent_statuses
+    exhausted = [
+        comment for comment in api.comments
+        if "single safe correction is unavailable or exhausted"
+        in comment.get("body", "")
+    ]
+    assert len(exhausted) == 1
+
+
+@pytest.mark.parametrize(("container", "value"), [
+    ("artifacts", 17),
+    ("sessions", 17),
+    ("artifacts", {}),
+    ("sessions", "not-a-list"),
+], ids=["integer-artifacts", "integer-sessions", "object-artifacts", "string-sessions"])
+def test_malformed_terminal_task_containers_are_diagnosed_and_recover(
+        tmp_path, container, value):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    task = api.tasks[original["task_id"]]
+    authentic_task = json.loads(json.dumps(task))
+    task[container] = value
+    if container == "sessions":
+        task["artifacts"] = []
+    task_posts = api.task_posts
+    review_attempts = api.review_attempts
+    publications = [
+        (route, body) for route, body in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ]
+    status_writes = sum(len(rows) for rows in api.status_log.values())
+
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )
+        blocked = StateStore(path).action(original["key"])
+        assert blocked["status"] == "sent"
+        assert blocked["report_observation_error"] == (
+            "Independent review task scope/session containers were malformed"
+        )
+        assert not blocked.get("report_retry_allowed")
+        assert blocked["task_id"] == original["task_id"]
+        assert api.task_posts == task_posts
+        assert api.review_attempts == review_attempts
+        assert api.fix_attempts == 1
+        assert [
+            (route, body) for route, body in api.writes
+            if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+        ] == publications
+        assert sum(len(rows) for rows in api.status_log.values()) == status_writes
+    blockers = [
+        comment for comment in api.comments
+        if "scope/session containers were malformed" in comment.get("body", "")
+    ]
+    assert len(blockers) == 1
+
+    api.tasks[original["task_id"]] = authentic_task
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )
+    recovered = StateStore(path).action(original["key"])
+    corrections = [
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]
+    assert recovered["status"] == "completed"
+    assert recovered.get("report_observation_error") is None
+    assert recovered["task_id"] == original["task_id"]
+    assert recovered["dispatch_nonce"] == original["dispatch_nonce"]
+    assert len(corrections) == 1
+    assert corrections[0]["status"] == "sent"
+    assert corrections[0]["task_id"] != original["task_id"]
+    assert StateStore(path).action(source_fix["key"])["task_id"] == source_fix["task_id"]
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+
+
+@pytest.mark.parametrize("verdict", ["pass", "changes_requested"])
+@pytest.mark.parametrize("response_id", [
+    "missing", None, True, 0, "review-id",
+], ids=["missing", "null", "boolean", "zero", "string"])
+def test_invalid_formal_review_id_stays_uncertain_until_authenticated_readback(
+        tmp_path, verdict, response_id):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    findings = [{
+        "path": "frontend/styles.css",
+        "comment": "Keep the existing behavior unchanged.",
+    }] if verdict == "changes_requested" else []
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict=verdict, findings=findings, files=api.review_file_digests(),
+    )
+    formal_writes = []
+
+    def synthetic_gh_write(route, body):
+        if route != "repos/lindayi/hermes-mobile/pulls/16/reviews":
+            return api_write(route, body)
+        formal_writes.append((route, body))
+        response = {
+            "state": "COMMENTED",
+            "commit_id": body["commit_id"],
+            "body": body["body"],
+            "user": {"id": OWNER},
+        }
+        if response_id != "missing":
+            response["id"] = response_id
+        transport = lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(response), stderr="",
+        )
+        return GhApi(run=transport).write(route, body)
+
+    api_write = api.write
+    api.write = synthetic_gh_write
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    uncertain = StateStore(path).action(correction["key"])
+    assert uncertain["publication_state"] == "uncertain"
+    assert uncertain.get("published_review_id") is None
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "reserved"
+    assert not any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for statuses in api.status_log.values() for status in statuses
+    )
+    assert api.fix_attempts == 1
+    assert len(formal_writes) == 1
+
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert len(formal_writes) == 1
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "reserved"
+    assert api.fix_attempts == 1
+
+    body = formal_writes[0][1]["body"]
+    api.owner_reviews.append({
+        "id": 81234, "state": "COMMENTED", "commit_id": correction["head"],
+        "body": body, "user": {"id": OWNER},
+    })
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )
+    reconciled = StateStore(path).action(correction["key"])
+    assert reconciled["publication_state"] == "done"
+    assert reconciled["published_review_id"] == 81234
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "recovered"
+    assert len(formal_writes) == 1
+    if verdict == "pass":
+        assert any(
+            status.get("context") == "agent-review" and status.get("state") == "success"
+            for statuses in api.status_log.values() for status in statuses
+        )
+        assert api.fix_attempts == 1
+    else:
+        assert not any(
+            status.get("context") == "agent-review" and status.get("state") == "success"
+            for statuses in api.status_log.values() for status in statuses
+        )
+        assert api.fix_attempts == 2
+        assert any(
+            action.get("kind") == "fix"
+            and action.get("task_type") == "review-followup"
+            for action in StateStore(path).actions().values()
+        )
+
+
 def test_unrepresentable_review_inventory_persists_one_deduplicated_blocker(
         tmp_path):
     api = FakeApi(source_failure=True, review_status_present=False)
