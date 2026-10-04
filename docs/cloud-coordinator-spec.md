@@ -568,6 +568,14 @@ completed correction and all required publications were already durably recorded
 before restart and the complete original task, report, source, and parent bindings
 still match.
 
+A stale correction's remote COMMENT and success status remain historical
+publications, not rollback targets. Review eligibility, source handoff, and fresh
+status/merge fences reject the selected COMMENT only when its PR, head, positive
+review ID, and exact generated-body digest match that stale correction's durable
+publication. Exhaustion remains recorded and deduplicated; it does not revoke an
+unrelated legacy review or a later authentic independent review. No new task,
+COMMENT, or success status is emitted to repair this stale publication.
+
 The validated completion time, session ID and receipt comment ID remain persisted
 with the receipt head/base and dispatch claim for restart. The authentic session
 completion is retained as `receipt_session_completed_at` in both the action and

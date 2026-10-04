@@ -370,15 +370,31 @@ def copilot_review_valid(head_sha, reviews, threads, *, threads_complete=True,
 
 
 def independent_review_valid(head_sha, reviews, threads, *, pull_author_id,
-                             threads_complete=True, reviews_complete=True):
+                             threads_complete=True, reviews_complete=True,
+                             issue=None, review_actions=None):
     """Require current owner-published independent evidence, not Copilot approval."""
     if (not _is_sha(head_sha) or type(pull_author_id) is not int
             or pull_author_id <= 0 or pull_author_id == OWNER_ID
             or reviews_complete is not True
             or not _complete_resolved_threads(threads, complete=threads_complete)):
         return False
-    if current_independent_agent_review(
-            reviews, head_sha, owner_id=OWNER_ID, complete=reviews_complete) is None:
+    selected = current_independent_agent_review(
+        reviews, head_sha, owner_id=OWNER_ID, complete=reviews_complete,
+    )
+    if selected is None:
+        return False
+    if any(
+            isinstance(action, dict)
+            and action.get("kind") == "review"
+            and action.get("task_type") == "report-correction"
+            and action.get("publication_disposition") == "stale"
+            and action.get("issue") == issue
+            and action.get("head") == head_sha
+            and _review_publication_proven(action)
+            and action["published_review_id"] == selected["review_id"]
+            and hashlib.sha256(action["published_review_body"].encode("utf-8")).hexdigest()
+            == selected["body_sha256"]
+            for action in (review_actions or {}).values()):
         return False
     latest_copilot = latest_reviews(reviews, COPILOT_REVIEWER_ID)
     return not latest_copilot or not any(
@@ -2857,7 +2873,8 @@ class Coordinator:
                 head, snapshot.get("reviews"), snapshot.get("threads"),
                 pull_author_id=author_id,
                 threads_complete=snapshot.get("threads_complete") is True,
-                reviews_complete=snapshot.get("reviews_complete") is True):
+                reviews_complete=snapshot.get("reviews_complete") is True,
+                issue=action["issue"], review_actions=self.store.actions()):
             review_action = _current_review_followup(
                 self.store.actions(), action["issue"], head,
             )
@@ -3189,6 +3206,7 @@ class Coordinator:
             pull_author_id=pull_user.get("id") if isinstance(pull_user, dict) else None,
             threads_complete=snapshot["threads_complete"],
             reviews_complete=snapshot["reviews_complete"],
+            issue=number, review_actions=actions,
         )
         sensitive = classify_sensitive_paths(
             snapshot["files"], complete=snapshot["files_complete"],
@@ -3868,6 +3886,7 @@ class Coordinator:
                             action["head"], reviews, threads,
                             pull_author_id=pull_user.get("id") if isinstance(pull_user, dict) else None,
                             threads_complete=threads_complete, reviews_complete=True,
+                            issue=action["issue"], review_actions=self.store.actions(),
                         )
                         or (sensitive
                             and (
@@ -3982,7 +4001,8 @@ class Coordinator:
                     pull_author_id=(current_user.get("id")
                                     if isinstance(current_user, dict) else None),
                     threads_complete=current["threads_complete"],
-                    reviews_complete=True):
+                    reviews_complete=True, issue=action["issue"],
+                    review_actions=self.store.actions()):
                 self.store.update_action(key, "blocked")
                 current_plan["auto_merge_eligible"] = False
                 current_plan["merge_action"] = None

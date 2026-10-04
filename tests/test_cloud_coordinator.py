@@ -4663,6 +4663,189 @@ def _prepare_malformed_review_report(tmp_path):
     return api, path, source_fix, original
 
 
+@pytest.mark.parametrize("superseding_review", [False, True])
+def test_stale_pass_cannot_complete_handoff_after_reload(
+        tmp_path, monkeypatch, superseding_review):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="pass", files=api.review_file_digests(),
+    )
+    write = api.write
+
+    def advance_main_after_status(route, body):
+        response = write(route, body)
+        if "/statuses/" in route and body.get("context") == "agent-review":
+            api.current_main_sha = NEXT_RESULT_HEAD
+            api.pull["base"]["sha"] = NEXT_RESULT_HEAD
+            api.pull.update(mergeable=True, mergeable_state="clean")
+            api.compare_results[f"{BASE}...{NEXT_RESULT_HEAD}"] = _compare_result(
+                BASE, ahead_by=2,
+            )
+        return response
+
+    monkeypatch.setattr(api, "write", advance_main_after_status)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    stale = StateStore(path).action(correction["key"])
+    assert stale["publication_state"] == "done"
+    assert stale["agent_review_state"] == "done"
+    assert stale["publication_disposition"] == "stale"
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "exhausted"
+    tasks = (api.task_posts, api.review_attempts, api.fix_attempts)
+    publications = len([
+        route for route, _ in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ])
+    successes = len([
+        status for statuses in api.status_log.values() for status in statuses
+        if status.get("context") == "agent-review" and status.get("state") == "success"
+    ])
+    assert publications == successes == 1
+
+    for _ in range(2):
+        summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )["pull_requests"][0]
+        assert summary["review_valid"] is False
+        assert summary["auto_merge_eligible"] is False
+        assert StateStore(path).action(source_fix["key"])["handoff_state"] != "done"
+        parent = StateStore(path).action(original["key"])
+        assert parent["report_retry_state"] == "exhausted"
+        assert parent["task_id"] == original["task_id"]
+        assert parent["report_error"]
+        assert len(parent["report_error"]) <= 256
+    assert (api.task_posts, api.review_attempts, api.fix_attempts) == tasks
+    assert len([
+        route for route, _ in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ]) == publications
+    assert len([
+        status for statuses in api.status_log.values() for status in statuses
+        if status.get("context") == "agent-review" and status.get("state") == "success"
+    ]) == successes
+    assert api.graphql_writes == []
+    assert len([
+        comment for comment in api.comments
+        if "single safe correction is unavailable or exhausted" in comment.get("body", "")
+    ]) == 1
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+
+    if superseding_review:
+        api.pending_required = True
+        refresh_owner_review(
+            api, HEAD, review_id=81234, submitted_at="2026-10-01T12:30:00Z",
+        )
+        for _ in range(2):
+            summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+                apply=True,
+            )["pull_requests"][0]
+            assert summary["review_valid"] is True
+            assert StateStore(path).action(source_fix["key"])["handoff_state"] == "done"
+            assert StateStore(path).action(original["key"])["report_retry_state"] == "exhausted"
+        assert (api.task_posts, api.review_attempts, api.fix_attempts) == tasks
+        assert len([
+            route for route, _ in api.writes
+            if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+        ]) == publications
+        assert len([
+            status for statuses in api.status_log.values() for status in statuses
+            if status.get("context") == "agent-review" and status.get("state") == "success"
+        ]) == successes
+        assert api.graphql_writes == []
+
+
+@pytest.mark.parametrize("unrelated", [
+    None, "issue", "head", "review_id", "body", "report", "disposition", "task_type",
+])
+def test_stale_correction_rejection_binds_exact_selected_publication(unrelated):
+    from deploy.cloud_coordinator import independent_review_valid, _published_review_body
+
+    report = {"verdict": "pass", "findings": [], "files": {}}
+    body = _published_review_body(report, HEAD)
+    api = FakeApi()
+    api.set_owner_review(
+        review_id=81234, head_sha=HEAD, body=body,
+        submitted_at="2026-10-01T12:30:00Z",
+    )
+    reviews = _rest_list(api, "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100")
+    action = {
+        "kind": "review", "task_type": "report-correction", "issue": 16,
+        "head": HEAD, "publication_state": "done", "publication_disposition": "stale",
+        "published_review_id": 81234, "published_review_body": body,
+        "review_report": report,
+    }
+    if unrelated == "issue":
+        action["issue"] = 17
+    elif unrelated == "head":
+        action["head"] = NEXT_RESULT_HEAD
+    elif unrelated == "review_id":
+        action["published_review_id"] = 81235
+    elif unrelated == "body":
+        action["published_review_body"] += " "
+    elif unrelated == "report":
+        action["review_report"] = report | {"files": {"other": None}}
+    elif unrelated == "disposition":
+        action["publication_disposition"] = "current"
+    elif unrelated == "task_type":
+        action["task_type"] = "independent-review"
+    assert independent_review_valid(
+        HEAD, reviews, [], pull_author_id=198982749,
+        issue=16, review_actions={"correction": action},
+    ) is (unrelated is not None)
+
+
+@pytest.mark.parametrize("stale_on_read", [2, 3], ids=["merge-replan", "final-merge"])
+def test_stale_correction_is_rejected_at_fresh_merge_fences(
+        tmp_path, stale_on_read):
+    from deploy.cloud_coordinator import _published_review_body
+
+    store = StateStore(tmp_path / "state.json")
+    report = {"verdict": "pass", "findings": [], "files": {}}
+    body = _published_review_body(report, HEAD)
+
+    class StalePublicationRace(FakeApi):
+        review_reads = 0
+
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                self.review_reads += 1
+                if self.review_reads == stale_on_read:
+                    store._mutate(lambda state: state["actions"].update({
+                        "stale-correction": {
+                            "key": "stale-correction",
+                            "kind": "review", "task_type": "report-correction",
+                            "issue": 16, "head": HEAD, "status": "completed",
+                            "publication_state": "done", "agent_review_state": "done",
+                            "publication_disposition": "stale", "review_report": report,
+                            "published_review_id": self.owner_review_id,
+                            "published_review_body": body,
+                        },
+                    }))
+            return values
+
+    api = StalePublicationRace()
+    api.set_owner_review(
+        review_id=81234, head_sha=HEAD, body=body,
+        submitted_at="2026-10-01T12:30:00Z",
+    )
+    result = Coordinator(api, store).run(apply=True)["pull_requests"][0]
+    assert api.review_reads >= stale_on_read
+    assert result["auto_merge_eligible"] is False
+    assert result["auto_merge_requested"] is False
+    assert store.action(f"auto-merge:16:{HEAD}:{BASE}")["status"] == "blocked"
+    assert api.graphql_writes == []
+    assert api.task_posts == 0
+
+
 def test_nonobject_review_task_response_stays_unresolved_until_terminal_evidence(
         tmp_path, monkeypatch):
     api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
