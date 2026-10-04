@@ -613,7 +613,10 @@ def review_anchor_request(snapshot, source_action, *, retry_of=None):
         f"{source_action.get('receipt_comment_id')}"
     )
     if retry_of is not None:
-        key += f":report-correction:{retry_of['key']}:{retry_of['task_id']}"
+        key += (
+            f":report-correction:{retry_of['key']}:{retry_of['task_id']}:"
+            f"{snapshot['main_sha']}"
+        )
     marker = (
         f"{REVIEW_ANCHOR_MARKER_PREFIX}{hashlib.sha256(key.encode()).hexdigest()[:20]}"
     )
@@ -637,7 +640,7 @@ def review_anchor_request(snapshot, source_action, *, retry_of=None):
             f"review-anchor:{snapshot['issue']}:{snapshot['head']}"
             if retry_of is None else
             f"review-anchor:{snapshot['issue']}:{snapshot['head']}:correction:"
-            f"{hashlib.sha256(retry_of['key'].encode()).hexdigest()[:16]}"
+            f"{hashlib.sha256((retry_of['key'] + ':' + snapshot['main_sha']).encode()).hexdigest()[:16]}"
         ),
         "marker": marker, "body": body, "prefix": prefix,
     }
@@ -726,7 +729,8 @@ def review_task_request(snapshot, source_action, anchor_comment_id, anchor_prefi
             return None
         nonce_material += (
             f":report-correction:{retry_of['key']}:{retry_of['task_id']}:"
-            f"{retry_of['dispatch_nonce']}"
+            f"{retry_of['dispatch_nonce']}:{retry_of['main_sha']}:"
+            f"{snapshot['main_sha']}"
         )
     nonce = hashlib.sha256(nonce_material.encode("utf-8")).hexdigest()[:32]
     finding_path = inventory[0]["path"]
@@ -1481,6 +1485,7 @@ def _review_report_correction_parent_needs_recovery(actions, correction):
             or correction.get("task_type") != "report-correction"
             or correction.get("status") != "completed"
             or correction.get("report_error")
+            or correction.get("publication_disposition") == "stale"
             or correction.get("publication_state") != "done"
             or correction.get("agent_review_state") not in {None, "done"}
             or not isinstance(correction.get("review_report"), dict)
@@ -1570,6 +1575,8 @@ def _review_report_recovery_busy(actions, report_action):
     correction = _review_report_correction(actions, report_action)
     if correction is None:
         return report_action.get("report_retry_allowed") is True
+    if correction.get("publication_disposition") == "stale":
+        return False
     if correction.get("status") in {"sending", "uncertain", "sent"}:
         return True
     if correction.get("status") == "completed":
@@ -2310,6 +2317,9 @@ class Coordinator:
                         review_publications.append(key)
                     busy = True
                     continue
+                if (status == "completed"
+                        and action.get("publication_disposition") == "stale"):
+                    continue
                 if (status == "completed" and (
                         action.get("publication_state") != "done"
                         or action.get("agent_review_state") not in {None, "done"}
@@ -2603,6 +2613,56 @@ class Coordinator:
             )
         )
 
+    def _report_correction_publication_current(self, action):
+        if (not isinstance(action, dict)
+                or action.get("task_type") != "report-correction"
+                or not _is_sha(action.get("head"))
+                or not _is_sha(action.get("main_sha"))
+                or type(action.get("issue")) is not int
+                or type(action.get("pull_id")) is not int
+                or not isinstance(action.get("pull_node_id"), str)
+                or not action.get("pull_node_id")):
+            return False
+        pull = self._fence_pull(
+            action["issue"], action["head"], action["main_sha"],
+            allow_historical_behind=True,
+        )
+        if (not isinstance(pull, dict) or not _pull_identity(pull, action)):
+            return False
+        enrollment = self.store.snapshot()["enrollments"].get(str(action["issue"]))
+        if not isinstance(enrollment, dict) or not enrollment.get("active"):
+            return False
+        if enrollment.get("authorized_head") is not None:
+            _, authorized_heads, blocked_heads = _authorized_result_heads(
+                action["issue"], enrollment, self.store.actions(),
+                _all_review_comments(self.api, action["issue"], None),
+                pull.get("base", {}).get("sha"),
+            )
+            if (authorized_heads is None or action["head"] not in authorized_heads
+                    or action["head"] in blocked_heads):
+                return False
+        return self._report_correction_dispatch_proven(action, pull)
+
+    def _stale_report_correction_publication(self, key, action):
+        self.store.update_action(
+            key, "completed",
+            publication_disposition="stale",
+            publication_error=(
+                "Correction reservation head or main advanced before publication completed"
+            ),
+            **(
+                {"agent_review_state": "stale"}
+                if action.get("report_verdict") == "pass"
+                and action.get("agent_review_state") != "done"
+                else {}
+            ),
+        )
+        self.store.update_action(
+            action.get("correction_of"), "completed",
+            report_retry_state="exhausted",
+        )
+        return "stale"
+
     def _now_string(self):
         return datetime.fromtimestamp(self.clock(), timezone.utc).isoformat(
             timespec="seconds",
@@ -2888,6 +2948,9 @@ class Coordinator:
                 agent_review_status_id=existing.get("id"),
             )
             return "done"
+        if (action.get("task_type") == "report-correction"
+                and not self._report_correction_publication_current(action)):
+            return self._stale_report_correction_publication(key, action)
         if action.get("agent_review_state") == "uncertain":
             return "uncertain"
         try:
@@ -2917,6 +2980,13 @@ class Coordinator:
         return "done"
 
     def _advance_review_publication(self, key, action, snapshot):
+        if action.get("publication_disposition") == "stale":
+            return "stale"
+        publications_were_durable = (
+            action.get("report_verdict") == "pass"
+            and action.get("publication_state") == "done"
+            and action.get("agent_review_state") == "done"
+        )
         body = _published_review_body(action["review_report"], action["head"])
         if action.get("publication_state") != "done":
             reviews = _rest_list(
@@ -2932,8 +3002,15 @@ class Coordinator:
             else:
                 state = action.get("publication_state")
                 if state == "uncertain":
+                    if (action.get("task_type") == "report-correction"
+                            and not self._report_correction_publication_current(action)):
+                        return self._stale_report_correction_publication(key, action)
                     return "uncertain"
                 self.store.update_action(key, "completed", publication_state="sending")
+                action = self.store.action(key) or action
+                if (action.get("task_type") == "report-correction"
+                        and not self._report_correction_publication_current(action)):
+                    return self._stale_report_correction_publication(key, action)
                 try:
                     response = self.api.write(
                         f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews",
@@ -2960,6 +3037,10 @@ class Coordinator:
             if status != "done":
                 return status
         if action.get("task_type") == "report-correction":
+            action = self.store.action(key) or action
+            if (not publications_were_durable
+                    and not self._report_correction_publication_current(action)):
+                return self._stale_report_correction_publication(key, action)
             self.store.update_action(
                 action.get("correction_of"), "completed",
                 report_retry_state="recovered",
@@ -4176,7 +4257,9 @@ def _retirable_action(action, current_head, inactive):
     """Only positively terminal records may be retired; unresolved claims stay."""
     status = action.get("status")
     if action.get("kind") == "fix":
-        if action.get("handoff_state") not in {None, "done", "failed", "superseded"}:
+        if action.get("handoff_state") not in {
+            None, "done", "failed", "superseded", "inventory_blocked",
+        }:
             return False
         action_head = (
             action.get("receipt_head")

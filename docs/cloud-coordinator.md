@@ -164,10 +164,25 @@ receipt, and independently proven ancestry from that saved base through the PR
 base, current main, and reviewed head. The correction records the historical parent
 base separately from its current-main report binding; if either changes after
 reservation, the correction report cannot be published or grant `agent-review`.
+Its anchor marker, outbox key, and nonce include the reservation main SHA. A main
+advance before claim leaves the old sent/uncertain anchor intact and permits a
+distinct current-main anchor; a claimed or uncertain correction task is never
+replaced by another correction task.
+
+Pending correction replay freshly verifies live PR identity, head, main, and
+authority immediately before formal review and status writes and before marking
+the parent recovered. Detected staleness is durably bounded, exhausts that
+correction reservation, and releases generic busy state. These client checks do
+not make the subsequent GitHub write atomic. A crash-repair transition after
+later main movement is permitted only when the completed correction and every
+required publication were already durably recorded and all original report,
+task, source, and parent bindings still match.
 An inventory that cannot be represented within the strict 64-file contract is
 blocked before reviewer dispatch, recorded on the source handoff, and reported
 once through the deduplicated outcome path. The blocked handoff does not keep a
-generic agent lock or create a fixer task.
+generic agent lock or create a fixer task. Once positively completed, it is
+retired after its head changes or enrollment becomes inactive; current active
+records and unresolved work remain retained.
 
 Sensitive changes additionally need owner authorization bound to that exact SHA
 and the documented targeted independent review; neither approval nor authorization

@@ -533,6 +533,25 @@ current-main observation. Dispatch and report acceptance are fenced to that
 reserved head and main; a later head or main advance invalidates the correction
 without publishing its report or an `agent-review` success status.
 
+The corrective anchor marker, outbox key, and reviewer nonce include the
+reservation's current-main SHA as well as the immutable parent failure identity.
+If main advances before an anchor is claimed, the old sent or uncertain anchor
+remains unchanged and a distinct anchor may be reserved for the new main. Once a
+correction task is claimed, including an uncertain creation, a later main advance
+does not authorize another correction task.
+
+Every pending correction publication replay freshly checks the live PR identity,
+head, current main, and existing correction authority immediately before a formal
+COMMENT write, an `agent-review` status write, and a parent `recovered` transition.
+Existing publication readback remains idempotent. A detected advance records a
+bounded stale disposition, exhausts that correction reservation, and releases the
+generic busy lock without retrying it. These client-side reads cannot make a later
+GitHub write atomic with the read; no server-side compare-and-swap guarantee is
+claimed. Crash repair may update the parent without new writes only when the
+completed correction and all required publications were already durably recorded
+before restart and the complete original task, report, source, and parent bindings
+still match.
+
 The validated completion time, session ID and receipt comment ID remain persisted
 with the receipt head/base and dispatch claim for restart. The authentic session
 completion is retained as `receipt_session_completed_at` in both the action and
@@ -810,6 +829,9 @@ lists of retired auto-merge and outbox key digests). Pending, sending, uncertain
 and sent fixer claims, every record on the current head, enrollments with their
 command fence and attempt budget, and consumed command IDs are never dropped;
 the oldest command IDs fold into a numeric watermark that still fences replays.
+Positively completed `inventory_blocked` fixer handoffs are terminal too and are
+retired by the same head-change/inactive contract; active, current-head, and
+uncertain work and pending outbox posts remain retained.
 
 ACK-backed lifecycle retirement does not erase history. The optional
 `lifecycle_context` preserves each retired event's canonical payload and exact

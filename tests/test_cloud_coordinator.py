@@ -4129,6 +4129,7 @@ def test_inventory_blocked_actions_retire_without_removing_unresolved_work(
     path = tmp_path / "state.json"
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     store = StateStore(path)
+    attempts_before = store.snapshot()["enrollments"]["16"]["attempts"]
 
     def seed(state):
         enrollment = state["enrollments"]["16"]
@@ -4169,7 +4170,7 @@ def test_inventory_blocked_actions_retire_without_removing_unresolved_work(
         assert "inventory-blocked-current" not in persisted["actions"]
     else:
         assert persisted["actions"]["inventory-blocked-current"]["head"] == HEAD
-    assert persisted["enrollments"]["16"]["attempts"] == 1
+    assert persisted["enrollments"]["16"]["attempts"] == attempts_before
 
 
 def test_task_handoff_marks_draft_ready_without_waiting_for_copilot(tmp_path):
@@ -4764,18 +4765,34 @@ def test_historical_report_recovery_uses_fresh_main_and_keeps_retry_separate(
     )
 
 
-def test_correction_anchor_identity_changes_if_main_advances_before_claim(tmp_path):
+@pytest.mark.parametrize("first_publication", ["sent", "uncertain"])
+def test_correction_anchor_identity_changes_if_main_advances_before_claim(
+        tmp_path, monkeypatch, first_publication):
     api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
     _advance_report_recovery_main(api, path)
+    attempted_anchors = []
+    write = api.write
+
+    def publish_anchor(route, body):
+        comment_body = body.get("body", "")
+        if "review-anchor" in comment_body:
+            attempted_anchors.append(comment_body)
+            if first_publication == "uncertain" and len(attempted_anchors) == 1:
+                raise CoordinatorError("response lost")
+        return write(route, body)
+
+    monkeypatch.setattr(api, "write", publish_anchor)
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     first_anchor = next(
         (key, entry) for key, entry in StateStore(path).snapshot()["outbox"].items()
         if key.startswith(f"review-anchor:16:{HEAD}:correction:")
     )
-    assert first_anchor[1]["status"] == "sent"
+    saved_parent = StateStore(path).action(original["key"])
+    assert first_anchor[1]["status"] == first_publication
     assert f"base `{CURRENT_MAIN}`" in first_anchor[1]["body"]
 
     api.current_main_sha = NEXT_RESULT_HEAD
+    api.pull["base"]["sha"] = NEXT_RESULT_HEAD
     api.compare_results[f"{BASE}...{NEXT_RESULT_HEAD}"] = _compare_result(
         BASE, ahead_by=2,
     )
@@ -4788,7 +4805,9 @@ def test_correction_anchor_identity_changes_if_main_advances_before_claim(tmp_pa
     assert anchors[0][0] != anchors[1][0]
     assert anchors[0][1]["marker"] != anchors[1][1]["marker"]
     assert f"base `{NEXT_RESULT_HEAD}`" in anchors[1][1]["body"]
-    assert all(entry["status"] == "sent" for _, entry in anchors)
+    assert anchors[0][1]["status"] == first_publication
+    assert anchors[1][1]["status"] == "sent"
+    assert len(attempted_anchors) == 2, (attempted_anchors, api.writes)
 
     for _ in range(3):
         Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
@@ -4805,10 +4824,29 @@ def test_correction_anchor_identity_changes_if_main_advances_before_claim(tmp_pa
     assert unchanged_parent["main_sha"] == BASE
     assert unchanged_parent["task_id"] == original["task_id"]
     assert unchanged_parent["dispatch_nonce"] == original["dispatch_nonce"]
-    assert unchanged_parent["report_error"] == original["report_error"]
+    assert unchanged_parent["report_error"] == saved_parent["report_error"]
     assert unchanged_parent["report_retry_state"] == "reserved"
+    for field in (
+        "head", "main_sha", "attempt", "report_session_id", "source_task_id",
+        "source_session_id", "source_comment_id", "source_start_head",
+    ):
+        assert unchanged_parent.get(field) == saved_parent.get(field)
     assert StateStore(path).action(source_fix["key"])["task_id"] == source_fix["task_id"]
     assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+    attempts = api.review_attempts
+    api.current_main_sha = RESULT_HEAD
+    api.pull["base"]["sha"] = RESULT_HEAD
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.compare_results[f"{BASE}...{RESULT_HEAD}"] = _compare_result(
+        BASE, ahead_by=3,
+    )
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert api.review_attempts == attempts
+    assert len([
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]) == 1
 
 
 @pytest.mark.parametrize(("snapshot", "diagnostic"), [
@@ -4922,8 +4960,15 @@ def test_pending_correction_publication_rechecks_live_reservation(
         if head:
             api.head_sha = RESULT_HEAD
             api.pull["head"]["sha"] = RESULT_HEAD
+            api.compare_results[f"{BASE}...{RESULT_HEAD}"] = _compare_result(
+                BASE, ahead_by=2,
+            )
         else:
             api.current_main_sha = NEXT_RESULT_HEAD
+            api.pull["base"]["sha"] = NEXT_RESULT_HEAD
+            api.compare_results[f"{BASE}...{NEXT_RESULT_HEAD}"] = _compare_result(
+                BASE, ahead_by=2,
+            )
 
     if stale_at == "after-validation":
         coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
@@ -5017,12 +5062,116 @@ def test_pending_correction_publication_rechecks_live_reservation(
         assert agent_statuses == []
     assert parent["report_retry_state"] != "recovered"
 
-    writes, tasks = list(api.writes), api.task_posts
+    protected_writes = [
+        (route, body) for route, body in api.writes
+        if (route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+            or ("/statuses/" in route and body.get("context") == "agent-review"))
+    ]
+    review_tasks = api.review_attempts
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     reloaded = StateStore(path)
-    assert reloaded.action(original["key"])["report_retry_state"] == "exhausted"
-    assert api.writes == writes
-    assert api.task_posts == tasks
+    remaining_parent = reloaded.action(original["key"])
+    if remaining_parent is not None:
+        assert remaining_parent["report_retry_state"] == "exhausted"
+    assert [
+        (route, body) for route, body in api.writes
+        if (route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+            or ("/statuses/" in route and body.get("context") == "agent-review"))
+    ] == protected_writes
+    assert api.review_attempts == review_tasks
+
+
+def test_pending_correction_replay_rechecks_fresh_main_before_publication(
+        tmp_path, monkeypatch):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="pass", files=api.review_file_digests(),
+    )
+    coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+
+    def crash_before_publication(*args, **kwargs):
+        raise RuntimeError("injected crash before pending publication")
+
+    monkeypatch.setattr(coordinator, "_advance_review_publication", crash_before_publication)
+    with pytest.raises(RuntimeError, match="injected crash before pending publication"):
+        coordinator.run(apply=True)
+    pending = StateStore(path).action(correction["key"])
+    assert pending["status"] == "completed"
+    assert pending["publication_state"] == "pending"
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "reserved"
+
+    api.current_main_sha = NEXT_RESULT_HEAD
+    api.compare_results[f"{BASE}...{NEXT_RESULT_HEAD}"] = _compare_result(
+        BASE, ahead_by=2,
+    )
+    writes = [
+        (route, body) for route, body in api.writes
+        if (route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+            or ("/statuses/" in route and body.get("context") == "agent-review"))
+    ]
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    replayed = StateStore(path)
+    blocked = replayed.action(correction["key"])
+    assert blocked["publication_disposition"] == "stale"
+    assert replayed.action(original["key"])["report_retry_state"] == "exhausted"
+    assert [
+        (route, body) for route, body in api.writes
+        if (route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+            or ("/statuses/" in route and body.get("context") == "agent-review"))
+    ] == writes
+
+
+def test_uncertain_correction_review_publication_reads_back_without_reposting(
+        tmp_path, monkeypatch):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="pass", files=api.review_file_digests(),
+    )
+    write = api.write
+
+    def lose_review_response(route, body):
+        response = write(route, body)
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews":
+            raise CoordinatorError("response lost after publication")
+        return response
+
+    monkeypatch.setattr(api, "write", lose_review_response)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert StateStore(path).action(correction["key"])["publication_state"] == "uncertain"
+    formal_count = len([
+        route for route, _ in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ])
+
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    persisted = StateStore(path)
+    assert persisted.action(correction["key"])["publication_state"] == "done"
+    assert persisted.action(correction["key"])["agent_review_state"] == "done"
+    assert persisted.action(original["key"])["report_retry_state"] == "recovered"
+    assert len([
+        route for route, _ in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ]) == formal_count == 1
 
 
 def test_unrepresentable_review_inventory_persists_one_deduplicated_blocker(
@@ -5137,6 +5286,7 @@ def test_review_report_recovery_bounds_external_session_metadata(
 def test_completed_report_correction_repairs_parent_after_publication_crash(
         tmp_path, monkeypatch):
     api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
     for _ in range(3):
         Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     correction = next(
@@ -5168,6 +5318,12 @@ def test_completed_report_correction_repairs_parent_after_publication_crash(
     assert published["publication_state"] == "done"
     assert published["agent_review_state"] == "done"
     assert after_crash.action(original["key"])["report_retry_state"] == "reserved"
+    api.current_main_sha = NEXT_RESULT_HEAD
+    api.pull["base"]["sha"] = NEXT_RESULT_HEAD
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.compare_results[f"{BASE}...{NEXT_RESULT_HEAD}"] = _compare_result(
+        BASE, ahead_by=2,
+    )
     publications = len([
         route for route, _ in api.writes
         if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
