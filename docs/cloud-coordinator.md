@@ -165,9 +165,11 @@ base, current main, and reviewed head. The correction records the historical par
 base separately from its current-main report binding; if either changes after
 reservation, the correction report cannot be published or grant `agent-review`.
 Its anchor marker, outbox key, and nonce include the reservation main SHA. A main
-advance before claim leaves the old sent/uncertain anchor intact and permits a
-distinct current-main anchor; a claimed or uncertain correction task is never
-replaced by another correction task.
+advance before claim preserves uncertain anchors but may compact a positively
+sent obsolete preclaim anchor into bounded outbox tombstones; its public marker
+remains replay evidence. A distinct current-main anchor is permitted, while
+claimed/current-needed anchors remain retained. A claimed or uncertain correction
+task is never replaced by another correction task.
 
 Pending correction replay freshly verifies live PR identity, head, main, and
 authority immediately before formal review and status writes and before marking
