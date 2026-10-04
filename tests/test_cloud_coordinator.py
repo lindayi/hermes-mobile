@@ -30,6 +30,8 @@ from deploy.cloud_coordinator import (
     repair_request,
     _rest_list,
     _is_owner_sensitive_command,
+    _review_prompt_inventory,
+    _review_prompt_inventory_error,
     _required_checks,
 )
 from deploy.cloud_coordinator import _authorized_result_heads
@@ -4608,6 +4610,254 @@ def _prepare_malformed_review_report(tmp_path):
         files={},
     )
     return api, path, source_fix, original
+
+
+def _advance_report_recovery_main(api, path):
+    StateStore(path)._mutate(lambda state: state["enrollments"]["16"].update(
+        authorized_head=HEAD,
+        owner_authorized_head=HEAD,
+    ))
+    api.current_main_sha = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="behind")
+    api.compare_results = {
+        f"{BASE}...{CURRENT_MAIN}": _compare_result(BASE, ahead_by=1),
+        f"{BASE}...{HEAD}": _compare_result(BASE, ahead_by=1),
+    }
+
+
+def test_historical_report_recovery_uses_fresh_main_and_keeps_retry_separate(
+        tmp_path):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+
+    first = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    saved_parent = StateStore(path).action(original["key"])
+    assert saved_parent["status"] == "completed"
+    assert saved_parent["main_sha"] == BASE
+    assert saved_parent["report_retry_allowed"] is True
+    assert saved_parent["report_retry_state"] == "available"
+    correction_anchors = [
+        (key, item) for key, item in StateStore(path).snapshot()["outbox"].items()
+        if key.startswith(f"review-anchor:16:{HEAD}:correction:")
+    ]
+    assert correction_anchors, first["reasons"]
+    assert correction_anchors[0][1]["status"] == "sent", correction_anchors[0]
+    assert any(
+        correction_anchors[0][1]["marker"] in comment.get("body", "")
+        for comment in api.comments
+    ), correction_anchors[0]
+    assert "review-report-exhausted" not in first["reasons"]
+
+    plan = Coordinator(api, StateStore(path), clock=lambda: 1790856660)._build_plan(
+        apply=False,
+    )["pull_requests"][0]
+    assert plan["review_action"] is not None, plan["reasons"]
+    second = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+    corrections = [
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]
+    assert corrections, (
+        api.review_attempts, second["reasons"],
+        [(key, item.get("status"), item.get("marker")) for key, item
+         in StateStore(path).snapshot()["outbox"].items()
+         if "review-anchor" in key],
+        [comment.get("body", "") for comment in api.comments
+         if "review-anchor" in comment.get("body", "").lower()],
+    )
+    correction = corrections[0]
+    assert correction["status"] == "sent"
+    assert correction["head"] == HEAD
+    assert correction["main_sha"] == CURRENT_MAIN
+    assert correction["correction_parent_main_sha"] == BASE
+    assert correction["source_task_id"] == saved_parent["source_task_id"]
+    assert correction["source_session_id"] == saved_parent["source_session_id"]
+    assert correction["source_comment_id"] == saved_parent["source_comment_id"]
+    assert correction["dispatch_nonce"] != saved_parent["dispatch_nonce"]
+    assert StateStore(path).action(source_fix["key"])["task_id"] == source_fix["task_id"]
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="pass",
+        files=api.review_file_digests(),
+    )
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    recovered = StateStore(path).action(original["key"])
+    completed_correction = StateStore(path).action(correction["key"])
+    assert recovered["status"] == "completed"
+    assert not completed_correction.get("report_error"), completed_correction.get(
+        "report_error",
+    )
+    assert recovered["report_retry_state"] == "recovered", completed_correction
+    assert recovered["report_error"]
+    assert completed_correction["status"] == "completed"
+    assert completed_correction["publication_state"] == "done"
+    assert completed_correction["report_verdict"] == "pass"
+    assert completed_correction["agent_review_state"] == "done"
+    assert api.fix_attempts == 1
+
+    latest = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+    assert latest["auto_merge_eligible"] is False
+    assert api.graphql_writes == []
+    assert any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for status in api.status_log.get(HEAD, [])
+    )
+
+
+@pytest.mark.parametrize(("snapshot", "diagnostic"), [
+    ({"files_complete": False, "files": []},
+     "changed-file inventory is incomplete"),
+    ({"files_complete": True, "files": None},
+     "changed-file inventory is malformed"),
+    ({"files_complete": True, "files": []},
+     "changed-file inventory is empty"),
+    ({"files_complete": True, "files": [None]},
+     "changed-file inventory contains a malformed entry"),
+    ({"files_complete": True, "files": [{
+        "filename": "../outside.py", "status": "modified", "sha": "a" * 40,
+    }]}, "changed-file inventory contains an invalid path"),
+    ({"files_complete": True, "files": [
+        {"filename": "tests/test_same.py", "status": "modified", "sha": "a" * 40},
+        {"filename": "tests/test_same.py", "status": "modified", "sha": "b" * 40},
+    ]}, "changed-file inventory contains a duplicate path"),
+    ({"files_complete": True, "files": [{
+        "filename": "tests/test_missing_status.py", "sha": "a" * 40,
+    }]}, "changed-file inventory contains a malformed status"),
+    ({"files_complete": True, "files": [{
+        "filename": "tests/test_missing_blob.py", "status": "modified",
+    }]}, "changed-file inventory contains an invalid blob identity"),
+])
+def test_unrepresentable_review_inventory_has_bounded_diagnosis(snapshot, diagnostic):
+    assert _review_prompt_inventory_error(snapshot) == diagnostic
+    assert _review_prompt_inventory(snapshot) is None
+
+
+@pytest.mark.parametrize("advance", ["main", "head"])
+def test_report_correction_is_not_published_after_its_snapshot_advances(
+        tmp_path, advance):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    corrections = [
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]
+    assert corrections, (
+        api.review_attempts,
+        [(key, item.get("status"), item.get("marker")) for key, item
+         in StateStore(path).snapshot()["outbox"].items()
+         if "review-anchor" in key],
+        [comment.get("body", "") for comment in api.comments
+         if "review-anchor" in comment.get("body", "").lower()],
+    )
+    correction = corrections[0]
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="pass",
+        files=api.review_file_digests(),
+    )
+    if advance == "main":
+        api.current_main_sha = NEXT_RESULT_HEAD
+        api.compare_results[f"{BASE}...{NEXT_RESULT_HEAD}"] = _compare_result(
+            BASE, ahead_by=2,
+        )
+    else:
+        api.head_sha = RESULT_HEAD
+        api.pull["head"]["sha"] = RESULT_HEAD
+
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    stale = StateStore(path).action(correction["key"])
+    if advance == "main":
+        assert stale["status"] == "completed"
+        assert "reservation snapshot is no longer current" in stale["report_error"]
+        assert stale.get("review_report") is None
+        assert stale.get("publication_state") is None
+        assert StateStore(path).action(original["key"])["report_retry_state"] == "exhausted"
+    else:
+        assert stale is None
+    assert api.review_attempts == 2
+    assert not any(
+        row.get("body", "").startswith(
+            '{"schema":"hermes-independent-agent-review-v1"'
+        )
+        for row in api.owner_reviews
+    )
+    assert not any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for statuses in api.status_log.values() for status in statuses
+    )
+
+
+def test_unrepresentable_review_inventory_persists_one_deduplicated_blocker(
+        tmp_path):
+    api = FakeApi(source_failure=True, review_status_present=False)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    api.pull_files = [
+        {
+            "filename": f"tests/test_review_{index:02}.py",
+            "status": "modified",
+            "sha": f"{index + 1:040x}",
+        }
+        for index in range(65)
+    ]
+    api.blob_contents = {
+        item["sha"]: item["filename"].encode()
+        for item in api.pull_files
+    }
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source_fix = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    api.review_state = "PENDING"
+
+    summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
+
+    blocked = StateStore(path).action(source_fix["key"])
+    assert blocked["handoff_state"] == "inventory_blocked"
+    assert blocked["review_inventory_error"] == (
+        "changed-file inventory has 65 entries; the review limit is 64"
+    )
+    assert summary["repair_requested"] is False
+    assert "review-inventory" in summary.get("reasons", [])
+    assert "agent" not in summary.get("reasons", [])
+    assert api.review_attempts == 0
+    assert api.fix_attempts == 1
+    assert len([
+        comment for comment in api.comments
+        if "changed-file inventory has 65 entries" in comment.get("body", "")
+    ]) == 1
+
+    for _ in range(3):
+        summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )["pull_requests"][0]
+        assert summary["repair_requested"] is False
+    assert api.review_attempts == 0
+    assert api.fix_attempts == 1
+    assert len([
+        comment for comment in api.comments
+        if "changed-file inventory has 65 entries" in comment.get("body", "")
+    ]) == 1
 
 
 @pytest.mark.parametrize(("session_id", "eligible"), [

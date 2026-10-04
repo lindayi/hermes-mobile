@@ -644,6 +644,8 @@ def review_anchor_request(snapshot, source_action, *, retry_of=None):
 
 
 def _review_prompt_inventory(snapshot):
+    if _review_prompt_inventory_error(snapshot):
+        return None
     files = snapshot.get("files")
     if (snapshot.get("files_complete") is not True
             or not isinstance(files, list)
@@ -660,6 +662,35 @@ def _review_prompt_inventory(snapshot):
         seen.add(path)
         inventory.append({"path": path, "deleted": item.get("status") == "removed"})
     return inventory
+
+
+def _review_prompt_inventory_error(snapshot):
+    files = snapshot.get("files")
+    if snapshot.get("files_complete") is not True:
+        return "changed-file inventory is incomplete"
+    if not isinstance(files, list):
+        return "changed-file inventory is malformed"
+    if len(files) > MAX_REVIEW_REPORT_FILES:
+        return (
+            f"changed-file inventory has {len(files)} entries; "
+            f"the review limit is {MAX_REVIEW_REPORT_FILES}"
+        )
+    if not files:
+        return "changed-file inventory is empty"
+    if any(not isinstance(item, dict) for item in files):
+        return "changed-file inventory contains a malformed entry"
+    paths = [item.get("filename") for item in files]
+    if any(not _bounded_path(path) for path in paths):
+        return "changed-file inventory contains an invalid path"
+    if len(set(paths)) != len(paths):
+        return "changed-file inventory contains a duplicate path"
+    for item in files:
+        status = item.get("status")
+        if not isinstance(status, str) or not status:
+            return "changed-file inventory contains a malformed status"
+        if status != "removed" and not _is_sha(item.get("sha")):
+            return "changed-file inventory contains an invalid blob identity"
+    return None
 
 
 def review_task_request(snapshot, source_action, anchor_comment_id, anchor_prefix,
@@ -690,7 +721,8 @@ def review_task_request(snapshot, source_action, anchor_comment_id, anchor_prefi
         if (not isinstance(retry_of, dict)
                 or not isinstance(retry_of.get("key"), str)
                 or not isinstance(retry_of.get("task_id"), str)
-                or not isinstance(retry_of.get("dispatch_nonce"), str)):
+                or not isinstance(retry_of.get("dispatch_nonce"), str)
+                or not _is_sha(retry_of.get("main_sha"))):
             return None
         nonce_material += (
             f":report-correction:{retry_of['key']}:{retry_of['task_id']}:"
@@ -803,7 +835,11 @@ def review_task_request(snapshot, source_action, anchor_comment_id, anchor_prefi
         "body": body,
     }
     if retry_of is not None:
-        request.update(task_type="report-correction", correction_of=retry_of["key"])
+        request.update(
+            task_type="report-correction",
+            correction_of=retry_of["key"],
+            correction_parent_main_sha=retry_of["main_sha"],
+        )
     return request
 
 
@@ -1469,9 +1505,12 @@ def _review_report_correction_parent_needs_recovery(actions, correction):
             or parent.get("report_retry_allowed") is not True
             or parent.get("report_retry_state") != "reserved"
             or any(parent.get(field) != correction.get(field) for field in (
-                "issue", "head", "main_sha", "source_task_id",
+                "issue", "head", "source_task_id",
                 "source_comment_id", "source_session_id", "source_start_head",
             ))
+            or correction.get(
+                "correction_parent_main_sha", correction.get("main_sha"),
+            ) != parent.get("main_sha")
             or not isinstance(parent_task_id, str)
             or not parent_task_id or len(parent_task_id) > 128
             or not isinstance(parent_session_id, str)
@@ -2293,6 +2332,10 @@ class Coordinator:
                     busy = self._advance_task_handoff(
                         key, action, snapshot, deferred=handoffs,
                     ) or busy
+                elif (action.get("handoff_state") == "waiting_review"
+                      and action.get("review_requirement") == "missing_independent_review"
+                      and _review_prompt_inventory_error(snapshot)):
+                    continue
                 else:
                     busy = True
                 continue
@@ -2464,6 +2507,102 @@ class Coordinator:
         now = datetime.fromtimestamp(self.clock(), timezone.utc)
         return task_created <= created <= completed <= now
 
+    def _historical_report_recovery_proven(
+            self, report_action, source_action, snapshot):
+        if (
+                not isinstance(report_action, dict)
+                or not isinstance(source_action, dict)
+                or report_action.get("report_retry_allowed") is not True
+                or report_action.get("status") != "completed"
+                or not report_action.get("report_error")
+                or not _is_sha(report_action.get("main_sha"))
+                or report_action.get("head") != snapshot.get("head")
+                or source_action.get("receipt_head") != snapshot.get("head")
+        ):
+            return False
+        old_base = report_action["main_sha"]
+        if old_base == snapshot["main_sha"]:
+            return snapshot.get("scoped") is True
+        if (snapshot["enrollment"].get("authorized_head") is None
+                or not (snapshot.get("scoped") or snapshot.get("historical_base"))):
+            return False
+        _, authorized_heads, blocked_heads = _authorized_result_heads(
+            snapshot["issue"], snapshot["enrollment"], self.store.actions(),
+            snapshot["comments"],
+            snapshot["pull"].get("base", {}).get("sha"),
+        )
+        if (authorized_heads is None or snapshot["head"] not in authorized_heads
+                or snapshot["head"] in blocked_heads):
+            return False
+        pull_base = snapshot["pull"].get("base", {}).get("sha")
+        return (
+            _is_sha(pull_base)
+            and (
+                old_base == pull_base
+                or self._compare_proves_ancestry(
+                    old_base, pull_base, allow_identical=True,
+                )
+            )
+            and (
+                old_base == snapshot["main_sha"]
+                or self._compare_proves_ancestry(
+                    old_base, snapshot["main_sha"], allow_identical=True,
+                )
+            )
+            and (
+                old_base == snapshot["head"]
+                or self._compare_proves_ancestry(
+                    old_base, snapshot["head"], allow_identical=True,
+                )
+            )
+        )
+
+    def _report_correction_dispatch_proven(self, action, pull):
+        parent = self.store.action(action.get("correction_of"))
+        if (
+                not isinstance(parent, dict)
+                or action.get("correction_parent_main_sha", action.get("main_sha"))
+                != parent.get("main_sha")
+                or any(parent.get(field) != action.get(field) for field in (
+                    "issue", "head", "source_task_id", "source_comment_id",
+                    "source_session_id", "source_start_head",
+                ))
+                or parent.get("report_retry_allowed") is not True
+                or parent.get("report_retry_state") not in {"available", "reserved"}
+        ):
+            return False
+        if parent.get("main_sha") == action.get("main_sha"):
+            return True
+        enrollment = self.store.snapshot()["enrollments"].get(
+            str(action.get("issue")), {},
+        )
+        _, authorized_heads, blocked_heads = _authorized_result_heads(
+            action.get("issue"), enrollment, self.store.actions(),
+            _all_review_comments(self.api, action["issue"], None),
+            pull.get("base", {}).get("sha"),
+        )
+        if (authorized_heads is None or action.get("head") not in authorized_heads
+                or action.get("head") in blocked_heads):
+            return False
+        old_base = parent.get("main_sha")
+        pull_base = pull.get("base", {}).get("sha")
+        return (
+            _is_sha(old_base)
+            and _is_sha(pull_base)
+            and (
+                old_base == pull_base
+                or self._compare_proves_ancestry(
+                    old_base, pull_base, allow_identical=True,
+                )
+            )
+            and self._compare_proves_ancestry(
+                old_base, action.get("main_sha"), allow_identical=True,
+            )
+            and self._compare_proves_ancestry(
+                old_base, action.get("head"), allow_identical=True,
+            )
+        )
+
     def _now_string(self):
         return datetime.fromtimestamp(self.clock(), timezone.utc).isoformat(
             timespec="seconds",
@@ -2617,6 +2756,14 @@ class Coordinator:
                     or review_action.get("status") != "completed"
                     or review_action.get("publication_state") != "done"
                     or review_action.get("report_verdict") != "changes_requested"):
+                inventory_error = _review_prompt_inventory_error(snapshot)
+                if inventory_error:
+                    self.store.update_action(
+                        key, "completed", handoff_state="inventory_blocked",
+                        review_requirement="unrepresentable_inventory",
+                        review_inventory_error=inventory_error,
+                    )
+                    return False
                 review_requirement = (
                     "missing_independent_review"
                     if current_owner_review is None else "existing_review_blocked"
@@ -2642,6 +2789,12 @@ class Coordinator:
         return False
 
     def _validate_review_report(self, action, snapshot, task):
+        if (action.get("task_type") == "report-correction"
+                and (action.get("head") != snapshot.get("head")
+                     or action.get("main_sha") != snapshot.get("main_sha"))):
+            raise ReceiptError(
+                "Independent review correction reservation snapshot is no longer current"
+            )
         sessions = task.get("sessions")
         if (not isinstance(task, dict)
                 or task.get("id") != action.get("task_id")
@@ -2706,9 +2859,12 @@ class Coordinator:
                     or not parent.get("report_error")
                     or parent.get("report_retry_state") != "reserved"
                     or any(parent.get(field) != action.get(field) for field in (
-                        "issue", "head", "main_sha", "source_task_id",
+                        "issue", "head", "source_task_id",
                         "source_comment_id", "source_session_id", "source_start_head",
                     ))
+                    or action.get(
+                        "correction_parent_main_sha", action.get("main_sha"),
+                    ) != parent.get("main_sha")
                     or not isinstance(parent_task_id, str)
                     or not parent_task_id or len(parent_task_id) > 128
                     or not isinstance(parent_session_id, str)
@@ -2817,7 +2973,8 @@ class Coordinator:
             if code not in {"sensitive", "budget", "up-to-date-policy",
                             "conversation-policy", "status-owner", "scope",
                             "conflict-incompatible", "policy-broken",
-                            "review-report", "review-report-exhausted"}:
+                            "review-report", "review-report-exhausted",
+                            "review-inventory"}:
                 continue
             key, entry = self._outcome(snapshot, code, message)
             outcomes.append((key, entry))
@@ -2971,6 +3128,15 @@ class Coordinator:
         mergeability_unknown = _mergeability_unknown(snapshot["pull"])
         source_handoff = _current_source_handoff(actions, number, head)
         review_followup = _current_review_followup(actions, number, head)
+        review_inventory_error = (
+            source_handoff.get("review_inventory_error")
+            if isinstance(source_handoff, dict) else None
+        )
+        if (not review_inventory_error and source_handoff
+                and source_handoff.get("handoff_state") == "waiting_review"
+                and source_handoff.get("review_requirement") == "missing_independent_review"):
+            review_inventory_error = _review_prompt_inventory_error(snapshot)
+        inventory_blocked = bool(review_inventory_error)
         review_anchor = None
         review_correction_anchor = None
         review_action = None
@@ -2985,6 +3151,7 @@ class Coordinator:
         if (source_handoff and source_handoff.get("handoff_state") == "waiting_review"
                 and source_handoff.get("review_requirement") == "missing_independent_review"
                 and source_handoff_ready
+                and not inventory_blocked
                 and review_followup is None and not mergeability_unknown
                 ):
             review_anchor = review_anchor_request(snapshot, source_handoff)
@@ -2998,13 +3165,21 @@ class Coordinator:
                 )
         report_failure = _current_review_report_failure(actions, number, head)
         report_correction = _review_report_correction(actions, report_failure)
+        report_source = (
+            _review_source_action(actions, number, report_failure, snapshot["comments"])
+            if report_failure else None
+        )
+        report_recovery_proven = (
+            self._historical_report_recovery_proven(
+                report_failure, report_source, snapshot,
+            )
+            if report_source is not None else False
+        )
         if (report_failure and report_failure.get("report_retry_allowed") is True
                 and report_correction is None
-                and report_failure.get("main_sha") == snapshot["main_sha"]
+                and report_recovery_proven
+                and not inventory_blocked
                 and not mergeability_unknown):
-            report_source = _review_source_action(
-                actions, number, report_failure, snapshot["comments"],
-            )
             if report_source is not None:
                 review_correction_anchor = review_anchor_request(
                     snapshot, report_source, retry_of=report_failure,
@@ -3037,7 +3212,8 @@ class Coordinator:
                     pull_number=number, source_failure=snapshot["source_failure"],
                     reviews=snapshot["reviews"],
                 )
-        if repair and not agent_busy and snapshot["enrollment"].get("attempts", 0) < REPAIR_LIMIT:
+        if (repair and not agent_busy and not inventory_blocked
+                and snapshot["enrollment"].get("attempts", 0) < REPAIR_LIMIT):
             repair.setdefault("issue", number)
             repair.setdefault("kind", "fix")
             repair.setdefault("head_ref", snapshot["pull"]["head"]["ref"])
@@ -3073,6 +3249,12 @@ class Coordinator:
             reasons.append(("sensitive", "Owner exact-head authorization is required for sensitive changes."))
         if not review_ok:
             reasons.append(("review", "A current structured independent-agent review and resolved conversations are required."))
+        if review_inventory_error:
+            reasons.append((
+                "review-inventory",
+                f"Independent review was not dispatched because {review_inventory_error}; "
+                "the complete changed-file inventory must fit the supported bounded review contract.",
+            ))
         if report_failure:
             correction_complete = (
                 report_correction is not None
@@ -3083,10 +3265,7 @@ class Coordinator:
             if not correction_complete:
                 correction_exhausted = (
                     report_failure.get("report_retry_allowed") is not True
-                    or report_failure.get("main_sha") != snapshot["main_sha"]
-                    or _review_source_action(
-                        actions, number, report_failure, snapshot["comments"],
-                    ) is None
+                    or not report_recovery_proven
                     or (report_correction is not None
                         and report_correction.get("status") not in {
                             "sending", "uncertain", "sent",
@@ -3109,7 +3288,8 @@ class Coordinator:
         if agent_busy:
             reasons.append(("agent", "A Copilot cloud task may still be running; no concurrent fixer was started."))
         budget_needed = (
-            repair_scoped and not agent_busy and not mergeability_unknown
+            repair_scoped and not agent_busy and not inventory_blocked
+            and not mergeability_unknown
             and snapshot["pull"].get("draft") is not True and not neutral_blocker
             and (needs_reconciliation or repair_request(
                 head, 0, snapshot["threads"], snapshot["check_runs"],
@@ -3288,16 +3468,20 @@ class Coordinator:
         neutral = action.get("task_type") == "neutral"
         review_followup = action.get("task_type") == "review-followup"
         review_task = action.get("kind") == "review"
+        report_correction = action.get("task_type") == "report-correction"
         if not _is_sha(action.get("main_sha")):
             return "superseded"
         current = self._fence_pull(
             action["issue"], action["head"], action["main_sha"],
-            allow_historical_behind=neutral,
+            allow_historical_behind=neutral or report_correction,
             expected_base_sha=(
                 action.get("recorded_base_sha") if neutral else None
             ),
         )
         if not current:
+            return "superseded"
+        if (report_correction
+                and not self._report_correction_dispatch_proven(action, current)):
             return "superseded"
         if current.get("draft") is not False:
             return "draft"
@@ -3370,12 +3554,15 @@ class Coordinator:
                            collection="tasks")
         current = self._fence_pull(
             action["issue"], action["head"], action["main_sha"],
-            allow_historical_behind=neutral,
+            allow_historical_behind=neutral or report_correction,
             expected_base_sha=(
                 action.get("recorded_base_sha") if neutral else None
             ),
         )
         if not _pull_identity(current, action) or current["head"].get("ref") != branch:
+            return "superseded"
+        if (report_correction
+                and not self._report_correction_dispatch_proven(action, current)):
             return "superseded"
         if not self._authorized_dispatch_head(
                 action["issue"], action["head"],
@@ -4488,7 +4675,9 @@ class StateStore:
                         or parent.get("report_retry_state") not in (None, "available")
                         or claimed.get("issue") != parent.get("issue")
                         or claimed.get("head") != parent.get("head")
-                        or claimed.get("main_sha") != parent.get("main_sha")
+                        or claimed.get(
+                            "correction_parent_main_sha", claimed.get("main_sha"),
+                        ) != parent.get("main_sha")
                         or claimed.get("dispatch_nonce") == parent.get("dispatch_nonce")
                         or claimed.get("anchor_comment_id") == parent.get("anchor_comment_id")
                         or claimed.get("anchor_prefix") == parent.get("anchor_prefix")

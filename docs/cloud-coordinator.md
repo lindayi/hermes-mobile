@@ -157,6 +157,18 @@ After a corrected report is durably published, reconciliation repairs a still-
 reserved parent to `recovered` only from the positively bound completed correction;
 for a pass, the `agent-review` status must also already be durably complete. This
 restart repair does not repeat publication or dispatch.
+
+Recovery after main advances preserves the original report's saved base as audit
+evidence. It requires current exact-head owner authority, the original source
+receipt, and independently proven ancestry from that saved base through the PR
+base, current main, and reviewed head. The correction records the historical parent
+base separately from its current-main report binding; if either changes after
+reservation, the correction report cannot be published or grant `agent-review`.
+An inventory that cannot be represented within the strict 64-file contract is
+blocked before reviewer dispatch, recorded on the source handoff, and reported
+once through the deduplicated outcome path. The blocked handoff does not keep a
+generic agent lock or create a fixer task.
+
 Sensitive changes additionally need owner authorization bound to that exact SHA
 and the documented targeted independent review; neither approval nor authorization
 carries to a later head.

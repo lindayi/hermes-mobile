@@ -484,6 +484,14 @@ Only those LF characters are removed before strict base64 decoding; other
 whitespace, non-ASCII characters, malformed alphabet or padding, and mismatched
 blob identity, encoding or declared byte size remain rejected.
 
+Before dispatch, the complete inventory must also be representable within the
+64-file bound and have unique bounded paths, nonempty statuses, and valid blob
+identities for non-deleted files. An unrepresentable inventory is never sent as
+a partial map: apply mode records a bounded diagnosis on the source handoff,
+marks that handoff `inventory_blocked`, and posts one deduplicated blocker. This
+terminal blocker does not retain generic agent occupancy or dispatch a fixer;
+repeated scans reuse the same outcome for the exact head.
+
 If a task returned by the saved task ID is positively terminal but its report is
 missing, malformed, or incomplete, apply mode durably records a bounded diagnostic
 and posts a deduplicated blocked outcome. A single corrective review may be
@@ -514,6 +522,16 @@ source bindings, and persisted owner publication all match. A pass also requires
 its `agent-review` publication to be durably complete. This repair does not repeat
 task dispatch, formal review publication, status publication, or fixer work;
 uncertain publication and unbound or mismatched parents remain unresolved.
+
+If main advances after the original malformed report is durably recorded, its
+saved `main_sha` remains unchanged as audit evidence. A retry is eligible only
+when the exact head remains owner-authorized, the original source receipt still
+authenticates, and ancestry from the saved report base is independently proven
+through the current PR base, current main, and exact head. The new correction
+stores that historical parent base separately and binds its report to the
+current-main observation. Dispatch and report acceptance are fenced to that
+reserved head and main; a later head or main advance invalidates the correction
+without publishing its report or an `agent-review` success status.
 
 The validated completion time, session ID and receipt comment ID remain persisted
 with the receipt head/base and dispatch claim for restart. The authentic session
