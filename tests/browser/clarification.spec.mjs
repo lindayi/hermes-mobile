@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {createServer} from 'node:http';
-import {readFile} from 'node:fs/promises';
+import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
+import {tmpdir} from 'node:os';
 import {createRequire} from 'node:module';
+import {generatedAssets} from './generated-assets.mjs';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
-const root=new URL('../../frontend/',import.meta.url);
 
-async function fixture(shape) {
+async function fixture(shape,{rejectDuplicate=false}={}) {
+  const temporary=await mkdtemp(join(tmpdir(),'hermes-clarification-browser-'));
+  const root=generatedAssets(temporary);
   const answerCalls=[],runCalls=[];
   const item={question_id:'a'.repeat(32),run_id:'r',session_id:'s',
     question:'Choose safely?',choices:shape==='open'?null:['Keep current','Change it'],
@@ -30,6 +33,9 @@ async function fixture(shape) {
         if(path.endsWith('/answer')){
           answerCalls.push(value);
           if(item.status!=='pending')return json({error:'conflict'},409);
+          if(rejectDuplicate && Array.isArray(value.answer)
+              && new Set(value.answer).size!==value.answer.length)
+            return json({detail:'Invalid clarification answer'},422);
           item.status='answered';item.answer=value.answer;item.other=value.other;item.updated_at=3;
           resolveWaiter(value.answer);
           return json({question_id:item.question_id,run_id:'r',status:'answered',answer:value.answer});
@@ -45,14 +51,14 @@ async function fixture(shape) {
     }
     const relative=url.pathname.replace(/^\/hermes\//,'')||'index.html';
     try{
-      const content=await readFile(join(root.pathname,relative));
+      const content=await readFile(join(root,relative));
       const extension=relative.split('.').at(-1);
-      response.writeHead(200,{'Content-Type':({html:'text/html',css:'text/css',js:'text/javascript',mjs:'text/javascript'})[extension]||'application/octet-stream'});
+      response.writeHead(200,{'Content-Type':({html:'text/html',css:'text/css',js:'text/javascript',mjs:'text/javascript',svg:'image/svg+xml',webmanifest:'application/manifest+json'})[extension]||'application/octet-stream'});
       response.end(content);
     }catch{response.writeHead(404).end();}
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  return {server,item,answerCalls,runCalls,waiter,
+  return {server,item,answerCalls,runCalls,waiter,temporary,
     url:`http://127.0.0.1:${server.address().port}/hermes/`};
 }
 
@@ -99,7 +105,44 @@ test('real mobile browser answers the same synthetic waiting clarification for a
       }finally{
         fixtureState.server.closeAllConnections();
         await new Promise(resolve=>fixtureState.server.close(resolve));
+        await rm(fixtureState.temporary,{recursive:true,force:true});
       }
     }
   }finally{await browser.close();}
+});
+
+test('real browser retains multi-select draft after backend validation rejection',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const fixtureState=await fixture('multi',{rejectDuplicate:true});
+  try{
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    await page.goto(fixtureState.url);
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    const card=page.locator('.clarification-card');
+    await card.waitFor();
+    const boxes=card.locator('input[type=checkbox]');
+    await boxes.nth(0).check();await boxes.nth(2).check();
+    const other=card.getByLabel('Other answer');
+    await other.fill('Keep current');
+    await card.getByRole('button',{name:'Submit answer'}).click();
+    await card.getByText(/correct it here/i).waitFor();
+    assert.equal(fixtureState.answerCalls.length,1);
+    assert.equal(fixtureState.item.status,'pending');
+    assert.equal(await card.locator('.clarification-form').count(),1);
+    assert.equal(await boxes.nth(0).isChecked(),true);
+    assert.equal(await boxes.nth(2).isChecked(),true);
+    assert.equal(await other.inputValue(),'Keep current');
+    await other.fill('A different plan');
+    await card.getByRole('button',{name:'Submit answer'}).click();
+    assert.deepEqual(await fixtureState.waiter,['Keep current','A different plan']);
+    assert.equal(fixtureState.answerCalls.length,2);
+    assert.deepEqual(fixtureState.runCalls,[]);
+    await page.close();
+  }finally{
+    fixtureState.server.closeAllConnections();
+    await new Promise(resolve=>fixtureState.server.close(resolve));
+    await rm(fixtureState.temporary,{recursive:true,force:true});
+    await browser.close();
+  }
 });

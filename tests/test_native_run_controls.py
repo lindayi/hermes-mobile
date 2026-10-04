@@ -198,6 +198,41 @@ def test_clarification_callback_waits_for_answer_and_returns_tool_result(registr
     asyncio.run(check())
 
 
+def test_pinned_clarify_tool_dispatches_to_the_run_bound_waiter(registry):
+    async def check():
+        import hashlib
+        from pathlib import Path
+        from deploy.native_controls_release import NATIVE_DEPENDENCIES
+        tool_path=Path('/usr/local/lib/hermes-agent/tools/clarify_tool.py')
+        if not tool_path.is_file():
+            pytest.skip('Pinned native runtime is provisioned only in hosted native tests')
+        assert hashlib.sha256(tool_path.read_bytes()).hexdigest()==NATIVE_DEPENDENCIES[tool_path]
+        spec=importlib.util.spec_from_file_location('pinned_clarify_tool',tool_path)
+        tool=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        a=adapter()
+        agent=SimpleNamespace(steer=lambda text: True,clear_interrupt=lambda: True,
+                              run_conversation=lambda: {})
+        attach(a,agent)
+        result={}
+        worker=threading.Thread(target=lambda: result.update(value=tool.clarify_tool(
+            'Which plan?', ['Keep current','Change it'], multi_select=True,
+            callback=agent.clarify_callback)))
+        worker.start()
+        event=await asyncio.wait_for(a._run_streams['r'].get(),timeout=1)
+        assert event['choices']==['Keep current (Recommended)','Change it']
+        response=await a._handle_clarification_answer(SimpleNamespace(
+            match_info={'run_id':'r','question_id':event['question_id']},
+            body={'answer':['Keep current (Recommended)','A new plan'],'other':True}))
+        assert response.status==200
+        await asyncio.to_thread(worker.join,1)
+        assert not worker.is_alive()
+        assert json.loads(result['value'])=={
+            'question':'Which plan?','choices_offered':['Keep current','Change it'],
+            'user_response':['Keep current','A new plan']}
+    asyncio.run(check())
+
+
 @pytest.mark.parametrize(('ending', 'expected'), [('timeout', 'expired'), ('stop', 'cancelled')])
 def test_clarification_timeout_and_stop_release_waiter_truthfully(registry, ending, expected):
     async def check():

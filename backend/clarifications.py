@@ -104,10 +104,17 @@ class ClarificationJournal:
                 if (existing['status'] in ('cancelled', 'expired')
                         and item['status'] != existing['status']):
                     return self._view(existing)
-                if (existing['status'] in ('sending', 'unknown')
-                        and item['status'] == 'pending'):
+                restore_pending = (existing['status'] == 'unknown'
+                                  and existing['answer'] is None
+                                  and item['status'] == 'pending')
+                if (existing['status'] == 'sending' and item['status'] == 'pending'
+                        or existing['status'] == 'unknown' and item['status'] == 'pending'
+                        and not restore_pending):
                     return self._view(existing)
-                if item['updated_at'] < existing['updated_at']:
+                if restore_pending:
+                    item = {**item, 'updated_at': max(
+                        item['updated_at'], math.nextafter(existing['updated_at'], math.inf))}
+                elif item['updated_at'] < existing['updated_at']:
                     return self._view(existing)
                 if existing['status'] == 'answered' and item['status'] == 'pending':
                     return self._view(existing)
@@ -138,14 +145,18 @@ class ClarificationJournal:
 
     def observe(self, user, run, result):
         if not isinstance(result, dict) or result.get('run_id') != run.get('upstream_id'):
-            return
+            return set()
         records = result.get('clarifications', [])
         if not isinstance(records, list) or len(records) > 256:
-            return
+            return set()
+        pending = set()
         for raw in records:
             item = self._normalize(raw, run['upstream_id'])
             if item is not None:
-                self._save(user, run, item)
+                saved = self._save(user, run, item)
+                if saved is not None and saved['status'] == 'pending':
+                    pending.add(item['question_id'])
+        return pending
 
     def event(self, user, run, event):
         if event.get('run_id') != run.get('upstream_id'):
@@ -162,16 +173,47 @@ class ClarificationJournal:
                 (user['id'], user['profile'], run_id)).fetchall()
         return [self._view(row) for row in rows]
 
-    def mark_pending_unknown(self, user, run_id):
+    @staticmethod
+    def _record_event(connection, run_id, item):
+        event = {**item, 'observed_at': item['updated_at']}
+        connection.execute('INSERT INTO events(run_id,name,data,created_at) VALUES(?,?,?,?)',
+                           (run_id, 'clarification', json.dumps(event), item['updated_at']))
+
+    def mark_pending_unknown(self, user, run_id, keep_pending=()):
+        keep_pending = set(keep_pending)
         with closing(self.journal.connect()) as connection, connection:
-            connection.execute('''UPDATE clarifications SET status='unknown',updated_at=?
-                WHERE user_id=? AND profile=? AND run_id=? AND status='pending' ''',
-                (time.time(), user['id'], user['profile'], run_id))
+            connection.execute('BEGIN IMMEDIATE')
+            rows = connection.execute('''SELECT c.*,r.session_id FROM clarifications c
+                JOIN runs r ON r.id=c.run_id WHERE c.user_id=? AND c.profile=?
+                AND c.run_id=? AND c.status='pending' ''',
+                (user['id'], user['profile'], run_id)).fetchall()
+            for row in rows:
+                if row['question_id'] in keep_pending:
+                    continue
+                updated_at = max(time.time(), math.nextafter(row['updated_at'], math.inf))
+                cursor = connection.execute('''UPDATE clarifications SET status='unknown',updated_at=?
+                    WHERE user_id=? AND profile=? AND run_id=? AND question_id=? AND status='pending' ''',
+                    (updated_at, user['id'], user['profile'], run_id, row['question_id']))
+                if cursor.rowcount:
+                    item = self._view(row)
+                    item.update(status='unknown', updated_at=updated_at)
+                    self._record_event(connection, run_id, item)
 
     def recover(self):
         with closing(self.journal.connect()) as connection, connection:
-            connection.execute('''UPDATE clarifications SET status='unknown',updated_at=?
-                WHERE status IN ('pending','sending')''', (time.time(),))
+            connection.execute('BEGIN IMMEDIATE')
+            rows = connection.execute('''SELECT c.*,r.session_id FROM clarifications c
+                JOIN runs r ON r.id=c.run_id WHERE c.status IN ('pending','sending')''').fetchall()
+            for row in rows:
+                updated_at = max(time.time(), math.nextafter(row['updated_at'], math.inf))
+                cursor = connection.execute('''UPDATE clarifications SET status='unknown',updated_at=?
+                    WHERE user_id=? AND profile=? AND run_id=? AND question_id=? AND status=? ''',
+                    (updated_at, row['user_id'], row['profile'], row['run_id'],
+                     row['question_id'], row['status']))
+                if cursor.rowcount:
+                    item = self._view(row)
+                    item.update(status='unknown', updated_at=updated_at)
+                    self._record_event(connection, row['run_id'], item)
 
     def claim(self, user, run, question_id, body):
         answer = body.get('answer')
@@ -285,8 +327,10 @@ class ClarificationJournal:
                     or result['status'] == 'running' and pending):
                 raise IntegrationUnavailable('Native clarification state is contradictory')
         except Exception:
-            self.mark_pending_unknown(user, run_id)
             return {'available': False, 'items': self.list(user, run_id), 'native_status': None}
-        self.observe(user, run, result)
+        observed_pending = self.observe(user, run, result)
+        keep_pending = (observed_pending
+                        if result['status'] == 'waiting_for_clarification' else set())
+        self.mark_pending_unknown(user, run_id, keep_pending)
         return {'available': True, 'items': self.list(user, run_id),
                 'native_status': result['status']}

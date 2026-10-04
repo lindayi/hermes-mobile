@@ -153,6 +153,9 @@ class Orchestrator:
             raise KeyError(question_id)
         if not self.clarifications.validate_answer(record, body):
             raise ValueError('Invalid clarification answer')
+        if record['status'] in ('answered', 'sending'):
+            receipt, _ = self.clarifications.claim(user, run, question_id, body)
+            return receipt
         if run['status'] != 'waiting_for_clarification' or not run['upstream_id']:
             raise RunConflict('Clarification is stale')
         if not hasattr(self.gateway, 'require_clarifications'):

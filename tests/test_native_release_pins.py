@@ -21,6 +21,13 @@ def test_approval_registry_contract_is_pinned():
         '266ce183b1adced097b29df7b2c4a15bde0f86c9a24f6d887339675f4011b903')
 
 
+def test_clarification_tool_callback_contract_is_pinned():
+    from deploy import native_controls_release as release
+    dependency = Path('/usr/local/lib/hermes-agent/tools/clarify_tool.py')
+    assert release.NATIVE_DEPENDENCIES.get(dependency) == (
+        'bbd37f211baa1a1fd1e79cf7ce9a553cbdc92459f5436d37ed04ea8d232dbcd4')
+
+
 def test_approval_registry_drift_rejected_before_service_queries(tmp_path, monkeypatch):
     import pytest
     from deploy import native_controls_release as release

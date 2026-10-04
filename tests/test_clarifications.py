@@ -116,7 +116,7 @@ async def test_owned_answer_resolves_the_waiting_native_request_without_new_run(
     from backend.orchestration import Orchestrator
 
     journal, run = run_state(tmp_path)
-    question = pending()
+    question = pending(multi_select=True)
     native = SimpleNamespace(status='waiting_for_clarification', item=question,
                              answer_gate=asyncio.get_running_loop().create_future(),
                              answer_calls=[])
@@ -152,14 +152,174 @@ async def test_owned_answer_resolves_the_waiting_native_request_without_new_run(
         state = await runtime.clarifications_for_run(OWNER, run['id'])
         assert state['available'] is True
         assert state['items'][0]['status'] == 'pending'
+        with pytest.raises(ValueError, match='Invalid clarification'):
+            await runtime.answer_clarification(
+                OWNER, run['id'], question['question_id'],
+                {'answer': ['Keep current', 'Keep current'], 'other': True})
+        assert native.answer_calls == []
+        assert journal.get('owner', run['id'])['status'] == 'waiting_for_clarification'
+        assert runtime.clarifications.list(OWNER, run['id'])[0]['status'] == 'pending'
+        answer = ['Keep current', 'A new plan']
         answered = await runtime.answer_clarification(
             OWNER, run['id'], question['question_id'],
-            {'answer': 'Change it', 'other': False})
+            {'answer': answer, 'other': True})
         assert answered['status'] == 'answered'
-        assert await native_waiter == 'Change it'
-        assert native.answer_calls == [('Change it', False)]
+        assert await native_waiter == answer
+        assert native.answer_calls == [(answer, True)]
         assert journal.get('owner', run['id'])['status'] == 'running'
+        retry = await runtime.answer_clarification(
+            OWNER, run['id'], question['question_id'],
+            {'answer': answer, 'other': True})
+        assert retry['status'] == 'answered'
+        assert native.answer_calls == [(answer, True)]
+        with pytest.raises(RunConflict):
+            await runtime.answer_clarification(
+                OWNER, run['id'], question['question_id'],
+                {'answer': ['Change it'], 'other': False})
+        with pytest.raises(KeyError):
+            await runtime.answer_clarification(
+                {**OWNER, 'id': 'other-owner'}, run['id'], question['question_id'],
+                {'answer': answer, 'other': True})
         with closing(journal.connect()) as connection:
             assert connection.execute('SELECT count(*) FROM runs').fetchone()[0] == 1
     finally:
         await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_restores_only_verified_unanswered_waiters(tmp_path):
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    question = pending()
+    bridge.event(OWNER, run, question)
+    bridge.recover()
+    recovered = bridge.list(OWNER, run['id'])[0]
+    assert recovered['status'] == 'unknown'
+    assert recovered['updated_at'] >= question['updated_at']
+
+    class Gateway:
+        def require_execution(self):
+            return None
+
+        async def require_clarifications(self):
+            return None
+
+        async def request(self, method, path, **kwargs):
+            return {'run_id': 'native-run', 'status': 'waiting_for_clarification',
+                    'clarifications': [question]}
+
+    state = await bridge.rehydrate(OWNER, run['id'], Gateway(), run)
+    restored = state['items'][0]
+    assert state['available'] is True
+    assert restored['status'] == 'pending'
+    assert restored['answer'] is None
+    assert restored['updated_at'] >= recovered['updated_at']
+    replay = journal.events('owner', run['id'])
+    assert replay[-1]['data']['status'] == 'pending'
+    assert replay[-1]['data']['updated_at'] == restored['updated_at']
+
+
+@pytest.mark.asyncio
+async def test_rehydrate_does_not_keep_changed_waiter_payload_pending(tmp_path):
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    question = pending()
+    bridge.event(OWNER, run, question)
+
+    class Gateway:
+        def require_execution(self):
+            return None
+
+        async def require_clarifications(self):
+            return None
+
+        async def request(self, method, path, **kwargs):
+            changed = {**question, 'question': 'Changed question'}
+            return {'run_id': 'native-run', 'status': 'waiting_for_clarification',
+                    'clarifications': [changed]}
+
+    state = await bridge.rehydrate(OWNER, run['id'], Gateway(), run)
+    assert state['available'] is True
+    assert state['items'][0]['status'] == 'unknown'
+    assert journal.events('owner', run['id'])[-1]['data']['status'] == 'unknown'
+
+
+def test_recovery_transition_is_reflected_in_event_replay(tmp_path):
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    bridge.event(OWNER, run, pending())
+    bridge.recover()
+    assert bridge.list(OWNER, run['id'])[0]['status'] == 'unknown'
+    replay = journal.events('owner', run['id'])
+    assert replay[-1]['data']['status'] == 'unknown'
+
+
+@pytest.mark.asyncio
+async def test_transient_rehydrate_failure_preserves_live_pending_question(tmp_path):
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    bridge.event(OWNER, run, pending())
+
+    class Gateway:
+        def require_execution(self):
+            return None
+
+        async def require_clarifications(self):
+            raise RuntimeError('synthetic transport unavailable')
+
+    state = await bridge.rehydrate(OWNER, run['id'], Gateway(), run)
+    assert state['available'] is False
+    assert state['items'][0]['status'] == 'pending'
+    assert journal.events('owner', run['id'])[-1]['data']['status'] == 'pending'
+
+
+@pytest.mark.asyncio
+async def test_valid_native_snapshot_marks_missing_waiter_unknown(tmp_path):
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    bridge.event(OWNER, run, pending())
+
+    class Gateway:
+        def require_execution(self):
+            return None
+
+        async def require_clarifications(self):
+            return None
+
+        async def request(self, method, path, **kwargs):
+            return {'run_id': 'native-run', 'status': 'running', 'clarifications': []}
+
+    state = await bridge.rehydrate(OWNER, run['id'], Gateway(), run)
+    assert state['available'] is True
+    assert state['items'][0]['status'] == 'unknown'
+    assert journal.events('owner', run['id'])[-1]['data']['status'] == 'unknown'
+
+
+@pytest.mark.asyncio
+async def test_uncertain_answer_is_not_restored_from_pending_native_snapshot(tmp_path):
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    question = pending()
+    bridge.event(OWNER, run, question)
+    body = {'answer': 'Change it', 'other': False}
+    claimed, fresh = bridge.claim(OWNER, run, question['question_id'], body)
+    assert fresh and claimed['status'] == 'sending'
+    bridge.recover()
+    attempted = bridge.list(OWNER, run['id'])[0]
+    assert attempted['status'] == 'unknown'
+    assert attempted['answer'] == 'Change it'
+
+    class Gateway:
+        def require_execution(self):
+            return None
+
+        async def require_clarifications(self):
+            return None
+
+        async def request(self, method, path, **kwargs):
+            return {'run_id': 'native-run', 'status': 'waiting_for_clarification',
+                    'clarifications': [question]}
+
+    state = await bridge.rehydrate(OWNER, run['id'], Gateway(), run)
+    assert state['items'][0]['status'] == 'unknown'
+    assert state['items'][0]['answer'] == 'Change it'

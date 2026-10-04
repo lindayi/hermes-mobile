@@ -40,7 +40,8 @@ _PRE_ROUTING_CONTROL_HASHES = {
 _TIMEOUT_BASELINE_CONTROL_HASHES = {
     'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
     'backend/native_run_controls.py': '5107e54ed631fe2579efe2fb50c6a8ba1e9e3616c4fcd1d0e8ead2f7f29445d9',
-    'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/native_api_service.py':
+        'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': 'e083b0941b2b849559cd685d946ed10fb14a87128cf8ea2d125f77cb38ce434b',
     'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
     'backend/native_notifications.py': '0159fbdd02705469853f51be7bb32479ea9e2fa0d6fdbc6789253d3b3c1c85fe',
@@ -49,7 +50,8 @@ _TIMEOUT_BASELINE_CONTROL_HASHES = {
 _PREVIOUS_CONTROL_HASHES = {
     'backend/native_controls_service.py': '1d9a23a567c8896cd1f2c69f9e111e9c9be6297f5b7bfe773426891bd1354969',
     'backend/native_run_controls.py': '5107e54ed631fe2579efe2fb50c6a8ba1e9e3616c4fcd1d0e8ead2f7f29445d9',
-    'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/native_api_service.py':
+        'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': '94feb8767f7bbbe5a641ad835712f0468b53e019a478d4887f18f0cfb0ed437a',
 }
 
@@ -98,7 +100,9 @@ def standalone_owner_verified():
         native=Path('/usr/local/lib/hermes-agent/gateway/platforms/api_server.py')
         if hashlib.sha256(native.read_bytes()).hexdigest()!='187c92509b3769c04756f0dc800d3597ea891ea21262e8a32ceaf3972ac95300':
             return False
-        pid=subprocess.check_output(['/usr/bin/systemctl','--user','show','hermes-mobile-api.service','--property=MainPID','--value'],text=True,timeout=2).strip()
+        pid=subprocess.check_output(
+            ['/usr/bin/systemctl','--user','show','hermes-mobile-api.service',
+             '--property=MainPID','--value'],text=True,timeout=2).strip()
         if not pid.isdigit() or int(pid)<=0:
             return False
         proc=Path('/proc')/pid

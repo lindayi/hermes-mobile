@@ -33,8 +33,11 @@ supports the pinned single-question ABI, not a newer batched-question schema.
 - The authenticated mobile bridge binds each request and answer to the local
   owner, profile, session, run, and native run ID. It persists bounded request,
   answer, and lifecycle evidence in the run journal. Reopen/refresh reconciles
-  with the native run snapshot; if the native process has lost its waiter, the
-  bridge reports unknown/expired and never claims that the question can resume.
+  with the native run snapshot. Recovery may restore an unanswered row to
+  pending only when an authenticated snapshot confirms the same live waiter;
+  failed or missing snapshots do not erase the last known state. If the native
+  process has lost its waiter, the bridge reports unknown/expired and never
+  claims that the question can resume.
 - Acknowledgement loss may be retried with the same question ID and exact answer,
   but cannot replace the first accepted answer or invoke a new user run. Unknown
   outcomes do not cause automatic retries. Question and answer text are rendered
@@ -48,10 +51,13 @@ supports the pinned single-question ABI, not a newer batched-question schema.
    from the same tool call and run.
 2. Single-select, multi-select, Other, and open-ended inputs require explicit
    submission; no option is preselected. Invalid, empty, excessive, or
-   unrecognized answers are rejected.
-3. Reopen/retry preserves a pending question and the first accepted answer;
-   duplicate, stale, cross-run, cross-profile, and cross-owner requests cannot
-   alter another waiter.
+   unrecognized answers are rejected before claiming the waiter. A definitive
+   validation rejection is explained inline and leaves the form and draft
+   correctable.
+3. Reopen/retry restores only an authenticated unchanged pending waiter and
+   preserves the first accepted answer. Identical accepted retries return the
+   receipt without another dispatch; changed, stale, cross-run, cross-profile,
+   and cross-owner requests cannot alter another waiter.
 4. Timeout, Stop, terminal status, or native process loss leaves a truthful
    non-pending status and releases any live waiter without fabricating a tool
    result or starting another run.

@@ -31,7 +31,8 @@ async function setup({item=question(),answerResult,waitForAnswer=false,history=[
       return {available:true,items:item?[item]:[]};
     if(path.endsWith('/answer') && options.method==='POST') {
       if(waitForAnswer)await gate.promise;
-      return answerResult || {question_id:item.question_id,run_id:'r',status:'answered',answer:options.body.answer};
+      return (typeof answerResult==='function'?answerResult(options.body):answerResult)
+        || {question_id:item.question_id,run_id:'r',status:'answered',answer:options.body.answer};
     }
     if(path.endsWith('/controls'))return {steering:false,attempts:[]};
     if(path.endsWith('/stop'))return {status:'stopping'};
@@ -68,6 +69,58 @@ test('multi-select and Other return the selected list after explicit submit',asy
     button(card,'Submit answer').click();await tick();
     assert.deepEqual(h.calls.find(call=>call.path.endsWith('/answer')).options.body,
       {answer:['Keep current','A third option'],other:true});
+  } finally {h.close();}
+});
+
+test('a rejected multi-select answer keeps the choices and Other draft correctable in place',async()=>{
+  const answers=[];
+  const h=await setup({item:question({multi_select:true}),answerResult:body=>{
+    answers.push(body);
+    if(answers.length===1)throw Object.assign(new Error('Invalid clarification answer'),{status:422});
+    return {question_id:'a'.repeat(32),run_id:'r',status:'answered',answer:body.answer};
+  }});
+  try {
+    const card=h.doc.querySelector('.clarification-card');
+    const form=card.querySelector('.clarification-form');
+    const choices=[...form.querySelectorAll('input[type=checkbox]')];
+    choices[0].click();choices.at(-1).click();
+    const other=form.querySelector('input[aria-label="Other answer"]');
+    other.value='Keep current';
+    button(form,'Submit answer').click();await tick();
+    assert.equal(card.querySelector('.clarification-form'),form);
+    assert.equal(choices[0].checked,true);
+    assert.equal(choices.at(-1).checked,true);
+    assert.equal(other.value,'Keep current');
+    assert.match(form.querySelector('.clarification-feedback').textContent,/correct it here/i);
+    other.value='A different plan';
+    button(form,'Submit answer').click();await tick();
+    assert.deepEqual(answers,[
+      {answer:['Keep current','Keep current'],other:true},
+      {answer:['Keep current','A different plan'],other:true},
+    ]);
+    assert.match(card.textContent,/Answered.*Answer: Keep current, A different plan/s);
+    assert.equal(h.calls.filter(call=>call.path==='/runs').length,0);
+  } finally {h.close();}
+});
+
+test('an invalid acknowledgement remains unknown and is never resent automatically',async()=>{
+  const item=question();
+  const h=await setup({item,answerResult:body=>{
+    item.status='unknown';item.answer=body.answer;item.other=body.other;
+    return {question_id:'b'.repeat(32),run_id:'another-run',status:'answered',answer:body.answer};
+  }});
+  try {
+    const card=h.doc.querySelector('.clarification-card');
+    card.querySelector('input[value="Change it"]').click();
+    button(card,'Submit answer').click();await tick();
+    assert.match(card.textContent,/Answer status unknown/);
+    assert.equal(card.querySelector('.clarification-form'),null);
+    assert.equal(h.calls.filter(call=>call.path.endsWith('/answer')).length,1);
+    button(h.doc,'Back to chats').click();await tick();
+    button(h.doc,'Fixture').click();await tick();
+    assert.match(h.doc.querySelector('.clarification-card').textContent,/Answer status unknown/);
+    assert.equal(h.calls.filter(call=>call.path.endsWith('/answer')).length,1);
+    assert.equal(h.calls.filter(call=>call.path==='/runs').length,0);
   } finally {h.close();}
 });
 

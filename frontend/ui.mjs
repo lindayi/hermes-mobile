@@ -1352,9 +1352,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             statusNode.textContent='Enter your other answer before submitting.';
             otherText.focus();return;
           }
+          for(const field of currentForm.elements)field.disabled=true;
           control.disabled=true;statusNode.textContent='Submitting answer…';
-          const pending={...item,status:'sending',answer,other,updated_at:item.updated_at+0.001};
-          renderClarification(pending);
           try{
             const result=await api.request(`/runs/${encodeURIComponent(run.id)}/clarifications/${encodeURIComponent(item.question_id)}/answer`,
               {method:'POST',body:{answer,other}});
@@ -1367,11 +1366,13 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             }else renderClarification({...item,status:'unknown',answer,other,updated_at:item.updated_at+0.001});
           }catch(error){
             if(version!==routeVersion || state.user?.id!==clarificationOwner)return;
-            if(error.status===401)expiredSession();
-            renderClarification({...item,status:error.status===409?'unknown':'sending',answer,other,updated_at:item.updated_at+0.001});
-            const latest=clarificationCards.get(item.question_id);
-            latest?.querySelector('.clarification-feedback')?.replaceChildren(
-              doc.createTextNode(error.status===409?'Answer status changed. Reopen the session to check it; do not submit again.':'Answer status is unresolved. Reopen the session to check it; it will not be sent again automatically.'));
+            if(error.status===401){expiredSession();return;}
+            if(error.status===422 && error.message==='Invalid clarification answer'){
+              for(const field of currentForm.elements)field.disabled=false;
+              statusNode.textContent='That answer did not pass validation. Review your selections and Other text, then correct it here.';
+              return;
+            }
+            renderClarification({...item,status:'unknown',answer,other,updated_at:item.updated_at+0.001});
           }
         };
       }else{
