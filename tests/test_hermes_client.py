@@ -90,3 +90,21 @@ async def test_gateway_types_only_authenticated_native_run_not_found(method, pat
         assert seen == [(method, path, True)]
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_timeout_is_not_classified_as_native_run_not_found():
+    from backend.hermes_client import GatewayClient, IntegrationUnavailable
+
+    async def handle(_request):
+        raise httpx.ReadTimeout('synthetic timeout')
+
+    client = GatewayClient(
+        'http://127.0.0.1:8642', 'synthetic-token', execution_ready=True,
+        transport=httpx.MockTransport(handle))
+    try:
+        with pytest.raises(IntegrationUnavailable) as error:
+            await client.request('GET', '/v1/runs/native-run')
+        assert error.value.__class__ is IntegrationUnavailable
+    finally:
+        await client.close()

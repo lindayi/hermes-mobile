@@ -214,6 +214,7 @@ def activate_candidate(bound_native):
         web_pending=0, quarantined=0, foreign_retained=0, web_delivered=0, shutdown_publications=0)
     caps['features'] = {'mobile_session_delete_version': 1}
     caps['mobile_notifications'] = dict(version=1, delivery='durable-inbox', automatic_model_wake=False)
+    caps['mobile_run_controls']['clarifications'] = True
     return probe, candidate_root, health, caps
 
 
