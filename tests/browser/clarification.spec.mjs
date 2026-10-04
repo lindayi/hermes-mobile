@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {createServer} from 'node:http';
-import {mkdtemp,readFile,rm} from 'node:fs/promises';
+import {access,mkdtemp,readFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createRequire} from 'node:module';
@@ -11,22 +11,102 @@ import {fileURLToPath} from 'node:url';
 import {generatedAssets} from './generated-assets.mjs';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
 
-test('generated browser reconciles a real native 409 through authenticated API transport',{timeout:60000},async()=>{
+async function nativeTransport({python=process.env.HERMES_TEST_PYTHON}={}) {
   const repo=fileURLToPath(new URL('../../',import.meta.url));
-  const child=spawn(process.env.HERMES_TEST_PYTHON||join(repo,'.venv/bin/python'),
+  const child=spawn(python||join(repo,'.venv/bin/python'),
     ['-B',join(repo,'tests/browser/clarification_transport_fixture.py')],{cwd:repo,stdio:['pipe','pipe','pipe']});
-  const lines=createInterface({input:child.stdout})[Symbol.asyncIterator]();
-  let diagnostic='';child.stderr.on('data',value=>{diagnostic+=value;});
+  const reader=createInterface({input:child.stdout}),lines=reader[Symbol.asyncIterator]();
+  let diagnostic='';child.stderr.on('data',value=>{diagnostic=(diagnostic+value).slice(-32768);});
+  let launchError;
+  child.on('error',error=>{launchError=error;});
+  child.stdin.on('error',error=>{launchError=error;});
+  const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));
+  const exitError=exit=>new Error(
+    `fixture exited: ${JSON.stringify(exit)}\n${launchError||''}\n${diagnostic}`);
   const next=async()=>{
     const value=await lines.next();
-    assert.equal(value.done,false,diagnostic);
+    if(value.done){
+      const exit=await closed;
+      throw exitError(exit);
+    }
     return JSON.parse(value.value);
   };
-  const temporary=await mkdtemp(join(tmpdir(),'hermes-native-conflict-browser-'));
-  const root=generatedAssets(temporary);
-  const startup=await next(),calls=[];
+  try {
+    const startup=await next();
+    let queue=Promise.resolve(),closing;
+    return {startup,child,
+      request:value=>{
+        if(closing)return Promise.reject(new Error('fixture is closing'));
+        const result=queue.then(()=>{
+          if(child.exitCode!==null||child.signalCode!==null)throw exitError({
+            code:child.exitCode,signal:child.signalCode});
+          child.stdin.write(JSON.stringify(value)+'\n');
+          return next();
+        });
+        queue=result.catch(()=>{});
+        return result;
+      },
+      close:()=>{
+        closing??=(async()=>{
+          await queue;
+          child.stdin.end();
+          const exit=await closed;
+          reader.close();
+          if(exit.code!==0||exit.signal!==null)throw exitError(exit);
+          return exit;
+        })();
+        return closing;
+      }};
+  }catch(error){
+    child.stdin.end();child.kill();reader.close();
+    await closed;
+    throw error;
+  }
+}
+
+test('native transport drains queued authenticated requests before shutdown',async()=>{
+  const transport=await nativeTransport();
+  try{
+    const requests=[transport.request({method:'GET',path:'/auth/me'}),
+      transport.request({method:'GET',path:'/approvals'})];
+    const closing=transport.close();
+    const [auth,approvals]=await Promise.all(requests);
+    assert.equal(auth.status,200);
+    assert.equal(auth.body.user.role,'owner');
+    assert.equal(approvals.status,200);
+    assert.ok(Array.isArray(approvals.body.items));
+    assert.deepEqual(await closing,{code:0,signal:null});
+    await assert.rejects(access(transport.startup.temporary),{code:'ENOENT'});
+  }finally{await transport.close();}
+});
+
+test('native transport reports launch and early request failures with exit diagnostics',async()=>{
+  await assert.rejects(nativeTransport({python:'/nonexistent/hermes-test-python'}),/ENOENT/);
+  const transport=await nativeTransport();
+  await assert.rejects(transport.request({}),error=>{
+    assert.match(error.message,/"code":1,"signal":null/);
+    assert.match(error.message,/Traceback[\s\S]*KeyError: 'method'/);
+    return true;
+  });
+  await assert.rejects(transport.close(),/KeyError: 'method'/);
+  assert.equal(transport.child.exitCode,1);
+  await assert.rejects(access(transport.startup.temporary),{code:'ENOENT'});
+});
+
+async function nativeConflictBrowser(exercise,{launch=options=>chromium.launch(options)}={}) {
+  let transport,temporary,server,browser,fixtureError;
+  const active=new Set();
+  let rejectFailure;
+  const failed=new Promise((resolve,reject)=>{rejectFailure=reject;});
+  failed.catch(()=>{});
+  const calls=[];
   let answerResponse;
-  const server=createServer(async(request,response)=>{
+  try{
+  transport=await nativeTransport();
+  const {startup}=transport;
+  temporary=await mkdtemp(join(tmpdir(),'hermes-native-conflict-browser-'));
+  const root=generatedAssets(temporary);
+  const handle=async(request,response)=>{
     const url=new URL(request.url,'http://fixture');
     const path=url.pathname.replace('/hermes/app-api','');
     const json=(body,status=200)=>{
@@ -43,9 +123,8 @@ test('generated browser reconciles a real native 409 through authenticated API t
       }
       let body='';
       for await(const chunk of request)body+=chunk;
-      child.stdin.write(JSON.stringify({method:request.method,path,
-        ...(body?{body:JSON.parse(body)}:{})})+'\n');
-      const result=await next();
+      const result=await transport.request({method:request.method,path,
+        ...(body?{body:JSON.parse(body)}:{})});
       calls.splice(0,calls.length,...result.calls);
       if(path.endsWith('/answer'))answerResponse=result;
       return json(result.body,result.status);
@@ -57,19 +136,87 @@ test('generated browser reconciles a real native 409 through authenticated API t
         relative.endsWith('.css')?'text/css':'text/javascript'});
       response.end(content);
     }catch{response.writeHead(404).end();}
+  };
+  server=createServer((request,response)=>{
+    const task=handle(request,response).catch(error=>{
+      fixtureError??=error;
+      rejectFailure(error);
+      if(!response.destroyed){
+        if(!response.headersSent)response.writeHead(500);
+        response.end();
+      }
+    });
+    active.add(task);
+    task.finally(()=>active.delete(task));
   });
-  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
-    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
-  try{
+  browser=await launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']},
+    {child:transport.child,temporary,server});
+  await Promise.race([failed,(async()=>{
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
     const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
-    await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);
+    await exercise({page,url:`http://127.0.0.1:${server.address().port}/hermes/`,
+      startup,calls,answerResponse:()=>answerResponse});
+  })()]);
+  }finally{
+    try{await browser?.close();}
+    finally{
+      try{
+        if(server){
+          server.closeAllConnections();
+          await new Promise(resolve=>server.close(resolve));
+          await Promise.all(active);
+        }
+      }finally{
+        try{await transport?.close();}
+        finally{if(temporary)await rm(temporary,{recursive:true,force:true});}
+      }
+    }
+    if(fixtureError)throw fixtureError;
+  }
+}
+
+test('native browser fixture cleans up a failed browser launch',async()=>{
+  let resources;
+  await assert.rejects(nativeConflictBrowser(()=>assert.fail('unexpected browser'),{
+    launch:async(options,value)=>{
+      resources=value;
+      throw new Error('synthetic browser launch failure');
+    },
+  }),/synthetic browser launch failure/);
+  assert.equal(resources.child.exitCode,0);
+  assert.equal(resources.server.listening,false);
+  await assert.rejects(access(resources.temporary),{code:'ENOENT'});
+});
+
+test('native browser fixture propagates HTTP handler failure and cleans up',async()=>{
+  let resources,browser;
+  await assert.rejects(nativeConflictBrowser(async({page,url})=>{
+    await page.goto(url);
+    await page.evaluate(()=>fetch('/hermes/app-api/fixture-invalid-json',{
+      method:'POST',body:'not-json'}));
+  },{
+    launch:async(options,value)=>{
+      resources=value;
+      browser=await chromium.launch(options);
+      return browser;
+    },
+  }),SyntaxError);
+  assert.equal(resources.child.exitCode,0);
+  assert.equal(resources.server.listening,false);
+  assert.equal(browser.isConnected(),false);
+  await assert.rejects(access(resources.temporary),{code:'ENOENT'});
+});
+
+test('generated browser reconciles a real native 409 through authenticated API transport',{timeout:60000},async()=>{
+  await nativeConflictBrowser(async({page,url,calls,answerResponse})=>{
+    await page.goto(url);
     await page.getByRole('button',{name:'Native seam fixture'}).click();
     const oldCard=page.locator('[data-clarification-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]');
     await oldCard.getByLabel('Change it').check();
     await oldCard.getByRole('button',{name:'Submit answer'}).click();
     await oldCard.getByText('Answered',{exact:true}).waitFor();
-    assert.equal(answerResponse.status,409);
+    assert.equal(answerResponse().status,409);
     assert.match(await oldCard.textContent(),/Answer: Keep current/);
     assert.doesNotMatch(await oldCard.textContent(),/Attempted answer: Change it/);
     await page.locator('[data-clarification-id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]')
@@ -79,13 +226,7 @@ test('generated browser reconciles a real native 409 through authenticated API t
     await page.waitForTimeout(100);
     assert.equal(calls.filter(([method])=>method==='POST').length,1);
     await page.close();
-  }finally{
-    server.closeAllConnections();
-    await new Promise(resolve=>server.close(resolve));
-    child.stdin.end();child.kill();lines.return();
-    await browser.close();
-    await rm(temporary,{recursive:true,force:true});
-  }
+  });
 });
 
 const questionFixture=question_id=>({

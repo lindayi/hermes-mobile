@@ -29,9 +29,12 @@ def main():
             state['clarifications'] = {
                 question['question_id']: {**question, 'signal': threading.Event()}}
             native.adapter._set_run_status('native-run', 'waiting_for_clarification')
-            print(json.dumps({'run': run, 'question': question}), flush=True)
+            print(json.dumps({'run': run, 'question': question,
+                              'temporary': temporary}), flush=True)
             for line in sys.stdin:
                 request = json.loads(line)
+                print(f"fixture request: {request['method']} {request['path']}",
+                      file=sys.stderr, flush=True)
                 if request['method'] == 'POST' and request['path'].endswith('/answer'):
                     # Another native caller wins just before this mobile dispatch.
                     receipt = client.portal.call(
