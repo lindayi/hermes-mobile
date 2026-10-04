@@ -280,7 +280,7 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
         source_action=StateStore(store.path).action(first["key"]),
         verdict="changes_requested",
         findings=[{
-            "path": "deploy/cloud_coordinator.py",
+            "path": "frontend/styles.css",
             "comment": "Publish a bounded follow-up fixer request before approval.",
         }],
         report="One bounded follow-up is required before approval.",
