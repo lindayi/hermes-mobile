@@ -451,7 +451,10 @@ bounded findings, reviewed file hashes, and bounded narrative report. The child
 does not echo its review-task UUID; the parent authenticates the saved task ID
 and session through the task API.
 
-The parser accepts only that bounded quoted-reply envelope. Edited, oversized,
+The parser accepts only that bounded quoted-reply envelope, with a limit of
+65,536 UTF-8 bytes and 64 LF-delimited lines. The byte budget accommodates the
+declared maximum inventory of 64 paths of up to 200 characters plus the quoted
+anchor and compact report. Edited, oversized,
 ambiguous, foreign, stale, wrong-session, wrong-binding, or duplicate reports
 fail closed, and a report inside the quote is never evidence. A verified report
 triggers one owner-published formal COMMENT review on the exact head using the
@@ -461,6 +464,139 @@ produce `verdict:"pass"`; bounded findings produce `verdict:"changes_requested"`
 and feed one bounded fixer follow-up for that exact head. The coordinator never
 infers review acceptance from task completion, a digest alone, a Copilot review
 request, or a status, and never invents a task-result API field.
+
+The task prompt is generated from this exact report contract. Top-level keys are
+`schema`, `nonce`, `session_id`, `repository`, `repository_id`, `pr`,
+`anchor_comment_id`, `role`, `head`, `base`, `source_start_head`,
+`source_session_id`, `source_comment_id`, `verdict`, `summary`, `findings`,
+`files`, and `report`. Each finding has exactly `path` and `comment`; paths must
+be reviewed changed paths and comments must be nonblank and at most 1,000
+characters. A `pass` has no findings; `changes_requested` has one through eight.
+Summary and report text are nonblank and at most 1,000 characters. The prompt
+includes the complete changed-path inventory, including deleted paths. `files`
+must map every inventory path exactly once: for each non-deleted path the reviewer
+independently computes lowercase SHA-256 over the exact Git-blob file bytes, and
+for a deleted path supplies JSON `null`. The coordinator independently fetches
+and hashes every non-deleted blob and accepts only an exact map; it never trusts
+the prompt or report to prove completeness.
+The report must use canonical compact ASCII-escaped JSON, exactly as produced by
+Python `json.dumps(report, ensure_ascii=True, separators=(',', ':'))`. Non-ASCII
+characters are represented by JSON Unicode escapes; parsing those escapes retains
+the original report text. Raw non-ASCII JSON is rejected by the canonical transport
+check.
+GitHub blob envelopes may contain ASCII LF line wrapping in base64 content.
+Only those LF characters are removed before strict base64 decoding; other
+whitespace, non-ASCII characters, malformed alphabet or padding, and mismatched
+blob identity, encoding or declared byte size remain rejected.
+
+Before dispatch, the complete inventory must also be representable within the
+64-file bound and have unique bounded paths, nonempty statuses, and valid blob
+identities for non-deleted files. An unrepresentable inventory is never sent as
+a partial map: apply mode records a bounded diagnosis on the source handoff,
+marks that handoff `inventory_blocked`, and posts one deduplicated blocker. This
+terminal blocker does not retain generic agent occupancy or dispatch a fixer;
+repeated scans reuse the same outcome for the exact head.
+
+If a task returned by the saved task ID is positively terminal but its report is
+missing, malformed, or incomplete, apply mode durably records a bounded diagnostic
+and posts a deduplicated blocked outcome. A single corrective review may be
+reserved for that source report only after task ID/time, task and repository
+identities, scope, the unique terminal session, session owner/repository/user,
+prompt, branch, and session chronology are authenticated. The correction has a
+separate action, anchor, task, session, and nonce; both its authenticated task ID
+and session ID must differ from the saved parent report's task and session IDs.
+Session IDs used for recovery must be strings of 1 through 128 characters before
+they are persisted or made retry-eligible. Missing, non-string, empty, or oversized
+IDs are not copied into state and block correction, while the bounded report
+diagnostic and deduplicated blocker remain durable.
+Missing or reused identities fail closed before report acceptance or publication.
+It cannot replace or edit the old report and does not reset or consume the
+source-fixer budget. The durable
+reservation is made before task creation. An ambiguous creation, active or unknown
+task/session, or missing authentication metadata is never retried; terminal correction
+failure exhausts this separate one-attempt budget and remains a clear blocker.
+If the task lookup itself returns a non-object, the task remains sent and unresolved:
+the bounded observation diagnostic and deduplicated blocker do not establish task
+identity, terminality, or availability for retry. Reconciliation waits for an
+authentic task response and does not dispatch a correction or publish review evidence.
+Non-list `artifacts` or `sessions` containers likewise retain the sent task and its
+occupancy, with a bounded deduplicated diagnostic; authentic container metadata can
+then resume reconciliation without resetting the task or repair history. Repeated
+polls reuse the same deduplicated outcome. A valid corrected
+`changes_requested` report is published through the existing formal COMMENT path
+and can feed the existing bounded fixer. A valid `pass` can publish `agent-review`
+only after the full report, exact-head bindings, and independently verified file
+inventory pass the same strict checks. If the process stops after a completed
+correction publication but before the parent audit transition, reconciliation
+idempotently changes `report_retry_state` from `reserved` to `recovered` only when
+the completed correction, parent, distinct task/session/nonce/anchor, exact head,
+source bindings, and persisted owner publication all match, including a positive
+non-boolean review ID and the exact generated body. A missing or invalid ID leaves
+publication uncertain until an authenticated exact matching review readback proves
+it. A pass also requires its `agent-review` publication to be durably complete; a
+`changes_requested`
+correction is complete with its durably recorded formal COMMENT publication and
+does not require or publish an `agent-review` success status. This parent-only
+repair does not repeat task dispatch, formal review publication, status
+publication, or fixer work; stale or incomplete publication is not successful
+recovery, and uncertain publication and unbound or mismatched parents remain
+unresolved.
+
+If main advances after the original malformed report is durably recorded, its
+saved `main_sha` remains unchanged as audit evidence. A retry is eligible only
+when the exact head remains owner-authorized, the original source receipt still
+authenticates, and ancestry from the saved report base is independently proven
+through the current PR base, current main, and exact head. The new correction
+stores that historical parent base separately and binds its report to the
+current-main observation. Dispatch and report acceptance are fenced to that
+reserved head and main; a later head or main advance invalidates the correction
+without publishing its report or an `agent-review` success status.
+
+The corrective anchor marker, outbox key, and reviewer nonce include the
+reservation's current-main SHA as well as the immutable parent failure identity.
+If main advances before an anchor is claimed, an uncertain anchor remains
+unchanged, while a positively sent obsolete preclaim anchor may be compacted into
+the existing bounded outbox tombstones; its public marker remains the replay
+evidence. A distinct anchor may be reserved for the new main. Claimed/current-needed
+anchors remain retained. Once a correction task is claimed, including an uncertain
+creation, a later main advance does not authorize another correction task.
+
+Every pending correction publication replay freshly checks the live PR identity,
+head, current main, and existing correction authority immediately before a formal
+COMMENT write, an `agent-review` status write, and a parent `recovered` transition.
+Existing publication readback remains idempotent. A detected advance records a
+bounded stale disposition, exhausts that correction reservation, and releases the
+generic busy lock without retrying it. These client-side reads cannot make a later
+GitHub write atomic with the read; no server-side compare-and-swap guarantee is
+claimed. Crash repair may update the parent without new writes only when the
+completed correction and all required publications were already durably recorded
+before restart and the complete original task, report, source, and parent bindings
+still match.
+
+A stale correction's remote COMMENT and success status remain historical
+publications, not rollback targets. Review eligibility, source handoff, and fresh
+status/merge fences reject the selected COMMENT only when its PR, head, positive
+review ID, and exact generated-body digest match that stale correction's durable
+publication. Before a correction COMMENT write, the exact generated body is
+persisted as publication intent. If the response is uncertain and a main/head
+advance makes the action stale before readback, a later authenticated owner
+COMMENT is also rejected only when its exact body matches that intent and its
+submission follows the authenticated completed reviewer session. A different
+later independent review remains eligible. Ambiguous publication is never
+reposted. Exhaustion remains recorded and deduplicated; it does not revoke an
+unrelated legacy review or a later authentic independent review. No new task,
+COMMENT, or success status is emitted to repair this stale publication.
+
+For a positively terminal malformed parent report, the authenticated review
+session completion time is retained with the bounded error and session ID. A
+later positive independent owner COMMENT on the same head supersedes recovery
+only when it is current, unedited, fully authenticated and submitted after that
+session completed. This suppresses the obsolete correction retry, its busy
+state, and its report blocker without deleting or resetting the parent record.
+The same review is rechecked immediately before claiming a correction task. A
+correction already sending, uncertain, sent, or otherwise remotely active keeps
+its separate occupancy lock; later review evidence does not cancel or release
+that task.
 
 The validated completion time, session ID and receipt comment ID remain persisted
 with the receipt head/base and dispatch claim for restart. The authentic session
@@ -505,8 +641,11 @@ policy is exactly `source-ci` (Actions app 15368), `integration-tests`,
 and required conversation resolution. Missing, extra, or differently app-bound
 required contexts fail closed. All four required checks must independently report
 success; skipped, cancelled, missing, pending, failed, or incomplete checks are not
-green. The coordinator never writes `integration-tests`, `source-ci`, or
-`agent-review` statuses. Branch rules are collected
+green. The coordinator never writes `integration-tests` or `source-ci` statuses.
+It may write `agent-review` success only after an independent-review report
+passes strict exact-head and authenticated-report validation plus complete,
+independently verified file-inventory checks; that status is not a substitute for
+independent review or any other required context. Branch rules are collected
 with explicit `per_page=100` and `page` pagination, bounded to 100 pages; only a
 short final page proves completion. Errors (including an unavailable rules
 endpoint), malformed pages/policy fields, or exhaustion of the bound fail closed.
@@ -536,6 +675,13 @@ GitHub's pull-request state proves auto-merge was enabled.
 The durable outbox posts deduplicated, fixed-text outcome/blocker comments on
 public PRs. It carries no logs, credentials, arbitrary issue text, or private
 runtime data. The owner mobile Inbox is not implemented by this adapter.
+Independent-review report observations and terminal unusable-report diagnoses use
+separate stable issue/head keys (`review-report-observation` and
+`review-report-terminal`), so one lifecycle stage cannot consume the other's
+notice. Historical `review-report` entries are classified by their fixed message:
+a pending observation follows normal delivery, sent observations remain deduplicated,
+and sending/uncertain observations are left unchanged and are not retried. A matching
+legacy terminal entry retains the prior terminal deduplication.
 Before posting, an existing marker in the fully read PR comments proves
 publication only when the numeric author ID matches the authenticated owner used
 for writes and the body exactly matches the planned notification. Copied markers
@@ -739,6 +885,10 @@ lists of retired auto-merge and outbox key digests). Pending, sending, uncertain
 and sent fixer claims, every record on the current head, enrollments with their
 command fence and attempt budget, and consumed command IDs are never dropped;
 the oldest command IDs fold into a numeric watermark that still fences replays.
+Positively completed `inventory_blocked` fixer handoffs are terminal too and are
+retired by the same head-change/inactive contract; active, current-head, and
+uncertain work and pending outbox posts remain retained. Their retirement comparison
+uses the authenticated `receipt_head` when available, not the dispatch head.
 
 ACK-backed lifecycle retirement does not erase history. The optional
 `lifecycle_context` preserves each retired event's canonical payload and exact

@@ -135,6 +135,57 @@ findings publish `verdict:"changes_requested"` and feed one bounded fixer
 follow-up for that exact head. The completed source task lock is retained until
 that verified reviewer lifecycle completes, and every configured required check
 must still independently succeed.
+
+The reviewer prompt names every required report field and the exact finding
+shape: each finding has only `path` and a nonblank `comment` of at most 1,000
+characters. It includes the complete changed-path inventory. Every non-deleted
+file hash is independently computed from the exact Git-blob bytes; deleted paths
+use JSON `null`. The coordinator fetches and hashes the full inventory again and
+does not accept a partial or report-supplied substitute. If a positively terminal
+task has no usable report, the private action record keeps a bounded validation
+error and the outbox posts one deduplicated blocker. At most one separately
+reserved correction can follow, with a new anchor, task, session, and nonce; the
+original report is left unchanged and source-fixer attempts/authority are
+preserved. Active, unknown, or insufficiently authenticated task/session evidence
+does not authorize a correction. An ambiguous creation is never replayed, and
+failure of the single correction remains a blocker. A corrected negative verdict
+uses the existing bounded fixer flow; a pass status is still gated by the full
+strict review proof. Recovery session IDs are stored and considered for retry only
+when they are nonempty strings no longer than 128 characters; unsafe IDs remain
+out of state while the bounded diagnosis and deduplicated blocker are retained.
+After a corrected report is durably published, reconciliation repairs a still-
+reserved parent to `recovered` only from the positively bound completed correction;
+for a pass, the `agent-review` status must also already be durably complete. This
+restart repair does not repeat publication or dispatch.
+
+Recovery after main advances preserves the original report's saved base as audit
+evidence. It requires current exact-head owner authority, the original source
+receipt, and independently proven ancestry from that saved base through the PR
+base, current main, and reviewed head. The correction records the historical parent
+base separately from its current-main report binding; if either changes after
+reservation, the correction report cannot be published or grant `agent-review`.
+Its anchor marker, outbox key, and nonce include the reservation main SHA. A main
+advance before claim preserves uncertain anchors but may compact a positively
+sent obsolete preclaim anchor into bounded outbox tombstones; its public marker
+remains replay evidence. A distinct current-main anchor is permitted, while
+claimed/current-needed anchors remain retained. A claimed or uncertain correction
+task is never replaced by another correction task.
+
+Pending correction replay freshly verifies live PR identity, head, main, and
+authority immediately before formal review and status writes and before marking
+the parent recovered. Detected staleness is durably bounded, exhausts that
+correction reservation, and releases generic busy state. These client checks do
+not make the subsequent GitHub write atomic. A crash-repair transition after
+later main movement is permitted only when the completed correction and every
+required publication were already durably recorded and all original report,
+task, source, and parent bindings still match.
+An inventory that cannot be represented within the strict 64-file contract is
+blocked before reviewer dispatch, recorded on the source handoff, and reported
+once through the deduplicated outcome path. The blocked handoff does not keep a
+generic agent lock or create a fixer task. Once positively completed, it is
+retired after its head changes or enrollment becomes inactive; current active
+records and unresolved work remain retained.
+
 Sensitive changes additionally need owner authorization bound to that exact SHA
 and the documented targeted independent review; neither approval nor authorization
 carries to a later head.

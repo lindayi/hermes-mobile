@@ -184,7 +184,10 @@ def test_review_report_requires_expected_reviewer_session_principal_ids(
 
     assert summary["review_valid"] is False
     assert StateStore(store.path).action(fix["key"])["handoff_state"] == "waiting_review"
-    assert StateStore(store.path).action(review["key"])["status"] == "sent"
+    rejected = StateStore(store.path).action(review["key"])
+    assert rejected["status"] == "completed"
+    assert rejected["report_retry_allowed"] is False
+    assert rejected["report_error"]
 
 
 @pytest.mark.parametrize("stage", ["enrollment", "snapshot", "authorization"])

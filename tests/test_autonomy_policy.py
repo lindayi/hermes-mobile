@@ -159,6 +159,12 @@ _ISSUE65_RECEIPT_PRODUCER_FIXTURE = {
     'deploy/task_receipts.py': '9cce2d879fd510c2a8239d1e7f560886370e59de08e21dabc8857d5299e62620',
 }
 
+# Candidate recovery overlay; retain historical literals and require delta review.
+_ISSUE79_REVIEW_RECOVERY_FIXTURE = {
+    'deploy/cloud_coordinator.py': '43716bc616930d1efb0954c12ee9403272d19b622adcc202bca7994c2568c1a8',
+    'deploy/task_receipts.py': 'a7bd1edee10c42c42d992e20d83160095203d792c9a6131b3a915351d2768981',
+}
+
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
 }
@@ -187,7 +193,7 @@ def _source_files():
             | _PENDING_ISSUE50_RECEIPT_FIXTURE | _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
             | _PENDING_ISSUE67_WORKFLOW_FIXTURE | _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
             | _PENDING_PR45_NAMING_FIXTURE
-            | _ISSUE65_RECEIPT_PRODUCER_FIXTURE)
+            | _ISSUE65_RECEIPT_PRODUCER_FIXTURE | _ISSUE79_REVIEW_RECOVERY_FIXTURE)
 
 
 def _source_ci():
@@ -583,7 +589,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in {'deploy/cloud_coordinator.py', 'deploy/review_evidence.py'}
     } == {
-        'deploy/cloud_coordinator.py': _PENDING_ISSUE50_RECEIPT_FIXTURE[
+        'deploy/cloud_coordinator.py': _ISSUE79_REVIEW_RECOVERY_FIXTURE[
             'deploy/cloud_coordinator.py'
         ],
         'deploy/review_evidence.py': _PENDING_ISSUE43_LAUNCH_FIXTURE[
@@ -605,7 +611,8 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
-    } == (_PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE)
+    } == (_PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
+          | _ISSUE79_REVIEW_RECOVERY_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
@@ -670,7 +677,8 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
 
 
 @pytest.mark.parametrize('pins', [
-    SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE,
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
+    | _ISSUE79_REVIEW_RECOVERY_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
 def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
