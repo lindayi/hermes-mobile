@@ -185,7 +185,7 @@ _PENDING_PR45_NAMING_FIXTURE = {
 }
 
 _PENDING_ISSUE77_CLARIFICATION_FIXTURE = {
-    'backend/app.py': 'b2a41b38830fb28456cae81bdb7bfc78ebf37da4d6b81912f6b1d62a94fc432f',
+    'backend/app.py': '3fbab2ca8c8d47dffdd1775d67026fbd537f7350aa6ec68f830cc9be87c266c5',
     'backend/clarifications.py': '5ad4b7c382f60355ef1eff1e73ec8c967221dbe632c954637608bc6d369d6a53',
     'backend/hermes_client.py': '6dfc387cab67e8186af3cac8eba4fbf974fb74bb658008efa83dad8b5deec12d',
     'backend/model_controls.py': '06a1dc3be87f9d81515157ba19de62de043e7f75491587eabb02aac3d5a406e3',

@@ -642,9 +642,10 @@ def create_app(settings=None, *, gateway_client=None):
         try:
             body=await request.json()
             return await runtime_for(user).answer_clarification(user,rid,question_id,body)
-        except ClarificationNotSent as exc:
+        except ClarificationNotSent:
             return JSONResponse(
-                {'detail': str(exc), 'code': 'clarification_not_sent'}, status_code=503)
+                {'detail': 'Native clarification controls are unavailable; no answer was sent.',
+                 'code': 'clarification_not_sent'}, status_code=503)
         except RunConflict:
             raise
         except KeyError:

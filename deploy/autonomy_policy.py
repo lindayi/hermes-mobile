@@ -217,7 +217,7 @@ SOURCE_FINGERPRINTS = {
     'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
     'backend/runs.py': '99297aef3ecf899d40b77d76de26132701596672dd6af432cdf16ecba1aaac93',
     # Accepted PR45 naming bytes in this assembly; no naming-source rewrite.
-    'backend/app.py': 'b2a41b38830fb28456cae81bdb7bfc78ebf37da4d6b81912f6b1d62a94fc432f',
+    'backend/app.py': '3fbab2ca8c8d47dffdd1775d67026fbd537f7350aa6ec68f830cc9be87c266c5',
     'backend/auth.py': '411529a1d53bdcd01eae4bf5e35c44d3d5099e4dc9e77eb9dbbe67df6433f335',  # gitleaks:allow
     'backend/auth_store.py': '8827856de744de03648924b0ff83011bdb70417781620724acd84078181c193e',  # gitleaks:allow
     'backend/background_delivery.py': '2da2bdd89d27f18beee0e0099d1bb39b325a9f70dcba099d55ceb3dea2e88629',
