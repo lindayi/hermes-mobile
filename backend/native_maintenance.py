@@ -156,7 +156,8 @@ def maintenance_snapshot(adapter, registry, delegations, state_db):
             statuses = [r['status'] for r in list(adapter._run_statuses.values())]
             if (any(type(v) is not bool for v in done)
                     or any(s not in {'completed', 'failed', 'cancelled', 'queued', 'running',
-                                     'stopping', 'waiting_for_approval'} for s in statuses)
+                                     'stopping', 'waiting_for_approval',
+                                     'waiting_for_clarification'} for s in statuses)
                     or type(adapter._maintenance_uncertain) is not bool):
                 raise ValueError('Unrecognized native work state')
             work = {

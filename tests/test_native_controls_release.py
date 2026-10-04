@@ -388,6 +388,11 @@ def test_native_idle_checks_known_latest_ids_and_counts(tmp_path):
     probe.request = lambda path, **kw: health() if path == '/health/detailed' else {'status': 'unknown'}
     with pytest.raises(RuntimeError, match='Unknown'):
         probe.idle(journal, {'root': '/old', 'legacy': True, 'pid': 123}, required_ids=('native1',))
+    probe.request = lambda path, **kw: (
+        health() if path == '/health/detailed'
+        else {'status': 'waiting_for_clarification'})
+    assert not probe.idle(
+        journal, {'root': '/old', 'legacy': True, 'pid': 123}, required_ids=('native1',))
 
 
 @pytest.mark.parametrize('changed', [None, 'caps-order', 'busy', 'pid', 'caps', 'anonymous', 'unknown',

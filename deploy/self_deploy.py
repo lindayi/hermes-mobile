@@ -41,7 +41,9 @@ def wait_idle(journal, *, bootstrap=False, timeout=1800, sleep=time.sleep):
             states = [row[0] for row in connection.execute("SELECT status FROM runs WHERE status NOT IN ('completed','failed','cancelled')")]
         if not states:
             return
-        if 'unknown' in states or any(s not in ('queued', 'running', 'stopping', 'waiting_for_approval') for s in states):
+        if 'unknown' in states or any(s not in (
+                'queued', 'running', 'stopping', 'waiting_for_approval',
+                'waiting_for_clarification') for s in states):
             raise RuntimeError('unknown/unresolved run blocks deployment')
         if bootstrap or time.monotonic() >= deadline:
             raise RuntimeError('Bridge must be idle before deployment')

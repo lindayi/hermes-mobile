@@ -60,6 +60,36 @@ def deploy_fixture(tmp_path):
     return module, paths
 
 
+def test_wait_idle_treats_clarification_as_active_until_answer_or_stop(tmp_path, monkeypatch):
+    from backend.runs import RunJournal
+    module = controller()
+    journal = RunJournal(tmp_path / 'runs.sqlite')
+    run, _ = journal.submit('owner', 'default', 'session', 'input', 'key')
+    with journal.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET status='waiting_for_clarification' WHERE id=?", (run['id'],))
+
+    clock = [0]
+    monkeypatch.setattr(module.time, 'monotonic', lambda: clock[0])
+
+    def advance_timeout(_):
+        clock[0] += 1
+
+    with pytest.raises(RuntimeError, match='Bridge must be idle'):
+        module.wait_idle(journal, timeout=2, sleep=advance_timeout)
+
+    for next_status in ('running', 'stopping'):
+        with journal.connect() as connection:
+            connection.execute(
+                "UPDATE runs SET status='waiting_for_clarification' WHERE id=?", (run['id'],))
+        transitions = iter((next_status, 'completed' if next_status == 'running' else 'cancelled'))
+        def answer_or_stop(_):
+            with journal.connect() as connection:
+                connection.execute(
+                    'UPDATE runs SET status=? WHERE id=?', (next(transitions), run['id']))
+        module.wait_idle(journal, timeout=10, sleep=answer_or_stop)
+
+
 @pytest.mark.parametrize('entry',['releases','backups','deploy.lock','status.json'])
 def test_internal_symlinks_rejected_before_writes_or_checks(tmp_path, entry):
     module,paths=deploy_fixture(tmp_path)

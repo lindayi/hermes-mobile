@@ -617,7 +617,9 @@ class NativeProbe:
         # Only runs active at gate acquisition require a fresh terminal response.
         for run_id in required_ids:
             status = self.request('/v1/runs/' + quote(run_id, safe='')).get('status')
-            if status not in TERMINAL | {'queued', 'running', 'stopping', 'waiting_for_approval'}:
+            if status not in TERMINAL | {
+                    'queued', 'running', 'stopping', 'waiting_for_approval',
+                    'waiting_for_clarification'}:
                 raise RuntimeError('Unknown native journal run status')
             idle = status in TERMINAL and idle
         return idle

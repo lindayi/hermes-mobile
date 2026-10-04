@@ -309,7 +309,9 @@ def test_listener_snapshot_all_work_categories_are_positive(tmp_path):
     a._pending_agent_requests = 1
     a._inflight_agent_runs = 2
     a._active_run_tasks['r'] = SimpleNamespace(done=lambda: False)
-    a._run_statuses = {s: {'status': s} for s in ('queued', 'running', 'stopping', 'waiting_for_approval', 'completed')}
+    a._run_statuses = {s: {'status': s} for s in (
+        'queued', 'running', 'stopping', 'waiting_for_approval',
+        'waiting_for_clarification', 'completed')}
     a._active_run_agents['r'] = object()
     a._shutdown_interruptible_agents[1] = object()
     a._stopping_run_ids.add('r')
@@ -321,7 +323,7 @@ def test_listener_snapshot_all_work_categories_are_positive(tmp_path):
     result = module().maintenance_snapshot(a, registry, delegations, path)
     assert result['status'] == 'ok'
     assert all(value > 0 for key, value in result['work'].items() if key != 'delegation_executor_threads')
-    assert result['work']['nonterminal_runs'] == 4
+    assert result['work']['nonterminal_runs'] == 5
     assert not path.exists()
 
 
