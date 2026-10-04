@@ -7,6 +7,10 @@ class IntegrationUnavailable(RuntimeError):
     pass
 
 
+class NativeRunNotFound(IntegrationUnavailable):
+    """An authenticated lookup proved that this process no longer owns the run."""
+
+
 class GatewayClient:
     def __init__(self, base_url, token, execution_ready=False, transport=None):
         u=urlparse(base_url)
@@ -25,6 +29,11 @@ class GatewayClient:
             raise IntegrationUnavailable('Private Hermes API is not configured')
         try:
             response=await self.client.request(method,path,**kwargs)
+            segments = urlparse(path).path.split('/')
+            if (method.upper() == 'GET' and len(segments) == 4
+                    and segments[:3] == ['', 'v1', 'runs'] and segments[3]
+                    and response.status_code == 404):
+                raise NativeRunNotFound('Native run no longer exists')
             response.raise_for_status()
             return response.json()
         except (httpx.HTTPError,ValueError) as exc:

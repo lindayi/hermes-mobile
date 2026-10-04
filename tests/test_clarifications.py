@@ -323,3 +323,87 @@ async def test_uncertain_answer_is_not_restored_from_pending_native_snapshot(tmp
     state = await bridge.rehydrate(OWNER, run['id'], Gateway(), run)
     assert state['items'][0]['status'] == 'unknown'
     assert state['items'][0]['answer'] == 'Change it'
+
+
+@pytest.mark.asyncio
+async def test_real_gateway_run_not_found_retires_waiters_durably_without_resubmission(tmp_path):
+    import httpx
+    from backend.hermes_client import GatewayClient
+
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    unanswered = pending('a' * 32)
+    attempted = pending('b' * 32)
+    bridge.event(OWNER, run, unanswered)
+    bridge.event(OWNER, run, attempted)
+    bridge.claim(OWNER, run, attempted['question_id'],
+                 {'answer': 'Change it', 'other': False})
+    calls = []
+
+    async def handle(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path == '/v1/capabilities':
+            return httpx.Response(200, json={
+                'mobile_run_controls': {'version': 1, 'clarifications': True}})
+        assert request.url.path == '/v1/runs/native-run'
+        return httpx.Response(404, json={'detail': 'synthetic missing run'})
+
+    gateway = GatewayClient(
+        'http://127.0.0.1:8642', 'synthetic-token', execution_ready=True,
+        transport=httpx.MockTransport(handle))
+    try:
+        state = await bridge.rehydrate(OWNER, run['id'], gateway, run)
+    finally:
+        await gateway.close()
+
+    reopened = RunJournal(journal.path)
+    recovered = ClarificationJournal(reopened).list(OWNER, run['id'])
+    by_id = {item['question_id']: item for item in recovered}
+    assert state['available'] is False
+    assert by_id[unanswered['question_id']]['status'] == 'unknown'
+    assert by_id[attempted['question_id']]['status'] == 'unknown'
+    assert by_id[attempted['question_id']]['answer'] == 'Change it'
+    with closing(reopened.connect()) as connection:
+        replayed = [event for event in reopened._replay_events(connection, run['id'])
+                    if event['name'] == 'clarification']
+    assert {event['data']['status'] for event in replayed} == {'unknown'}
+    assert calls == [
+        ('GET', '/v1/capabilities'),
+        ('GET', '/v1/runs/native-run'),
+    ]
+    with pytest.raises(RunConflict):
+        ClarificationJournal(reopened).claim(
+            OWNER, reopened.get('owner', run['id']), unanswered['question_id'],
+            {'answer': 'Keep current', 'other': False})
+    with pytest.raises(RunConflict):
+        ClarificationJournal(reopened).claim(
+            OWNER, reopened.get('owner', run['id']), attempted['question_id'],
+            {'answer': 'Change it', 'other': False})
+
+
+@pytest.mark.asyncio
+async def test_real_gateway_transient_run_failure_keeps_waiter_pending(tmp_path):
+    import httpx
+    from backend.hermes_client import GatewayClient
+
+    journal, run = run_state(tmp_path)
+    bridge = ClarificationJournal(journal)
+    question = pending()
+    bridge.event(OWNER, run, question)
+
+    async def handle(request):
+        if request.url.path == '/v1/capabilities':
+            return httpx.Response(200, json={
+                'mobile_run_controls': {'version': 1, 'clarifications': True}})
+        return httpx.Response(503, json={'detail': 'synthetic unavailable'})
+
+    gateway = GatewayClient(
+        'http://127.0.0.1:8642', 'synthetic-token', execution_ready=True,
+        transport=httpx.MockTransport(handle))
+    try:
+        state = await bridge.rehydrate(OWNER, run['id'], gateway, run)
+    finally:
+        await gateway.close()
+    assert state['available'] is False
+    assert state['items'][0]['status'] == 'pending'
+    assert journal.events('owner', run['id'])[-1]['data']['status'] == 'pending'

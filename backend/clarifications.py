@@ -6,7 +6,7 @@ import math
 import time
 
 from .runs import RunConflict
-from .hermes_client import IntegrationUnavailable
+from .hermes_client import IntegrationUnavailable, NativeRunNotFound
 
 
 class ClarificationJournal:
@@ -199,6 +199,25 @@ class ClarificationJournal:
                     item.update(status='unknown', updated_at=updated_at)
                     self._record_event(connection, run_id, item)
 
+    def mark_run_not_found_unknown(self, user, run_id):
+        with closing(self.journal.connect()) as connection, connection:
+            connection.execute('BEGIN IMMEDIATE')
+            rows = connection.execute('''SELECT c.*,r.session_id FROM clarifications c
+                JOIN runs r ON r.id=c.run_id WHERE c.user_id=? AND c.profile=?
+                AND c.run_id=? AND c.status IN ('pending','sending')''',
+                (user['id'], user['profile'], run_id)).fetchall()
+            for row in rows:
+                updated_at = max(time.time(), math.nextafter(row['updated_at'], math.inf))
+                cursor = connection.execute('''UPDATE clarifications
+                    SET status='unknown',updated_at=?
+                    WHERE user_id=? AND profile=? AND run_id=? AND question_id=?
+                    AND status IN ('pending','sending')''',
+                    (updated_at, user['id'], user['profile'], run_id, row['question_id']))
+                if cursor.rowcount:
+                    item = self._view(row)
+                    item.update(status='unknown', updated_at=updated_at)
+                    self._record_event(connection, run_id, item)
+
     def recover(self):
         with closing(self.journal.connect()) as connection, connection:
             connection.execute('BEGIN IMMEDIATE')
@@ -326,6 +345,9 @@ class ClarificationJournal:
             if (result['status'] == 'waiting_for_clarification' and len(pending) != 1
                     or result['status'] == 'running' and pending):
                 raise IntegrationUnavailable('Native clarification state is contradictory')
+        except NativeRunNotFound:
+            self.mark_run_not_found_unknown(user, run_id)
+            return {'available': False, 'items': self.list(user, run_id), 'native_status': None}
         except Exception:
             return {'available': False, 'items': self.list(user, run_id), 'native_status': None}
         observed_pending = self.observe(user, run, result)

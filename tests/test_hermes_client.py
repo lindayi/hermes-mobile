@@ -58,3 +58,35 @@ async def test_gateway_stream_parses_events_and_routes_control():
     await c.stop('r1')
     assert ('POST','/v1/runs/r1/stop') in seen
     await c.close()
+
+
+@pytest.mark.parametrize(('method', 'path', 'status', 'expected'), [
+    ('GET', '/v1/runs/native-run', 404, 'NativeRunNotFound'),
+    ('GET', '/v1/runs/native-run', 503, 'IntegrationUnavailable'),
+    ('GET', '/v1/runs/native-run', 401, 'IntegrationUnavailable'),
+    ('GET', '/v1/runs/native-run/events', 404, 'IntegrationUnavailable'),
+    ('POST', '/v1/runs/native-run', 404, 'IntegrationUnavailable'),
+    ('GET', '/v1/runs/native-run', 200, 'IntegrationUnavailable'),
+])
+@pytest.mark.asyncio
+async def test_gateway_types_only_authenticated_native_run_not_found(method, path, status, expected):
+    from backend.hermes_client import GatewayClient, IntegrationUnavailable
+    seen = []
+
+    async def handle(request):
+        seen.append((request.method, request.url.path,
+                     request.headers.get('authorization') is not None))
+        if status == 200:
+            return httpx.Response(status, text='malformed')
+        return httpx.Response(status, json={'detail': 'synthetic'})
+
+    client = GatewayClient(
+        'http://127.0.0.1:8642', 'synthetic-token', execution_ready=True,
+        transport=httpx.MockTransport(handle))
+    try:
+        with pytest.raises(IntegrationUnavailable) as error:
+            await client.request(method, path)
+        assert error.value.__class__.__name__ == expected
+        assert seen == [(method, path, True)]
+    finally:
+        await client.close()
