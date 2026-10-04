@@ -233,6 +233,39 @@ def test_candidate_activation_and_previous_rollback_use_distinct_contracts(bound
     probe.verify(root)
 
 
+def test_clarification_capability_is_bound_to_source_on_release_entrypoints(bound_native):
+    probe, native_root, bridge_root, _, health, caps, proc = bound_native
+    old_caps = dict(caps)
+    baseline = probe.capture(bridge_root, False)
+    probe.verify(native_root, baseline=baseline)
+
+    probe, candidate_root, health, caps = activate_candidate(bound_native)
+    caps['mobile_run_controls']['clarifications'] = True
+    probe.verify(candidate_root)
+    probe.verify_operational(candidate_root)
+
+    del caps['mobile_run_controls']['clarifications']
+    with pytest.raises(RuntimeError, match='source version'):
+        probe.capture(bridge_root, False)
+
+    caps['mobile_run_controls']['clarifications'] = True
+    caps['mobile_run_controls']['unapproved'] = True
+    with pytest.raises(RuntimeError, match='source version'):
+        probe.capture(bridge_root, False)
+
+    (proc / '123/cwd').unlink()
+    (proc / '123/cwd').symlink_to(native_root)
+    (proc / '123/cmdline').write_bytes(
+        (release.NATIVE_PYTHON + '\0'
+         + str(native_root / 'backend/native_controls_service.py') + '\0').encode())
+    caps.clear()
+    caps.update(old_caps)
+    caps['mobile_run_controls'] = {
+        **caps['mobile_run_controls'], 'clarifications': True}
+    with pytest.raises(RuntimeError, match='source version'):
+        probe.capture(bridge_root, False)
+
+
 @pytest.mark.parametrize('change', ['outside-release', 'noncanonical-release', 'source-root'])
 def test_capture_rejects_unapproved_runtime_roots(bound_native, tmp_path, change):
     probe, native_root, bridge_root, _, health, caps, proc = bound_native

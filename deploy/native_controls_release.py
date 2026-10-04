@@ -141,10 +141,12 @@ def approved_controls(root):
     return actual
 
 
-def require_controls_capabilities(caps, *, session_delete_version, notification_version=0):
+def require_controls_capabilities(caps, *, session_delete_version, notification_version=0,
+                                  clarification_version=0):
     """Capabilities must agree with the independently attested source version."""
     try:
-        if (type(notification_version) is not int or notification_version not in (0, 1)):
+        if (type(notification_version) is not int or notification_version not in (0, 1)
+                or type(clarification_version) is not int or clarification_version not in (0, 1)):
             raise ValueError()
         if notification_version == 0:
             if 'mobile_notifications' in caps:
@@ -152,8 +154,11 @@ def require_controls_capabilities(caps, *, session_delete_version, notification_
         elif json.dumps(caps['mobile_notifications'], sort_keys=True, allow_nan=False) != json.dumps(
                 dict(version=1, delivery='durable-inbox', automatic_model_wake=False), sort_keys=True):
             raise ValueError()
+        run_controls = dict(version=1, steering=True, live_commentary=True)
+        if clarification_version:
+            run_controls['clarifications'] = True
         for name, expected in (
-                ('mobile_run_controls', dict(version=1, steering=True, live_commentary=True)),
+                ('mobile_run_controls', run_controls),
                 ('mobile_native_maintenance', dict(version=1, scope='dedicated-listener', atomic_drain=False))):
             if json.dumps(caps[name], sort_keys=True, allow_nan=False) != json.dumps(expected, sort_keys=True):
                 raise ValueError()
@@ -589,7 +594,8 @@ class NativeProbe:
         if not legacy:
             require_controls_capabilities(caps,
                 session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
-                notification_version=int('backend/native_notifications.py' in source_hashes))
+                notification_version=int('backend/native_notifications.py' in source_hashes),
+                clarification_version=int(source_hashes == APPROVED_CONTROL_HASHES))
         captured = dict(root=str(root), pid=pid, legacy=legacy, caps=caps, source_hashes=source_hashes,
                         start_ticks=started, bootstrap=bootstrap,
                         bridge_root=str(baseline), bridge_pid=self._bridge_pid(baseline))
@@ -639,7 +645,8 @@ class NativeProbe:
         caps = self.request('/v1/capabilities')
         require_controls_capabilities(
             caps, session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
-            notification_version=int('backend/native_notifications.py' in source_hashes))
+            notification_version=int('backend/native_notifications.py' in source_hashes),
+            clarification_version=int(source_hashes == APPROVED_CONTROL_HASHES))
         self.verify_unchanged(root, baseline=dict(
             root=str(root), legacy=False, caps=caps, source_hashes=source_hashes,
             pid=pid, start_ticks=started), operational=True)
@@ -671,11 +678,20 @@ class NativeProbe:
         if health.get('status') != 'ok':
             raise RuntimeError('Unchanged native health is not healthy')
         require_native_quiescence(health)  # Validate typed known evidence, permit busy.
+        caps = self.request('/v1/capabilities')
         if not baseline['legacy']:
             self._ready(health, baseline=baseline)  # Validate schema/source, permit busy.
+            source_hashes = baseline.get('source_hashes')
+            if not isinstance(source_hashes, dict):
+                raise RuntimeError('Missing native source-version baseline')
+            require_controls_capabilities(
+                caps,
+                session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
+                notification_version=int('backend/native_notifications.py' in source_hashes),
+                clarification_version=int(source_hashes == APPROVED_CONTROL_HASHES))
             if operational:
                 self._require_operational_activity(health)
-        if json.dumps(self.request('/v1/capabilities'), sort_keys=True, allow_nan=False) != json.dumps(
+        if json.dumps(caps, sort_keys=True, allow_nan=False) != json.dumps(
                 baseline['caps'], sort_keys=True, allow_nan=False):
             raise RuntimeError('Unchanged native capabilities differ')
         try:
@@ -718,13 +734,26 @@ class NativeProbe:
                         raise RuntimeError('Restored legacy native has active work')
                 caps = self.request('/v1/capabilities')
                 if baseline is not None:
+                    if not legacy:
+                        source_hashes = baseline.get('source_hashes')
+                        if not isinstance(source_hashes, dict):
+                            raise RuntimeError('Missing native source-version baseline')
+                        require_controls_capabilities(
+                            caps,
+                            session_delete_version=int(
+                                'backend/native_session_deletion.py' in source_hashes),
+                            notification_version=int(
+                                'backend/native_notifications.py' in source_hashes),
+                            clarification_version=int(
+                                source_hashes == APPROVED_CONTROL_HASHES))
                     if json.dumps(caps, sort_keys=True, allow_nan=False) != json.dumps(
                             baseline['caps'], sort_keys=True, allow_nan=False):
                         raise RuntimeError('Restored native capabilities differ')
                 else:
                     require_controls_capabilities(caps,
                         session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
-                        notification_version=int('backend/native_notifications.py' in source_hashes))
+                        notification_version=int('backend/native_notifications.py' in source_hashes),
+                        clarification_version=int(source_hashes == APPROVED_CONTROL_HASHES))
                 if not legacy:
                     expected = baseline if baseline is not None else dict(
                         root=str(root), legacy=False, caps=caps, source_hashes=APPROVED_CONTROL_HASHES)
