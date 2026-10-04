@@ -5475,6 +5475,9 @@ def test_invalid_formal_review_id_stays_uncertain_until_authenticated_readback(
         action for action in StateStore(path).actions().values()
         if action.get("task_type") == "report-correction"
     )
+    api.current_main_sha = correction["main_sha"]
+    api.pull["base"]["sha"] = correction["main_sha"]
+    api.pull.update(mergeable=True, mergeable_state="clean")
     findings = [{
         "path": "frontend/styles.css",
         "comment": "Keep the existing behavior unchanged.",
@@ -5524,7 +5527,9 @@ def test_invalid_formal_review_id_stays_uncertain_until_authenticated_readback(
 
     body = formal_writes[0][1]["body"]
     api.owner_reviews.append({
-        "id": 81234, "state": "COMMENTED", "commit_id": correction["head"],
+        "id": 81234, "node_id": "PRR_kwDOU3FvNc8AAAAB81234",
+        "state": "COMMENTED", "commit_id": correction["head"],
+        "submitted_at": "2026-10-01T12:30:00Z",
         "body": body, "user": {"id": OWNER},
     })
     for _ in range(3):

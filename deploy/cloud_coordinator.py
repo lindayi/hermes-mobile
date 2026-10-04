@@ -1364,13 +1364,18 @@ def _matching_owner_comment(comments, marker, *, expected_body):
 def _task_scoped(task, snapshot):
     if not isinstance(task, dict):
         return False
+    artifacts = task.get("artifacts")
+    sessions = task.get("sessions")
+    if ((artifacts is not None and not isinstance(artifacts, list))
+            or (sessions is not None and not isinstance(sessions, list))):
+        return False
     for field, expected in (("creator", OWNER_ID), ("repository", REPOSITORY_ID)):
         value = task.get(field)
         if value is not None and not _github_identity(value, expected):
             return False
     head = snapshot["pull"]["head"]["ref"]
     matched = False
-    for artifact in task.get("artifacts") or ():
+    for artifact in artifacts or ():
         if not isinstance(artifact, dict) or artifact.get("provider") != "github":
             return False
         data = artifact.get("data")
@@ -1385,7 +1390,7 @@ def _task_scoped(task, snapshot):
     return matched or any(
         isinstance(session, dict) and session.get("head_ref") == head
         and session.get("base_ref") == MAIN_BRANCH
-        for session in task.get("sessions") or ()
+        for session in sessions or ()
     )
 
 
@@ -1405,6 +1410,7 @@ def _matching_owner_review(reviews, *, head_sha, body):
         return None
     for review in reviews:
         if (isinstance(review, dict)
+                and type(review.get("id")) is int and review["id"] > 0
                 and review.get("state") == "COMMENTED"
                 and review.get("commit_id") == head_sha
                 and isinstance(review.get("user"), dict)
@@ -1412,6 +1418,23 @@ def _matching_owner_review(reviews, *, head_sha, body):
                 and review.get("body") == body):
             return review
     return None
+
+
+def _review_publication_proven(action):
+    if (not isinstance(action, dict)
+            or action.get("publication_state") != "done"
+            or type(action.get("published_review_id")) is not int
+            or action["published_review_id"] <= 0
+            or not _is_sha(action.get("head"))
+            or not isinstance(action.get("review_report"), dict)):
+        return False
+    try:
+        expected_body = _published_review_body(
+            action["review_report"], action["head"],
+        )
+    except (KeyError, TypeError, ValueError, UnicodeError):
+        return False
+    return action.get("published_review_body") == expected_body
 
 
 def _current_source_handoff(actions, issue, head_sha):
@@ -1437,6 +1460,8 @@ def _current_review_followup(actions, issue, head_sha):
                 or action.get("kind") != "review"
                 or action.get("issue") != issue
                 or action.get("head") != head_sha
+                or (action.get("task_type") == "report-correction"
+                    and action.get("publication_disposition") == "stale")
                 or action.get("status") not in {"sending", "uncertain", "sent", "completed"}):
             continue
         action_rank = (
@@ -1490,9 +1515,7 @@ def _review_report_correction_parent_needs_recovery(actions, correction):
             or correction.get("publication_state") != "done"
             or correction.get("agent_review_state") not in {None, "done"}
             or not isinstance(correction.get("review_report"), dict)
-            or type(correction.get("published_review_id")) is not int
-            or correction["published_review_id"] <= 0
-            or not isinstance(correction.get("published_review_body"), str)):
+            or not _review_publication_proven(correction)):
         return False
     parent = actions.get(correction.get("correction_of"))
     parent_task_id = parent.get("task_id") if isinstance(parent, dict) else None
@@ -2248,6 +2271,22 @@ class Coordinator:
                         busy = True
                         continue
                     except (ReceiptError, TypeError, ValueError) as error:
+                        if (isinstance(task, dict)
+                                and (
+                                    (task.get("artifacts") is not None
+                                     and not isinstance(task.get("artifacts"), list))
+                                    or (task.get("sessions") is not None
+                                        and not isinstance(task.get("sessions"), list))
+                                )):
+                            if apply:
+                                self.store.update_action(
+                                    key, status,
+                                    report_observation_error=(
+                                        "Independent review task scope/session containers were malformed"
+                                    ),
+                                )
+                            busy = True
+                            continue
                         if not _review_task_terminal(action, task):
                             if not isinstance(task, dict) and apply:
                                 self.store.update_action(
@@ -3036,6 +3075,7 @@ class Coordinator:
                     self.store.update_action(key, "completed", publication_state="uncertain")
                     return "uncertain"
                 if (not isinstance(response, dict)
+                        or type(response.get("id")) is not int or response["id"] <= 0
                         or response.get("body") != body
                         or response.get("commit_id") != action["head"]
                         or response.get("state") != "COMMENTED"
@@ -3057,6 +3097,8 @@ class Coordinator:
             if (not publications_were_durable
                     and not self._report_correction_publication_current(action)):
                 return self._stale_report_correction_publication(key, action)
+            if not _review_publication_proven(action):
+                return "uncertain"
             self.store.update_action(
                 action.get("correction_of"), "completed",
                 report_retry_state="recovered",
@@ -3405,10 +3447,19 @@ class Coordinator:
                             "The terminal independent-review task did not produce a usable bound report. At most one separately authenticated corrective review may be reserved; ambiguous task creation is never replayed.",
                         ))
         elif report_observation_error:
-            reasons.append((
-                "review-report",
-                "The independent-review task response was malformed; its identity and terminality remain unverified, so recovery is paused.",
-            ))
+            if report_observation_error.get("report_observation_error") == (
+                    "Independent review task scope/session containers were malformed"):
+                message = (
+                    "The independent-review task's scope/session containers were malformed; "
+                    "its saved task remains occupied and recovery is paused until authentic "
+                    "container metadata is restored."
+                )
+            else:
+                message = (
+                    "The independent-review task response was malformed; its identity and "
+                    "terminality remain unverified, so recovery is paused."
+                )
+            reasons.append(("review-report", message))
         if not checks_ok:
             reasons.append(("checks", "Every configured required check must complete successfully."))
         if status and not status_owned:

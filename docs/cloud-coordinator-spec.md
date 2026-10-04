@@ -514,7 +514,10 @@ If the task lookup itself returns a non-object, the task remains sent and unreso
 the bounded observation diagnostic and deduplicated blocker do not establish task
 identity, terminality, or availability for retry. Reconciliation waits for an
 authentic task response and does not dispatch a correction or publish review evidence.
-Repeated polls reuse the same deduplicated outcome. A valid corrected
+Non-list `artifacts` or `sessions` containers likewise retain the sent task and its
+occupancy, with a bounded deduplicated diagnostic; authentic container metadata can
+then resume reconciliation without resetting the task or repair history. Repeated
+polls reuse the same deduplicated outcome. A valid corrected
 `changes_requested` report is published through the existing formal COMMENT path
 and can feed the existing bounded fixer. A valid `pass` can publish `agent-review`
 only after the full report, exact-head bindings, and independently verified file
@@ -522,8 +525,11 @@ inventory pass the same strict checks. If the process stops after a completed
 correction publication but before the parent audit transition, reconciliation
 idempotently changes `report_retry_state` from `reserved` to `recovered` only when
 the completed correction, parent, distinct task/session/nonce/anchor, exact head,
-source bindings, and persisted owner publication all match. A pass also requires
-its `agent-review` publication to be durably complete; a `changes_requested`
+source bindings, and persisted owner publication all match, including a positive
+non-boolean review ID and the exact generated body. A missing or invalid ID leaves
+publication uncertain until an authenticated exact matching review readback proves
+it. A pass also requires its `agent-review` publication to be durably complete; a
+`changes_requested`
 correction is complete with its durably recorded formal COMMENT publication and
 does not require or publish an `agent-review` success status. This parent-only
 repair does not repeat task dispatch, formal review publication, status
