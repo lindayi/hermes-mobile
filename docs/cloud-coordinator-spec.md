@@ -510,6 +510,10 @@ source-fixer budget. The durable
 reservation is made before task creation. An ambiguous creation, active or unknown
 task/session, or missing authentication metadata is never retried; terminal correction
 failure exhausts this separate one-attempt budget and remains a clear blocker.
+If the task lookup itself returns a non-object, the task remains sent and unresolved:
+the bounded observation diagnostic and deduplicated blocker do not establish task
+identity, terminality, or availability for retry. Reconciliation waits for an
+authentic task response and does not dispatch a correction or publish review evidence.
 Repeated polls reuse the same deduplicated outcome. A valid corrected
 `changes_requested` report is published through the existing formal COMMENT path
 and can feed the existing bounded fixer. A valid `pass` can publish `agent-review`
@@ -523,8 +527,9 @@ its `agent-review` publication to be durably complete; a `changes_requested`
 correction is complete with its durably recorded formal COMMENT publication and
 does not require or publish an `agent-review` success status. This parent-only
 repair does not repeat task dispatch, formal review publication, status
-publication, or fixer work; uncertain publication and unbound or mismatched
-parents remain unresolved.
+publication, or fixer work; stale or incomplete publication is not successful
+recovery, and uncertain publication and unbound or mismatched parents remain
+unresolved.
 
 If main advances after the original malformed report is durably recorded, its
 saved `main_sha` remains unchanged as audit evidence. A retry is eligible only

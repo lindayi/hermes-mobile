@@ -2249,6 +2249,13 @@ class Coordinator:
                         continue
                     except (ReceiptError, TypeError, ValueError) as error:
                         if not _review_task_terminal(action, task):
+                            if not isinstance(task, dict) and apply:
+                                self.store.update_action(
+                                    key, status,
+                                    report_observation_error=(
+                                        "Independent review task response was not an object"
+                                    ),
+                                )
                             busy = True
                             continue
                         retry_allowed = (
@@ -2273,6 +2280,7 @@ class Coordinator:
                             key, "completed",
                             report_error=message,
                             report_error_at=self._now_string(),
+                            report_observation_error=None,
                             report_session_id=report_session_id,
                             report_retry_allowed=retry_allowed,
                             report_retry_state=(
@@ -2297,6 +2305,7 @@ class Coordinator:
                             review_session_id=session["id"],
                             review_session_completed_at=session["completed_at"],
                             review_report=report["report"],
+                            report_observation_error=None,
                             report_verdict=report["report"]["verdict"],
                             publication_state="pending",
                             agent_review_state=(
@@ -2850,6 +2859,10 @@ class Coordinator:
         return False
 
     def _validate_review_report(self, action, snapshot, task):
+        if not isinstance(task, dict):
+            raise ReceiptError(
+                "Independent review task response was not an object"
+            )
         if (action.get("task_type") == "report-correction"
                 and (action.get("head") != snapshot.get("head")
                      or action.get("main_sha") != snapshot.get("main_sha"))):
@@ -2857,8 +2870,7 @@ class Coordinator:
                 "Independent review correction reservation snapshot is no longer current"
             )
         sessions = task.get("sessions")
-        if (not isinstance(task, dict)
-                or task.get("id") != action.get("task_id")
+        if (task.get("id") != action.get("task_id")
                 or task.get("state") != "completed"
                 or task.get("created_at") != action.get("task_created_at")
                 or not all(_github_identity(task.get(field), expected)
@@ -3250,6 +3262,15 @@ class Coordinator:
                 )
         report_failure = _current_review_report_failure(actions, number, head)
         report_correction = _review_report_correction(actions, report_failure)
+        report_observation_error = next((
+            action for action in actions.values()
+            if action.get("kind") == "review"
+            and action.get("issue") == number
+            and action.get("head") == head
+            and action.get("status") == "sent"
+            and isinstance(action.get("report_observation_error"), str)
+            and action["report_observation_error"]
+        ), None)
         report_source = (
             _review_source_action(actions, number, report_failure, snapshot["comments"])
             if report_failure else None
@@ -3341,11 +3362,26 @@ class Coordinator:
                 "the complete changed-file inventory must fit the supported bounded review contract.",
             ))
         if report_failure:
+            correction_publication_pending = (
+                report_correction is not None
+                and report_correction.get("status") == "completed"
+                and not report_correction.get("report_error")
+                and report_correction.get("publication_disposition") != "stale"
+                and isinstance(report_correction.get("review_report"), dict)
+                and (
+                    report_correction.get("publication_state") != "done"
+                    or (report_correction.get("report_verdict") == "pass"
+                        and report_correction.get("agent_review_state") != "done")
+                )
+            )
             correction_complete = (
                 report_correction is not None
                 and report_correction.get("status") == "completed"
                 and not report_correction.get("report_error")
+                and report_correction.get("publication_disposition") != "stale"
                 and isinstance(report_correction.get("review_report"), dict)
+                and report_correction.get("publication_state") == "done"
+                and report_correction.get("agent_review_state") in {None, "done"}
             )
             if not correction_complete:
                 correction_exhausted = (
@@ -3354,18 +3390,25 @@ class Coordinator:
                     or (report_correction is not None
                         and report_correction.get("status") not in {
                             "sending", "uncertain", "sent",
-                        })
+                        }
+                        and not correction_publication_pending)
                 )
-                if correction_exhausted:
-                    reasons.append((
-                        "review-report-exhausted",
-                        "The terminal independent-review task did not produce a usable bound report, and its single safe correction is unavailable or exhausted. This head remains blocked; no review status is inferred.",
-                    ))
-                else:
-                    reasons.append((
-                        "review-report",
-                        "The terminal independent-review task did not produce a usable bound report. At most one separately authenticated corrective review may be reserved; ambiguous task creation is never replayed.",
-                    ))
+                if not correction_publication_pending:
+                    if correction_exhausted:
+                        reasons.append((
+                            "review-report-exhausted",
+                            "The terminal independent-review task did not produce a usable bound report, and its single safe correction is unavailable or exhausted. This head remains blocked; no review status is inferred.",
+                        ))
+                    else:
+                        reasons.append((
+                            "review-report",
+                            "The terminal independent-review task did not produce a usable bound report. At most one separately authenticated corrective review may be reserved; ambiguous task creation is never replayed.",
+                        ))
+        elif report_observation_error:
+            reasons.append((
+                "review-report",
+                "The independent-review task response was malformed; its identity and terminality remain unverified, so recovery is paused.",
+            ))
         if not checks_ok:
             reasons.append(("checks", "Every configured required check must complete successfully."))
         if status and not status_owned:

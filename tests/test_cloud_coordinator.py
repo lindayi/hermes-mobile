@@ -4663,6 +4663,77 @@ def _prepare_malformed_review_report(tmp_path):
     return api, path, source_fix, original
 
 
+def test_nonobject_review_task_response_stays_unresolved_until_terminal_evidence(
+        tmp_path, monkeypatch):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    get = api.get
+    task_route = (
+        f"agents/repos/lindayi/hermes-mobile/tasks/{original['task_id']}"
+    )
+
+    def missing_task_response(route):
+        if route == task_route:
+            return None
+        return get(route)
+
+    monkeypatch.setattr(api, "get", missing_task_response)
+    task_posts = api.task_posts
+    review_attempts = api.review_attempts
+    report_publications = len([
+        route for route, _ in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ])
+    status_writes = sum(len(rows) for rows in api.status_log.values())
+
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    unresolved = StateStore(path).action(original["key"])
+    assert unresolved["status"] == "sent"
+    assert unresolved["report_observation_error"] == (
+        "Independent review task response was not an object"
+    )
+    assert len(unresolved["report_observation_error"]) <= 256
+    assert not unresolved.get("report_retry_allowed")
+    assert not unresolved.get("report_session_id")
+    blocker = [
+        comment for comment in api.comments
+        if "identity and terminality remain unverified"
+        in comment.get("body", "")
+    ]
+    assert len(blocker) == 1
+    assert api.task_posts == task_posts
+    assert api.review_attempts == review_attempts
+    assert len([
+        route for route, _ in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ]) == report_publications
+    assert sum(len(rows) for rows in api.status_log.values()) == status_writes
+
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert len([
+        comment for comment in api.comments
+        if "identity and terminality remain unverified"
+        in comment.get("body", "")
+    ]) == 1
+    assert api.task_posts == task_posts
+    assert sum(len(rows) for rows in api.status_log.values()) == status_writes
+
+    monkeypatch.setattr(api, "get", get)
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )
+    recovered = StateStore(path).action(original["key"])
+    corrections = [
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]
+    assert recovered["status"] == "completed"
+    assert recovered.get("report_observation_error") is None
+    assert recovered["report_retry_allowed"] is True
+    assert len(corrections) == 1
+
+
 def _advance_report_recovery_main(api, path):
     StateStore(path)._mutate(lambda state: state["enrollments"]["16"].update(
         authorized_head=HEAD,
@@ -5092,17 +5163,37 @@ def test_pending_correction_publication_rechecks_live_reservation(
             or ("/statuses/" in route and body.get("context") == "agent-review"))
     ]
     review_tasks = api.review_attempts
-    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    replay = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+        apply=True,
+    )["pull_requests"][0]
     reloaded = StateStore(path)
     remaining_parent = reloaded.action(original["key"])
     if remaining_parent is not None:
         assert remaining_parent["report_retry_state"] == "exhausted"
+    if stale_at == "after-validation":
+        assert "review-report-exhausted" in replay["reasons"]
+        assert len([
+            comment for comment in api.comments
+            if "single safe correction is unavailable or exhausted"
+            in comment.get("body", "")
+        ]) == 1
     assert [
         (route, body) for route, body in api.writes
         if (route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
             or ("/statuses/" in route and body.get("context") == "agent-review"))
     ] == protected_writes
     assert api.review_attempts == review_tasks
+    if stale_at == "after-validation":
+        replay = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+            apply=True,
+        )["pull_requests"][0]
+        assert "review-report-exhausted" in replay["reasons"]
+        assert len([
+            comment for comment in api.comments
+            if "single safe correction is unavailable or exhausted"
+            in comment.get("body", "")
+        ]) == 1
+        assert api.review_attempts == review_tasks
 
 
 def test_pending_correction_replay_rechecks_fresh_main_before_publication(
@@ -5132,6 +5223,10 @@ def test_pending_correction_replay_rechecks_fresh_main_before_publication(
     assert pending["status"] == "completed"
     assert pending["publication_state"] == "pending"
     assert StateStore(path).action(original["key"])["report_retry_state"] == "reserved"
+    pending_plan = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._build_plan(apply=False)["pull_requests"][0]
+    assert "review-report-exhausted" not in pending_plan["reasons"]
 
     api.current_main_sha = NEXT_RESULT_HEAD
     api.compare_results[f"{BASE}...{NEXT_RESULT_HEAD}"] = _compare_result(
