@@ -479,6 +479,10 @@ independently computes lowercase SHA-256 over the exact Git-blob file bytes, and
 for a deleted path supplies JSON `null`. The coordinator independently fetches
 and hashes every non-deleted blob and accepts only an exact map; it never trusts
 the prompt or report to prove completeness.
+GitHub blob envelopes may contain ASCII LF line wrapping in base64 content.
+Only those LF characters are removed before strict base64 decoding; other
+whitespace, non-ASCII characters, malformed alphabet or padding, and mismatched
+blob identity, encoding or declared byte size remain rejected.
 
 If a task returned by the saved task ID is positively terminal but its report is
 missing, malformed, or incomplete, apply mode durably records a bounded diagnostic

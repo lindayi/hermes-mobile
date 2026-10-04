@@ -1334,11 +1334,15 @@ class FakeApi:
         if route.startswith("repos/lindayi/hermes-mobile/git/blobs/"):
             sha = route.rsplit("/", 1)[-1]
             data = self.blob_contents[sha]
+            encoded = base64.b64encode(data).decode("ascii")
             return {
                 "sha": sha,
                 "encoding": "base64",
                 "size": len(data),
-                "content": base64.b64encode(data).decode("ascii"),
+                "content": "".join(
+                    encoded[index:index + 60] + "\n"
+                    for index in range(0, len(encoded), 60)
+                ),
             }
         if route == "repos/lindayi/hermes-mobile/pulls/16":
             self.pull_reads += 1
@@ -4208,12 +4212,15 @@ def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
     api = ColdStartAgentReviewApi(source_failure=True, review_status_present=False)
     api.owner_reviews = []
     api.owner_review_body = "not a structured independent review"
-    api.pull_files = [{
-        "filename": "deploy/cloud_coordinator.py",
-        "status": "modified",
-        "sha": "f" * 40,
-    }]
-    api.blob_contents = {"f" * 40: b"coordinator review bytes"}
+    api.pull_files = [
+        {"filename": "deploy/cloud_coordinator.py", "status": "modified", "sha": "f" * 40},
+        {"filename": "src/added.py", "status": "added", "sha": "1" * 40},
+        {"filename": "src/deleted.py", "status": "removed"},
+    ]
+    api.blob_contents = {
+        "f" * 40: b"coordinator review bytes\n" * 8,
+        "1" * 40: bytes(range(256)),
+    }
     path = tmp_path / "state.json"
     store = StateStore(path)
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
@@ -4244,6 +4251,22 @@ def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
     api.complete_review_task(
         review["task_id"], review, source_action=StateStore(path).action(source_fix["key"]),
     )
+    snapshot = coordinator._snapshot_pull(
+        16, StateStore(path).snapshot()["enrollments"]["16"], BASE,
+    )
+    report, session = coordinator._validate_review_report(
+        review, snapshot, api.tasks[review["task_id"]],
+    )
+    assert session["task_id"] == review["task_id"]
+    assert report["report"]["nonce"] == review["dispatch_nonce"]
+    assert report["report"]["head"] == review["head"]
+    assert report["report"]["source_session_id"] == review["source_session_id"]
+    assert report["report"]["source_comment_id"] == review["source_comment_id"]
+    assert report["report"]["files"] == {
+        "deploy/cloud_coordinator.py": hashlib.sha256(api.blob_contents["f" * 40]).hexdigest(),
+        "src/added.py": hashlib.sha256(bytes(range(256))).hexdigest(),
+        "src/deleted.py": None,
+    }
 
     second = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
         apply=True,
@@ -4312,8 +4335,17 @@ def test_review_report_rejects_forged_file_sha256_inventory(tmp_path):
     )
 
 
-def test_completed_partial_review_report_persists_error_and_retries_once(tmp_path):
+@pytest.mark.parametrize("malformed_blob", [False, True])
+def test_completed_partial_review_report_persists_error_and_retries_once(tmp_path, malformed_blob):
     class ColdStartAgentReviewApi(FakeApi):
+        corrupt_blob = False
+
+        def get(self, route):
+            value = super().get(route)
+            if self.corrupt_blob and "/git/blobs/" in route:
+                return value | {"content": "$" + value["content"]}
+            return value
+
         def get_all(self, route, *, collection=None):
             values = super().get_all(route, collection=collection)
             if f"/commits/{self.head_sha}/check-runs?" in route:
@@ -4355,11 +4387,12 @@ def test_completed_partial_review_report_persists_error_and_retries_once(tmp_pat
     api.complete_review_task(
         original_review["task_id"], original_review,
         source_action=StateStore(path).action(source_fix["key"]),
-        files={
+        files=api.review_file_digests() if malformed_blob else {
             filename: digest
             for filename, digest in list(api.review_file_digests().items())[:2]
         },
     )
+    api.corrupt_blob = malformed_blob
     malformed_comment = next(
         comment for comment in api.comments
         if "hermes-independent-review-report-v1" in comment.get("body", "")
@@ -4374,7 +4407,10 @@ def test_completed_partial_review_report_persists_error_and_retries_once(tmp_pat
     recovered = StateStore(path).action(original_review["key"])
 
     assert recovered["status"] == "completed"
-    assert "files do not match the exact head" in recovered["report_error"]
+    if malformed_blob:
+        assert "blob data is malformed" in recovered["report_error"]
+    else:
+        assert "files do not match the exact head" in recovered["report_error"]
     assert recovered["task_id"] == original_review["task_id"]
     assert recovered["dispatch_nonce"] == original_review["dispatch_nonce"]
     assert malformed_comment["body"] == malformed_body
@@ -4421,6 +4457,7 @@ def test_completed_partial_review_report_persists_error_and_retries_once(tmp_pat
         }],
         files=api.review_file_digests(),
     )
+    api.corrupt_blob = False
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
 

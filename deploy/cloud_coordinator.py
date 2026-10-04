@@ -1646,7 +1646,7 @@ def _blob_bytes(api, blob_sha):
             or not isinstance(content, str)):
         raise ReceiptError("Independent review blob data is malformed")
     try:
-        data = base64.b64decode(content, validate=True)
+        data = base64.b64decode(content.replace("\n", ""), validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ReceiptError("Independent review blob data is malformed") from exc
     if type(blob.get("size")) is int and blob.get("size") != len(data):

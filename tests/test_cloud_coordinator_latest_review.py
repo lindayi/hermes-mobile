@@ -1,14 +1,63 @@
 """Direct seam regressions for PR33 review 5388069795."""
+import base64
 import json
 
 import pytest
 
-from deploy.cloud_coordinator import neutral_reconciliation_request, review_task_request
+from deploy.cloud_coordinator import _blob_bytes, neutral_reconciliation_request, review_task_request
+from deploy.task_receipts import ReceiptError
 from deploy.workflow_lifecycle import pull_event
 from test_cloud_coordinator import (
     APP_OWNER_ID, BASE, HEAD, Coordinator, CoordinatorError, FakeApi, StateStore,
     enrolled_record,
 )
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_github_blob_envelope_decodes_exact_bytes(wrapped):
+    data = bytes(range(256))
+    encoded = base64.b64encode(data).decode("ascii")
+    content = (
+        "".join(encoded[index:index + 60] + "\n" for index in range(0, len(encoded), 60))
+        if wrapped else encoded
+    )
+    envelope = json.loads(json.dumps({
+        "sha": "f" * 40, "node_id": "synthetic-blob",
+        "url": f"https://api.github.com/repos/lindayi/hermes-mobile/git/blobs/{'f' * 40}",
+        "content": content, "encoding": "base64", "size": len(data),
+    }))
+
+    class BlobApi:
+        def get(self, route):
+            assert route == f"repos/lindayi/hermes-mobile/git/blobs/{'f' * 40}"
+            return envelope
+
+    assert _blob_bytes(BlobApi(), "f" * 40) == data
+
+
+@pytest.mark.parametrize("change", [
+    {"content": "YQ\n$==\n"},
+    {"content": "YQ=\n"},
+    {"content": "YQ===\n"},
+    {"content": "YQ==\nYQ==\n"},
+    {"content": "Y Q==\n"},
+    {"content": "YQ==\t\n"},
+    {"content": "YQ==\r\n"},
+    {"content": "YQ==\u00a0\n"},
+    {"content": "YQ==\u2028\n"},
+    {"content": None},
+    {"sha": "e" * 40},
+    {"encoding": "utf-8"},
+    {"size": 2},
+])
+def test_github_blob_envelope_rejects_malformed_data(change):
+    class BlobApi:
+        def get(self, route):
+            return {"sha": "f" * 40, "content": "YQ==\n",
+                    "encoding": "base64", "size": 1} | change
+
+    with pytest.raises(ReceiptError, match="Independent review blob .*malformed"):
+        _blob_bytes(BlobApi(), "f" * 40)
 
 
 def test_legacy_enrollment_reports_unsupported_upgrade_without_changing_state(tmp_path):
