@@ -135,6 +135,22 @@ findings publish `verdict:"changes_requested"` and feed one bounded fixer
 follow-up for that exact head. The completed source task lock is retained until
 that verified reviewer lifecycle completes, and every configured required check
 must still independently succeed.
+
+The reviewer prompt names every required report field and the exact finding
+shape: each finding has only `path` and a nonblank `comment` of at most 1,000
+characters. It includes the complete changed-path inventory. Every non-deleted
+file hash is independently computed from the exact Git-blob bytes; deleted paths
+use JSON `null`. The coordinator fetches and hashes the full inventory again and
+does not accept a partial or report-supplied substitute. If a positively terminal
+task has no usable report, the private action record keeps a bounded validation
+error and the outbox posts one deduplicated blocker. At most one separately
+reserved correction can follow, with a new anchor, task, session, and nonce; the
+original report is left unchanged and source-fixer attempts/authority are
+preserved. Active, unknown, or insufficiently authenticated task/session evidence
+does not authorize a correction. An ambiguous creation is never replayed, and
+failure of the single correction remains a blocker. A corrected negative verdict
+uses the existing bounded fixer flow; a pass status is still gated by the full
+strict review proof.
 Sensitive changes additionally need owner authorization bound to that exact SHA
 and the documented targeted independent review; neither approval nor authorization
 carries to a later head.

@@ -1334,11 +1334,15 @@ class FakeApi:
         if route.startswith("repos/lindayi/hermes-mobile/git/blobs/"):
             sha = route.rsplit("/", 1)[-1]
             data = self.blob_contents[sha]
+            encoded = base64.b64encode(data).decode("ascii")
             return {
                 "sha": sha,
                 "encoding": "base64",
                 "size": len(data),
-                "content": base64.b64encode(data).decode("ascii"),
+                "content": "".join(
+                    encoded[index:index + 60] + "\n"
+                    for index in range(0, len(encoded), 60)
+                ),
             }
         if route == "repos/lindayi/hermes-mobile/pulls/16":
             self.pull_reads += 1
@@ -4208,12 +4212,15 @@ def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
     api = ColdStartAgentReviewApi(source_failure=True, review_status_present=False)
     api.owner_reviews = []
     api.owner_review_body = "not a structured independent review"
-    api.pull_files = [{
-        "filename": "deploy/cloud_coordinator.py",
-        "status": "modified",
-        "sha": "f" * 40,
-    }]
-    api.blob_contents = {"f" * 40: b"coordinator review bytes"}
+    api.pull_files = [
+        {"filename": "deploy/cloud_coordinator.py", "status": "modified", "sha": "f" * 40},
+        {"filename": "src/added.py", "status": "added", "sha": "1" * 40},
+        {"filename": "src/deleted.py", "status": "removed"},
+    ]
+    api.blob_contents = {
+        "f" * 40: b"coordinator review bytes\n" * 8,
+        "1" * 40: bytes(range(256)),
+    }
     path = tmp_path / "state.json"
     store = StateStore(path)
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
@@ -4236,6 +4243,7 @@ def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
     )
     assert review["status"] == "sent"
     assert review["anchor_comment_id"] > 0
+    assert "65536 UTF-8 bytes and 64 LF-delimited lines" in review["body"]
     assert first["review_valid"] is False
     assert second["review_valid"] is False
     assert StateStore(path).action(source_fix["key"])["handoff_state"] == "waiting_review"
@@ -4243,6 +4251,22 @@ def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
     api.complete_review_task(
         review["task_id"], review, source_action=StateStore(path).action(source_fix["key"]),
     )
+    snapshot = coordinator._snapshot_pull(
+        16, StateStore(path).snapshot()["enrollments"]["16"], BASE,
+    )
+    report, session = coordinator._validate_review_report(
+        review, snapshot, api.tasks[review["task_id"]],
+    )
+    assert session["task_id"] == review["task_id"]
+    assert report["report"]["nonce"] == review["dispatch_nonce"]
+    assert report["report"]["head"] == review["head"]
+    assert report["report"]["source_session_id"] == review["source_session_id"]
+    assert report["report"]["source_comment_id"] == review["source_comment_id"]
+    assert report["report"]["files"] == {
+        "deploy/cloud_coordinator.py": hashlib.sha256(api.blob_contents["f" * 40]).hexdigest(),
+        "src/added.py": hashlib.sha256(bytes(range(256))).hexdigest(),
+        "src/deleted.py": None,
+    }
 
     second = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
         apply=True,
@@ -4302,11 +4326,284 @@ def test_review_report_rejects_forged_file_sha256_inventory(tmp_path):
 
     assert summary["review_valid"] is False
     assert StateStore(path).action(source_fix["key"])["handoff_state"] == "waiting_review"
-    assert StateStore(path).action(review["key"])["status"] == "sent"
+    rejected = StateStore(path).action(review["key"])
+    assert rejected["status"] == "completed"
+    assert "files do not match the exact head" in rejected["report_error"]
     assert not any(
         status.get("context") == "agent-review"
         for status in api.status_log.get(HEAD, [])
     )
+
+
+@pytest.mark.parametrize("malformed_blob", [False, True])
+def test_completed_partial_review_report_persists_error_and_retries_once(tmp_path, malformed_blob):
+    class ColdStartAgentReviewApi(FakeApi):
+        corrupt_blob = False
+
+        def get(self, route):
+            value = super().get(route)
+            if self.corrupt_blob and "/git/blobs/" in route:
+                return value | {"content": "$" + value["content"]}
+            return value
+
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if f"/commits/{self.head_sha}/check-runs?" in route:
+                return [run for run in values if run.get("name") != "agent-review"]
+            return values
+
+    api = ColdStartAgentReviewApi(source_failure=True, review_status_present=False)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    api.pull_files = [
+        {
+            "filename": f"src/module_{index:02}.py",
+            "status": "modified",
+            "sha": f"{index + 1:040x}",
+        }
+        for index in range(27)
+    ]
+    api.blob_contents = {
+        item["sha"]: f"synthetic file {index}".encode()
+        for index, item in enumerate(api.pull_files)
+    }
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    source_fix = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    api.review_state = "PENDING"
+    coordinator.run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    original_review = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "review"
+    )
+    api.complete_review_task(
+        original_review["task_id"], original_review,
+        source_action=StateStore(path).action(source_fix["key"]),
+        files=api.review_file_digests() if malformed_blob else {
+            filename: digest
+            for filename, digest in list(api.review_file_digests().items())[:2]
+        },
+    )
+    api.corrupt_blob = malformed_blob
+    malformed_comment = next(
+        comment for comment in api.comments
+        if "hermes-independent-review-report-v1" in comment.get("body", "")
+    )
+    malformed_body = malformed_comment["body"]
+
+    state_before_planning = path.read_bytes()
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=False)
+    assert path.read_bytes() == state_before_planning
+
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    recovered = StateStore(path).action(original_review["key"])
+
+    assert recovered["status"] == "completed"
+    if malformed_blob:
+        assert "blob data is malformed" in recovered["report_error"]
+    else:
+        assert "files do not match the exact head" in recovered["report_error"]
+    assert recovered["task_id"] == original_review["task_id"]
+    assert recovered["dispatch_nonce"] == original_review["dispatch_nonce"]
+    assert malformed_comment["body"] == malformed_body
+    outcomes = [
+        comment["body"] for comment in api.comments
+        if "usable bound report" in comment.get("body", "")
+    ]
+    assert len(outcomes) == 1, outcomes
+
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    actions = StateStore(path).actions()
+    corrections = [
+        action for action in actions.values()
+        if action.get("kind") == "review"
+        and action.get("task_type") == "report-correction"
+    ]
+    assert len(corrections) == 1
+    correction = corrections[0]
+    assert correction["status"] == "sent"
+    assert correction["task_id"] != original_review["task_id"]
+    assert correction["dispatch_nonce"] != original_review["dispatch_nonce"]
+    assert correction["anchor_comment_id"] != original_review["anchor_comment_id"]
+    assert StateStore(path).action(source_fix["key"])["task_id"] == source_fix["task_id"]
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert StateStore(path).action(original_review["key"])["report_retry_state"] == "reserved"
+    assert not any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for status in api.status_log.get(HEAD, [])
+    )
+    outcomes = [
+        comment["body"] for comment in api.comments
+        if "usable bound report" in comment.get("body", "")
+    ]
+    assert len(outcomes) == 1, outcomes
+
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="changes_requested",
+        findings=[{
+            "path": "src/module_00.py",
+            "comment": "Keep this correction bounded and preserve the current behavior.",
+        }],
+        files=api.review_file_digests(),
+    )
+    api.corrupt_blob = False
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    recovered = StateStore(path).action(original_review["key"])
+    correction = StateStore(path).action(correction["key"])
+    followups = [
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "fix"
+        and action.get("task_type") == "review-followup"
+    ]
+    assert recovered["report_retry_state"] == "recovered"
+    assert correction["status"] == "completed"
+    assert correction["report_verdict"] == "changes_requested"
+    assert correction["publication_state"] == "done"
+    assert len(followups) == 1 and followups[0]["status"] == "sent"
+    assert api.fix_attempts == 2
+    assert not any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for status in api.status_log.get(HEAD, [])
+    )
+
+
+@pytest.mark.parametrize("evidence", [
+    "active", "unknown", "wrong_task_id", "missing_session",
+    "missing_session_task_id", "missing_task_owner",
+])
+def test_review_report_correction_requires_authenticated_terminal_task_metadata(
+        tmp_path, evidence):
+    api = FakeApi(source_failure=True, review_status_present=False)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    source_fix = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    original = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "review"
+    )
+    api.complete_review_task(
+        original["task_id"], original,
+        source_action=StateStore(path).action(source_fix["key"]),
+    )
+    remote_task = api.tasks[original["task_id"]]
+    if evidence == "active":
+        remote_task["state"] = "in_progress"
+    elif evidence == "unknown":
+        remote_task["state"] = "waiting_for_unknown_state"
+    elif evidence == "wrong_task_id":
+        remote_task.update(state="completed", id="another-task")
+    elif evidence == "missing_session":
+        remote_task.update(state="completed", sessions=[])
+    elif evidence == "missing_session_task_id":
+        remote_task["state"] = "completed"
+        remote_task["sessions"][0]["task_id"] = "another-task"
+    else:
+        remote_task.update(state="completed", owner=None)
+
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    persisted = StateStore(path).action(original["key"])
+
+    assert not [
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]
+    assert api.review_attempts == 1
+    if evidence in {"active", "unknown", "wrong_task_id"}:
+        assert persisted["status"] == "sent"
+        assert "report_error" not in persisted
+    else:
+        assert persisted["status"] == "completed"
+        assert persisted["report_retry_allowed"] is False
+        assert persisted["report_error"]
+        assert persisted["report_retry_state"] == "blocked"
+        for _ in range(2):
+            Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
+                apply=True,
+            )
+        blockers = [
+            comment["body"] for comment in api.comments
+            if "single safe correction is unavailable or exhausted"
+            in comment.get("body", "")
+        ]
+        assert len(blockers) == 1
+
+
+def test_ambiguous_corrective_review_creation_is_never_reposted(tmp_path):
+    class LostCorrectionResponseApi(FakeApi):
+        def write(self, route, body):
+            if (route == "agents/repos/lindayi/hermes-mobile/tasks"
+                    and "new, bounded corrective review task" in body["prompt"]):
+                super().write(route, body)
+                raise ApiError("response lost", status=503)
+            return super().write(route, body)
+
+    api = LostCorrectionResponseApi(source_failure=True, review_status_present=False)
+    api.owner_reviews = []
+    api.owner_review_body = "not a structured independent review"
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    source_fix = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(source_fix["task_id"], source_fix)
+    api.source_failure = False
+    api.review_state = "PENDING"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    original = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "review"
+    )
+    api.complete_review_task(
+        original["task_id"], original,
+        source_action=StateStore(path).action(source_fix["key"]),
+        files={"frontend/styles.css": "a" * 64},
+    )
+    api.review_status_present = False
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    posts_before_reconcile = api.task_posts
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    assert correction["status"] == "uncertain"
+    assert "task_id" not in correction
+
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    assert api.task_posts == posts_before_reconcile
+    assert api.review_attempts == 2
+    assert StateStore(path).action(original["key"])["task_id"] == original["task_id"]
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "reserved"
+    assert len([
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]) == 1
 
 
 def test_review_report_findings_publish_and_trigger_bounded_followup(tmp_path):
