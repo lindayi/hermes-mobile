@@ -5006,7 +5006,10 @@ class StateStore:
                     )
                 claimed_anchor = (
                     entry.get("kind") == "review-anchor"
-                    and entry.get("correction") is True
+                    and (
+                        entry.get("correction") is True
+                        or ":correction:" in key
+                    )
                     and _is_sha(anchor_main_sha)
                     and any(
                         action.get("issue") == issue

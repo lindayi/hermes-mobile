@@ -5507,8 +5507,8 @@ def test_retirement_preserves_unresolved_and_claimed_correction_anchors(tmp_path
         keys["claimed"] = f"review-anchor:16:{HEAD}:correction:claimed"
         state["outbox"][keys["claimed"]] = {
             "kind": "review-anchor", "issue": 16, "head": HEAD,
-            "main_sha": BASE, "correction": True, "comment_id": 1234,
-            "status": "sent", "marker": "claimed-marker", "body": "claimed",
+            "comment_id": 1234, "status": "sent", "marker": "claimed-marker",
+            "body": f"at exact head `{HEAD}` against base `{BASE}`.\n",
         }
         keys["obsolete"] = f"review-anchor:16:{HEAD}:correction:sent"
         state["outbox"][keys["obsolete"]] = {
