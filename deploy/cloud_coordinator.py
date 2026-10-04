@@ -40,8 +40,10 @@ from deploy.workflow_lifecycle import (
 )
 from deploy.workflow_events import event_digest
 from deploy.task_receipts import (
+    MAX_REVIEW_REPORT_BYTES,
     MAX_REVIEW_REPORT_FILES,
     MAX_REVIEW_REPORT_FINDINGS,
+    MAX_REVIEW_REPORT_LINES,
     MAX_REVIEW_REPORT_TEXT,
     ReceiptError,
     REVIEW_REPORT_FINDING_FIELDS,
@@ -774,7 +776,10 @@ def review_task_request(snapshot, source_action, anchor_comment_id, anchor_prefi
         "value must be JSON `null`. Deleted paths in this inventory: "
         f"{deleted_files}.\n{inventory_json}\n\n"
         "Replace every placeholder below, preserve all bindings, JSON-escape strings, "
-        "and serialize the entire report as one compact JSON object. Do not omit files "
+        "and serialize the entire report as one compact JSON object. Keep the full reply "
+        f"within {MAX_REVIEW_REPORT_BYTES} UTF-8 bytes and "
+        f"{MAX_REVIEW_REPORT_LINES} LF-delimited lines. "
+        "Do not omit files "
         "if unable to inspect or hash one; stop without publishing an incomplete report.\n"
         f"{json.dumps(report_template, separators=(',', ':'), ensure_ascii=True)}"
     )
@@ -2138,6 +2143,9 @@ class Coordinator:
                         message = " ".join(str(error).split())[:256]
                         if not message:
                             message = type(error).__name__
+                        busy = retry_allowed
+                        if not apply:
+                            continue
                         self.store.update_action(
                             key, "completed",
                             report_error=message,
@@ -2161,7 +2169,6 @@ class Coordinator:
                                 action.get("correction_of"), "completed",
                                 report_retry_state="exhausted",
                             )
-                        busy = retry_allowed
                         continue
                     if apply:
                         self.store.update_action(

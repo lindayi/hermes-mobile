@@ -4236,6 +4236,7 @@ def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
     )
     assert review["status"] == "sent"
     assert review["anchor_comment_id"] > 0
+    assert "65536 UTF-8 bytes and 64 LF-delimited lines" in review["body"]
     assert first["review_valid"] is False
     assert second["review_valid"] is False
     assert StateStore(path).action(source_fix["key"])["handoff_state"] == "waiting_review"

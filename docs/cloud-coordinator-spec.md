@@ -451,7 +451,10 @@ bounded findings, reviewed file hashes, and bounded narrative report. The child
 does not echo its review-task UUID; the parent authenticates the saved task ID
 and session through the task API.
 
-The parser accepts only that bounded quoted-reply envelope. Edited, oversized,
+The parser accepts only that bounded quoted-reply envelope, with a limit of
+65,536 UTF-8 bytes and 64 LF-delimited lines. The byte budget accommodates the
+declared maximum inventory of 64 paths of up to 200 characters plus the quoted
+anchor and compact report. Edited, oversized,
 ambiguous, foreign, stale, wrong-session, wrong-binding, or duplicate reports
 fail closed, and a report inside the quote is never evidence. A verified report
 triggers one owner-published formal COMMENT review on the exact head using the

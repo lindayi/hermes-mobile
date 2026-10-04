@@ -25,7 +25,7 @@ REVIEW_REPORT_REQUIRED_FIELDS = (
     "files", "report",
 )
 REVIEW_REPORT_FINDING_FIELDS = ("path", "comment")
-MAX_REVIEW_REPORT_BYTES = 8192
+MAX_REVIEW_REPORT_BYTES = 64 * 1024
 MAX_REVIEW_REPORT_LINES = 64
 MAX_REVIEW_REPORT_FINDINGS = 8
 MAX_REVIEW_REPORT_FILES = 64
@@ -249,6 +249,8 @@ def find_receipt(comments, *, complete, nonce, task_id, session_id,
 def _reply_transport_json(body, *, anchor_prefix):
     if not isinstance(body, str):
         raise ReceiptError("Review report body is missing")
+    if len(body) > MAX_REVIEW_REPORT_BYTES:
+        raise ReceiptError("Review report exceeds the transport safety bounds")
     try:
         byte_count = len(body.encode("utf-8"))
     except UnicodeEncodeError as error:
