@@ -138,6 +138,47 @@ def test_authenticated_uncertainty_does_not_fence_live_waiter(authenticated_clar
     assert app.state.journal.events(owner['id'], run['id']) == before
 
 
+def test_pre_dispatch_clarification_unavailable_is_explicitly_not_sent(
+        authenticated_clarification_app):
+    from test_auth import BASE
+
+    app, client, owner, run, native = authenticated_clarification_app
+    question = pending()
+    app.state.orchestrator.clarifications.event(owner, run, question)
+    native.mode = 'unsupported'
+
+    response = client.post(
+        BASE + '/runs/' + run['id'] + '/clarifications/' +
+        question['question_id'] + '/answer',
+        json={'answer': 'Keep current', 'other': False})
+
+    assert response.status_code == 503
+    assert response.json()['code'] == 'clarification_not_sent'
+    assert app.state.orchestrator.clarifications.list(owner, run['id'])[0]['status'] == 'pending'
+    assert all(method == 'GET' for method, _ in native.calls)
+
+
+def test_conflicting_answer_preserves_first_native_receipt(authenticated_clarification_app):
+    from test_auth import BASE
+
+    app, client, owner, run, native = authenticated_clarification_app
+    question = pending()
+    native.items = [question]
+    app.state.orchestrator.clarifications.event(owner, run, question)
+    path = (BASE + '/runs/' + run['id'] + '/clarifications/' +
+            question['question_id'] + '/answer')
+
+    accepted = client.post(path, json={'answer': 'Keep current', 'other': False})
+    conflict = client.post(path, json={'answer': 'Change it', 'other': False})
+    state = client.get(BASE + '/runs/' + run['id'] + '/clarifications').json()
+
+    assert accepted.status_code == 200
+    assert conflict.status_code == 409
+    assert state['items'][0]['status'] == 'answered'
+    assert state['items'][0]['answer'] == 'Keep current'
+    assert len([call for call in native.calls if call[0] == 'POST']) == 1
+
+
 @pytest.mark.parametrize('late_status', ['answered', 'expired'])
 @pytest.mark.parametrize('current_status', ['pending', 'sending', 'unknown'])
 def test_older_terminal_observations_preserve_current_waiter(

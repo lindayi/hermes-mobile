@@ -12,6 +12,10 @@ from .runs import RunConflict
 from .hermes_client import IntegrationUnavailable, NativeRunNotFound
 
 
+class ClarificationNotSent(IntegrationUnavailable):
+    """Clarification capability was unavailable before claiming or sending an answer."""
+
+
 class Orchestrator:
     def __init__(self, journal, gateway, catalog, *, history_loader=None, profile="default", run_timeout=3600):
         self.journal, self.gateway, self.catalog = journal, gateway, catalog
@@ -167,8 +171,12 @@ class Orchestrator:
         if run['status'] != 'waiting_for_clarification' or not run['upstream_id']:
             raise RunConflict('Clarification is stale')
         if not hasattr(self.gateway, 'require_clarifications'):
-            raise IntegrationUnavailable('Native clarification controls are unavailable')
-        await self.gateway.require_clarifications()
+            raise ClarificationNotSent('Native clarification controls are unavailable')
+        try:
+            await self.gateway.require_clarifications()
+        except IntegrationUnavailable as exc:
+            raise ClarificationNotSent(
+                'Native clarification controls are unavailable') from exc
         claimed, fresh = self.clarifications.claim(user, run, question_id, body)
         if not fresh:
             return claimed

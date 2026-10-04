@@ -119,6 +119,19 @@ The owner/profile/native identity, Stop intent, and actual terminal progress
 remain authoritative. Repeated GET, reconciliation, store reopen, and fresh
 Orchestrator replay must stabilize clarification/done events without redispatch.
 
+The answer-rejection correction starts from PR #78 head
+`45ba7773bf7988951eef6e3cdd3e6e66694fb1eb` over main
+`f718cc3ec2f227184d2875a1e7c94047af54c574`. A definitive stale/conflicting
+answer rejection reconciles the authenticated owned run and current question:
+accepted, expired, cancelled, terminal, and replacement-question state is rendered
+from that authoritative result, and a rejected draft never replaces an accepted
+answer. If the same question is still pending and the run permits answers, retain
+the draft and require an explicit retry. Capability failure proven before the
+answer claim/dispatch uses the bounded `clarification_not_sent` response marker;
+arbitrary 503 responses and post-dispatch acknowledgement loss remain unknown.
+Late answer failures and reconciliation are fenced by route, owner, session, run,
+question, Stop, terminal state, and newer clarification observations.
+
 Run-state derivation under the existing clarification lock uses the aggregate
 persisted question state, not the arriving event or incidental history order.
 The newest creation time identifies the current question; ties are conservative.
@@ -153,6 +166,13 @@ transient uncertainty and Stop/terminal races without altering prior assertions.
 5. Small touch layouts and keyboard interaction can reach every choice, Other,
    and Submit control. Existing drafts, Stop, parallel sessions, scroll position,
    and permission approval behavior are unchanged.
+6. A definitive answer conflict reconciles the first accepted answer or the
+   current question; a still-pending question keeps its draft and only retries
+   after an explicit user action. Verified pre-dispatch capability failure says
+   the answer was not sent, while ambiguous post-dispatch outcomes remain
+   nonretrying unknown.
+7. Delayed answer failures and conflict reconciliation cannot overwrite newer
+   question, Stop, terminal, route, owner, session, or run state.
 
 Native activation remains a separate guarded deployment step: this change does
 not restart a listener, access a production runtime, or claim installed-host

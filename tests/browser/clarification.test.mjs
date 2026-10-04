@@ -31,7 +31,8 @@ async function setup({item=question(),answerResult,waitForAnswer=false,history=[
     if(path.includes('/messages'))return {items:history,run:{id:'r',session_id:'s',
       status:item?.status==='pending'?'waiting_for_clarification':'running',input:'Original'}};
     if(path.endsWith('/clarifications') && options.method!=='POST')
-      return {available:true,items:item?[item]:[]};
+      return {available:true,items:item?[item]:[],run_id:'r',
+        status:item?.status==='pending'?'waiting_for_clarification':'running'};
     if(path.endsWith('/answer') && options.method==='POST') {
       if(waitForAnswer)await gate.promise;
       return (typeof answerResult==='function'?answerResult(options.body):answerResult)
@@ -207,7 +208,8 @@ test('late answer acknowledgement preserves newer run and clarification state',a
       if(scenario==='completed')stream.emit('done',{status:'completed'});
       else if(scenario==='stopping')stream.emit('status',{status:'stopping'});
       else stream.emit('clarification',question({
-        question_id:'b'.repeat(32),question:'Choose another plan?',updated_at:3,
+        question_id:'b'.repeat(32),question:'Choose another plan?',
+        created_at:3,updated_at:3,
       }));
       await tick();
       const status=()=>h.doc.querySelector('.live-activity-heading [role=status]').textContent;

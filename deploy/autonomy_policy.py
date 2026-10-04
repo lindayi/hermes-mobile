@@ -217,7 +217,7 @@ SOURCE_FINGERPRINTS = {
     'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
     'backend/runs.py': '99297aef3ecf899d40b77d76de26132701596672dd6af432cdf16ecba1aaac93',
     # Accepted PR45 naming bytes in this assembly; no naming-source rewrite.
-    'backend/app.py': '7fee54ea8d210be56ef5608400a1ef3ee3de3437ea1119192ff228817b102798',
+    'backend/app.py': 'b2a41b38830fb28456cae81bdb7bfc78ebf37da4d6b81912f6b1d62a94fc432f',
     'backend/auth.py': '411529a1d53bdcd01eae4bf5e35c44d3d5099e4dc9e77eb9dbbe67df6433f335',  # gitleaks:allow
     'backend/auth_store.py': '8827856de744de03648924b0ff83011bdb70417781620724acd84078181c193e',  # gitleaks:allow
     'backend/background_delivery.py': '2da2bdd89d27f18beee0e0099d1bb39b325a9f70dcba099d55ceb3dea2e88629',
@@ -230,7 +230,7 @@ SOURCE_FINGERPRINTS = {
     'backend/native_catalog.py': '8b3c398f52388e0e334d6d64381b677b651b9337ece2d1868a14d3de069c5ed6',
     'backend/notification_policy.py': '69c7c6807210dbf9300cd25c5ba14604be75730d06f41879074208d62655684d',
     'backend/operational_notifications.py': '9edbc496bb931a02096bf820d984a4032107e003924492e1120684a0f5cdad31',
-    'backend/orchestration.py': '0b792d3a0d88204cf37bbec7c51fa47c6122d77cb3676a4378365b9420f96065',
+    'backend/orchestration.py': '89e2dc79ba9ea55cd6848ea48ae1be643c155b6f4c91a2af8ce5ab3550a27d13',
     'backend/profiles.py': '8bf7681b69f6273d6a6f86a9835cc7e2fc0bd6f31fdb59e7934bd8dbb7515f40',
     'backend/public_commentary.py': 'a52a81b0852fdcff13057bcd25ee39836abdc2d8ab658b90a9db7197ca0cf57a',
     'backend/request_notifications.py': '1136806183f7b3cbb51b65691fc5c26b41f22c2d06098d1440bb3c42a869ede8',

@@ -20,7 +20,7 @@ from .hermes_client import GatewayClient, IntegrationUnavailable
 from .native_catalog import NativeCatalog
 from .runs import RunJournal, RunConflict
 from .notifications import NotificationService, build_notifications_router
-from .orchestration import Orchestrator
+from .orchestration import ClarificationNotSent, Orchestrator
 from .jobs import JobService, build_jobs_router
 from .profiles import ProfileProvisioner, build_profiles_router
 from .delivery import build_delivery_router
@@ -642,6 +642,9 @@ def create_app(settings=None, *, gateway_client=None):
         try:
             body=await request.json()
             return await runtime_for(user).answer_clarification(user,rid,question_id,body)
+        except ClarificationNotSent as exc:
+            return JSONResponse(
+                {'detail': str(exc), 'code': 'clarification_not_sent'}, status_code=503)
         except RunConflict:
             raise
         except KeyError:
