@@ -7,6 +7,14 @@ class IntegrationUnavailable(RuntimeError):
     pass
 
 
+class NativeRunNotFound(IntegrationUnavailable):
+    """An authenticated lookup proved that this process no longer owns the run."""
+
+
+class NativeClarificationRejected(IntegrationUnavailable):
+    """The bound native waiter definitively rejected this answer dispatch."""
+
+
 class GatewayClient:
     def __init__(self, base_url, token, execution_ready=False, transport=None):
         u=urlparse(base_url)
@@ -25,6 +33,11 @@ class GatewayClient:
             raise IntegrationUnavailable('Private Hermes API is not configured')
         try:
             response=await self.client.request(method,path,**kwargs)
+            segments = urlparse(path).path.split('/')
+            if (method.upper() == 'GET' and len(segments) == 4
+                    and segments[:3] == ['', 'v1', 'runs'] and segments[3]
+                    and response.status_code == 404):
+                raise NativeRunNotFound('Native run no longer exists')
             response.raise_for_status()
             return response.json()
         except (httpx.HTTPError,ValueError) as exc:
@@ -65,6 +78,40 @@ class GatewayClient:
                 or controls['version'] != 1 or controls.get('steering') is not True
                 or controls.get('live_commentary') is not True):
             raise IntegrationUnavailable('Native durable steering controls are unavailable')
+
+    async def require_clarifications(self):
+        self.require_execution()
+        result = await self.request('GET', '/v1/capabilities')
+        controls = result.get('mobile_run_controls') if isinstance(result, dict) else None
+        if (not isinstance(controls, dict) or type(controls.get('version')) is not int
+                or controls['version'] != 1 or controls.get('clarifications') is not True):
+            raise IntegrationUnavailable('Native clarification controls are unavailable')
+
+    async def answer_clarification(self, run_id, question_id, answer, other):
+        from urllib.parse import quote
+        self.require_execution()
+        try:
+            response = await self.client.post(
+                '/v1/runs/' + quote(run_id, safe='') + '/clarifications/' + quote(question_id, safe=''),
+                json={'answer': answer, 'other': other})
+            reply = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise IntegrationUnavailable('Clarification acknowledgement is unresolved') from exc
+        if (response.status_code == 409 and isinstance(reply, dict)
+                and set(reply) == {'object', 'run_id', 'question_id', 'status', 'error'}
+                and reply.get('object') == 'hermes.run.clarification'
+                and reply.get('run_id') == run_id and reply.get('question_id') == question_id
+                and reply.get('status') == 'rejected'
+                and isinstance(reply.get('error'), dict)
+                and set(reply['error']) == {'code'}
+                and reply['error'].get('code') in ('clarification_conflict', 'clarification_stale')):
+            raise NativeClarificationRejected('Native clarification answer was rejected')
+        if (response.status_code != 200 or not isinstance(reply, dict)
+                or reply.get('object') != 'hermes.run.clarification'
+                or reply.get('run_id') != run_id or reply.get('question_id') != question_id
+                or reply.get('status') != 'answered' or reply.get('answer') != answer):
+            raise IntegrationUnavailable('Clarification acknowledgement is unresolved')
+        return reply
 
     async def steer(self, run_id, text, key):
         from urllib.parse import quote

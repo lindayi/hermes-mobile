@@ -9,6 +9,16 @@ _OWNER_SOURCE = Path('/home/lindayi/projects/hermes-mobile')
 _OWNER_RELEASES = Path('/home/lindayi/.local/share/hermes-mobile-deploy/releases')
 _CONTROL_HASHES = {
     'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
+    'backend/native_run_controls.py': '564f0ab912a1d138f2ac5b1271935ef5aa2c99cdd2ab48d0527363f1a031e65c',
+    'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/native_maintenance.py': 'e79cfee2bf8d32c3f51dd3ee9247e23029376e10c5e55ea21aa373d6d72535c5',
+    'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
+    'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
+}
+
+# Exact pre-clarification source set, retained for drain/rollback.
+_PRE_CLARIFICATION_CONTROL_HASHES = {
+    'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
     'backend/native_run_controls.py': '6e3a8796028925ea771bf90b2b97ba1fd7a47cbbd979a71e9be7fb525c129b16',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': 'e083b0941b2b849559cd685d946ed10fb14a87128cf8ea2d125f77cb38ce434b',
@@ -30,7 +40,8 @@ _PRE_ROUTING_CONTROL_HASHES = {
 _TIMEOUT_BASELINE_CONTROL_HASHES = {
     'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
     'backend/native_run_controls.py': '5107e54ed631fe2579efe2fb50c6a8ba1e9e3616c4fcd1d0e8ead2f7f29445d9',
-    'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/native_api_service.py':
+        'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': 'e083b0941b2b849559cd685d946ed10fb14a87128cf8ea2d125f77cb38ce434b',
     'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
     'backend/native_notifications.py': '0159fbdd02705469853f51be7bb32479ea9e2fa0d6fdbc6789253d3b3c1c85fe',
@@ -39,7 +50,8 @@ _TIMEOUT_BASELINE_CONTROL_HASHES = {
 _PREVIOUS_CONTROL_HASHES = {
     'backend/native_controls_service.py': '1d9a23a567c8896cd1f2c69f9e111e9c9be6297f5b7bfe773426891bd1354969',
     'backend/native_run_controls.py': '5107e54ed631fe2579efe2fb50c6a8ba1e9e3616c4fcd1d0e8ead2f7f29445d9',
-    'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/native_api_service.py':
+        'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': '94feb8767f7bbbe5a641ad835712f0468b53e019a478d4887f18f0cfb0ed437a',
 }
 
@@ -54,7 +66,8 @@ def _control_source_hashes(root):
     """Select an exact approved version, never a per-file mixture."""
     import hashlib
     try:
-        versions = (_CONTROL_HASHES, _PRE_ROUTING_CONTROL_HASHES,
+        versions = (_CONTROL_HASHES, _PRE_CLARIFICATION_CONTROL_HASHES,
+                    _PRE_ROUTING_CONTROL_HASHES,
                     _TIMEOUT_BASELINE_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES)
         for hashes in versions:
             absent = set().union(*versions) - set(hashes)
@@ -87,7 +100,9 @@ def standalone_owner_verified():
         native=Path('/usr/local/lib/hermes-agent/gateway/platforms/api_server.py')
         if hashlib.sha256(native.read_bytes()).hexdigest()!='187c92509b3769c04756f0dc800d3597ea891ea21262e8a32ceaf3972ac95300':
             return False
-        pid=subprocess.check_output(['/usr/bin/systemctl','--user','show','hermes-mobile-api.service','--property=MainPID','--value'],text=True,timeout=2).strip()
+        pid=subprocess.check_output(
+            ['/usr/bin/systemctl','--user','show','hermes-mobile-api.service',
+             '--property=MainPID','--value'],text=True,timeout=2).strip()
         if not pid.isdigit() or int(pid)<=0:
             return False
         proc=Path('/proc')/pid

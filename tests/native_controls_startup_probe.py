@@ -44,7 +44,8 @@ with tempfile.TemporaryDirectory(prefix='hermes-native-startup-') as d:
                 async with client.get(url+'/v1/capabilities',headers=headers) as response:
                     assert response.status==200
                     data=await response.json()
-                    assert data['mobile_run_controls']==dict(version=1,steering=True,live_commentary=True)
+                    assert data['mobile_run_controls']==dict(version=1,steering=True,live_commentary=True,
+                                                             clarifications=True)
                     assert data['mobile_native_maintenance']==dict(version=1,scope='dedicated-listener',atomic_drain=False)
                 async with client.get(url+'/health/detailed',headers=headers) as response:
                     data=await response.json()

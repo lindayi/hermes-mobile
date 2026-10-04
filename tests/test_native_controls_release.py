@@ -188,9 +188,11 @@ def fixture(tmp_path):
     (paths.source / 'backend/native_maintenance.py').write_text('maintenance')
     (paths.source / 'backend/native_session_deletion.py').write_text('deletion')
     (paths.source / 'backend/native_notifications.py').write_text('notifications')
-    from backend.model_controls import _CONTROL_HASHES, _PRE_ROUTING_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES
+    from backend.model_controls import (_CONTROL_HASHES, _PRE_CLARIFICATION_CONTROL_HASHES,
+                                        _PRE_ROUTING_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES)
     (paths.source / 'backend/model_controls.py').write_text(
         '_CONTROL_HASHES = ' + repr(_CONTROL_HASHES)
+        + '\n_PRE_CLARIFICATION_CONTROL_HASHES = ' + repr(_PRE_CLARIFICATION_CONTROL_HASHES)
         + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(_PRE_ROUTING_CONTROL_HASHES)
         + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(_PREVIOUS_CONTROL_HASHES)
         + '\n_TIMEOUT_BASELINE_CONTROL_HASHES = ' + repr(release.TIMEOUT_BASELINE_CONTROL_HASHES))
@@ -386,6 +388,11 @@ def test_native_idle_checks_known_latest_ids_and_counts(tmp_path):
     probe.request = lambda path, **kw: health() if path == '/health/detailed' else {'status': 'unknown'}
     with pytest.raises(RuntimeError, match='Unknown'):
         probe.idle(journal, {'root': '/old', 'legacy': True, 'pid': 123}, required_ids=('native1',))
+    probe.request = lambda path, **kw: (
+        health() if path == '/health/detailed'
+        else {'status': 'waiting_for_clarification'})
+    assert not probe.idle(
+        journal, {'root': '/old', 'legacy': True, 'pid': 123}, required_ids=('native1',))
 
 
 @pytest.mark.parametrize('changed', [None, 'caps-order', 'busy', 'pid', 'caps', 'anonymous', 'unknown',
@@ -955,6 +962,7 @@ def test_authorized_controls_delta_allowed_but_legacy_still_protected(tmp_path, 
     monkeypatch.setattr(release, 'APPROVED_CONTROL_HASHES', approved)
     (paths.source / 'backend/model_controls.py').write_text(
         '_CONTROL_HASHES = ' + repr(approved)
+        + '\n_PRE_CLARIFICATION_CONTROL_HASHES = ' + repr(release.PRE_CLARIFICATION_CONTROL_HASHES)
         + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(release.PRE_ROUTING_CONTROL_HASHES)
         + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(release.PREVIOUS_CONTROL_HASHES)
         + '\n_TIMEOUT_BASELINE_CONTROL_HASHES = ' + repr(release.TIMEOUT_BASELINE_CONTROL_HASHES))

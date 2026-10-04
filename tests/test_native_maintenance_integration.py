@@ -32,7 +32,7 @@ def test_idle_and_post_restart_verifier_use_scoped_readiness(tmp_path,monkeypatc
         target.parent.mkdir(exist_ok=True)
         shutil.copyfile(Path(__file__).resolve().parents[1] / name, target)
     probe.attest=lambda root,legacy=False:123
-    caps={'mobile_run_controls':dict(version=1,steering=True,live_commentary=True),
+    caps={'mobile_run_controls':dict(version=1,steering=True,live_commentary=True,clarifications=True),
           'mobile_native_maintenance':dict(version=1,scope='dedicated-listener',atomic_drain=False),
           'features': {'mobile_session_delete_version': 1},
           'mobile_notifications': dict(version=1, delivery='durable-inbox', automatic_model_wake=False)}

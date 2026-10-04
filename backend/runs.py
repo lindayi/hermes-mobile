@@ -12,6 +12,9 @@ class RunConflict(ValueError):
     pass
 
 
+NATIVE_RUN_LOST_ERROR = 'Native run no longer exists; automatic retry is disabled'
+
+
 class RunJournal:
     @staticmethod
     def _public_replay(row):
@@ -35,6 +38,26 @@ class RunJournal:
             allowed = ('event', 'tool', 'name', 'tool_name', 'run_id', 'id', 'call_id',
                        'tool_call_id', 'toolCallId', 'status', 'is_error', 'error', 'duration', 'summary')
             data = {key: data[key] for key in allowed if key in data}
+        elif row['name'] == 'clarification':
+            if (data.get('run_id') != row['run_id']
+                    or not isinstance(data.get('question_id'), str)
+                    or len(data['question_id']) != 32
+                    or any(c not in '0123456789abcdef' for c in data['question_id'])
+                    or not isinstance(data.get('session_id'), str)
+                    or not isinstance(data.get('question'), str) or not data['question'].strip()
+                    or (data.get('choices') is not None and (
+                        not isinstance(data['choices'], list) or len(data['choices']) > 4
+                        or any(not isinstance(value, str) or not value.strip()
+                               for value in data['choices'])))
+                    or type(data.get('multi_select')) is not bool
+                    or data.get('status') not in (
+                        'pending', 'sending', 'answered', 'cancelled', 'expired', 'unknown')
+                    or type(data.get('created_at')) not in (int, float)
+                    or type(data.get('updated_at')) not in (int, float)):
+                return None
+            allowed = ('question_id', 'run_id', 'session_id', 'question', 'choices',
+                       'multi_select', 'status', 'answer', 'other', 'created_at', 'updated_at')
+            data = {key: data[key] for key in allowed if key in data}
         else:
             if (data.get('channel') in ('analysis', 'reasoning')
                     or data.get('phase') in ('analysis', 'reasoning')
@@ -45,7 +68,7 @@ class RunJournal:
                 return None
             data = dict(text=text, **({'id': data['id']} if isinstance(data.get('id'), str) else {}))
         result = dict(id=row['id'], name=row['name'], data=data)
-        if row['name'] in ('tool', 'commentary', 'delta'):
+        if row['name'] in ('tool', 'commentary', 'delta', 'clarification'):
             result['observed_at'] = row['created_at']
         return result
 
@@ -216,7 +239,7 @@ class RunJournal:
                 if (json.loads(saved[0]) if saved else None)!=selection:
                     raise RunConflict('Idempotency key already used for another selection')
                 return dict(row,**({'selection':selection} if selection is not None else {})), False
-            if c.execute("SELECT 1 FROM runs WHERE profile=? AND session_id=? AND status IN ('queued','running','stopping','waiting_for_approval','unknown')", (profile,session_id)).fetchone():
+            if c.execute("SELECT 1 FROM runs WHERE profile=? AND session_id=? AND status IN ('queued','running','stopping','waiting_for_approval','waiting_for_clarification','unknown')", (profile,session_id)).fetchone():
                 raise RunConflict('Session has an active or unresolved run')
             # Match the dedicated native listener's bounded capacity. Unknown
             # dispatch still consumes a slot: absence of a receipt is not proof
@@ -288,7 +311,8 @@ class RunJournal:
                 WHERE user_id=? AND profile=? AND session_id IN ('''
                 + ','.join('?' for _ in ids) + ') GROUP BY session_id)',
                 (user_id, profile, *ids)).fetchall()
-        known = {'queued','running','waiting_for_approval','stopping','failed','unknown','completed','cancelled'}
+        known = {'queued','running','waiting_for_approval','waiting_for_clarification',
+                 'stopping','failed','unknown','completed','cancelled'}
         for row in rows:
             last = row['status'] if row['status'] in known else 'unknown'
             result[row['session_id']] = dict(status='idle' if last in ('completed','cancelled') else last,
@@ -316,7 +340,7 @@ class RunJournal:
         replay, accepted = [], {}
         for row in connection.execute(
                 "SELECT id,run_id,name,data,created_at FROM events WHERE run_id=? "
-                "AND name IN ('tool','commentary','delta','steering') ORDER BY id", (run_id,)):
+                "AND name IN ('tool','commentary','delta','steering','clarification') ORDER BY id", (run_id,)):
             event = self._public_replay(row)
             if event is None:
                 continue
@@ -332,6 +356,13 @@ class RunJournal:
                 if event['data']['status'] != 'accepted_unconfirmed':
                     continue
                 accepted[aid] = event
+            elif event['name'] == 'clarification':
+                question_id = event['data']['question_id']
+                previous = next((item for item in replay if item['name'] == 'clarification'
+                                 and item['data']['question_id'] == question_id), None)
+                if previous is not None:
+                    previous['data'] = event['data']
+                    continue
             replay.append(event)
         return replay
 
@@ -352,10 +383,10 @@ class RunJournal:
                 replay_events = self._replay_events(c, rows[-1]['id'])
             prior_replays = {}
             for row in rows[:-1]:
-                if c.execute("SELECT 1 FROM events WHERE run_id=? AND name='steering' LIMIT 1",
+                if c.execute("SELECT 1 FROM events WHERE run_id=? AND name IN ('steering','clarification') LIMIT 1",
                              (row['id'],)).fetchone():
                     events = self._replay_events(c, row['id'])
-                    if any(event['name'] == 'steering' for event in events):
+                    if any(event['name'] in ('steering','clarification') for event in events):
                         prior_replays[row['id']] = events
         entries = []
         for row in rows:
@@ -375,7 +406,8 @@ class RunJournal:
             c.execute("UPDATE runs SET upstream_id=?,status='running',updated_at=? WHERE id=? AND user_id=?", (upstream_id,time.time(),run_id,user_id))
 
     def finish(self,user_id,run_id,status,output=None,error=None,*,expected=None):
-        if status not in ('completed','failed','cancelled','unknown','stopping','waiting_for_approval'):
+        if status not in ('completed','failed','cancelled','unknown','stopping',
+                          'waiting_for_approval','waiting_for_clarification'):
             raise ValueError('Invalid run state')
         with closing(self.connect()) as c,c:
             c.execute('BEGIN IMMEDIATE')
@@ -395,6 +427,25 @@ class RunJournal:
             data={'status':status,'output':output,'error':error}
             c.execute('INSERT INTO events(run_id,name,data,created_at) VALUES(?,?,?,?)',(run_id,name,json.dumps(data),time.time()))
 
+    def set_active_status(self, user_id, run_id, status, *, upstream_id=None):
+        if status not in ('running', 'waiting_for_clarification'):
+            raise ValueError('Invalid active run state')
+        with closing(self.connect()) as c, c:
+            c.execute('BEGIN IMMEDIATE')
+            current = self._require_run(c, user_id, run_id)
+            if (current['status'] in ('completed', 'failed', 'cancelled', 'stopping')
+                    or upstream_id is not None and current['upstream_id'] != upstream_id
+                    or c.execute('SELECT 1 FROM run_stop_intents WHERE run_id=?', (run_id,)).fetchone()):
+                return False
+            changed = c.execute('''UPDATE runs SET status=?,error=NULL,updated_at=?
+                WHERE id=? AND user_id=? AND profile=? AND upstream_id=?
+                AND status IN ('running','waiting_for_clarification','unknown')''',
+                (status, time.time(), run_id, user_id, current['profile'], current['upstream_id'])).rowcount
+            if changed:
+                c.execute('INSERT INTO events(run_id,name,data,created_at) VALUES(?,?,?,?)',
+                           (run_id, 'status', json.dumps({'status': status}), time.time()))
+            return bool(changed)
+
     def event(self,user_id,run_id,name,data):
         with closing(self.connect()) as c,c:
             c.execute('BEGIN IMMEDIATE')
@@ -413,4 +464,4 @@ class RunJournal:
         # Dispatch may have reached Hermes before a crash. Never retry it blindly.
         with closing(self.connect()) as c,c:
             c.execute("INSERT OR IGNORE INTO run_stop_intents SELECT id FROM runs WHERE status='stopping' OR error='Stop outcome is unresolved'")
-            c.execute("UPDATE runs SET status='unknown',error='Bridge restarted; upstream outcome must be reconciled',updated_at=? WHERE status IN ('queued','running','stopping','waiting_for_approval')",(time.time(),))
+            c.execute("UPDATE runs SET status='unknown',error='Bridge restarted; upstream outcome must be reconciled',updated_at=? WHERE status IN ('queued','running','stopping','waiting_for_approval','waiting_for_clarification')",(time.time(),))

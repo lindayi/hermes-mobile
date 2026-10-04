@@ -39,6 +39,7 @@ def versions(tmp_path, monkeypatch):
     for root in roots:
         (root / 'backend/model_controls.py').write_text(
             '_CONTROL_HASHES = ' + repr(maps[1])
+            + '\n_PRE_CLARIFICATION_CONTROL_HASHES = ' + repr(release.PRE_CLARIFICATION_CONTROL_HASHES)
             + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(release.PRE_ROUTING_CONTROL_HASHES)
             + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(maps[0])
             + '\n_TIMEOUT_BASELINE_CONTROL_HASHES = ' + repr(release.TIMEOUT_BASELINE_CONTROL_HASHES))
@@ -77,7 +78,8 @@ def test_unknown_or_mixed_sources_are_not_a_trusted_version(versions, change):
         release.attested_controls(root)
 
 
-@pytest.mark.parametrize('constant', ['_CONTROL_HASHES', '_PRE_ROUTING_CONTROL_HASHES',
+@pytest.mark.parametrize('constant', ['_CONTROL_HASHES', '_PRE_CLARIFICATION_CONTROL_HASHES',
+                                      '_PRE_ROUTING_CONTROL_HASHES',
                                       '_PREVIOUS_CONTROL_HASHES',
                                       '_TIMEOUT_BASELINE_CONTROL_HASHES'])
 def test_candidate_requires_all_staged_literal_maps(versions, constant):
@@ -212,6 +214,7 @@ def activate_candidate(bound_native):
         web_pending=0, quarantined=0, foreign_retained=0, web_delivered=0, shutdown_publications=0)
     caps['features'] = {'mobile_session_delete_version': 1}
     caps['mobile_notifications'] = dict(version=1, delivery='durable-inbox', automatic_model_wake=False)
+    caps['mobile_run_controls']['clarifications'] = True
     return probe, candidate_root, health, caps
 
 
@@ -229,6 +232,39 @@ def test_candidate_activation_and_previous_rollback_use_distinct_contracts(bound
     probe.verify(native_root, baseline=baseline)
     probe, root, health, caps = activate_candidate(bound_native)
     probe.verify(root)
+
+
+def test_clarification_capability_is_bound_to_source_on_release_entrypoints(bound_native):
+    probe, native_root, bridge_root, _, health, caps, proc = bound_native
+    old_caps = dict(caps)
+    baseline = probe.capture(bridge_root, False)
+    probe.verify(native_root, baseline=baseline)
+
+    probe, candidate_root, health, caps = activate_candidate(bound_native)
+    caps['mobile_run_controls']['clarifications'] = True
+    probe.verify(candidate_root)
+    probe.verify_operational(candidate_root)
+
+    del caps['mobile_run_controls']['clarifications']
+    with pytest.raises(RuntimeError, match='source version'):
+        probe.capture(bridge_root, False)
+
+    caps['mobile_run_controls']['clarifications'] = True
+    caps['mobile_run_controls']['unapproved'] = True
+    with pytest.raises(RuntimeError, match='source version'):
+        probe.capture(bridge_root, False)
+
+    (proc / '123/cwd').unlink()
+    (proc / '123/cwd').symlink_to(native_root)
+    (proc / '123/cmdline').write_bytes(
+        (release.NATIVE_PYTHON + '\0'
+         + str(native_root / 'backend/native_controls_service.py') + '\0').encode())
+    caps.clear()
+    caps.update(old_caps)
+    caps['mobile_run_controls'] = {
+        **caps['mobile_run_controls'], 'clarifications': True}
+    with pytest.raises(RuntimeError, match='source version'):
+        probe.capture(bridge_root, False)
 
 
 @pytest.mark.parametrize('change', ['outside-release', 'noncanonical-release', 'source-root'])

@@ -104,13 +104,13 @@ they do not assert independent review, merge, deployment, or gate activation.
 | `deploy/native_controls_release.py` | `0887a6ad4fa0bb5c1351089cc6c53fc8ff7be4c609f42d956d3a51642256dba5` |
 | `deploy/self_deploy.py` | `04036a85d2abba0cf38e7717c30d5e6b6f04da2fd7efcea16bbf21086f2ab68a` |
 
-The native-controller hash in both candidate tables and independent fixtures is
-the integrated issue #46 + #52 source: operational busy observation remains
-separate from idle-required maintenance with verified hosted artifacts. It replaces
-the separate PR47 and PR53 controller candidate hashes, not historical-main pins.
-Issue #59 updates the self-deploy candidate with reusable public HTTPS transport;
-the new source pin records that change, not operational approval. This local
-assembly does not authorize activation or deployment.
+At the issue #52 stage, the native-controller hash in both candidate tables and
+independent fixtures was the integrated issue #46 + #52 source: operational busy
+observation remained separate from idle-required maintenance with verified hosted
+artifacts. It replaced the separate PR47 and PR53 controller candidates, not
+historical-main pins. Issue #59 updated the self-deploy candidate with reusable
+public HTTPS transport. Those historical candidate pins do not authorize activation
+or deployment.
 
 The PR60 second transport follow-up replaces multiprocessing preparation transfer
 with a fixed isolated child entrypoint in the already inventoried
@@ -122,6 +122,42 @@ pin with `5f0d210cb24b6b49cbf30a4286e6b256c42baa1f552f4b063961c67c5d85ec33`
 without changing naming source. Runtime policy and independent pending fixtures
 pin these bytes; historical merged-main fixtures are retained unchanged. Focused
 actual-byte checks cover both complete current pin maps, not activation approval.
+
+### Issue #77 interactive clarification source candidate
+
+Issue #77 adds the clarification journal and routes to the owner-only mobile run
+bridge. `backend/clarifications.py` is included in the fixed source inventory and
+the statically traversed Python closure; changes to it use the
+`execution-source-contract` blocker. The candidate pins below supersede the
+corresponding earlier application and native-controller candidate pins. They bind
+exact bytes only and do not assert independent review acceptance, activation, or
+deployment.
+
+| Issue #77 candidate path | SHA-256 |
+| --- | --- |
+| `backend/app.py` | `3fbab2ca8c8d47dffdd1775d67026fbd537f7350aa6ec68f830cc9be87c266c5` |
+| `backend/clarifications.py` | `6a6f042beb98881a482efdd85c20555d88a375156a024481ab18a0d5c80e94fd` |
+| `backend/hermes_client.py` | `8c018cc4c6e566d481ffcecd87905f2c6dc40bd1fdc67980cb18e5438cdbdf4f` |
+| `backend/model_controls.py` | `c35c6e7ed5c92715ef1bd5af236268d1ef080bbcef2a4069a647dbd04bc4e217` |
+| `backend/native_maintenance.py` | `e79cfee2bf8d32c3f51dd3ee9247e23029376e10c5e55ea21aa373d6d72535c5` |
+| `backend/native_catalog.py` | `8b3c398f52388e0e334d6d64381b677b651b9337ece2d1868a14d3de069c5ed6` |
+| `backend/native_run_controls.py` | `564f0ab912a1d138f2ac5b1271935ef5aa2c99cdd2ab48d0527363f1a031e65c` |
+| `backend/orchestration.py` | `1ea28e810f7c1827e9f40e934a24c4e7774d76b5fe0beb8d090a0ab0174dce7f` |
+| `backend/runs.py` | `b2648c509c520189da024a7338b5556b64876e9542dd8b608c9033d1b2f42d29` |
+| `deploy/native_controls_release.py` | `905e5b0f163e92383b7a72d9215a5ebd903751eca908500a48abe6251c1a9fb9` |
+| `deploy/self_deploy.py` | `1a72fcf9ac6018a449bcac7bb76764af3f144817e8f6e764eb49aa5a95241363` |
+
+The current native-controls source map binds the clarification-capable
+`backend/native_maintenance.py` bytes, while its pre-clarification and rollback
+maps retain their original hashes. A clarification wait is known active work;
+maintenance and release drains cannot treat it as idle. This current table also
+includes the bounded supervised native-409, lifecycle-reopen, and early-terminal
+snapshot repairs from head `709ecdcea72b28b1314ee3cd9f6564cd33fd70dd`.
+The adapter digest is bound by both current native-controls maps; only derived
+pin literals change in `backend/model_controls.py` and
+`deploy/native_controls_release.py`. Historical accepted reports and rollback
+maps remain unchanged. Source consistency is not a new independent delta review,
+pristine autonomous completion, merge authorization, or deployment evidence.
 
 PR57 extends the assembled starter/consumer authority contract with the exact
 head/issue/body-digest command and a final prepared-scan admission fence. Its new

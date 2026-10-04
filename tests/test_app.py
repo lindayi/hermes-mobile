@@ -13,12 +13,20 @@ def test_app_requires_auth_and_reads_native_sessions_without_mutations(tmp_path)
     with TestClient(create_app(settings),base_url=ORIGIN) as client:
         client.headers['Origin']=ORIGIN
         assert client.get(BASE+'/sessions').status_code==401
+        assert client.get(BASE+'/runs/missing/clarifications').status_code==401
+        assert client.post(BASE+'/runs/missing/clarifications/'+('a'*32)+'/answer',
+                           json={'answer':'A','other':False}).status_code==401
         enroll(client)
         response=client.get(BASE+'/sessions')
         assert response.status_code==200, response.text
         assert response.json()['total']==2
         assert client.get(BASE+'/sessions/wa-1/messages').json()['items'][0]['content']=='Retained answer'
         assert client.get(BASE+'/sessions/not-found/messages').status_code==404
+        answer_path=BASE+'/runs/missing/clarifications/'+('a'*32)+'/answer'
+        client.headers.pop('X-CSRF-Token')
+        assert client.post(answer_path,json={'answer':'A','other':False}).status_code==403
+        client.headers['X-CSRF-Token']=client.get(BASE+'/auth/me').json()['csrf_token']
+        assert client.post(answer_path,json={'answer':'A','other':False}).status_code==404
         assert client.post(BASE+'/runs',json={'session_id':'wa-1','input':'hello','idempotency_key':'key'}).status_code==503
         assert client.get(BASE+'/sessions').headers['cache-control']=='no-store'
 
@@ -85,6 +93,61 @@ def test_app_orchestrates_upstream_once_and_returns_real_result(tmp_path):
         assert calls.count('/v1/runs')==1
         events=c.get(BASE+'/runs/'+rid+'/events')
         assert 'event: done' in events.text and 'A result' in events.text
+
+
+def test_invalid_clarification_answer_returns_422_before_native_dispatch(tmp_path):
+    import time
+    import httpx
+    from backend.app import create_app,Settings
+    from backend.hermes_client import GatewayClient
+    native_calls=[]
+    question={'question_id':'c'*32,'run_id':'native-run','question':'Choose?',
+              'choices':['Keep current','Change it'],'multi_select':True,
+              'status':'pending','answer':None,'other':None,
+              'created_at':time.time(),'updated_at':time.time()}
+    async def upstream(request):
+        if request.url.path=='/v1/capabilities':
+            return httpx.Response(200,json={'mobile_run_controls':{'version':1,'clarifications':True}})
+        if request.url.path=='/v1/runs/native-run':
+            return httpx.Response(200,json={'run_id':'native-run','status':'waiting_for_clarification',
+                                            'clarifications':[question]})
+        if request.url.path.endswith('/clarifications/'+question['question_id']):
+            native_calls.append(request)
+            answer=request.content
+            import json
+            body=json.loads(answer)
+            question.update(status='answered',answer=body['answer'],other=body['other'],
+                            updated_at=time.time())
+            return httpx.Response(200,json={'object':'hermes.run.clarification',
+                'run_id':'native-run','question_id':question['question_id'],
+                'status':'answered','answer':body['answer']})
+        return httpx.Response(404)
+    gateway=GatewayClient('http://127.0.0.1:8642','synthetic-test-token-not-a-secret',
+                          execution_ready=True,transport=httpx.MockTransport(upstream))
+    home=tmp_path/'hermes';home.mkdir();create_native_db(home/'state.db')
+    app=create_app(Settings(state_dir=tmp_path/'state',profiles={'default':home},
+                            bootstrap_secret=BOOTSTRAP),gateway_client=gateway)
+    with TestClient(app,base_url=ORIGIN) as client:
+        client.headers['Origin']=ORIGIN;enroll(client)
+        owner=client.get(BASE+'/auth/me').json()['user']
+        run,_=app.state.journal.submit(owner['id'],'default','wa-1','Original','synthetic-key')
+        app.state.journal.set_upstream(owner['id'],run['id'],'native-run')
+        app.state.journal.set_active_status(owner['id'],run['id'],'waiting_for_clarification',
+                                            upstream_id='native-run')
+        run=app.state.journal.get(owner['id'],run['id'])
+        app.state.orchestrator.clarifications.event(owner,run,
+            {**question,'event':'run.clarification'})
+        path=BASE+'/runs/'+run['id']+'/clarifications/'+question['question_id']+'/answer'
+        invalid=client.post(path,json={'answer':['Keep current','Keep current'],'other':True})
+        assert invalid.status_code==422
+        assert native_calls==[]
+        assert app.state.orchestrator.clarifications.list(owner,run['id'])[0]['status']=='pending'
+        corrected=['Keep current','A new plan']
+        accepted=client.post(path,json={'answer':corrected,'other':True})
+        assert accepted.status_code==200,accepted.text
+        assert accepted.json()['status']=='answered'
+        assert len(native_calls)==1
+        assert app.state.journal.get(owner['id'],run['id'])['status']=='running'
 
 
 def test_lifespan_drains_push_outbox_without_a_connected_phone(tmp_path):

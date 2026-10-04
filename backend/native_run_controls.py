@@ -2,6 +2,7 @@
 import json
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 
 from aiohttp import web
@@ -15,7 +16,29 @@ def run_controls_adapter(base):
             super().__init__(*args, **kwargs)
 
         def _state(self, run_id):
-            return self._controls.setdefault(run_id, {'receipts': {}, 'closed': False, 'pending': []})
+            return self._controls.setdefault(run_id, {
+                'receipts': {}, 'closed': False, 'pending': [], 'clarifications': {}})
+
+        @staticmethod
+        def _clarification_view(item):
+            return {key: item[key] for key in (
+                'question_id', 'question', 'choices', 'multi_select', 'status',
+                'answer', 'other', 'created_at', 'updated_at') if key in item}
+
+        def _clarification_snapshot(self, state):
+            return [self._clarification_view(item)
+                    for item in state.get('clarifications', {}).values()]
+
+        def _release_clarifications(self, run_id, state, status):
+            changed = []
+            for item in state.get('clarifications', {}).values():
+                if item['status'] == 'pending':
+                    item.update(status=status, updated_at=time.time())
+                    item['signal'].set()
+                    changed.append(item)
+            for item in changed:
+                state['emit']({'event': 'run.clarification', 'run_id': run_id,
+                               **self._clarification_view(item)})
 
         def _sweep_orphaned_runs_once(self, now=None):
             with self._controls_lock:
@@ -34,19 +57,23 @@ def run_controls_adapter(base):
             fields = {'steer_receipts': [dict(v['receipt']) for v in state['receipts'].values()]}
             if state.get('pending'):
                 fields['pending_steer'] = '\n'.join(state['pending'])
+            if state.get('clarifications'):
+                fields['clarifications'] = self._clarification_snapshot(state)
             return fields
 
         def _set_run_status(self, run_id, status, **fields):
             with self._controls_lock:
                 state = self._controls.get(run_id)
                 current = self._run_statuses.get(run_id, {})
-                previous = current.get('status')
+                previous = (state.get('terminal_status') if state else None) or current.get('status')
                 terminal = {'completed', 'failed', 'cancelled'}
                 if (previous in terminal and status != previous
                         or previous == 'stopping' and status not in terminal | {'stopping'}):
                     return current
                 if state and status in {'completed', 'failed', 'cancelled', 'stopping'}:
                     state['closed'] = True
+                    self._release_clarifications(
+                        run_id, state, 'cancelled' if status in {'stopping', 'cancelled'} else 'expired')
                     agent = self._active_run_agents.get(run_id)
                     if agent is not None:
                         self._retain(state, agent._drain_pending_steer() if hasattr(agent, '_drain_pending_steer') else None)
@@ -87,7 +114,16 @@ def run_controls_adapter(base):
                         # Native terminal frames can precede status publication.
                         if isinstance(event, dict) and event.get('event') in {
                                 'run.completed', 'run.failed', 'run.cancelled'}:
+                            if state.get('terminal_status'):
+                                return
+                            status = event['event'].split('.')[1]
+                            published = self._run_statuses.get(run_id, {}).get('status')
+                            if published in {'completed', 'failed', 'cancelled'} and published != status:
+                                return
+                            state['terminal_status'] = status
                             state['closed'] = True
+                            self._release_clarifications(
+                                run_id, state, 'cancelled' if status == 'cancelled' else 'expired')
                             agent = self._active_run_agents.get(run_id)
                             if agent is not None and hasattr(agent, '_drain_pending_steer'):
                                 self._retain(state, agent._drain_pending_steer())
@@ -138,6 +174,7 @@ def run_controls_adapter(base):
                 finally:
                     with self._controls_lock:
                         state['closed'] = True
+                        self._release_clarifications(run_id, state, 'cancelled')
                         if isinstance(result, dict):
                             self._retain(state, result.get('pending_steer'))
                         self._retain(state, agent._drain_pending_steer())
@@ -146,6 +183,8 @@ def run_controls_adapter(base):
             agent.steer = steer
             agent.clear_interrupt = clear_interrupt
             agent.run_conversation = run
+            agent.clarify_callback = lambda question, choices=None, multi_select=False: (
+                self._clarify(run_id, agent, question, choices, multi_select))
             def commentary(text, already_streamed=False):
                 # This is the native safe PUBLIC interim seam, never reasoning.
                 if (already_streamed or not getattr(agent, 'show_commentary', True)
@@ -158,6 +197,128 @@ def run_controls_adapter(base):
                                        'phase': 'commentary', 'channel': 'commentary'})
             agent.interim_assistant_callback = commentary
             return agent
+
+        def _clarify(self, run_id, agent, question, choices=None, multi_select=False):
+            if (not isinstance(question, str) or not question.strip() or len(question) > 4096
+                    or type(multi_select) is not bool):
+                raise ValueError('Invalid clarification request')
+            if choices is not None and (
+                    not isinstance(choices, list) or len(choices) > 4
+                    or any(not isinstance(choice, str) or not choice.strip() or len(choice) > 512
+                           for choice in choices)):
+                raise ValueError('Invalid clarification choices')
+            choices = list(choices) if choices else None
+            run_id = str(run_id)
+            with self._controls_lock:
+                state = self._controls.get(run_id)
+                current = self._run_statuses.get(run_id, {})
+                if (state is None or state['closed'] or state.get('agent') is not agent
+                        or current.get('status') not in {'running', 'waiting_for_clarification'}):
+                    raise RuntimeError('Clarification is unavailable for this run.')
+                records = state.setdefault('clarifications', {})
+                if len(records) >= 256 or any(item['status'] == 'pending' for item in records.values()):
+                    raise RuntimeError('Clarification capacity is unavailable.')
+                now = time.time()
+                item = {
+                    'question_id': uuid.uuid4().hex, 'question': question.strip(),
+                    'choices': choices, 'multi_select': multi_select, 'status': 'pending',
+                    'created_at': now, 'updated_at': now, 'signal': threading.Event(),
+                }
+                records[item['question_id']] = item
+                self._set_run_status(run_id, 'waiting_for_clarification')
+                state['emit']({'event': 'run.clarification', 'run_id': run_id,
+                               **self._clarification_view(item)})
+            configured = getattr(agent, 'clarify_timeout', 3600)
+            timeout = (min(float(configured), 3600)
+                       if type(configured) in (int, float) and configured > 0 else 3600)
+            if not item['signal'].wait(timeout):
+                with self._controls_lock:
+                    if item['status'] == 'pending':
+                        item.update(status='expired', updated_at=time.time())
+                        if not any(entry['status'] == 'pending' for entry in records.values()):
+                            self._set_run_status(run_id, 'running')
+                        state['emit']({'event': 'run.clarification', 'run_id': run_id,
+                                       **self._clarification_view(item)})
+            with self._controls_lock:
+                if item['status'] != 'answered':
+                    raise RuntimeError(f"Clarification {item['status']}.")
+                return item['answer']
+
+        def _validate_clarification_answer(self, item, body):
+            if not isinstance(body, dict) or set(body) != {'answer', 'other'} or type(body.get('other')) is not bool:
+                return None
+            answer, other = body['answer'], body['other']
+            choices = item['choices']
+            if item['multi_select'] and choices is not None:
+                if (not isinstance(answer, list) or not answer or len(answer) > 5
+                        or any(not isinstance(value, str) or not value.strip() or len(value) > 32768
+                               for value in answer)):
+                    return None
+                if len(answer) != len(set(answer)):
+                    return None
+                unknown = [value for value in answer if value not in choices]
+                if (unknown and (not other or len(unknown) != 1 or answer[-1] != unknown[0])
+                        or other and not unknown):
+                    return None
+                return answer
+            if not isinstance(answer, str) or not answer.strip() or len(answer) > 32768:
+                return None
+            if choices is not None:
+                if other:
+                    if answer in choices:
+                        return None
+                elif answer not in choices:
+                    return None
+            elif other:
+                return None
+            return answer
+
+        async def _handle_clarification_answer(self, request):
+            error = self._check_auth(request)
+            if error is not None:
+                return error
+            body, error = await self._read_json_body(request)
+            if error is not None:
+                return error
+            run_id = request.match_info['run_id']
+            question_id = request.match_info['question_id']
+            with self._controls_lock:
+                state = self._controls.get(run_id)
+                item = state.get('clarifications', {}).get(question_id) if state else None
+                if item is None:
+                    return web.json_response({'error': {'code': 'clarification_not_found'}}, status=404)
+                answer = self._validate_clarification_answer(item, body)
+                if answer is None:
+                    return web.json_response({'error': {'code': 'invalid_clarification_answer'}}, status=400)
+                if item['status'] != 'pending':
+                    if (item['status'] == 'answered' and item['answer'] == answer
+                            and item['other'] == body['other']):
+                        return web.json_response({
+                            'object': 'hermes.run.clarification', 'run_id': run_id,
+                            'question_id': question_id, 'status': 'answered', 'answer': item['answer']})
+                    return web.json_response({
+                        'object': 'hermes.run.clarification', 'run_id': run_id,
+                        'question_id': question_id, 'status': 'rejected',
+                        'error': {'code': 'clarification_conflict'}}, status=409)
+                if (state['closed'] or self._run_statuses.get(run_id, {}).get('status')
+                        != 'waiting_for_clarification'):
+                    return web.json_response({
+                        'object': 'hermes.run.clarification', 'run_id': run_id,
+                        'question_id': question_id, 'status': 'rejected',
+                        'error': {'code': 'clarification_stale'}}, status=409)
+                item.update(status='answered', answer=answer, other=body['other'], updated_at=time.time())
+                item['signal'].set()
+                self._set_run_status(run_id, 'running')
+                state['emit']({'event': 'run.clarification', 'run_id': run_id,
+                               **self._clarification_view(item)})
+                return web.json_response({
+                    'object': 'hermes.run.clarification', 'run_id': run_id,
+                    'question_id': question_id, 'status': 'answered', 'answer': answer})
+
+        def _http_route_table(self):
+            routes = super()._http_route_table()
+            return [*routes, ('POST', '/v1/runs/{run_id}/clarifications/{question_id}',
+                              self._handle_clarification_answer)]
 
         async def _handle_steer_run(self, request):
             error = self._check_auth(request)
@@ -273,6 +434,7 @@ def run_controls_adapter(base):
                 data = dict(self._run_statuses.get(run_id, json.loads(response.text)))
                 if pending is not None:
                     data['pending_approvals'] = pending
+                data.update(self._snapshot(run_id))
                 return web.json_response(data)
 
         async def _handle_capabilities(self, request):
@@ -281,7 +443,8 @@ def run_controls_adapter(base):
                 return response
             data = json.loads(response.text)
             data['mobile_run_controls'] = {
-                'version': 1, 'steering': True, 'live_commentary': True}
+                'version': 1, 'steering': True, 'live_commentary': True,
+                'clarifications': True}
             data['mobile_run_controls_v1'] = True
             return web.json_response(data)
     return RunControlsAdapter

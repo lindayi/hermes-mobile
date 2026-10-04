@@ -156,7 +156,8 @@ def maintenance_snapshot(adapter, registry, delegations, state_db):
             statuses = [r['status'] for r in list(adapter._run_statuses.values())]
             if (any(type(v) is not bool for v in done)
                     or any(s not in {'completed', 'failed', 'cancelled', 'queued', 'running',
-                                     'stopping', 'waiting_for_approval'} for s in statuses)
+                                     'stopping', 'waiting_for_approval',
+                                     'waiting_for_clarification'} for s in statuses)
                     or type(adapter._maintenance_uncertain) is not bool):
                 raise ValueError('Unrecognized native work state')
             work = {
@@ -233,6 +234,9 @@ def maintenance_adapter(base, *, sources=_local_sources):
             self._maintenance_workers = 0
             self._maintenance_uncertain = False
             super().__init__(*args, **kwargs)
+            if hasattr(self, '_controls_lock'):
+                # The composed listener publishes both kinds of state under one lock.
+                self._controls_lock = self._maintenance_lock
 
         def _create_agent(self, *args, **kwargs):
             with self._maintenance_lock:

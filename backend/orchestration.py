@@ -7,9 +7,13 @@ import uuid
 import sqlite3
 from contextlib import closing
 
-from .runs import RunConflict
+from .runs import NATIVE_RUN_LOST_ERROR, RunConflict
 
-from .hermes_client import IntegrationUnavailable
+from .hermes_client import IntegrationUnavailable, NativeRunNotFound, NativeClarificationRejected
+
+
+class ClarificationNotSent(IntegrationUnavailable):
+    """Clarification capability was unavailable before claiming or sending an answer."""
 
 
 class Orchestrator:
@@ -22,6 +26,7 @@ class Orchestrator:
         self._dispatching = set()
         from weakref import WeakValueDictionary
         self._control_locks = WeakValueDictionary()
+        self._clarification_locks = WeakValueDictionary()
         self._closed = False
         self.recovery_interval = 5.0
         self.observation_timeout = 10.0
@@ -31,6 +36,9 @@ class Orchestrator:
         self.run_timeout = max(0.001, min(float(run_timeout), 3600))
         from .steering import SteeringJournal
         self.steering = SteeringJournal(journal)
+        from .clarifications import ClarificationJournal
+        self.clarifications = ClarificationJournal(journal)
+        self.clarifications.recover()
         with closing(journal.connect()) as c, c:
             c.execute('''CREATE TABLE IF NOT EXISTS orchestration_approvals(
                 id TEXT PRIMARY KEY, run_id TEXT NOT NULL, request_id TEXT NOT NULL,
@@ -50,6 +58,7 @@ class Orchestrator:
         busy = set(self._dispatching)
         busy.update(run['id'] for task, (_, run) in self._tasks.items() if not task.done())
         busy.update(rid for rid, lock in self._control_locks.items() if lock.locked())
+        busy.update(key[2] for key, lock in self._clarification_locks.items() if lock.locked())
         busy.update(rid for rid, lock in self._observation_locks.items() if lock.locked())
         return self.journal.claim_deletion(user['id'], user['profile'], session_id, busy_run_ids=busy)
 
@@ -125,6 +134,111 @@ class Orchestrator:
             raise KeyError(rid)
         return run
 
+    async def clarifications_for_run(self, user, rid):
+        async with self._clarification_lock(user, rid):
+            return await self._clarifications_for_run_locked(user, rid)
+
+    async def _clarifications_for_run_locked(self, user, rid):
+        run = self.get(user, rid)
+        if user.get('role') != 'owner' or user.get('profile') != 'default':
+            raise KeyError(rid)
+        result = await self.clarifications.rehydrate(
+            user, rid, self.gateway, run,
+            validate_snapshot=lambda snapshot: (
+                self._can_observe(user) and self._matches(run, snapshot)
+                and self.get(user, rid)['upstream_id'] == run['upstream_id']))
+        native_status = result.get('native_status')
+        if native_status == 'unknown':
+            self._native_run_lost(user, run)
+        elif native_status == 'waiting_for_clarification':
+            self._clarification_status(user, run, resume=False)
+        elif result.get('native_snapshot') is not None:
+            await self._reconcile_locked(user, rid, run=run, result=result['native_snapshot'])
+        current = self.get(user, rid)
+        return {
+            'run_id': current['id'], 'status': current['status'],
+            'available': (result['available']
+                          and current['status'] not in ('completed', 'failed', 'cancelled')),
+            'items': result['items'],
+        }
+
+    async def answer_clarification(self, user, rid, question_id, body):
+        async with self._clarification_lock(user, rid):
+            return await self._answer_clarification(user, rid, question_id, body)
+
+    async def _answer_clarification(self, user, rid, question_id, body):
+        run = self.get(user, rid)
+        if user.get('role') != 'owner' or user.get('profile') != 'default':
+            raise KeyError(rid)
+        records = self.clarifications.list(user, rid)
+        record = next((item for item in records if item['question_id'] == question_id), None)
+        if record is None:
+            raise KeyError(question_id)
+        if not self.clarifications.validate_answer(record, body):
+            raise ValueError('Invalid clarification answer')
+        if record['status'] in ('answered', 'sending'):
+            receipt, _ = self.clarifications.claim(user, run, question_id, body)
+            return receipt
+        if run['status'] != 'waiting_for_clarification' or not run['upstream_id']:
+            raise RunConflict('Clarification is stale')
+        if not hasattr(self.gateway, 'require_clarifications'):
+            raise ClarificationNotSent('Native clarification controls are unavailable')
+        try:
+            await self.gateway.require_clarifications()
+        except IntegrationUnavailable as exc:
+            raise ClarificationNotSent(
+                'Native clarification controls are unavailable') from exc
+        claimed, fresh = self.clarifications.claim(user, run, question_id, body)
+        if not fresh:
+            return claimed
+        try:
+            async with asyncio.timeout(30):
+                await self.gateway.answer_clarification(
+                    run['upstream_id'], question_id, body['answer'], body['other'])
+        except NativeClarificationRejected as exc:
+            self.clarifications.finish(user, rid, question_id, 'unknown', rejected=True)
+            await self._clarifications_for_run_locked(user, rid)
+            raise RunConflict('Native clarification answer was rejected') from exc
+        except (Exception, asyncio.CancelledError) as exc:
+            result = self.clarifications.finish(user, rid, question_id, 'unknown')
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return result
+        result = self.clarifications.finish(user, rid, question_id, 'answered')
+        self._clarification_status(user, run, resume=True)
+        return result
+
+    def _native_run_lost(self, user, run):
+        current = self.get(user, run['id'])
+        if (not self._can_observe(user)
+                or any(current[k] != run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at'))
+                or current['status'] in ('stopping', 'completed', 'failed', 'cancelled')
+                or current['error'] == NATIVE_RUN_LOST_ERROR):
+            return
+        with closing(self.journal.connect()) as connection:
+            if connection.execute('SELECT 1 FROM run_stop_intents WHERE run_id=?',
+                                  (run['id'],)).fetchone():
+                return
+        self.journal.finish(user['id'], run['id'], 'unknown',
+                            error=NATIVE_RUN_LOST_ERROR,
+                            expected={k: run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at')})
+
+    def _clarification_status(self, user, run, *, resume):
+        if run.get('error') == NATIVE_RUN_LOST_ERROR:
+            return
+        items = self.clarifications.list(user, run['id'])
+        latest = max((item['created_at'] for item in items), default=None)
+        items = [item for item in items if item['created_at'] == latest]
+        if any(item['status'] in ('pending', 'sending') for item in items):
+            status = 'waiting_for_clarification'
+        elif resume and not any(item['status'] == 'unknown' for item in items):
+            status = 'running'
+        else:
+            return
+        if self.get(user, run['id'])['status'] == status:
+            return
+        self.journal.set_active_status(user['id'], run['id'], status, upstream_id=run['upstream_id'])
+
     async def refresh(self, user, rid):
         self.get(user, rid)  # Authorize before consulting shared observation state.
         lock = self._observation_locks.get(rid)
@@ -151,7 +265,8 @@ class Orchestrator:
                 with closing(self.journal.connect()) as c:
                     rows = c.execute("""SELECT id,user_id,profile FROM runs WHERE profile=?
                         AND upstream_id IS NOT NULL AND status IN
-                        ('queued','running','stopping','waiting_for_approval','unknown') LIMIT 1000""",
+                        ('queued','running','stopping','waiting_for_approval',
+                         'waiting_for_clarification','unknown') LIMIT 1000""",
                         (self.profile,)).fetchall()
                 for row in rows:
                     # Live streams own their observer; disconnected ones poll themselves.
@@ -192,6 +307,14 @@ class Orchestrator:
         lock = self._control_locks.get(rid)
         if lock is None:
             lock = self._control_locks[rid] = asyncio.Lock()
+        return lock
+
+    def _clarification_lock(self, user, rid):
+        run = self.get(user, rid)
+        key = (user['id'], user['profile'], rid, run['upstream_id'])
+        lock = self._clarification_locks.get(key)
+        if lock is None:
+            lock = self._clarification_locks[key] = asyncio.Lock()
         return lock
 
     async def steer(self, user, rid, body):
@@ -248,6 +371,7 @@ class Orchestrator:
                 return self.get(user, rid)
             raise RunConflict('Upstream run ID is unresolved')
         self.journal.finish(user['id'], rid, 'stopping')
+        self.clarifications.mark_pending_unknown(user, rid)
         try:
             async with asyncio.timeout(30):
                 await self.gateway.stop(run['upstream_id'])
@@ -335,16 +459,33 @@ class Orchestrator:
                     self.journal.event(user['id'], run['id'], 'commentary' if commentary else 'delta', {'text': text})
             elif event['event'] == 'run.steer_receipts':
                 self.steering.observe(user, self.get(user, run['id']), event)
+            elif event['event'] == 'run.clarification':
+                await self._observe_clarification_event(user, run['id'], event)
             elif event['event'] in ('run.completed', 'run.failed', 'run.cancelled'):
-                current = self.get(user, run['id'])
-                self.gateway.require_execution()
-                if not self._can_observe(user) or not self._matches(current, event):
-                    raise IntegrationUnavailable('Unbound native terminal event')
-                self.steering.observe(user, current, event)
-                self.journal.finish(user['id'], run['id'], event['event'].split('.')[1], output=event.get('output'),
-                                    expected={k: current[k] for k in ('profile', 'upstream_id')})
+                await self._observe_terminal_event(user, run['id'], event)
                 return
         raise IntegrationUnavailable('Upstream stream ended without a terminal event')
+
+    async def _observe_clarification_event(self, user, rid, event):
+        async with self._clarification_lock(user, rid):
+            run = self.get(user, rid)
+            if not self._can_observe(user) or not self._matches(run, event):
+                return
+            result = self.clarifications.event(user, run, event)
+            if result:
+                self._clarification_status(
+                    user, run, resume=result['status'] in ('answered', 'expired'))
+
+    async def _observe_terminal_event(self, user, rid, event):
+        async with self._clarification_lock(user, rid):
+            current = self.get(user, rid)
+            self.gateway.require_execution()
+            if not self._can_observe(user) or not self._matches(current, event):
+                raise IntegrationUnavailable('Unbound native terminal event')
+            self.steering.observe(user, current, event)
+            self.clarifications.observe(user, current, event)
+            self.journal.finish(user['id'], rid, event['event'].split('.')[1], output=event.get('output'),
+                                expected={k: current[k] for k in ('profile', 'upstream_id')})
 
     def _matches(self, run, result):
         if (not isinstance(result, dict) or result.get('run_id') != run['upstream_id']
@@ -363,15 +504,21 @@ class Orchestrator:
                 and (validator is None or validator(user) is True))
 
     async def _reconcile(self, user, rid):
-        run = self.get(user, rid)
-        if not self._can_observe(user) or run['status'] in ('completed', 'failed', 'cancelled'):
+        async with self._clarification_lock(user, rid):
+            await self._reconcile_locked(user, rid)
+
+    async def _reconcile_locked(self, user, rid, *, run=None, result=None):
+        run = run or self.get(user, rid)
+        if (not self._can_observe(user) or run['status'] in ('completed', 'failed', 'cancelled')
+                or run.get('error') == NATIVE_RUN_LOST_ERROR):
             return
         if run['upstream_id']:
             try:
                 from urllib.parse import quote
                 self.gateway.require_execution()
-                async with asyncio.timeout(self.observation_timeout):
-                    result = await self.gateway.request('GET', '/v1/runs/' + quote(run['upstream_id'], safe=''))
+                if result is None:
+                    async with asyncio.timeout(self.observation_timeout):
+                        result = await self.gateway.request('GET', '/v1/runs/' + quote(run['upstream_id'], safe=''))
                 self.gateway.require_execution()
                 if (not self._can_observe(user)
                         or self.get(user, rid)['upstream_id'] != run['upstream_id']):
@@ -380,13 +527,15 @@ class Orchestrator:
                     raise IntegrationUnavailable('Mismatched native run snapshot')
                 if isinstance(result, dict) and result.get('run_id') == run['upstream_id']:
                     self.steering.observe(user, run, result)
+                    self.clarifications.observe(user, run, result)
                 if result.get('run_id') == run['upstream_id'] and result.get('status') in ('completed', 'failed', 'cancelled'):
                     self.journal.finish(user['id'], rid, result['status'], output=result.get('output'),
                                         expected={k: run[k] for k in ('profile', 'upstream_id')})
                     return
                 if result.get('status') == 'stopping':
-                    self.journal.finish(user['id'], rid, 'stopping',
-                        expected={k: run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at')})
+                    if run['status'] != 'stopping':
+                        self.journal.finish(user['id'], rid, 'stopping',
+                            expected={k: run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at')})
                     return
                 if result.get('status') == 'waiting_for_approval':
                     pending = result.get('pending_approvals')
@@ -427,15 +576,41 @@ class Orchestrator:
                         known = {r[0] for r in c.execute('SELECT request_id FROM orchestration_approvals WHERE run_id=?', (rid,))}
                     if fenced or current['status'] == 'stopping':
                         return
-                    self.journal.finish(user['id'], rid, 'waiting_for_approval',
-                        expected={k: run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at')})
+                    if run['status'] != 'waiting_for_approval':
+                        self.journal.finish(user['id'], rid, 'waiting_for_approval',
+                            expected={k: run[k] for k in ('profile', 'upstream_id', 'status', 'updated_at')})
                     for action in pending:
                         if action['request_id'] not in known:
                             self._missing_approval(user, run, action['request_id'])
                     return
+                if result.get('status') == 'waiting_for_clarification':
+                    pending = result.get('clarifications')
+                    if (not isinstance(pending, list) or not pending or len(pending) > 256
+                            or any(self.clarifications._normalize(item, run['upstream_id']) is None
+                                   for item in pending)):
+                        raise IntegrationUnavailable('Pending clarification identity is unavailable')
+                    with closing(self.journal.connect()) as c:
+                        if c.execute('SELECT 1 FROM run_stop_intents WHERE run_id=?',
+                                     (rid,)).fetchone():
+                            return
+                    saved_pending = [item for item in self.clarifications.list(user, rid)
+                                     if item['status'] in ('pending', 'sending')]
+                    if not saved_pending:
+                        raise IntegrationUnavailable('Pending clarification identity is unavailable')
+                    self._clarification_status(user, run, resume=False)
+                    return
                 if result.get('status') == 'running':
                     if 'pending_approvals' in result and result['pending_approvals'] != []:
                         raise IntegrationUnavailable('Contradictory native approval snapshot')
+                    clarification_clear = (
+                        isinstance(result.get('clarifications'), list)
+                        and len(result['clarifications']) <= 256
+                        and all(self.clarifications._normalize(item, run['upstream_id']) is not None
+                                and item.get('status') != 'pending'
+                                for item in result['clarifications']))
+                    if (run['status'] == 'waiting_for_clarification'
+                            and not clarification_clear):
+                        raise IntegrationUnavailable('Native clarification outcome is unavailable')
                     with closing(self.journal.connect()) as c, c:
                         c.execute('BEGIN IMMEDIATE')
                         current = self.journal._require_run(c, user['id'], rid)
@@ -445,13 +620,22 @@ class Orchestrator:
                             c.execute("UPDATE orchestration_approvals SET status='resolved_external' WHERE run_id=? AND status IN ('pending','details_unavailable')", (rid,))
                         c.execute("""UPDATE runs SET status='running',error=NULL,updated_at=?
                             WHERE id=? AND user_id=? AND profile=? AND upstream_id=?
-                            AND (status IN ('running','unknown') OR (status='waiting_for_approval' AND ?))
+                            AND (status IN ('running','unknown')
+                                 OR (status='waiting_for_approval' AND ?)
+                                 OR (status='waiting_for_clarification' AND ?))
                             AND NOT EXISTS(SELECT 1 FROM orchestration_approvals WHERE run_id=?
                              AND status IN ('pending','sending','unknown','details_unavailable'))
+                            AND NOT EXISTS(SELECT 1 FROM clarifications WHERE run_id=?
+                             AND status IN ('pending','sending','unknown')
+                             AND created_at=(SELECT MAX(created_at) FROM clarifications WHERE run_id=?))
                             AND NOT EXISTS(SELECT 1 FROM run_stop_intents WHERE run_id=?)""",
                             (time.time(), rid, user['id'], self.profile, run['upstream_id'],
-                             result.get('pending_approvals') == [], rid, rid))
+                             result.get('pending_approvals') == [], clarification_clear, rid, rid, rid, rid))
                     return
+            except NativeRunNotFound:
+                self.clarifications.mark_run_not_found_unknown(user, run)
+                self._native_run_lost(user, run)
+                return
             except Exception:
                 pass
         self.journal.finish(user['id'], rid, 'unknown', error='Upstream outcome is unresolved; automatic retry is disabled',

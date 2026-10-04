@@ -1,0 +1,1006 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {createServer} from 'node:http';
+import {access,mkdtemp,readFile,rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {createRequire} from 'node:module';
+import {spawn} from 'node:child_process';
+import {createInterface} from 'node:readline';
+import {fileURLToPath} from 'node:url';
+import {generatedAssets} from './generated-assets.mjs';
+const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
+
+async function nativeTransport({python=process.env.HERMES_TEST_PYTHON,scenario='conflict',shape='single'}={}) {
+  const repo=fileURLToPath(new URL('../../',import.meta.url));
+  const child=spawn(python||join(repo,'.venv/bin/python'),
+    ['-B',join(repo,'tests/browser/clarification_transport_fixture.py'),scenario,shape],{cwd:repo,stdio:['pipe','pipe','pipe']});
+  const reader=createInterface({input:child.stdout}),lines=reader[Symbol.asyncIterator]();
+  let diagnostic='';child.stderr.on('data',value=>{diagnostic=(diagnostic+value).slice(-32768);});
+  let launchError;
+  child.on('error',error=>{launchError=error;});
+  child.stdin.on('error',error=>{launchError=error;});
+  const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));
+  const exitError=exit=>new Error(
+    `fixture exited: ${JSON.stringify(exit)}\n${launchError||''}\n${diagnostic}`);
+  const next=async()=>{
+    const value=await lines.next();
+    if(value.done){
+      const exit=await closed;
+      throw exitError(exit);
+    }
+    return JSON.parse(value.value);
+  };
+  try {
+    const startup=await next();
+    let queue=Promise.resolve(),closing;
+    return {startup,child,
+      request:value=>{
+        if(closing)return Promise.reject(new Error('fixture is closing'));
+        const result=queue.then(()=>{
+          if(child.exitCode!==null||child.signalCode!==null)throw exitError({
+            code:child.exitCode,signal:child.signalCode});
+          child.stdin.write(JSON.stringify(value)+'\n');
+          return next();
+        });
+        queue=result.catch(()=>{});
+        return result;
+      },
+      close:()=>{
+        closing??=(async()=>{
+          await queue;
+          child.stdin.end();
+          const exit=await closed;
+          reader.close();
+          if(exit.code!==0||exit.signal!==null)throw exitError(exit);
+          return exit;
+        })();
+        return closing;
+      }};
+  }catch(error){
+    child.stdin.end();child.kill();reader.close();
+    await closed;
+    throw error;
+  }
+}
+
+test('native transport drains queued authenticated requests before shutdown',async()=>{
+  const transport=await nativeTransport();
+  try{
+    const requests=[transport.request({method:'GET',path:'/auth/me'}),
+      transport.request({method:'GET',path:'/approvals'})];
+    const closing=transport.close();
+    const [auth,approvals]=await Promise.all(requests);
+    assert.equal(auth.status,200);
+    assert.equal(auth.body.user.role,'owner');
+    assert.equal(approvals.status,200);
+    assert.ok(Array.isArray(approvals.body.items));
+    assert.deepEqual(await closing,{code:0,signal:null});
+    await assert.rejects(access(transport.startup.temporary),{code:'ENOENT'});
+  }finally{await transport.close();}
+});
+
+test('native transport reports launch and early request failures with exit diagnostics',async()=>{
+  await assert.rejects(nativeTransport({python:'/nonexistent/hermes-test-python'}),/ENOENT/);
+  const transport=await nativeTransport();
+  await assert.rejects(transport.request({}),error=>{
+    assert.match(error.message,/"code":1,"signal":null/);
+    assert.match(error.message,/Traceback[\s\S]*KeyError: 'method'/);
+    return true;
+  });
+  await assert.rejects(transport.close(),/KeyError: 'method'/);
+  assert.equal(transport.child.exitCode,1);
+  await assert.rejects(access(transport.startup.temporary),{code:'ENOENT'});
+});
+
+async function nativeConflictBrowser(exercise,{
+  launch=options=>chromium.launch(options),scenario='conflict',shape='single',holdAnswer=false,
+}={}) {
+  let transport,temporary,server,browser,fixtureError;
+  const active=new Set();
+  let rejectFailure;
+  const failed=new Promise((resolve,reject)=>{rejectFailure=reject;});
+  failed.catch(()=>{});
+  const calls=[];
+  let answerResponse;
+  const streams=[],frames=[];
+  let resolveStream,resolveAnswer,releaseAnswer;
+  const streamReady=new Promise(resolve=>{resolveStream=resolve;});
+  const answerReady=new Promise(resolve=>{resolveAnswer=resolve;});
+  const answerGate=new Promise(resolve=>{releaseAnswer=resolve;});
+  const publishFrames=items=>{
+    for(const frame of items)for(const response of streams)if(!response.destroyed)
+      response.write(`id: ${frame.id}\nevent: ${frame.name}\ndata: ${JSON.stringify(frame.data)}\n\n`);
+  };
+  try{
+  transport=await nativeTransport({scenario,shape});
+  const {startup}=transport;
+  temporary=await mkdtemp(join(tmpdir(),'hm-c-'));
+  const root=generatedAssets(temporary);
+  const handle=async(request,response)=>{
+    const url=new URL(request.url,'http://fixture');
+    const path=url.pathname.replace('/hermes/app-api','');
+    const json=(body,status=200)=>{
+      response.writeHead(status,{'Content-Type':'application/json'});
+      response.end(JSON.stringify(body));
+    };
+    if(url.pathname.startsWith('/hermes/app-api/')){
+      if(path==='/sessions')return json({items:[{id:'wa-1',title:'Native seam fixture'}],total:1});
+      if(path.endsWith('/messages'))return json({items:[],run:startup.run});
+      if(path.endsWith('/controls'))return json({steering:false,attempts:[]});
+      if(path.endsWith('/events')){
+        response.writeHead(200,{'Content-Type':'text/event-stream'});
+        response.write(': ready\n\n');streams.push(response);resolveStream();return;
+      }
+      let body='';
+      for await(const chunk of request)body+=chunk;
+      const result=await transport.request({method:request.method,path,
+        ...(body?{body:JSON.parse(body)}:{})});
+      calls.splice(0,calls.length,...result.calls);
+      if(path.endsWith('/answer')){
+        answerResponse=result;
+        frames.splice(0,frames.length,...result.events.filter(frame=>frame.id>startup.cursor));
+        if(scenario==='conflict')publishFrames(frames);
+        resolveAnswer();
+        if(holdAnswer)await answerGate;
+      }
+      return json(result.body,result.status);
+    }
+    try{
+      const relative=url.pathname.replace(/^\/hermes\//,'')||'index.html';
+      const content=await readFile(join(root,relative));
+      response.writeHead(200,{'Content-Type':relative.endsWith('.html')?'text/html':
+        relative.endsWith('.css')?'text/css':'text/javascript'});
+      response.end(content);
+    }catch{response.writeHead(404).end();}
+  };
+  server=createServer((request,response)=>{
+    const task=handle(request,response).catch(error=>{
+      fixtureError??=error;
+      rejectFailure(error);
+      if(!response.destroyed){
+        if(!response.headersSent)response.writeHead(500);
+        response.end();
+      }
+    });
+    active.add(task);
+    task.finally(()=>active.delete(task));
+  });
+  browser=await launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']},
+    {child:transport.child,temporary,server});
+  await Promise.race([failed,(async()=>{
+    await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    await exercise({page,url:`http://127.0.0.1:${server.address().port}/hermes/`,
+      startup,calls,answerResponse:()=>answerResponse,frames,publishFrames,
+      observe:async event=>{
+        const result=await transport.request({method:'POST',path:'/fixture/observe',body:event});
+        publishFrames(result.events.filter(frame=>frame.id>startup.cursor));
+      },
+      streamReady,answerReady,releaseAnswer,disconnect:()=>{
+        for(const response of streams)response.destroy();
+      }});
+  })()]);
+  }finally{
+    releaseAnswer();
+    try{await browser?.close();}
+    finally{
+      try{
+        if(server){
+          server.closeAllConnections();
+          await new Promise(resolve=>server.close(resolve));
+          await Promise.all(active);
+        }
+      }finally{
+        try{await transport?.close();}
+        finally{if(temporary)await rm(temporary,{recursive:true,force:true});}
+      }
+    }
+    if(fixtureError)throw fixtureError;
+  }
+}
+
+test('native browser fixture cleans up a failed browser launch',async()=>{
+  let resources;
+  await assert.rejects(nativeConflictBrowser(()=>assert.fail('unexpected browser'),{
+    launch:async(options,value)=>{
+      resources=value;
+      throw new Error('synthetic browser launch failure');
+    },
+  }),/synthetic browser launch failure/);
+  assert.equal(resources.child.exitCode,0);
+  assert.equal(resources.server.listening,false);
+  await assert.rejects(access(resources.temporary),{code:'ENOENT'});
+});
+
+test('native browser fixture propagates HTTP handler failure and cleans up',async()=>{
+  let resources,browser;
+  await assert.rejects(nativeConflictBrowser(async({page,url})=>{
+    await page.goto(url);
+    await page.evaluate(()=>fetch('/hermes/app-api/fixture-invalid-json',{
+      method:'POST',body:'not-json'}));
+  },{
+    launch:async(options,value)=>{
+      resources=value;
+      browser=await chromium.launch(options);
+      return browser;
+    },
+  }),SyntaxError);
+  assert.equal(resources.child.exitCode,0);
+  assert.equal(resources.server.listening,false);
+  assert.equal(browser.isConnected(),false);
+  await assert.rejects(access(resources.temporary),{code:'ENOENT'});
+});
+
+test('generated browser reconciles a real native 409 through authenticated API transport',{timeout:60000},async()=>{
+  await nativeConflictBrowser(async({page,url,calls,answerResponse})=>{
+    await page.goto(url);
+    await page.getByRole('button',{name:'Native seam fixture'}).click();
+    const oldCard=page.locator('[data-clarification-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]');
+    await oldCard.getByLabel('Change it').check();
+    await oldCard.getByRole('button',{name:'Submit answer'}).click();
+    await oldCard.getByText('Answered',{exact:true}).waitFor();
+    assert.equal(answerResponse().status,409);
+    assert.match(await oldCard.textContent(),/Answer: Keep current/);
+    assert.doesNotMatch(await oldCard.textContent(),/Attempted answer: Change it/);
+    await page.locator('[data-clarification-id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]')
+      .getByRole('button',{name:'Submit answer'}).waitFor();
+    assert.equal(calls.filter(([method])=>method==='POST').length,1);
+    assert.equal(calls.some(([,path])=>path==='/v1/runs'),false);
+    await page.waitForTimeout(100);
+    assert.equal(calls.filter(([method])=>method==='POST').length,1);
+    await page.close();
+  });
+});
+
+const questionFixture=question_id=>({
+  question_id,run_id:'r',session_id:'s',question:'Choose safely?',
+  choices:['Keep current','Change it'],multi_select:false,status:'pending',
+  answer:null,other:null,created_at:1,updated_at:2,
+});
+
+for(const outcome of ['answered','unknown']){
+  test(`journal sending after ${outcome} HTTP acknowledgement cannot regress the visible receipt`,{timeout:60000},async()=>{
+    await nativeConflictBrowser(async({page,url,frames,publishFrames,streamReady,
+      answerReady,answerResponse,disconnect,calls})=>{
+      await page.goto(url);
+      await page.getByRole('button',{name:'Native seam fixture'}).click();
+      const card=page.locator('[data-clarification-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]');
+      await card.getByLabel('Change it').check();
+      await streamReady;
+      await card.getByRole('button',{name:'Submit answer'}).click();
+      await answerReady;
+      const label=outcome==='answered'?'Answered':'Answer status unknown';
+      await card.getByText(label,{exact:true}).waitFor({timeout:3000});
+      const sending=frames.filter(frame=>frame.name==='clarification' && frame.data.status==='sending');
+      assert.equal(sending.length,1);
+      assert.ok(sending[0].data.updated_at<answerResponse().body.updated_at);
+      publishFrames(sending);
+      // Disconnect before the journal's later receipt is delivered.
+      await page.waitForTimeout(100);
+      disconnect();
+      assert.equal(await card.getByText(label,{exact:true}).count(),1);
+      assert.doesNotMatch(await card.textContent(),/Submitting answer/);
+      assert.equal(calls.filter(([method])=>method==='POST').length,1);
+      await page.close();
+    },{scenario:outcome});
+  });
+}
+
+for(const timing of ['before','after'])for(const shape of ['single','multi','open']){
+  test(`real rejected journal SSE ${timing} reconciliation retains ${shape} draft and explicit retry`,{timeout:60000},async()=>{
+    await nativeConflictBrowser(async({page,url,frames,publishFrames,streamReady,
+      answerReady,releaseAnswer,answerResponse,calls})=>{
+      await page.goto(url);
+      await page.getByRole('button',{name:'Native seam fixture'}).click();
+      const card=page.locator('[data-clarification-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]');
+      const text='A safer synthetic plan';
+      if(shape==='single')await card.getByLabel('Change it').check();
+      else if(shape==='multi'){
+        await card.getByLabel('Keep current').check();
+        await card.getByRole('textbox',{name:'Other answer'}).fill(text);
+      }else await card.getByRole('textbox',{name:'Your answer'}).fill(text);
+      await streamReady;
+      await card.getByRole('button',{name:'Submit answer'}).click();
+      await answerReady;
+      assert.equal(answerResponse().status,409);
+      const lifecycle=frames.filter(frame=>frame.name==='clarification');
+      assert.deepEqual(lifecycle.map(frame=>frame.data.status),['sending','unknown','pending']);
+      if(timing==='before'){
+        publishFrames(lifecycle);
+        await page.waitForTimeout(100);
+      }
+      releaseAnswer();
+      await card.getByText(/this question is still waiting/).waitFor({timeout:3000});
+      if(timing==='after'){
+        publishFrames(lifecycle);
+        await page.waitForTimeout(100);
+      }
+      if(shape==='single')assert.equal(await card.getByLabel('Change it').isChecked(),true);
+      else if(shape==='multi'){
+        assert.equal(await card.getByLabel('Keep current').isChecked(),true);
+        assert.equal(await card.getByRole('textbox',{name:'Other answer'}).inputValue(),text);
+      }else assert.equal(await card.getByRole('textbox',{name:'Your answer'}).inputValue(),text);
+      assert.equal(calls.filter(([method])=>method==='POST').length,1,'No automatic retry');
+      await card.getByRole('button',{name:'Submit answer'}).click();
+      await card.getByText('Answered',{exact:true}).waitFor({timeout:3000});
+      const expected=shape==='single'?'Change it':shape==='multi'?['Keep current',text]:text;
+      assert.deepEqual(answerResponse().body.answer,expected);
+      assert.equal(answerResponse().body.other,shape==='multi');
+      assert.deepEqual(answerResponse().native_question.answer,expected);
+      assert.deepEqual(answerResponse().answer_bodies,
+        Array(2).fill({answer:expected,other:shape==='multi'}));
+      assert.equal(calls.filter(([method])=>method==='POST').length,2);
+      assert.equal(calls.some(([,path])=>path==='/v1/runs'),false);
+      await page.close();
+    },{scenario:'rejected',shape,holdAnswer:true});
+  });
+}
+
+for(const [scenario,observation] of [
+  ['rejected','new-question'],['rejected','terminal'],['rejected','accepted-answer'],
+  ['answered','new-question'],['answered','terminal'],
+  ['unknown','new-question'],['unknown','terminal'],
+]){
+  test(`real journal ${observation} supersedes an active ${scenario} clarification`,{timeout:60000},async()=>{
+    await nativeConflictBrowser(async({page,url,startup,streamReady,answerReady,
+      releaseAnswer,answerResponse,observe,calls})=>{
+      await page.goto(url);
+      await page.getByRole('button',{name:'Native seam fixture'}).click();
+      const card=page.locator('[data-clarification-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]');
+      await card.getByRole('textbox',{name:'Other answer'}).fill('Rejected draft');
+      await streamReady;
+      await card.getByRole('button',{name:'Submit answer'}).click();
+      await answerReady;
+      const updated_at=answerResponse().events.at(-1).observed_at+1;
+      if(observation==='terminal'){
+        await observe({event:'run.completed',run_id:'native-run',output:'Synthetic completion'});
+        await page.locator('.live-activity-heading [role=status]').getByText('completed',{exact:true})
+          .waitFor({timeout:3000});
+      }else{
+        await observe({...startup.question,event:'run.clarification',updated_at,
+          ...(observation==='new-question'
+            ?{question_id:'b'.repeat(32),created_at:updated_at}
+            :{status:'answered',answer:'Keep current',other:false})});
+        if(observation==='new-question')
+          await page.locator('[data-clarification-id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]')
+            .getByRole('button',{name:'Submit answer'}).waitFor({timeout:3000});
+        else await card.getByText('Answered',{exact:true}).waitFor({timeout:3000});
+      }
+      releaseAnswer();
+      await page.waitForTimeout(100);
+      assert.equal(await card.locator('.clarification-form').count(),0);
+      if(scenario==='rejected')assert.doesNotMatch(await card.textContent(),/Rejected draft/);
+      if(observation==='accepted-answer')assert.match(await card.textContent(),/Answer: Keep current/);
+      assert.equal(calls.filter(([method])=>method==='POST').length,1);
+      await page.close();
+    },{scenario,holdAnswer:true});
+  });
+}
+
+async function fixture(shape,{
+  rejectDuplicate=false,holdAnswer=false,initialRunStatus=null,
+  rehydrateStatus=null,holdRehydrate=false,itemStatus='pending',
+  completeAfterAnswer=false,answerOutcomes=[],holdConflictReconcile=false,
+}={}) {
+  const temporary=await mkdtemp(join(tmpdir(),'hermes-clarification-browser-'));
+  const root=generatedAssets(temporary);
+  const answerCalls=[],runCalls=[];
+  const streams=[];
+  let currentRunStatus=initialRunStatus;
+  let currentOutput=null;
+  let resolveRehydrateStarted,releaseRehydrate,resolveCompleted;
+  const rehydrateStarted=new Promise(resolve=>{resolveRehydrateStarted=resolve;});
+  const rehydrateGate=new Promise(resolve=>{releaseRehydrate=resolve;});
+  const completed=new Promise(resolve=>{resolveCompleted=resolve;});
+  const item={question_id:'a'.repeat(32),run_id:'r',session_id:'s',
+    question:'Choose safely?',choices:shape==='open'?null:
+      shape.endsWith('-sentinel')?['__other__','A separate choice']:['Keep current','Change it'],
+    multi_select:shape==='multi'||shape==='multi-sentinel',status:itemStatus,answer:null,other:null,
+    created_at:1,updated_at:2};
+  let items=[item];
+  const nativeAnswerCalls=[];
+  let resolveWaiter;
+  const waiter=new Promise(resolve=>{resolveWaiter=resolve;});
+  let resolveSubmitted,releaseAck,resolveStreamReady,resolveConflictReconcile,releaseConflictReconcile;
+  const answerSubmitted=new Promise(resolve=>{resolveSubmitted=resolve;});
+  const acknowledgement=new Promise(resolve=>{releaseAck=resolve;});
+  const streamReady=new Promise(resolve=>{resolveStreamReady=resolve;});
+  const conflictReconcileStarted=new Promise(resolve=>{resolveConflictReconcile=resolve;});
+  const conflictReconcileGate=new Promise(resolve=>{releaseConflictReconcile=resolve;});
+  let clarificationGets=0;
+  const publish=(event,data)=>{
+    for(const response of streams)if(!response.destroyed)
+      response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+  const server=createServer(async(request,response)=>{
+    const url=new URL(request.url,'http://fixture');
+    const path=url.pathname.replace('/hermes/app-api','');
+    const json=(value,status=200)=>{
+      response.writeHead(status,{'Content-Type':'application/json'});
+      response.end(JSON.stringify(value));
+    };
+    if(url.pathname.startsWith('/hermes/app-api/')){
+      if(request.method==='POST'){
+        let body='';for await(const chunk of request)body+=chunk;
+        const value=JSON.parse(body);
+        if(path==='/runs')runCalls.push(value);
+        if(path.endsWith('/answer')){
+          answerCalls.push(value);
+          resolveSubmitted();
+          const outcome=answerOutcomes.shift();
+          if(outcome){
+            if(outcome.item)Object.assign(item,outcome.item);
+            if(outcome.items)items=outcome.items;
+            if(outcome.runStatus)currentRunStatus=outcome.runStatus;
+            return json(outcome.body||{detail:'Synthetic answer rejection',
+              ...(outcome.code?{code:outcome.code}:{})},outcome.status);
+          }
+          if(item.status!=='pending')return json({error:'conflict'},409);
+          if(rejectDuplicate && Array.isArray(value.answer)
+              && new Set(value.answer).size!==value.answer.length)
+            return json({detail:'Invalid clarification answer'},422);
+          nativeAnswerCalls.push(value);
+          item.status='answered';item.answer=value.answer;item.other=value.other;item.updated_at=3;
+          resolveWaiter(value.answer);
+          if(completeAfterAnswer){
+            currentRunStatus='completed';
+            currentOutput=`Native continuation completed: ${value.answer}`;
+            setTimeout(()=>{
+              publish('done',{status:'completed',output:currentOutput});
+              resolveCompleted({status:currentRunStatus,output:currentOutput});
+            },10);
+          }
+          if(holdAnswer)await acknowledgement;
+          return json({question_id:item.question_id,run_id:'r',status:'answered',
+            answer:value.answer,updated_at:item.updated_at});
+        }
+      }
+      if(path==='/auth/me')return json({user:{id:'owner',status:'ready'}});
+      if(path==='/sessions')return json({items:[{id:'s',title:'Clarification fixture'}],total:1});
+      if(path.endsWith('/messages'))return json({items:[],run:{id:'r',session_id:'s',
+        status:initialRunStatus || (item.status==='pending'?'waiting_for_clarification':'running'),
+        input:'Original'}});
+      if(path.endsWith('/clarifications')){
+        clarificationGets++;
+        resolveRehydrateStarted();
+        if(holdRehydrate)await rehydrateGate;
+        if(holdConflictReconcile && answerCalls.length && clarificationGets>1){
+          resolveConflictReconcile();await conflictReconcileGate;
+        }
+        return json({available:true,items,run_id:'r',
+          status:rehydrateStatus||currentRunStatus
+            ||(items.some(value=>value.status==='pending')
+              ?'waiting_for_clarification':'running')});
+      }
+      if(path==='/runs/r'){
+        return json({id:'r',session_id:'s',status:currentRunStatus || 'running',output:currentOutput});
+      }
+      if(path.endsWith('/controls'))return json({steering:false,attempts:[]});
+      if(path.endsWith('/events')){
+        response.writeHead(200,{'Content-Type':'text/event-stream'});
+        response.write(': ready\n\n');streams.push(response);resolveStreamReady();return;
+      }
+      return json({items:[]});
+    }
+    const relative=url.pathname.replace(/^\/hermes\//,'')||'index.html';
+    try{
+      const content=await readFile(join(root,relative));
+      const extension=relative.split('.').at(-1);
+      response.writeHead(200,{'Content-Type':({html:'text/html',css:'text/css',js:'text/javascript',mjs:'text/javascript',svg:'image/svg+xml',webmanifest:'application/manifest+json'})[extension]||'application/octet-stream'});
+      response.end(content);
+    }catch{response.writeHead(404).end();}
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  return {server,item,answerCalls,nativeAnswerCalls,runCalls,waiter,answerSubmitted,streamReady,
+    conflictReconcileStarted,releaseConflictReconcile:()=>releaseConflictReconcile(),
+    rehydrateStarted,completed,streams,releaseAck:()=>releaseAck(),
+    releaseRehydrate:()=>releaseRehydrate(),publish,temporary,
+    url:`http://127.0.0.1:${server.address().port}/hermes/`};
+}
+
+test('real mobile browser answers the same synthetic waiting clarification for all choice modes',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  try{
+    for(const mode of ['single','multi','open']){
+      const fixtureState=await fixture(mode);
+      try{
+        const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+        const errors=[];page.on('pageerror',error=>errors.push(error.message));
+        await page.goto(fixtureState.url);
+        await page.getByRole('button',{name:'Clarification fixture'}).click();
+        const card=page.locator('.clarification-card');
+        await card.waitFor();
+        assert.equal(await card.locator('input:checked').count(),0,'Recommended is never selected automatically');
+        assert.equal(fixtureState.answerCalls.length,0);
+        if(mode==='single'){
+          await card.getByLabel('Change it').check();
+          await card.getByRole('button',{name:'Submit answer'}).focus();
+          await page.keyboard.press('Enter');
+          assert.equal(await fixtureState.waiter,'Change it');
+        }else if(mode==='multi'){
+          const boxes=card.locator('input[type=checkbox]');
+          await boxes.nth(0).check();await boxes.nth(2).check();
+          await card.getByLabel('Other answer').fill('New plan');
+          await card.getByRole('button',{name:'Submit answer'}).click();
+          assert.deepEqual(await fixtureState.waiter,['Keep current','New plan']);
+        }else{
+          const answer=card.getByLabel('Your answer');
+          await answer.fill('Use the safer plan');
+          await card.getByRole('button',{name:'Submit answer'}).click();
+          assert.equal(await fixtureState.waiter,'Use the safer plan');
+        }
+        await card.getByText('Answered').waitFor();
+        assert.equal(await page.locator('.live-activity-heading [role=status]').textContent(),'running');
+        assert.equal(fixtureState.answerCalls.length,1);
+        assert.deepEqual(fixtureState.runCalls,[],'Clarification never starts a new user run');
+        const submit=card.getByRole('button',{name:'Submit answer'});
+        assert.equal(await submit.count(),0);
+        assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),320);
+        assert.deepEqual(errors,[]);
+        await page.close();
+      }finally{
+        fixtureState.server.closeAllConnections();
+        await new Promise(resolve=>fixtureState.server.close(resolve));
+        await rm(fixtureState.temporary,{recursive:true,force:true});
+      }
+    }
+  }finally{await browser.close();}
+});
+
+test('409 answer rejection renders the authoritative first accepted answer',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const fixtureState=await fixture('single',{answerOutcomes:[{
+    status:409,runStatus:'running',
+    item:{status:'answered',answer:'Keep current',other:false,updated_at:3},
+  }]});
+  try{
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    await page.goto(fixtureState.url);
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    const card=page.locator('.clarification-card');
+    await card.waitFor();
+    await card.getByLabel('Change it').check();
+    await card.getByRole('button',{name:'Submit answer'}).click();
+    await card.getByText('Answered').waitFor();
+    assert.match(await card.textContent(),/Answer: Keep current/);
+    assert.doesNotMatch(await card.textContent(),/Attempted answer: Change it/);
+    assert.equal(await card.locator('.clarification-form').count(),0);
+    assert.equal(fixtureState.answerCalls.length,1);
+    assert.deepEqual(fixtureState.nativeAnswerCalls,[]);
+    assert.deepEqual(fixtureState.runCalls,[]);
+    await page.close();
+  }finally{
+    fixtureState.server.closeAllConnections();
+    await new Promise(resolve=>fixtureState.server.close(resolve));
+    await rm(fixtureState.temporary,{recursive:true,force:true});
+    await browser.close();
+  }
+});
+
+test('409 with a still-pending question preserves the draft and requires an explicit retry',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const fixtureState=await fixture('single',{answerOutcomes:[{
+    status:409,runStatus:'waiting_for_clarification',
+    item:{status:'pending',updated_at:3},
+  }]});
+  try{
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    await page.goto(fixtureState.url);
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    const card=page.locator('.clarification-card');
+    await card.waitFor();
+    await card.getByLabel('Change it').check();
+    await card.getByRole('button',{name:'Submit answer'}).click();
+    await card.getByText(/not sent.*still waiting/i).waitFor();
+    assert.equal(await card.locator('input[value="Change it"]').isChecked(),true);
+    assert.equal(await card.getByRole('button',{name:'Submit answer'}).isEnabled(),true);
+    assert.equal(fixtureState.nativeAnswerCalls.length,0);
+    await card.getByRole('button',{name:'Submit answer'}).click();
+    assert.equal(await fixtureState.waiter,'Change it');
+    assert.equal(fixtureState.nativeAnswerCalls.length,1);
+    assert.equal(fixtureState.answerCalls.length,2);
+    assert.deepEqual(fixtureState.runCalls,[]);
+    await page.close();
+  }finally{
+    fixtureState.server.closeAllConnections();
+    await new Promise(resolve=>fixtureState.server.close(resolve));
+    await rm(fixtureState.temporary,{recursive:true,force:true});
+    await browser.close();
+  }
+});
+
+test('explicit pre-dispatch 503 retains the draft and never claims success',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const fixtureState=await fixture('single',{answerOutcomes:[{
+    status:503,code:'clarification_not_sent',
+    body:{detail:'Native clarification controls are unavailable',
+      code:'clarification_not_sent'},
+  }]});
+  try{
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    await page.goto(fixtureState.url);
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    const card=page.locator('.clarification-card');
+    await card.waitFor();
+    await card.getByLabel('Change it').check();
+    await card.getByRole('button',{name:'Submit answer'}).click();
+    await card.getByText(/unavailable.*not sent/i).waitFor();
+    assert.equal(await card.locator('input[value="Change it"]').isChecked(),true);
+    assert.equal(await card.locator('.clarification-form').count(),1);
+    assert.equal(fixtureState.nativeAnswerCalls.length,0);
+    assert.equal(fixtureState.runCalls.length,0);
+    await card.getByRole('button',{name:'Submit answer'}).click();
+    assert.equal(await fixtureState.waiter,'Change it');
+    assert.equal(fixtureState.nativeAnswerCalls.length,1);
+    await page.close();
+  }finally{
+    fixtureState.server.closeAllConnections();
+    await new Promise(resolve=>fixtureState.server.close(resolve));
+    await rm(fixtureState.temporary,{recursive:true,force:true});
+    await browser.close();
+  }
+});
+
+test('unmarked 503 remains ambiguous, unknown, and nonretrying',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const fixtureState=await fixture('single',{answerOutcomes:[{
+    status:503,item:{status:'unknown',answer:'Change it',other:false,updated_at:3},
+    body:{detail:'Synthetic intermediary failure'},
+  }]});
+  try{
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    await page.goto(fixtureState.url);
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    const card=page.locator('.clarification-card');
+    await card.waitFor();
+    await card.getByLabel('Change it').check();
+    await card.getByRole('button',{name:'Submit answer'}).click();
+    await card.getByText('Answer status unknown',{exact:true}).waitFor();
+    assert.match(await card.textContent(),/Attempted answer: Change it/);
+    assert.equal(await card.locator('.clarification-form').count(),0);
+    await page.getByRole('button',{name:'Back to chats'}).click();
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    await page.locator('.clarification-card').getByText('Answer status unknown',{exact:true}).waitFor();
+    assert.equal(fixtureState.answerCalls.length,1);
+    assert.equal(fixtureState.nativeAnswerCalls.length,0);
+    assert.deepEqual(fixtureState.runCalls,[]);
+    await page.close();
+  }finally{
+    fixtureState.server.closeAllConnections();
+    await new Promise(resolve=>fixtureState.server.close(resolve));
+    await rm(fixtureState.temporary,{recursive:true,force:true});
+    await browser.close();
+  }
+});
+
+test('409 reconciliation renders an expired old question and the newer current waiter',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const fixtureState=await fixture('single',{answerOutcomes:[{
+    status:409,runStatus:'waiting_for_clarification',
+    items:[
+      {...questionFixture('a'.repeat(32)),status:'expired',updated_at:3},
+      {...questionFixture('b'.repeat(32)),question:'Choose the next step?',
+        created_at:4,updated_at:4},
+    ],
+  }]});
+  try{
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    await page.goto(fixtureState.url);
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    const oldCard=page.locator('[data-clarification-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]');
+    await oldCard.waitFor();
+    await oldCard.getByLabel('Change it').check();
+    await oldCard.getByRole('button',{name:'Submit answer'}).click();
+    await oldCard.getByText('Expired',{exact:true}).waitFor();
+    const currentCard=page.locator('[data-clarification-id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]');
+    await currentCard.getByRole('button',{name:'Submit answer'}).waitFor();
+    assert.equal(await oldCard.locator('.clarification-form').count(),0);
+    assert.equal(await currentCard.locator('input:checked').count(),0);
+    assert.equal(fixtureState.answerCalls.length,1);
+    assert.deepEqual(fixtureState.nativeAnswerCalls,[]);
+    assert.deepEqual(fixtureState.runCalls,[]);
+    await page.close();
+  }finally{
+    fixtureState.server.closeAllConnections();
+    await new Promise(resolve=>fixtureState.server.close(resolve));
+    await rm(fixtureState.temporary,{recursive:true,force:true});
+    await browser.close();
+  }
+});
+
+test('delayed 409 reconciliation is fenced by newer questions, Stop, terminal, and navigation',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  try{
+    for(const scenario of ['new-question','stopping','terminal','navigation']){
+      const fixtureState=await fixture('single',{
+        holdConflictReconcile:true,
+        answerOutcomes:[{status:409,runStatus:'waiting_for_clarification'}],
+      });
+      const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+      try{
+        await page.goto(fixtureState.url);
+        await page.getByRole('button',{name:'Clarification fixture'}).click();
+        const oldCard=page.locator('.clarification-card').first();
+        await oldCard.waitFor();
+        await fixtureState.streamReady;
+        await oldCard.getByLabel('Change it').check();
+        await oldCard.getByRole('button',{name:'Submit answer'}).click();
+        await fixtureState.answerSubmitted;
+        await fixtureState.conflictReconcileStarted;
+        if(scenario==='new-question'){
+          fixtureState.publish('clarification',{
+            ...questionFixture('b'.repeat(32)),question:'Choose the next step?',
+            created_at:4,updated_at:4,
+          });
+        }else if(scenario==='stopping'){
+          fixtureState.publish('status',{status:'stopping'});
+        }else if(scenario==='terminal'){
+          fixtureState.publish('clarification',{
+            ...questionFixture('a'.repeat(32)),status:'expired',updated_at:3,
+          });
+          fixtureState.publish('done',{status:'completed'});
+        }else await page.getByRole('button',{name:'Back to chats'}).click();
+        fixtureState.releaseConflictReconcile();
+        await page.waitForTimeout(50);
+        if(scenario==='new-question'){
+          const currentCard=page.locator('[data-clarification-id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]');
+          assert.equal(await currentCard.getByRole('button',{name:'Submit answer'}).isEnabled(),true);
+          assert.equal(await oldCard.locator('.clarification-form').count(),0);
+        }else if(scenario==='stopping'){
+          assert.equal(await page.locator('.live-activity-heading [role=status]').textContent(),'stopping');
+          assert.equal(await oldCard.locator('.clarification-form').count(),0);
+        }else if(scenario==='terminal'){
+          assert.equal(await page.locator('.live-activity-heading [role=status]').textContent(),'completed');
+          assert.equal(await oldCard.getByText('Expired',{exact:true}).count(),1);
+        }else assert.equal(await page.locator('.clarification-card').count(),0);
+        assert.deepEqual(fixtureState.nativeAnswerCalls,[]);
+        assert.deepEqual(fixtureState.runCalls,[]);
+      }finally{
+        fixtureState.releaseConflictReconcile();
+        fixtureState.server.closeAllConnections();
+        await new Promise(resolve=>fixtureState.server.close(resolve));
+        await rm(fixtureState.temporary,{recursive:true,force:true});
+        if(!page.isClosed())await page.close();
+      }
+    }
+  }finally{
+    await browser.close();
+  }
+});
+
+test('unknown reopened run tracks verified clarification through same-run completion',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const fixtureState=await fixture('single',{
+    initialRunStatus:'unknown',rehydrateStatus:'waiting_for_clarification',
+    holdRehydrate:true,completeAfterAnswer:true,
+  });
+  try{
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(fixtureState.url);
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    await fixtureState.rehydrateStarted;
+    fixtureState.releaseRehydrate();
+    const card=page.locator('.clarification-card');
+    await card.waitFor();
+    await card.getByLabel('Change it').check();
+    await card.getByRole('button',{name:'Submit answer'}).click();
+    assert.equal(await fixtureState.waiter,'Change it');
+    const completion=await fixtureState.completed;
+    assert.equal(completion.status,'completed');
+    assert.equal(fixtureState.streams.length,1);
+    await page.waitForFunction(()=>
+      document.querySelector('.live-activity-heading [role=status]')?.textContent==='completed');
+    assert.match(await page.locator('.live-message .message-body').textContent(),
+      /Native continuation completed: Change it/);
+    assert.equal(fixtureState.answerCalls.length,1);
+    assert.deepEqual(fixtureState.answerCalls,[{answer:'Change it',other:false}]);
+    assert.deepEqual(fixtureState.runCalls,[]);
+    assert.deepEqual(errors,[]);
+    await page.close();
+  }finally{
+    fixtureState.server.closeAllConnections();
+    await new Promise(resolve=>fixtureState.server.close(resolve));
+    await rm(fixtureState.temporary,{recursive:true,force:true});
+    await browser.close();
+  }
+});
+
+test('late clarification reconciliation cannot reconnect after navigation or teardown',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  try{
+    for(const exit of ['navigation','teardown']){
+      const fixtureState=await fixture('single',{
+        initialRunStatus:'unknown',rehydrateStatus:'waiting_for_clarification',
+        holdRehydrate:true,
+      });
+      const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+      try{
+        await page.goto(fixtureState.url);
+        await page.getByRole('button',{name:'Clarification fixture'}).click();
+        await fixtureState.rehydrateStarted;
+        if(exit==='navigation')await page.getByRole('button',{name:'Back to chats'}).click();
+        else await page.close();
+        fixtureState.releaseRehydrate();
+        if(exit==='navigation'){
+          await page.waitForTimeout(50);
+          assert.equal(await page.locator('.clarification-card').count(),0);
+        }else await new Promise(resolve=>setTimeout(resolve,50));
+        assert.equal(fixtureState.streams.length,0);
+        assert.equal(fixtureState.answerCalls.length,0);
+        assert.deepEqual(fixtureState.runCalls,[]);
+      }finally{
+        fixtureState.server.closeAllConnections();
+        await new Promise(resolve=>fixtureState.server.close(resolve));
+        await rm(fixtureState.temporary,{recursive:true,force:true});
+        if(!page.isClosed())await page.close();
+      }
+    }
+  }finally{
+    await browser.close();
+  }
+});
+
+test('terminal unknown remains non-live after clarification rehydration',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const fixtureState=await fixture('single',{
+    initialRunStatus:'unknown',rehydrateStatus:'unknown',itemStatus:'unknown',
+  });
+  try{
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    await page.goto(fixtureState.url);
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    await fixtureState.rehydrateStarted;
+    await page.locator('.clarification-card').waitFor();
+    assert.equal(await page.locator('.clarification-card .clarification-form').count(),0);
+    assert.equal(fixtureState.streams.length,0);
+    assert.equal(fixtureState.answerCalls.length,0);
+    assert.deepEqual(fixtureState.runCalls,[]);
+    await page.close();
+  }finally{
+    fixtureState.server.closeAllConnections();
+    await new Promise(resolve=>fixtureState.server.close(resolve));
+    await rm(fixtureState.temporary,{recursive:true,force:true});
+    await browser.close();
+  }
+});
+
+test('real browser submits literal __other__ choices separately from dedicated Other',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  try{
+    for(const mode of ['single','multi']){
+      for(const selected of ['literal','other']){
+        const fixtureState=await fixture(`${mode}-sentinel`);
+        try{
+          const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+          await page.goto(fixtureState.url);
+          await page.getByRole('button',{name:'Clarification fixture'}).click();
+          const card=page.locator('.clarification-card');
+          await card.waitFor();
+          assert.equal(await card.locator('input:checked').count(),0);
+          if(selected==='literal'){
+            await card.locator('label.clarification-option').first().locator('input').check();
+          }else{
+            await card.locator('label.clarification-option').last()
+              .locator('input[type=checkbox],input[type=radio]').check();
+            await card.getByLabel('Other answer').fill('A typed answer');
+          }
+          await card.getByRole('button',{name:'Submit answer'}).click();
+          const expected=selected==='literal'
+            ?(mode==='multi'?['__other__']:'__other__')
+            :(mode==='multi'?['A typed answer']:'A typed answer');
+          await page.waitForTimeout(10);
+          assert.equal(fixtureState.answerCalls.length,1,
+            'the selected literal or explicitly selected Other value reaches the same waiter');
+          assert.deepEqual(await fixtureState.waiter,expected);
+          assert.deepEqual(fixtureState.answerCalls,[{answer:expected,other:selected==='other'}]);
+          assert.deepEqual(fixtureState.runCalls,[]);
+          await page.close();
+        }finally{
+          fixtureState.server.closeAllConnections();
+          await new Promise(resolve=>fixtureState.server.close(resolve));
+          await rm(fixtureState.temporary,{recursive:true,force:true});
+        }
+      }
+    }
+  }finally{await browser.close();}
+});
+
+test('late answer acknowledgement cannot regress authoritative run state',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  try{
+    for(const scenario of ['completed','stopping','new-question']){
+      const fixtureState=await fixture('single',{holdAnswer:true});
+      try{
+        const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+        await page.goto(fixtureState.url);
+        await page.getByRole('button',{name:'Clarification fixture'}).click();
+        const card=page.locator('.clarification-card').first();
+        await card.waitFor();await fixtureState.streamReady;
+        await card.getByLabel('Change it').check();
+        await card.getByRole('button',{name:'Submit answer'}).click();
+        await fixtureState.answerSubmitted;
+        if(scenario==='completed')
+          fixtureState.publish('done',{status:'completed'});
+        else if(scenario==='stopping')
+          fixtureState.publish('status',{status:'stopping'});
+        else fixtureState.publish('clarification',{
+          ...fixtureState.item,question_id:'b'.repeat(32),
+          question:'Choose another plan?',status:'pending',created_at:4,updated_at:4,
+        });
+        const expected=scenario==='new-question'?'waiting_for_clarification':scenario;
+        await page.waitForFunction(status=>
+          document.querySelector('.live-activity-heading [role=status]')?.textContent===status,expected);
+        fixtureState.releaseAck();
+        await card.getByText('Answered').waitFor();
+        await page.waitForTimeout(10);
+        assert.equal(await page.locator('.live-activity-heading [role=status]').textContent(),expected);
+        if(scenario==='new-question')
+          await page.locator(`[data-clarification-id="${'b'.repeat(32)}"] .clarification-form`).waitFor();
+        assert.equal(fixtureState.answerCalls.length,1);
+        assert.deepEqual(fixtureState.runCalls,[]);
+        await page.close();
+      }finally{
+        fixtureState.server.closeAllConnections();
+        await new Promise(resolve=>fixtureState.server.close(resolve));
+        await rm(fixtureState.temporary,{recursive:true,force:true});
+      }
+    }
+  }finally{await browser.close();}
+});
+
+test('real browser retains multi-select draft after backend validation rejection',{timeout:60000},async()=>{
+  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
+    headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const fixtureState=await fixture('multi',{rejectDuplicate:true});
+  try{
+    const page=await browser.newPage({viewport:{width:320,height:640},serviceWorkers:'block'});
+    await page.goto(fixtureState.url);
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    const card=page.locator('.clarification-card');
+    await card.waitFor();
+    const boxes=card.locator('input[type=checkbox]');
+    await boxes.nth(0).check();await boxes.nth(2).check();
+    const other=card.getByLabel('Other answer');
+    await other.fill('Keep current');
+    await card.getByRole('button',{name:'Submit answer'}).click();
+    await card.getByText(/correct it here/i).waitFor();
+    assert.equal(fixtureState.answerCalls.length,1);
+    assert.equal(fixtureState.item.status,'pending');
+    assert.equal(await card.locator('.clarification-form').count(),1);
+    assert.equal(await boxes.nth(0).isChecked(),true);
+    assert.equal(await boxes.nth(2).isChecked(),true);
+    assert.equal(await other.inputValue(),'Keep current');
+    await page.getByRole('button',{name:'Back to chats'}).click();
+    await page.getByRole('button',{name:'Clarification fixture'}).click();
+    await card.locator('.clarification-form').waitFor();
+    assert.equal(fixtureState.answerCalls.length,1);
+    assert.deepEqual(fixtureState.runCalls,[]);
+    await boxes.nth(0).check();await boxes.nth(2).check();
+    await other.fill('A different plan');
+    await card.getByRole('button',{name:'Submit answer'}).click();
+    assert.deepEqual(await fixtureState.waiter,['Keep current','A different plan']);
+    assert.equal(fixtureState.answerCalls.length,2);
+    assert.deepEqual(fixtureState.runCalls,[]);
+    await page.close();
+  }finally{
+    fixtureState.server.closeAllConnections();
+    await new Promise(resolve=>fixtureState.server.close(resolve));
+    await rm(fixtureState.temporary,{recursive:true,force:true});
+    await browser.close();
+  }
+});
