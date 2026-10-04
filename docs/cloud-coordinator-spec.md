@@ -887,7 +887,8 @@ command fence and attempt budget, and consumed command IDs are never dropped;
 the oldest command IDs fold into a numeric watermark that still fences replays.
 Positively completed `inventory_blocked` fixer handoffs are terminal too and are
 retired by the same head-change/inactive contract; active, current-head, and
-uncertain work and pending outbox posts remain retained.
+uncertain work and pending outbox posts remain retained. Their retirement comparison
+uses the authenticated `receipt_head` when available, not the dispatch head.
 
 ACK-backed lifecycle retirement does not erase history. The optional
 `lifecycle_context` preserves each retired event's canonical payload and exact

@@ -4706,6 +4706,7 @@ def test_failed_correction_child_write_recovers_reserved_parent_after_reload(
     assert failed["status"] == "completed"
     assert "Review report fields or bindings do not match" in failed["report_error"]
     assert failed["report_session_id"] == f"session-{correction['task_id']}"
+    assert failed["report_session_completed_at"] == "2026-10-01T12:09:00Z"
     assert after_crash.action(original["key"])["report_retry_state"] == "reserved"
     tasks = (api.task_posts, api.review_attempts, api.fix_attempts)
     publications = len([
@@ -4716,8 +4717,12 @@ def test_failed_correction_child_write_recovers_reserved_parent_after_reload(
         status.get("context") == "agent-review" and status.get("state") == "success"
         for rows in api.status_log.values() for status in rows
     )
+    attempts_before_recovery = StateStore(path).snapshot()["enrollments"]["16"][
+        "attempts"
+    ]
 
-    for _ in range(3):
+    settled_tasks = None
+    for index in range(3):
         Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
             apply=True,
         )
@@ -4725,8 +4730,20 @@ def test_failed_correction_child_write_recovers_reserved_parent_after_reload(
             "report_retry_state"
         ] == "exhausted"
         assert StateStore(path).action(correction["key"])["report_error"]
+        current_tasks = (api.task_posts, api.review_attempts, api.fix_attempts)
+        if index == 0:
+            settled_tasks = current_tasks
+        else:
+            assert current_tasks == settled_tasks
+    assert sum(
+        action.get("task_type") == "report-correction"
+        for action in StateStore(path).actions().values()
+    ) == 1
+    assert StateStore(path).action(source_fix["key"])["task_id"] == source_fix["task_id"]
 
-    assert (api.task_posts, api.review_attempts, api.fix_attempts) == tasks
+    assert settled_tasks[0] == tasks[0] + 1
+    assert settled_tasks[1] == tasks[1]
+    assert settled_tasks[2] == tasks[2] + 1
     assert len([
         route for route, _ in api.writes
         if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
@@ -4739,7 +4756,9 @@ def test_failed_correction_child_write_recovers_reserved_parent_after_reload(
         comment for comment in api.comments
         if "single safe correction is unavailable or exhausted" in comment.get("body", "")
     ]) == 1
-    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == (
+        attempts_before_recovery + 1
+    )
 
 
 @pytest.mark.parametrize("superseding_review", [False, True])

@@ -1518,7 +1518,7 @@ def _stale_report_correction_matches_review(action, selected, reviews):
         submitted = datetime.fromisoformat(review["submitted_at"].replace("Z", "+00:00"))
     except (KeyError, TypeError, ValueError):
         return False
-    return submitted > completed
+    return submitted >= completed
 
 
 def _current_source_handoff(actions, issue, head_sha):
@@ -1657,6 +1657,105 @@ def _review_report_correction_parent_needs_recovery(actions, correction):
             report, correction["head"],
         )
     )
+
+
+def _review_report_correction_parent_needs_exhaustion(actions, correction):
+    if (not isinstance(correction, dict)
+            or correction.get("kind") != "review"
+            or correction.get("task_type") != "report-correction"
+            or correction.get("status") != "completed"):
+        return False
+    failed = (
+        isinstance(correction.get("report_error"), str)
+        and bool(correction["report_error"])
+        and len(correction["report_error"]) <= 256
+        and correction.get("report_retry_state") == "exhausted"
+        and correction.get("report_task_terminal_authenticated") is True
+    )
+    report = correction.get("review_report")
+    try:
+        expected_body = _published_review_body(report, correction.get("head"))
+    except (KeyError, TypeError, ValueError, UnicodeError):
+        expected_body = None
+    stale = (
+        correction.get("publication_disposition") == "stale"
+        and correction.get("publication_error") == (
+            "Correction reservation head or main advanced before publication completed"
+        )
+        and isinstance(report, dict)
+        and report.get("schema") == "hermes-independent-review-report-v1"
+        and report.get("nonce") == correction.get("dispatch_nonce")
+        and report.get("session_id") == (
+            correction.get("review_session_id") or correction.get("report_session_id")
+        )
+        and report.get("repository") == REPOSITORY
+        and report.get("repository_id") == REPOSITORY_ID
+        and report.get("pr") == correction.get("issue")
+        and report.get("anchor_comment_id") == correction.get("anchor_comment_id")
+        and report.get("role") == "independent-reviewer"
+        and report.get("head") == correction.get("head")
+        and report.get("base") == correction.get("main_sha")
+        and report.get("source_start_head") == correction.get("source_start_head")
+        and report.get("source_session_id") == correction.get("source_session_id")
+        and report.get("source_comment_id") == correction.get("source_comment_id")
+        and report.get("verdict") == correction.get("report_verdict")
+        and correction.get("publication_intent_body") == expected_body
+    )
+    parent = actions.get(correction.get("correction_of"))
+    if not (failed or stale) or not isinstance(parent, dict):
+        return False
+    parent_task_id = parent.get("task_id")
+    parent_session_id = parent.get("report_session_id")
+    correction_task_id = correction.get("task_id")
+    correction_session_id = (
+        correction.get("review_session_id") or correction.get("report_session_id")
+    )
+    completed_at = (
+        correction.get("review_session_completed_at")
+        or correction.get("report_session_completed_at")
+    )
+    parent_nonce = parent.get("dispatch_nonce")
+    correction_nonce = correction.get("dispatch_nonce")
+    parent_anchor = parent.get("anchor_comment_id")
+    correction_anchor = correction.get("anchor_comment_id")
+    if (parent.get("key") != correction.get("correction_of")
+            or parent.get("kind") != "review"
+            or parent.get("task_type") == "report-correction"
+            or parent.get("status") != "completed"
+            or not parent.get("report_error")
+            or parent.get("report_retry_allowed") is not True
+            or parent.get("report_retry_state") != "reserved"
+            or any(parent.get(field) != correction.get(field) for field in (
+                "issue", "head", "source_task_id", "source_comment_id",
+                "source_session_id", "source_start_head",
+            ))
+            or correction.get(
+                "correction_parent_main_sha", correction.get("main_sha"),
+            ) != parent.get("main_sha")
+            or type(correction.get("issue")) is not int
+            or correction["issue"] <= 0
+            or not _is_sha(correction.get("head"))
+            or not _is_sha(correction.get("main_sha"))
+            or not isinstance(parent_task_id, str)
+            or not parent_task_id or len(parent_task_id) > 128
+            or not isinstance(correction_task_id, str)
+            or not correction_task_id or len(correction_task_id) > 128
+            or correction_task_id == parent_task_id
+            or not _valid_timestamp(correction.get("task_created_at"))
+            or not isinstance(parent_session_id, str)
+            or not parent_session_id or len(parent_session_id) > 128
+            or not isinstance(correction_session_id, str)
+            or not correction_session_id or len(correction_session_id) > 128
+            or (stale and correction_session_id == parent_session_id)
+            or not _valid_timestamp(completed_at)
+            or not isinstance(parent_nonce, str) or not parent_nonce
+            or not isinstance(correction_nonce, str) or not correction_nonce
+            or parent_nonce == correction_nonce
+            or type(parent_anchor) is not int or parent_anchor <= 0
+            or type(correction_anchor) is not int or correction_anchor <= 0
+            or parent_anchor == correction_anchor):
+        return False
+    return True
 
 
 def _review_source_action(actions, issue, report_action, comments):
@@ -2411,9 +2510,16 @@ class Coordinator:
                                 )
                             busy = True
                             continue
+                        task_recovery_authenticated = (
+                            self._review_task_recovery_allowed(action, snapshot, task)
+                        )
                         retry_allowed = (
                             action.get("task_type") != "report-correction"
-                            and self._review_task_recovery_allowed(action, snapshot, task)
+                            and task_recovery_authenticated
+                        )
+                        correction_authenticated = (
+                            action.get("task_type") == "report-correction"
+                            and task_recovery_authenticated
                         )
                         report_session_id = None
                         report_session_completed_at = None
@@ -2421,10 +2527,11 @@ class Coordinator:
                         if (isinstance(sessions, list) and len(sessions) == 1
                                 and isinstance(sessions[0], dict)):
                             session_id = sessions[0].get("id")
-                            if (isinstance(session_id, str) and session_id
+                            if ((retry_allowed or correction_authenticated)
+                                    and isinstance(session_id, str) and session_id
                                     and len(session_id) <= 128):
                                 report_session_id = session_id
-                            if retry_allowed:
+                            if retry_allowed or correction_authenticated:
                                 report_session_completed_at = sessions[0].get(
                                     "completed_at",
                                 )
@@ -2469,12 +2576,32 @@ class Coordinator:
                             report_session_completed_at=report_session_completed_at,
                             report_retry_allowed=retry_allowed,
                             report_retry_state=(
-                                "available" if retry_allowed
-                                else "exhausted" if action.get("task_type") == "report-correction"
-                                else "blocked"
+                                "available" if retry_allowed else (
+                                    "exhausted" if correction_authenticated else "blocked"
+                                )
+                            ),
+                            **(
+                                {"report_task_terminal_authenticated": True}
+                                if correction_authenticated else {}
                             ),
                         )
-                        if action.get("task_type") == "report-correction":
+                        correction_failure = action | {
+                            "status": "completed",
+                            "report_error": message,
+                            "report_retry_allowed": retry_allowed,
+                            "report_retry_state": (
+                                "exhausted" if correction_authenticated else "blocked"
+                            ),
+                            "report_session_id": report_session_id,
+                            "report_session_completed_at": report_session_completed_at,
+                            "report_task_terminal_authenticated": correction_authenticated,
+                        }
+                        if (correction_authenticated
+                                and action.get("task_type") == "report-correction"
+                                and _review_report_correction_parent_needs_exhaustion(
+                                    actions | {key: correction_failure},
+                                    correction_failure,
+                                )):
                             self.store.update_action(
                                 action.get("correction_of"), "completed",
                                 report_retry_state="exhausted",
@@ -2499,6 +2626,21 @@ class Coordinator:
                         )
                         review_publications.append(key)
                     busy = True
+                    continue
+                if (status == "completed"
+                        and action.get("task_type") == "report-correction"
+                        and (
+                            action.get("report_error")
+                            or action.get("publication_disposition") == "stale"
+                        )):
+                    if (apply
+                            and _review_report_correction_parent_needs_exhaustion(
+                                actions, action,
+                            )):
+                        self.store.update_action(
+                            action["correction_of"], "completed",
+                            report_retry_state="exhausted",
+                        )
                     continue
                 if status == "completed" and action.get("report_error"):
                     if action.get("task_type") != "report-correction":
@@ -4638,8 +4780,9 @@ def _retirable_action(action, current_head, inactive):
         }:
             return False
         action_head = (
-            action.get("receipt_head")
-            if action.get("blocker") in {
+            action.get("receipt_head") or action.get("head")
+            if action.get("handoff_state") == "inventory_blocked"
+            or action.get("blocker") in {
                 "conflict_incompatible", "policy_broken", "review_handoff_exhausted",
             }
             else action.get("head")
