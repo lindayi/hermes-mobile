@@ -84,7 +84,18 @@ def test_terminal_queue_frame_releases_waiter_before_status_publication(
         journal = RunJournal(tmp_path / 'runs.sqlite')
         run, _ = journal.submit('owner', 'default', 'session', 'Original', 'original')
         journal.set_upstream('owner', run['id'], 'native-run')
-        gateway = SimpleNamespace(require_execution=lambda: None)
+        frames, starts = [], []
+
+        async def start(session_id, text, history):
+            starts.append((session_id, text))
+            return {'run_id': 'native-run'}
+
+        async def events(run_id):
+            assert run_id == 'native-run'
+            yield frames[0]
+            pytest.fail('Bridge must stop at terminal before reading the later release event')
+
+        gateway = SimpleNamespace(require_execution=lambda: None, start=start, events=events)
         runtime = Orchestrator(journal, gateway, SimpleNamespace(profiles={'default': tmp_path}))
         worker = threading.Thread(target=agent.run_conversation, daemon=True)
         worker.start()
@@ -100,8 +111,9 @@ def test_terminal_queue_frame_releases_waiter_before_status_publication(
             assert terminal['clarifications'][0]['status'] == expected
             assert adapter._controls['native-run']['clarifications'][
                 question['question_id']]['signal'].is_set()
-            # The bridge consumes this frame and never reads the subsequent release event.
-            await runtime._observe_terminal_event(OWNER, run['id'], terminal)
+            frames.append(terminal)
+            await runtime._stream(OWNER, run, [])
+            assert starts == [('session', 'Original')]
             await asyncio.to_thread(worker.join, 1)
             assert not worker.is_alive()
             assert outcome == {'error': f'Clarification {expected}.'}
