@@ -2421,9 +2421,10 @@ class Coordinator:
         started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
         cursor, seen, edited = None, set(), False
         for _ in range(MAX_PAGES):
-            response = self.api.graphql(query, {
-                "issueNumber": issue_number, "after": cursor,
-            })
+            variables = {"issueNumber": issue_number}
+            if cursor is not None:
+                variables["after"] = cursor
+            response = self.api.graphql(query, variables)
             repository = (
                 response.get("data", {}).get("repository")
                 if isinstance(response, dict) else None

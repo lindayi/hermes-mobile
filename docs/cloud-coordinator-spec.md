@@ -79,7 +79,9 @@ their explicitly recorded task/session and a unique unedited owner start command
 The issue-edit GraphQL proof requires an explicitly present nullable
 `lastEditedAt` field and a complete, bounded `userContentEdits` connection;
 explicit null remains the no-last-edit value, while a missing field is incomplete
-evidence.
+evidence. The consumer omits the first-page cursor from GraphQL variables rather
+than letting its CLI adapter serialize Python `None` as a string; subsequent
+pages use the returned cursor. Transport regressions exercise both real adapters.
 The coordinator never selects a task from a task-list search to fill missing
 provenance. A missing, edited, ambiguous, changed-head, unknown-task or incomplete
 source fails closed with a deduplicated blocker and cannot dispatch first review
