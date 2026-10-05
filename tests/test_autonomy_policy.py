@@ -166,8 +166,8 @@ _ISSUE79_REVIEW_RECOVERY_FIXTURE = {
 }
 
 _ISSUE83_INITIAL_REVIEW_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'f3e52fa1146cc4a39a2ed337a85c337554306ef1d237d20ecb9f179c8990ff03',
-    'deploy/issue_starter.py': 'e453d23eebdaaa12fa78c815f563bf11c543b57412b88abfb126ffa12229dfc0',
+    'deploy/cloud_coordinator.py': '4ce82f84f60f41e4c5218d0afd6b70cfdab9b0503ba12048059c03f994d3fa38',
+    'deploy/issue_starter.py': '533cdc8a5c9f64963e457330152c3cd8d8bc465de065accf770ef2345905bcc7',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {

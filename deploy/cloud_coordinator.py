@@ -69,6 +69,7 @@ COPILOT_AGENT_ID = 198982749
 MAIN_BRANCH = "main"
 REPAIR_LIMIT = 3
 REVIEW_REPORT_CORRECTION_LIMIT = 1
+MAX_SESSION_ID_LENGTH = 256
 MAX_RECEIPT_POLLS = 3
 MAX_HANDOFF_POLLS = 6
 HANDOFF_ACTIVE_STATES = frozenset({
@@ -188,6 +189,16 @@ def _valid_timestamp(value):
     return parsed.tzinfo is not None
 
 
+def _valid_session_id(value):
+    return (
+        isinstance(value, str)
+        and re.fullmatch(
+            rf"[A-Za-z0-9._:-]{{1,{MAX_SESSION_ID_LENGTH}}}",
+            value,
+        ) is not None
+    )
+
+
 def enrollment_from_comment(issue, pull, comment, *, api=None):
     """Return a minimal enrollment record only for an exact owner command."""
     user = comment.get("user") if isinstance(comment, dict) else None
@@ -198,7 +209,7 @@ def enrollment_from_comment(issue, pull, comment, *, api=None):
         starter = re.fullmatch(
             r"/hermes enroll ([0-9a-f]{40}) issue ([1-9][0-9]{0,9}) "
             r"body-sha256 ([0-9a-f]{64})(?: source-task ([A-Za-z0-9._-]{1,128}) "
-            r"source-session ([A-Za-z0-9._:-]{1,128})"
+            r"source-session ([A-Za-z0-9._:-]{1,256})"
             r"(?: source-command ([1-9][0-9]{0,19}))?)?", body,
         )
     if body != "/hermes enroll":
@@ -288,8 +299,7 @@ def _valid_starter_admission(value):
         and (value["version"] == 1 or (
             isinstance(value["source_task_id"], str)
             and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value["source_task_id"])
-            and isinstance(value["source_session_id"], str)
-            and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value["source_session_id"])
+            and _valid_session_id(value["source_session_id"])
             and (value["version"] != 3 or (
                 type(value["start_comment_id"]) is int and value["start_comment_id"] > 0
             ))
@@ -314,8 +324,7 @@ def _valid_initial_source(value):
         and _valid_timestamp(value["start_comment_created_at"])
         and isinstance(value["task_id"], str)
         and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value["task_id"]) is not None
-        and isinstance(value["session_id"], str)
-        and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value["session_id"]) is not None
+        and _valid_session_id(value["session_id"])
         and all(_valid_timestamp(value[field]) for field in (
             "task_created_at", "session_created_at", "session_completed_at",
             "admission_comment_created_at",
@@ -1520,12 +1529,15 @@ def _starter_task_artifacts_match(task, pull):
     for artifact in artifacts:
         if not isinstance(artifact, dict) or artifact.get("provider") != "github":
             continue
+        kind = artifact.get("type")
+        if kind not in {"branch", "pull"}:
+            continue
         data = artifact.get("data")
         if not isinstance(data, dict):
-            continue
-        if artifact.get("type") == "branch":
+            return False
+        if kind == "branch":
             branches.append(data)
-        elif artifact.get("type") == "pull":
+        else:
             pulls.append(data)
     if len(branches) != 1 or len(pulls) != 1:
         return False
@@ -1758,12 +1770,12 @@ def _review_report_correction_parent_needs_recovery(actions, correction):
             or not isinstance(parent_task_id, str)
             or not parent_task_id or len(parent_task_id) > 128
             or not isinstance(parent_session_id, str)
-            or not parent_session_id or len(parent_session_id) > 128
+            or not _valid_session_id(parent_session_id)
             or not isinstance(correction_task_id, str)
             or not correction_task_id or len(correction_task_id) > 128
             or correction_task_id == parent_task_id
             or not isinstance(correction_session_id, str)
-            or not correction_session_id or len(correction_session_id) > 128
+            or not _valid_session_id(correction_session_id)
             or correction_session_id == parent_session_id
             or correction.get("dispatch_nonce") == parent.get("dispatch_nonce")
             or correction.get("anchor_comment_id") == parent.get("anchor_comment_id")):
@@ -1874,9 +1886,9 @@ def _review_report_correction_parent_needs_exhaustion(actions, correction):
             or correction_task_id == parent_task_id
             or not _valid_timestamp(correction.get("task_created_at"))
             or not isinstance(parent_session_id, str)
-            or not parent_session_id or len(parent_session_id) > 128
+            or not _valid_session_id(parent_session_id)
             or not isinstance(correction_session_id, str)
-            or not correction_session_id or len(correction_session_id) > 128
+            or not _valid_session_id(correction_session_id)
             or (stale and correction_session_id == parent_session_id)
             or not _valid_timestamp(completed_at)
             or not isinstance(parent_nonce, str) or not parent_nonce
@@ -2003,8 +2015,7 @@ def _valid_receipt_proof(action, comments):
             or action["receipt_comment_id"] <= 0
             or not isinstance(action.get("receipt_task_id"), str)
             or action["receipt_task_id"] != action.get("task_id")
-            or not isinstance(action.get("receipt_session_id"), str)
-            or not action["receipt_session_id"].strip()
+            or not _valid_session_id(action.get("receipt_session_id"))
             or not isinstance(action.get("receipt_nonce"), str)
             or not action["receipt_nonce"].strip()
             or action["receipt_nonce"] != action.get("dispatch_nonce")
@@ -2421,11 +2432,12 @@ class Coordinator:
             edits = issue.get("userContentEdits") if isinstance(issue, dict) else None
             page_info = edits.get("pageInfo") if isinstance(edits, dict) else None
             nodes = edits.get("nodes") if isinstance(edits, dict) else None
-            last_edited = issue.get("lastEditedAt") if isinstance(issue, dict) else None
+            if not isinstance(issue, dict) or "lastEditedAt" not in issue:
+                return None
+            last_edited = issue.get("lastEditedAt")
             if (not isinstance(repository, dict)
                     or repository.get("databaseId") != REPOSITORY_ID
                     or repository.get("nameWithOwner") != REPOSITORY
-                    or not isinstance(issue, dict)
                     or (last_edited is not None and not _valid_timestamp(last_edited))
                     or not isinstance(nodes, list) or not isinstance(page_info, dict)
                     or type(page_info.get("hasNextPage")) is not bool):
@@ -2550,8 +2562,7 @@ class Coordinator:
                         return None, "unverified"
                     session = sessions[0]
                     if (not isinstance(session, dict)
-                            or not isinstance(session.get("id"), str)
-                            or re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session["id"]) is None
+                            or not _valid_session_id(session.get("id"))
                             or session.get("task_id") != task_id
                             or session.get("state") != "completed"
                             or not _github_identity(session.get("user"), OWNER_ID)
@@ -3007,8 +3018,7 @@ class Coordinator:
                                 and isinstance(sessions[0], dict)):
                             session_id = sessions[0].get("id")
                             if ((retry_allowed or correction_authenticated)
-                                    and isinstance(session_id, str) and session_id
-                                    and len(session_id) <= 128):
+                                    and _valid_session_id(session_id)):
                                 report_session_id = session_id
                             if retry_allowed or correction_authenticated:
                                 report_session_completed_at = sessions[0].get(
@@ -3303,8 +3313,7 @@ class Coordinator:
             return False
         session = sessions[0]
         if (not isinstance(session, dict)
-                or not isinstance(session.get("id"), str)
-                or not session["id"] or len(session["id"]) > 128
+                or not _valid_session_id(session.get("id"))
                 or session.get("task_id") != action.get("task_id")
                 or session.get("state") not in (
                     "completed", "failed", "timed_out", "cancelled",
@@ -3717,8 +3726,7 @@ class Coordinator:
             raise ReceiptError("Independent review task evidence is incomplete")
         session = sessions[0]
         if (not isinstance(session, dict)
-                or not isinstance(session.get("id"), str)
-                or not session.get("id") or len(session["id"]) > 128
+                or not _valid_session_id(session.get("id"))
                 or session.get("task_id") != action.get("task_id")
                 or session.get("state") != "completed"
                 or session.get("prompt") != action.get("body")
@@ -3777,7 +3785,7 @@ class Coordinator:
                     or not isinstance(parent_task_id, str)
                     or not parent_task_id or len(parent_task_id) > 128
                     or not isinstance(parent_session_id, str)
-                    or not parent_session_id or len(parent_session_id) > 128
+                    or not _valid_session_id(parent_session_id)
                     or action.get("task_id") == parent_task_id
                     or task.get("id") == parent_task_id
             ):
@@ -5892,9 +5900,7 @@ class StateStore:
                         or not isinstance(parent.get("task_id"), str)
                         or not parent.get("task_id")
                         or len(parent["task_id"]) > 128
-                        or not isinstance(parent.get("report_session_id"), str)
-                        or not parent.get("report_session_id")
-                        or len(parent["report_session_id"]) > 128
+                        or not _valid_session_id(parent.get("report_session_id"))
                         or any(
                             action.get("kind") == "review"
                             and action.get("task_type") == "report-correction"

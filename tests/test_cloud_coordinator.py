@@ -4442,6 +4442,85 @@ def test_dispatched_starter_report_uses_durable_source_identity(tmp_path, change
         assert report["report"]["verdict"] == "pass"
 
 
+def test_starter_source_artifacts_reject_malformed_relevant_entries():
+    from deploy.cloud_coordinator import _starter_task_artifacts_match
+
+    pull = {
+        "id": 123, "node_id": "PR_node",
+        "head": {"ref": "topic"},
+    }
+    artifacts = [
+        {"provider": "github", "type": "branch",
+         "data": {"head_ref": "topic", "base_ref": "main"}},
+        {"provider": "github", "type": "pull",
+         "data": {"id": 123, "global_id": "PR_node"}},
+    ]
+    assert _starter_task_artifacts_match({"artifacts": artifacts}, pull)
+    for kind in ("branch", "pull"):
+        for artifact in (
+            {"provider": "github", "type": kind},
+            {"provider": "github", "type": kind, "data": None},
+            {"provider": "github", "type": kind, "data": []},
+            {"provider": "github", "type": kind, "data": "malformed"},
+        ):
+            assert not _starter_task_artifacts_match(
+                {"artifacts": artifacts + [artifact]}, pull,
+            )
+    assert _starter_task_artifacts_match(
+        {"artifacts": artifacts + [
+            {"provider": "copilot", "type": "branch"},
+            {"provider": "github", "type": "log", "data": None},
+        ]},
+        pull,
+    )
+
+
+def test_starter_issue_edit_evidence_requires_explicit_nullable_field_and_paginates(tmp_path):
+    api = FakeApi()
+    coordinator = Coordinator(api, StateStore(tmp_path / "issue-edit-evidence.json"))
+    calls = []
+
+    def graphql(query, variables):
+        calls.append(variables.get("after"))
+        issue = {
+            "lastEditedAt": None,
+            "userContentEdits": {
+                "nodes": [],
+                "pageInfo": {
+                    "hasNextPage": variables.get("after") is None,
+                    "endCursor": "next" if variables.get("after") is None else None,
+                },
+            },
+        }
+        if variables.get("after") is not None:
+            issue["userContentEdits"]["nodes"] = [
+                {"editedAt": "2026-10-01T09:30:00Z"},
+            ]
+        return {
+            "data": {"repository": {
+                "databaseId": 1399942965,
+                "nameWithOwner": "lindayi/hermes-mobile",
+                "issue": issue,
+            }},
+        }
+
+    api.graphql = graphql
+    assert coordinator._starter_issue_content_edited_after(
+        28, "2026-10-01T10:00:00Z",
+    ) is False
+    assert calls == [None, "next"]
+
+    def missing_field(query, variables):
+        response = graphql(query, variables)
+        response["data"]["repository"]["issue"].pop("lastEditedAt")
+        return response
+
+    api.graphql = missing_field
+    assert coordinator._starter_issue_content_edited_after(
+        28, "2026-10-01T10:00:00Z",
+    ) is None
+
+
 def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
     class ColdStartAgentReviewApi(FakeApi):
         def get_all(self, route, *, collection=None):
@@ -6683,12 +6762,17 @@ def test_unrepresentable_review_inventory_persists_one_deduplicated_blocker(
 
 
 @pytest.mark.parametrize(("session_id", "eligible"), [
-    ("s" * 129, False),
+    ("s" * 128, True),
+    ("s" * 129, True),
+    ("s" * 256, True),
+    ("s" * 257, False),
     ("s" * (MAX_STATE_BYTES + 1), False),
     (17, False),
     (["session"], False),
-    ("s" * 128, True),
-], ids=["129-characters", "oversized", "integer", "list", "valid-limit"])
+], ids=[
+    "128-characters", "129-characters", "256-characters", "257-characters",
+    "oversized", "integer", "list",
+])
 def test_review_report_recovery_bounds_external_session_metadata(
         tmp_path, session_id, eligible):
     api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)

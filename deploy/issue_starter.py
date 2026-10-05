@@ -1821,6 +1821,15 @@ class Coordinator:
             f"source-task {record['task_id']} source-session {source_session_id} "
             f"source-command {record['command_id']}"
         )
+        legacy_enrollment_body = (
+            f"/hermes enroll {record['head_sha']} issue {record['issue']} "
+            f"body-sha256 {record['pull_body_sha256']} "
+            f"source-task {record['task_id']} source-session {source_session_id}"
+        )
+        original_enrollment_body = (
+            f"/hermes enroll {record['head_sha']} issue {record['issue']} "
+            f"body-sha256 {record['pull_body_sha256']}"
+        )
         enrollment_state = record.get("enrollment_state")
         if enrollment_state == "reserved":
             self.store.update(key, {
@@ -1878,8 +1887,12 @@ class Coordinator:
                     "handed_off": 1, "blocked": 0}
         if enrollment_state in {"started", "uncertain"}:
             eligible = next(
-                (item for item in comments if _verified_owner_comment(
-                    item, enrollment_body, now=self.clock(),
+                (item for item in comments if (
+                    any(_verified_owner_comment(item, body, now=self.clock())
+                        for body in (
+                            enrollment_body, legacy_enrollment_body,
+                            original_enrollment_body,
+                        ))
                 ) and item["id"] > record.get("comment_high_water", 0)),
                 None,
             )

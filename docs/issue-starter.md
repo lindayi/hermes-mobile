@@ -161,6 +161,13 @@ send; an uncertain send is never reposted. Both direct POST confirmation and
 uncertain-send reconciliation require a final fresh pull with `draft` explicitly
 `false` before recording completion. A re-draft blocks completion while preserving
 the consumed enrollment attempt: neither enrollment nor readiness is retried.
+After upgrade, a `started`/`uncertain` record may also reconcile either exact
+prior format: the version-2 comment without `source-command`, or the original
+version-1 comment without `source-task`/`source-session`. Reconciliation requires
+an immutable authenticated owner comment above the saved high-water and a matching
+saved task/session binding (including a historical `link_intent.session_id`).
+This read-only compatibility path never resends enrollment; malformed, edited,
+stale or unbound evidence stays blocked.
 This producer-side certification does not retract a comment already sent or make
 the handoff atomic. The paired cloud coordinator authenticates the same immutable
 owner command, exact current head and body digest, explicitly ready PR, and

@@ -76,6 +76,10 @@ No ledger is written, no enrollment is replayed and no repair receipt
 is manufactured. Missing, unreadable, ambiguous or changed saved evidence fails
 closed. Version-2 admissions can be revalidated only through
 their explicitly recorded task/session and a unique unedited owner start command.
+The issue-edit GraphQL proof requires an explicitly present nullable
+`lastEditedAt` field and a complete, bounded `userContentEdits` connection;
+explicit null remains the no-last-edit value, while a missing field is incomplete
+evidence.
 The coordinator never selects a task from a task-list search to fill missing
 provenance. A missing, edited, ambiguous, changed-head, unknown-task or incomplete
 source fails closed with a deduplicated blocker and cannot dispatch first review
@@ -101,6 +105,10 @@ bound. Explicit malformed or out-of-order completion timestamps are rejected,
 not replaced. The bound is persisted unchanged on restart. Artifact selection
 matches the producer: at most 20 entries, with exactly one GitHub branch and one
 GitHub pull matching the current PR; unrelated artifacts confer no authority.
+Malformed data on a relevant GitHub branch or pull artifact invalidates the whole
+relevant inventory. Session IDs use the starter's `[A-Za-z0-9._:-]{1,256}`
+contract at enrollment, admission, source resolution and downstream review/report
+boundaries; 257-character IDs are rejected.
 The pull artifact's optional `global_id` may be absent only because authenticated
 PR detail supplies the bound node identity; explicit null or mismatch is rejected.
 An already accepted exact-head independent review suppresses first-review

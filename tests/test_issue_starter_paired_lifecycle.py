@@ -353,7 +353,8 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
 
 def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
                             completed_at=True, extra_artifact=False,
-                            existing_closing=True, id_only_artifact=False):
+                            existing_closing=True, id_only_artifact=False,
+                            session_id="session-1"):
     from test_issue_starter import (
         FakeApi as StarterApi, completed_task, make_coordinator, pull_request, start_task,
     )
@@ -379,6 +380,7 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
     producer.task_detail["created_at"] = "2026-10-01T11:01:00Z"
     producer.task_detail["sessions"][0]["created_at"] = "2026-10-01T11:02:00Z"
     producer.task_detail["sessions"][0]["completed_at"] = "2026-10-01T11:05:00Z"
+    producer.task_detail["sessions"][0]["id"] = session_id
     if id_only_artifact:
         producer.task_detail["artifacts"][1]["data"].pop("global_id")
     if not completed_at:
@@ -1597,3 +1599,172 @@ def test_admitted_starter_body_report_and_v2_receipt_survive_restart_and_manual_
     assert result["auto_merge_requested"], result["reasons"]
     assert len(api.graphql_writes) == 1 and api.fix_attempts == 1
     assert api.review_attempts == 0
+
+
+@pytest.mark.parametrize("length", [128, 129, 256])
+def test_starter_source_session_boundary_survives_paired_admission(tmp_path, length):
+    session_id = "s" * length
+    api, store = actual_starter_consumer(
+        tmp_path, admit=False, missing_review=True, session_id=session_id,
+    )
+    api.unresolved = False
+    for _ in range(3):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1791210000).run(apply=True)
+    source = StateStore(store.path).snapshot()["enrollments"]["16"]["initial_source"]
+    assert source["session_id"] == session_id
+    review = next(
+        action for action in StateStore(store.path).actions().values()
+        if action["kind"] == "review"
+    )
+    api.complete_review_task(
+        review["task_id"], review,
+        source_action={
+            "source_start_head": source["head_sha"],
+            "source_session_id": source["session_id"],
+            "source_comment_id": source["admission_comment_id"],
+        },
+        verdict="pass", findings=[], report="The complete source head is accepted.",
+    )
+    for _ in range(3):
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1791210000,
+        ).run(apply=True)["pull_requests"][0]
+    assert result["review_valid"] and result["auto_merge_eligible"]
+    assert api.review_attempts == 1 and api.fix_attempts == 0
+    if length == 256:
+        from deploy.cloud_coordinator import (
+            _valid_initial_source, _valid_starter_admission, enrollment_from_comment,
+        )
+
+        enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+        invalid_admission = deepcopy(enrollment["starter_admission"])
+        invalid_admission["source_session_id"] = "s" * 257
+        invalid_source = deepcopy(source)
+        invalid_source["session_id"] = "s" * 257
+        assert not _valid_starter_admission(invalid_admission)
+        assert not _valid_initial_source(invalid_source)
+        invalid_comment = deepcopy(api.comments[0])
+        invalid_comment["body"] = invalid_comment["body"].replace(
+            f"source-session {'s' * 256}",
+            f"source-session {'s' * 257}",
+        )
+        assert enrollment_from_comment(
+            api.issue, api.pull, invalid_comment, api=api,
+        ) is None
+
+
+def test_upgraded_starter_reconciles_old_format_lost_response_and_consumer_replays_once(
+        tmp_path):
+    from test_issue_starter import (
+        FakeApi as StarterApi, completed_task, make_coordinator, pull_request, start_task,
+    )
+
+    class Starter16Api(StarterApi):
+        def get(self, route):
+            return super().get(route.replace("/issues/16/comments", "/issues/41/comments"))
+
+        def post(self, route, body):
+            if (route.endswith("/issues/16/comments")
+                    and body.get("body", "").startswith("/hermes enroll ")):
+                legacy_body = body["body"].split(" source-task ", 1)[0]
+                self.posts.append((route, body))
+                self.comments.append({
+                    "id": 9101, "body": legacy_body,
+                    "created_at": "2026-10-01T21:00:00Z",
+                    "updated_at": "2026-10-01T21:00:00Z",
+                    "user": {"id": OWNER},
+                })
+                raise TimeoutError("accepted pre-upgrade response was lost")
+            return super().post(route.replace("/issues/16/comments", "/issues/41/comments"), body)
+
+    pull = pull_request(pull_id=160000016, node_id="PR_node_16", head_ref="topic")
+    pull["number"] = 16
+    producer = Starter16Api(pulls=[pull])
+    producer.closing_issues = []
+    producer.comments[0]["created_at"] = "2026-10-01T11:00:00Z"
+    producer.comments[0]["updated_at"] = "2026-10-01T11:00:00Z"
+    start_task(tmp_path, producer)
+    producer.task_detail = completed_task(
+        pull_id=pull["id"], node_id=pull["node_id"], head_ref="topic",
+    )
+    producer.task_detail["created_at"] = "2026-10-01T11:01:00Z"
+    producer.task_detail["sessions"][0]["created_at"] = "2026-10-01T11:02:00Z"
+    producer.task_detail["sessions"][0]["completed_at"] = "2026-10-01T11:05:00Z"
+
+    first = make_coordinator(tmp_path, producer).run(apply=True)
+    producer_path = make_coordinator(tmp_path, producer).store.path
+    pending = json.loads(producer_path.read_text())["commands"]["28:9001"]
+    assert first["blocked"] == 1
+    assert pending["phase"] == "handoff_uncertain"
+    assert pending["link_intent"]["session_id"] == "session-1"
+    pending.pop("source_session_id")
+    saved_pending = json.loads(producer_path.read_text())
+    saved_pending["commands"]["28:9001"] = pending
+    producer_path.write_text(json.dumps(saved_pending))
+
+    recovered = make_coordinator(tmp_path, producer).run(apply=True)
+    assert recovered["handed_off"] == 1
+    saved = json.loads(producer_path.read_text())["commands"]["28:9001"]
+    assert saved["phase"] == "handed_off" and saved["enrollment_state"] == "done"
+    assert len([post for post in producer.posts
+                if post[0].endswith("/issues/16/comments")]) == 1
+    legacy_comment = next(item for item in producer.comments if item["id"] == 9101)
+
+    api = FakeApi(unresolved=True)
+    api.comments = [deepcopy(legacy_comment)]
+    api.pull.update(pull)
+    api.pull["draft"] = False
+    api.initial_source_issue = deepcopy(producer.current_issue)
+    api.source_comments = deepcopy(producer.comments)
+    api.source_timeline = deepcopy(producer.timeline)
+    api.starter_state_path = producer_path
+    api.issue_edit_evidence = {
+        "lastEditedAt": None, "nodes": [],
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+    }
+    api.tasks[producer.task_detail["id"]] = deepcopy(producer.task_detail)
+    api.task_posts = 1
+    api.unresolved = False
+    original_get, original_get_all = api.get, api.get_all
+
+    def get(route):
+        if route == "repos/lindayi/hermes-mobile/issues/28":
+            return deepcopy(producer.current_issue)
+        return original_get(route)
+
+    def get_all(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues/28/comments?"):
+            return deepcopy(producer.comments)
+        if route.startswith("repos/lindayi/hermes-mobile/issues/28/timeline?"):
+            return deepcopy(producer.timeline)
+        return original_get_all(route, collection=collection)
+
+    api.get, api.get_all = get, get_all
+    api.owner_review_body = "No independent review has been published."
+    api.pull_files = [
+        {"filename": "README.md", "status": "modified", "sha": "f" * 40},
+    ]
+    api.blob_contents["f" * 40] = b"Synthetic starter source\n"
+    attach_closing_issue_api(api)
+    store = StateStore(tmp_path / "legacy-consumer" / "state.json")
+    for _ in range(3):
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1791210000,
+            starter_state_path=producer_path,
+        ).run(apply=True)["pull_requests"][0]
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    worker = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1791210000,
+        starter_state_path=producer_path,
+    )
+    source, source_error = worker._resolve_initial_source({
+        "enrollment": enrollment, "pull": api.pull,
+        "head": api.pull["head"]["sha"], "comments": api.comments,
+    })
+    assert "initial_source" in enrollment, result["reasons"]
+    assert source_error is None and source == enrollment["initial_source"]
+    source = enrollment["initial_source"]
+    assert source["session_id"] == pending["link_intent"]["session_id"]
+    assert api.review_attempts == 1 and api.fix_attempts == 0
+    assert len([action for action in StateStore(store.path).actions().values()
+                if action["kind"] == "review"]) == 1
