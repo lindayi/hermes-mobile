@@ -57,6 +57,7 @@ TERMINAL_PHASES = {"failed", "handed_off", "stale_authorization", "handoff_faile
 IMMUTABLE_FIELDS = {
     "issue", "command_id", "accepted_title_body_sha256", "accepted_at",
     "pull_body_sha256", "pull_base_sha", "link_intent",
+    "source_session_id",
 }
 PHASES = {
     "reserved", "dispatch_started", "unknown", "task_created", "failed",
@@ -129,6 +130,11 @@ def _valid_state_record(key, item):
                      or not TASK_ID_RE.fullmatch(item["task_id"])))):
         return False
     pull_body_sha = item.get("pull_body_sha256")
+    source_session_id = item.get("source_session_id")
+    if (source_session_id is not None
+            and (not isinstance(source_session_id, str)
+                 or not SESSION_ID_RE.fullmatch(source_session_id))):
+        return False
     if (pull_body_sha is not None
             and (not isinstance(pull_body_sha, str)
                  or re.fullmatch(r"[0-9a-f]{64}", pull_body_sha) is None)):
@@ -1599,6 +1605,7 @@ class Coordinator:
             # our own POST; only later comments can reconcile an uncertain send.
             self.store.update(key, {
                 "phase": "handoff_reserved",
+                "source_session_id": self._authenticated_task_session(task),
                 "pull_number": pull["number"],
                 "pull_node_id": pull["node_id"],
                 "head_sha": pull["head"]["sha"],
@@ -1790,6 +1797,9 @@ class Coordinator:
             source_session_id = self._authenticated_task_session(source_task)
             if source_session_id is None:
                 raise CoordinatorError("Completed task session identity did not match")
+            if (record.get("source_session_id") is not None
+                    and source_session_id != record["source_session_id"]):
+                raise CoordinatorError("Completed task session identity changed")
             pull = self._current_pull(record)
             if pull.get("draft") is not False:
                 raise CoordinatorError("Task pull request is no longer ready for enrollment")

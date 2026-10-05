@@ -337,8 +337,8 @@ required-check projection handling:
 
 | Issue #83 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `5a3d5f6d0b3c0bcf1983c057bad2dd62bb38b162a504ff97f56749eba0765069` |
-| `deploy/issue_starter.py` | `2341c8be8cffca78b215869c8088f3befb1e3838bdc04988022b477a1189c3a6` |
+| `deploy/cloud_coordinator.py` | `d8887e679ffa50eb0216cdca8366868ac8dd2354d2f595c8b62e21ecee9fb7cb` |
+| `deploy/issue_starter.py` | `1aa462f4416cf16897665a28919be36401d4358b9031d04a840228adaec60ae7` |
 
 The independent policy test fixture pins these exact candidate bytes. The update
 preserves earlier issue #43, #50, and #79 history; it establishes source consistency

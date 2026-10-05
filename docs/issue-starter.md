@@ -178,6 +178,15 @@ The consumer also reauthenticates the referenced completed task and its single
 completed owner session, exact task artifacts, and source issue. It requires the
 exact unedited owner `/hermes start` comment, unchanged issue body, no post-start
 content edits or renames, and the start/task/session/admission timestamps in order.
+The optional session `completed_at` may be omitted by GitHub: the consumer uses
+the immutable owner-authenticated completed-source enrollment timestamp as a
+conservative completion upper bound, while retaining completed task/session
+states and ordered authenticated creation evidence. This is owner handoff
+certification, not a provider-reported exact completion timestamp. Explicit invalid completion
+timestamps fail closed. The producer and consumer both select exactly one GitHub
+branch and pull from at most 20 artifacts; unrelated artifacts do not block an
+otherwise bound handoff. Accepted exact-head independent review suppresses
+redundant first-review dispatch.
 The start-comment ID in the producer command prevents substitution of another
 otherwise-valid owner command. It persists verified initial-source identity before
 dispatching one independent-review task; that dispatch does not publish a review or
@@ -186,8 +195,19 @@ review dispatch with a deduplicated outcome.
 Compact versioned `starter_admission` and `initial_source` provenance are committed
 with enrollment. Existing version-1/2 admissions are never completed by searching
 the task list for a matching artifact: a version-1 admission is recoverable only
-when its authenticated initial-source record was already durably saved, and a
-version-2 admission must validate its explicitly recorded task/session and unique
+when its authenticated initial-source record was already durably saved, or through
+the coordinator's explicit read-only `--starter-state <path>` bridge to this
+owner-private ledger. The bridge selects exactly one completed handed-off record
+bound to the enrolled issue/PR/node/head/branch/base/body and saved comment
+high-water, then reauthenticates its exact start command, accepted title/body,
+task/session and live GitHub closing authority. Current handoff reservations
+persist immutable `source_session_id`; the bridge explicitly compares that saved
+binding to the fetched session. Historical canonical-link reservations may supply
+their saved `link_intent.session_id` instead, with agreement required when both
+are present. Missing saved session identity blocks recovery rather than adopting
+the task's currently returned session. It never writes the starter
+ledger, re-enrolls, resets budgets, selects task-list candidates or invents a
+fixer receipt. A version-2 admission must validate its explicitly recorded task/session and unique
 unedited start command. Recovery preserves existing task claims, receipts, and
 repair history; it does not fabricate source evidence or reset ledgers.
 This is an admission condition, not a lifetime body/linkage pin: later legitimate

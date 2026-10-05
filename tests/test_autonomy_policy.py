@@ -166,8 +166,8 @@ _ISSUE79_REVIEW_RECOVERY_FIXTURE = {
 }
 
 _ISSUE83_INITIAL_REVIEW_FIXTURE = {
-    'deploy/cloud_coordinator.py': '5a3d5f6d0b3c0bcf1983c057bad2dd62bb38b162a504ff97f56749eba0765069',
-    'deploy/issue_starter.py': '2341c8be8cffca78b215869c8088f3befb1e3838bdc04988022b477a1189c3a6',
+    'deploy/cloud_coordinator.py': 'd8887e679ffa50eb0216cdca8366868ac8dd2354d2f595c8b62e21ecee9fb7cb',
+    'deploy/issue_starter.py': '1aa462f4416cf16897665a28919be36401d4358b9031d04a840228adaec60ae7',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
@@ -855,11 +855,13 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
         'deploy/workflow_lifecycle.py', 'deploy/workflow_lifecycle_sources.py',
         'deploy/workflow_notifications.py',
     }
-    assert closure == shared | coordinator
-    assert len(closure) == 38
+    starter_bridge = {'deploy/issue_starter.py'}
+    assert closure == shared | coordinator | starter_bridge
+    assert len(closure) == 39
     assert closure <= set(REQUIRED_FILES)
     assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in coordinator)
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract' for path in shared)
+    assert all(SOURCE_BLOCKERS[path] == 'autonomy-launch-contract' for path in starter_bridge)
     assert not dynamic_imports
     assert not unresolved_imports
 

@@ -1325,8 +1325,9 @@ def _required_checks(api):
                 normalized_checks = _required_contexts(checks)
                 normalized_contexts = _required_contexts(contexts)
                 if (not isinstance(checks, list) or not isinstance(contexts, list)
-                        or not normalized_checks or not normalized_contexts):
+                        or not all(isinstance(context, str) for context in contexts)):
                     add_checks(contexts)
+                    malformed = True
                 else:
                     check_names = [item["context"] for item in normalized_checks]
                     context_names = [item["context"] for item in normalized_contexts]
@@ -1512,20 +1513,20 @@ def _task_scoped(task, snapshot):
 
 def _starter_task_artifacts_match(task, pull):
     artifacts = task.get("artifacts") if isinstance(task, dict) else None
-    if not isinstance(artifacts, list) or len(artifacts) != 2:
+    if not isinstance(artifacts, list) or len(artifacts) > 20:
         return False
     branches = []
     pulls = []
     for artifact in artifacts:
         if not isinstance(artifact, dict) or artifact.get("provider") != "github":
-            return False
+            continue
         data = artifact.get("data")
+        if not isinstance(data, dict):
+            continue
         if artifact.get("type") == "branch":
             branches.append(data)
         elif artifact.get("type") == "pull":
             pulls.append(data)
-        else:
-            return False
     if len(branches) != 1 or len(pulls) != 1:
         return False
     branch, linked_pull = branches[0], pulls[0]
@@ -2013,9 +2014,9 @@ def _valid_receipt_proof(action, comments):
             or not isinstance(action.get("receipt_body"), str)
             or not isinstance(action.get("receipt_created_at"), str)
             or not _valid_timestamp(action.get("receipt_completed_at"))
-            or not _valid_timestamp(action.get("receipt_session_completed_at"))
-            or action.get("receipt_completed_at")
-               != action.get("receipt_session_completed_at")
+            or ("receipt_session_completed_at" in action
+                and action.get("receipt_completed_at")
+                    != action["receipt_session_completed_at"])
             or not isinstance(comments, list)):
         return False
     version = action.get("receipt_version", "v1")
@@ -2217,12 +2218,13 @@ class Coordinator:
     """Poll, plan, and (only on explicit request) apply bounded public GitHub actions."""
 
     def __init__(self, api, store, *, clock=time.time, owner_user_id=None,
-                 lifecycle_source_paths=None):
+                 lifecycle_source_paths=None, starter_state_path=None):
         self.api = api
         self.store = store
         self.clock = clock
         self.owner_user_id = owner_user_id
         self.lifecycle_source_paths = lifecycle_source_paths
+        self.starter_state_path = starter_state_path
 
     def _identity(self):
         repository = self.api.get(f"repos/{REPOSITORY}")
@@ -2447,6 +2449,35 @@ class Coordinator:
             cursor = next_cursor
         return None
 
+    def _saved_starter_binding(self, admission, pull):
+        """Read the starter's owner-private dispatch ledger, never adopt listed tasks."""
+        if self.starter_state_path is None:
+            return None
+        from deploy.issue_starter import StateStore as StarterStore, CoordinatorError as StarterError
+
+        try:
+            records = StarterStore(self.starter_state_path).snapshot()["commands"]
+        except (StarterError, OSError, ValueError):
+            return None
+        matches = [
+            record for record in records.values()
+            if record.get("phase") == "handed_off"
+            and record.get("enrollment_state") == "done"
+            and record.get("ready_state") == "done"
+            and record.get("issue") == admission["issue_number"]
+            and type(record.get("pull_number")) is int
+            and record.get("pull_number") == pull.get("number")
+            and record.get("pull_node_id") == pull.get("node_id")
+            and record.get("head_sha") == admission["head_sha"]
+            and record.get("branch") == pull.get("head", {}).get("ref")
+            and record.get("pull_body_sha256") == admission["body_sha256"]
+            and record.get("pull_base_sha") == pull.get("base", {}).get("sha")
+            and type(record.get("comment_high_water")) is int
+            and record["comment_high_water"] >= 0
+            and admission["comment_id"] > record["comment_high_water"]
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     def _resolve_initial_source(self, snapshot):
                 enrollment = snapshot.get("enrollment")
                 admission = enrollment.get("starter_admission") if isinstance(enrollment, dict) else None
@@ -2485,6 +2516,10 @@ class Coordinator:
                         or admission_comments[0].get("updated_at") != admission["comment_created_at"]):
                     return None, "changed"
                 try:
+                    saved_binding = (
+                        self._saved_starter_binding(admission, pull)
+                        if admission["version"] == 1 else None
+                    )
                     task_id = admission.get("source_task_id")
                     source = enrollment.get("initial_source")
                     if source is not None:
@@ -2493,6 +2528,8 @@ class Coordinator:
                         if source["head_sha"] != head or source["issue_number"] != admission["issue_number"]:
                             return None, "changed"
                         task_id = source["task_id"]
+                    if task_id is None and saved_binding is not None:
+                        task_id = saved_binding.get("task_id")
                     if not isinstance(task_id, str) or not task_id:
                         return None, "missing"
                     task = self.api.get(
@@ -2528,6 +2565,27 @@ class Coordinator:
                         return None, "changed"
                     if (source is not None and source["session_id"] != session["id"]):
                         return None, "changed"
+                    if admission["version"] == 1 and source is None:
+                        saved_session_id = (
+                            saved_binding.get("source_session_id")
+                            if saved_binding is not None else None
+                        )
+                        link_intent = (
+                            saved_binding.get("link_intent")
+                            if saved_binding is not None else None
+                        )
+                        linked_session_id = (
+                            link_intent.get("session_id")
+                            if isinstance(link_intent, dict) else None
+                        )
+                        if (saved_session_id is None and linked_session_id is None):
+                            return None, "missing"
+                        if (saved_binding.get("task_id") != task_id
+                                or (saved_session_id is not None
+                                    and saved_session_id != session["id"])
+                                or (linked_session_id is not None
+                                    and linked_session_id != session["id"])):
+                            return None, "changed"
                     from deploy.pull_handoff_binding import _closing_issue_linked
 
                     if not _closing_issue_linked(self.api, pull, admission["issue_number"]):
@@ -2555,7 +2613,14 @@ class Coordinator:
                         return None, "unverified"
                     task_created = task.get("created_at")
                     session_created = session.get("created_at")
+                    # The immutable owner handoff certifies a completed session by
+                    # admission time when GitHub omits its optional completion time.
                     session_completed = session.get("completed_at")
+                    if session_completed is None:
+                        session_completed = (
+                            source["session_completed_at"] if source is not None
+                            else admission["comment_created_at"]
+                        )
                     if not all(_valid_timestamp(value) for value in (
                         task_created, session_created, session_completed,
                     )):
@@ -2567,7 +2632,10 @@ class Coordinator:
                         admission["comment_created_at"].replace("Z", "+00:00"),
                     )
                     starts = []
-                    expected_start_id = admission.get("start_comment_id")
+                    expected_start_id = (
+                        saved_binding["command_id"] if saved_binding is not None
+                        else admission.get("start_comment_id")
+                    )
                     for comment in source_comments:
                         if (not isinstance(comment, dict) or comment.get("body") != "/hermes start"
                                 or not _github_identity(comment.get("user"), OWNER_ID)
@@ -2583,6 +2651,13 @@ class Coordinator:
                     if len(starts) != 1:
                         return None, "missing"
                     start_at, start_comment = starts[0]
+                    if saved_binding is not None:
+                        accepted_digest = hashlib.sha256((
+                            source_issue["title"] + "\0" + source_issue["body"]
+                        ).encode("utf-8")).hexdigest()
+                        if (saved_binding["accepted_at"] != start_comment["created_at"]
+                                or saved_binding["accepted_title_body_sha256"] != accepted_digest):
+                            return None, "changed"
                     if not (start_at <= task_created_at <= session_created_at
                             <= session_completed_at <= admission_at):
                         return None, "changed"
@@ -3612,8 +3687,15 @@ class Coordinator:
                 "Independent review correction reservation snapshot is no longer current"
             )
         if action.get("source_type") == "starter":
-            source = snapshot.get("initial_source")
+            source = self.store.snapshot()["enrollments"].get(
+                str(action.get("issue")), {},
+            ).get("initial_source")
             if (not _valid_initial_source(source)
+                    or source.get("head_sha") != action.get("head")
+                    or action.get("head") != snapshot.get("head")
+                    or source.get("pull_id") != snapshot["pull"].get("id")
+                    or source.get("pull_node_id") != snapshot["pull"].get("node_id")
+                    or source.get("head_ref") != snapshot["pull"].get("head", {}).get("ref")
                     or source.get("head_sha") != action.get("source_start_head")
                     or source.get("task_id") != action.get("source_task_id")
                     or source.get("session_id") != action.get("source_session_id")
@@ -4051,7 +4133,7 @@ class Coordinator:
         mergeability_unknown = _mergeability_unknown(snapshot["pull"])
         source_handoff = _current_source_handoff(actions, number, head)
         initial_source = snapshot.get("initial_source")
-        if source_handoff is None and _valid_initial_source(initial_source):
+        if not review_ok and source_handoff is None and _valid_initial_source(initial_source):
             source_handoff = {
                 "kind": "starter-source", "issue": number, "head": head,
                 "status": "completed", "handoff_state": "waiting_review",
@@ -4118,7 +4200,7 @@ class Coordinator:
         report_source = (
             _review_source_action(
                 actions, number, report_failure, snapshot["comments"],
-                snapshot.get("initial_source"),
+                snapshot["enrollment"].get("initial_source"),
             )
             if report_failure else None
         )
@@ -4204,13 +4286,27 @@ class Coordinator:
         if not review_ok:
             reasons.append(("review", "A current structured independent-agent review and resolved conversations are required."))
         if (not review_ok and source_handoff is None and repair is None
-                and _valid_starter_admission(
-                    snapshot["enrollment"].get("starter_admission"),
+                and snapshot["pull"].get("draft") is False
+                and not _cloud_agent_active(
+                    snapshot["workflows"], snapshot["pull"]["head"]["ref"],
                 )
-                and head == snapshot["enrollment"]["starter_admission"]["head_sha"]
+                and not _other_task_active([
+                    task for task in snapshot["tasks"]
+                    if isinstance(task, dict) and task.get("state") in {
+                        "queued", "in_progress", "waiting_for_user", "idle",
+                        "requested", "pending",
+                    }
+                ], snapshot)
                 and not any(
-                    action.get("kind") == "review" and action.get("issue") == number
-                    and action.get("head") == head
+                    action.get("issue") == number
+                    and action.get("kind") in {"fix", "review"}
+                    and action.get("status") in {"sending", "uncertain", "sent"}
+                    for action in actions.values()
+                )
+                and not any(
+                    action.get("kind") in {"fix", "review"}
+                    and action.get("issue") == number
+                    and (action.get("head") == head or action.get("receipt_head") == head)
                     for action in actions.values()
                 )):
             reasons.append((
@@ -6076,6 +6172,8 @@ def main(argv=None, *, api_factory=GhApi, store_factory=StateStore,
     parser.add_argument("--apply", action="store_true",
                         help="allow owner-enrolled GitHub writes (requires --once)")
     parser.add_argument("--state", type=Path, help="private durable state file")
+    parser.add_argument("--starter-state", type=Path,
+                        help="read-only owner-private saved issue-starter ledger for legacy handoffs")
     args = parser.parse_args(argv)
     if args.apply and not args.once:
         parser.error("--apply requires explicit --once")
@@ -6094,6 +6192,7 @@ def main(argv=None, *, api_factory=GhApi, store_factory=StateStore,
         coordinator = Coordinator(
             api_factory(), store_factory(state_path),
             lifecycle_source_paths=source_paths,
+            starter_state_path=args.starter_state,
         )
         result = coordinator.run(apply=args.apply)
         print(json.dumps(result, sort_keys=True))

@@ -351,7 +351,9 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     assert len(api.graphql_writes) == 1 and api.fix_attempts == 2
 
 
-def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False):
+def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
+                            completed_at=True, extra_artifact=False,
+                            existing_closing=True):
     from test_issue_starter import (
         FakeApi as StarterApi, completed_task, make_coordinator, pull_request, start_task,
     )
@@ -366,10 +368,23 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False):
     pull = pull_request(pull_id=160000016, node_id="PR_node_16", head_ref="topic")
     pull["number"] = 16
     producer = Starter16Api(pulls=[pull])
+    if not existing_closing:
+        producer.closing_issues = []
+    producer.comments[0]["created_at"] = "2026-10-01T11:00:00Z"
+    producer.comments[0]["updated_at"] = "2026-10-01T11:00:00Z"
     start_task(tmp_path, producer)
     producer.task_detail = completed_task(
         pull_id=pull["id"], node_id=pull["node_id"], head_ref="topic",
     )
+    producer.task_detail["created_at"] = "2026-10-01T11:01:00Z"
+    producer.task_detail["sessions"][0]["created_at"] = "2026-10-01T11:02:00Z"
+    producer.task_detail["sessions"][0]["completed_at"] = "2026-10-01T11:05:00Z"
+    if not completed_at:
+        producer.task_detail["sessions"][0].pop("completed_at")
+    if extra_artifact:
+        producer.task_detail["artifacts"].append({
+            "provider": "copilot", "type": "log", "data": {},
+        })
     assert make_coordinator(tmp_path, producer).run(apply=True)["handed_off"] == 1
     emitted = next(c for c in producer.comments if c["body"].startswith(f"/hermes enroll {HEAD} issue "))
     api = FakeApi(unresolved=True)
@@ -378,6 +393,8 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False):
     api.initial_source_issue = deepcopy(producer.current_issue)
     api.source_comments = deepcopy(producer.comments)
     api.source_timeline = deepcopy(producer.timeline)
+    api.starter_state_path = make_coordinator(tmp_path, producer).store.path
+    api.issue_edit_evidence = deepcopy(producer.edit_evidence)
     original_get, original_get_all = api.get, api.get_all
     original_graphql = api.graphql
 
@@ -403,11 +420,7 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False):
                     "databaseId": 1399942965,
                     "nameWithOwner": "lindayi/hermes-mobile",
                     "issue": {
-                        "lastEditedAt": None,
-                        "userContentEdits": {
-                            "nodes": [],
-                            "pageInfo": {"hasNextPage": False, "endCursor": None},
-                        },
+                        **api.issue_edit_evidence,
                     },
                 }},
             }
@@ -418,11 +431,13 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False):
     api.pull.update(pull)
     api.pull["draft"] = False
     api.tasks[producer.task_detail["id"]] = deepcopy(producer.task_detail)
+    api.task_posts = 1
     api.pull_files = [
         {"filename": "tests/test_cloud_coordinator.py", "status": "modified", "sha": "f" * 40},
     ]
     api.blob_contents["f" * 40] = b"Synthetic coordinator test contents\n"
-    api.owner_review_body = "no independent review has been published"
+    if missing_review:
+        api.owner_review_body = "no independent review has been published"
     attach_closing_issue_api(api)
     store = StateStore(tmp_path / "paired-main" / "state.json")
     if not admit:
@@ -1009,8 +1024,20 @@ def test_starter_admission_provenance_rejects_malformed_durable_state(tmp_path, 
     "task_owner", "task_creator", "task_repository", "task_state", "session_id",
     "session_user", "session_branch", "branch_artifact", "command_task",
     "command_session", "command_edited", "issue_body_edited",
+    "task_unknown", "task_created", "session_created", "session_completed",
+    "session_owner", "session_repository", "session_task", "session_state",
+    "pull_artifact", "duplicate_branch", "command_missing", "issue_title_edited",
+    "incomplete_edits",
 ])
 def test_initial_starter_source_rejects_unbound_or_changed_evidence(tmp_path, change):
+    positive, positive_store = actual_starter_consumer(
+        tmp_path / "positive", admit=False, missing_review=True,
+    )
+    positive.unresolved = False
+    for _ in range(3):
+        Coordinator(positive, StateStore(positive_store.path),
+                    clock=lambda: 1790942400).run(apply=True)
+    assert positive.review_attempts == 1 and positive.fix_attempts == 0
     api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
     api.unresolved = False
     task = next(iter(api.tasks.values()))
@@ -1045,24 +1072,59 @@ def test_initial_starter_source_rejects_unbound_or_changed_evidence(tmp_path, ch
         api.initial_source_issue["body"] += " changed"
         api.issue_edit_evidence = {
             "lastEditedAt": "2026-10-01T20:01:00Z",
-            "nodes": [{"editedAt": "2026-10-01T20:01:00Z"}],
-            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "userContentEdits": {
+                "nodes": [{"editedAt": "2026-10-01T20:01:00Z"}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
         }
+    elif change == "task_unknown":
+        task["state"] = "unknown"
+    elif change == "task_created":
+        task["created_at"] = "2026-10-01T10:00:00Z"
+    elif change == "session_created":
+        task["sessions"][0]["created_at"] = "2026-10-01T10:00:00Z"
+    elif change == "session_completed":
+        task["sessions"][0]["completed_at"] = "2026-10-03T12:00:00Z"
+    elif change == "session_owner":
+        task["sessions"][0]["owner"] = {"id": 9}
+    elif change == "session_repository":
+        task["sessions"][0]["repository"] = {"id": 9}
+    elif change == "session_task":
+        task["sessions"][0]["task_id"] = "other"
+    elif change == "session_state":
+        task["sessions"][0]["state"] = "unknown"
+    elif change == "pull_artifact":
+        task["artifacts"][1]["data"]["id"] += 1
+    elif change == "duplicate_branch":
+        task["artifacts"].append(deepcopy(task["artifacts"][0]))
+    elif change == "command_missing":
+        api.source_comments = [c for c in api.source_comments if c["body"] != "/hermes start"]
+    elif change == "issue_title_edited":
+        api.initial_source_issue["title"] += " changed"
+        api.source_timeline.append({"event": "renamed", "created_at": "2026-10-01T12:00:00Z"})
+    elif change == "incomplete_edits":
+        api.issue_edit_evidence["userContentEdits"]["pageInfo"]["hasNextPage"] = True
     def run():
         return Coordinator(
-            api, StateStore(store.path), clock=lambda: NOW,
+            api, StateStore(store.path), clock=lambda: 1790942400,
         ).run(apply=True)["pull_requests"][0]
 
     first = run()
     second = run()
-    assert "starter-source-provenance" in first["reasons"]
-    assert "starter-source-provenance" in second["reasons"]
+    if change == "task_state":
+        assert "agent" in first["reasons"] and "agent" in second["reasons"]
+        assert "starter-source-provenance" not in first["reasons"]
+    else:
+        assert "starter-source-provenance" in first["reasons"]
+        assert "starter-source-provenance" in second["reasons"]
     assert not any(
         action.get("kind") in {"review", "fix"}
         for action in StateStore(store.path).actions().values()
     )
     outbox = StateStore(store.path).snapshot()["outbox"]
-    assert sum(key.endswith(":starter-source-provenance") for key in outbox) == 1
+    assert sum(key.endswith(":starter-source-provenance") for key in outbox) == (
+        0 if change == "task_state" else 1
+    )
     assert api.review_attempts == 0 and api.fix_attempts == 0
 
 
@@ -1101,6 +1163,343 @@ def test_legacy_starter_admission_does_not_adopt_matching_task_list_entries(tmp_
         for action in StateStore(store.path).actions().values()
     )
     assert api.review_attempts == 0 and api.fix_attempts == 0
+
+
+@pytest.mark.parametrize("mode", [
+    "legacy", "legacy_link_intent", "missing_completed_at", "extra_artifact", "already_reviewed",
+])
+def test_initial_source_supported_handoffs_and_exact_head_review(tmp_path, mode):
+    api, store = actual_starter_consumer(
+        tmp_path, admit=False, missing_review=True,
+        completed_at=mode != "missing_completed_at",
+        extra_artifact=mode == "extra_artifact",
+        existing_closing=mode != "legacy_link_intent",
+    )
+    api.unresolved = False
+    task = next(iter(api.tasks.values()))
+    if mode in {"legacy", "legacy_link_intent"}:
+        if mode == "legacy_link_intent":
+            saved = json.loads(api.starter_state_path.read_text())
+            record = next(iter(saved["commands"].values()))
+            assert record["link_intent"]["session_id"] == "session-1"
+            record.pop("source_session_id")
+            api.starter_state_path.write_text(json.dumps(saved))
+        api.comments[0]["body"] = re.sub(
+            r" source-task [^ ]+ source-session [^ ]+ source-command [0-9]+$",
+            "", api.comments[0]["body"],
+        )
+        blocked = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790942400,
+        ).run(apply=True)["pull_requests"][0]
+        assert "starter-source-provenance" in blocked["reasons"]
+        legacy_enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+        assert legacy_enrollment["starter_admission"]["version"] == 1
+        assert "initial_source" not in legacy_enrollment
+        assert api.review_attempts == 0 and api.fix_attempts == 0
+    elif mode == "already_reviewed":
+        refresh_owner_review(api, HEAD)
+    before = api.starter_state_path.read_bytes()
+    for _ in range(4):
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790942400,
+            starter_state_path=api.starter_state_path,
+        ).run(apply=True)["pull_requests"][0]
+    assert api.starter_state_path.read_bytes() == before
+    assert api.fix_attempts == 0
+    assert api.review_attempts == (0 if mode == "already_reviewed" else 1)
+    assert "starter-source-provenance" not in result["reasons"]
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 0 and not enrollment.get("receipt_proofs")
+    assert enrollment["initial_source"]["task_id"] == task["id"]
+    if mode in {"legacy", "legacy_link_intent"}:
+        assert enrollment["starter_admission"] == legacy_enrollment["starter_admission"]
+        assert enrollment["comment"] == legacy_enrollment["comment"]
+        assert enrollment["authorized_head"] == legacy_enrollment["authorized_head"]
+    if mode != "already_reviewed":
+        review = next(a for a in store.actions().values() if a["kind"] == "review")
+        source = enrollment["initial_source"]
+        api.complete_review_task(
+            review["task_id"], review,
+            source_action={
+                "source_start_head": source["head_sha"],
+                "source_session_id": source["session_id"],
+                "source_comment_id": source["admission_comment_id"],
+            },
+            verdict="pass", findings=[], report="Verified initial source accepted.",
+        )
+        for _ in range(4):
+            result = Coordinator(
+                api, StateStore(store.path), clock=lambda: 1790942400,
+                starter_state_path=api.starter_state_path,
+            ).run(apply=True)["pull_requests"][0]
+        assert result["review_valid"] and result["required_checks_green"]
+        assert result["auto_merge_eligible"] and api.review_attempts == 1
+        assert sum(item.get("state") == "success"
+                   for item in api.status_log.get(HEAD, [])
+                   if item.get("context") == "agent-review") == 1
+        assert api.starter_state_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("command", ["/hermes enroll", f"/hermes enroll {HEAD}"])
+def test_manual_enrollment_without_source_has_one_explicit_blocker(tmp_path, command):
+    api = FakeApi()
+    api.owner_review_body = "no independent review"
+    api.comments[0]["body"] = command
+    path = tmp_path / "manual-no-source" / "state.json"
+    for _ in range(3):
+        result = Coordinator(
+            api, StateStore(path), clock=lambda: NOW,
+        ).run(apply=True)["pull_requests"][0]
+        assert "starter-source-provenance" in result["reasons"]
+    assert api.review_attempts == 0 and api.fix_attempts == 0
+    assert sum(key.endswith(":starter-source-provenance")
+               for key in StateStore(path).snapshot()["outbox"]) == 1
+
+
+@pytest.mark.parametrize("authenticated", [True, False])
+def test_manual_missing_source_skips_only_authenticated_active_cloud_workflow(tmp_path, authenticated):
+    from deploy.cloud_coordinator import (
+        COPILOT_AGENT_ID, COPILOT_WORKFLOW_ID, COPILOT_WORKFLOW_PATH, REPOSITORY_ID,
+    )
+
+    api = FakeApi()
+    api.owner_review_body = "no independent review"
+    api.workflow_runs = [{
+        "id": 789, "name": "Running cloud work", "workflow_id": COPILOT_WORKFLOW_ID,
+        "path": COPILOT_WORKFLOW_PATH, "head_sha": "c" * 40,
+        "head_branch": "topic", "event": "dynamic", "status": "in_progress",
+        "actor": {"id": COPILOT_AGENT_ID if authenticated else 9},
+        "repository": {"id": REPOSITORY_ID},
+        "head_repository": {"id": REPOSITORY_ID},
+    }]
+    path = tmp_path / "active-workflow" / "state.json"
+    for _ in range(3):
+        result = Coordinator(api, StateStore(path), clock=lambda: NOW).run(apply=True)["pull_requests"][0]
+        assert ("starter-source-provenance" in result["reasons"]) is not authenticated
+    assert api.review_attempts == 0 and api.fix_attempts == 0
+    assert sum(key.endswith(":starter-source-provenance")
+               for key in StateStore(path).snapshot()["outbox"]) == (0 if authenticated else 1)
+
+
+def test_legacy_starter_bridge_is_supported_by_read_only_cli(tmp_path, capsys):
+    from deploy.cloud_coordinator import main
+
+    api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
+    api.unresolved = False
+    api.comments[0]["body"] = re.sub(
+        r" source-task [^ ]+ source-session [^ ]+ source-command [0-9]+$",
+        "", api.comments[0]["body"],
+    )
+    Coordinator(api, store, clock=lambda: 1790942400).run(apply=True)
+    saved_starter = api.starter_state_path.read_bytes()
+    saved_consumer = store.path.read_bytes()
+    writes = deepcopy(api.writes)
+    assert main(
+        ["--once", "--state", str(store.path),
+         "--starter-state", str(api.starter_state_path)],
+        api_factory=lambda: api, lifecycle_source_paths_factory=lambda: None,
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert "starter-source-provenance" not in result["pull_requests"][0]["reasons"]
+    assert api.starter_state_path.read_bytes() == saved_starter
+    assert store.path.read_bytes() == saved_consumer
+    assert api.writes == writes and api.review_attempts == 0
+
+
+@pytest.mark.parametrize("change", ["command", "body", "edge", "session", "issue"])
+def test_saved_initial_source_revocation_before_dispatch_survives_restart(tmp_path, change):
+    api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
+    api.unresolved = False
+    Coordinator(api, store, clock=lambda: 1790942400).run(apply=True)
+    assert store.snapshot()["enrollments"]["16"]["initial_source"]
+    assert api.review_attempts == 0
+    if change == "command":
+        api.comments[0]["updated_at"] = "2026-10-01T21:01:00Z"
+    elif change == "body":
+        api.pull["body"] += " changed"
+    elif change == "edge":
+        api.closing_issues = []
+    elif change == "session":
+        next(iter(api.tasks.values()))["sessions"][0]["id"] = "other-session"
+    else:
+        api.initial_source_issue["title"] += " changed"
+        api.source_timeline.append({"event": "renamed", "created_at": "2026-10-01T22:00:00Z"})
+    for _ in range(3):
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790942400,
+        ).run(apply=True)["pull_requests"][0]
+        assert "starter-source-provenance" in result["reasons"]
+        assert not result["review_valid"] and not result["auto_merge_eligible"]
+    assert api.review_attempts == 0 and api.fix_attempts == 0
+    assert sum(key.endswith(":starter-source-provenance")
+               for key in StateStore(store.path).snapshot()["outbox"]) == 1
+
+
+@pytest.mark.parametrize("change", [
+    "task", "command", "accepted_digest", "head", "branch", "phase",
+    "ambiguous", "permissions", "fetched_session", "session_binding", "session_binding_missing",
+    "linked_session",
+])
+def test_legacy_saved_starter_bridge_rejects_single_binding_mutations(tmp_path, change):
+    api, store = actual_starter_consumer(
+        tmp_path, admit=False, missing_review=True, existing_closing=change != "linked_session",
+    )
+    api.unresolved = False
+    api.comments[0]["body"] = re.sub(
+        r" source-task [^ ]+ source-session [^ ]+ source-command [0-9]+$",
+        "", api.comments[0]["body"],
+    )
+    # Prove assembled legacy recovery can dispatch with exactly these envelopes.
+    positive_path = tmp_path / "positive-legacy" / "state.json"
+    for _ in range(3):
+        Coordinator(api, StateStore(positive_path), clock=lambda: 1790942400,
+                    starter_state_path=api.starter_state_path).run(apply=True)
+    assert api.review_attempts == 1 and api.fix_attempts == 0
+    api.comments = [api.comments[0]]
+    api.tasks = {"task-1": next(t for t in api.tasks.values() if t["id"] == "task-1")}
+    api.review_attempts = 0
+    saved = json.loads(api.starter_state_path.read_text())
+    record = next(iter(saved["commands"].values()))
+    fields = {
+        "task": ("task_id", "unrelated-task"),
+        "command": ("command_id", 9999),
+        "accepted_digest": ("accepted_title_body_sha256", "e" * 64),
+        "head": ("head_sha", RESULT_HEAD),
+        "branch": ("branch", "unrelated"),
+        "phase": ("phase", "task_created"),
+        "session_binding": ("source_session_id", "different-saved-session"),
+    }
+    if change == "ambiguous":
+        duplicate = deepcopy(record)
+        duplicate["command_id"] = 9999
+        saved["commands"]["28:9999"] = duplicate
+    elif change == "fetched_session":
+        api.tasks["task-1"]["sessions"][0]["id"] = "substituted-authenticated-session"
+    elif change == "session_binding_missing":
+        record.pop("source_session_id")
+    elif change == "linked_session":
+        record["link_intent"]["session_id"] = "substituted-link-session"
+    elif change != "permissions":
+        name, value = fields[change]
+        record[name] = value
+        if change == "command":
+            saved["commands"] = {f"28:{value}": record}
+    api.starter_state_path.write_text(json.dumps(saved))
+    if change == "permissions":
+        api.starter_state_path.chmod(0o644)
+    for _ in range(3):
+        result = Coordinator(api, StateStore(store.path), clock=lambda: 1790942400,
+                             starter_state_path=api.starter_state_path).run(apply=True)["pull_requests"][0]
+        assert "starter-source-provenance" in result["reasons"]
+    assert api.review_attempts == 0 and api.fix_attempts == 0
+
+
+def test_initial_starter_changes_requested_runs_real_fixer_receipt_and_delta_review(tmp_path):
+    api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
+    api.unresolved = False
+    api.task_posts = 1
+    clock = [1790942400]
+
+    def run():
+        return Coordinator(api, StateStore(store.path),
+                           clock=lambda: clock[0]).run(apply=True)["pull_requests"][0]
+
+    for _ in range(3):
+        run()
+    initial_review = next(a for a in store.actions().values() if a["kind"] == "review")
+    source = store.snapshot()["enrollments"]["16"]["initial_source"]
+    api.complete_review_task(
+        initial_review["task_id"], initial_review,
+        source_action={
+            "source_start_head": source["head_sha"],
+            "source_session_id": source["session_id"],
+            "source_comment_id": source["admission_comment_id"],
+        },
+        verdict="changes_requested",
+        findings=[{"path": "tests/test_cloud_coordinator.py",
+                   "comment": "Preserve exact source identity in the bounded follow-up."}],
+        report="One bounded follow-up is required.",
+    )
+    for _ in range(3):
+        result = run()
+        assert not result["review_valid"] and not result["auto_merge_eligible"]
+    fixer = next(a for a in store.actions().values() if a["kind"] == "fix")
+    assert api.fix_attempts == 1 and api.review_attempts == 1
+    api.complete_task(fixer["task_id"], fixer, head_sha=RESULT_HEAD)
+    api.head_sha = RESULT_HEAD
+    api.pull["head"]["sha"] = RESULT_HEAD
+    for _ in range(3):
+        run()
+    validated_fixer = store.action(fixer["key"])
+    assert validated_fixer["receipt_result"] == "ready"
+    assert validated_fixer["receipt_session_id"]
+    delta = next(a for a in store.actions().values()
+                 if a["kind"] == "review" and a["source_task_id"] == fixer["task_id"])
+    assert delta["task_id"] != fixer["task_id"] != initial_review["task_id"]
+    api.complete_review_task(delta["task_id"], delta, source_action=validated_fixer,
+                             verdict="pass", findings=[], report="Delta accepted.")
+    for _ in range(4):
+        result = run()
+    assert result["review_valid"] and result["auto_merge_eligible"]
+    assert api.fix_attempts == 1 and api.review_attempts == 2
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert len(api.graphql_writes) == 1
+    assert sum(item.get("state") == "success"
+               for item in api.status_log.get(RESULT_HEAD, [])
+               if item.get("context") == "agent-review") == 1
+
+
+@pytest.mark.parametrize("change", ["body", "closing_edge", "body_and_closing_edge"])
+def test_dispatched_initial_review_accepts_report_after_admission_only_binding_changes(
+        tmp_path, change):
+    api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
+    api.unresolved = False
+
+    def run():
+        return Coordinator(api, StateStore(store.path),
+                           clock=lambda: 1790942400).run(apply=True)["pull_requests"][0]
+
+    for _ in range(3):
+        run()
+    review = next(a for a in store.actions().values() if a["kind"] == "review")
+    source = deepcopy(store.snapshot()["enrollments"]["16"]["initial_source"])
+    admission = deepcopy(store.snapshot()["enrollments"]["16"]["starter_admission"])
+    assert review["status"] == "sent"
+    assert api.review_attempts == 1 and api.fix_attempts == 0
+    if change in {"body", "body_and_closing_edge"}:
+        api.pull["body"] += "\n\nAuthenticated independent review results follow."
+    if change in {"closing_edge", "body_and_closing_edge"}:
+        api.closing_issues = []
+    api.complete_review_task(
+        review["task_id"], review,
+        source_action={
+            "source_start_head": source["head_sha"],
+            "source_session_id": source["session_id"],
+            "source_comment_id": source["admission_comment_id"],
+        },
+        verdict="pass", findings=[], report="The complete unchanged source head is accepted.",
+    )
+    for _ in range(5):
+        result = run()
+    assert result["review_valid"] and result["required_checks_green"]
+    assert result["auto_merge_eligible"] and result["auto_merge_requested"]
+    assert api.review_attempts == 1 and api.fix_attempts == 0
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["initial_source"] == source
+    assert enrollment["starter_admission"] == admission
+    assert enrollment["attempts"] == 0 and not enrollment.get("receipt_proofs")
+    assert len(api.graphql_writes) == 1
+    assert sum(item.get("state") == "success"
+               for item in api.status_log.get(HEAD, [])
+               if item.get("context") == "agent-review") == 1
+    published = [
+        item for item in api.owner_reviews + [api._current_owner_review_record()]
+        if item.get("commit_id") == HEAD and item.get("state") == "COMMENTED"
+        and item.get("body", "").startswith(
+            '{"schema":"hermes-independent-agent-review-v1",',
+        )
+    ]
+    assert len(published) == 1
 
 
 def test_admitted_starter_body_report_and_v2_receipt_survive_restart_and_manual_renewal(tmp_path):

@@ -828,6 +828,7 @@ def test_required_policy_normalizes_only_redundant_legacy_context_projection():
 
 @pytest.mark.parametrize("change", [
     "extra-context", "missing-context", "duplicate-context", "wrong-app",
+    "empty-contexts", "object-context", "conflicting-context-app", "non-string-context",
 ])
 def test_required_policy_does_not_hide_nonredundant_legacy_rules(change):
     checks = [
@@ -843,6 +844,14 @@ def test_required_policy_does_not_hide_nonredundant_legacy_rules(change):
         contexts.pop()
     elif change == "duplicate-context":
         contexts.append("source-ci")
+    elif change == "empty-contexts":
+        contexts.clear()
+    elif change == "object-context":
+        contexts[0] = {"context": "source-ci", "app_id": 15368}
+    elif change == "conflicting-context-app":
+        contexts[0] = {"context": "source-ci", "app_id": 15369}
+    elif change == "non-string-context":
+        contexts[0] = None
     else:
         checks[0] = {"context": "source-ci", "app_id": 15369}
 
@@ -859,6 +868,35 @@ def test_required_policy_does_not_hide_nonredundant_legacy_rules(change):
     required, complete, _, _ = _required_checks(PolicyApi())
     assert not complete
     assert len(required) >= 4
+
+
+def test_required_policy_allows_consistently_empty_classic_rules_with_ruleset():
+    checks = [
+        {"context": "source-ci", "integration_id": 15368},
+        {"context": "integration-tests"},
+        {"context": "agent-review"},
+        {"context": "issue-link", "integration_id": 15368},
+    ]
+
+    class PolicyApi:
+        def get(self, route):
+            if route.endswith("/branches/main/protection"):
+                return {"required_conversation_resolution": {"enabled": True}}
+            if route.endswith("/branches/main/protection/required_status_checks"):
+                return {"checks": [], "contexts": [], "strict": True}
+            if "/rules/branches/main?" in route:
+                return [{
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "required_status_checks": checks,
+                        "strict_required_status_checks_policy": True,
+                    },
+                }]
+            raise AssertionError(route)
+
+    required, complete, strict, conversations = _required_checks(PolicyApi())
+    assert complete and strict and conversations
+    assert len(required) == 4
 
 
 def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
@@ -4341,6 +4379,67 @@ def test_current_independent_review_completes_handoff_without_copilot(tmp_path):
     assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     assert api.fix_attempts == 1
     assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("change", [None, "body", "closing", "source-task", "source-session", "head", "pull"])
+def test_dispatched_starter_report_uses_durable_source_identity(tmp_path, change):
+    from deploy.cloud_coordinator import review_task_request
+    from deploy.task_receipts import ReceiptError
+
+    api = FakeApi()
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    enrollment = enrollment_from_comment(api.issue, api.pull, api.comments[0])
+    enrollment["authorized_head"] = HEAD
+    source = {
+        "version": 1, "issue_number": 28, "start_comment_id": 10,
+        "start_comment_created_at": "2026-10-01T10:00:00Z",
+        "task_id": "source-task", "session_id": "source-session",
+        "task_created_at": "2026-10-01T10:01:00Z",
+        "session_created_at": "2026-10-01T10:02:00Z",
+        "session_completed_at": "2026-10-01T10:30:00Z",
+        "head_sha": HEAD, "head_ref": "topic",
+        "pull_id": api.pull["id"], "pull_node_id": api.pull["node_id"],
+        "repository_id": 1399942965,
+        "pull_body_sha256": hashlib.sha256(api.pull.get("body", "").encode()).hexdigest(),
+        "issue_body_sha256": "e" * 64,
+        "admission_comment_id": 123,
+        "admission_comment_created_at": api.comments[0]["created_at"],
+    }
+    enrollment["starter_admission"] = {
+        "version": 1, "issue_number": 28, "head_sha": HEAD,
+        "body_sha256": source["pull_body_sha256"],
+        "comment_id": 123, "comment_created_at": api.comments[0]["created_at"],
+    }
+    store.commit_scan(None, [], commands=[("enroll", enrollment)],
+                      starter_sources=[(16, HEAD, source)])
+    snapshot = coordinator._snapshot_pull(16, store.snapshot()["enrollments"]["16"], BASE)
+    handoff = {"issue": 16, "head": HEAD, "source_type": "starter", "initial_source": source}
+    action = review_task_request(snapshot, handoff, 100, "durable-source-anchor")
+    response = api.write("agents/repos/lindayi/hermes-mobile/tasks", {"prompt": action["body"]})
+    action.update(task_id=response["id"], task_created_at=response["created_at"])
+    api.complete_review_task(action["task_id"], action, source_action=action)
+    snapshot["comments"] = api.comments
+    snapshot["initial_source"] = source
+    report, _ = coordinator._validate_review_report(action, snapshot, api.tasks[action["task_id"]])
+    assert report["report"]["verdict"] == "pass"
+
+    if change in {"body", "closing"}:
+        snapshot["initial_source"] = None
+        if change == "body":
+            snapshot["pull"]["body"] = "A later report, not new source authority."
+    elif change in {"source-task", "source-session"}:
+        action["source_task_id" if change == "source-task" else "source_session_id"] = "unrelated"
+    elif change == "head":
+        snapshot["head"] = "f" * 40
+    elif change == "pull":
+        snapshot["pull"]["id"] += 1
+    if change in {"source-task", "source-session", "head", "pull"}:
+        with pytest.raises(ReceiptError):
+            coordinator._validate_review_report(action, snapshot, api.tasks[action["task_id"]])
+    else:
+        report, _ = coordinator._validate_review_report(action, snapshot, api.tasks[action["task_id"]])
+        assert report["report"]["verdict"] == "pass"
 
 
 def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
