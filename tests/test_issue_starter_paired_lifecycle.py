@@ -394,12 +394,15 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
     pull = pull_request(pull_id=160000016, node_id="PR_node_16", head_ref="topic")
     pull["number"] = 16
     producer = Starter16Api(pulls=[pull])
+    producer.comments[0]["created_at"] = "2026-10-01T11:00:00Z"
+    producer.comments[0]["updated_at"] = "2026-10-01T11:00:00Z"
     start_task(tmp_path, producer)
     producer.task_detail = completed_task(
         pull_id=pull["id"], node_id=pull["node_id"], head_ref="topic",
     )
-    producer.task_detail["created_at"] = "2026-10-01T20:01:00Z"
-    producer.task_detail["sessions"][0]["created_at"] = "2026-10-01T20:01:00Z"
+    producer.task_detail["created_at"] = "2026-10-01T11:01:00Z"
+    producer.task_detail["sessions"][0]["created_at"] = "2026-10-01T11:01:00Z"
+    producer.task_detail["sessions"][0]["completed_at"] = "2026-10-01T11:05:00Z"
     assert make_coordinator(tmp_path, producer).run(apply=True)["handed_off"] == 1
     emitted = next(c for c in producer.comments if c["body"].startswith(f"/hermes enroll {HEAD} issue "))
 
@@ -428,20 +431,75 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
     api.task_posts = 1
     attach_closing_issue_api(api)
     path = tmp_path / "starter-first-review" / "state.json"
-    source_now = 1790888460
+    clock = [1790942400]
 
-    first = Coordinator(api, StateStore(path), clock=lambda: source_now).run(apply=True)
-    second = Coordinator(api, StateStore(path), clock=lambda: source_now).run(apply=True)
+    def run():
+        return Coordinator(api, StateStore(path), clock=lambda: clock[0]).run(apply=True)
 
+    first = run()
+    second = run()
+    third = run()
     actions = StateStore(path).actions()
     reviews = [item for item in actions.values() if item.get("kind") == "review"]
-    assert len(reviews) == 1
+    assert len(reviews) == 1, (
+        first["pull_requests"][0]["reasons"], second["pull_requests"][0]["reasons"],
+        third["pull_requests"][0]["reasons"], api.review_attempts,
+        StateStore(path).snapshot()["enrollments"]["16"],
+    )
     assert reviews[0]["status"] == "sent"
     assert reviews[0]["source_task_id"] == producer.task_detail["id"]
+    assert reviews[0]["task_id"] != reviews[0]["source_task_id"]
     assert not any(item.get("kind") == "fix" for item in actions.values())
     assert api.fix_attempts == 0 and api.review_attempts == 1
     assert first["pull_requests"][0]["auto_merge_eligible"] is False
     assert second["pull_requests"][0]["auto_merge_eligible"] is False
+    assert third["pull_requests"][0]["auto_merge_eligible"] is False
+
+    source = StateStore(path).snapshot()["enrollments"]["16"]["initial_source"]
+    api.complete_review_task(
+        reviews[0]["task_id"], reviews[0],
+        source_action={
+            "source_start_head": source["head_sha"],
+            "source_session_id": source["session_id"],
+            "source_comment_id": source["admission_comment_id"],
+        },
+        verdict="pass", findings=[], report="No findings in the complete source inventory.",
+    )
+    for _ in range(3):
+        result = run()
+    assert result["pull_requests"][0]["review_valid"] is True
+    assert result["pull_requests"][0]["required_checks_green"] is True
+    published = [
+        item for item in api.owner_reviews
+        if (item.get("commit_id") == HEAD and item.get("state") == "COMMENTED"
+            and item.get("body", "").startswith(
+                '{"schema":"hermes-independent-agent-review-v1",',
+            ))
+    ]
+    assert len(published) == 1
+    agent_statuses = [
+        item for item in api.status_log.get(HEAD, [])
+        if item.get("context") == "agent-review" and item.get("state") == "success"
+    ]
+    assert len(agent_statuses) == 1
+    assert not any(
+        item.get("kind") == "fix" for item in StateStore(path).actions().values()
+    )
+    assert api.review_attempts == 1 and api.fix_attempts == 0
+
+    review_id = api.owner_review_id
+    review_digest = hashlib.sha256(api.owner_review_body.encode("utf-8")).hexdigest()
+    api.comments.append({
+        "id": 11000, "user": {"id": OWNER},
+        "body": f"/hermes authorize-sensitive {HEAD} review {review_id} {review_digest}",
+        "created_at": "2026-10-02T12:01:00Z",
+        "updated_at": "2026-10-02T12:01:00Z",
+    })
+    clock[0] = 1790942520
+    authorized = run()["pull_requests"][0]
+    assert authorized["auto_merge_eligible"] is True
+    assert authorized["auto_merge_requested"] is True
+    assert api.review_attempts == 1 and api.fix_attempts == 0
 
 
 def finish_v2(api, action, *, head=RESULT_HEAD, result="ready"):

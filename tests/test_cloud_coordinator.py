@@ -1674,9 +1674,15 @@ class FakeApi:
             "role": "independent-reviewer",
             "head": action["head"],
             "base": action["main_sha"],
-            "source_start_head": source_action["head"],
-            "source_session_id": source_action["receipt_session_id"],
-            "source_comment_id": source_action["receipt_comment_id"],
+            "source_start_head": source_action.get(
+                "source_start_head", source_action.get("head"),
+            ),
+            "source_session_id": source_action.get(
+                "source_session_id", source_action.get("receipt_session_id"),
+            ),
+            "source_comment_id": source_action.get(
+                "source_comment_id", source_action.get("receipt_comment_id"),
+            ),
             "verdict": verdict,
             "summary": "Independent review completed.",
             "findings": findings or [],
