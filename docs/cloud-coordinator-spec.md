@@ -45,11 +45,24 @@ After all prepared planning and lifecycle source reads, immediately before
 command identity/body/timestamp and live binding proof. A late mismatch or
 incomplete read aborts the entire preparation: no cursor/events, enrollment,
 receipts, retirement/export, or external write commits. Compact optional
-`starter_admission` metadata contains exactly version 1, `issue_number`,
-`head_sha`, `body_sha256`, `comment_id`, and `comment_created_at`; present metadata
-is strictly validated on state load. Enrollment `issue` still denotes the PR.
-Absence remains valid for supported identity-bound legacy enrollment; identity-less
-legacy active state remains fail-closed.
+`starter_admission` metadata is strictly validated on state load. Version 1
+contains exactly `version`, `issue_number`, `head_sha`, `body_sha256`, `comment_id`,
+and `comment_created_at`; version 2 adds the explicitly recorded
+`source_task_id`/`source_session_id`; the current version 3 also records the exact
+positive `start_comment_id`. The consumer persists a separately validated
+`initial_source` record only after it authenticates the completed source task and
+session, task artifacts, exact start command, unchanged source issue, edit/rename
+history, ordered timestamps, PR identity/body/head and canonical closing edge.
+Version-1 admissions are recoverable only from an `initial_source` record already
+saved with the enrollment; version-2 admissions can be revalidated only through
+their explicitly recorded task/session and a unique unedited owner start command.
+The coordinator never selects a task from a task-list search to fill missing
+provenance. A missing, edited, ambiguous, changed-head, unknown-task or incomplete
+source fails closed with a deduplicated blocker and cannot dispatch review/fixer
+work. Absence of starter metadata remains valid for supported identity-bound
+manual enrollment; identity-less legacy active state remains fail-closed.
+Enrollment `issue` still denotes the PR. Recovery preserves action claims, receipt
+proofs and repair budgets; it does not invent provenance or reset ledgers.
 
 This fence is admission-only. Later body reports or changed canonical linkage do
 not revoke a durably admitted PR; PR45 receipt-result heads, restart/compaction,
@@ -651,7 +664,13 @@ short final page proves completion. Errors (including an unavailable rules
 endpoint), malformed pages/policy fields, or exhaustion of the bound fail closed.
 The policy retains the union of classic and all ruleset requirements, including
 separate app bindings for the same check context, and validates that union against
-the four active required contexts.
+the four active required contexts. GitHub's classic-protection response may include
+both app-bound `checks` and a legacy `contexts` array that is only their name
+projection. When both arrays contain the same distinct context names, the
+coordinator counts the projection once and retains the stronger `checks` app
+bindings. Extra, missing, duplicate, malformed, or otherwise inconsistent names
+are not normalized away: all available requirements are retained and the policy
+fails closed rather than weakening protection.
 
 Auto-merge is requested through GitHub's protected `enablePullRequestAutoMerge`
 operation only when the same-repository main base is current, the PR is not a

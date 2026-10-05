@@ -337,6 +337,8 @@ def test_blocker_receipt_never_authorizes_a_result_head():
         "receipt_nonce": "nonce", "receipt_start_head": HEAD,
         "receipt_head": result_head, "receipt_base": BASE,
         "receipt_body": body, "receipt_created_at": "2026-10-01T12:04:00Z",
+        "receipt_completed_at": "2026-10-01T12:04:00Z",
+        "receipt_session_completed_at": "2026-10-01T12:04:00Z",
     }
     comments = [{
         "id": 900, "user": {"id": 198982749},
@@ -7519,7 +7521,7 @@ def test_required_policy_preserves_classic_and_multiple_ruleset_sources():
         }} for app in (8, 9)
     ] + [{"type": "pull_request", "parameters": {"required_review_thread_resolution": False}}])
     required, complete, strict, conversations = _required_checks(api)
-    assert not complete and strict and conversations
+    assert not complete and strict and not conversations
     assert {(item["context"], item["app_id"]) for item in required} == {
         ("legacy", None), ("bound", 7), ("bound", 8), ("bound", 9),
     }

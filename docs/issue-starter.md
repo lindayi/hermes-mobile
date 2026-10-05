@@ -148,9 +148,10 @@ mutation boundary can therefore mark a newer head ready. Fresh post-mutation
 reads block enrollment on a detected change; uncertain writes are not retried.
 
 Only after that proof, the worker posts exactly
-`/hermes enroll <40lowerhex> issue <N> body-sha256 <64lowerhex>`, using the
-reserved verified head SHA, originating issue number, and exact raw UTF-8 PR body
-digest with the owner-authenticated API client. The issue number is canonical
+`/hermes enroll <40lowerhex> issue <N> body-sha256 <64lowerhex> source-task <task-id> source-session <session-id> source-command <start-comment-id>`,
+using the reserved verified head SHA, originating issue number, exact raw UTF-8 PR
+body digest, completed task/session IDs, and exact owner start-comment ID with the
+owner-authenticated API client. The issue number is canonical
 positive decimal, at most 2147483647. No trimming or Markdown normalization is
 performed. Before posting, it captures the PR comment high-water ID and reserves a fresh enrollment,
 even if an exact historical command exists: that command may already have been
@@ -173,7 +174,22 @@ immediately before the atomic scan commit, the consumer repeats the command and
 binding proof for every effective new starter admission or renewal. A late change
 or incomplete read discards the entire prepared scan, including cursor, events,
 receipt acceptance, lifecycle retirement and export, with no external write.
-Compact versioned `starter_admission` provenance is committed with enrollment.
+The consumer also reauthenticates the referenced completed task and its single
+completed owner session, exact task artifacts, and source issue. It requires the
+exact unedited owner `/hermes start` comment, unchanged issue body, no post-start
+content edits or renames, and the start/task/session/admission timestamps in order.
+The start-comment ID in the producer command prevents substitution of another
+otherwise-valid owner command. It persists verified initial-source identity before
+dispatching one independent-review task; that dispatch does not publish a review or
+status and cannot satisfy merge gates. Invalid, missing, or changed source blocks
+review dispatch with a deduplicated outcome.
+Compact versioned `starter_admission` and `initial_source` provenance are committed
+with enrollment. Existing version-1/2 admissions are never completed by searching
+the task list for a matching artifact: a version-1 admission is recoverable only
+when its authenticated initial-source record was already durably saved, and a
+version-2 admission must validate its explicitly recorded task/session and unique
+unedited start command. Recovery preserves existing task claims, receipts, and
+repair history; it does not fabricate source evidence or reset ledgers.
 This is an admission condition, not a lifetime body/linkage pin: later legitimate
 body reports and receipt-authorized result heads remain supported. GitHub reads,
 local state commit and remote writes are not one transaction; a change after the

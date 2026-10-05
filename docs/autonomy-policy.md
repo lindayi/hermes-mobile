@@ -331,6 +331,19 @@ durable one-shot canonical issue-link recovery with complete readback.
 The PR57 digest above remains historical. The refreshed current pin is source
 consistency only, not independent review, runtime evidence, or activation permission.
 
+Issue #83 updates the current coordinator and starter source pins for authenticated
+initial-source provenance, first independent-review dispatch, and redundant classic
+required-check projection handling:
+
+| Issue #83 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `5a3d5f6d0b3c0bcf1983c057bad2dd62bb38b162a504ff97f56749eba0765069` |
+| `deploy/issue_starter.py` | `2341c8be8cffca78b215869c8088f3befb1e3838bdc04988022b477a1189c3a6` |
+
+The independent policy test fixture pins these exact candidate bytes. The update
+preserves earlier issue #43, #50, and #79 history; it establishes source consistency
+only, not independent review, merge, runtime evidence, or activation permission.
+
 Issue #50's historical receipt-transport candidate overlaid only
 `deploy/cloud_coordinator.py` and `deploy/task_receipts.py` in the source inventory.
 The historical PR40 and issue #43 table hashes above remain unchanged:

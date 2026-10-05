@@ -351,7 +351,7 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     assert len(api.graphql_writes) == 1 and api.fix_attempts == 2
 
 
-def actual_starter_consumer(tmp_path, *, admit=True):
+def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False):
     from test_issue_starter import (
         FakeApi as StarterApi, completed_task, make_coordinator, pull_request, start_task,
     )
@@ -392,7 +392,7 @@ def actual_starter_consumer(tmp_path, *, admit=True):
         if route.startswith("repos/lindayi/hermes-mobile/issues/28/timeline?"):
             return api.source_timeline
         values = original_get_all(route, collection=collection)
-        if "/check-runs?" in route:
+        if missing_review and "/check-runs?" in route:
             return [item for item in values if item.get("name") != "agent-review"]
         return values
 
@@ -419,9 +419,9 @@ def actual_starter_consumer(tmp_path, *, admit=True):
     api.pull["draft"] = False
     api.tasks[producer.task_detail["id"]] = deepcopy(producer.task_detail)
     api.pull_files = [
-        {"filename": "README.md", "status": "modified", "sha": "f" * 40},
+        {"filename": "tests/test_cloud_coordinator.py", "status": "modified", "sha": "f" * 40},
     ]
-    api.blob_contents["f" * 40] = b"Synthetic starter PR contents\n"
+    api.blob_contents["f" * 40] = b"Synthetic coordinator test contents\n"
     api.owner_review_body = "no independent review has been published"
     attach_closing_issue_api(api)
     store = StateStore(tmp_path / "paired-main" / "state.json")
@@ -657,7 +657,7 @@ def test_actual_paired_v2_main_advance_keeps_authority_but_requires_neutral_repa
     published = run()
     assert not published["review_valid"]
     merged = run()
-    assert merged["auto_merge_requested"]
+    assert merged["auto_merge_requested"], merged["reasons"]
     assert api.graphql_writes[-1][1]["expectedHeadOid"] == repaired_head
     run()
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
@@ -899,7 +899,7 @@ def attach_closing_issue_api(api):
 
 
 def test_actual_starter_admission_persists_compact_provenance(tmp_path):
-    api, store = actual_starter_consumer(tmp_path, admit=False)
+    api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
     emitted = api.comments[0]
     digest = hashlib.sha256(api.pull["body"].encode("utf-8")).hexdigest()
     assert emitted["body"] == (
@@ -927,7 +927,7 @@ def test_actual_starter_admission_persists_compact_provenance(tmp_path):
 def test_starter_admission_final_precommit_aborts_entire_preparation(tmp_path, monkeypatch, change, renewal):
     from deploy.cloud_coordinator import ApiError, CoordinatorError
 
-    api, store = actual_starter_consumer(tmp_path, admit=False)
+    api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
     if renewal:
         Coordinator(api, store, clock=lambda: NOW).run(apply=True)
         command = deepcopy(api.comments[0])
@@ -1011,7 +1011,7 @@ def test_starter_admission_provenance_rejects_malformed_durable_state(tmp_path, 
     "command_session", "command_edited", "issue_body_edited",
 ])
 def test_initial_starter_source_rejects_unbound_or_changed_evidence(tmp_path, change):
-    api, store = actual_starter_consumer(tmp_path, admit=False)
+    api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
     api.unresolved = False
     task = next(iter(api.tasks.values()))
     if change == "task_owner":
@@ -1067,7 +1067,7 @@ def test_initial_starter_source_rejects_unbound_or_changed_evidence(tmp_path, ch
 
 
 def test_initial_starter_source_rejects_a_removed_closing_edge(tmp_path):
-    api, store = actual_starter_consumer(tmp_path, admit=False)
+    api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
     api.unresolved = False
     api.closing_issues = []
     result = Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)
@@ -1080,7 +1080,7 @@ def test_initial_starter_source_rejects_a_removed_closing_edge(tmp_path):
 
 
 def test_legacy_starter_admission_does_not_adopt_matching_task_list_entries(tmp_path):
-    api, store = actual_starter_consumer(tmp_path, admit=False)
+    api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
     api.unresolved = False
     api.comments[0]["body"] = re.sub(
         r" source-task [^ ]+ source-session [^ ]+ source-command [0-9]+$",
@@ -1136,6 +1136,7 @@ def test_admitted_starter_body_report_and_v2_receipt_survive_restart_and_manual_
     assert enrollment["owner_authorized_head"] == RESULT_HEAD
     api.pending_required = False
     refresh_owner_review(api, RESULT_HEAD, submitted_at="2026-10-01T12:07:00Z")
-    assert run()["auto_merge_requested"]
+    result = run()
+    assert result["auto_merge_requested"], result["reasons"]
     assert len(api.graphql_writes) == 1 and api.fix_attempts == 1
     assert api.review_attempts == 0

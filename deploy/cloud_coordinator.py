@@ -4207,6 +4207,7 @@ class Coordinator:
                 and _valid_starter_admission(
                     snapshot["enrollment"].get("starter_admission"),
                 )
+                and head == snapshot["enrollment"]["starter_admission"]["head_sha"]
                 and not any(
                     action.get("kind") == "review" and action.get("issue") == number
                     and action.get("head") == head
