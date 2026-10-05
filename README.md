@@ -3,6 +3,12 @@
 A mobile web interface to Hermes Agent with passkey authentication, shared native
 sessions, streaming runs, scoped approvals, background activity, Inbox and push.
 
+During a run, an agent can ask a single-choice or multiple-choice question, offer an
+Other response when available, or request open-ended text. Submit the answer
+explicitly to continue the same waiting run. Clarification is not approval for a
+dangerous command or a deployment; configured approval policies remain separate.
+See the [mobile clarification bridge contract](docs/clarification-bridge-contract.md).
+
 Canonical source: https://github.com/lindayi/hermes-mobile
 
 ## Development
@@ -50,17 +56,18 @@ failure evidence. Do not run account enrollment, real model probes or live opera
 scripts as routine tests. Physical Safari/Home Screen push and biometric behavior
 remain distinct from emulated browser verification.
 
-Hosted `source-ci` now aggregates syntax/secret checks, the complete JS suite,
-two portable-Python shards and four generated-assets browser shards. Each browser
-shard runs serially on its own disposable runner; lockfile-keyed dependency caches
-avoid repeated downloads. All jobs must succeed, including after cancellations.
-Only files explicitly listed with reasons in `.github/host-tests.json` run in the
-local compatibility suite; all new files default to hosted coverage. The local
-`integration-tests` status requires that residual suite AND the matching hosted
-aggregate, recorded on the exact PR head. No public-PR code automatically runs on
-the production host via a self-hosted Actions runner. See
-[hosted CI acceptance](docs/hosted-ci-spec.md). `scripts/test.py all` remains
-available for explicit full-host diagnostics and conservative release validation.
+Hosted `source-ci` requires the public build, syntax/secret checks, complete
+JavaScript suite, portable-Python shards, generated-assets browser shards and native
+suite. The `integration-tests` check succeeds only when `source-ci` succeeds in the
+same workflow run. These hosted results, together with `agent-review` and
+`issue-link` above, are required merge evidence on the exact PR head. The complete
+installed/private compatibility partition in `.github/host-tests.json` is not run
+on PR heads; it must pass against verified exact-main staged source and artifact
+inside guarded deployment before activation, and any failure blocks activation.
+See [hosted CI acceptance](docs/hosted-ci-spec.md). Use the managed runner for
+focused local iteration; local checks do not replace hosted merge evidence.
+`scripts/test.py all` remains available for explicit full-host diagnostics and
+conservative release validation.
 
 ## Deployment
 
@@ -75,12 +82,21 @@ protected native fingerprints and rollback checks. Main provenance is recorded
 with staged releases. Never deploy old copied candidate directories or restart an
 active session. The installed dependency venv remains separate from tracked code.
 
-Merging main triggers CI, **not automatic deployment**. Releases are explicitly
-initiated through the guarded controller. Its full staged test gate remains
-unchanged: this PR offloads repeated premerge work, not release validation. Reusing
-CI at deployment requires separately reviewed exact-source/asset evidence; a green
-PR check alone is not permission to skip staged checks. No service restarts are
-part of CI changes. Private operational
+Merging main starts CI. After the exact-main source workflow succeeds, the
+Production approval workflow verifies current-main provenance and classifies the
+full diff from the authenticated deployed base before creating a queued exact-SHA
+production intent. The configured risk and environment policies remain in force:
+only audited routine changes qualify for routine delivery, while sensitive changes
+require the applicable owner approval. When installed and enabled, the outbound
+guarded worker revalidates the intent and exact-main hosted artifact; the existing
+controller stages the verified source and artifact and runs the complete
+installed/private compatibility partition before activation. It defers for active
+or unknown sessions and preserves the deployment lock, drain, native fingerprints,
+health checks and rollback. Native, dependency or data changes unsupported by
+ordinary delivery require the separate guarded maintenance path; hosted evidence
+and owner approval do not bypass compatibility checks. See
+[guarded delivery](docs/guarded-delivery-spec.md) and
+[routine delivery policy](docs/routine-delivery-spec.md). Private operational
 configuration, account/session data and historical incident evidence are omitted
 from Git. Product specifications remain under `docs/`; legacy specs describe their
 original feature scope, while [the Git workflow](docs/git-development-spec.md) and
