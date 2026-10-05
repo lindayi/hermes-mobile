@@ -185,10 +185,10 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    'deploy/cloud_coordinator.py': '4cffc6d9883ad904f2e64be1192a03ca134fa035982a99cc0449fdf0594ca371',
+    'deploy/cloud_coordinator.py': 'ea0464972f7157786c36f911b5af1680a204fee0dd949281eb97b487b6f73a53',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
-    'deploy/issue_starter.py': '533cdc8a5c9f64963e457330152c3cd8d8bc465de065accf770ef2345905bcc7',
+    'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
     'deploy/review_evidence.py': 'bd391f404a26ebe8b3b1d9c3ba3e0ac18bba0c4b5a4cef563c04a1d7572735b8',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see

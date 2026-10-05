@@ -82,6 +82,14 @@ explicit null remains the no-last-edit value, while a missing field is incomplet
 evidence. The consumer omits the first-page cursor from GraphQL variables rather
 than letting its CLI adapter serialize Python `None` as a string; subsequent
 pages use the returned cursor. Transport regressions exercise both real adapters.
+Each page is folded through the starter's shared pure validator
+(`deploy/issue_starter.py` `_fold_issue_edit_page`) under its 20-page/100-node
+bounds: object `data`/repository/issue/connection/node/`pageInfo` shapes,
+unchanged `lastEditedAt` across complete pages, null `lastEditedAt` only without
+edit nodes, and an exact latest-edit node. Malformed, `errors`-bearing or
+inconsistent history yields the provenance blocker rather than aborting the poll;
+transport `ApiError` remains distinct. REST `renamed` events use the starter's same
+rename-payload and timestamp contract.
 The coordinator never selects a task from a task-list search to fill missing
 provenance. A missing, edited, ambiguous, changed-head, unknown-task or incomplete
 source fails closed with a deduplicated blocker and cannot dispatch first review

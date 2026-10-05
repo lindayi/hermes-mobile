@@ -90,6 +90,51 @@ def _parse_time(value):
     return parsed.astimezone(timezone.utc)
 
 
+def _fold_issue_edit_page(issue, evidence, seen_cursors):
+    """Fold one GraphQL issue edit-history page into ``evidence``.
+
+    Pure validation shared by this producer and the paired coordinator. Returns
+    the next cursor, or None once the complete history is consistent: unchanged
+    ``lastEditedAt`` across pages, null only without edits, otherwise present as
+    an edit node. Malformed or inconsistent evidence raises CoordinatorError.
+    """
+    connection = issue.get("userContentEdits") if isinstance(issue, dict) else None
+    nodes = connection.get("nodes") if isinstance(connection, dict) else None
+    page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
+    if (not isinstance(issue, dict) or "lastEditedAt" not in issue
+            or not isinstance(nodes, list)
+            or len(nodes) > MAX_ITEMS_PER_PAGE
+            or not isinstance(page_info, dict)
+            or type(page_info.get("hasNextPage")) is not bool):
+        raise CoordinatorError("GitHub issue edit history was incomplete")
+    current_last_edited = issue.get("lastEditedAt")
+    if current_last_edited is not None and _parse_time(current_last_edited) is None:
+        raise CoordinatorError("GitHub issue edit timestamp was invalid")
+    if "edits" not in evidence:
+        evidence.update(lastEditedAt=current_last_edited, edits=[])
+    elif current_last_edited != evidence["lastEditedAt"]:
+        raise CoordinatorError("GitHub issue changed during edit-history pagination")
+    for item in nodes:
+        edited_at = item.get("editedAt") if isinstance(item, dict) else None
+        if _parse_time(edited_at) is None:
+            raise CoordinatorError("GitHub issue edit history was incomplete")
+        evidence["edits"].append(edited_at)
+    if not page_info["hasNextPage"]:
+        last_edited_at = evidence["lastEditedAt"]
+        if (last_edited_at is None) != (not evidence["edits"]):
+            raise CoordinatorError("GitHub issue edit history was inconsistent")
+        if last_edited_at is not None and not any(
+            edited_at == last_edited_at for edited_at in evidence["edits"]
+        ):
+            raise CoordinatorError("GitHub issue edit history was incomplete")
+        return None
+    cursor = page_info.get("endCursor")
+    if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+        raise CoordinatorError("GitHub issue edit history was incomplete")
+    seen_cursors.add(cursor)
+    return cursor
+
+
 def _verified_owner_comment(comment, expected, *, now, not_before=None):
     """Verify fixed text and immutable GitHub metadata, not just a marker."""
     if (not isinstance(comment, dict) or comment.get("body") != expected
@@ -639,9 +684,8 @@ class Coordinator:
             }
           }
         """
-        edits = []
+        evidence = {}
         after = None
-        last_edited_at = None
         seen_cursors = set()
         for _ in range(MAX_EDIT_EVIDENCE_PAGES):
             response = self.api.graphql(
@@ -652,42 +696,9 @@ class Coordinator:
             data = response.get("data")
             repository = data.get("repository") if isinstance(data, dict) else None
             issue = repository.get("issue") if isinstance(repository, dict) else None
-            connection = (
-                issue.get("userContentEdits") if isinstance(issue, dict) else None
-            )
-            nodes = connection.get("nodes") if isinstance(connection, dict) else None
-            page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
-            if (not isinstance(issue, dict) or "lastEditedAt" not in issue
-                    or not isinstance(nodes, list)
-                    or len(nodes) > MAX_ITEMS_PER_PAGE
-                    or not isinstance(page_info, dict)
-                    or type(page_info.get("hasNextPage")) is not bool):
-                raise CoordinatorError("GitHub issue edit history was incomplete")
-            current_last_edited = issue.get("lastEditedAt")
-            if current_last_edited is not None and _parse_time(current_last_edited) is None:
-                raise CoordinatorError("GitHub issue edit timestamp was invalid")
-            if not edits and after is None:
-                last_edited_at = current_last_edited
-            elif current_last_edited != last_edited_at:
-                raise CoordinatorError("GitHub issue changed during edit-history pagination")
-            for item in nodes:
-                edited_at = item.get("editedAt") if isinstance(item, dict) else None
-                if _parse_time(edited_at) is None:
-                    raise CoordinatorError("GitHub issue edit history was incomplete")
-                edits.append(edited_at)
-            if not page_info["hasNextPage"]:
-                if (last_edited_at is None) != (not edits):
-                    raise CoordinatorError("GitHub issue edit history was inconsistent")
-                if last_edited_at is not None and not any(
-                    edited_at == last_edited_at for edited_at in edits
-                ):
-                    raise CoordinatorError("GitHub issue edit history was incomplete")
-                return {"lastEditedAt": last_edited_at, "edits": edits}
-            cursor = page_info.get("endCursor")
-            if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
-                raise CoordinatorError("GitHub issue edit history was incomplete")
-            seen_cursors.add(cursor)
-            after = cursor
+            after = _fold_issue_edit_page(issue, evidence, seen_cursors)
+            if after is None:
+                return evidence
         raise CoordinatorError("GitHub issue edit history exceeded its safety bound")
 
     @staticmethod

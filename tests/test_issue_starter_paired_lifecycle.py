@@ -1149,6 +1149,110 @@ def test_initial_starter_source_rejects_a_removed_closing_edge(tmp_path):
     assert api.review_attempts == 0 and api.fix_attempts == 0
 
 
+@pytest.mark.parametrize("change", [
+    None, "errors", "data_null", "data_list", "issue_null", "connection_null",
+    "node_not_object", "page_info_not_object", "null_with_nodes",
+    "latest_missing", "edited_without_nodes", "changed_across_pages",
+    "rename_payload_missing",
+])
+def test_initial_starter_source_requires_consistent_complete_edit_history(tmp_path, change):
+    # Baseline: coherent two-page history and a title rename, all before `/hermes start`.
+    api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
+    api.unresolved = False
+    rename = {
+        "event": "renamed", "created_at": "2026-10-01T10:15:00Z",
+        "rename": {"from": "Earlier title", "to": api.initial_source_issue["title"]},
+    }
+    if change == "rename_payload_missing":
+        rename.pop("rename")
+    api.source_timeline.append(rename)
+    older, latest = "2026-10-01T10:00:00Z", "2026-10-01T10:30:00Z"
+    original_graphql = api.graphql
+    edit_reads = []
+
+    def graphql(query, variables):
+        if "StarterIssueEditEvidence" not in query:
+            return original_graphql(query, variables)
+        cursor = variables.get("after")
+        edit_reads.append(cursor)
+        assert cursor in {None, "page-two"}
+        first_page = cursor is None
+        nodes = [{"editedAt": older if first_page else latest}]
+        issue = {
+            "lastEditedAt": latest,
+            "userContentEdits": {
+                "nodes": nodes,
+                "pageInfo": {
+                    "hasNextPage": first_page,
+                    "endCursor": "page-two" if first_page else None,
+                },
+            },
+        }
+        response = {"data": {"repository": {
+            "databaseId": 1399942965,
+            "nameWithOwner": "lindayi/hermes-mobile",
+            "issue": issue,
+        }}}
+        if change == "errors":
+            response["errors"] = [{"message": "Unavailable edit history"}]
+        elif change == "data_null":
+            response["data"] = None
+        elif change == "data_list":
+            response["data"] = []
+        elif change == "issue_null":
+            response["data"]["repository"]["issue"] = None
+        elif change == "connection_null":
+            issue["userContentEdits"] = None
+        elif change == "node_not_object":
+            nodes[0] = "not-an-edit-node"
+        elif change == "page_info_not_object":
+            issue["userContentEdits"]["pageInfo"] = []
+        elif change == "null_with_nodes":
+            issue["lastEditedAt"] = None
+        elif change == "latest_missing" and not first_page:
+            nodes[0] = {"editedAt": "2026-10-01T10:15:00Z"}
+        elif change == "edited_without_nodes":
+            nodes.clear()
+        elif change == "changed_across_pages" and first_page:
+            issue["lastEditedAt"] = older
+        return response
+
+    api.graphql = graphql
+    writes, graphql_writes = list(api.writes), list(api.graphql_writes)
+
+    def run():
+        return Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790942400,
+        ).run(apply=True)["pull_requests"][0]
+
+    first = run()
+    second = run()
+    actions = StateStore(store.path).actions().values()
+    outbox = StateStore(store.path).snapshot()["outbox"]
+    assert edit_reads
+    if change is None:
+        assert "starter-source-provenance" not in first["reasons"]
+        assert api.review_attempts == 1 and api.fix_attempts == 0
+        assert sum(action.get("kind") == "review" for action in actions) == 1
+        assert not any(key.endswith(":starter-source-provenance") for key in outbox)
+        return
+    assert "starter-source-provenance" in first["reasons"]
+    assert "starter-source-provenance" in second["reasons"]
+    assert not any(action.get("kind") in {"review", "fix"} for action in actions)
+    assert sum(key.endswith(":starter-source-provenance") for key in outbox) == 1
+    assert api.review_attempts == 0 and api.fix_attempts == 0
+    # Only the deduplicated blocker outcome and its pending status are written.
+    new_writes = api.writes[len(writes):]
+    assert api.writes[:len(writes)] == writes and api.graphql_writes == graphql_writes
+    comments = [body for route, body in new_writes if route.endswith("/issues/16/comments")]
+    assert len(comments) == 1
+    assert "No authenticated initial-source task provenance" in comments[0]["body"]
+    assert all(
+        route.endswith("/issues/16/comments") or "/statuses/" in route
+        for route, _ in new_writes
+    )
+
+
 def test_legacy_starter_admission_does_not_adopt_matching_task_list_entries(tmp_path):
     api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
     api.unresolved = False

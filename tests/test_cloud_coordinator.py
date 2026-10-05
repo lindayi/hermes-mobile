@@ -4482,8 +4482,9 @@ def test_starter_issue_edit_evidence_requires_explicit_nullable_field_and_pagina
 
     def graphql(query, variables):
         calls.append(variables.get("after"))
+        # A coherent response: the latest pre-command edit is on the final page.
         issue = {
-            "lastEditedAt": None,
+            "lastEditedAt": "2026-10-01T09:30:00Z",
             "userContentEdits": {
                 "nodes": [],
                 "pageInfo": {
@@ -4519,6 +4520,34 @@ def test_starter_issue_edit_evidence_requires_explicit_nullable_field_and_pagina
     assert coordinator._starter_issue_content_edited_after(
         28, "2026-10-01T10:00:00Z",
     ) is None
+
+
+def test_starter_issue_edit_evidence_shares_the_producer_page_bound(tmp_path):
+    from deploy.issue_starter import MAX_EDIT_EVIDENCE_PAGES
+
+    api = FakeApi()
+    coordinator = Coordinator(api, StateStore(tmp_path / "issue-edit-bound.json"))
+    calls = []
+
+    def graphql(query, variables):
+        calls.append(variables.get("after"))
+        return {"data": {"repository": {
+            "databaseId": 1399942965,
+            "nameWithOwner": "lindayi/hermes-mobile",
+            "issue": {
+                "lastEditedAt": None,
+                "userContentEdits": {
+                    "nodes": [],
+                    "pageInfo": {"hasNextPage": True, "endCursor": f"page-{len(calls)}"},
+                },
+            },
+        }}}
+
+    api.graphql = graphql
+    assert coordinator._starter_issue_content_edited_after(
+        28, "2026-10-01T10:00:00Z",
+    ) is None
+    assert len(calls) == MAX_EDIT_EVIDENCE_PAGES
 
 
 def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):

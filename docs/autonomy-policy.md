@@ -334,12 +334,12 @@ consistency only, not independent review, runtime evidence, or activation permis
 Issue #83 updates the current coordinator and starter source pins for authenticated
 initial-source provenance, first independent-review dispatch, and redundant classic
 required-check projection handling, including current-main-bound normal anchor
-identities:
+identities and the producer/consumer shared issue edit-history page validator:
 
 | Issue #83 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `4cffc6d9883ad904f2e64be1192a03ca134fa035982a99cc0449fdf0594ca371` |
-| `deploy/issue_starter.py` | `533cdc8a5c9f64963e457330152c3cd8d8bc465de065accf770ef2345905bcc7` |
+| `deploy/cloud_coordinator.py` | `ea0464972f7157786c36f911b5af1680a204fee0dd949281eb97b487b6f73a53` |
+| `deploy/issue_starter.py` | `6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a` |
 
 The independent policy test fixture pins these exact candidate bytes. The update
 preserves earlier issue #43, #50, and #79 history; it establishes source consistency

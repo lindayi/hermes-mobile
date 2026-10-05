@@ -23,6 +23,8 @@ include local credentials, private sessions, or arbitrary thread comments. The
 issue content is JSON-escaped in the task prompt. Before accepting that snapshot,
 the worker verifies bounded GraphQL `Issue.lastEditedAt` and
 `Issue.userContentEdits` history plus timestamped REST `renamed` timeline events.
+Its pure `_fold_issue_edit_page` page validator is shared with the paired
+coordinator, so both clients apply one edit-history consistency contract.
 Edits after authorization, incomplete pagination/evidence, closed issues, and
 stale commands fail closed. Both collection and preflight require the owner command
 to have a valid `created_at` and an identical explicit `updated_at`; edited or

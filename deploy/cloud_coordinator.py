@@ -2418,51 +2418,35 @@ class Coordinator:
             }
           }
         """
+        from deploy.issue_starter import (
+            MAX_EDIT_EVIDENCE_PAGES, Coordinator as Starter,
+            CoordinatorError as StarterError, _fold_issue_edit_page,
+        )
+
         if not _valid_timestamp(started_at):
             return None
-        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-        cursor, seen, edited = None, set(), False
-        for _ in range(MAX_PAGES):
+        # Share the producer's pure page validation; adapter errors still raise.
+        cursor, seen, evidence = None, set(), {}
+        for _ in range(MAX_EDIT_EVIDENCE_PAGES):
             variables = {"issueNumber": issue_number}
             if cursor is not None:
                 variables["after"] = cursor
             response = self.api.graphql(query, variables)
-            repository = (
-                response.get("data", {}).get("repository")
-                if isinstance(response, dict) else None
-            )
-            issue = repository.get("issue") if isinstance(repository, dict) else None
-            edits = issue.get("userContentEdits") if isinstance(issue, dict) else None
-            page_info = edits.get("pageInfo") if isinstance(edits, dict) else None
-            nodes = edits.get("nodes") if isinstance(edits, dict) else None
-            if not isinstance(issue, dict) or "lastEditedAt" not in issue:
-                return None
-            last_edited = issue.get("lastEditedAt")
-            if (not isinstance(repository, dict)
+            data = response.get("data") if isinstance(response, dict) else None
+            repository = data.get("repository") if isinstance(data, dict) else None
+            if (not isinstance(response, dict) or response.get("errors")
+                    or not isinstance(repository, dict)
                     or repository.get("databaseId") != REPOSITORY_ID
-                    or repository.get("nameWithOwner") != REPOSITORY
-                    or (last_edited is not None and not _valid_timestamp(last_edited))
-                    or not isinstance(nodes, list) or not isinstance(page_info, dict)
-                    or type(page_info.get("hasNextPage")) is not bool):
+                    or repository.get("nameWithOwner") != REPOSITORY):
                 return None
-            if last_edited is not None:
-                edited = edited or datetime.fromisoformat(
-                    last_edited.replace("Z", "+00:00"),
-                ) >= started
-            for item in nodes:
-                if not isinstance(item, dict) or not _valid_timestamp(item.get("editedAt")):
-                    return None
-                edited = edited or datetime.fromisoformat(
-                    item["editedAt"].replace("Z", "+00:00"),
-                ) >= started
-            if page_info["hasNextPage"] is False:
-                return edited
-            next_cursor = page_info.get("endCursor")
-            if (not isinstance(next_cursor, str) or not next_cursor
-                    or next_cursor in seen or next_cursor == cursor):
+            try:
+                cursor = _fold_issue_edit_page(
+                    repository.get("issue"), evidence, seen,
+                )
+            except StarterError:
                 return None
-            seen.add(next_cursor)
-            cursor = next_cursor
+            if cursor is None:
+                return Starter._content_edited_after(evidence, started_at)
         return None
 
     def _saved_starter_binding(self, admission, pull):
@@ -2682,6 +2666,9 @@ class Coordinator:
                     if issue_edit is None:
                         return None, "unverified"
                     if issue_edit:
+                        return None, "changed"
+                    from deploy.issue_starter import _edited_after_authorization
+                    if _edited_after_authorization(timeline, start_comment["created_at"]):
                         return None, "changed"
                     for event in timeline:
                         if not isinstance(event, dict) or not isinstance(event.get("event"), str):
