@@ -516,6 +516,15 @@ bounded findings, reviewed file hashes, and bounded narrative report. The child
 does not echo its review-task UUID; the parent authenticates the saved task ID
 and session through the task API.
 
+Normal first-review anchor markers and outbox keys bind the current-main SHA.
+If main advances before reviewer dispatch, a distinct anchor may be reserved
+without rewriting or replaying the old sent or uncertain anchor, including legacy
+anchors whose identities omitted main. Dispatch still requires the admitted exact
+head and the existing current-main/base fences. A sent or uncertain reviewer
+creation remains occupied across a base change and is never replayed; an existing
+normal report retains its saved base binding and exact-current-head acceptance
+semantics. Corrective anchor identities and their separate retry budget are unchanged.
+
 The parser accepts only that bounded quoted-reply envelope, with a limit of
 65,536 UTF-8 bytes and 64 LF-delimited lines. The byte budget accommodates the
 declared maximum inventory of 64 paths of up to 200 characters plus the quoted

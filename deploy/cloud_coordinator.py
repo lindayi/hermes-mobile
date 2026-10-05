@@ -699,7 +699,9 @@ def review_anchor_request(snapshot, source_action, *, retry_of=None):
         f"{source_action.get('source_task_id', source_action.get('task_id'))}:"
         f"{source_action.get('source_comment_id', source_action.get('receipt_comment_id'))}"
     )
-    if retry_of is not None:
+    if retry_of is None:
+        key += f":{snapshot['main_sha']}"
+    else:
         key += (
             f":report-correction:{retry_of['key']}:{retry_of['task_id']}:"
             f"{snapshot['main_sha']}"
@@ -725,7 +727,7 @@ def review_anchor_request(snapshot, source_action, *, retry_of=None):
         "kind": "review-anchor", "issue": snapshot["issue"], "head": snapshot["head"],
         "main_sha": snapshot["main_sha"], "correction": retry_of is not None,
         "key": (
-            f"review-anchor:{snapshot['issue']}:{snapshot['head']}"
+            f"review-anchor:{snapshot['issue']}:{snapshot['head']}:{snapshot['main_sha']}"
             if retry_of is None else
             f"review-anchor:{snapshot['issue']}:{snapshot['head']}:correction:"
             f"{hashlib.sha256((retry_of['key'] + ':' + snapshot['main_sha']).encode()).hexdigest()[:16]}"

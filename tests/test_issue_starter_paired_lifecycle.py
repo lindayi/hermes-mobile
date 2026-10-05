@@ -1250,6 +1250,200 @@ def test_initial_source_supported_handoffs_and_exact_head_review(tmp_path, mode)
         assert api.starter_state_path.read_bytes() == before
 
 
+@pytest.mark.parametrize("publication", ["sent", "uncertain", "lost_response"])
+@pytest.mark.parametrize("legacy_identity", [False, True])
+def test_first_review_anchor_survives_main_advance_before_dispatch(
+        tmp_path, monkeypatch, publication, legacy_identity):
+    from deploy import cloud_coordinator
+
+    api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
+    api.unresolved = False
+    attempts = []
+    write = api.write
+    anchor_request = cloud_coordinator.review_anchor_request
+
+    def legacy_anchor(snapshot, source_action, **kwargs):
+        request = anchor_request(snapshot, source_action, **kwargs)
+        material = (
+            f"{snapshot['issue']}:{snapshot['head']}:"
+            f"{source_action['source_task_id']}:{source_action['source_comment_id']}"
+        )
+        marker = (
+            cloud_coordinator.REVIEW_ANCHOR_MARKER_PREFIX
+            + hashlib.sha256(material.encode()).hexdigest()[:20]
+        )
+        request["body"] = request["body"].replace(request["marker"], marker)
+        request["marker"] = marker
+        request["prefix"] = cloud_coordinator.REVIEW_ANCHOR_PREFIX + marker
+        request["key"] = f"review-anchor:{snapshot['issue']}:{snapshot['head']}"
+        return request
+
+    def publish(route, body):
+        if "Reserved independent-review anchor" in body.get("body", ""):
+            attempts.append(body["body"])
+            if publication != "sent" and len(attempts) == 1:
+                if publication == "lost_response":
+                    write(route, body)
+                raise cloud_coordinator.CoordinatorError("response lost")
+        return write(route, body)
+
+    def run():
+        return Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790942400,
+        ).run(apply=True)["pull_requests"][0]
+
+    monkeypatch.setattr(api, "write", publish)
+    if legacy_identity:
+        monkeypatch.setattr(cloud_coordinator, "review_anchor_request", legacy_anchor)
+    baseline = run()
+    monkeypatch.setattr(cloud_coordinator, "review_anchor_request", anchor_request)
+    old_key, old_anchor = next(
+        (key, entry) for key, entry in StateStore(store.path).snapshot()["outbox"].items()
+        if entry.get("kind") == "review-anchor"
+    )
+    source = StateStore(store.path).snapshot()["enrollments"]["16"]["initial_source"]
+    assert old_anchor["status"] == ("sent" if publication == "sent" else "uncertain")
+    assert old_anchor["main_sha"] == BASE
+    assert not baseline["review_valid"] and not baseline["auto_merge_eligible"]
+    assert api.review_attempts == api.fix_attempts == 0
+
+    new_main = "e" * 40
+    api.current_main_sha = new_main
+    run()
+    anchors = [
+        (key, entry) for key, entry in StateStore(store.path).snapshot()["outbox"].items()
+        if entry.get("kind") == "review-anchor"
+    ]
+    assert len(anchors) == 2
+    new_key, new_anchor = next(item for item in anchors if item[0] != old_key)
+    assert new_anchor["main_sha"] == new_main
+    assert new_anchor["marker"] != old_anchor["marker"]
+    assert new_anchor["status"] == "sent"
+    assert f"against base `{new_main}`" in new_anchor["body"]
+    retained_anchor = StateStore(store.path).snapshot()["outbox"][old_key]
+    if publication == "lost_response":
+        assert retained_anchor["status"] == "sent" and retained_anchor["comment_id"] > 0
+        assert all(retained_anchor[field] == value for field, value in old_anchor.items()
+                   if field != "status")
+    else:
+        assert retained_anchor == old_anchor
+    blocked = run()
+    assert "scope" in blocked["reasons"] and not blocked["auto_merge_eligible"]
+    assert api.review_attempts == api.fix_attempts == 0
+    api.pull["base"]["sha"] = new_main
+    for _ in range(3):
+        result = run()
+    review = next(
+        item for item in StateStore(store.path).actions().values()
+        if item.get("kind") == "review"
+    )
+    assert review["status"] == "sent" and review["main_sha"] == new_main
+    assert review["anchor_comment_id"] == new_anchor["comment_id"]
+    assert review["source_task_id"] == source["task_id"]
+    assert review["task_id"] != source["task_id"]
+    assert api.review_attempts == 1 and api.fix_attempts == 0
+    assert len(attempts) == 2
+    assert not result["review_valid"] and not result["auto_merge_eligible"]
+
+    api.complete_review_task(
+        review["task_id"], review,
+        source_action={
+            "source_start_head": source["head_sha"],
+            "source_session_id": source["session_id"],
+            "source_comment_id": source["admission_comment_id"],
+        },
+    )
+    for _ in range(3):
+        result = run()
+    assert result["review_valid"] and result["required_checks_green"]
+    assert result["auto_merge_eligible"]
+    assert api.review_attempts == 1 and api.fix_attempts == 0
+    assert sum(
+        route.endswith("/pulls/16/reviews") for route, _ in api.writes
+    ) == 1
+    assert sum(
+        item.get("context") == "agent-review" and item.get("state") == "success"
+        for item in api.status_log.get(HEAD, [])
+    ) == 1
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert enrollment["initial_source"] == source
+    assert enrollment["attempts"] == 0 and not enrollment.get("receipt_proofs")
+    assert StateStore(store.path).snapshot()["outbox"][old_key] == retained_anchor
+
+
+@pytest.mark.parametrize("response", ["queued", "unknown"])
+@pytest.mark.parametrize("head_change", [False, True])
+def test_first_review_main_advance_after_dispatch_never_replays_creation(
+        tmp_path, monkeypatch, response, head_change):
+    from deploy.cloud_coordinator import CoordinatorError
+
+    api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
+    api.unresolved = False
+    write = api.write
+
+    def create(route, body):
+        if route == "agents/repos/lindayi/hermes-mobile/tasks" and response == "unknown":
+            write(route, body)
+            raise CoordinatorError("response lost")
+        return write(route, body)
+
+    def run():
+        return Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790942400,
+        ).run(apply=True)["pull_requests"][0]
+
+    monkeypatch.setattr(api, "write", create)
+    for _ in range(3):
+        run()
+    old_review = next(
+        item for item in StateStore(store.path).actions().values()
+        if item.get("kind") == "review"
+    )
+    assert old_review["status"] == ("sent" if response == "queued" else "uncertain")
+    assert api.review_attempts == 1
+    source = StateStore(store.path).snapshot()["enrollments"]["16"]["initial_source"]
+    api.current_main_sha = "e" * 40
+    api.pull["base"]["sha"] = api.current_main_sha
+    if head_change:
+        api.head_sha = RESULT_HEAD
+        api.pull["head"]["sha"] = RESULT_HEAD
+    for _ in range(4):
+        result = run()
+    if head_change and response == "queued":
+        assert hashlib.sha256(old_review["key"].encode()).hexdigest()[:32] in (
+            StateStore(store.path).snapshot()["retired"]["16"]["actions"]
+        )
+    else:
+        assert StateStore(store.path).action(old_review["key"]) == old_review
+    assert api.review_attempts == 1 and api.fix_attempts == 0
+    assert not result["review_valid"] and not result["auto_merge_eligible"]
+    assert ("unauthorized-continuation" if head_change else "agent") in result["reasons"]
+    assert StateStore(store.path).snapshot()["enrollments"]["16"]["initial_source"] == source
+    if response == "queued":
+        api.complete_review_task(
+            old_review["task_id"], old_review,
+            source_action={
+                "source_start_head": source["head_sha"],
+                "source_session_id": source["session_id"],
+                "source_comment_id": source["admission_comment_id"],
+            },
+        )
+        for _ in range(3):
+            result = run()
+        assert result["review_valid"] is (not head_change)
+        assert result["auto_merge_eligible"] is (not head_change)
+        assert api.review_attempts == 1 and api.fix_attempts == 0
+        if not head_change:
+            retained = StateStore(store.path).action(old_review["key"])
+            assert retained["main_sha"] == BASE
+            assert retained["dispatch_nonce"] == old_review["dispatch_nonce"]
+            assert retained["anchor_comment_id"] == old_review["anchor_comment_id"]
+        assert sum(
+            item.get("context") == "agent-review" and item.get("state") == "success"
+            for item in api.status_log.get(HEAD, [])
+        ) == (0 if head_change else 1)
+
+
 @pytest.mark.parametrize("command", ["/hermes enroll", f"/hermes enroll {HEAD}"])
 def test_manual_enrollment_without_source_has_one_explicit_blocker(tmp_path, command):
     api = FakeApi()
