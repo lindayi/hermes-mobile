@@ -34,7 +34,10 @@ CREATED = "2026-10-01T20:00:00Z"
 
 def enrollment_command(head="a" * 40, body="Closes #28", issue_number=28):
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-    return f"/hermes enroll {head} issue {issue_number} body-sha256 {digest}"
+    return (
+        f"/hermes enroll {head} issue {issue_number} body-sha256 {digest} "
+        "source-task task-1 source-session session-1"
+    )
 
 
 def issue_reference(number=ISSUE_NUMBER, repository=None):

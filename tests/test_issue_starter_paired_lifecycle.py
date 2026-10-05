@@ -379,6 +379,71 @@ def actual_starter_consumer(tmp_path, *, admit=True):
     return api, store, action
 
 
+def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(tmp_path):
+    from test_issue_starter import (
+        FakeApi as StarterApi, completed_task, make_coordinator, pull_request, start_task,
+    )
+
+    class Starter16Api(StarterApi):
+        def get(self, route):
+            return super().get(route.replace("/issues/16/comments", "/issues/41/comments"))
+
+        def post(self, route, body):
+            return super().post(route.replace("/issues/16/comments", "/issues/41/comments"), body)
+
+    pull = pull_request(pull_id=160000016, node_id="PR_node_16", head_ref="topic")
+    pull["number"] = 16
+    producer = Starter16Api(pulls=[pull])
+    start_task(tmp_path, producer)
+    producer.task_detail = completed_task(
+        pull_id=pull["id"], node_id=pull["node_id"], head_ref="topic",
+    )
+    producer.task_detail["created_at"] = "2026-10-01T20:01:00Z"
+    producer.task_detail["sessions"][0]["created_at"] = "2026-10-01T20:01:00Z"
+    assert make_coordinator(tmp_path, producer).run(apply=True)["handed_off"] == 1
+    emitted = next(c for c in producer.comments if c["body"].startswith(f"/hermes enroll {HEAD} issue "))
+
+    class SourceApi(FakeApi):
+        def get(self, route):
+            if route == "repos/lindayi/hermes-mobile/issues/28":
+                return producer.current_issue
+            return super().get(route)
+
+        def get_all(self, route, *, collection=None):
+            if route.startswith("repos/lindayi/hermes-mobile/issues/28/comments?"):
+                return list(producer.comments)
+            if route.startswith("repos/lindayi/hermes-mobile/issues/28/timeline?"):
+                return list(producer.timeline)
+            return super().get_all(route, collection=collection)
+
+    api = SourceApi()
+    api.comments = [dict(emitted)]
+    api.pull.update(pull)
+    api.pull["draft"] = False
+    api.pull_files = [
+        {"filename": "README.md", "status": "modified", "sha": "f" * 40},
+    ]
+    api.owner_review_body = "no independent review has been published"
+    api.tasks[producer.task_detail["id"]] = producer.task_detail
+    api.task_posts = 1
+    attach_closing_issue_api(api)
+    path = tmp_path / "starter-first-review" / "state.json"
+    source_now = 1790888460
+
+    first = Coordinator(api, StateStore(path), clock=lambda: source_now).run(apply=True)
+    second = Coordinator(api, StateStore(path), clock=lambda: source_now).run(apply=True)
+
+    actions = StateStore(path).actions()
+    reviews = [item for item in actions.values() if item.get("kind") == "review"]
+    assert len(reviews) == 1
+    assert reviews[0]["status"] == "sent"
+    assert reviews[0]["source_task_id"] == producer.task_detail["id"]
+    assert not any(item.get("kind") == "fix" for item in actions.values())
+    assert api.fix_attempts == 0 and api.review_attempts == 1
+    assert first["pull_requests"][0]["auto_merge_eligible"] is False
+    assert second["pull_requests"][0]["auto_merge_eligible"] is False
+
+
 def finish_v2(api, action, *, head=RESULT_HEAD, result="ready"):
     api.head_sha = head
     api.pull["head"]["sha"] = head
@@ -702,14 +767,18 @@ def test_actual_starter_admission_persists_compact_provenance(tmp_path):
     api, store = actual_starter_consumer(tmp_path, admit=False)
     emitted = api.comments[0]
     digest = hashlib.sha256(api.pull["body"].encode("utf-8")).hexdigest()
-    assert emitted["body"] == f"/hermes enroll {HEAD} issue 28 body-sha256 {digest}"
+    assert emitted["body"] == (
+        f"/hermes enroll {HEAD} issue 28 body-sha256 {digest} "
+        "source-task task-1 source-session session-1"
+    )
     Coordinator(api, store, clock=lambda: NOW).run(apply=True)
     enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
     assert enrollment["issue"] == 16
     assert enrollment["starter_admission"] == {
-        "version": 1, "issue_number": 28, "head_sha": HEAD,
+        "version": 2, "issue_number": 28, "head_sha": HEAD,
         "body_sha256": digest, "comment_id": emitted["id"],
         "comment_created_at": emitted["created_at"],
+        "source_task_id": "task-1", "source_session_id": "session-1",
     }
 
 

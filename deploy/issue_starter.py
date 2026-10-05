@@ -1782,11 +1782,14 @@ class Coordinator:
             return {"planned": 0, "pending": 0, "dispatched": 0,
                     "handed_off": 0, "blocked": 1}
         try:
-            _, linked_pull = self._verified_link_context(record, allow_ready=True)
+            source_task, linked_pull = self._verified_link_context(record, allow_ready=True)
             if (linked_pull.get("number") != record["pull_number"]
                     or linked_pull.get("head", {}).get("sha") != record["head_sha"]
                     or _pull_body_digest(linked_pull) != record.get("pull_body_sha256")):
                 raise CoordinatorError("Task pull changed before enrollment")
+            source_session_id = self._authenticated_task_session(source_task)
+            if source_session_id is None:
+                raise CoordinatorError("Completed task session identity did not match")
             pull = self._current_pull(record)
             if pull.get("draft") is not False:
                 raise CoordinatorError("Task pull request is no longer ready for enrollment")
@@ -1801,7 +1804,8 @@ class Coordinator:
         comments = self._pr_comments(record["pull_number"])
         enrollment_body = (
             f"/hermes enroll {record['head_sha']} issue {record['issue']} "
-            f"body-sha256 {record['pull_body_sha256']}"
+            f"body-sha256 {record['pull_body_sha256']} "
+            f"source-task {record['task_id']} source-session {source_session_id}"
         )
         enrollment_state = record.get("enrollment_state")
         if enrollment_state == "reserved":
