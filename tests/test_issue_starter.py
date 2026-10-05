@@ -1772,6 +1772,41 @@ def test_task_pull_without_optional_global_id_resolves_and_binds_detail_node(tmp
             if route.endswith("/issues/41/comments")] == [enrollment_command()]
 
 
+@pytest.mark.parametrize("binding", ["missing", "saved", "link", "mismatch", "disagreement"])
+def test_preupgrade_handoff_reservation_requires_saved_session_on_restart(tmp_path, monkeypatch, binding):
+    api = FakeApi(pulls=[pull_request(draft=False)])
+    if binding in {"link", "disagreement"}:
+        api.closing_issues = []
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    with monkeypatch.context() as patch:
+        patch.setattr(Coordinator, "_advance_handoff", lambda *args: {
+            "planned": 0, "pending": 1, "dispatched": 0, "handed_off": 0, "blocked": 0,
+        })
+        make_coordinator(tmp_path, api).run(apply=True)
+    path = make_coordinator(tmp_path, api).store.path
+    saved = json.loads(path.read_text())
+    record = saved["commands"]["28:9001"]
+    assert record["phase"] == "handoff_reserved"
+    assert record["source_session_id"] == "session-1"
+    assert bool(record.get("link_intent")) == (binding in {"link", "disagreement"})
+    if binding in {"missing", "link"}:
+        record.pop("source_session_id")
+    elif binding == "mismatch":
+        record["source_session_id"] = "old-session"
+    if binding == "disagreement":
+        record["source_session_id"] = "old-session"
+    path.write_text(json.dumps(saved))
+    expected = binding in {"saved", "link"}
+    for _ in range(3):
+        make_coordinator(tmp_path, api).run(apply=True)
+    assert make_coordinator(tmp_path, api).store.snapshot()["commands"]["28:9001"]["phase"] == (
+        "handed_off" if expected else "handoff_failed"
+    )
+    assert len([body for route, body in api.posts
+                if route.endswith("/issues/41/comments")]) == int(expected)
+
+
 @pytest.mark.parametrize("invalid", ["global_mismatch", "global_null", "id_missing",
                                      "id_mismatch", "duplicate_id", "list_detail_node_mismatch",
                                      "detail_id_mismatch", "node_missing"])

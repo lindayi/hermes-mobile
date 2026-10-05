@@ -196,8 +196,10 @@ Compact versioned `starter_admission` and `initial_source` provenance are commit
 with enrollment. Existing version-1/2 admissions are never completed by searching
 the task list for a matching artifact: a version-1 admission is recoverable only
 when its authenticated initial-source record was already durably saved, or through
-the coordinator's explicit read-only `--starter-state <path>` bridge to this
-owner-private ledger. The bridge selects exactly one completed handed-off record
+the coordinator's read-only bridge to this owner-private ledger. Its default CLI
+uses the same XDG/HOME path described above (empty XDG state home also falls back
+to HOME), including installed no-flag invocation; `--starter-state <path>` may
+override the input without any ledger writes. The bridge selects exactly one completed handed-off record
 bound to the enrolled issue/PR/node/head/branch/base/body and saved comment
 high-water, then reauthenticates its exact start command, accepted title/body,
 task/session and live GitHub closing authority. Current handoff reservations
@@ -205,7 +207,10 @@ persist immutable `source_session_id`; the bridge explicitly compares that saved
 binding to the fetched session. Historical canonical-link reservations may supply
 their saved `link_intent.session_id` instead, with agreement required when both
 are present. Missing saved session identity blocks recovery rather than adopting
-the task's currently returned session. It never writes the starter
+the task's currently returned session. Resuming a pre-upgrade handoff reservation likewise
+requires an immutable matching saved session binding before enrollment; an
+already-existing closing edge is not a substitute for that proof.
+It never writes the starter
 ledger, re-enrolls, resets budgets, selects task-list candidates or invents a
 fixer receipt. A version-2 admission must validate its explicitly recorded task/session and unique
 unedited start command. Recovery preserves existing task claims, receipts, and

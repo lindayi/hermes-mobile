@@ -1797,8 +1797,11 @@ class Coordinator:
             source_session_id = self._authenticated_task_session(source_task)
             if source_session_id is None:
                 raise CoordinatorError("Completed task session identity did not match")
-            if (record.get("source_session_id") is not None
-                    and source_session_id != record["source_session_id"]):
+            saved_session = record.get("source_session_id")
+            linked_session = (record.get("link_intent") or {}).get("session_id")
+            if (not (saved_session or linked_session)
+                    or (saved_session is not None and source_session_id != saved_session)
+                    or (linked_session is not None and source_session_id != linked_session)):
                 raise CoordinatorError("Completed task session identity changed")
             pull = self._current_pull(record)
             if pull.get("draft") is not False:

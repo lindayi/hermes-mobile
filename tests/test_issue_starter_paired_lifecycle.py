@@ -353,7 +353,7 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
 
 def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
                             completed_at=True, extra_artifact=False,
-                            existing_closing=True):
+                            existing_closing=True, id_only_artifact=False):
     from test_issue_starter import (
         FakeApi as StarterApi, completed_task, make_coordinator, pull_request, start_task,
     )
@@ -379,6 +379,8 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
     producer.task_detail["created_at"] = "2026-10-01T11:01:00Z"
     producer.task_detail["sessions"][0]["created_at"] = "2026-10-01T11:02:00Z"
     producer.task_detail["sessions"][0]["completed_at"] = "2026-10-01T11:05:00Z"
+    if id_only_artifact:
+        producer.task_detail["artifacts"][1]["data"].pop("global_id")
     if not completed_at:
         producer.task_detail["sessions"][0].pop("completed_at")
     if extra_artifact:
@@ -1027,7 +1029,7 @@ def test_starter_admission_provenance_rejects_malformed_durable_state(tmp_path, 
     "task_unknown", "task_created", "session_created", "session_completed",
     "session_owner", "session_repository", "session_task", "session_state",
     "pull_artifact", "duplicate_branch", "command_missing", "issue_title_edited",
-    "incomplete_edits",
+    "incomplete_edits", "global_null", "global_mismatch",
 ])
 def test_initial_starter_source_rejects_unbound_or_changed_evidence(tmp_path, change):
     positive, positive_store = actual_starter_consumer(
@@ -1095,6 +1097,10 @@ def test_initial_starter_source_rejects_unbound_or_changed_evidence(tmp_path, ch
         task["sessions"][0]["state"] = "unknown"
     elif change == "pull_artifact":
         task["artifacts"][1]["data"]["id"] += 1
+    elif change in {"global_null", "global_mismatch"}:
+        task["artifacts"][1]["data"]["global_id"] = (
+            None if change == "global_null" else "PR_other"
+        )
     elif change == "duplicate_branch":
         task["artifacts"].append(deepcopy(task["artifacts"][0]))
     elif change == "command_missing":
@@ -1167,6 +1173,7 @@ def test_legacy_starter_admission_does_not_adopt_matching_task_list_entries(tmp_
 
 @pytest.mark.parametrize("mode", [
     "legacy", "legacy_link_intent", "missing_completed_at", "extra_artifact", "already_reviewed",
+    "id_only_artifact",
 ])
 def test_initial_source_supported_handoffs_and_exact_head_review(tmp_path, mode):
     api, store = actual_starter_consumer(
@@ -1174,6 +1181,7 @@ def test_initial_source_supported_handoffs_and_exact_head_review(tmp_path, mode)
         completed_at=mode != "missing_completed_at",
         extra_artifact=mode == "extra_artifact",
         existing_closing=mode != "legacy_link_intent",
+        id_only_artifact=mode == "id_only_artifact",
     )
     api.unresolved = False
     task = next(iter(api.tasks.values()))
@@ -1281,7 +1289,9 @@ def test_manual_missing_source_skips_only_authenticated_active_cloud_workflow(tm
                for key in StateStore(path).snapshot()["outbox"]) == (0 if authenticated else 1)
 
 
-def test_legacy_starter_bridge_is_supported_by_read_only_cli(tmp_path, capsys):
+@pytest.mark.parametrize("location", ["explicit", "xdg", "home", "empty_xdg"])
+@pytest.mark.parametrize("ledger", ["valid", "permissions", "directory", "symlink", "oversized", "missing"])
+def test_legacy_starter_bridge_is_supported_by_read_only_cli(tmp_path, capsys, monkeypatch, location, ledger):
     from deploy.cloud_coordinator import main
 
     api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
@@ -1291,19 +1301,67 @@ def test_legacy_starter_bridge_is_supported_by_read_only_cli(tmp_path, capsys):
         "", api.comments[0]["body"],
     )
     Coordinator(api, store, clock=lambda: 1790942400).run(apply=True)
-    saved_starter = api.starter_state_path.read_bytes()
+    args = ["--once", "--state", str(store.path)]
+    if location == "explicit":
+        args += ["--starter-state", str(api.starter_state_path)]
+    else:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        if location == "xdg":
+            monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+            root = tmp_path / "xdg"
+        else:
+            monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+            if location == "empty_xdg":
+                monkeypatch.setenv("XDG_STATE_HOME", "")
+            root = tmp_path / ".local" / "state"
+        default_path = root / "hermes-mobile-issue-starter" / "state.json"
+        default_path.parent.mkdir(parents=True, mode=0o700)
+        api.starter_state_path.rename(default_path)
+        api.starter_state_path = default_path
+    if ledger == "permissions":
+        api.starter_state_path.chmod(0o644)
+    elif ledger == "directory":
+        api.starter_state_path.parent.chmod(0o755)
+    elif ledger == "symlink":
+        target = api.starter_state_path.with_name("target.json")
+        api.starter_state_path.rename(target)
+        api.starter_state_path.symlink_to(target)
+    elif ledger == "oversized":
+        from deploy.issue_starter import MAX_STATE_BYTES
+        api.starter_state_path.write_bytes(b" " * (MAX_STATE_BYTES + 1))
+    elif ledger == "missing":
+        api.starter_state_path.unlink()
+    saved_starter = api.starter_state_path.read_bytes() if api.starter_state_path.exists() else None
     saved_consumer = store.path.read_bytes()
     writes = deepcopy(api.writes)
     assert main(
-        ["--once", "--state", str(store.path),
-         "--starter-state", str(api.starter_state_path)],
+        args,
         api_factory=lambda: api, lifecycle_source_paths_factory=lambda: None,
     ) == 0
     result = json.loads(capsys.readouterr().out)
-    assert "starter-source-provenance" not in result["pull_requests"][0]["reasons"]
-    assert api.starter_state_path.read_bytes() == saved_starter
+    assert ("starter-source-provenance" in result["pull_requests"][0]["reasons"]) == (ledger != "valid")
+    assert (api.starter_state_path.read_bytes() if api.starter_state_path.exists() else None) == saved_starter
     assert store.path.read_bytes() == saved_consumer
     assert api.writes == writes and api.review_attempts == 0
+
+
+@pytest.mark.parametrize("kind", ["fix", "review"])
+@pytest.mark.parametrize("status", ["completed", "failed", "sending", "uncertain", "sent"])
+def test_source_less_enrollment_history_blocks_only_active_work(tmp_path, kind, status):
+    api = FakeApi()
+    api.owner_review_body = "no independent review"
+    store = StateStore(tmp_path / "history" / "state.json")
+    Coordinator(api, store, clock=lambda: NOW).run(apply=True)
+    assert store.claim_action("history", {
+        "kind": kind, "issue": 16, "head": HEAD, "head_ref": "topic",
+    })
+    store.update_action("history", status, publication_state="done")
+    for _ in range(3):
+        result = Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=False)["pull_requests"][0]
+        assert ("starter-source-provenance" in result["reasons"]) == (
+            status in {"completed", "failed"}
+        )
+    assert api.review_attempts == 0 and api.fix_attempts == 0
 
 
 @pytest.mark.parametrize("change", ["command", "body", "edge", "session", "issue"])

@@ -1536,7 +1536,8 @@ def _starter_task_artifacts_match(task, pull):
         and branch.get("base_ref") == MAIN_BRANCH
         and _github_identity(linked_pull, pull.get("id"))
         and isinstance(linked_pull, dict)
-        and linked_pull.get("global_id") == pull.get("node_id")
+        and ("global_id" not in linked_pull
+             or linked_pull["global_id"] == pull.get("node_id"))
     )
 
 
@@ -4286,6 +4287,11 @@ class Coordinator:
         if not review_ok:
             reasons.append(("review", "A current structured independent-agent review and resolved conversations are required."))
         if (not review_ok and source_handoff is None and repair is None
+                and not (agent_busy and any(
+                    action.get("issue") == number
+                    and action.get("kind") in {"fix", "review"}
+                    for action in actions.values()
+                ))
                 and snapshot["pull"].get("draft") is False
                 and not _cloud_agent_active(
                     snapshot["workflows"], snapshot["pull"]["head"]["ref"],
@@ -4301,12 +4307,6 @@ class Coordinator:
                     action.get("issue") == number
                     and action.get("kind") in {"fix", "review"}
                     and action.get("status") in {"sending", "uncertain", "sent"}
-                    for action in actions.values()
-                )
-                and not any(
-                    action.get("kind") in {"fix", "review"}
-                    and action.get("issue") == number
-                    and (action.get("head") == head or action.get("receipt_head") == head)
                     for action in actions.values()
                 )):
             reasons.append((
@@ -6173,7 +6173,7 @@ def main(argv=None, *, api_factory=GhApi, store_factory=StateStore,
                         help="allow owner-enrolled GitHub writes (requires --once)")
     parser.add_argument("--state", type=Path, help="private durable state file")
     parser.add_argument("--starter-state", type=Path,
-                        help="read-only owner-private saved issue-starter ledger for legacy handoffs")
+                        help="read-only owner-private issue-starter ledger (defaults to its XDG/HOME path)")
     args = parser.parse_args(argv)
     if args.apply and not args.once:
         parser.error("--apply requires explicit --once")
@@ -6192,7 +6192,10 @@ def main(argv=None, *, api_factory=GhApi, store_factory=StateStore,
         coordinator = Coordinator(
             api_factory(), store_factory(state_path),
             lifecycle_source_paths=source_paths,
-            starter_state_path=args.starter_state,
+            starter_state_path=args.starter_state or (
+                Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+                / "hermes-mobile-issue-starter" / "state.json"
+            ),
         )
         result = coordinator.run(apply=args.apply)
         print(json.dumps(result, sort_keys=True))

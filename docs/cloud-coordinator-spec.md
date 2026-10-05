@@ -55,8 +55,12 @@ positive `start_comment_id`. The consumer persists a separately validated
 session, task artifacts, exact start command, unchanged source issue, edit/rename
 history, ordered timestamps, PR identity/body/head and canonical closing edge.
 Version-1 admissions are recoverable from an `initial_source` record already
-saved with the enrollment, or the explicit read-only `--starter-state <path>`
-bridge to the existing issue-starter ledger. That ledger must pass the starter's
+saved with the enrollment, or the read-only bridge to the existing issue-starter
+ledger. The default CLI, including the installed service's no-flag invocation,
+reads `$XDG_STATE_HOME/hermes-mobile-issue-starter/state.json`, or
+`~/.local/state/hermes-mobile-issue-starter/state.json` when XDG state home is
+unset or empty, exactly like the starter. `--starter-state <path>` overrides
+only that read-only input. That ledger must pass the starter's
 bounded schema and owner-private regular-file/directory checks. Exactly one
 `handed_off`/enrollment-`done` record must bind the admitted issue, PR number/node,
 head, branch, base and body digest; the immutable enrollment comment must exceed
@@ -77,9 +81,11 @@ provenance. A missing, edited, ambiguous, changed-head, unknown-task or incomple
 source fails closed with a deduplicated blocker and cannot dispatch first review
 work. Ordinary and SHA-only manual enrollments without a supported source or
 accepted review receive the same explicit provenance blocker; active source,
-fixer and reviewer work, including an authenticated active Copilot dynamic
+fixer and reviewer work and pending receipt/publication/corrective-review
+progress, including an authenticated active Copilot dynamic
 workflow on the same branch, does not generate that redundant outcome. Unknown
 or unverified source state still receives the explicit provenance blocker.
+Terminal same-head action history alone does not suppress that blocker.
 Absence of starter metadata remains valid for supported identity-bound
 manual enrollment; identity-less legacy active state remains fail-closed.
 Enrollment `issue` still denotes the PR. Recovery preserves action claims, receipt
@@ -95,6 +101,8 @@ bound. Explicit malformed or out-of-order completion timestamps are rejected,
 not replaced. The bound is persisted unchanged on restart. Artifact selection
 matches the producer: at most 20 entries, with exactly one GitHub branch and one
 GitHub pull matching the current PR; unrelated artifacts confer no authority.
+The pull artifact's optional `global_id` may be absent only because authenticated
+PR detail supplies the bound node identity; explicit null or mismatch is rejected.
 An already accepted exact-head independent review suppresses first-review
 anchors and dispatch even without a local reviewer action.
 
