@@ -2389,30 +2389,6 @@ class Coordinator:
                         or admission_comments[0].get("updated_at") != admission["comment_created_at"]):
                     return None, "changed"
                 try:
-                    from deploy.pull_handoff_binding import _closing_issue_linked
-
-                    if not _closing_issue_linked(self.api, pull, admission["issue_number"]):
-                        return None, "changed"
-                    source_issue = self.api.get(
-                        f"repos/{REPOSITORY}/issues/{admission['issue_number']}",
-                    )
-                    if (not isinstance(source_issue, dict)
-                            or source_issue.get("number") != admission["issue_number"]
-                            or source_issue.get("pull_request")
-                            or source_issue.get("state") != "open"
-                            or not isinstance(source_issue.get("body"), str)
-                            or len(source_issue["body"]) > 40_000):
-                        return None, "unverified"
-                    source_comments = _all_review_comments(
-                        self.api, admission["issue_number"], None,
-                    )
-                    timeline = _rest_list(
-                        self.api,
-                        f"repos/{REPOSITORY}/issues/{admission['issue_number']}/timeline?per_page=100",
-                        collection="timeline",
-                    )
-                    if not isinstance(timeline, list):
-                        return None, "unverified"
                     task_id = admission.get("source_task_id")
                     source = enrollment.get("initial_source")
                     if source is not None:
@@ -2468,6 +2444,30 @@ class Coordinator:
                         return None, "changed"
                     if (source is not None and source["session_id"] != session["id"]):
                         return None, "changed"
+                    from deploy.pull_handoff_binding import _closing_issue_linked
+
+                    if not _closing_issue_linked(self.api, pull, admission["issue_number"]):
+                        return None, "changed"
+                    source_issue = self.api.get(
+                        f"repos/{REPOSITORY}/issues/{admission['issue_number']}",
+                    )
+                    if (not isinstance(source_issue, dict)
+                            or source_issue.get("number") != admission["issue_number"]
+                            or source_issue.get("pull_request")
+                            or source_issue.get("state") != "open"
+                            or not isinstance(source_issue.get("body"), str)
+                            or len(source_issue["body"]) > 40_000):
+                        return None, "unverified"
+                    source_comments = _all_review_comments(
+                        self.api, admission["issue_number"], None,
+                    )
+                    timeline = _rest_list(
+                        self.api,
+                        f"repos/{REPOSITORY}/issues/{admission['issue_number']}/timeline?per_page=100",
+                        collection="timeline",
+                    )
+                    if not isinstance(timeline, list):
+                        return None, "unverified"
                     task_created = task.get("created_at")
                     session_created = session.get("created_at")
                     session_completed = session.get("completed_at")
@@ -4105,7 +4105,7 @@ class Coordinator:
             reasons.append(("sensitive", "Owner exact-head authorization is required for sensitive changes."))
         if not review_ok:
             reasons.append(("review", "A current structured independent-agent review and resolved conversations are required."))
-        if (not review_ok and source_handoff is None
+        if (not review_ok and source_handoff is None and repair is None
                 and not any(
                     action.get("kind") == "review" and action.get("issue") == number
                     and action.get("head") == head
@@ -4242,7 +4242,8 @@ class Coordinator:
         notification_outcomes, lifecycle_events = self._notification_outcomes(
             snapshot, reasons,
         )
-        if any(code == "starter-source-provenance" for code, _ in reasons):
+        if (not mergeability_unknown
+                and any(code == "starter-source-provenance" for code, _ in reasons)):
             notification_outcomes.append(self._outcome(
                 snapshot, "starter-source-provenance",
                 "No authenticated initial-source task provenance is available; independent review dispatch is blocked. Use an authenticated issue-starter handoff or a verified coordinator repair handoff.",

@@ -426,6 +426,7 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
     api.pull_files = [
         {"filename": "README.md", "status": "modified", "sha": "f" * 40},
     ]
+    api.blob_contents["f" * 40] = b"Synthetic starter PR contents\n"
     api.owner_review_body = "no independent review has been published"
     api.tasks[producer.task_detail["id"]] = producer.task_detail
     api.task_posts = 1
@@ -471,6 +472,7 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
     assert result["pull_requests"][0]["required_checks_green"] is True
     published = [
         item for item in api.owner_reviews
+        + [api._current_owner_review_record()]
         if (item.get("commit_id") == HEAD and item.get("state") == "COMMENTED"
             and item.get("body", "").startswith(
                 '{"schema":"hermes-independent-agent-review-v1",',
@@ -904,7 +906,7 @@ def test_starter_admission_final_precommit_aborts_entire_preparation(tmp_path, m
 
 
 @pytest.mark.parametrize("field,value", [
-    ("version", True), ("version", 2), ("issue_number", True),
+    ("version", True), ("version", 3), ("issue_number", True),
     ("issue_number", 0), ("issue_number", 2147483648), ("issue_number", "28"),
     ("head_sha", "A" * 40), ("body_sha256", "f" * 63),
     ("comment_id", 0), ("comment_id", 9100.0),

@@ -8208,14 +8208,16 @@ def starter_admission_inputs():
 def test_starter_admission_exact_grammar_and_authenticated_binding(change):
     api, issue, pull, comment = starter_admission_inputs()
     body = comment["body"]
+    prefix, digest_and_source = body.split(" body-sha256 ", 1)
+    digest, source = digest_and_source.split(" ", 1)
     if change in {"leading_zero", "zero", "negative", "overflow", "huge", "wrong_issue"}:
         number = {"leading_zero": "028", "zero": "0", "negative": "-28",
                   "overflow": "2147483648", "huge": "9" * 5000, "wrong_issue": "29"}[change]
         comment["body"] = body.replace("issue 28", "issue " + number)
     elif change == "uppercase_digest":
-        comment["body"] = body.rsplit(" ", 1)[0] + " " + body.rsplit(" ", 1)[1].upper()
+        comment["body"] = f"{prefix} body-sha256 {digest.upper()} {source}"
     elif change == "short_digest":
-        comment["body"] = body[:-1]
+        comment["body"] = f"{prefix} body-sha256 {digest[:-1]} {source}"
     elif change == "uppercase_head":
         comment["body"] = body.replace(HEAD, HEAD.upper())
     elif change in {"suffix", "newline"}:
