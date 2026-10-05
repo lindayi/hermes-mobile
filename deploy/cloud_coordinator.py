@@ -198,7 +198,8 @@ def enrollment_from_comment(issue, pull, comment, *, api=None):
         starter = re.fullmatch(
             r"/hermes enroll ([0-9a-f]{40}) issue ([1-9][0-9]{0,9}) "
             r"body-sha256 ([0-9a-f]{64})(?: source-task ([A-Za-z0-9._-]{1,128}) "
-            r"source-session ([A-Za-z0-9._:-]{1,128}))?", body,
+            r"source-session ([A-Za-z0-9._:-]{1,128})"
+            r"(?: source-command ([1-9][0-9]{0,19}))?)?", body,
         )
     if body != "/hermes enroll":
         if not isinstance(body, str):
@@ -249,7 +250,7 @@ def enrollment_from_comment(issue, pull, comment, *, api=None):
         enrollment["authorized_head"] = authorized_head
     if starter:
         provenance = {
-            "version": 2 if starter.group(4) else 1,
+            "version": 3 if starter.group(6) else (2 if starter.group(4) else 1),
             "issue_number": int(starter.group(2)),
             "head_sha": authorized_head, "body_sha256": starter.group(3),
             "comment_id": comment["id"], "comment_created_at": comment["created_at"],
@@ -259,6 +260,8 @@ def enrollment_from_comment(issue, pull, comment, *, api=None):
                 "source_task_id": starter.group(4),
                 "source_session_id": starter.group(5),
             })
+        if starter.group(6):
+            provenance["start_comment_id"] = int(starter.group(6))
         enrollment["starter_admission"] = provenance
     return enrollment
 
@@ -271,9 +274,11 @@ def _valid_starter_admission(value):
               "comment_id", "comment_created_at"}
     if value.get("version") == 2:
         fields |= {"source_task_id", "source_session_id"}
+    elif value.get("version") == 3:
+        fields |= {"source_task_id", "source_session_id", "start_comment_id"}
     return (
         set(value) == fields
-        and type(value["version"]) is int and value["version"] in {1, 2}
+        and type(value["version"]) is int and value["version"] in {1, 2, 3}
         and type(value["issue_number"]) is int and 1 <= value["issue_number"] <= 2**31 - 1
         and _is_sha(value["head_sha"])
         and isinstance(value["body_sha256"], str)
@@ -285,6 +290,9 @@ def _valid_starter_admission(value):
             and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value["source_task_id"])
             and isinstance(value["source_session_id"], str)
             and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value["source_session_id"])
+            and (value["version"] != 3 or (
+                type(value["start_comment_id"]) is int and value["start_comment_id"] > 0
+            ))
         ))
     )
 
@@ -1310,8 +1318,28 @@ def _required_checks(api):
     try:
         protection = api.get(protection_route)
         if isinstance(protection, dict):
-            add_checks(protection.get("checks", []))
-            add_checks(protection.get("contexts", []))
+            checks = protection.get("checks", [])
+            contexts = protection.get("contexts", [])
+            add_checks(checks)
+            if "contexts" in protection and "checks" in protection:
+                normalized_checks = _required_contexts(checks)
+                normalized_contexts = _required_contexts(contexts)
+                if (not isinstance(checks, list) or not isinstance(contexts, list)
+                        or not normalized_checks or not normalized_contexts):
+                    add_checks(contexts)
+                else:
+                    check_names = [item["context"] for item in normalized_checks]
+                    context_names = [item["context"] for item in normalized_contexts]
+                    if (len(check_names) == len(context_names)
+                            and len(set(check_names)) == len(check_names)
+                            and len(set(context_names)) == len(context_names)
+                            and set(check_names) == set(context_names)):
+                        pass
+                    else:
+                        add_checks(contexts)
+                        malformed = True
+            elif "contexts" in protection:
+                add_checks(contexts)
             if (type(protection.get("strict")) is not bool
                     or not {"checks", "contexts"}.intersection(protection)):
                 malformed = True
@@ -1872,7 +1900,8 @@ def _review_source_action(actions, issue, report_action, comments, initial_sourc
                 or source.get("head_sha") != report_action.get("source_start_head")):
             return None
         return {
-            "kind": "starter-source", "issue": issue, "head": source["head_sha"],
+            "kind": "starter-source", "source_type": "starter",
+            "issue": issue, "head": source["head_sha"],
             "task_id": source["task_id"], "source_task_id": source["task_id"],
             "source_session_id": source["session_id"],
             "source_comment_id": source["admission_comment_id"],
@@ -1983,6 +2012,10 @@ def _valid_receipt_proof(action, comments):
             or not _is_sha(action.get("receipt_base"))
             or not isinstance(action.get("receipt_body"), str)
             or not isinstance(action.get("receipt_created_at"), str)
+            or not _valid_timestamp(action.get("receipt_completed_at"))
+            or not _valid_timestamp(action.get("receipt_session_completed_at"))
+            or action.get("receipt_completed_at")
+               != action.get("receipt_session_completed_at")
             or not isinstance(comments, list)):
         return False
     version = action.get("receipt_version", "v1")
@@ -2353,6 +2386,67 @@ class Coordinator:
             return False
         return True
 
+    def _starter_issue_content_edited_after(self, issue_number, started_at):
+        query = """
+          query StarterIssueEditEvidence($issueNumber: Int!, $after: String) {
+            repository(owner: "lindayi", name: "hermes-mobile") {
+              databaseId
+              nameWithOwner
+              issue(number: $issueNumber) {
+                lastEditedAt
+                userContentEdits(first: 100, after: $after) {
+                  nodes { editedAt }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }
+          }
+        """
+        if not _valid_timestamp(started_at):
+            return None
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        cursor, seen, edited = None, set(), False
+        for _ in range(MAX_PAGES):
+            response = self.api.graphql(query, {
+                "issueNumber": issue_number, "after": cursor,
+            })
+            repository = (
+                response.get("data", {}).get("repository")
+                if isinstance(response, dict) else None
+            )
+            issue = repository.get("issue") if isinstance(repository, dict) else None
+            edits = issue.get("userContentEdits") if isinstance(issue, dict) else None
+            page_info = edits.get("pageInfo") if isinstance(edits, dict) else None
+            nodes = edits.get("nodes") if isinstance(edits, dict) else None
+            last_edited = issue.get("lastEditedAt") if isinstance(issue, dict) else None
+            if (not isinstance(repository, dict)
+                    or repository.get("databaseId") != REPOSITORY_ID
+                    or repository.get("nameWithOwner") != REPOSITORY
+                    or not isinstance(issue, dict)
+                    or (last_edited is not None and not _valid_timestamp(last_edited))
+                    or not isinstance(nodes, list) or not isinstance(page_info, dict)
+                    or type(page_info.get("hasNextPage")) is not bool):
+                return None
+            if last_edited is not None:
+                edited = edited or datetime.fromisoformat(
+                    last_edited.replace("Z", "+00:00"),
+                ) >= started
+            for item in nodes:
+                if not isinstance(item, dict) or not _valid_timestamp(item.get("editedAt")):
+                    return None
+                edited = edited or datetime.fromisoformat(
+                    item["editedAt"].replace("Z", "+00:00"),
+                ) >= started
+            if page_info["hasNextPage"] is False:
+                return edited
+            next_cursor = page_info.get("endCursor")
+            if (not isinstance(next_cursor, str) or not next_cursor
+                    or next_cursor in seen or next_cursor == cursor):
+                return None
+            seen.add(next_cursor)
+            cursor = next_cursor
+        return None
+
     def _resolve_initial_source(self, snapshot):
                 enrollment = snapshot.get("enrollment")
                 admission = enrollment.get("starter_admission") if isinstance(enrollment, dict) else None
@@ -2373,11 +2467,13 @@ class Coordinator:
                     f"/hermes enroll {head} issue {admission['issue_number']} "
                     f"body-sha256 {admission['body_sha256']}"
                 )
-                if admission["version"] == 2:
+                if admission["version"] in {2, 3}:
                     admission_body += (
                         f" source-task {admission['source_task_id']}"
                         f" source-session {admission['source_session_id']}"
                     )
+                if admission["version"] == 3:
+                    admission_body += f" source-command {admission['start_comment_id']}"
                 admission_comments = [
                     item for item in snapshot.get("comments", ())
                     if isinstance(item, dict) and item.get("id") == admission["comment_id"]
@@ -2397,23 +2493,11 @@ class Coordinator:
                         if source["head_sha"] != head or source["issue_number"] != admission["issue_number"]:
                             return None, "changed"
                         task_id = source["task_id"]
-                    if task_id is not None:
-                        task = self.api.get(
-                            f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}",
-                        )
-                    else:
-                        candidates = [
-                            item for item in snapshot.get("tasks", ())
-                            if isinstance(item, dict) and _starter_task_artifacts_match(item, pull)
-                        ]
-                        if len(candidates) != 1:
-                            return None, "missing"
-                        task_id = candidates[0].get("id")
-                        if not isinstance(task_id, str) or not task_id:
-                            return None, "unverified"
-                        task = self.api.get(
-                            f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}",
-                        )
+                    if not isinstance(task_id, str) or not task_id:
+                        return None, "missing"
+                    task = self.api.get(
+                        f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}",
+                    )
                     if (not isinstance(task, dict) or task.get("id") != task_id
                             or task.get("state") != "completed"
                             or type(task.get("session_count")) is not int
@@ -2435,10 +2519,10 @@ class Coordinator:
                             or not _github_identity(session.get("user"), OWNER_ID)
                             or not _github_identity(session.get("owner"), OWNER_ID)
                             or not _github_identity(session.get("repository"), REPOSITORY_ID)
-                            or session.get("head_ref") not in (None, pull["head"].get("ref"))
-                            or session.get("base_ref") not in (None, MAIN_BRANCH)):
+                            or session.get("head_ref") != pull["head"].get("ref")
+                            or session.get("base_ref") != MAIN_BRANCH):
                         return None, "unverified"
-                    if (admission["version"] == 2
+                    if (admission["version"] in {2, 3}
                             and (admission["source_task_id"] != task_id
                                  or admission["source_session_id"] != session["id"])):
                         return None, "changed"
@@ -2455,8 +2539,9 @@ class Coordinator:
                             or source_issue.get("number") != admission["issue_number"]
                             or source_issue.get("pull_request")
                             or source_issue.get("state") != "open"
+                            or not isinstance(source_issue.get("title"), str)
                             or not isinstance(source_issue.get("body"), str)
-                            or len(source_issue["body"]) > 40_000):
+                            or len(source_issue["title"]) + len(source_issue["body"]) > 40_000):
                         return None, "unverified"
                     source_comments = _all_review_comments(
                         self.api, admission["issue_number"], None,
@@ -2482,6 +2567,7 @@ class Coordinator:
                         admission["comment_created_at"].replace("Z", "+00:00"),
                     )
                     starts = []
+                    expected_start_id = admission.get("start_comment_id")
                     for comment in source_comments:
                         if (not isinstance(comment, dict) or comment.get("body") != "/hermes start"
                                 or not _github_identity(comment.get("user"), OWNER_ID)
@@ -2490,18 +2576,27 @@ class Coordinator:
                                 or comment.get("updated_at") != comment.get("created_at")):
                             continue
                         created = datetime.fromisoformat(comment["created_at"].replace("Z", "+00:00"))
-                        if created <= task_created_at:
+                        if (created <= task_created_at
+                                and (expected_start_id is None
+                                     or comment["id"] == expected_start_id)):
                             starts.append((created, comment))
-                    if not starts:
+                    if len(starts) != 1:
                         return None, "missing"
-                    start_at, start_comment = max(starts, key=lambda item: item[0])
+                    start_at, start_comment = starts[0]
                     if not (start_at <= task_created_at <= session_created_at
                             <= session_completed_at <= admission_at):
+                        return None, "changed"
+                    issue_edit = self._starter_issue_content_edited_after(
+                        admission["issue_number"], start_comment["created_at"],
+                    )
+                    if issue_edit is None:
+                        return None, "unverified"
+                    if issue_edit:
                         return None, "changed"
                     for event in timeline:
                         if not isinstance(event, dict) or not isinstance(event.get("event"), str):
                             return None, "unverified"
-                        if event["event"] == "edited":
+                        if event["event"] in {"edited", "renamed", "closed", "reopened"}:
                             if not _valid_timestamp(event.get("created_at")):
                                 return None, "unverified"
                             edited_at = datetime.fromisoformat(
@@ -3179,9 +3274,10 @@ class Coordinator:
                 ) != snapshot.get("head")
         ):
             return False
-        if (action.get("source_type") == "starter"
-                and (action.get("source_task_id") == action.get("task_id")
-                     or session.get("id") == action.get("source_session_id"))):
+        if (report_action.get("source_type") == "starter"
+                and (report_action.get("task_id") == report_action.get("source_task_id")
+                     or report_action.get("report_session_id")
+                        == report_action.get("source_session_id"))):
             return False
         old_base = report_action["main_sha"]
         if old_base == snapshot["main_sha"]:
@@ -3371,6 +3467,8 @@ class Coordinator:
         mutation; those steps run only after the scan commit succeeds.
         """
         head = action.get("receipt_head")
+        if not _valid_receipt_proof(action, snapshot.get("comments")):
+            return self._handoff_wait(key, action, snapshot)
         # Receipt base records dispatch provenance, not current-main eligibility.
         # Fence handoff mutations against the fresh scan base (and live main).
         base = snapshot["main_sha"]
@@ -4106,6 +4204,9 @@ class Coordinator:
         if not review_ok:
             reasons.append(("review", "A current structured independent-agent review and resolved conversations are required."))
         if (not review_ok and source_handoff is None and repair is None
+                and _valid_starter_admission(
+                    snapshot["enrollment"].get("starter_admission"),
+                )
                 and not any(
                     action.get("kind") == "review" and action.get("issue") == number
                     and action.get("head") == head
@@ -4286,7 +4387,7 @@ class Coordinator:
                 int(key), enrollment, main_sha, actions=state["actions"],
             )
             source = snapshot.get("initial_source")
-            if _valid_initial_source(source) and enrollment.get("initial_source") is None:
+            if _valid_initial_source(source):
                 starter_sources.append((snapshot["issue"], snapshot["head"], source))
             if (not snapshot.get("terminal") and enrollment.get("sensitive_sha")
                     and (enrollment["sensitive_sha"] != snapshot["head"]

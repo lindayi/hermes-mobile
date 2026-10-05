@@ -797,6 +797,68 @@ def test_required_policy_accepts_only_current_four_contexts_and_apps(drift):
         }
 
 
+def test_required_policy_normalizes_only_redundant_legacy_context_projection():
+    checks = [
+        {"context": "source-ci", "app_id": 15368},
+        {"context": "integration-tests", "app_id": None},
+        {"context": "agent-review", "app_id": None},
+        {"context": "issue-link", "app_id": 15368},
+    ]
+    contexts = [check["context"] for check in checks]
+
+    class PolicyApi:
+        def get(self, route):
+            if route.endswith("/branches/main/protection"):
+                return {"required_conversation_resolution": {"enabled": True}}
+            if route.endswith("/branches/main/protection/required_status_checks"):
+                return {"checks": checks, "contexts": contexts, "strict": True}
+            if "/rules/branches/main?" in route:
+                return []
+            raise AssertionError(route)
+
+    required, complete, strict, conversations = _required_checks(PolicyApi())
+    assert complete and strict and conversations
+    assert {(item["context"], item["app_id"]) for item in required} == {
+        ("source-ci", 15368), ("integration-tests", None),
+        ("agent-review", None), ("issue-link", 15368),
+    }
+
+
+@pytest.mark.parametrize("change", [
+    "extra-context", "missing-context", "duplicate-context", "wrong-app",
+])
+def test_required_policy_does_not_hide_nonredundant_legacy_rules(change):
+    checks = [
+        {"context": "source-ci", "app_id": 15368},
+        {"context": "integration-tests", "app_id": None},
+        {"context": "agent-review", "app_id": None},
+        {"context": "issue-link", "app_id": 15368},
+    ]
+    contexts = [check["context"] for check in checks]
+    if change == "extra-context":
+        contexts.append("independent-audit")
+    elif change == "missing-context":
+        contexts.pop()
+    elif change == "duplicate-context":
+        contexts.append("source-ci")
+    else:
+        checks[0] = {"context": "source-ci", "app_id": 15369}
+
+    class PolicyApi:
+        def get(self, route):
+            if route.endswith("/branches/main/protection"):
+                return {"required_conversation_resolution": {"enabled": True}}
+            if route.endswith("/branches/main/protection/required_status_checks"):
+                return {"checks": checks, "contexts": contexts, "strict": True}
+            if "/rules/branches/main?" in route:
+                return []
+            raise AssertionError(route)
+
+    required, complete, _, _ = _required_checks(PolicyApi())
+    assert not complete
+    assert len(required) >= 4
+
+
 def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
     pr = valid_pr()
     args = dict(
@@ -1244,6 +1306,10 @@ class FakeApi:
             self.owner_review_body.encode("utf-8"),
         ).hexdigest()
         self.pull_files = None
+        self.issue_edit_evidence = {
+            "lastEditedAt": None, "nodes": [],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }
         self.blob_contents = {
             "d" * 40: b"frontend style bytes",
             "e" * 40: b"backend auth bytes",
@@ -1453,6 +1519,20 @@ class FakeApi:
         raise AssertionError(f"Unexpected API list: {route}")
 
     def graphql(self, query, variables):
+        if "StarterIssueEditEvidence" in query:
+            return {
+                "data": {"repository": {
+                    "databaseId": 1399942965,
+                    "nameWithOwner": "lindayi/hermes-mobile",
+                    "issue": {
+                        "lastEditedAt": self.issue_edit_evidence["lastEditedAt"],
+                        "userContentEdits": {
+                            "nodes": self.issue_edit_evidence["nodes"],
+                            "pageInfo": self.issue_edit_evidence["pageInfo"],
+                        },
+                    },
+                }},
+            }
         if "PullRequestReview" in query:
             requested = variables.get("id")
             review = next((item for item in self.owner_reviews

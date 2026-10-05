@@ -36,7 +36,7 @@ def enrollment_command(head="a" * 40, body="Closes #28", issue_number=28):
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     return (
         f"/hermes enroll {head} issue {issue_number} body-sha256 {digest} "
-        "source-task task-1 source-session session-1"
+        "source-task task-1 source-session session-1 source-command 9001"
     )
 
 
@@ -135,6 +135,8 @@ def completed_task(*, repository_id=REPOSITORY_ID, creator_id=OWNER_ID,
         "repository": {"id": REPOSITORY_ID},
         "task_id": value["id"],
         "state": "completed",
+        "head_ref": head_ref,
+        "base_ref": "main",
         "completed_at": "2026-10-01T20:30:00Z",
     }]
     return value

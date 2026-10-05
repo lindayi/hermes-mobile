@@ -1805,7 +1805,8 @@ class Coordinator:
         enrollment_body = (
             f"/hermes enroll {record['head_sha']} issue {record['issue']} "
             f"body-sha256 {record['pull_body_sha256']} "
-            f"source-task {record['task_id']} source-session {source_session_id}"
+            f"source-task {record['task_id']} source-session {source_session_id} "
+            f"source-command {record['command_id']}"
         )
         enrollment_state = record.get("enrollment_state")
         if enrollment_state == "reserved":
