@@ -57,6 +57,7 @@ TERMINAL_PHASES = {"failed", "handed_off", "stale_authorization", "handoff_faile
 IMMUTABLE_FIELDS = {
     "issue", "command_id", "accepted_title_body_sha256", "accepted_at",
     "pull_body_sha256", "pull_base_sha", "link_intent",
+    "source_session_id",
 }
 PHASES = {
     "reserved", "dispatch_started", "unknown", "task_created", "failed",
@@ -87,6 +88,51 @@ def _parse_time(value):
     if parsed.tzinfo is None:
         return None
     return parsed.astimezone(timezone.utc)
+
+
+def _fold_issue_edit_page(issue, evidence, seen_cursors):
+    """Fold one GraphQL issue edit-history page into ``evidence``.
+
+    Pure validation shared by this producer and the paired coordinator. Returns
+    the next cursor, or None once the complete history is consistent: unchanged
+    ``lastEditedAt`` across pages, null only without edits, otherwise present as
+    an edit node. Malformed or inconsistent evidence raises CoordinatorError.
+    """
+    connection = issue.get("userContentEdits") if isinstance(issue, dict) else None
+    nodes = connection.get("nodes") if isinstance(connection, dict) else None
+    page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
+    if (not isinstance(issue, dict) or "lastEditedAt" not in issue
+            or not isinstance(nodes, list)
+            or len(nodes) > MAX_ITEMS_PER_PAGE
+            or not isinstance(page_info, dict)
+            or type(page_info.get("hasNextPage")) is not bool):
+        raise CoordinatorError("GitHub issue edit history was incomplete")
+    current_last_edited = issue.get("lastEditedAt")
+    if current_last_edited is not None and _parse_time(current_last_edited) is None:
+        raise CoordinatorError("GitHub issue edit timestamp was invalid")
+    if "edits" not in evidence:
+        evidence.update(lastEditedAt=current_last_edited, edits=[])
+    elif current_last_edited != evidence["lastEditedAt"]:
+        raise CoordinatorError("GitHub issue changed during edit-history pagination")
+    for item in nodes:
+        edited_at = item.get("editedAt") if isinstance(item, dict) else None
+        if _parse_time(edited_at) is None:
+            raise CoordinatorError("GitHub issue edit history was incomplete")
+        evidence["edits"].append(edited_at)
+    if not page_info["hasNextPage"]:
+        last_edited_at = evidence["lastEditedAt"]
+        if (last_edited_at is None) != (not evidence["edits"]):
+            raise CoordinatorError("GitHub issue edit history was inconsistent")
+        if last_edited_at is not None and not any(
+            edited_at == last_edited_at for edited_at in evidence["edits"]
+        ):
+            raise CoordinatorError("GitHub issue edit history was incomplete")
+        return None
+    cursor = page_info.get("endCursor")
+    if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+        raise CoordinatorError("GitHub issue edit history was incomplete")
+    seen_cursors.add(cursor)
+    return cursor
 
 
 def _verified_owner_comment(comment, expected, *, now, not_before=None):
@@ -129,6 +175,11 @@ def _valid_state_record(key, item):
                      or not TASK_ID_RE.fullmatch(item["task_id"])))):
         return False
     pull_body_sha = item.get("pull_body_sha256")
+    source_session_id = item.get("source_session_id")
+    if (source_session_id is not None
+            and (not isinstance(source_session_id, str)
+                 or not SESSION_ID_RE.fullmatch(source_session_id))):
+        return False
     if (pull_body_sha is not None
             and (not isinstance(pull_body_sha, str)
                  or re.fullmatch(r"[0-9a-f]{64}", pull_body_sha) is None)):
@@ -633,9 +684,8 @@ class Coordinator:
             }
           }
         """
-        edits = []
+        evidence = {}
         after = None
-        last_edited_at = None
         seen_cursors = set()
         for _ in range(MAX_EDIT_EVIDENCE_PAGES):
             response = self.api.graphql(
@@ -646,42 +696,9 @@ class Coordinator:
             data = response.get("data")
             repository = data.get("repository") if isinstance(data, dict) else None
             issue = repository.get("issue") if isinstance(repository, dict) else None
-            connection = (
-                issue.get("userContentEdits") if isinstance(issue, dict) else None
-            )
-            nodes = connection.get("nodes") if isinstance(connection, dict) else None
-            page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
-            if (not isinstance(issue, dict) or "lastEditedAt" not in issue
-                    or not isinstance(nodes, list)
-                    or len(nodes) > MAX_ITEMS_PER_PAGE
-                    or not isinstance(page_info, dict)
-                    or type(page_info.get("hasNextPage")) is not bool):
-                raise CoordinatorError("GitHub issue edit history was incomplete")
-            current_last_edited = issue.get("lastEditedAt")
-            if current_last_edited is not None and _parse_time(current_last_edited) is None:
-                raise CoordinatorError("GitHub issue edit timestamp was invalid")
-            if not edits and after is None:
-                last_edited_at = current_last_edited
-            elif current_last_edited != last_edited_at:
-                raise CoordinatorError("GitHub issue changed during edit-history pagination")
-            for item in nodes:
-                edited_at = item.get("editedAt") if isinstance(item, dict) else None
-                if _parse_time(edited_at) is None:
-                    raise CoordinatorError("GitHub issue edit history was incomplete")
-                edits.append(edited_at)
-            if not page_info["hasNextPage"]:
-                if (last_edited_at is None) != (not edits):
-                    raise CoordinatorError("GitHub issue edit history was inconsistent")
-                if last_edited_at is not None and not any(
-                    edited_at == last_edited_at for edited_at in edits
-                ):
-                    raise CoordinatorError("GitHub issue edit history was incomplete")
-                return {"lastEditedAt": last_edited_at, "edits": edits}
-            cursor = page_info.get("endCursor")
-            if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
-                raise CoordinatorError("GitHub issue edit history was incomplete")
-            seen_cursors.add(cursor)
-            after = cursor
+            after = _fold_issue_edit_page(issue, evidence, seen_cursors)
+            if after is None:
+                return evidence
         raise CoordinatorError("GitHub issue edit history exceeded its safety bound")
 
     @staticmethod
@@ -1599,6 +1616,7 @@ class Coordinator:
             # our own POST; only later comments can reconcile an uncertain send.
             self.store.update(key, {
                 "phase": "handoff_reserved",
+                "source_session_id": self._authenticated_task_session(task),
                 "pull_number": pull["number"],
                 "pull_node_id": pull["node_id"],
                 "head_sha": pull["head"]["sha"],
@@ -1782,11 +1800,20 @@ class Coordinator:
             return {"planned": 0, "pending": 0, "dispatched": 0,
                     "handed_off": 0, "blocked": 1}
         try:
-            _, linked_pull = self._verified_link_context(record, allow_ready=True)
+            source_task, linked_pull = self._verified_link_context(record, allow_ready=True)
             if (linked_pull.get("number") != record["pull_number"]
                     or linked_pull.get("head", {}).get("sha") != record["head_sha"]
                     or _pull_body_digest(linked_pull) != record.get("pull_body_sha256")):
                 raise CoordinatorError("Task pull changed before enrollment")
+            source_session_id = self._authenticated_task_session(source_task)
+            if source_session_id is None:
+                raise CoordinatorError("Completed task session identity did not match")
+            saved_session = record.get("source_session_id")
+            linked_session = (record.get("link_intent") or {}).get("session_id")
+            if (not (saved_session or linked_session)
+                    or (saved_session is not None and source_session_id != saved_session)
+                    or (linked_session is not None and source_session_id != linked_session)):
+                raise CoordinatorError("Completed task session identity changed")
             pull = self._current_pull(record)
             if pull.get("draft") is not False:
                 raise CoordinatorError("Task pull request is no longer ready for enrollment")
@@ -1800,6 +1827,17 @@ class Coordinator:
                     "handed_off": 0, "blocked": 1}
         comments = self._pr_comments(record["pull_number"])
         enrollment_body = (
+            f"/hermes enroll {record['head_sha']} issue {record['issue']} "
+            f"body-sha256 {record['pull_body_sha256']} "
+            f"source-task {record['task_id']} source-session {source_session_id} "
+            f"source-command {record['command_id']}"
+        )
+        legacy_enrollment_body = (
+            f"/hermes enroll {record['head_sha']} issue {record['issue']} "
+            f"body-sha256 {record['pull_body_sha256']} "
+            f"source-task {record['task_id']} source-session {source_session_id}"
+        )
+        original_enrollment_body = (
             f"/hermes enroll {record['head_sha']} issue {record['issue']} "
             f"body-sha256 {record['pull_body_sha256']}"
         )
@@ -1860,8 +1898,12 @@ class Coordinator:
                     "handed_off": 1, "blocked": 0}
         if enrollment_state in {"started", "uncertain"}:
             eligible = next(
-                (item for item in comments if _verified_owner_comment(
-                    item, enrollment_body, now=self.clock(),
+                (item for item in comments if (
+                    any(_verified_owner_comment(item, body, now=self.clock())
+                        for body in (
+                            enrollment_body, legacy_enrollment_body,
+                            original_enrollment_body,
+                        ))
                 ) and item["id"] > record.get("comment_high_water", 0)),
                 None,
             )

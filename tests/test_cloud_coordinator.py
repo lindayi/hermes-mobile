@@ -337,6 +337,8 @@ def test_blocker_receipt_never_authorizes_a_result_head():
         "receipt_nonce": "nonce", "receipt_start_head": HEAD,
         "receipt_head": result_head, "receipt_base": BASE,
         "receipt_body": body, "receipt_created_at": "2026-10-01T12:04:00Z",
+        "receipt_completed_at": "2026-10-01T12:04:00Z",
+        "receipt_session_completed_at": "2026-10-01T12:04:00Z",
     }
     comments = [{
         "id": 900, "user": {"id": 198982749},
@@ -797,6 +799,106 @@ def test_required_policy_accepts_only_current_four_contexts_and_apps(drift):
         }
 
 
+def test_required_policy_normalizes_only_redundant_legacy_context_projection():
+    checks = [
+        {"context": "source-ci", "app_id": 15368},
+        {"context": "integration-tests", "app_id": None},
+        {"context": "agent-review", "app_id": None},
+        {"context": "issue-link", "app_id": 15368},
+    ]
+    contexts = [check["context"] for check in checks]
+
+    class PolicyApi:
+        def get(self, route):
+            if route.endswith("/branches/main/protection"):
+                return {"required_conversation_resolution": {"enabled": True}}
+            if route.endswith("/branches/main/protection/required_status_checks"):
+                return {"checks": checks, "contexts": contexts, "strict": True}
+            if "/rules/branches/main?" in route:
+                return []
+            raise AssertionError(route)
+
+    required, complete, strict, conversations = _required_checks(PolicyApi())
+    assert complete and strict and conversations
+    assert {(item["context"], item["app_id"]) for item in required} == {
+        ("source-ci", 15368), ("integration-tests", None),
+        ("agent-review", None), ("issue-link", 15368),
+    }
+
+
+@pytest.mark.parametrize("change", [
+    "extra-context", "missing-context", "duplicate-context", "wrong-app",
+    "empty-contexts", "object-context", "conflicting-context-app", "non-string-context",
+])
+def test_required_policy_does_not_hide_nonredundant_legacy_rules(change):
+    checks = [
+        {"context": "source-ci", "app_id": 15368},
+        {"context": "integration-tests", "app_id": None},
+        {"context": "agent-review", "app_id": None},
+        {"context": "issue-link", "app_id": 15368},
+    ]
+    contexts = [check["context"] for check in checks]
+    if change == "extra-context":
+        contexts.append("independent-audit")
+    elif change == "missing-context":
+        contexts.pop()
+    elif change == "duplicate-context":
+        contexts.append("source-ci")
+    elif change == "empty-contexts":
+        contexts.clear()
+    elif change == "object-context":
+        contexts[0] = {"context": "source-ci", "app_id": 15368}
+    elif change == "conflicting-context-app":
+        contexts[0] = {"context": "source-ci", "app_id": 15369}
+    elif change == "non-string-context":
+        contexts[0] = None
+    else:
+        checks[0] = {"context": "source-ci", "app_id": 15369}
+
+    class PolicyApi:
+        def get(self, route):
+            if route.endswith("/branches/main/protection"):
+                return {"required_conversation_resolution": {"enabled": True}}
+            if route.endswith("/branches/main/protection/required_status_checks"):
+                return {"checks": checks, "contexts": contexts, "strict": True}
+            if "/rules/branches/main?" in route:
+                return []
+            raise AssertionError(route)
+
+    required, complete, _, _ = _required_checks(PolicyApi())
+    assert not complete
+    assert len(required) >= 4
+
+
+def test_required_policy_allows_consistently_empty_classic_rules_with_ruleset():
+    checks = [
+        {"context": "source-ci", "integration_id": 15368},
+        {"context": "integration-tests"},
+        {"context": "agent-review"},
+        {"context": "issue-link", "integration_id": 15368},
+    ]
+
+    class PolicyApi:
+        def get(self, route):
+            if route.endswith("/branches/main/protection"):
+                return {"required_conversation_resolution": {"enabled": True}}
+            if route.endswith("/branches/main/protection/required_status_checks"):
+                return {"checks": [], "contexts": [], "strict": True}
+            if "/rules/branches/main?" in route:
+                return [{
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "required_status_checks": checks,
+                        "strict_required_status_checks_policy": True,
+                    },
+                }]
+            raise AssertionError(route)
+
+    required, complete, strict, conversations = _required_checks(PolicyApi())
+    assert complete and strict and conversations
+    assert len(required) == 4
+
+
 def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
     pr = valid_pr()
     args = dict(
@@ -1244,6 +1346,10 @@ class FakeApi:
             self.owner_review_body.encode("utf-8"),
         ).hexdigest()
         self.pull_files = None
+        self.issue_edit_evidence = {
+            "lastEditedAt": None, "nodes": [],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }
         self.blob_contents = {
             "d" * 40: b"frontend style bytes",
             "e" * 40: b"backend auth bytes",
@@ -1453,6 +1559,20 @@ class FakeApi:
         raise AssertionError(f"Unexpected API list: {route}")
 
     def graphql(self, query, variables):
+        if "StarterIssueEditEvidence" in query:
+            return {
+                "data": {"repository": {
+                    "databaseId": 1399942965,
+                    "nameWithOwner": "lindayi/hermes-mobile",
+                    "issue": {
+                        "lastEditedAt": self.issue_edit_evidence["lastEditedAt"],
+                        "userContentEdits": {
+                            "nodes": self.issue_edit_evidence["nodes"],
+                            "pageInfo": self.issue_edit_evidence["pageInfo"],
+                        },
+                    },
+                }},
+            }
         if "PullRequestReview" in query:
             requested = variables.get("id")
             review = next((item for item in self.owner_reviews
@@ -1674,9 +1794,15 @@ class FakeApi:
             "role": "independent-reviewer",
             "head": action["head"],
             "base": action["main_sha"],
-            "source_start_head": source_action["head"],
-            "source_session_id": source_action["receipt_session_id"],
-            "source_comment_id": source_action["receipt_comment_id"],
+            "source_start_head": source_action.get(
+                "source_start_head", source_action.get("head"),
+            ),
+            "source_session_id": source_action.get(
+                "source_session_id", source_action.get("receipt_session_id"),
+            ),
+            "source_comment_id": source_action.get(
+                "source_comment_id", source_action.get("receipt_comment_id"),
+            ),
             "verdict": verdict,
             "summary": "Independent review completed.",
             "findings": findings or [],
@@ -4255,6 +4381,175 @@ def test_current_independent_review_completes_handoff_without_copilot(tmp_path):
     assert not api.graphql_writes
 
 
+@pytest.mark.parametrize("change", [None, "body", "closing", "source-task", "source-session", "head", "pull"])
+def test_dispatched_starter_report_uses_durable_source_identity(tmp_path, change):
+    from deploy.cloud_coordinator import review_task_request
+    from deploy.task_receipts import ReceiptError
+
+    api = FakeApi()
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    enrollment = enrollment_from_comment(api.issue, api.pull, api.comments[0])
+    enrollment["authorized_head"] = HEAD
+    source = {
+        "version": 1, "issue_number": 28, "start_comment_id": 10,
+        "start_comment_created_at": "2026-10-01T10:00:00Z",
+        "task_id": "source-task", "session_id": "source-session",
+        "task_created_at": "2026-10-01T10:01:00Z",
+        "session_created_at": "2026-10-01T10:02:00Z",
+        "session_completed_at": "2026-10-01T10:30:00Z",
+        "head_sha": HEAD, "head_ref": "topic",
+        "pull_id": api.pull["id"], "pull_node_id": api.pull["node_id"],
+        "repository_id": 1399942965,
+        "pull_body_sha256": hashlib.sha256(api.pull.get("body", "").encode()).hexdigest(),
+        "issue_body_sha256": "e" * 64,
+        "admission_comment_id": 123,
+        "admission_comment_created_at": api.comments[0]["created_at"],
+    }
+    enrollment["starter_admission"] = {
+        "version": 1, "issue_number": 28, "head_sha": HEAD,
+        "body_sha256": source["pull_body_sha256"],
+        "comment_id": 123, "comment_created_at": api.comments[0]["created_at"],
+    }
+    store.commit_scan(None, [], commands=[("enroll", enrollment)],
+                      starter_sources=[(16, HEAD, source)])
+    snapshot = coordinator._snapshot_pull(16, store.snapshot()["enrollments"]["16"], BASE)
+    handoff = {"issue": 16, "head": HEAD, "source_type": "starter", "initial_source": source}
+    action = review_task_request(snapshot, handoff, 100, "durable-source-anchor")
+    response = api.write("agents/repos/lindayi/hermes-mobile/tasks", {"prompt": action["body"]})
+    action.update(task_id=response["id"], task_created_at=response["created_at"])
+    api.complete_review_task(action["task_id"], action, source_action=action)
+    snapshot["comments"] = api.comments
+    snapshot["initial_source"] = source
+    report, _ = coordinator._validate_review_report(action, snapshot, api.tasks[action["task_id"]])
+    assert report["report"]["verdict"] == "pass"
+
+    if change in {"body", "closing"}:
+        snapshot["initial_source"] = None
+        if change == "body":
+            snapshot["pull"]["body"] = "A later report, not new source authority."
+    elif change in {"source-task", "source-session"}:
+        action["source_task_id" if change == "source-task" else "source_session_id"] = "unrelated"
+    elif change == "head":
+        snapshot["head"] = "f" * 40
+    elif change == "pull":
+        snapshot["pull"]["id"] += 1
+    if change in {"source-task", "source-session", "head", "pull"}:
+        with pytest.raises(ReceiptError):
+            coordinator._validate_review_report(action, snapshot, api.tasks[action["task_id"]])
+    else:
+        report, _ = coordinator._validate_review_report(action, snapshot, api.tasks[action["task_id"]])
+        assert report["report"]["verdict"] == "pass"
+
+
+def test_starter_source_artifacts_reject_malformed_relevant_entries():
+    from deploy.cloud_coordinator import _starter_task_artifacts_match
+
+    pull = {
+        "id": 123, "node_id": "PR_node",
+        "head": {"ref": "topic"},
+    }
+    artifacts = [
+        {"provider": "github", "type": "branch",
+         "data": {"head_ref": "topic", "base_ref": "main"}},
+        {"provider": "github", "type": "pull",
+         "data": {"id": 123, "global_id": "PR_node"}},
+    ]
+    assert _starter_task_artifacts_match({"artifacts": artifacts}, pull)
+    for kind in ("branch", "pull"):
+        for artifact in (
+            {"provider": "github", "type": kind},
+            {"provider": "github", "type": kind, "data": None},
+            {"provider": "github", "type": kind, "data": []},
+            {"provider": "github", "type": kind, "data": "malformed"},
+        ):
+            assert not _starter_task_artifacts_match(
+                {"artifacts": artifacts + [artifact]}, pull,
+            )
+    assert _starter_task_artifacts_match(
+        {"artifacts": artifacts + [
+            {"provider": "copilot", "type": "branch"},
+            {"provider": "github", "type": "log", "data": None},
+        ]},
+        pull,
+    )
+
+
+def test_starter_issue_edit_evidence_requires_explicit_nullable_field_and_paginates(tmp_path):
+    api = FakeApi()
+    coordinator = Coordinator(api, StateStore(tmp_path / "issue-edit-evidence.json"))
+    calls = []
+
+    def graphql(query, variables):
+        calls.append(variables.get("after"))
+        # A coherent response: the latest pre-command edit is on the final page.
+        issue = {
+            "lastEditedAt": "2026-10-01T09:30:00Z",
+            "userContentEdits": {
+                "nodes": [],
+                "pageInfo": {
+                    "hasNextPage": variables.get("after") is None,
+                    "endCursor": "next" if variables.get("after") is None else None,
+                },
+            },
+        }
+        if variables.get("after") is not None:
+            issue["userContentEdits"]["nodes"] = [
+                {"editedAt": "2026-10-01T09:30:00Z"},
+            ]
+        return {
+            "data": {"repository": {
+                "databaseId": 1399942965,
+                "nameWithOwner": "lindayi/hermes-mobile",
+                "issue": issue,
+            }},
+        }
+
+    api.graphql = graphql
+    assert coordinator._starter_issue_content_edited_after(
+        28, "2026-10-01T10:00:00Z",
+    ) is False
+    assert calls == [None, "next"]
+
+    def missing_field(query, variables):
+        response = graphql(query, variables)
+        response["data"]["repository"]["issue"].pop("lastEditedAt")
+        return response
+
+    api.graphql = missing_field
+    assert coordinator._starter_issue_content_edited_after(
+        28, "2026-10-01T10:00:00Z",
+    ) is None
+
+
+def test_starter_issue_edit_evidence_shares_the_producer_page_bound(tmp_path):
+    from deploy.issue_starter import MAX_EDIT_EVIDENCE_PAGES
+
+    api = FakeApi()
+    coordinator = Coordinator(api, StateStore(tmp_path / "issue-edit-bound.json"))
+    calls = []
+
+    def graphql(query, variables):
+        calls.append(variables.get("after"))
+        return {"data": {"repository": {
+            "databaseId": 1399942965,
+            "nameWithOwner": "lindayi/hermes-mobile",
+            "issue": {
+                "lastEditedAt": None,
+                "userContentEdits": {
+                    "nodes": [],
+                    "pageInfo": {"hasNextPage": True, "endCursor": f"page-{len(calls)}"},
+                },
+            },
+        }}}
+
+    api.graphql = graphql
+    assert coordinator._starter_issue_content_edited_after(
+        28, "2026-10-01T10:00:00Z",
+    ) is None
+    assert len(calls) == MAX_EDIT_EVIDENCE_PAGES
+
+
 def test_review_report_dispatch_and_publication_complete_handoff(tmp_path):
     class ColdStartAgentReviewApi(FakeApi):
         def get_all(self, route, *, collection=None):
@@ -6496,12 +6791,17 @@ def test_unrepresentable_review_inventory_persists_one_deduplicated_blocker(
 
 
 @pytest.mark.parametrize(("session_id", "eligible"), [
-    ("s" * 129, False),
+    ("s" * 128, True),
+    ("s" * 129, True),
+    ("s" * 256, True),
+    ("s" * 257, False),
     ("s" * (MAX_STATE_BYTES + 1), False),
     (17, False),
     (["session"], False),
-    ("s" * 128, True),
-], ids=["129-characters", "oversized", "integer", "list", "valid-limit"])
+], ids=[
+    "128-characters", "129-characters", "256-characters", "257-characters",
+    "oversized", "integer", "list",
+])
 def test_review_report_recovery_bounds_external_session_metadata(
         tmp_path, session_id, eligible):
     api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
@@ -7433,7 +7733,7 @@ def test_required_policy_preserves_classic_and_multiple_ruleset_sources():
         }} for app in (8, 9)
     ] + [{"type": "pull_request", "parameters": {"required_review_thread_resolution": False}}])
     required, complete, strict, conversations = _required_checks(api)
-    assert not complete and strict and conversations
+    assert not complete and strict and not conversations
     assert {(item["context"], item["app_id"]) for item in required} == {
         ("legacy", None), ("bound", 7), ("bound", 8), ("bound", 9),
     }
@@ -8202,14 +8502,16 @@ def starter_admission_inputs():
 def test_starter_admission_exact_grammar_and_authenticated_binding(change):
     api, issue, pull, comment = starter_admission_inputs()
     body = comment["body"]
+    prefix, digest_and_source = body.split(" body-sha256 ", 1)
+    digest, source = digest_and_source.split(" ", 1)
     if change in {"leading_zero", "zero", "negative", "overflow", "huge", "wrong_issue"}:
         number = {"leading_zero": "028", "zero": "0", "negative": "-28",
                   "overflow": "2147483648", "huge": "9" * 5000, "wrong_issue": "29"}[change]
         comment["body"] = body.replace("issue 28", "issue " + number)
     elif change == "uppercase_digest":
-        comment["body"] = body.rsplit(" ", 1)[0] + " " + body.rsplit(" ", 1)[1].upper()
+        comment["body"] = f"{prefix} body-sha256 {digest.upper()} {source}"
     elif change == "short_digest":
-        comment["body"] = body[:-1]
+        comment["body"] = f"{prefix} body-sha256 {digest[:-1]} {source}"
     elif change == "uppercase_head":
         comment["body"] = body.replace(HEAD, HEAD.upper())
     elif change in {"suffix", "newline"}:

@@ -69,6 +69,7 @@ COPILOT_AGENT_ID = 198982749
 MAIN_BRANCH = "main"
 REPAIR_LIMIT = 3
 REVIEW_REPORT_CORRECTION_LIMIT = 1
+MAX_SESSION_ID_LENGTH = 256
 MAX_RECEIPT_POLLS = 3
 MAX_HANDOFF_POLLS = 6
 HANDOFF_ACTIVE_STATES = frozenset({
@@ -188,6 +189,16 @@ def _valid_timestamp(value):
     return parsed.tzinfo is not None
 
 
+def _valid_session_id(value):
+    return (
+        isinstance(value, str)
+        and re.fullmatch(
+            rf"[A-Za-z0-9._:-]{{1,{MAX_SESSION_ID_LENGTH}}}",
+            value,
+        ) is not None
+    )
+
+
 def enrollment_from_comment(issue, pull, comment, *, api=None):
     """Return a minimal enrollment record only for an exact owner command."""
     user = comment.get("user") if isinstance(comment, dict) else None
@@ -197,7 +208,9 @@ def enrollment_from_comment(issue, pull, comment, *, api=None):
     if isinstance(body, str):
         starter = re.fullmatch(
             r"/hermes enroll ([0-9a-f]{40}) issue ([1-9][0-9]{0,9}) "
-            r"body-sha256 ([0-9a-f]{64})", body,
+            r"body-sha256 ([0-9a-f]{64})(?: source-task ([A-Za-z0-9._-]{1,128}) "
+            r"source-session ([A-Za-z0-9._:-]{1,256})"
+            r"(?: source-command ([1-9][0-9]{0,19}))?)?", body,
         )
     if body != "/hermes enroll":
         if not isinstance(body, str):
@@ -247,27 +260,87 @@ def enrollment_from_comment(issue, pull, comment, *, api=None):
     if authorized_head is not None:
         enrollment["authorized_head"] = authorized_head
     if starter:
-        enrollment["starter_admission"] = {
-            "version": 1, "issue_number": int(starter.group(2)),
+        provenance = {
+            "version": 3 if starter.group(6) else (2 if starter.group(4) else 1),
+            "issue_number": int(starter.group(2)),
             "head_sha": authorized_head, "body_sha256": starter.group(3),
             "comment_id": comment["id"], "comment_created_at": comment["created_at"],
         }
+        if starter.group(4):
+            provenance.update({
+                "source_task_id": starter.group(4),
+                "source_session_id": starter.group(5),
+            })
+        if starter.group(6):
+            provenance["start_comment_id"] = int(starter.group(6))
+        enrollment["starter_admission"] = provenance
     return enrollment
 
 
 def _valid_starter_admission(value):
     """Strict optional historical provenance; never compare to a later PR body/head."""
+    if not isinstance(value, dict):
+        return False
+    fields = {"version", "issue_number", "head_sha", "body_sha256",
+              "comment_id", "comment_created_at"}
+    if value.get("version") == 2:
+        fields |= {"source_task_id", "source_session_id"}
+    elif value.get("version") == 3:
+        fields |= {"source_task_id", "source_session_id", "start_comment_id"}
     return (
-        isinstance(value, dict)
-        and set(value) == {"version", "issue_number", "head_sha", "body_sha256",
-                          "comment_id", "comment_created_at"}
-        and type(value["version"]) is int and value["version"] == 1
+        set(value) == fields
+        and type(value["version"]) is int and value["version"] in {1, 2, 3}
         and type(value["issue_number"]) is int and 1 <= value["issue_number"] <= 2**31 - 1
         and _is_sha(value["head_sha"])
         and isinstance(value["body_sha256"], str)
         and re.fullmatch(r"[0-9a-f]{64}", value["body_sha256"]) is not None
         and type(value["comment_id"]) is int and value["comment_id"] > 0
         and _valid_timestamp(value["comment_created_at"])
+        and (value["version"] == 1 or (
+            isinstance(value["source_task_id"], str)
+            and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value["source_task_id"])
+            and _valid_session_id(value["source_session_id"])
+            and (value["version"] != 3 or (
+                type(value["start_comment_id"]) is int and value["start_comment_id"] > 0
+            ))
+        ))
+    )
+
+
+def _valid_initial_source(value):
+    fields = {
+        "version", "issue_number", "start_comment_id", "start_comment_created_at",
+        "task_id", "session_id", "task_created_at", "session_created_at",
+        "session_completed_at", "head_sha", "head_ref", "pull_id", "pull_node_id",
+        "repository_id", "pull_body_sha256", "issue_body_sha256",
+        "admission_comment_id", "admission_comment_created_at",
+    }
+    return (
+        isinstance(value, dict) and set(value) == fields
+        and type(value["version"]) is int and value["version"] == 1
+        and type(value["issue_number"]) is int
+        and 1 <= value["issue_number"] <= 2**31 - 1
+        and type(value["start_comment_id"]) is int and value["start_comment_id"] > 0
+        and _valid_timestamp(value["start_comment_created_at"])
+        and isinstance(value["task_id"], str)
+        and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value["task_id"]) is not None
+        and _valid_session_id(value["session_id"])
+        and all(_valid_timestamp(value[field]) for field in (
+            "task_created_at", "session_created_at", "session_completed_at",
+            "admission_comment_created_at",
+        ))
+        and _is_sha(value["head_sha"])
+        and isinstance(value["head_ref"], str) and 1 <= len(value["head_ref"]) <= 256
+        and type(value["pull_id"]) is int and value["pull_id"] > 0
+        and isinstance(value["pull_node_id"], str) and 1 <= len(value["pull_node_id"]) <= 256
+        and type(value["repository_id"]) is int and value["repository_id"] == REPOSITORY_ID
+        and all(
+            isinstance(value[field], str)
+            and re.fullmatch(r"[0-9a-f]{64}", value[field]) is not None
+            for field in ("pull_body_sha256", "issue_body_sha256")
+        )
+        and type(value["admission_comment_id"]) is int
+        and value["admission_comment_id"] > 0
     )
 
 
@@ -622,10 +695,13 @@ def neutral_reconciliation_request(snapshot, attempts):
 
 def review_anchor_request(snapshot, source_action, *, retry_of=None):
     key = (
-        f"{snapshot['issue']}:{snapshot['head']}:{source_action.get('task_id')}:"
-        f"{source_action.get('receipt_comment_id')}"
+        f"{snapshot['issue']}:{snapshot['head']}:"
+        f"{source_action.get('source_task_id', source_action.get('task_id'))}:"
+        f"{source_action.get('source_comment_id', source_action.get('receipt_comment_id'))}"
     )
-    if retry_of is not None:
+    if retry_of is None:
+        key += f":{snapshot['main_sha']}"
+    else:
         key += (
             f":report-correction:{retry_of['key']}:{retry_of['task_id']}:"
             f"{snapshot['main_sha']}"
@@ -651,7 +727,7 @@ def review_anchor_request(snapshot, source_action, *, retry_of=None):
         "kind": "review-anchor", "issue": snapshot["issue"], "head": snapshot["head"],
         "main_sha": snapshot["main_sha"], "correction": retry_of is not None,
         "key": (
-            f"review-anchor:{snapshot['issue']}:{snapshot['head']}"
+            f"review-anchor:{snapshot['issue']}:{snapshot['head']}:{snapshot['main_sha']}"
             if retry_of is None else
             f"review-anchor:{snapshot['issue']}:{snapshot['head']}:correction:"
             f"{hashlib.sha256((retry_of['key'] + ':' + snapshot['main_sha']).encode()).hexdigest()[:16]}"
@@ -714,14 +790,28 @@ def review_task_request(snapshot, source_action, anchor_comment_id, anchor_prefi
                         *, retry_of=None):
     if (type(anchor_comment_id) is not int or anchor_comment_id <= 0
             or not isinstance(anchor_prefix, str) or not anchor_prefix
-            or not isinstance(source_action, dict)
-            or not isinstance(source_action.get("task_id"), str)
-            or not source_action.get("task_id")
-            or not _is_sha(source_action.get("head"))
-            or not isinstance(source_action.get("receipt_session_id"), str)
-            or not source_action.get("receipt_session_id")
-            or type(source_action.get("receipt_comment_id")) is not int
-            or source_action["receipt_comment_id"] <= 0):
+            or not isinstance(source_action, dict)):
+        return None
+    starter_source = source_action.get("source_type") == "starter"
+    if starter_source:
+        provenance = source_action.get("initial_source")
+        if (not _valid_initial_source(provenance)
+                or source_action.get("issue") != snapshot.get("issue")
+                or source_action.get("head") != provenance["head_sha"]):
+            return None
+        source_task_id = provenance["task_id"]
+        source_session_id = provenance["session_id"]
+        source_comment_id = provenance["admission_comment_id"]
+        source_start_head = provenance["head_sha"]
+    else:
+        source_task_id = source_action.get("task_id")
+        source_session_id = source_action.get("receipt_session_id")
+        source_comment_id = source_action.get("receipt_comment_id")
+        source_start_head = source_action.get("head")
+    if (not isinstance(source_task_id, str) or not source_task_id
+            or not _is_sha(source_start_head)
+            or not isinstance(source_session_id, str) or not source_session_id
+            or type(source_comment_id) is not int or source_comment_id <= 0):
         return None
     branch = snapshot["pull"]["head"].get("ref")
     inventory = _review_prompt_inventory(snapshot)
@@ -731,8 +821,8 @@ def review_task_request(snapshot, source_action, anchor_comment_id, anchor_prefi
             or inventory is None):
         return None
     nonce_material = (
-        f"{snapshot['issue']}:{snapshot['head']}:{source_action['task_id']}:"
-        f"{source_action['receipt_comment_id']}"
+        f"{snapshot['issue']}:{snapshot['head']}:{source_task_id}:"
+        f"{source_comment_id}"
     )
     if retry_of is not None:
         if (not isinstance(retry_of, dict)
@@ -766,9 +856,9 @@ def review_task_request(snapshot, source_action, anchor_comment_id, anchor_prefi
         "role": REVIEW_REPORT_ROLE,
         "head": snapshot["head"],
         "base": snapshot["main_sha"],
-        "source_start_head": source_action["head"],
-        "source_session_id": source_action["receipt_session_id"],
-        "source_comment_id": source_action["receipt_comment_id"],
+        "source_start_head": source_start_head,
+        "source_session_id": source_session_id,
+        "source_comment_id": source_comment_id,
         "verdict": "changes_requested",
         "summary": "REPLACE_WITH_NONBLANK_SUMMARY",
         "findings": [{
@@ -803,9 +893,9 @@ def review_task_request(snapshot, source_action, anchor_comment_id, anchor_prefi
         f"- review nonce: `{nonce}`\n"
         f"- reviewed head: `{snapshot['head']}`\n"
         f"- reviewed base: `{snapshot['main_sha']}`\n"
-        f"- source start head: `{source_action['head']}`\n"
-        f"- source session: `{source_action['receipt_session_id']}`\n"
-        f"- source receipt comment: `{source_action['receipt_comment_id']}`\n"
+        f"- source start head: `{source_start_head}`\n"
+        f"- source session: `{source_session_id}`\n"
+        f"- source {'enrollment' if starter_source else 'receipt'} comment: `{source_comment_id}`\n"
         f"- owner anchor comment: `{anchor_comment_id}`\n\n"
         "After read-only review, call `engine-tools-reply_to_comment` exactly once with "
         f"`commentId={anchor_comment_id}` and one compact, valid JSON object with exactly "
@@ -842,10 +932,11 @@ def review_task_request(snapshot, source_action, anchor_comment_id, anchor_prefi
         "pull_id": snapshot["pull"].get("id"),
         "pull_node_id": snapshot["pull"].get("node_id"),
         "dispatch_nonce": nonce,
-        "source_task_id": source_action.get("task_id"),
-        "source_comment_id": source_action.get("receipt_comment_id"),
-        "source_session_id": source_action.get("receipt_session_id"),
-        "source_start_head": source_action.get("head"),
+        "source_type": "starter" if starter_source else "fix",
+        "source_task_id": source_task_id,
+        "source_comment_id": source_comment_id,
+        "source_session_id": source_session_id,
+        "source_start_head": source_start_head,
         "anchor_comment_id": anchor_comment_id,
         "anchor_prefix": anchor_prefix,
         "key": (
@@ -1238,8 +1329,29 @@ def _required_checks(api):
     try:
         protection = api.get(protection_route)
         if isinstance(protection, dict):
-            add_checks(protection.get("checks", []))
-            add_checks(protection.get("contexts", []))
+            checks = protection.get("checks", [])
+            contexts = protection.get("contexts", [])
+            add_checks(checks)
+            if "contexts" in protection and "checks" in protection:
+                normalized_checks = _required_contexts(checks)
+                normalized_contexts = _required_contexts(contexts)
+                if (not isinstance(checks, list) or not isinstance(contexts, list)
+                        or not all(isinstance(context, str) for context in contexts)):
+                    add_checks(contexts)
+                    malformed = True
+                else:
+                    check_names = [item["context"] for item in normalized_checks]
+                    context_names = [item["context"] for item in normalized_contexts]
+                    if (len(check_names) == len(context_names)
+                            and len(set(check_names)) == len(check_names)
+                            and len(set(context_names)) == len(context_names)
+                            and set(check_names) == set(context_names)):
+                        pass
+                    else:
+                        add_checks(contexts)
+                        malformed = True
+            elif "contexts" in protection:
+                add_checks(contexts)
             if (type(protection.get("strict")) is not bool
                     or not {"checks", "contexts"}.intersection(protection)):
                 malformed = True
@@ -1407,6 +1519,39 @@ def _task_scoped(task, snapshot):
         isinstance(session, dict) and session.get("head_ref") == head
         and session.get("base_ref") == MAIN_BRANCH
         for session in sessions or ()
+    )
+
+
+def _starter_task_artifacts_match(task, pull):
+    artifacts = task.get("artifacts") if isinstance(task, dict) else None
+    if not isinstance(artifacts, list) or len(artifacts) > 20:
+        return False
+    branches = []
+    pulls = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or artifact.get("provider") != "github":
+            continue
+        kind = artifact.get("type")
+        if kind not in {"branch", "pull"}:
+            continue
+        data = artifact.get("data")
+        if not isinstance(data, dict):
+            return False
+        if kind == "branch":
+            branches.append(data)
+        else:
+            pulls.append(data)
+    if len(branches) != 1 or len(pulls) != 1:
+        return False
+    branch, linked_pull = branches[0], pulls[0]
+    return (
+        isinstance(branch, dict)
+        and branch.get("head_ref") == pull.get("head", {}).get("ref")
+        and branch.get("base_ref") == MAIN_BRANCH
+        and _github_identity(linked_pull, pull.get("id"))
+        and isinstance(linked_pull, dict)
+        and ("global_id" not in linked_pull
+             or linked_pull["global_id"] == pull.get("node_id"))
     )
 
 
@@ -1627,12 +1772,12 @@ def _review_report_correction_parent_needs_recovery(actions, correction):
             or not isinstance(parent_task_id, str)
             or not parent_task_id or len(parent_task_id) > 128
             or not isinstance(parent_session_id, str)
-            or not parent_session_id or len(parent_session_id) > 128
+            or not _valid_session_id(parent_session_id)
             or not isinstance(correction_task_id, str)
             or not correction_task_id or len(correction_task_id) > 128
             or correction_task_id == parent_task_id
             or not isinstance(correction_session_id, str)
-            or not correction_session_id or len(correction_session_id) > 128
+            or not _valid_session_id(correction_session_id)
             or correction_session_id == parent_session_id
             or correction.get("dispatch_nonce") == parent.get("dispatch_nonce")
             or correction.get("anchor_comment_id") == parent.get("anchor_comment_id")):
@@ -1743,9 +1888,9 @@ def _review_report_correction_parent_needs_exhaustion(actions, correction):
             or correction_task_id == parent_task_id
             or not _valid_timestamp(correction.get("task_created_at"))
             or not isinstance(parent_session_id, str)
-            or not parent_session_id or len(parent_session_id) > 128
+            or not _valid_session_id(parent_session_id)
             or not isinstance(correction_session_id, str)
-            or not correction_session_id or len(correction_session_id) > 128
+            or not _valid_session_id(correction_session_id)
             or (stale and correction_session_id == parent_session_id)
             or not _valid_timestamp(completed_at)
             or not isinstance(parent_nonce, str) or not parent_nonce
@@ -1758,9 +1903,27 @@ def _review_report_correction_parent_needs_exhaustion(actions, correction):
     return True
 
 
-def _review_source_action(actions, issue, report_action, comments):
+def _review_source_action(actions, issue, report_action, comments, initial_source=None):
     if not isinstance(report_action, dict):
         return None
+    if report_action.get("source_type") == "starter":
+        source = initial_source
+        if (not _valid_initial_source(source)
+                or source.get("head_sha") != report_action.get("head")
+                or source.get("task_id") != report_action.get("source_task_id")
+                or source.get("session_id") != report_action.get("source_session_id")
+                or source.get("admission_comment_id") != report_action.get("source_comment_id")
+                or source.get("head_sha") != report_action.get("source_start_head")):
+            return None
+        return {
+            "kind": "starter-source", "source_type": "starter",
+            "issue": issue, "head": source["head_sha"],
+            "task_id": source["task_id"], "source_task_id": source["task_id"],
+            "source_session_id": source["session_id"],
+            "source_comment_id": source["admission_comment_id"],
+            "source_start_head": source["head_sha"],
+            "initial_source": source,
+        }
     for action in actions.values():
         if (not isinstance(action, dict)
                 or action.get("kind") != "fix"
@@ -1854,8 +2017,7 @@ def _valid_receipt_proof(action, comments):
             or action["receipt_comment_id"] <= 0
             or not isinstance(action.get("receipt_task_id"), str)
             or action["receipt_task_id"] != action.get("task_id")
-            or not isinstance(action.get("receipt_session_id"), str)
-            or not action["receipt_session_id"].strip()
+            or not _valid_session_id(action.get("receipt_session_id"))
             or not isinstance(action.get("receipt_nonce"), str)
             or not action["receipt_nonce"].strip()
             or action["receipt_nonce"] != action.get("dispatch_nonce")
@@ -1865,6 +2027,10 @@ def _valid_receipt_proof(action, comments):
             or not _is_sha(action.get("receipt_base"))
             or not isinstance(action.get("receipt_body"), str)
             or not isinstance(action.get("receipt_created_at"), str)
+            or not _valid_timestamp(action.get("receipt_completed_at"))
+            or ("receipt_session_completed_at" in action
+                and action.get("receipt_completed_at")
+                    != action["receipt_session_completed_at"])
             or not isinstance(comments, list)):
         return False
     version = action.get("receipt_version", "v1")
@@ -2066,12 +2232,13 @@ class Coordinator:
     """Poll, plan, and (only on explicit request) apply bounded public GitHub actions."""
 
     def __init__(self, api, store, *, clock=time.time, owner_user_id=None,
-                 lifecycle_source_paths=None):
+                 lifecycle_source_paths=None, starter_state_path=None):
         self.api = api
         self.store = store
         self.clock = clock
         self.owner_user_id = owner_user_id
         self.lifecycle_source_paths = lifecycle_source_paths
+        self.starter_state_path = starter_state_path
 
     def _identity(self):
         repository = self.api.get(f"repos/{REPOSITORY}")
@@ -2235,6 +2402,316 @@ class Coordinator:
             return False
         return True
 
+    def _starter_issue_content_edited_after(self, issue_number, started_at):
+        query = """
+          query StarterIssueEditEvidence($issueNumber: Int!, $after: String) {
+            repository(owner: "lindayi", name: "hermes-mobile") {
+              databaseId
+              nameWithOwner
+              issue(number: $issueNumber) {
+                lastEditedAt
+                userContentEdits(first: 100, after: $after) {
+                  nodes { editedAt }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }
+          }
+        """
+        from deploy.issue_starter import (
+            MAX_EDIT_EVIDENCE_PAGES, Coordinator as Starter,
+            CoordinatorError as StarterError, _fold_issue_edit_page,
+        )
+
+        if not _valid_timestamp(started_at):
+            return None
+        # Share the producer's pure page validation; adapter errors still raise.
+        cursor, seen, evidence = None, set(), {}
+        for _ in range(MAX_EDIT_EVIDENCE_PAGES):
+            variables = {"issueNumber": issue_number}
+            if cursor is not None:
+                variables["after"] = cursor
+            response = self.api.graphql(query, variables)
+            data = response.get("data") if isinstance(response, dict) else None
+            repository = data.get("repository") if isinstance(data, dict) else None
+            if (not isinstance(response, dict) or response.get("errors")
+                    or not isinstance(repository, dict)
+                    or repository.get("databaseId") != REPOSITORY_ID
+                    or repository.get("nameWithOwner") != REPOSITORY):
+                return None
+            try:
+                cursor = _fold_issue_edit_page(
+                    repository.get("issue"), evidence, seen,
+                )
+            except StarterError:
+                return None
+            if cursor is None:
+                return Starter._content_edited_after(evidence, started_at)
+        return None
+
+    def _saved_starter_binding(self, admission, pull):
+        """Read the starter's owner-private dispatch ledger, never adopt listed tasks."""
+        if self.starter_state_path is None:
+            return None
+        from deploy.issue_starter import StateStore as StarterStore, CoordinatorError as StarterError
+
+        try:
+            records = StarterStore(self.starter_state_path).snapshot()["commands"]
+        except (StarterError, OSError, ValueError):
+            return None
+        matches = [
+            record for record in records.values()
+            if record.get("phase") == "handed_off"
+            and record.get("enrollment_state") == "done"
+            and record.get("ready_state") == "done"
+            and record.get("issue") == admission["issue_number"]
+            and type(record.get("pull_number")) is int
+            and record.get("pull_number") == pull.get("number")
+            and record.get("pull_node_id") == pull.get("node_id")
+            and record.get("head_sha") == admission["head_sha"]
+            and record.get("branch") == pull.get("head", {}).get("ref")
+            and record.get("pull_body_sha256") == admission["body_sha256"]
+            and record.get("pull_base_sha") == pull.get("base", {}).get("sha")
+            and type(record.get("comment_high_water")) is int
+            and record["comment_high_water"] >= 0
+            and admission["comment_id"] > record["comment_high_water"]
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _resolve_initial_source(self, snapshot):
+                enrollment = snapshot.get("enrollment")
+                admission = enrollment.get("starter_admission") if isinstance(enrollment, dict) else None
+                if not _valid_starter_admission(admission):
+                    return None, "missing"
+                pull = snapshot.get("pull")
+                head = snapshot.get("head")
+                pull_body = pull.get("body") if isinstance(pull, dict) else None
+                if (not isinstance(pull, dict)
+                        or head != admission["head_sha"]
+                        or enrollment.get("authorized_head") != head
+                        or pull.get("draft") is not False
+                        or not isinstance(pull_body, str) or len(pull_body) > 60_000
+                        or hashlib.sha256(pull_body.encode("utf-8")).hexdigest()
+                        != admission["body_sha256"]):
+                    return None, "changed"
+                admission_body = (
+                    f"/hermes enroll {head} issue {admission['issue_number']} "
+                    f"body-sha256 {admission['body_sha256']}"
+                )
+                if admission["version"] in {2, 3}:
+                    admission_body += (
+                        f" source-task {admission['source_task_id']}"
+                        f" source-session {admission['source_session_id']}"
+                    )
+                if admission["version"] == 3:
+                    admission_body += f" source-command {admission['start_comment_id']}"
+                admission_comments = [
+                    item for item in snapshot.get("comments", ())
+                    if isinstance(item, dict) and item.get("id") == admission["comment_id"]
+                ]
+                if (len(admission_comments) != 1
+                        or admission_comments[0].get("body") != admission_body
+                        or not _github_identity(admission_comments[0].get("user"), OWNER_ID)
+                        or admission_comments[0].get("created_at") != admission["comment_created_at"]
+                        or admission_comments[0].get("updated_at") != admission["comment_created_at"]):
+                    return None, "changed"
+                try:
+                    saved_binding = (
+                        self._saved_starter_binding(admission, pull)
+                        if admission["version"] == 1 else None
+                    )
+                    task_id = admission.get("source_task_id")
+                    source = enrollment.get("initial_source")
+                    if source is not None:
+                        if not _valid_initial_source(source):
+                            return None, "unverified"
+                        if source["head_sha"] != head or source["issue_number"] != admission["issue_number"]:
+                            return None, "changed"
+                        task_id = source["task_id"]
+                    if task_id is None and saved_binding is not None:
+                        task_id = saved_binding.get("task_id")
+                    if not isinstance(task_id, str) or not task_id:
+                        return None, "missing"
+                    task = self.api.get(
+                        f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}",
+                    )
+                    if (not isinstance(task, dict) or task.get("id") != task_id
+                            or task.get("state") != "completed"
+                            or type(task.get("session_count")) is not int
+                            or task["session_count"] != 1
+                            or not _github_identity(task.get("creator"), OWNER_ID)
+                            or not _github_identity(task.get("owner"), OWNER_ID)
+                            or not _github_identity(task.get("repository"), REPOSITORY_ID)
+                            or not _starter_task_artifacts_match(task, pull)):
+                        return None, "unverified"
+                    sessions = task.get("sessions")
+                    if not isinstance(sessions, list) or len(sessions) != 1:
+                        return None, "unverified"
+                    session = sessions[0]
+                    if (not isinstance(session, dict)
+                            or not _valid_session_id(session.get("id"))
+                            or session.get("task_id") != task_id
+                            or session.get("state") != "completed"
+                            or not _github_identity(session.get("user"), OWNER_ID)
+                            or not _github_identity(session.get("owner"), OWNER_ID)
+                            or not _github_identity(session.get("repository"), REPOSITORY_ID)
+                            or session.get("head_ref") != pull["head"].get("ref")
+                            or session.get("base_ref") != MAIN_BRANCH):
+                        return None, "unverified"
+                    if (admission["version"] in {2, 3}
+                            and (admission["source_task_id"] != task_id
+                                 or admission["source_session_id"] != session["id"])):
+                        return None, "changed"
+                    if (source is not None and source["session_id"] != session["id"]):
+                        return None, "changed"
+                    if admission["version"] == 1 and source is None:
+                        saved_session_id = (
+                            saved_binding.get("source_session_id")
+                            if saved_binding is not None else None
+                        )
+                        link_intent = (
+                            saved_binding.get("link_intent")
+                            if saved_binding is not None else None
+                        )
+                        linked_session_id = (
+                            link_intent.get("session_id")
+                            if isinstance(link_intent, dict) else None
+                        )
+                        if (saved_session_id is None and linked_session_id is None):
+                            return None, "missing"
+                        if (saved_binding.get("task_id") != task_id
+                                or (saved_session_id is not None
+                                    and saved_session_id != session["id"])
+                                or (linked_session_id is not None
+                                    and linked_session_id != session["id"])):
+                            return None, "changed"
+                    from deploy.pull_handoff_binding import _closing_issue_linked
+
+                    if not _closing_issue_linked(self.api, pull, admission["issue_number"]):
+                        return None, "changed"
+                    source_issue = self.api.get(
+                        f"repos/{REPOSITORY}/issues/{admission['issue_number']}",
+                    )
+                    if (not isinstance(source_issue, dict)
+                            or source_issue.get("number") != admission["issue_number"]
+                            or source_issue.get("pull_request")
+                            or source_issue.get("state") != "open"
+                            or not isinstance(source_issue.get("title"), str)
+                            or not isinstance(source_issue.get("body"), str)
+                            or len(source_issue["title"]) + len(source_issue["body"]) > 40_000):
+                        return None, "unverified"
+                    source_comments = _all_review_comments(
+                        self.api, admission["issue_number"], None,
+                    )
+                    timeline = _rest_list(
+                        self.api,
+                        f"repos/{REPOSITORY}/issues/{admission['issue_number']}/timeline?per_page=100",
+                        collection="timeline",
+                    )
+                    if not isinstance(timeline, list):
+                        return None, "unverified"
+                    task_created = task.get("created_at")
+                    session_created = session.get("created_at")
+                    # The immutable owner handoff certifies a completed session by
+                    # admission time when GitHub omits its optional completion time.
+                    session_completed = session.get("completed_at")
+                    if session_completed is None:
+                        session_completed = (
+                            source["session_completed_at"] if source is not None
+                            else admission["comment_created_at"]
+                        )
+                    if not all(_valid_timestamp(value) for value in (
+                        task_created, session_created, session_completed,
+                    )):
+                        return None, "unverified"
+                    task_created_at = datetime.fromisoformat(task_created.replace("Z", "+00:00"))
+                    session_created_at = datetime.fromisoformat(session_created.replace("Z", "+00:00"))
+                    session_completed_at = datetime.fromisoformat(session_completed.replace("Z", "+00:00"))
+                    admission_at = datetime.fromisoformat(
+                        admission["comment_created_at"].replace("Z", "+00:00"),
+                    )
+                    starts = []
+                    expected_start_id = (
+                        saved_binding["command_id"] if saved_binding is not None
+                        else source["start_comment_id"] if source is not None
+                        else admission.get("start_comment_id")
+                    )
+                    for comment in source_comments:
+                        if (not isinstance(comment, dict) or comment.get("body") != "/hermes start"
+                                or not _github_identity(comment.get("user"), OWNER_ID)
+                                or type(comment.get("id")) is not int or comment["id"] <= 0
+                                or not _valid_timestamp(comment.get("created_at"))
+                                or comment.get("updated_at") != comment.get("created_at")):
+                            continue
+                        created = datetime.fromisoformat(comment["created_at"].replace("Z", "+00:00"))
+                        if (created <= task_created_at
+                                and (expected_start_id is None
+                                     or comment["id"] == expected_start_id)):
+                            starts.append((created, comment))
+                    if len(starts) != 1:
+                        return None, "missing"
+                    start_at, start_comment = starts[0]
+                    if saved_binding is not None:
+                        accepted_digest = hashlib.sha256((
+                            source_issue["title"] + "\0" + source_issue["body"]
+                        ).encode("utf-8")).hexdigest()
+                        if (saved_binding["accepted_at"] != start_comment["created_at"]
+                                or saved_binding["accepted_title_body_sha256"] != accepted_digest):
+                            return None, "changed"
+                    if not (start_at <= task_created_at <= session_created_at
+                            <= session_completed_at <= admission_at):
+                        return None, "changed"
+                    issue_edit = self._starter_issue_content_edited_after(
+                        admission["issue_number"], start_comment["created_at"],
+                    )
+                    if issue_edit is None:
+                        return None, "unverified"
+                    if issue_edit:
+                        return None, "changed"
+                    from deploy.issue_starter import _edited_after_authorization
+                    if _edited_after_authorization(timeline, start_comment["created_at"]):
+                        return None, "changed"
+                    for event in timeline:
+                        if not isinstance(event, dict) or not isinstance(event.get("event"), str):
+                            return None, "unverified"
+                        if event["event"] in {"edited", "renamed", "closed", "reopened"}:
+                            if not _valid_timestamp(event.get("created_at")):
+                                return None, "unverified"
+                            edited_at = datetime.fromisoformat(
+                                event["created_at"].replace("Z", "+00:00"),
+                            )
+                            if edited_at >= start_at:
+                                return None, "changed"
+                    result = {
+                        "version": 1,
+                        "issue_number": admission["issue_number"],
+                        "start_comment_id": start_comment["id"],
+                        "start_comment_created_at": start_comment["created_at"],
+                        "task_id": task_id,
+                        "session_id": session["id"],
+                        "task_created_at": task_created,
+                        "session_created_at": session_created,
+                        "session_completed_at": session_completed,
+                        "head_sha": head,
+                        "head_ref": pull["head"]["ref"],
+                        "pull_id": pull["id"],
+                        "pull_node_id": pull["node_id"],
+                        "repository_id": REPOSITORY_ID,
+                        "pull_body_sha256": admission["body_sha256"],
+                        "issue_body_sha256": hashlib.sha256(
+                            source_issue["body"].encode("utf-8"),
+                        ).hexdigest(),
+                        "admission_comment_id": admission["comment_id"],
+                        "admission_comment_created_at": admission["comment_created_at"],
+                    }
+                    if not _valid_initial_source(result):
+                        return None, "unverified"
+                    if source is not None and result != source:
+                        return None, "changed"
+                    return result, None
+                except (ApiError, CoordinatorError, KeyError, TypeError, ValueError, UnicodeError):
+                    return None, "unverified"
+
     def _snapshot_pull(self, number, enrollment, main_sha, actions=None):
         if not {"pull_id", "pull_node_id", "repository_id"}.issubset(enrollment):
             raise CoordinatorError(
@@ -2340,7 +2817,7 @@ class Coordinator:
         source_failure = _latest_source_failure(
             workflows, sha, head.get("ref", ""), number,
         )
-        return {
+        snapshot = {
             "issue": number, "enrollment": enrollment, "pull": pull, "head": sha,
             "main_sha": main_sha, "scoped": scoped,
             "historical_base": historical_base, "files": files,
@@ -2355,6 +2832,10 @@ class Coordinator:
             "comments": comments, "workflows": workflows, "tasks": tasks,
             "pull_workflows": pull_workflows,
         }
+        snapshot["initial_source"], snapshot["initial_source_error"] = (
+            self._resolve_initial_source(snapshot)
+        )
+        return snapshot
 
     def _verified_stale_ready_handoff(self, action, snapshot):
         pull = snapshot["pull"]
@@ -2528,8 +3009,7 @@ class Coordinator:
                                 and isinstance(sessions[0], dict)):
                             session_id = sessions[0].get("id")
                             if ((retry_allowed or correction_authenticated)
-                                    and isinstance(session_id, str) and session_id
-                                    and len(session_id) <= 128):
+                                    and _valid_session_id(session_id)):
                                 report_session_id = session_id
                             if retry_allowed or correction_authenticated:
                                 report_session_completed_at = sessions[0].get(
@@ -2824,8 +3304,7 @@ class Coordinator:
             return False
         session = sessions[0]
         if (not isinstance(session, dict)
-                or not isinstance(session.get("id"), str)
-                or not session["id"] or len(session["id"]) > 128
+                or not _valid_session_id(session.get("id"))
                 or session.get("task_id") != action.get("task_id")
                 or session.get("state") not in (
                     "completed", "failed", "timed_out", "cancelled",
@@ -2866,8 +3345,15 @@ class Coordinator:
                 or not report_action.get("report_error")
                 or not _is_sha(report_action.get("main_sha"))
                 or report_action.get("head") != snapshot.get("head")
-                or source_action.get("receipt_head") != snapshot.get("head")
+                or source_action.get(
+                    "receipt_head", source_action.get("head"),
+                ) != snapshot.get("head")
         ):
+            return False
+        if (report_action.get("source_type") == "starter"
+                and (report_action.get("task_id") == report_action.get("source_task_id")
+                     or report_action.get("report_session_id")
+                        == report_action.get("source_session_id"))):
             return False
         old_base = report_action["main_sha"]
         if old_base == snapshot["main_sha"]:
@@ -3057,6 +3543,8 @@ class Coordinator:
         mutation; those steps run only after the scan commit succeeds.
         """
         head = action.get("receipt_head")
+        if not _valid_receipt_proof(action, snapshot.get("comments")):
+            return self._handoff_wait(key, action, snapshot)
         # Receipt base records dispatch provenance, not current-main eligibility.
         # Fence handoff mutations against the fresh scan base (and live main).
         base = snapshot["main_sha"]
@@ -3199,6 +3687,22 @@ class Coordinator:
             raise ReceiptError(
                 "Independent review correction reservation snapshot is no longer current"
             )
+        if action.get("source_type") == "starter":
+            source = self.store.snapshot()["enrollments"].get(
+                str(action.get("issue")), {},
+            ).get("initial_source")
+            if (not _valid_initial_source(source)
+                    or source.get("head_sha") != action.get("head")
+                    or action.get("head") != snapshot.get("head")
+                    or source.get("pull_id") != snapshot["pull"].get("id")
+                    or source.get("pull_node_id") != snapshot["pull"].get("node_id")
+                    or source.get("head_ref") != snapshot["pull"].get("head", {}).get("ref")
+                    or source.get("head_sha") != action.get("source_start_head")
+                    or source.get("task_id") != action.get("source_task_id")
+                    or source.get("session_id") != action.get("source_session_id")
+                    or source.get("admission_comment_id") != action.get("source_comment_id")
+                    or action.get("source_task_id") == action.get("task_id")):
+                raise ReceiptError("Initial source provenance is no longer current")
         sessions = task.get("sessions")
         if (task.get("id") != action.get("task_id")
                 or task.get("state") != "completed"
@@ -3213,8 +3717,7 @@ class Coordinator:
             raise ReceiptError("Independent review task evidence is incomplete")
         session = sessions[0]
         if (not isinstance(session, dict)
-                or not isinstance(session.get("id"), str)
-                or not session.get("id") or len(session["id"]) > 128
+                or not _valid_session_id(session.get("id"))
                 or session.get("task_id") != action.get("task_id")
                 or session.get("state") != "completed"
                 or session.get("prompt") != action.get("body")
@@ -3222,7 +3725,9 @@ class Coordinator:
                 or session.get("base_ref") != MAIN_BRANCH
                 or not _github_identity(session.get("user"), OWNER_ID)
                 or not _github_identity(session.get("owner"), OWNER_ID)
-                or not _github_identity(session.get("repository"), REPOSITORY_ID)):
+                or not _github_identity(session.get("repository"), REPOSITORY_ID)
+                or (action.get("source_type") == "starter"
+                    and session.get("id") == action.get("source_session_id"))):
             raise ReceiptError("Independent review session evidence is incomplete")
         report = find_review_report(
             snapshot["comments"],
@@ -3271,7 +3776,7 @@ class Coordinator:
                     or not isinstance(parent_task_id, str)
                     or not parent_task_id or len(parent_task_id) > 128
                     or not isinstance(parent_session_id, str)
-                    or not parent_session_id or len(parent_session_id) > 128
+                    or not _valid_session_id(parent_session_id)
                     or action.get("task_id") == parent_task_id
                     or task.get("id") == parent_task_id
             ):
@@ -3627,6 +4132,19 @@ class Coordinator:
         )
         mergeability_unknown = _mergeability_unknown(snapshot["pull"])
         source_handoff = _current_source_handoff(actions, number, head)
+        initial_source = snapshot.get("initial_source")
+        if not review_ok and source_handoff is None and _valid_initial_source(initial_source):
+            source_handoff = {
+                "kind": "starter-source", "issue": number, "head": head,
+                "status": "completed", "handoff_state": "waiting_review",
+                "review_requirement": "missing_independent_review",
+                "source_type": "starter", "source_task_id": initial_source["task_id"],
+                "source_session_id": initial_source["session_id"],
+                "source_comment_id": initial_source["admission_comment_id"],
+                "source_start_head": initial_source["head_sha"],
+                "source_session_completed_at": initial_source["session_completed_at"],
+                "initial_source": initial_source,
+            }
         review_followup = _current_review_followup(actions, number, head)
         review_inventory_error = (
             source_handoff.get("review_inventory_error")
@@ -3641,9 +4159,14 @@ class Coordinator:
         review_correction_anchor = None
         review_action = None
         source_handoff_ready = False
-        if source_handoff and _valid_timestamp(source_handoff.get("receipt_completed_at")):
+        source_completed_at = (
+            source_handoff.get("receipt_completed_at")
+            or source_handoff.get("source_session_completed_at")
+            if source_handoff else None
+        )
+        if source_handoff and _valid_timestamp(source_completed_at):
             completed = datetime.fromisoformat(
-                source_handoff["receipt_completed_at"].replace("Z", "+00:00")
+                source_completed_at.replace("Z", "+00:00")
             )
             source_handoff_ready = completed <= datetime.fromtimestamp(
                 self.clock(), timezone.utc
@@ -3675,7 +4198,10 @@ class Coordinator:
             and action["report_observation_error"]
         ), None)
         report_source = (
-            _review_source_action(actions, number, report_failure, snapshot["comments"])
+            _review_source_action(
+                actions, number, report_failure, snapshot["comments"],
+                snapshot["enrollment"].get("initial_source"),
+            )
             if report_failure else None
         )
         report_recovery_proven = (
@@ -3759,6 +4285,33 @@ class Coordinator:
             reasons.append(("sensitive", "Owner exact-head authorization is required for sensitive changes."))
         if not review_ok:
             reasons.append(("review", "A current structured independent-agent review and resolved conversations are required."))
+        if (not review_ok and source_handoff is None and repair is None
+                and not (agent_busy and any(
+                    action.get("issue") == number
+                    and action.get("kind") in {"fix", "review"}
+                    for action in actions.values()
+                ))
+                and snapshot["pull"].get("draft") is False
+                and not _cloud_agent_active(
+                    snapshot["workflows"], snapshot["pull"]["head"]["ref"],
+                )
+                and not _other_task_active([
+                    task for task in snapshot["tasks"]
+                    if isinstance(task, dict) and task.get("state") in {
+                        "queued", "in_progress", "waiting_for_user", "idle",
+                        "requested", "pending",
+                    }
+                ], snapshot)
+                and not any(
+                    action.get("issue") == number
+                    and action.get("kind") in {"fix", "review"}
+                    and action.get("status") in {"sending", "uncertain", "sent"}
+                    for action in actions.values()
+                )):
+            reasons.append((
+                "starter-source-provenance",
+                "No authenticated initial-source task provenance is available; independent review dispatch is blocked.",
+            ))
         if review_inventory_error:
             reasons.append((
                 "review-inventory",
@@ -3886,6 +4439,12 @@ class Coordinator:
         notification_outcomes, lifecycle_events = self._notification_outcomes(
             snapshot, reasons,
         )
+        if (not mergeability_unknown
+                and any(code == "starter-source-provenance" for code, _ in reasons)):
+            notification_outcomes.append(self._outcome(
+                snapshot, "starter-source-provenance",
+                "No authenticated initial-source task provenance is available; independent review dispatch is blocked. Use an authenticated issue-starter handoff or a verified coordinator repair handoff.",
+            ))
         if (repair_scoped and not agent_busy
                 and snapshot["pull"].get("draft") is not True
                 and attempts >= REPAIR_LIMIT and needs_reconciliation and not neutral_blocker
@@ -3918,11 +4477,14 @@ class Coordinator:
         issues, commands, processed, enrollments = self._scan_enrollments(
             state, admission_checks=admission_checks,
         )
-        scans, sensitive_revocations = [], []
+        scans, sensitive_revocations, starter_sources = [], [], []
         for key, enrollment in enrollments.items():
             snapshot = self._snapshot_pull(
                 int(key), enrollment, main_sha, actions=state["actions"],
             )
+            source = snapshot.get("initial_source")
+            if _valid_initial_source(source):
+                starter_sources.append((snapshot["issue"], snapshot["head"], source))
             if (not snapshot.get("terminal") and enrollment.get("sensitive_sha")
                     and (enrollment["sensitive_sha"] != snapshot["head"]
                          or not sensitive_review_authorized(
@@ -3950,8 +4512,10 @@ class Coordinator:
             if not snapshot.get("terminal")
         ]
         return {
-            "cursor": cursor, "processed": processed, "commands": commands,
+            "cursor": cursor, "main_sha": main_sha,
+            "processed": processed, "commands": commands,
             "starter_admissions": admission_checks,
+            "starter_sources": starter_sources,
             "enrollments": enrollments, "snapshots": scans, "pull_requests": plans,
             "observations": observations, "sensitive_revocations": sensitive_revocations,
             "now": self.clock(),
@@ -4170,7 +4734,8 @@ class Coordinator:
                     "completed", "failed", "timed_out", "cancelled",
                 } or not _valid_timestamp(response.get("created_at"))
                 or not _github_identity(response.get("creator"), OWNER_ID)
-                or not _github_identity(response.get("repository"), REPOSITORY_ID)):
+                or not _github_identity(response.get("repository"), REPOSITORY_ID)
+                or (review_task and task_id == action.get("source_task_id"))):
             event = self._record_uncertain_task(claimed_action)
             self.store.update_action_with_lifecycle(
                 key, "uncertain", event, now=self.clock(),
@@ -4452,8 +5017,23 @@ class Coordinator:
                                        if key not in {"last_open_seen", "last_open_head"})):
                 raise CoordinatorError("Starter admission binding changed before state commit")
 
+    def _fence_starter_sources(self, sources, enrollments, main_sha):
+        for number, expected_head, expected_source in sources:
+            enrollment = enrollments.get(str(number))
+            if not isinstance(enrollment, dict) or not _valid_initial_source(expected_source):
+                raise CoordinatorError("Initial starter source evidence was invalid before state commit")
+            current = self._snapshot_pull(
+                number, enrollment, main_sha, actions=self.store.actions(),
+            )
+            if (current.get("head") != expected_head
+                    or current.get("initial_source") != expected_source):
+                raise CoordinatorError("Initial starter source evidence changed before state commit")
+
     def _apply(self, plan, *, after_commit=None):
         self._fence_starter_admissions(plan.get("starter_admissions", ()))
+        self._fence_starter_sources(
+            plan.get("starter_sources", ()), plan["enrollments"], plan["main_sha"],
+        )
         self.store.commit_scan(
             plan["cursor"], plan["processed"], commands=plan["commands"],
             retirements=[
@@ -4466,6 +5046,7 @@ class Coordinator:
             ] + plan.get("source_lifecycle_events", [])),
             observations=plan.get("observations", []),
             sensitive_revocations=plan.get("sensitive_revocations", []),
+            starter_sources=plan.get("starter_sources", ()),
             now=plan["now"],
         )
         # Publish only committed observations before fallible reads or mutations.
@@ -4880,6 +5461,10 @@ class StateStore:
                and not _valid_starter_admission(item["starter_admission"])
                for item in data["enrollments"].values()):
             raise CoordinatorError("Starter admission provenance is invalid")
+        if any("initial_source" in item
+               and not _valid_initial_source(item["initial_source"])
+               for item in data["enrollments"].values()):
+            raise CoordinatorError("Initial starter source provenance is invalid")
         data.setdefault("lifecycle_events", [])
         if (not isinstance(data["lifecycle_events"], list)
                 or len(data["lifecycle_events"]) > MAX_LIFECYCLE_EVENTS
@@ -5110,7 +5695,8 @@ class StateStore:
                 temporary.unlink()
 
     def commit_scan(self, cursor, processed, *, commands=(), retirements=(),
-                    lifecycle_events=(), observations=(), sensitive_revocations=(), now=None):
+                    lifecycle_events=(), observations=(), sensitive_revocations=(),
+                    starter_sources=(), now=None):
         keys = [str(item) for item in processed]
         prepared, baseline = self._prepared, self._preparation_base
         self.discard_preparation()
@@ -5186,6 +5772,20 @@ class StateStore:
                         enrollment["sensitive_sha"] = item["head"]
                         enrollment["sensitive_authorization"] = item["owner_authorization"]
                         enrollment["targeted_review"] = item["targeted_review"]
+            for issue, head, source in starter_sources:
+                enrollment = data["enrollments"].get(str(issue))
+                if (not enrollment or not enrollment.get("active")
+                        or enrollment.get("authorized_head") != head
+                        or not _valid_initial_source(source)
+                        or source.get("head_sha") != head
+                        or source.get("issue_number") != enrollment.get(
+                            "starter_admission", {},
+                        ).get("issue_number")):
+                    raise CoordinatorError("Initial starter source did not match its admitted head")
+                existing = enrollment.get("initial_source")
+                if existing is not None and existing != source:
+                    raise CoordinatorError("Initial starter source provenance changed")
+                enrollment["initial_source"] = deepcopy(source)
             for issue, generation in sensitive_revocations:
                 enrollment = data["enrollments"].get(str(issue))
                 if enrollment and enrollment.get("active"):
@@ -5291,9 +5891,7 @@ class StateStore:
                         or not isinstance(parent.get("task_id"), str)
                         or not parent.get("task_id")
                         or len(parent["task_id"]) > 128
-                        or not isinstance(parent.get("report_session_id"), str)
-                        or not parent.get("report_session_id")
-                        or len(parent["report_session_id"]) > 128
+                        or not _valid_session_id(parent.get("report_session_id"))
                         or any(
                             action.get("kind") == "review"
                             and action.get("task_type") == "report-correction"
@@ -5571,6 +6169,8 @@ def main(argv=None, *, api_factory=GhApi, store_factory=StateStore,
     parser.add_argument("--apply", action="store_true",
                         help="allow owner-enrolled GitHub writes (requires --once)")
     parser.add_argument("--state", type=Path, help="private durable state file")
+    parser.add_argument("--starter-state", type=Path,
+                        help="read-only owner-private issue-starter ledger (defaults to its XDG/HOME path)")
     args = parser.parse_args(argv)
     if args.apply and not args.once:
         parser.error("--apply requires explicit --once")
@@ -5589,6 +6189,10 @@ def main(argv=None, *, api_factory=GhApi, store_factory=StateStore,
         coordinator = Coordinator(
             api_factory(), store_factory(state_path),
             lifecycle_source_paths=source_paths,
+            starter_state_path=args.starter_state or (
+                Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+                / "hermes-mobile-issue-starter" / "state.json"
+            ),
         )
         result = coordinator.run(apply=args.apply)
         print(json.dumps(result, sort_keys=True))

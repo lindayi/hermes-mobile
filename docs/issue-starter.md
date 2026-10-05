@@ -23,6 +23,8 @@ include local credentials, private sessions, or arbitrary thread comments. The
 issue content is JSON-escaped in the task prompt. Before accepting that snapshot,
 the worker verifies bounded GraphQL `Issue.lastEditedAt` and
 `Issue.userContentEdits` history plus timestamped REST `renamed` timeline events.
+Its pure `_fold_issue_edit_page` page validator is shared with the paired
+coordinator, so both clients apply one edit-history consistency contract.
 Edits after authorization, incomplete pagination/evidence, closed issues, and
 stale commands fail closed. Both collection and preflight require the owner command
 to have a valid `created_at` and an identical explicit `updated_at`; edited or
@@ -148,9 +150,10 @@ mutation boundary can therefore mark a newer head ready. Fresh post-mutation
 reads block enrollment on a detected change; uncertain writes are not retried.
 
 Only after that proof, the worker posts exactly
-`/hermes enroll <40lowerhex> issue <N> body-sha256 <64lowerhex>`, using the
-reserved verified head SHA, originating issue number, and exact raw UTF-8 PR body
-digest with the owner-authenticated API client. The issue number is canonical
+`/hermes enroll <40lowerhex> issue <N> body-sha256 <64lowerhex> source-task <task-id> source-session <session-id> source-command <start-comment-id>`,
+using the reserved verified head SHA, originating issue number, exact raw UTF-8 PR
+body digest, completed task/session IDs, and exact owner start-comment ID with the
+owner-authenticated API client. The issue number is canonical
 positive decimal, at most 2147483647. No trimming or Markdown normalization is
 performed. Before posting, it captures the PR comment high-water ID and reserves a fresh enrollment,
 even if an exact historical command exists: that command may already have been
@@ -160,6 +163,13 @@ send; an uncertain send is never reposted. Both direct POST confirmation and
 uncertain-send reconciliation require a final fresh pull with `draft` explicitly
 `false` before recording completion. A re-draft blocks completion while preserving
 the consumed enrollment attempt: neither enrollment nor readiness is retried.
+After upgrade, a `started`/`uncertain` record may also reconcile either exact
+prior format: the version-2 comment without `source-command`, or the original
+version-1 comment without `source-task`/`source-session`. Reconciliation requires
+an immutable authenticated owner comment above the saved high-water and a matching
+saved task/session binding (including a historical `link_intent.session_id`).
+This read-only compatibility path never resends enrollment; malformed, edited,
+stale or unbound evidence stays blocked.
 This producer-side certification does not retract a comment already sent or make
 the handoff atomic. The paired cloud coordinator authenticates the same immutable
 owner command, exact current head and body digest, explicitly ready PR, and
@@ -173,7 +183,47 @@ immediately before the atomic scan commit, the consumer repeats the command and
 binding proof for every effective new starter admission or renewal. A late change
 or incomplete read discards the entire prepared scan, including cursor, events,
 receipt acceptance, lifecycle retirement and export, with no external write.
-Compact versioned `starter_admission` provenance is committed with enrollment.
+The consumer also reauthenticates the referenced completed task and its single
+completed owner session, exact task artifacts, and source issue. It requires the
+exact unedited owner `/hermes start` comment, unchanged issue body, no post-start
+content edits or renames, and the start/task/session/admission timestamps in order.
+The optional session `completed_at` may be omitted by GitHub: the consumer uses
+the immutable owner-authenticated completed-source enrollment timestamp as a
+conservative completion upper bound, while retaining completed task/session
+states and ordered authenticated creation evidence. This is owner handoff
+certification, not a provider-reported exact completion timestamp. Explicit invalid completion
+timestamps fail closed. The producer and consumer both select exactly one GitHub
+branch and pull from at most 20 artifacts; unrelated artifacts do not block an
+otherwise bound handoff. Accepted exact-head independent review suppresses
+redundant first-review dispatch.
+The start-comment ID in the producer command prevents substitution of another
+otherwise-valid owner command. It persists verified initial-source identity before
+dispatching one independent-review task; that dispatch does not publish a review or
+status and cannot satisfy merge gates. Invalid, missing, or changed source blocks
+review dispatch with a deduplicated outcome.
+Compact versioned `starter_admission` and `initial_source` provenance are committed
+with enrollment. Existing version-1/2 admissions are never completed by searching
+the task list for a matching artifact: a version-1 admission is recoverable only
+when its authenticated initial-source record was already durably saved, or through
+the coordinator's read-only bridge to this owner-private ledger. Its default CLI
+uses the same XDG/HOME path described above (empty XDG state home also falls back
+to HOME), including installed no-flag invocation; `--starter-state <path>` may
+override the input without any ledger writes. The bridge selects exactly one completed handed-off record
+bound to the enrolled issue/PR/node/head/branch/base/body and saved comment
+high-water, then reauthenticates its exact start command, accepted title/body,
+task/session and live GitHub closing authority. Current handoff reservations
+persist immutable `source_session_id`; the bridge explicitly compares that saved
+binding to the fetched session. Historical canonical-link reservations may supply
+their saved `link_intent.session_id` instead, with agreement required when both
+are present. Missing saved session identity blocks recovery rather than adopting
+the task's currently returned session. Resuming a pre-upgrade handoff reservation likewise
+requires an immutable matching saved session binding before enrollment; an
+already-existing closing edge is not a substitute for that proof.
+It never writes the starter
+ledger, re-enrolls, resets budgets, selects task-list candidates or invents a
+fixer receipt. A version-2 admission must validate its explicitly recorded task/session and unique
+unedited start command. Recovery preserves existing task claims, receipts, and
+repair history; it does not fabricate source evidence or reset ledgers.
 This is an admission condition, not a lifetime body/linkage pin: later legitimate
 body reports and receipt-authorized result heads remain supported. GitHub reads,
 local state commit and remote writes are not one transaction; a change after the

@@ -165,6 +165,11 @@ _ISSUE79_REVIEW_RECOVERY_FIXTURE = {
     'deploy/task_receipts.py': 'a7bd1edee10c42c42d992e20d83160095203d792c9a6131b3a915351d2768981',
 }
 
+_ISSUE83_INITIAL_REVIEW_FIXTURE = {
+    'deploy/cloud_coordinator.py': '497261d432e5ec8a1a200183ed6a0eca4bdb49f50ab7c8db3a03228bfddafe8a',
+    'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
+}
+
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
 }
@@ -206,7 +211,7 @@ def _source_files():
             | _PENDING_ISSUE67_WORKFLOW_FIXTURE | _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
             | _PENDING_PR45_NAMING_FIXTURE
             | _ISSUE65_RECEIPT_PRODUCER_FIXTURE | _PENDING_ISSUE77_CLARIFICATION_FIXTURE
-            | _ISSUE79_REVIEW_RECOVERY_FIXTURE)
+            | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE)
 
 
 def _source_ci():
@@ -587,6 +592,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_PENDING_ISSUE75_HOSTED_GATE_FIXTURE)
     pending |= set(_PENDING_PR45_NAMING_FIXTURE)
     pending |= set(_PENDING_ISSUE77_CLARIFICATION_FIXTURE)
+    pending |= set(_ISSUE83_INITIAL_REVIEW_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
@@ -603,10 +609,14 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     }
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
-        if path in {'deploy/cloud_coordinator.py', 'deploy/review_evidence.py'}
+        if path in {'deploy/cloud_coordinator.py', 'deploy/issue_starter.py',
+                    'deploy/review_evidence.py'}
     } == {
-        'deploy/cloud_coordinator.py': _ISSUE79_REVIEW_RECOVERY_FIXTURE[
+        'deploy/cloud_coordinator.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
             'deploy/cloud_coordinator.py'
+        ],
+        'deploy/issue_starter.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
+            'deploy/issue_starter.py'
         ],
         'deploy/review_evidence.py': _PENDING_ISSUE43_LAUNCH_FIXTURE[
             'deploy/review_evidence.py'
@@ -627,8 +637,14 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
-    } == (_PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
-          | _ISSUE79_REVIEW_RECOVERY_FIXTURE)
+    } == {
+        path: digest
+        for path, digest in (
+            _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
+            | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
+        ).items()
+        if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
+    }
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE
@@ -699,7 +715,8 @@ def test_issue46_observer_pin_matches_exact_candidate_bytes(pins, path):
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize(
     'path', sorted(set(_PENDING_ISSUE43_LAUNCH_FIXTURE) -
-                   set(_PENDING_ISSUE50_RECEIPT_FIXTURE)),
+                   set(_PENDING_ISSUE50_RECEIPT_FIXTURE) -
+                   set(_ISSUE83_INITIAL_REVIEW_FIXTURE)),
 )
 def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
     source = Path(__file__).resolve().parents[1] / path
@@ -708,10 +725,19 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
 
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
-    | _ISSUE79_REVIEW_RECOVERY_FIXTURE,
+    | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
 def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
+    source = Path(__file__).resolve().parents[1] / path
+    assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize('pins', [
+    SOURCE_FINGERPRINTS, _ISSUE83_INITIAL_REVIEW_FIXTURE,
+], ids=['policy', 'independent-fixture'])
+@pytest.mark.parametrize('path', sorted(_ISSUE83_INITIAL_REVIEW_FIXTURE))
+def test_issue83_initial_review_pin_matches_actual_candidate_bytes(path, pins):
     source = Path(__file__).resolve().parents[1] / path
     assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
 
@@ -829,11 +855,13 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
         'deploy/workflow_lifecycle.py', 'deploy/workflow_lifecycle_sources.py',
         'deploy/workflow_notifications.py',
     }
-    assert closure == shared | coordinator
-    assert len(closure) == 38
+    starter_bridge = {'deploy/issue_starter.py'}
+    assert closure == shared | coordinator | starter_bridge
+    assert len(closure) == 39
     assert closure <= set(REQUIRED_FILES)
     assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in coordinator)
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract' for path in shared)
+    assert all(SOURCE_BLOCKERS[path] == 'autonomy-launch-contract' for path in starter_bridge)
     assert not dynamic_imports
     assert not unresolved_imports
 

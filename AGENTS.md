@@ -48,6 +48,9 @@ then make the smallest complete change and show it pass. Keep existing assertion
 do not weaken or remove unrelated tests. Review the final diff for scope and data
 handling.
 
+Coordinator review-anchor markers and outbox keys must bind the frozen main SHA;
+base changes never authorize rewriting or replaying old task reservations.
+
 Use the managed runner for local checks and provide explicit test paths for focused
 work:
 

@@ -5,8 +5,10 @@ import subprocess
 
 import pytest
 
-from deploy.cloud_coordinator import GhApi as ConsumerApi
-from deploy.issue_starter import GhApi as ProducerApi, _BoundedApi
+from deploy.cloud_coordinator import (
+    ApiError, Coordinator, GhApi as ConsumerApi, StateStore,
+)
+from deploy.issue_starter import CoordinatorError, GhApi as ProducerApi, _BoundedApi
 from deploy.pull_handoff_binding import _closing_issue_linked as closing_issue_linked
 from test_issue_starter import (
     REPOSITORY, FakeApi, closing_issue_response, completed_task, issue_reference,
@@ -76,6 +78,205 @@ def test_shared_linkage_preserves_first_page_through_real_adapters(adapter, pagi
     if paginated:
         assert requests[1]['after'] == 'page-two'
     assert len(reads) == (0 if missing else 1)
+
+
+@pytest.mark.parametrize('adapter', [ConsumerApi, ProducerApi])
+@pytest.mark.parametrize('paginated', [False, True])
+@pytest.mark.parametrize('evidence', [
+    'unedited', 'before_start', 'at_start', 'after_start', 'missing_field',
+    'missing_connection', 'invalid_timestamp', 'missing_cursor', 'repeated_cursor',
+    'errors',
+])
+def test_issue_edit_evidence_through_real_adapters(
+        adapter, paginated, evidence, tmp_path, monkeypatch):
+    if not paginated and evidence in {'missing_cursor', 'repeated_cursor'}:
+        pytest.skip('Requires a paginated connection')
+    started_at = '2026-10-01T10:00:00Z'
+    edited_at = {
+        'before_start': '2026-10-01T09:30:00Z',
+        'at_start': started_at,
+        'after_start': '2026-10-01T10:00:01Z',
+        'invalid_timestamp': 'not-a-timestamp',
+    }.get(evidence)
+    requests = []
+
+    def transport(command, **kwargs):
+        assert command[:4] == ['gh', 'api', '--hostname', 'github.com']
+        assert 'graphql' in command
+        if '--input' in command:
+            variables = json.loads(kwargs['input'])['variables']
+        else:
+            variables = {}
+            for index, argument in enumerate(command):
+                if argument == '-F':
+                    key, value = command[index + 1].split('=', 1)
+                    try:
+                        variables[key] = json.loads(value)
+                    except ValueError:
+                        variables[key] = value
+        requests.append(variables)
+        assert variables['issueNumber'] == 28
+        cursor = variables.get('after')
+        if cursor == 'None':
+            # The actual CLI serialization sends an invalid string, not null.
+            response = {'errors': [{'message': 'Invalid pagination cursor'}]}
+        else:
+            assert cursor == (None if len(requests) == 1 else 'page-two')
+            first_page = paginated and cursor is None
+            issue = {
+                'lastEditedAt': edited_at,
+                'userContentEdits': {
+                    'nodes': ([] if first_page or edited_at is None
+                              else [{'editedAt': edited_at}]),
+                    'pageInfo': {
+                        'hasNextPage': first_page,
+                        'endCursor': 'page-two' if first_page else None,
+                    },
+                },
+            }
+            if evidence == 'missing_field':
+                issue.pop('lastEditedAt')
+            elif evidence == 'missing_connection':
+                issue.pop('userContentEdits')
+            elif evidence == 'missing_cursor':
+                issue['userContentEdits']['pageInfo']['endCursor'] = None
+            elif evidence == 'repeated_cursor':
+                issue['userContentEdits']['pageInfo'] = {
+                    'hasNextPage': True, 'endCursor': 'page-two',
+                }
+            response = {'data': {'repository': {
+                'databaseId': 1399942965,
+                'nameWithOwner': REPOSITORY,
+                'issue': issue,
+            }}}
+            if evidence == 'errors':
+                response = {'errors': [{'message': 'Unavailable edit history'}]}
+        return subprocess.CompletedProcess(command, 0, json.dumps(response), '')
+
+    if adapter is ConsumerApi:
+        coordinator = Coordinator(adapter(run=transport), StateStore(tmp_path / 'state.json'))
+        read = lambda: coordinator._starter_issue_content_edited_after(28, started_at)
+    else:
+        monkeypatch.setattr('deploy.issue_starter.subprocess.run', transport)
+        coordinator = make_coordinator(tmp_path, adapter())
+        read = lambda: coordinator._content_edited_after(
+            coordinator._issue_edit_evidence(28), started_at,
+        )
+    if evidence in {'unedited', 'before_start', 'at_start', 'after_start'}:
+        assert read() is (evidence in {'at_start', 'after_start'})
+        assert len(requests) == (2 if paginated else 1)
+    elif evidence == 'errors':
+        with pytest.raises(ApiError if adapter is ConsumerApi else CoordinatorError):
+            read()
+    elif adapter is ConsumerApi:
+        assert read() is None
+    else:
+        with pytest.raises(CoordinatorError):
+            read()
+    assert requests[0].get('after') is None
+    if adapter is ConsumerApi:
+        assert 'after' not in requests[0]
+    if len(requests) > 1:
+        assert requests[1]['after'] == 'page-two'
+
+
+@pytest.mark.parametrize('adapter', [ConsumerApi, ProducerApi])
+@pytest.mark.parametrize('paginated', [False, True])
+@pytest.mark.parametrize('evidence', [
+    'historical', 'data_null', 'data_list', 'issue_null', 'connection_null',
+    'node_not_object', 'page_info_not_object', 'null_with_nodes',
+    'latest_missing', 'edited_without_nodes', 'changed_across_pages',
+])
+def test_issue_edit_history_consistency_through_real_adapters(
+        adapter, paginated, evidence, tmp_path, monkeypatch):
+    # Coherent multi-page historical edits are accepted; each negative changes one
+    # field of that baseline and must fail closed through both production adapters.
+    if not paginated and evidence == 'changed_across_pages':
+        pytest.skip('Requires a paginated connection')
+    started_at = '2026-10-01T10:00:00Z'
+    older, latest = '2026-10-01T09:00:00Z', '2026-10-01T09:30:00Z'
+    requests = []
+
+    def page(cursor):
+        first_page = paginated and cursor is None
+        nodes = [{'editedAt': older}] if first_page else [{'editedAt': latest}]
+        if not paginated:
+            nodes = [{'editedAt': older}, {'editedAt': latest}]
+        issue = {
+            'lastEditedAt': latest,
+            'userContentEdits': {
+                'nodes': nodes,
+                'pageInfo': {
+                    'hasNextPage': first_page,
+                    'endCursor': 'page-two' if first_page else None,
+                },
+            },
+        }
+        final_page = not first_page
+        data = {'repository': {
+            'databaseId': 1399942965, 'nameWithOwner': REPOSITORY, 'issue': issue,
+        }}
+        if evidence == 'data_null':
+            data = None
+        elif evidence == 'data_list':
+            data = []
+        elif evidence == 'issue_null':
+            data['repository']['issue'] = None
+        elif evidence == 'connection_null':
+            issue['userContentEdits'] = None
+        elif evidence == 'node_not_object':
+            nodes[0] = 'not-an-edit-node'
+        elif evidence == 'page_info_not_object':
+            issue['userContentEdits']['pageInfo'] = []
+        elif evidence == 'null_with_nodes':
+            issue['lastEditedAt'] = None
+        elif evidence == 'latest_missing' and final_page:
+            nodes[-1] = {'editedAt': '2026-10-01T09:15:00Z'}
+        elif evidence == 'edited_without_nodes':
+            nodes.clear()
+        elif evidence == 'changed_across_pages' and first_page:
+            issue['lastEditedAt'] = older
+        return {'data': data}
+
+    def transport(command, **kwargs):
+        assert command[:4] == ['gh', 'api', '--hostname', 'github.com']
+        assert 'graphql' in command
+        if '--input' in command:
+            variables = json.loads(kwargs['input'])['variables']
+        else:
+            variables = {}
+            for index, argument in enumerate(command):
+                if argument == '-F':
+                    key, value = command[index + 1].split('=', 1)
+                    try:
+                        variables[key] = json.loads(value)
+                    except ValueError:
+                        variables[key] = value
+        requests.append(variables)
+        assert variables['issueNumber'] == 28
+        cursor = variables.get('after')
+        assert cursor == (None if len(requests) == 1 else 'page-two')
+        return subprocess.CompletedProcess(command, 0, json.dumps(page(cursor)), '')
+
+    if adapter is ConsumerApi:
+        coordinator = Coordinator(adapter(run=transport), StateStore(tmp_path / 'state.json'))
+        read = lambda: coordinator._starter_issue_content_edited_after(28, started_at)
+    else:
+        monkeypatch.setattr('deploy.issue_starter.subprocess.run', transport)
+        coordinator = make_coordinator(tmp_path, adapter())
+        read = lambda: coordinator._content_edited_after(
+            coordinator._issue_edit_evidence(28), started_at,
+        )
+    if evidence == 'historical':
+        assert read() is False
+        assert len(requests) == (2 if paginated else 1)
+    elif adapter is ConsumerApi:
+        assert read() is None
+    else:
+        with pytest.raises(CoordinatorError):
+            read()
+    if adapter is ConsumerApi:
+        assert 'after' not in requests[0]
 
 
 def test_starter_closing_mutation_uses_real_bounded_json_transport(tmp_path, monkeypatch):

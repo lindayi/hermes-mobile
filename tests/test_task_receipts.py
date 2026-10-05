@@ -127,6 +127,26 @@ def check_v2_transport(request):
     return check
 
 
+@pytest.mark.parametrize("duplicate", [None, "same", "invalid", "different"])
+def test_persisted_proof_uses_validator_completion_contract(duplicate):
+    from deploy.cloud_coordinator import _valid_receipt_proof
+
+    task, action, pull, comments = v2_binding()
+    proof = validate_task_receipt(task, action, pull, comments, now=NOW)
+    action.update(status="completed", **{
+        f"receipt_{key}": value for key, value in proof.items()
+    })
+    if duplicate is not None:
+        action["receipt_session_completed_at"] = {
+            "same": proof["completed_at"],
+            "invalid": "invalid",
+            "different": "2026-10-01T12:04:00Z",
+        }[duplicate]
+    assert _valid_receipt_proof(action, comments) is (duplicate in {None, "same"})
+    action["receipt_completed_at"] = "invalid"
+    assert not _valid_receipt_proof(action, comments)
+
+
 @pytest.mark.parametrize("prefix,accepted", [
     ("> quoted example\n", False),
     ("\n> quoted example\n", False),

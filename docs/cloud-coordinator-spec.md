@@ -21,8 +21,9 @@ enrolled by their age, label, author, or open state. The explicit manual form
 `/hermes enroll <40-lowercase-hex-head-sha>` also remains supported; the consumer
 requires the value to match the current pull request head and stores it as
 immutable `authorized_head`. The paired issue starter instead emits exactly
-`/hermes enroll <40lowerhex> issue <N> body-sha256 <64lowerhex>` from its reserved
-head, originating issue and raw UTF-8 PR body digest. `N` is canonical positive
+`/hermes enroll <40lowerhex> issue <N> body-sha256 <64lowerhex> source-task <task-id> source-session <session-id> source-command <start-comment-id>`
+from its reserved head, originating issue, raw UTF-8 PR body digest and completed
+source identity. `N` is canonical positive
 decimal bounded by 2147483647; digests are lowercase and malformed extended forms
 never downgrade to a manual prefix. SHA-bound commands require a valid timezone-aware
 `created_at` and an identical explicit `updated_at`; an edited or unverifiable
@@ -45,11 +46,85 @@ After all prepared planning and lifecycle source reads, immediately before
 command identity/body/timestamp and live binding proof. A late mismatch or
 incomplete read aborts the entire preparation: no cursor/events, enrollment,
 receipts, retirement/export, or external write commits. Compact optional
-`starter_admission` metadata contains exactly version 1, `issue_number`,
-`head_sha`, `body_sha256`, `comment_id`, and `comment_created_at`; present metadata
-is strictly validated on state load. Enrollment `issue` still denotes the PR.
-Absence remains valid for supported identity-bound legacy enrollment; identity-less
-legacy active state remains fail-closed.
+`starter_admission` metadata is strictly validated on state load. Version 1
+contains exactly `version`, `issue_number`, `head_sha`, `body_sha256`, `comment_id`,
+and `comment_created_at`; version 2 adds the explicitly recorded
+`source_task_id`/`source_session_id`; the current version 3 also records the exact
+positive `start_comment_id`. The consumer persists a separately validated
+`initial_source` record only after it authenticates the completed source task and
+session, task artifacts, exact start command, unchanged source issue, edit/rename
+history, ordered timestamps, PR identity/body/head and canonical closing edge.
+Version-1 admissions are recoverable from an `initial_source` record already
+saved with the enrollment, or the read-only bridge to the existing issue-starter
+ledger. The default CLI, including the installed service's no-flag invocation,
+reads `$XDG_STATE_HOME/hermes-mobile-issue-starter/state.json`, or
+`~/.local/state/hermes-mobile-issue-starter/state.json` when XDG state home is
+unset or empty, exactly like the starter. `--starter-state <path>` overrides
+only that read-only input. That ledger must pass the starter's
+bounded schema and owner-private regular-file/directory checks. Exactly one
+`handed_off`/enrollment-`done` record must bind the admitted issue, PR number/node,
+head, branch, base and body digest; the immutable enrollment comment must exceed
+its saved pre-send comment high-water. The saved task and exact command ID are
+then reauthenticated against live GitHub task/session, owner start command,
+accepted title/body digest, complete edit/rename history and canonical closing
+authority. Its saved task ID and immutable `source_session_id` must match the
+fetched task/session. Historical records may instead use the authenticated
+canonical-link reservation's saved `link_intent.session_id`; when both session
+bindings exist they must both match. A record lacking either saved session
+binding cannot recover authority merely because the task now has one session.
+No ledger is written, no enrollment is replayed and no repair receipt
+is manufactured. Missing, unreadable, ambiguous or changed saved evidence fails
+closed. Version-2 admissions can be revalidated only through
+their explicitly recorded task/session and a unique unedited owner start command.
+The issue-edit GraphQL proof requires an explicitly present nullable
+`lastEditedAt` field and a complete, bounded `userContentEdits` connection;
+explicit null remains the no-last-edit value, while a missing field is incomplete
+evidence. The consumer omits the first-page cursor from GraphQL variables rather
+than letting its CLI adapter serialize Python `None` as a string; subsequent
+pages use the returned cursor. Transport regressions exercise both real adapters.
+Each page is folded through the starter's shared pure validator
+(`deploy/issue_starter.py` `_fold_issue_edit_page`) under its 20-page/100-node
+bounds: object `data`/repository/issue/connection/node/`pageInfo` shapes,
+unchanged `lastEditedAt` across complete pages, null `lastEditedAt` only without
+edit nodes, and an exact latest-edit node. Malformed, `errors`-bearing or
+inconsistent history yields the provenance blocker rather than aborting the poll;
+transport `ApiError` remains distinct. REST `renamed` events use the starter's same
+rename-payload and timestamp contract.
+The coordinator never selects a task from a task-list search to fill missing
+provenance. A missing, edited, ambiguous, changed-head, unknown-task or incomplete
+source fails closed with a deduplicated blocker and cannot dispatch first review
+work. Ordinary and SHA-only manual enrollments without a supported source or
+accepted review receive the same explicit provenance blocker; active source,
+fixer and reviewer work and pending receipt/publication/corrective-review
+progress, including an authenticated active Copilot dynamic
+workflow on the same branch, does not generate that redundant outcome. Unknown
+or unverified source state still receives the explicit provenance blocker.
+Terminal same-head action history alone does not suppress that blocker.
+Absence of starter metadata remains valid for supported identity-bound
+manual enrollment; identity-less legacy active state remains fail-closed.
+Enrollment `issue` still denotes the PR. Recovery preserves action claims, receipt
+proofs and repair budgets; it does not invent provenance or reset ledgers.
+
+The source chronology requires authenticated task/session creation timestamps
+at or after the immutable start command. Timestamp ties are accepted as
+nondecreasing chronology; they do not establish an order finer than GitHub
+provides, while reversed timestamps are rejected. GitHub's session `completed_at` is optional:
+when omitted, the immutable owner-authenticated completed-source enrollment
+timestamp supplies a conservative owner-handoff-certified completion upper
+bound, not a provider-reported exact completion time. Task and session must
+still both be completed and uniquely authenticated; creation must precede that
+bound. Explicit malformed or out-of-order completion timestamps are rejected,
+not replaced. The bound is persisted unchanged on restart. Artifact selection
+matches the producer: at most 20 entries, with exactly one GitHub branch and one
+GitHub pull matching the current PR; unrelated artifacts confer no authority.
+Malformed data on a relevant GitHub branch or pull artifact invalidates the whole
+relevant inventory. Session IDs use the starter's `[A-Za-z0-9._:-]{1,256}`
+contract at enrollment, admission, source resolution and downstream review/report
+boundaries; 257-character IDs are rejected.
+The pull artifact's optional `global_id` may be absent only because authenticated
+PR detail supplies the bound node identity; explicit null or mismatch is rejected.
+An already accepted exact-head independent review suppresses first-review
+anchors and dispatch even without a local reviewer action.
 
 This fence is admission-only. Later body reports or changed canonical linkage do
 not revoke a durably admitted PR; PR45 receipt-result heads, restart/compaction,
@@ -451,6 +526,15 @@ bounded findings, reviewed file hashes, and bounded narrative report. The child
 does not echo its review-task UUID; the parent authenticates the saved task ID
 and session through the task API.
 
+Normal first-review anchor markers and outbox keys bind the current-main SHA.
+If main advances before reviewer dispatch, a distinct anchor may be reserved
+without rewriting or replaying the old sent or uncertain anchor, including legacy
+anchors whose identities omitted main. Dispatch still requires the admitted exact
+head and the existing current-main/base fences. A sent or uncertain reviewer
+creation remains occupied across a base change and is never replayed; an existing
+normal report retains its saved base binding and exact-current-head acceptance
+semantics. Corrective anchor identities and their separate retry budget are unchanged.
+
 The parser accepts only that bounded quoted-reply envelope, with a limit of
 65,536 UTF-8 bytes and 64 LF-delimited lines. The byte budget accommodates the
 declared maximum inventory of 64 paths of up to 200 characters plus the quoted
@@ -599,11 +683,13 @@ its separate occupancy lock; later review evidence does not cancel or release
 that task.
 
 The validated completion time, session ID and receipt comment ID remain persisted
-with the receipt head/base and dispatch claim for restart. The authentic session
-completion is retained as `receipt_session_completed_at` in both the action and
-the SHA-bound enrollment's `receipt_proofs` projection before compaction, alongside
-the supported `receipt_completed_at` metadata. Observation time or mutable task
-update time is not a substitute. Missing or invalid completion proof fails closed.
+with the receipt head/base and dispatch claim for restart. The canonical supported
+validator metadata is `receipt_completed_at`, retained in both the action and the
+SHA-bound enrollment's `receipt_proofs` before compaction. The optional redundant
+`receipt_session_completed_at` projection must equal that canonical timestamp when
+present; its absence does not invalidate an older genuinely validated proof.
+Observation time or mutable task update time is never substituted for authenticated
+completion. Missing, invalid or conflicting completion proof fails closed.
 Unresolved findings and threads remain eligible for the existing bounded repair
 path; no fixer attempt is consumed just for awaiting advisory Copilot feedback.
 Preparation stages verified receipt/handoff state in memory. Controller evidence
@@ -651,7 +737,17 @@ short final page proves completion. Errors (including an unavailable rules
 endpoint), malformed pages/policy fields, or exhaustion of the bound fail closed.
 The policy retains the union of classic and all ruleset requirements, including
 separate app bindings for the same check context, and validates that union against
-the four active required contexts.
+the four active required contexts. GitHub's classic-protection response may include
+both app-bound `checks` and a legacy `contexts` array that is only their name
+projection. Its entries must be strictly strings, not context objects whose app
+bindings could be discarded. When both arrays contain the same distinct context names, the
+coordinator counts the projection once and retains the stronger `checks` app
+bindings. The comparison includes empty arrays: an empty projection beside
+nonempty checks (or the reverse) is inconsistent and fails closed. Consistent
+empty classic arrays remain valid when the required union is supplied by rulesets.
+Extra, missing, duplicate, malformed, or otherwise inconsistent names
+are not normalized away: all available requirements are retained and the policy
+fails closed rather than weakening protection.
 
 Auto-merge is requested through GitHub's protected `enablePullRequestAutoMerge`
 operation only when the same-repository main base is current, the PR is not a

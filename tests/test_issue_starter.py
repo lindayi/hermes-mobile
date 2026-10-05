@@ -34,7 +34,10 @@ CREATED = "2026-10-01T20:00:00Z"
 
 def enrollment_command(head="a" * 40, body="Closes #28", issue_number=28):
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-    return f"/hermes enroll {head} issue {issue_number} body-sha256 {digest}"
+    return (
+        f"/hermes enroll {head} issue {issue_number} body-sha256 {digest} "
+        "source-task task-1 source-session session-1 source-command 9001"
+    )
 
 
 def issue_reference(number=ISSUE_NUMBER, repository=None):
@@ -132,6 +135,8 @@ def completed_task(*, repository_id=REPOSITORY_ID, creator_id=OWNER_ID,
         "repository": {"id": REPOSITORY_ID},
         "task_id": value["id"],
         "state": "completed",
+        "head_ref": head_ref,
+        "base_ref": "main",
         "completed_at": "2026-10-01T20:30:00Z",
     }]
     return value
@@ -1534,6 +1539,79 @@ def test_redraft_after_enrollment_blocks_completion_without_repost(tmp_path, pat
                    for route, body in api.posts if route.endswith("/issues/28/comments"))
 
 
+@pytest.mark.parametrize("legacy_format", ["v1", "v2"])
+@pytest.mark.parametrize("tamper", ["none", "body", "author", "edited", "stale", "binding"])
+def test_preupgrade_lost_enrollment_response_reconciles_legacy_comment_once(
+        tmp_path, tamper, legacy_format):
+    class LegacyResponseLostApi(FakeApi):
+        def post(self, route, body):
+            if (route.endswith("/issues/41/comments")
+                    and body.get("body", "").startswith("/hermes enroll ")):
+                legacy_body = (
+                    body["body"].split(" source-task ", 1)[0]
+                    if legacy_format == "v1"
+                    else body["body"].rsplit(" source-command ", 1)[0]
+                )
+                comment = {
+                    "id": 9101, "body": legacy_body,
+                    "created_at": "2026-10-01T21:00:00Z",
+                    "updated_at": "2026-10-01T21:00:00Z",
+                    "user": {"id": OWNER_ID},
+                }
+                self.posts.append((route, body))
+                self.comments.append(comment)
+                raise TimeoutError("accepted legacy enrollment response lost")
+            return super().post(route, body)
+
+    api = LegacyResponseLostApi(pulls=[pull_request(draft=False)])
+    api.closing_issues = []
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+
+    first = make_coordinator(tmp_path, api).run(apply=True)
+    path = make_coordinator(tmp_path, api).store.path
+    saved = json.loads(path.read_text())
+    record = saved["commands"]["28:9001"]
+    assert first["blocked"] == 1
+    assert record["enrollment_state"] == "uncertain"
+    assert record["link_intent"]["session_id"] == "session-1"
+    assert len([post for post in api.posts if post[0].endswith("/issues/41/comments")]) == 1
+
+    comment = next(item for item in api.comments if item["id"] == 9101)
+    if tamper == "body":
+        comment["body"] += " changed"
+    elif tamper == "author":
+        comment["user"] = {"id": OWNER_ID + 1}
+    elif tamper == "edited":
+        comment["updated_at"] = "2026-10-01T21:00:01Z"
+    elif tamper == "stale":
+        comment["id"] = record["comment_high_water"]
+    elif tamper == "binding":
+        record["link_intent"]["session_id"] = "other-session"
+        path.write_text(json.dumps(saved))
+
+    restarted = make_coordinator(tmp_path, api).run(apply=True)
+    expected = tamper == "none"
+    assert restarted["handed_off"] == int(expected)
+    record = make_coordinator(tmp_path, api).store.snapshot()["commands"]["28:9001"]
+    assert record["phase"] == ("handed_off" if expected else "handoff_failed")
+    assert len([post for post in api.posts if post[0].endswith("/issues/41/comments")]) == 1
+    cold_replay = make_coordinator(tmp_path, api).run(apply=True)
+    assert cold_replay["handed_off"] == 0
+    assert len([post for post in api.posts if post[0].endswith("/issues/41/comments")]) == 1
+
+
+@pytest.mark.parametrize(("length", "accepted"), [
+    (128, True), (129, True), (256, True), (257, False),
+])
+def test_starter_task_session_id_contract_boundaries(length, accepted):
+    value = completed_task()
+    value["sessions"][0]["id"] = "s" * length
+    assert Coordinator._authenticated_task_session(value) == (
+        "s" * length if accepted else None
+    )
+
+
 def test_completed_bound_task_marks_its_draft_pr_ready_and_enrolls_once(tmp_path):
     pull = pull_request()
     api = FakeApi(pulls=[pull])
@@ -1765,6 +1843,41 @@ def test_task_pull_without_optional_global_id_resolves_and_binds_detail_node(tmp
     assert readiness[0]["variables"]["pullRequestId"] == "PR_kwDO123"
     assert [body["body"] for route, body in api.posts
             if route.endswith("/issues/41/comments")] == [enrollment_command()]
+
+
+@pytest.mark.parametrize("binding", ["missing", "saved", "link", "mismatch", "disagreement"])
+def test_preupgrade_handoff_reservation_requires_saved_session_on_restart(tmp_path, monkeypatch, binding):
+    api = FakeApi(pulls=[pull_request(draft=False)])
+    if binding in {"link", "disagreement"}:
+        api.closing_issues = []
+    start_task(tmp_path, api)
+    api.task_detail = completed_task()
+    with monkeypatch.context() as patch:
+        patch.setattr(Coordinator, "_advance_handoff", lambda *args: {
+            "planned": 0, "pending": 1, "dispatched": 0, "handed_off": 0, "blocked": 0,
+        })
+        make_coordinator(tmp_path, api).run(apply=True)
+    path = make_coordinator(tmp_path, api).store.path
+    saved = json.loads(path.read_text())
+    record = saved["commands"]["28:9001"]
+    assert record["phase"] == "handoff_reserved"
+    assert record["source_session_id"] == "session-1"
+    assert bool(record.get("link_intent")) == (binding in {"link", "disagreement"})
+    if binding in {"missing", "link"}:
+        record.pop("source_session_id")
+    elif binding == "mismatch":
+        record["source_session_id"] = "old-session"
+    if binding == "disagreement":
+        record["source_session_id"] = "old-session"
+    path.write_text(json.dumps(saved))
+    expected = binding in {"saved", "link"}
+    for _ in range(3):
+        make_coordinator(tmp_path, api).run(apply=True)
+    assert make_coordinator(tmp_path, api).store.snapshot()["commands"]["28:9001"]["phase"] == (
+        "handed_off" if expected else "handoff_failed"
+    )
+    assert len([body for route, body in api.posts
+                if route.endswith("/issues/41/comments")]) == int(expected)
 
 
 @pytest.mark.parametrize("invalid", ["global_mismatch", "global_null", "id_missing",
