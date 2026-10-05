@@ -106,7 +106,9 @@ Enrollment `issue` still denotes the PR. Recovery preserves action claims, recei
 proofs and repair budgets; it does not invent provenance or reset ledgers.
 
 The source chronology requires authenticated task/session creation timestamps
-after the immutable start command. GitHub's session `completed_at` is optional:
+at or after the immutable start command. Timestamp ties are accepted as
+nondecreasing chronology; they do not establish an order finer than GitHub
+provides, while reversed timestamps are rejected. GitHub's session `completed_at` is optional:
 when omitted, the immutable owner-authenticated completed-source enrollment
 timestamp supplies a conservative owner-handoff-certified completion upper
 bound, not a provider-reported exact completion time. Task and session must

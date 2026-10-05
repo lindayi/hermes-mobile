@@ -598,6 +598,110 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
     assert api.review_attempts == 1 and api.fix_attempts == 0
 
 
+def test_persisted_v1_source_replays_with_multiple_start_commands_without_ledger(tmp_path):
+    from copy import deepcopy
+
+    from deploy.cloud_coordinator import enrollment_from_comment
+
+    api, _ = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
+    admission = enrollment_from_comment(
+        api.issue, api.pull, api.comments[0], api=api,
+    )
+    admission["authorized_head"] = HEAD
+    worker = Coordinator(
+        api, StateStore(tmp_path / "source-read" / "state.json"),
+        starter_state_path=tmp_path / "missing-starter-ledger.json",
+    )
+    source, error = worker._resolve_initial_source({
+        "enrollment": admission, "pull": api.pull, "head": HEAD,
+        "comments": api.comments,
+    })
+    assert error is None
+
+    second_start = deepcopy(next(
+        comment for comment in api.source_comments
+        if comment.get("body") == "/hermes start"
+    ))
+    second_start.update(
+        id=second_start["id"] + 1,
+        created_at="2026-10-01T10:45:00Z",
+        updated_at="2026-10-01T10:45:00Z",
+    )
+    api.source_comments.append(second_start)
+    api.comments[0]["body"] = re.sub(
+        r" source-task [^ ]+ source-session [^ ]+ source-command [0-9]+$",
+        "", api.comments[0]["body"],
+    )
+    legacy_admission = enrollment_from_comment(
+        api.issue, api.pull, api.comments[0], api=api,
+    )
+    legacy_admission["authorized_head"] = HEAD
+    legacy_admission["initial_source"] = source
+
+    path = tmp_path / "fresh-consumer" / "state.json"
+    store = StateStore(path)
+    store.commit_scan(
+        None, [], commands=[("enroll", legacy_admission)],
+    )
+    api.unresolved = False
+    for _ in range(3):
+        result = Coordinator(
+            api, StateStore(path), starter_state_path=tmp_path / "missing-starter-ledger.json",
+            clock=lambda: NOW,
+        ).run(apply=True)["pull_requests"][0]
+
+    actions = StateStore(path).actions()
+    reviews = [action for action in actions.values() if action["kind"] == "review"]
+    assert len(reviews) == 1, (
+        result["reasons"], StateStore(path).snapshot()["enrollments"]["16"],
+    )
+    assert reviews[0]["source_comment_id"] == source["admission_comment_id"]
+    assert api.review_attempts == 1 and api.fix_attempts == 0
+    assert "starter-source-provenance" not in result["reasons"]
+
+    legacy_admission["initial_source"] = {
+        **source, "start_comment_id": second_start["id"],
+    }
+    mismatched_source, mismatch_error = worker._resolve_initial_source({
+        "enrollment": legacy_admission, "pull": api.pull, "head": HEAD,
+        "comments": api.comments,
+    })
+    assert mismatched_source is None and mismatch_error == "changed", (
+        source, second_start, mismatch_error,
+    )
+
+
+@pytest.mark.parametrize("session_created_at, accepted", [
+    ("2026-10-01T11:01:00Z", True),
+    ("2026-10-01T11:00:59Z", False),
+])
+def test_source_chronology_accepts_ties_but_rejects_reversal(
+        tmp_path, session_created_at, accepted):
+    from deploy.cloud_coordinator import enrollment_from_comment
+
+    api, _ = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
+    admission = enrollment_from_comment(
+        api.issue, api.pull, api.comments[0], api=api,
+    )
+    admission["authorized_head"] = HEAD
+    task = next(iter(api.tasks.values()))
+    task["created_at"] = "2026-10-01T11:01:00Z"
+    task["sessions"][0]["created_at"] = session_created_at
+    worker = Coordinator(
+        api, StateStore(tmp_path / "chronology" / "state.json"),
+        starter_state_path=tmp_path / "missing-starter-ledger.json",
+    )
+
+    source, error = worker._resolve_initial_source({
+        "enrollment": admission, "pull": api.pull, "head": HEAD,
+        "comments": api.comments,
+    })
+
+    assert (error is None and source is not None) is accepted
+    if not accepted:
+        assert error == "changed"
+
+
 def finish_v2(api, action, *, head=RESULT_HEAD, result="ready"):
     api.head_sha = head
     api.pull["head"]["sha"] = head

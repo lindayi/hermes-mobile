@@ -2633,6 +2633,7 @@ class Coordinator:
                     starts = []
                     expected_start_id = (
                         saved_binding["command_id"] if saved_binding is not None
+                        else source["start_comment_id"] if source is not None
                         else admission.get("start_comment_id")
                     )
                     for comment in source_comments:
