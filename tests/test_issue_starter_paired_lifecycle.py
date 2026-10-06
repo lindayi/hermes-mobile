@@ -299,6 +299,11 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     assert not first_review["review_valid"]
     assert not second_review["review_valid"]
     assert not third_review["review_valid"]
+    assert not third_review["repair_requested"]
+    assert api.fix_attempts == 1
+    api.pending_required = False
+    run()
+    assert first["task_id"] in store.snapshot()["enrollments"]["16"]["repair_progress"]["evaluated_task_ids"]
     api.review_sha = RESULT_HEAD
     second = next(
         a for a in store.actions().values()
@@ -312,6 +317,7 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     durable = StateStore(store.path).snapshot()["enrollments"]["16"]["receipt_proofs"][0]
     assert durable["receipt_session_completed_at"] == "2026-10-01T12:05:30Z"
     final_head = "d" * 40
+    api.pending_required = True
     api.complete_task(second["task_id"], second, head_sha=final_head)
     api.head_sha = final_head
     api.pull["head"]["sha"] = final_head
@@ -453,7 +459,10 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
     return api, store, action
 
 
-def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
+@pytest.mark.parametrize("corruption", [None, "prompt", "session", "receipt", "count"])
+def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path, corruption):
+    from deploy.task_receipts import receipt_instruction
+
     api, store, first_action = actual_starter_consumer(tmp_path)
     original = store.snapshot()["enrollments"]["16"]
     assert original["initial_source"]["head_sha"] == HEAD
@@ -474,9 +483,8 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
         created_at = f"2026-10-01T12:0{attempt}:00Z"
         completed_at = f"2026-10-01T12:0{attempt}:30Z"
         body = (
-            "Hermes-Task-Receipt: v1\n"
+            "Hermes-Task-Receipt: v2\n"
             f"nonce={nonce}\n"
-            f"task={task_id}\n"
             f"session={session_id}\n"
             "pr=16\n"
             f"start_head={start_head}\n"
@@ -494,7 +502,7 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
             "receipt_session_completed_at": completed_at,
             "receipt_nonce": nonce, "receipt_start_head": start_head,
             "receipt_head": result_head, "receipt_base": BASE,
-            "attempt": attempt,
+            "main_sha": BASE, "receipt_version": "v2",
         })
         api.comments.append({
             "id": comment_id, "user": {"id": COPILOT_AGENT},
@@ -521,8 +529,12 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
                 "head_ref": "topic", "base_ref": "main",
                 "prompt": (
                     f"Please address bounded review/check follow-up for PR #16 "
-                    f"at head `{start_head}`."
+                    f"at head `{start_head}`.\n\n"
+                    + receipt_instruction(
+                        nonce, pull_number=16, start_head=start_head, base_sha=BASE,
+                    )
                 ),
+                "created_at": created_at, "completed_at": completed_at,
             }],
         }
 
@@ -563,6 +575,25 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
         }, separators=(",", ":")),
         submitted_at="2026-10-01T12:10:00Z",
     )
+
+    if corruption is not None:
+        original_tasks = deepcopy(api.tasks)
+        original_comments = deepcopy(api.comments)
+        if corruption == "prompt":
+            api.tasks[proofs[0]["task_id"]]["sessions"][0]["prompt"] = "Unbound synthetic prompt."
+        elif corruption == "session":
+            api.tasks[proofs[0]["task_id"]]["sessions"][0]["owner"] = {"id": 1}
+        elif corruption == "receipt":
+            api.comments[-1]["updated_at"] = "2026-10-01T12:09:00Z"
+        else:
+            api.tasks.pop(proofs[0]["task_id"])
+        waiting = Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)
+        enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+        assert enrollment["neutral_attempts_unknown"] is True
+        assert enrollment["attempts"] == 3 and enrollment["receipt_proofs"] == proofs
+        assert not waiting["pull_requests"][0]["repair_requested"]
+        assert api.fix_attempts == 1
+        api.tasks, api.comments = original_tasks, original_comments
 
     result = Coordinator(
         api, StateStore(store.path), clock=lambda: NOW,
@@ -649,6 +680,73 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
     assert enrollment["starter_admission"] == original["starter_admission"]
     assert enrollment["repair_progress"]["legacy_unknown"] is True
     assert api.fix_attempts == 3
+
+    result_head = "4" * 40
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.complete_task(
+        source["task_id"], source, head_sha=result_head, base_sha=moved_main,
+    )
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)
+    reopened = StateStore(store.path)
+    completed_source = reopened.action(source["key"])
+    reviewer = next(
+        action for action in reopened.actions().values()
+        if action.get("kind") == "review" and action.get("head") == result_head
+    )
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=completed_source,
+        verdict="changes_requested",
+        findings=[
+            {"path": "tests/test_cloud_coordinator.py", "comment": "First new finding."},
+            {"path": "tests/test_cloud_coordinator.py", "comment": "Second new finding."},
+        ],
+        files=api.review_file_digests(),
+    )
+    # Publish a real bound negative report while verification remains pending.
+    original_get_all = api.get_all
+
+    def pending_checks(route, *, collection=None):
+        values = original_get_all(route, collection=collection)
+        if collection == "check_runs":
+            return [
+                {**check, "status": "in_progress", "conclusion": None}
+                for check in values
+            ]
+        return values
+
+    api.get_all = pending_checks
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)
+    persisted = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert source["task_id"] not in persisted["repair_progress"]["evaluated_task_ids"]
+    assert persisted["attempts"] == 4
+    assert StateStore(store.path).action(reviewer["key"])["publication_state"] == "done"
+
+    # A new main does not revoke the source receipt or its completed review.
+    api.current_main_sha = "e" * 40
+    api.pull["mergeable_state"] = "behind"
+    api.compare_results[f"{moved_main}...{'e' * 40}"] = _compare_result(
+        moved_main, ahead_by=1,
+    )
+    api.compare_results[f"{moved_main}...{result_head}"] = _compare_result(
+        moved_main, ahead_by=1,
+    )
+    api.get_all = original_get_all
+    evaluated = Coordinator(
+        api, StateStore(store.path), clock=lambda: NOW,
+    ).run(apply=True)["pull_requests"][0]
+    persisted = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert not evaluated["review_valid"]
+    assert source["task_id"] in persisted["repair_progress"]["evaluated_task_ids"]
+    assert persisted["repair_progress"]["consecutive_no_progress"] == 1
+    assert persisted["repair_progress"]["legacy_unknown"] is True
+    assert persisted["receipt_proofs"][:3] == proofs
+    assert persisted["attempts"] == 4
+    assert persisted["initial_source"] == original["initial_source"]
+    assert persisted["starter_admission"] == original["starter_admission"]
+    assert api.fix_attempts == 4  # Only a separate neutral reservation may follow.
 
 
 def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(tmp_path):

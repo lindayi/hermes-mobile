@@ -493,7 +493,7 @@ unchanged ready receipt binds the task, session, starting head, result head, PR 
 dispatch base. The result head must be the current authorized PR head; the recorded
 dispatch base must still match the receipt, but need not remain current after main
 advances. The complete current GitHub collections must also prove successful
-required checks and resolved review conversations. A positive exact-head review can
+required checks and a complete review-conversation inventory. A positive exact-head review can
 confirm progress as before. A complete authenticated, owner-published
 `changes_requested` report for the current head can also prove which tracked
 independent-review findings remain or were resolved; the negative disposition is
@@ -502,19 +502,51 @@ deployment authority. Task state, agent prose, a
 changed SHA, code churn, unrelated green checks, elapsed time, changed issue text,
 cosmetic wording, or new review IDs alone cannot count as progress.
 
+Evidence collection is independent of dispatch caps and usable repair prose.
+An unresolved thread with missing comments is not an empty inventory. Historical
+main advancement does not invalidate a bound source receipt or its exact-head
+completed review/check evaluation; it still cannot authorize current-main dispatch.
+Terminal source tasks await a verified evaluation before another source reservation.
+Pre-upgrade unscored receipts remain explicitly unknown rather than blocking forever.
+Legacy shared counts are split only after authenticating every unique retained
+task/session, prompt, and receipt chain, without inventing ordinals or task types.
+Fully observed terminal failed verification allows only a nonprogress decision.
+A bound negative report supplies the review-stage disposition, not a successful
+`agent-review` check; all non-review checks must be observed before scoring.
+An incomplete or older-encoding reservation baseline receives an explicitly
+unknown decision only after fresh complete review/check evidence; it cannot clear
+targets or alter the streak. Neutral advancement can leave an older source result
+unscored; this remains explicit unknown history, not a current-head pending lock.
+
 At reservation, the coordinator records at most 32 bounded fingerprints of the
 actual eligible repair targets: stable review-thread identity, normalized body
 finding, or source-workflow failure class. The persisted resolved-history bound
 is 640 fingerprints per enrollment (20 reservations at that per-task limit), so
 the progress ledger and retained receipt proofs stay bounded within coordinator
 state capacity. A result is progress only when at least one previous target is absent from the
-complete current-head evidence. The ready receipt's original dispatch base remains
+complete current-head evidence and independently verified as resolved. Negative
+reports may include optional `progress_disposition` with exactly `version: 1` and
+`resolved`: up to 32 unique lowercase SHA-256 target fingerprints from the saved
+source reservation. The reviewer receives that inventory and source evidence,
+must inspect the exact source delta, and must not infer resolution from wording,
+new IDs, or a moved finding. The authenticated report envelope binds this assertion
+to source receipt/session/head/base; the owner publication digest includes it.
+Absent disposition on a negative report earns no resolution credit. Positive
+independent review retains its existing resolution semantics. Finding text uses
+one canonical namespace across body sections and independent paths; thread IDs
+and workflow failure classes retain their stable namespaces. All independently
+observed cleared targets enter history even when regression withholds credit.
+The ready receipt's original dispatch base remains
 bound as historical provenance even after main advances; it is not replaced with
 the current base or treated as a fresh eligibility requirement. A previously
 cleared fingerprint that reappears is a regression and prevents progress credit;
 thus alternating A-to-B-to-A findings cannot repeatedly reset the streak.
 Fingerprints ignore review IDs and cosmetic case, whitespace, and punctuation
-changes. If task, receipt, original dispatch-base binding, CI, review evidence,
+changes. Encoding version 2 is persisted on reservations, proofs and progress.
+Unversioned hashes/history remain retained but are never treated as cleared by
+canonical version-2 observations. Incomparable resolved history cannot grant
+progress credit; lifetime counts and prior stagnation remain unchanged.
+If task, receipt, original dispatch-base binding, CI, review evidence,
 pagination, or target identity is absent, malformed, partial, stale, or otherwise
 unverified, the attempt remains unevaluated: it neither earns progress nor
 increments the no-progress streak. Three positively observed no-progress decisions

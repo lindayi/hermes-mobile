@@ -67,6 +67,22 @@ def test_pull_lifecycle_events_preserve_authenticated_linked_issue_identity():
     assert linked_policy["event_id"] == unlinked_policy["event_id"]
 
 
+@pytest.mark.parametrize("source_used", [0, 1, 2, 21, True, "3"])
+def test_stop_detail_rejects_impossible_source_reservations(source_used):
+    with pytest.raises(ValueError):
+        event = pull_event(
+            {"issue": 86, "head": HEAD, "enrollment": {"comment": 127}},
+            "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
+            incident="source-repair-no-progress",
+            stop_detail={
+                "cause": "no-progress", "used": 3, "remaining": 0, "limit": 3,
+                "source_used": source_used, "source_ceiling": 20, "stagnation_count": 3,
+            },
+        )
+        from deploy.workflow_lifecycle import validate_event
+        validate_event(event, now=NOW)
+
+
 def test_linked_stop_event_upgrade_preserves_acknowledged_legacy_identity():
     from deploy.workflow_lifecycle import (
         filter_acknowledged_replays, merge_events, validate_event,

@@ -123,14 +123,15 @@ def _event(value, generated_at):
                 or detail['limit'] != _STOP_LIMITS[detail['cause']]
                 or not 0 <= detail['used'] <= 2**31 - 1
                 or detail['remaining'] != max(0, detail['limit'] - detail['used'])
-                or not 0 <= detail['source_used'] <= 2**31 - 1
+                or not 0 <= detail['source_used'] <= detail['source_ceiling']
                 or detail['source_ceiling'] != 20
                 or not 0 <= detail['stagnation_count'] <= 3
                 or (detail['cause'] == 'source-ceiling'
                     and (detail['source_used'] != detail['used']
                          or detail['used'] < detail['limit']))
                 or (detail['cause'] == 'no-progress'
-                    and (detail['used'] != 3 or detail['stagnation_count'] != 3))
+                    and (detail['used'] != 3 or detail['stagnation_count'] != 3
+                         or detail['source_used'] < 3))
                 or (detail['cause'] == 'neutral-ceiling' and detail['used'] < detail['limit'])
                 or (detail['cause'] == 'review-handoff'
                     and detail['used'] < detail['limit'])):

@@ -171,8 +171,9 @@ _ISSUE83_INITIAL_REVIEW_FIXTURE = {
 }
 
 _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE = {
-    'deploy/cloud_coordinator.py': '76904a66bc2506c021deed488fa7f7c7f130d7ed814ad3fbccbac278550b221d',
-    'deploy/workflow_events.py': '5759930bb5a15465399c54e37c712d9c3eda5e42fee1a59d05dd50745418d91f',
+    'deploy/cloud_coordinator.py': 'f1f7dbf954e3eec7b85f0cca4c6949b8cf9e4c7f5adb477ad28a68fd8952a599',
+    'deploy/task_receipts.py': 'bfc903eddf33a7b8e4b17ccafd8112af70611ce472a44520ed4fe5842845a1c7',
+    'deploy/workflow_events.py': '63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e',
     'deploy/workflow_lifecycle.py': 'f8ecf4fa881d907d41a3f8482fa60f1166591dd51e75108aaa4d31f4f2df65b0',
     'deploy/workflow_notifications.py': 'c599d19bc1f1b1976429d7e5ca834eade37e35c718b4c389ceaef4ad47ecb1ad',
 }
