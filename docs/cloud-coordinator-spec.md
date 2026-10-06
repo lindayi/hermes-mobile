@@ -495,9 +495,10 @@ dispatch base must still match the receipt, but need not remain current after ma
 advances. The complete current GitHub collections must also prove successful
 required checks and resolved review conversations. A positive exact-head review can
 confirm progress as before. A complete authenticated, owner-published
-`changes_requested` report can also prove that tracked independent-review findings
-remain or were resolved; this evidence scores progress only and never grants review
-approval, merge eligibility, or deployment authority. Task state, agent prose, a
+`changes_requested` report for the current head can also prove which tracked
+independent-review findings remain or were resolved; the negative disposition is
+progress evidence only and never grants review approval, merge eligibility, or
+deployment authority. Task state, agent prose, a
 changed SHA, code churn, unrelated green checks, elapsed time, changed issue text,
 cosmetic wording, or new review IDs alone cannot count as progress.
 
@@ -506,8 +507,10 @@ actual eligible repair targets: stable review-thread identity, normalized body
 finding, or source-workflow failure class. The persisted resolved-history bound
 is 640 fingerprints per enrollment (20 reservations at that per-task limit), so
 the progress ledger and retained receipt proofs stay bounded within coordinator
-state capacity. A result is progress only when at least one
-previous target is absent from the complete current-head evidence. A previously
+state capacity. A result is progress only when at least one previous target is absent from the
+complete current-head evidence. The ready receipt's original dispatch base remains
+bound as historical provenance even after main advances; it is not replaced with
+the current base or treated as a fresh eligibility requirement. A previously
 cleared fingerprint that reappears is a regression and prevents progress credit;
 thus alternating A-to-B-to-A findings cannot repeatedly reset the streak.
 Fingerprints ignore review IDs and cosmetic case, whitespace, and punctuation

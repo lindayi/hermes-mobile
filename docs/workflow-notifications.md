@@ -76,6 +76,11 @@ new producers; older events without it remain valid. Its exact fields are `cause
 limit. The source ceiling is 20 and the no-progress count is bounded at 3. The
 consumer renders only these validated values, along with the existing PR and
 linked-issue identity; it never infers an exhaustion cause from free text.
+When legacy events lack `stop_detail`, the consumer keeps generic stop wording and
+explicitly states that the exact cause and counts are unavailable; it does not
+guess from a former attempt limit or review-poll count. Linked-issue projection
+with typed stop detail uses a distinct event identity, leaving persisted legacy
+event IDs and PR identities unchanged.
 
 For a `sensitive_approval` event, the exporter must recheck that the exact PR
 head and requested decision are still current and pending before including it
