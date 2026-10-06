@@ -369,6 +369,10 @@ def _renewed_bound_enrollment(prior, incoming):
             "neutral_attempts",
             NEUTRAL_LIMIT if prior.get("attempts", 0) else 0,
         ),
+        "neutral_attempts_unknown": prior.get(
+            "neutral_attempts_unknown",
+            prior.get("attempts", 0) > 0 and "neutral_attempts" not in prior,
+        ),
         "repair_progress": deepcopy(prior.get(
             "repair_progress", _new_repair_progress(legacy_unknown=True),
         )),
@@ -2188,6 +2192,39 @@ def _valid_receipt_proof(action, comments):
         and comment.get("created_at") == action["receipt_created_at"]
         and comment.get("updated_at") == action["receipt_created_at"]
     )
+
+
+def _legacy_neutral_attempt_count(enrollment, actions, comments):
+    """Recover the old shared budget only when every reservation has typed history."""
+    attempts = enrollment.get("attempts")
+    if type(attempts) is not int or attempts < 0:
+        return None
+    if attempts == 0:
+        return 0
+    by_attempt = {}
+    records = [
+        *actions.values(),
+        *enrollment.get("receipt_proofs", []),
+    ]
+    for record in records:
+        if (not isinstance(record, dict) or record.get("kind") != "fix"
+                or record.get("issue") != enrollment.get("issue")
+                or type(record.get("attempt")) is not int
+                or not 1 <= record["attempt"] <= attempts):
+            continue
+        if ("receipt_result" in record and
+                not _valid_receipt_proof(record, comments)):
+            continue
+        task_type = record.get("task_type")
+        if task_type not in {None, "neutral", "review-followup"}:
+            continue
+        is_neutral = task_type == "neutral"
+        previous = by_attempt.setdefault(record["attempt"], is_neutral)
+        if previous != is_neutral:
+            return None
+    if set(by_attempt) != set(range(1, attempts + 1)):
+        return None
+    return sum(by_attempt.values())
 
 
 def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
@@ -4304,6 +4341,18 @@ class Coordinator:
         enrollment["receipt_proofs"] = self.store.snapshot()["enrollments"].get(
             str(number), {},
         ).get("receipt_proofs", [])
+        if enrollment.get("neutral_attempts_unknown") is True:
+            recovered_neutral_attempts = _legacy_neutral_attempt_count(
+                enrollment, actions, snapshot["comments"],
+            )
+            if recovered_neutral_attempts is not None:
+                if apply:
+                    self.store.recover_legacy_neutral_attempts(
+                        number, enrollment.get("attempts"), recovered_neutral_attempts,
+                    )
+                enrollment["neutral_attempts"] = recovered_neutral_attempts
+                enrollment["neutral_attempts_unknown"] = False
+        snapshot["enrollment"] = enrollment
         authorized_head, authorized_heads, blocked_heads = _authorized_result_heads(
             number, enrollment, self.store.actions(),
             snapshot["comments"], snapshot["pull"].get("base", {}).get("sha"),
@@ -4529,7 +4578,12 @@ class Coordinator:
                     )
         repair = None
         attempts = snapshot["enrollment"].get("attempts", 0)
-        neutral_attempts = snapshot["enrollment"].get("neutral_attempts", NEUTRAL_LIMIT)
+        neutral_attempts = snapshot["enrollment"].get(
+            "neutral_attempts",
+            NEUTRAL_LIMIT if snapshot["enrollment"].get(
+                "neutral_attempts_unknown",
+            ) else 0,
+        )
         source_budget_exhausted = (
             attempts >= REPAIR_LIMIT or no_progress >= NO_PROGRESS_LIMIT
         )
@@ -5818,14 +5872,19 @@ class StateStore:
             raise CoordinatorError("Sensitive authorization episode is invalid")
         for enrollment in data["enrollments"].values():
             enrollment.setdefault("attempts", REPAIR_LIMIT)
-            enrollment.setdefault(
-                "neutral_attempts",
-                NEUTRAL_LIMIT if enrollment["attempts"] else 0,
-            )
+            missing_neutral_count = "neutral_attempts" not in enrollment
+            if missing_neutral_count:
+                enrollment["neutral_attempts"] = (
+                    NEUTRAL_LIMIT if enrollment["attempts"] else 0
+                )
+                enrollment["neutral_attempts_unknown"] = enrollment["attempts"] > 0
+            else:
+                enrollment.setdefault("neutral_attempts_unknown", False)
             if (type(enrollment["attempts"]) is not int
                     or not 0 <= enrollment["attempts"] <= 2**31 - 1
                     or type(enrollment["neutral_attempts"]) is not int
                     or not 0 <= enrollment["neutral_attempts"] <= 2**31 - 1
+                    or type(enrollment["neutral_attempts_unknown"]) is not bool
                     or ("repair_progress" in enrollment
                         and not _repair_progress_valid(enrollment["repair_progress"]))):
                 raise CoordinatorError("Repair budget or progress history is invalid")
@@ -6111,6 +6170,10 @@ class StateStore:
                         "neutral_attempts",
                         NEUTRAL_LIMIT if attempts else 0,
                     )
+                    neutral_attempts_unknown = previous.get(
+                        "neutral_attempts_unknown",
+                        attempts > 0 and "neutral_attempts" not in previous,
+                    )
                     repair_progress = deepcopy(previous.get(
                         "repair_progress",
                         _new_repair_progress(legacy_unknown=key in data["enrollments"]),
@@ -6135,6 +6198,7 @@ class StateStore:
                     enrollment = {
                         **item, "attempts": attempts,
                         "neutral_attempts": neutral_attempts,
+                        "neutral_attempts_unknown": neutral_attempts_unknown,
                         "repair_progress": repair_progress,
                         "sensitive_sha": None, "active": True,
                     }
@@ -6453,6 +6517,24 @@ class StateStore:
             if not isinstance(enrollment, dict) or not enrollment.get("active"):
                 return False
             enrollment["repair_progress"] = deepcopy(progress)
+            return True
+        return self._mutate(update)
+
+    def recover_legacy_neutral_attempts(self, issue, source_attempts, neutral_attempts):
+        if (type(source_attempts) is not int or source_attempts < 0
+                or type(neutral_attempts) is not int
+                or not 0 <= neutral_attempts <= min(source_attempts, NEUTRAL_LIMIT)):
+            raise CoordinatorError("Legacy neutral reservation history is invalid")
+        key = str(issue)
+
+        def update(data):
+            enrollment = data["enrollments"].get(key)
+            if (not isinstance(enrollment, dict)
+                    or enrollment.get("neutral_attempts_unknown") is not True
+                    or enrollment.get("attempts") != source_attempts):
+                return False
+            enrollment["neutral_attempts"] = neutral_attempts
+            enrollment["neutral_attempts_unknown"] = False
             return True
         return self._mutate(update)
 

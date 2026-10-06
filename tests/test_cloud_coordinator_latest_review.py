@@ -377,7 +377,10 @@ def test_task_post_requires_exact_positive_integer_identity(
     action = next(a for a in store.actions().values() if a["kind"] == "fix")
     assert action["status"] == ("sent" if identity == "exact" else "uncertain")
     # A POST was attempted: retain its reserved attempt and never resend ambiguity.
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == (0 if neutral else 1)
+    assert enrollment["neutral_attempts"] == (1 if neutral else 0)
+    assert action.get("task_type") == ("neutral" if neutral else None)
     assert api.fix_attempts == 1
     if identity != "exact":
         assert action["blocker"] == "execution_uncertain"
@@ -385,7 +388,9 @@ def test_task_post_requires_exact_positive_integer_identity(
         assert [event["reason"] for event in events] == ["execution_uncertain"]
         Coordinator(api, StateStore(store.path), clock=lambda: 1790856661).run(apply=True)
         assert store.action(action["key"])["status"] == "uncertain"
-        assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+        enrollment = store.snapshot()["enrollments"]["16"]
+        assert enrollment["attempts"] == (0 if neutral else 1)
+        assert enrollment["neutral_attempts"] == (1 if neutral else 0)
         assert store.snapshot()["lifecycle_events"] == events
         assert api.fix_attempts == 1
     assert not api.graphql_writes

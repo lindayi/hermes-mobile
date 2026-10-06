@@ -453,7 +453,7 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
 
 
 def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
-    api, store, _ = actual_starter_consumer(tmp_path)
+    api, store, first_action = actual_starter_consumer(tmp_path)
     original = store.snapshot()["enrollments"]["16"]
     assert original["initial_source"]["head_sha"] == HEAD
     assert original["starter_admission"]["head_sha"] == HEAD
@@ -506,6 +506,7 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
         }
 
     store._mutate(make_legacy)
+    api.tasks.pop(first_action["task_id"], None)
     current_head = proof_heads[-1]
     moved_main = "d" * 40
     api.head_sha = current_head
@@ -537,9 +538,13 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
 
     reopened = StateStore(store.path)
     enrollment = reopened.snapshot()["enrollments"]["16"]
-    neutral = next(
+    neutral = next((
         action for action in reopened.actions().values()
         if action.get("kind") == "fix" and action.get("task_type") == "neutral"
+    ), None)
+    assert neutral is not None, (
+        result["reasons"], enrollment["neutral_attempts"],
+        enrollment.get("neutral_attempts_unknown"), api.fix_attempts,
     )
     assert not result["review_valid"]
     assert result["repair_requested"]
@@ -885,7 +890,8 @@ def test_actual_paired_v2_main_advance_keeps_authority_but_requires_neutral_repa
     assert merged["auto_merge_requested"], merged["reasons"]
     assert api.graphql_writes[-1][1]["expectedHeadOid"] == repaired_head
     run()
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
     assert len(api.graphql_writes) == 1 and api.fix_attempts == 2
     api.head_sha = "f" * 40
     api.pull["head"]["sha"] = api.head_sha
