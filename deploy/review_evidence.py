@@ -509,7 +509,8 @@ def parse_body(body, state, *, body_html=None):
     Findings are (kind, quoted text) pairs. Classifications are explicit section
     dispositions, including non-actionable sections, for callers/diagnostics.
     """
-    result = {"classifications": [], "findings": [], "ambiguous": False, "reason": None}
+    result = {"classifications": [], "findings": [], "ambiguous": False, "reason": None,
+              "findings_total": 0, "truncated": False, "inventory_complete": True}
     parser = _DisclosureParser()
     try:
         if not isinstance(body, str) or len(body) > MAX_BODY_CHARS:
@@ -523,10 +524,12 @@ def parse_body(body, state, *, body_html=None):
         if len(parser.stack) != 1:
             raise ValueError("unclosed-markup")
     except (ValueError, AssertionError) as exc:
-        return dict(result, classifications=["ambiguous"], ambiguous=True, reason=str(exc))
+        return dict(result, classifications=["ambiguous"], ambiguous=True, reason=str(exc),
+                    inventory_complete=False)
 
     if not overview and state != "CHANGES_REQUESTED":
-        return dict(result, classifications=["ambiguous"], ambiguous=True, reason="unstructured-comment")
+        return dict(result, classifications=["ambiguous"], ambiguous=True,
+                    reason="unstructured-comment", inventory_complete=False)
 
     sections = list(_disclosures(parser.root)) if overview else []
     positive_open = False
@@ -555,7 +558,10 @@ def parse_body(body, state, *, body_html=None):
                     and all(_summary(child) is not None for child in children)):
                 texts = [_text(child, exclude_history=True).strip() for child in children
                          if _has_live_content(child)]
+                if len(texts) != expected:
+                    result["inventory_complete"] = False
             else:
+                result["inventory_complete"] = False
                 # Count/shape uncertainty may preserve a populated active section,
                 # but its label, intro and history cannot themselves be a finding.
                 texts = ([_text(node, exclude_history=True).strip()]
@@ -591,23 +597,43 @@ def parse_body(body, state, *, body_html=None):
     # independently bounded active sections because an unrelated footer changed.
     if result["ambiguous"]:
         result["reason"] = "unclassified-content"
+        result["inventory_complete"] = False
+    result["findings_total"] = len(result["findings"])
+    result["truncated"] = result["findings_total"] > MAX_BODY_FINDINGS
+    if result["truncated"]:
+        result["inventory_complete"] = False
     result["findings"] = result["findings"][:MAX_BODY_FINDINGS]
     return result
 
 
 def review_body_disposition(reviews, head_sha, *, reviewer_id):
     """Select exactly one authenticated current-head review, then classify it."""
-    empty = {"classifications": [], "findings": [], "ambiguous": False, "reason": None}
+    empty = {"classifications": [], "findings": [], "ambiguous": False, "reason": None,
+             "findings_total": 0, "truncated": False, "inventory_complete": True}
     latest = latest_reviews(reviews, reviewer_id)
-    if not latest or len(latest) != 1:
+    if latest is None:
+        if (not isinstance(reviews, list)
+                or any(not isinstance(review, dict)
+                       or not isinstance(review.get("user"), dict)
+                       or not positive_id(review["user"].get("id"))
+                       or not positive_id(review.get("id"))
+                       or review["user"]["id"] == reviewer_id for review in reviews)
+                or len({review["id"] for review in reviews}) != len(reviews)):
+            return dict(empty, inventory_complete=False)
         return empty
+    if len(latest) != 1:
+        return dict(empty, inventory_complete=False)
     review = latest[0]
     state, body = review.get("state"), review.get("body")
-    if (not isinstance(head_sha, str) or review.get("commit_id") != head_sha
-            or not positive_id(review.get("id"))
-            or type(state) is not str or state not in {"COMMENTED", "CHANGES_REQUESTED"}
-            or not isinstance(body, str) or not body.strip()):
+    if not isinstance(head_sha, str) or review.get("commit_id") != head_sha:
         return empty
+    if (type(state) is str and (
+            state in {"APPROVED", "DISMISSED", "PENDING"}
+            or state == "COMMENTED" and body == "")):
+        return empty
+    if (type(state) is not str or state not in {"COMMENTED", "CHANGES_REQUESTED"}
+            or not isinstance(body, str) or not body.strip()):
+        return dict(empty, inventory_complete=False)
     result = parse_body(body, state, body_html=review.get("body_html"))
     result["findings"] = [
         {"review": review["id"], "head": head_sha,

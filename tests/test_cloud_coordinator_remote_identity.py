@@ -4,7 +4,10 @@ from copy import deepcopy
 import pytest
 
 from deploy.cloud_coordinator import MAX_RECEIPT_POLLS, OWNER_ID, REPOSITORY_ID
-from test_cloud_coordinator import BASE, Coordinator, FakeApi, StateStore, enrolled_record
+from test_cloud_coordinator import (
+    BASE, HEAD, Coordinator, FakeApi, StateStore, _progress_review,
+    enrolled_record, refresh_owner_review,
+)
 
 
 KINDS = ["valid", "float", "string", "bool", "zero", "negative", "missing"]
@@ -52,7 +55,33 @@ def test_terminal_task_requires_live_numeric_ownership(tmp_path, state, field, k
         coordinator.run(apply=True)
         assert store.action(fix["key"])["status"] == "completed"
         assert [e["reason"] for e in store.snapshot()["lifecycle_events"]] == ["task_failed"]
-        assert api.fix_attempts == 2  # Authenticated terminal proof releases the lock.
+        assert api.fix_attempts == 1
+        assert store.snapshot()["enrollments"]["16"]["repair_progress"]["evaluated_task_ids"] == []
+
+        api.unresolved = False
+        refresh_owner_review(api, HEAD)
+        original_get_all = api.get_all
+
+        def current_evidence(route, *, collection=None):
+            values = original_get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                values.append(_progress_review(
+                    HEAD, 63002, "The next synthetic blocker remains.",
+                    "2026-10-01T12:10:00Z",
+                ))
+            return values
+
+        api.get_all = current_evidence
+        api.pending_required = True
+        coordinator.run(apply=True)
+        assert api.fix_attempts == 1
+        assert store.snapshot()["enrollments"]["16"]["repair_progress"]["evaluated_task_ids"] == []
+        api.pending_required = False
+        coordinator = Coordinator(api, StateStore(store.path), clock=lambda: 1790856660)
+        coordinator.run(apply=True)
+        assert api.fix_attempts == 2
+        assert store.snapshot()["enrollments"]["16"]["repair_progress"]["evaluated_task_ids"] == [fix["task_id"]]
+        assert not api.graphql_writes
         return
 
     # Reopen durable state each time; weak evidence never creates a blind retry.

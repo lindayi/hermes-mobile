@@ -353,7 +353,7 @@ def test_meaningful_outcomes_keep_failures_approvals_merge_and_deployment_distin
     assert set(notices) == {
         'Issue #31 needs attention',
         'Workflow task failed for issue #31',
-        'Workflow budget exhausted for issue #31',
+        'Workflow repair stopped for issue #31',
         'Workflow outcome uncertain for issue #31',
         'Owner decision required for PR #32',
         'PR #32 merged',
@@ -361,7 +361,81 @@ def test_meaningful_outcomes_keep_failures_approvals_merge_and_deployment_distin
     assert 'authorize the sensitive action' in notices['Owner decision required for PR #32']
     assert head in notices['Owner decision required for PR #32']
     assert 'separate from deployment' in notices['PR #32 merged']
+    assert 'exact stop cause and counts are unavailable' in notices[
+        'Workflow repair stopped for issue #31'
+    ]
+    assert '20 lifetime dispatches' not in notices['Workflow repair stopped for issue #31']
+    assert 'not a billing' in notices['Workflow repair stopped for issue #31']
     assert all('deployed' not in title.lower() for title in notices)
+
+
+def test_repair_stop_notice_names_pull_and_authenticated_linked_issue():
+    from deploy.workflow_notifications import _message
+
+    title, body = _message(event(
+        'failed', 'execution_exhausted', event_id='pr:86:exhausted:1',
+        issue_number=85, pr_number=86, head_sha='a' * 40,
+    ))
+
+    assert title == 'Workflow repair stopped for PR #86 (linked issue #85)'
+    assert 'exact stop cause and counts are unavailable' in body
+    assert '20 lifetime dispatches' not in body
+    assert '3 consecutive completed repairs' not in body
+    assert 'not a billing' in body
+
+
+@pytest.mark.parametrize(('detail', 'expected'), [
+    ({
+        'cause': 'source-ceiling', 'used': 20, 'remaining': 0, 'limit': 20,
+        'source_used': 20, 'source_ceiling': 20, 'stagnation_count': 1,
+    }, ('source-repair lifetime ceiling', '20/20 used', '0 remaining', '1/3')),
+    ({
+        'cause': 'no-progress', 'used': 3, 'remaining': 0, 'limit': 3,
+        'source_used': 4, 'source_ceiling': 20, 'stagnation_count': 3,
+    }, ('verified no-progress limit', '3/3 used', '4/20', '3/3')),
+    ({
+        'cause': 'neutral-ceiling', 'used': 3, 'remaining': 0, 'limit': 3,
+        'source_used': 3, 'source_ceiling': 20, 'stagnation_count': 0,
+    }, ('neutral-reconciliation limit', '3/3 used', '3/20', '0/3')),
+])
+def test_execution_exhaustion_notice_reports_typed_stop_details(
+        tmp_path, detail, expected):
+    from deploy.workflow_notifications import process
+
+    item = event(
+        'failed', 'execution_exhausted', event_id='pr:86:exhausted:typed',
+        issue_number=85, pr_number=86, head_sha='a' * 40,
+        stop_detail=detail,
+    )
+    paths, _, _, inbox, _, _ = adapter_fixture(tmp_path, export(item))
+
+    process(paths, apply=True, now=NOW)
+
+    with sqlite3.connect(inbox) as db:
+        title, body = db.execute('SELECT title,body FROM inbox').fetchone()
+    assert title == 'Workflow repair stopped for PR #86 (linked issue #85)'
+    assert all(value in body for value in expected)
+    assert 'not a billing or deployment status' in body
+
+
+@pytest.mark.parametrize('change', [
+    {'cause': 'unknown'},
+    {'used': True},
+    {'remaining': 1},
+    {'source_ceiling': 19},
+    {'stagnation_count': 4},
+    {'unexpected': 'unbounded'},
+])
+def test_execution_exhaustion_rejects_malformed_stop_details(change):
+    detail = {
+        'cause': 'no-progress', 'used': 3, 'remaining': 0, 'limit': 3,
+        'source_used': 4, 'source_ceiling': 20, 'stagnation_count': 3,
+    } | change
+    with pytest.raises(ValueError):
+        validate_export(export(event(
+            'failed', 'execution_exhausted', pr_number=86, issue_number=85,
+            head_sha='a' * 40, stop_detail=detail,
+        )), now=NOW)
 
 
 def test_issue30_terminal_notices_are_safe_and_operational(tmp_path):

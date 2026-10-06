@@ -12,13 +12,18 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from deploy import cloud_coordinator
 from deploy.cloud_coordinator import (
     ApiError,
     Coordinator as CloudCoordinator,
     CoordinatorError,
     GhApi,
     MAX_HANDOFF_POLLS,
+    MAX_REPAIR_FINGERPRINTS,
+    MAX_REPAIR_PROGRESS_HISTORY,
     MAX_STATE_BYTES,
+    NEUTRAL_LIMIT,
+    NO_PROGRESS_LIMIT,
     REPAIR_LIMIT,
     StateStore,
     classify_sensitive_paths,
@@ -28,6 +33,7 @@ from deploy.cloud_coordinator import (
     enrollment_from_comment,
     required_checks_pass,
     repair_request,
+    review_followup_request,
     _rest_list,
     _is_owner_sensitive_command,
     _review_prompt_inventory,
@@ -1050,7 +1056,9 @@ def test_repair_request_is_bounded_deduplicable_and_uses_only_actionable_evidenc
     assert "curl secret" in request["body"]
     assert "example.invalid" not in request["body"]
     assert repair_request(HEAD, 2, threads, failed)["marker"] != request["marker"]
-    assert repair_request(HEAD, 3, threads, failed) is None
+    final = repair_request(HEAD, REPAIR_LIMIT - 1, threads, failed)
+    assert final["attempt"] == REPAIR_LIMIT
+    assert repair_request(HEAD, REPAIR_LIMIT, threads, failed) is None
     assert repair_request(HEAD, 1, [], [{
         "name": "Source checks", "status": "completed", "conclusion": "cancelled",
     }]) is None
@@ -1074,16 +1082,166 @@ def test_state_survives_restart_and_does_not_replay_or_retry_ambiguous_writes(tm
     assert json.loads(path.read_text())["version"] == 1
 
 
-def test_three_repair_attempts_are_the_hard_limit(tmp_path):
+def test_twenty_source_repair_attempts_are_the_hard_limit(tmp_path):
     store = StateStore(tmp_path / "state.json")
     store.enroll(enrolled_record())
-    for attempt in range(3):
+    for attempt in range(REPAIR_LIMIT):
         assert store.claim_action(f"fix:{attempt}", {
             "kind": "fix", "issue": 16, "status": "sending",
         })
         store.update_action(f"fix:{attempt}", "completed")
-    assert not store.claim_action("fix:fourth", {"kind": "fix", "issue": 16})
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
+    assert not store.claim_action("fix:next", {"kind": "fix", "issue": 16})
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == REPAIR_LIMIT
+
+
+def test_neutral_reconciliation_uses_only_its_own_bounded_counter(tmp_path):
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    store.enroll(enrolled_record())
+    for attempt in range(NEUTRAL_LIMIT):
+        key = f"neutral:{attempt}"
+        assert store.claim_action(key, {
+            "kind": "fix", "task_type": "neutral", "issue": 16,
+        })
+        store.update_action(key, "completed")
+
+    restarted = StateStore(path)
+    assert restarted.snapshot()["enrollments"]["16"]["attempts"] == 0
+    assert restarted.snapshot()["enrollments"]["16"]["neutral_attempts"] == NEUTRAL_LIMIT
+    assert not restarted.claim_action("neutral:next", {
+        "kind": "fix", "task_type": "neutral", "issue": 16,
+    })
+
+
+def test_legacy_neutral_counter_requires_typed_reservation_history():
+    from deploy.cloud_coordinator import _legacy_neutral_attempt_count
+
+    enrollment = {"issue": 16, "attempts": 0}
+    assert _legacy_neutral_attempt_count(enrollment, {}, []) == 0
+    assert _legacy_neutral_attempt_count(
+        enrollment | {"receipt_proofs": [{
+            "issue": 16, "kind": "fix", "attempt": 1, "task_type": "neutral",
+        }]}, {}, [],
+    ) is None
+
+    enrollment["attempts"] = 1
+    legacy_proof = {"issue": 16, "kind": "fix", "attempt": 1}
+    assert _legacy_neutral_attempt_count(
+        enrollment | {"receipt_proofs": [legacy_proof]}, {}, [],
+    ) is None
+    assert _legacy_neutral_attempt_count(
+        enrollment | {"receipt_proofs": [{
+            **legacy_proof, "task_type": "neutral",
+        }]}, {}, [],
+    ) is None
+    assert _legacy_neutral_attempt_count(
+        enrollment | {"receipt_proofs": [{
+            **legacy_proof, "repair_policy_version": 1,
+        }]}, {}, [],
+    ) is None
+
+
+def test_completed_source_progress_survives_main_advance_with_negative_review(
+        monkeypatch):
+    from deploy import cloud_coordinator
+
+    head = "a" * 40
+    old_main = "b" * 40
+    fingerprint = cloud_coordinator._repair_fingerprint(
+        "independent-review:deploy/cloud_coordinator.py", "The finding remains.",
+    )
+    action = {
+        "kind": "fix", "task_type": "review-followup", "issue": 16,
+        "status": "completed", "attempt": 4, "task_id": "source-task-4",
+        "head": head, "main_sha": old_main, "receipt_result": "ready",
+        "receipt_head": head, "receipt_base": old_main,
+        "pull_id": 160000016, "pull_node_id": "PR_node_16",
+        "repository_id": 1399942965, "owner_id": OWNER,
+        "repair_policy_version": 1, "repair_fingerprints": [fingerprint],
+        "repair_fingerprint_version": 2,
+        "repair_fingerprints_complete": True,
+    }
+    monkeypatch.setattr(
+        cloud_coordinator, "_valid_receipt_proof", lambda *_args, **_kwargs: True,
+    )
+    snapshot = {
+        "issue": 16, "head": head, "main_sha": "c" * 40, "comments": [],
+        "scoped": True, "reviews_complete": True, "threads_complete": True,
+        "pull": {"id": 160000016, "node_id": "PR_node_16"},
+        "enrollment": {
+            "repair_progress": cloud_coordinator._new_repair_progress(),
+        },
+    }
+
+    progress = cloud_coordinator._completed_repair_progress(
+        snapshot, {"source-task-4": action}, [fingerprint], {head},
+        review_ok=False, checks_ok=True, current_fingerprints_complete=True,
+        negative_review_complete=True,
+    )
+
+    assert progress["consecutive_no_progress"] == 1
+    assert progress["evaluated_task_ids"] == ["source-task-4"]
+    assert not cloud_coordinator.independent_review_valid(
+        head, [], [], pull_author_id=123, threads_complete=True,
+        reviews_complete=True, issue=16, review_actions={},
+    )
+    unrelated = action | {
+        "receipt_head": "d" * 40, "receipt_result": "ready",
+    }
+    ignored = cloud_coordinator._completed_repair_progress(
+        snapshot, {"source-task-4": unrelated}, [fingerprint], {head},
+        review_ok=False, checks_ok=True, current_fingerprints_complete=True,
+        negative_review_complete=True,
+    )
+    assert ignored["consecutive_no_progress"] == 0
+
+
+def test_legacy_neutral_recovery_splits_shared_counter_atomically(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    legacy = store.snapshot()
+    legacy["enrollments"]["16"].update(
+        attempts=3, neutral_attempts=NEUTRAL_LIMIT,
+        neutral_attempts_unknown=True,
+    )
+    store._save(legacy)
+
+    assert store.recover_legacy_neutral_attempts(16, 3, 1)
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 2
+    assert enrollment["neutral_attempts"] == 1
+    assert enrollment["neutral_attempts_unknown"] is False
+
+
+def test_repair_fingerprint_history_has_a_small_hard_bound():
+    assert MAX_REPAIR_FINGERPRINTS == 32
+    assert MAX_REPAIR_PROGRESS_HISTORY == REPAIR_LIMIT * MAX_REPAIR_FINGERPRINTS
+    assert MAX_REPAIR_PROGRESS_HISTORY <= 640
+
+
+def test_neutral_ceiling_exports_typed_stop_detail(tmp_path):
+    api = FakeApi(unresolved=True)
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    store._mutate(lambda state: state["enrollments"]["16"].update(
+        attempts=3, neutral_attempts=NEUTRAL_LIMIT,
+    ))
+
+    result = Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+
+    stopped = next(
+        event for event in store.snapshot()["lifecycle_events"]
+        if event["reason"] == "execution_exhausted"
+    )
+    assert stopped["issue_number"] == 16 and stopped["pr_number"] == 16
+    assert stopped["stop_detail"] == {
+        "cause": "neutral-ceiling", "used": NEUTRAL_LIMIT, "remaining": 0,
+        "limit": NEUTRAL_LIMIT, "source_used": 3,
+        "source_ceiling": REPAIR_LIMIT, "stagnation_count": 0,
+    }
+    assert not result["pull_requests"][0]["repair_requested"]
+    assert api.fix_attempts == 0
 
 
 def test_state_outbox_is_deduplicated_and_apply_lock_is_exclusive(tmp_path):
@@ -1104,7 +1262,7 @@ def test_truncated_graphql_threads_never_become_complete():
     class Truncated:
         def graphql(self, query, variables):
             return {"data": {"repository": {"pullRequest": {"reviewThreads": {
-                "nodes": [{"isResolved": True, "comments": {
+                "nodes": [{"id": "PRRT_truncated", "isResolved": True, "comments": {
                     "nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
                 }}],
                 "pageInfo": {"hasNextPage": True, "endCursor": None},
@@ -1115,6 +1273,75 @@ def test_truncated_graphql_threads_never_become_complete():
     assert not copilot_review_valid(HEAD, [{
         "state": "APPROVED", "commit_id": HEAD, "user": {"id": COPILOT_REVIEWER},
     }], threads, threads_complete=complete)
+
+
+@pytest.mark.parametrize("identity", [None, 1, True, {}, "", "x" * 257])
+def test_graphql_thread_identity_must_be_a_bounded_nonempty_string_before_writes(
+        tmp_path, identity):
+    api = FakeApi(unresolved=True)
+    original_graphql = api.graphql
+
+    def malformed_thread(query, variables):
+        response = original_graphql(query, variables)
+        if "reviewThreads" in query:
+            response["data"]["repository"]["pullRequest"]["reviewThreads"][
+                "nodes"
+            ][0]["id"] = identity
+        return response
+
+    api.graphql = malformed_thread
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    before = store.path.read_bytes()
+
+    with pytest.raises(CoordinatorError, match="Review thread identity"):
+        Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+
+    assert store.path.read_bytes() == before
+    assert not api.writes and not api.graphql_writes
+
+
+def test_graphql_review_thread_identity_survives_complete_pagination():
+    class Paginated:
+        def __init__(self):
+            self.calls = []
+
+        def graphql(self, query, variables):
+            self.calls.append(dict(variables))
+            if len(self.calls) == 1:
+                return {"data": {"repository": {"pullRequest": {
+                    "reviewThreads": {
+                        "nodes": [{
+                            "id": "PRRT_valid",
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [{"body": "First page"}],
+                                "pageInfo": {"hasNextPage": False},
+                            },
+                        }],
+                        "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                    },
+                }}}}
+            return {"data": {"repository": {"pullRequest": {
+                "reviewThreads": {
+                    "nodes": [{
+                        "id": "PRRT_second",
+                        "isResolved": True,
+                        "comments": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": False},
+                        },
+                    }],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+            }}}}
+
+    api = Paginated()
+    threads, complete = collect_review_threads(api, 16)
+
+    assert complete
+    assert [thread["id"] for thread in threads] == ["PRRT_valid", "PRRT_second"]
+    assert api.calls == [{"number": 16}, {"number": 16, "cursor": "cursor-1"}]
 
 
 def test_graphql_pagination_rejects_api_errors_without_exposing_payload():
@@ -1518,6 +1745,7 @@ class FakeApi:
             return [
                 {
                     "name": name,
+                    "head_sha": self.head_sha,
                     "app": {"id": app_id} if app_id is not None else {},
                     "status": ("in_progress" if self.pending_required and name == "integration-tests"
                                else "completed"),
@@ -1761,7 +1989,8 @@ class FakeApi:
         })
 
     def complete_review_task(self, task_id, action, *, source_action, verdict="pass",
-                             findings=None, files=None, report="Independent review complete."):
+                             findings=None, files=None, report="Independent review complete.",
+                             progress_disposition=None):
         task = self.tasks[task_id]
         session_id = f"session-{task_id}"
         created = "2026-10-01T12:07:00Z"
@@ -1809,6 +2038,8 @@ class FakeApi:
             "files": self.review_file_digests() if files is None else files,
             "report": report,
         }
+        if progress_disposition is not None:
+            payload["progress_disposition"] = progress_disposition
         self.comments.append({
             "id": self.next_issue_comment_id,
             "user": {"id": COPILOT_AGENT},
@@ -1923,7 +2154,9 @@ def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
     assert len(neutral) == 1
     assert api.fix_attempts == 2
     assert api.review_attempts == 0
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 1
+    assert enrollment["neutral_attempts"] == 1
     first_proof = next(
         proof for proof in store.snapshot()["enrollments"]["16"]["receipt_proofs"]
         if proof["task_id"] == first["task_id"]
@@ -1944,7 +2177,45 @@ def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
     assert api.writes == before_writes
 
 
-def test_stale_base_reconciliation_uses_the_existing_repair_budget(tmp_path):
+def test_neutral_new_head_keeps_unscored_source_unknown_without_deadlock(tmp_path):
+    api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
+    coordinator.run(apply=True)
+    neutral = next(a for a in store.actions().values() if a.get("task_type") == "neutral")
+    head = "e" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.complete_task(
+        neutral["task_id"], neutral, head_sha=head, base_sha=CURRENT_MAIN,
+    )
+    api.unresolved = False
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+    reopened = StateStore(store.path)
+    reviewer = next(
+        a for a in reopened.actions().values()
+        if a.get("kind") == "review" and a.get("head") == head
+    )
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=reopened.action(neutral["key"]),
+        verdict="changes_requested",
+        findings=[{"path": "frontend/styles.css", "comment": "A new independently observed blocker."}],
+    )
+    for _ in range(3):
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 2 and enrollment["neutral_attempts"] == 1
+    assert enrollment["repair_progress"]["legacy_unknown"] is True
+    assert enrollment["repair_progress"]["evaluated_task_ids"] == []
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == 0
+    assert any(p["task_id"] == first["task_id"] for p in enrollment["receipt_proofs"])
+    assert api.fix_attempts == 3
+    assert not result["review_valid"]
+
+
+def test_stale_base_neutral_reconciliation_has_a_separate_budget(tmp_path):
     api, store, coordinator, _ = _ready_sha_bound_handoff(tmp_path)
     store._mutate(lambda state: state["enrollments"]["16"].update(
         attempts=REPAIR_LIMIT,
@@ -1953,9 +2224,10 @@ def test_stale_base_reconciliation_uses_the_existing_repair_budget(tmp_path):
     coordinator.run(apply=True)
 
     assert store.snapshot()["enrollments"]["16"]["attempts"] == REPAIR_LIMIT
-    assert api.fix_attempts == 1
-    assert not [action for action in store.actions().values()
-                if action.get("task_type") == "neutral"]
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
+    assert api.fix_attempts == 2
+    assert [action for action in store.actions().values()
+            if action.get("task_type") == "neutral"]
 
 
 def test_stale_base_reconciliation_releases_exhausted_review_handoff(tmp_path):
@@ -1970,7 +2242,8 @@ def test_stale_base_reconciliation_releases_exhausted_review_handoff(tmp_path):
     assert store.action(first["key"])["handoff_state"] == "superseded"
     assert api.fix_attempts == 2
     assert api.review_attempts == 0
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
 
 
 def test_superseded_stale_handoffs_retire_before_reenrollment(tmp_path):
@@ -2001,7 +2274,8 @@ def test_superseded_stale_handoffs_retire_before_reenrollment(tmp_path):
     enrollment = store.snapshot()["enrollments"]["16"]
     assert enrollment["active"] is True
     assert enrollment["comment"] == 127
-    assert enrollment["attempts"] == 0
+    assert enrollment["attempts"] == 1
+    assert enrollment["neutral_attempts"] == 1
     assert enrollment["receipt_proofs"] == receipt_proofs
 
 
@@ -2229,7 +2503,9 @@ def test_neutral_restart_after_head_advance_never_advances_predecessor(
         Coordinator(api, fresh, clock=lambda: 1790856660).run(apply=True)
         predecessor_states.append(fresh.action(first["key"]))
         assert fresh.action(neutral["key"])["status"] == "uncertain"
-        assert fresh.snapshot()["enrollments"]["16"]["attempts"] == 2
+        enrollment = fresh.snapshot()["enrollments"]["16"]
+        assert enrollment["attempts"] == 1
+        assert enrollment["neutral_attempts"] == 1
         assert fresh.snapshot()["enrollments"]["16"]["receipt_proofs"] == receipt_proofs
         assert api.fix_attempts == 2
 
@@ -2252,7 +2528,9 @@ def test_neutral_restart_after_head_advance_never_advances_predecessor(
     assert result["pull_requests"][0]["repair_requested"] is False
     assert result["pull_requests"][0]["auto_merge_eligible"] is False
     assert store.action(neutral["key"])["status"] == "uncertain"
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 1
+    assert enrollment["neutral_attempts"] == 1
     assert api.fix_attempts == 2
 
 
@@ -2842,6 +3120,1454 @@ def test_new_head_receipt_blocker_vetoes_that_result_head(tmp_path, result):
     assert not any("enablePullRequestAutoMerge" in query for query, _ in api.graphql_writes)
 
 
+def _progress_review(head, review_id, text, submitted_at):
+    body = (
+        "<!-- ccr-overview-v2 -->\n\n"
+        "<h2>Copilot review overview</h2>\n\n"
+        "<h3>🔵 Needs a closer look</h3>\n\n"
+        "<p>No findings were found in the changes.</p>\n\n"
+        "<p><strong>Findings:</strong> None</p>\n\n"
+        "<details><summary><strong>Previously missed (1)</strong></summary>\n\n"
+        "In code that hasn't changed since last review\n\n"
+        f"<details><summary>Synthetic finding</summary>\n\n<p>{text}</p>\n"
+        "</details>\n</details>"
+    )
+    return {
+        "id": review_id, "state": "COMMENTED", "commit_id": head,
+        "submitted_at": submitted_at, "user": {"id": COPILOT_REVIEWER},
+        "body": body, "body_html": body.removeprefix("<!-- ccr-overview-v2 -->"),
+    }
+
+
+class ProgressApi(FakeApi):
+    def get_all(self, route, *, collection=None):
+        result = super().get_all(route, collection=collection)
+        if route.endswith("/pulls/16/reviews?per_page=100") and self.progress_review:
+            return [
+                self.progress_review,
+                *[review for review in result
+                  if review.get("user", {}).get("id") != COPILOT_REVIEWER],
+            ]
+        return result
+
+
+@pytest.mark.parametrize("repairs", [4, 15, REPAIR_LIMIT])
+def test_progressing_source_repairs_continue_to_the_twenty_attempt_ceiling(
+        tmp_path, repairs):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "The first synthetic blocker remains.", "2026-10-01T12:10:00Z",
+    )
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+
+    first = coordinator.run(apply=True)["pull_requests"][0]
+    assert first["repair_requested"]
+    assert api.fix_attempts == 1, (first, store.actions())
+    for attempt in range(1, repairs):
+        fix_actions = [
+            item for item in store.actions().values() if item["kind"] == "fix"
+        ]
+        assert fix_actions, (first, store.actions(), api.writes)
+        action = max(fix_actions, key=lambda item: item.get("attempt", 0))
+        assert action["status"] == "sent", (action, store.actions(), api.fix_attempts)
+        result_head = f"{attempt + 1:040x}"
+        api.head_sha = result_head
+        api.pull["head"]["sha"] = result_head
+        api.complete_task(action["task_id"], action, head_sha=result_head)
+        refresh_owner_review(
+            api, result_head, submitted_at=f"2026-10-01T12:{5 + attempt:02d}:00Z",
+        )
+        api.progress_review = _progress_review(
+            result_head, 63002 + attempt,
+            f"The next synthetic blocker {attempt} remains.",
+            f"2026-10-01T12:{10 + attempt}:00Z",
+        )
+
+        result = coordinator.run(apply=True)["pull_requests"][0]
+        if attempt < repairs - 1:
+            assert result["repair_requested"], result["reasons"]
+
+    assert api.fix_attempts == repairs
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == repairs
+    if repairs < REPAIR_LIMIT:
+        assert result["repair_requested"]
+    else:
+        action = max(
+            (item for item in store.actions().values() if item["kind"] == "fix"),
+            key=lambda item: item["attempt"],
+        )
+        result_head = f"{repairs + 1:040x}"
+        api.head_sha = result_head
+        api.pull["head"]["sha"] = result_head
+        api.complete_task(action["task_id"], action, head_sha=result_head)
+        refresh_owner_review(
+            api, result_head, submitted_at="2026-10-01T12:45:00Z",
+        )
+        api.progress_review = _progress_review(
+            result_head, 63030, "A new synthetic blocker remains.",
+            "2026-10-01T12:46:00Z",
+        )
+
+        result = coordinator.run(apply=True)["pull_requests"][0]
+
+        assert not result["repair_requested"]
+        assert "budget" in result["reasons"]
+        assert api.fix_attempts == REPAIR_LIMIT
+        assert any(
+            event["reason"] == "execution_exhausted"
+            for event in store.snapshot()["lifecycle_events"]
+        )
+        stopped = next(
+            event for event in store.snapshot()["lifecycle_events"]
+            if event["reason"] == "execution_exhausted"
+        )
+        assert stopped["issue_number"] == 16 and stopped["pr_number"] == 16
+        assert stopped["stop_detail"] == {
+            "cause": "source-ceiling", "used": REPAIR_LIMIT, "remaining": 0,
+            "limit": REPAIR_LIMIT, "source_used": REPAIR_LIMIT,
+            "source_ceiling": REPAIR_LIMIT, "stagnation_count": 0,
+        }
+
+
+@pytest.mark.parametrize("producer", ["source", "review-followup", "neutral"])
+@pytest.mark.parametrize("occupancy", [None, "sending", "uncertain", "sent", "remote-active"])
+def test_cold_legacy_mixed_budget_request_identity(tmp_path, producer, occupancy):
+    from deploy.cloud_coordinator import _legacy_task_reservation_type
+    from deploy.task_receipts import receipt_instruction
+
+    fixture = json.loads((
+        Path(__file__).parent / "fixtures" / "coordinator-budget-v1-requests.json"
+    ).read_text())
+    assert fixture["baseline"] == "a5dbc52d835d85658567c57330a3b29bfdc6b124"
+    assert fixture["source_sha256"] == (
+        "497261d432e5ec8a1a200183ed6a0eca4bdb49f50ab7c8db3a03228bfddafe8a"
+    )
+    api = FakeApi(unresolved=producer == "source")
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    if producer == "neutral":
+        api.current_main_sha = CURRENT_MAIN
+        api.pull["mergeable_state"] = "behind"
+        api.compare_results = {
+            f"{BASE}...{CURRENT_MAIN}": _compare_result(BASE, ahead_by=1),
+            f"{BASE}...{HEAD}": _compare_result(BASE, ahead_by=1),
+        }
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record(authorized_head=HEAD))
+    state = store.snapshot()
+    enrollment = state["enrollments"]["16"]
+    enrollment["attempts"] = 2
+    for field in ("neutral_attempts", "neutral_attempts_unknown", "repair_progress"):
+        enrollment.pop(field, None)
+    names = ["source1", "neutral2"] if producer == "neutral" else [
+        "neutral1", f"{producer}2",
+    ]
+    historical = {}
+    for ordinal, name in enumerate(names, 1):
+        request = fixture["requests"][name]
+        task_id = f"legacy-budget-{ordinal}"
+        nonce = f"synthetic-legacy-budget-{ordinal}"
+        key = f"fix:16:{request['marker']}"
+        base = request.get("main_sha", BASE)
+        action = {
+            **request, "key": key, "kind": "fix", "issue": 16,
+            "head_ref": "topic", "main_sha": base, "status": "completed",
+            "task_id": task_id, "dispatch_nonce": nonce,
+            "owner_id": OWNER, "repository_id": 1399942965,
+            "pull_id": api.pull["id"], "pull_node_id": api.pull["node_id"],
+            "handoff_state": "done",
+            "body": request["body"] + "\n\n" + receipt_instruction(
+                nonce, pull_number=16, start_head=HEAD, base_sha=base,
+            ),
+        }
+        api.tasks[task_id] = {
+            "id": task_id, "creator": {"id": OWNER}, "owner": {"id": OWNER},
+            "repository": {"id": 1399942965},
+            "artifacts": [{"provider": "github", "type": "branch",
+                           "data": {"head_ref": "topic", "base_ref": "main"}}],
+        }
+        api.fix_attempts = ordinal
+        api.complete_task(task_id, action, base_sha=base)
+        comment = api.comments[-1]
+        action.update(
+            receipt_result="ready", receipt_comment_id=comment["id"],
+            receipt_created_at=comment["created_at"], receipt_body=comment["body"],
+            receipt_task_id=task_id, receipt_session_id=f"session-{task_id}",
+            receipt_completed_at="2026-10-01T12:05:30Z",
+            receipt_nonce=nonce, receipt_start_head=HEAD, receipt_head=HEAD,
+            receipt_base=base,
+        )
+        historical[key] = action
+        state["actions"][key] = action
+    enrollment["receipt_proofs"] = list(historical.values())
+    if producer == "review-followup":
+        state["actions"]["review:legacy-budget"] = {
+            "key": "review:legacy-budget", "kind": "review", "issue": 16,
+            "head": HEAD, "status": "completed", "publication_state": "done",
+            "review_report": fixture["report"], "report_verdict": "changes_requested",
+        }
+    if occupancy in {"sending", "uncertain", "sent"}:
+        action = state["actions"][key]
+        action["status"] = occupancy
+        action.pop("handoff_state")
+        for field in list(action):
+            if field.startswith("receipt_"):
+                action.pop(field)
+        enrollment["receipt_proofs"] = [historical[next(iter(historical))]]
+        if occupancy != "sent":
+            action.pop("task_id")
+            api.tasks.pop(task_id)
+        else:
+            api.tasks[task_id]["state"] = "queued"
+            api.tasks[task_id]["sessions"] = []
+    if occupancy == "remote-active":
+        api.active_agent = True
+    store._save(state)
+    before = StateStore(store.path).snapshot()
+    api.fix_attempts = 0
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    after = StateStore(store.path).snapshot()
+    if occupancy is None:
+        assert result["repair_requested"], result
+        assert api.task_posts == 1, (result, after["actions"])
+        fresh = next(
+            action for key, action in after["actions"].items()
+            if key not in before["actions"] and action["kind"] == "fix"
+        )
+        assert fresh["attempt"] == 2 and fresh["status"] == "sent"
+        assert fresh["marker"] != request["marker"]
+        assert after["enrollments"]["16"]["attempts"] == (
+            1 if producer == "neutral" else 2
+        )
+        assert after["enrollments"]["16"]["neutral_attempts"] == (
+            2 if producer == "neutral" else 1
+        )
+        assert after["enrollments"]["16"]["receipt_proofs"] == enrollment["receipt_proofs"]
+        for old_key, old_action in historical.items():
+            assert after["actions"][old_key] == old_action
+            assert _legacy_task_reservation_type(
+                old_action, api.tasks, {"issue": 16, "pull": api.pull},
+            ) is (old_action.get("task_type") == "neutral")
+        api.complete_task(fresh["task_id"], fresh, base_sha=fresh["main_sha"])
+        assert _legacy_task_reservation_type(
+            fresh, api.tasks, {"issue": 16, "pull": api.pull},
+        ) is (producer == "neutral")
+        # Keep the accepted POST active while exercising repeat and cold restart.
+        api.tasks[fresh["task_id"]]["state"] = "queued"
+    else:
+        assert api.task_posts == 0
+        assert after["enrollments"]["16"]["attempts"] == 2
+        for old_key, old_action in before["actions"].items():
+            retained = after["actions"][old_key]
+            for field, value in old_action.items():
+                if field == "status" and value == "sending":
+                    assert retained[field] == "uncertain"
+                else:
+                    assert retained[field] == value
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+    assert api.task_posts == (1 if occupancy is None else 0)
+
+
+def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        tmp_path):
+    api = ProgressApi(unresolved=False)
+    api.pull["body"] = "Synthetic linked pull request."
+    legacy_head = "3" * 40
+    body_sha = hashlib.sha256(api.pull["body"].encode()).hexdigest()
+    started_at = "2026-10-01T10:00:00Z"
+    admitted_at = "2026-10-01T11:00:00Z"
+    source = {
+        "version": 1, "issue_number": 85, "start_comment_id": 122,
+        "start_comment_created_at": started_at,
+        "task_id": "legacy-starter-task", "session_id": "legacy-starter-session",
+        "task_created_at": "2026-10-01T10:05:00Z",
+        "session_created_at": "2026-10-01T10:06:00Z",
+        "session_completed_at": "2026-10-01T10:30:00Z",
+        "head_sha": HEAD, "head_ref": "topic",
+        "pull_id": api.pull["id"], "pull_node_id": api.pull["node_id"],
+        "repository_id": 1399942965,
+        "pull_body_sha256": body_sha, "issue_body_sha256": "e" * 64,
+        "admission_comment_id": 123, "admission_comment_created_at": admitted_at,
+    }
+    admission = {
+        "version": 3, "issue_number": 85, "head_sha": HEAD,
+        "body_sha256": body_sha, "comment_id": 123,
+        "comment_created_at": admitted_at,
+        "source_task_id": source["task_id"],
+        "source_session_id": source["session_id"], "start_comment_id": 122,
+    }
+    api.comments = [{
+        "id": 123, "user": {"id": OWNER},
+        "body": (
+            f"/hermes enroll {HEAD} issue 85 body-sha256 {body_sha} "
+            f"source-task {source['task_id']} source-session {source['session_id']} "
+            "source-command 122"
+        ),
+        "created_at": admitted_at, "updated_at": admitted_at,
+    }]
+    proofs = []
+    start_head = HEAD
+    for attempt, result_head in enumerate(
+            ("1" * 40, "2" * 40, legacy_head), 1):
+        task_id = f"legacy-source-{attempt}"
+        session_id = f"legacy-session-{attempt}"
+        nonce = f"legacy-nonce-{attempt}"
+        comment_id = 8000 + attempt
+        created_at = f"2026-09-30T10:0{attempt}:00Z"
+        body = (
+            "Hermes-Task-Receipt: v2\n"
+            f"nonce={nonce}\npr=16\nstart_head={start_head}\n"
+            f"base={BASE}\nsession={session_id}\nhead={result_head}\nresult=ready"
+        )
+        api.comments.append({
+            "id": comment_id, "user": {"id": COPILOT_AGENT}, "body": body,
+            "created_at": created_at, "updated_at": created_at,
+        })
+        proofs.append({
+            "issue": 16, "kind": "fix", "task_type": "source",
+            "status": "completed", "attempt": attempt, "head": start_head,
+            "task_id": task_id, "dispatch_nonce": nonce,
+            "receipt_result": "ready", "receipt_comment_id": comment_id,
+            "receipt_created_at": created_at, "receipt_body": body,
+            "receipt_task_id": task_id, "receipt_session_id": session_id,
+            "receipt_completed_at": created_at, "receipt_nonce": nonce,
+            "receipt_start_head": start_head, "receipt_head": result_head,
+            "receipt_base": BASE, "receipt_version": "v2", "main_sha": BASE,
+            "owner_id": OWNER, "repository_id": 1399942965,
+            "pull_id": api.pull["id"], "pull_node_id": api.pull["node_id"],
+        })
+        api.tasks[task_id] = {
+            "id": task_id, "state": "completed",
+            "creator": {"id": OWNER}, "owner": {"id": OWNER},
+            "repository": {"id": 1399942965},
+            "artifacts": [
+                {
+                    "provider": "github", "type": "branch",
+                    "data": {"head_ref": "topic", "base_ref": "main"},
+                },
+                {
+                    "provider": "github", "type": "pull",
+                    "data": {"id": 160000016, "global_id": "PR_node_16"},
+                },
+            ],
+            "sessions": [{
+                "id": session_id, "task_id": task_id, "state": "completed",
+                "user": {"id": OWNER}, "owner": {"id": OWNER},
+                "repository": {"id": 1399942965},
+                "head_ref": "topic", "base_ref": "main",
+                "prompt": (
+                    f"Please address bounded review/check follow-up for PR #16 "
+                    f"at head `{start_head}`."
+                ),
+            }],
+        }
+        start_head = result_head
+
+    api.head_sha = legacy_head
+    api.pull["head"]["sha"] = legacy_head
+    api.current_main_sha = CURRENT_MAIN
+    api.pull["mergeable_state"] = "behind"
+    api.compare_results = {
+        f"{BASE}...{CURRENT_MAIN}": _compare_result(BASE, ahead_by=1),
+        f"{BASE}...{legacy_head}": _compare_result(BASE, ahead_by=3),
+    }
+    api.review_state = "CHANGES_REQUESTED"
+    api.owner_review_head_sha = legacy_head
+    api.owner_review_submitted_at = "2026-10-01T12:00:00Z"
+    api.owner_review_body = json.dumps({
+        "schema": "hermes-independent-agent-review-v1",
+        "reviewed_head_sha": legacy_head,
+        "review_method": "independent-agent",
+        "verdict": "changes_requested",
+        "evidence_sha256": "f" * 64,
+    }, separators=(",", ":"))
+    api.owner_review_digest = hashlib.sha256(
+        api.owner_review_body.encode(),
+    ).hexdigest()
+    api.progress_review = _progress_review(
+        legacy_head, 63002, "The first synthetic blocker remains.",
+        "2026-10-01T12:10:00Z",
+    )
+    api.progress_review["body"] = api.progress_review["body"].replace(
+        "Previously missed (1)", "Previously missed (2)",
+    ).replace(
+        "</details>\n</details>",
+        "</details>\n<details><summary>Second synthetic finding</summary>\n\n"
+        "<p>The second synthetic blocker remains.</p>\n</details>\n</details>",
+    )
+    api.progress_review["body_html"] = api.progress_review["body"].split("\n", 1)[1]
+    from deploy.review_evidence import body_findings
+    assert len(body_findings(
+        [api.progress_review], legacy_head, reviewer_id=COPILOT_REVIEWER,
+    )) == 2
+
+    path = tmp_path / "legacy-state.json"
+    store = StateStore(path)
+    store.enroll(enrolled_record(
+        authorized_head=HEAD, owner_authorized_head=HEAD,
+        starter_admission=admission, initial_source=source, receipt_proofs=proofs,
+    ))
+    legacy = store.snapshot()
+    enrollment = legacy["enrollments"]["16"]
+    enrollment["attempts"] = 3
+    enrollment.pop("neutral_attempts")
+    enrollment.pop("neutral_attempts_unknown")
+    enrollment.pop("repair_progress")
+    legacy["actions"][f"review:negative:{legacy_head}"] = {
+        "key": f"review:negative:{legacy_head}",
+        "kind": "review", "task_type": "independent-review", "issue": 16,
+        "head": legacy_head, "status": "completed",
+        "publication_state": "done", "report_verdict": "changes_requested",
+        "review_report": {
+            "verdict": "changes_requested",
+            "findings": [
+                {"path": "frontend/styles.css", "comment": "Keep the first behavior."},
+                {"path": "frontend/styles.css", "comment": "Keep the second behavior."},
+            ],
+        },
+    }
+    store._save(legacy)
+    historical_event = {
+        "event_id": "pr:16:execution_uncertain:historical",
+        "outcome": "execution_uncertain",
+        "reason": "execution_uncertain",
+        "issue_number": 16,
+        "pr_number": 16,
+        "head_sha": legacy_head,
+        "merge_sha": None,
+        "decision": None,
+        "occurred_at": "2026-10-01T12:00:00Z",
+    }
+    store.record_lifecycle(historical_event, now=1790856660)
+
+    cold_store = StateStore(path)
+    assert cold_store.snapshot()["enrollments"]["16"]["neutral_attempts_unknown"]
+    assert not any(action.get("kind") == "fix" for action in cold_store.actions().values())
+    from deploy.cloud_coordinator import _legacy_neutral_attempt_count, _valid_receipt_proof
+    assert all(_valid_receipt_proof(proof, api.comments) for proof in proofs)
+    assert _legacy_neutral_attempt_count(
+        cold_store.snapshot()["enrollments"]["16"], {},
+        api.comments,
+        tasks=list(api.tasks.values()),
+        snapshot={
+            "issue": 16,
+            "pull": {
+                "id": api.pull["id"], "node_id": api.pull["node_id"],
+                "head": {"ref": "topic"},
+            },
+        },
+    ) == 0
+
+    history_visible = False
+    original_get_all = api.get_all
+
+    def delayed_task_history(route, *, collection=None):
+        values = original_get_all(route, collection=collection)
+        if (route.startswith("agents/repos/lindayi/hermes-mobile/tasks?")
+                and not history_visible):
+            return [task for task in values if task.get("id") != "legacy-source-1"]
+        return values
+
+    api.get_all = delayed_task_history
+    waiting = Coordinator(
+        api, cold_store, clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    waiting_state = StateStore(path).snapshot()
+    waiting_export = json.loads((path.parent / "workflow-events.json").read_text())
+    assert "waiting-for-verified-history" in waiting["reasons"]
+    assert waiting_state["enrollments"]["16"]["neutral_attempts_unknown"] is True
+    assert waiting_state["enrollments"]["16"]["attempts"] == 3
+    assert waiting_state["enrollments"]["16"]["receipt_proofs"] == proofs
+    assert not any(action.get("kind") == "fix"
+                   for action in StateStore(path).actions().values())
+    assert not any(key.endswith(":budget") for key in waiting_state["outbox"])
+    assert waiting_state["lifecycle_events"] == [historical_event]
+    assert waiting_export["events"] == [historical_event]
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in waiting_export["events"])
+    assert api.fix_attempts == 0
+
+    from backend.notification_policy import default_preferences
+    from backend.notifications import NotificationService
+    from deploy.workflow_notifications import (
+        ADAPTER_STATE_NAME, Paths as WorkflowNotificationPaths,
+        process as process_workflow_events,
+    )
+
+    config = tmp_path / "app-config.json"
+    config.write_text(json.dumps({"state_dir": str(path.parent)}))
+    config.chmod(0o600)
+    auth_path = path.parent / "auth.sqlite"
+    with sqlite3.connect(auth_path) as db:
+        db.execute("CREATE TABLE users(id TEXT,role TEXT,status TEXT,profile TEXT)")
+        db.execute(
+            "INSERT INTO users VALUES(?,?,?,?)",
+            (APP_OWNER_ID, "owner", "ready", "default"),
+        )
+    auth_path.chmod(0o600)
+    notification_service = NotificationService(
+        path.parent / "notifications.sqlite", clock=lambda: 1790856660,
+    )
+    with notification_service._db() as db:
+        preferences = default_preferences()
+        preferences["categories"]["operational"] = True
+        db.execute(
+            "INSERT INTO push_preferences VALUES(?,?,?)",
+            (APP_OWNER_ID, "device-1", json.dumps(preferences)),
+        )
+    notification_paths = WorkflowNotificationPaths(
+        config=config,
+        delivery_state=tmp_path / "delivery" / "state.json",
+        controller_state=tmp_path / "controller",
+    )
+    consumer_now = datetime.fromtimestamp(1790856660, timezone.utc)
+    event_export = path.parent / "workflow-events.json"
+    os.utime(event_export, (consumer_now.timestamp(), consumer_now.timestamp()))
+    first_delivery = process_workflow_events(
+        notification_paths, apply=True, now=consumer_now,
+    )
+    assert first_delivery["inbox_items"] == 1
+    with sqlite3.connect(path.parent / ADAPTER_STATE_NAME) as db:
+        assert db.execute("SELECT status FROM events").fetchone() == ("acked",)
+
+    history_visible = True
+    result = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    os.utime(event_export, (consumer_now.timestamp(), consumer_now.timestamp()))
+    second_delivery = process_workflow_events(
+        notification_paths, apply=True, now=consumer_now,
+    )
+
+    enrollment = cold_store.snapshot()["enrollments"]["16"]
+    neutral = next((
+        action for action in cold_store.actions().values()
+        if action.get("task_type") == "neutral"
+    ), None)
+    assert neutral is not None, (
+        result["reasons"], result.get("repair_requested"), enrollment,
+        api.fix_attempts,
+    )
+    assert result["repair_requested"]
+    assert "starter-source-provenance" not in result["reasons"]
+    assert enrollment["attempts"] == 3
+    assert enrollment["neutral_attempts"] == 1
+    assert enrollment["neutral_attempts_unknown"] is False
+    assert enrollment["receipt_proofs"] == proofs
+    assert api.fix_attempts == 1
+    assert neutral["status"] == "sent"
+    assert second_delivery["inbox_items"] == 0
+    assert StateStore(path).snapshot()["lifecycle_events"] == [historical_event]
+    recovered_export = json.loads((path.parent / "workflow-events.json").read_text())
+    assert recovered_export["events"] == [historical_event]
+    with sqlite3.connect(path.parent / ADAPTER_STATE_NAME) as db:
+        assert db.execute("SELECT status FROM events").fetchone() == ("acked",)
+
+    api.complete_task(
+        neutral["task_id"], neutral, head_sha=legacy_head, base_sha=CURRENT_MAIN,
+    )
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull["mergeable_state"] = "clean"
+    resumed = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    followup = next((
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "fix" and action.get("task_type") != "neutral"
+    ), None)
+    assert followup is not None, (resumed["reasons"], resumed, enrollment)
+    assert resumed["repair_requested"]
+    assert enrollment["attempts"] == 4
+    assert enrollment["neutral_attempts"] == 1
+    assert followup["attempt"] == 4 and followup["status"] == "sent"
+    assert api.fix_attempts == 2
+
+
+def test_three_receipt_verified_no_progress_attempts_stop_after_restart(tmp_path):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "The same synthetic blocker remains.", "2026-10-01T12:10:00Z",
+    )
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+
+    for attempt in range(1, NO_PROGRESS_LIMIT + 1):
+        action = max(
+            (item for item in StateStore(path).actions().values()
+             if item["kind"] == "fix"),
+            key=lambda item: item["attempt"],
+        )
+        assert action["status"] == "sent"
+        result_head = f"{attempt + 1:040x}"
+        api.head_sha = result_head
+        api.pull["head"]["sha"] = result_head
+        api.complete_task(action["task_id"], action, head_sha=result_head)
+        refresh_owner_review(
+            api, result_head, submitted_at=f"2026-10-01T12:{5 + attempt:02d}:00Z",
+        )
+        api.progress_review = _progress_review(
+            result_head, 63002 + attempt, "The same synthetic blocker remains.",
+            f"2026-10-01T12:{10 + attempt}:00Z",
+        )
+
+        result = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        persisted = StateStore(path).snapshot()["enrollments"]["16"]
+        assert persisted["attempts"] == min(attempt + 1, NO_PROGRESS_LIMIT)
+        assert persisted["repair_progress"]["consecutive_no_progress"] == attempt
+        if attempt < NO_PROGRESS_LIMIT:
+            assert result["repair_requested"]
+        else:
+            assert not result["repair_requested"]
+            assert "budget" in result["reasons"]
+            budget_outcome = next(
+                item for key, item in StateStore(path).snapshot()["outbox"].items()
+                if key.endswith(":budget")
+            )
+            assert "no verified forward progress" in budget_outcome["body"]
+            stopped = next(
+                event for event in StateStore(path).snapshot()["lifecycle_events"]
+                if event["reason"] == "execution_exhausted"
+            )
+            assert stopped["stop_detail"] == {
+                "cause": "no-progress", "used": NO_PROGRESS_LIMIT, "remaining": 0,
+                "limit": NO_PROGRESS_LIMIT, "source_used": NO_PROGRESS_LIMIT,
+                "source_ceiling": REPAIR_LIMIT,
+                "stagnation_count": NO_PROGRESS_LIMIT,
+            }
+
+    assert api.fix_attempts == NO_PROGRESS_LIMIT
+
+
+def test_authenticated_failed_repair_counts_only_with_fresh_head_evidence(tmp_path):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "The same synthetic blocker remains.", "2026-10-01T12:10:00Z",
+    )
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    first = next(action for action in store.actions().values()
+                 if action["kind"] == "fix")
+    api.tasks[first["task_id"]].update(
+        state="failed", updated_at="2026-10-01T12:05:30Z",
+    )
+
+    result = coordinator.run(apply=True)["pull_requests"][0]
+
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 2
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == 1
+    assert result["repair_requested"]
+    assert api.fix_attempts == 2
+    assert any(event["reason"] == "task_failed"
+               for event in store.snapshot()["lifecycle_events"])
+
+
+@pytest.mark.parametrize("completion", ["failed", "no-op"])
+def test_failed_and_noop_repairs_cannot_credit_dropped_findings(
+        tmp_path, completion):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "Finding A remains.", "2026-10-01T12:10:00Z",
+    )
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    first = max(
+        (action for action in StateStore(path).actions().values()
+         if action.get("kind") == "fix"),
+        key=lambda action: action["attempt"],
+    )
+    changed_head = "2" * 40
+    api.head_sha = api.pull["head"]["sha"] = changed_head
+    api.complete_task(first["task_id"], first, head_sha=changed_head)
+    refresh_owner_review(api, changed_head, submitted_at="2026-10-01T12:06:00Z")
+    api.progress_review = _progress_review(
+        changed_head, 63003, "Finding A remains.", "2026-10-01T12:10:00Z",
+    )
+    result = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    assert result["repair_requested"]
+    assert StateStore(path).snapshot()["enrollments"]["16"][
+        "repair_progress"
+    ]["consecutive_no_progress"] == 1
+
+    second = max(
+        (action for action in StateStore(path).actions().values()
+         if action.get("kind") == "fix"),
+        key=lambda action: action["attempt"],
+    )
+    if completion == "failed":
+        api.tasks[second["task_id"]].update(
+            state="failed", updated_at="2026-10-01T12:05:30Z",
+        )
+    else:
+        api.complete_task(
+            second["task_id"], second, head_sha=second["head"],
+        )
+    api.progress_review = _progress_review(
+        changed_head, 63004, "Finding B remains.", "2026-10-01T12:11:00Z",
+    )
+    result = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+
+    assert result["repair_requested"]
+    assert enrollment["attempts"] == 3
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == 2
+    assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+
+    third = max(
+        (action for action in StateStore(path).actions().values()
+         if action.get("kind") == "fix"),
+        key=lambda action: action["attempt"],
+    )
+    if completion == "failed":
+        api.tasks[third["task_id"]].update(
+            state="failed", updated_at="2026-10-01T12:05:30Z",
+        )
+    else:
+        api.complete_task(third["task_id"], third, head_sha=third["head"])
+    api.progress_review = _progress_review(
+        changed_head, 63005, "Finding B remains.", "2026-10-01T12:12:00Z",
+    )
+    result = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+
+    assert not result["repair_requested"]
+    assert "budget" in result["reasons"]
+    assert enrollment["attempts"] == 3
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == NO_PROGRESS_LIMIT
+    assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+    assert api.fix_attempts == 3
+
+
+def test_a_b_a_finding_cycle_never_reearns_progress_credit(tmp_path):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "Finding A remains.", "2026-10-01T12:10:00Z",
+    )
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    observed_streaks = []
+    findings = ("Finding B remains.", "Finding A remains.",
+                "Finding B remains.", "Finding B remains.")
+
+    for attempt, finding in enumerate(findings, 1):
+        action = max(
+            (item for item in StateStore(path).actions().values()
+             if item["kind"] == "fix"),
+            key=lambda item: item["attempt"],
+        )
+        result_head = f"{attempt + 1:040x}"
+        api.head_sha = result_head
+        api.pull["head"]["sha"] = result_head
+        api.complete_task(action["task_id"], action, head_sha=result_head)
+        refresh_owner_review(
+            api, result_head, submitted_at=f"2026-10-01T12:{5 + attempt:02d}:00Z",
+        )
+        api.progress_review = _progress_review(
+            result_head, 63002 + attempt, finding,
+            f"2026-10-01T12:{10 + attempt}:00Z",
+        )
+
+        result = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
+        observed_streaks.append(progress["consecutive_no_progress"])
+        if attempt < len(findings):
+            assert result["repair_requested"]
+
+    assert observed_streaks == [0, 1, 2, NO_PROGRESS_LIMIT]
+    assert api.fix_attempts == 4
+    assert not result["repair_requested"]
+    assert "budget" in result["reasons"]
+
+
+def test_a_b_a_c_b_retains_every_cleared_target(tmp_path):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "Finding A remains.", "2026-10-01T12:10:00Z",
+    )
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    streaks = []
+    for attempt, finding in enumerate(("B", "A", "C", "B"), 1):
+        source = max(
+            (a for a in StateStore(path).actions().values() if a["kind"] == "fix"),
+            key=lambda a: a["attempt"],
+        )
+        head = f"{attempt + 1:040x}"
+        api.head_sha = api.pull["head"]["sha"] = head
+        api.complete_task(source["task_id"], source, head_sha=head)
+        refresh_owner_review(api, head, submitted_at=f"2026-10-01T12:{5 + attempt:02d}:00Z")
+        api.progress_review = _progress_review(
+            head, 63002 + attempt, f"Finding {finding} remains.",
+            f"2026-10-01T12:{10 + attempt}:00Z",
+        )
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
+        streaks.append(progress["consecutive_no_progress"])
+    assert streaks == [0, 1, 2, 3]
+    assert _repair_target("Synthetic finding Finding B remains.") in progress["resolved_fingerprints"]
+    assert api.fix_attempts == 4
+
+
+def _repair_target(text):
+    return cloud_coordinator._repair_fingerprint("finding", text)
+
+
+def _progress_inventory(head, texts, review_id=63002):
+    review = _progress_review(head, review_id, texts[0], "2026-10-01T12:10:00Z")
+    sections = "".join(
+        f"<details><summary>Synthetic finding</summary><p>{text}</p></details>"
+        for text in texts
+    )
+    review["body_html"] = (
+        f"<details><summary>Previously missed ({len(texts)})</summary>{sections}</details>"
+    )
+    review["body"] = "<!-- ccr-overview-v2 -->\n" + review["body_html"]
+    return review
+
+
+@pytest.mark.parametrize("state", ["COMMENTED", "CHANGES_REQUESTED"])
+def test_capped_reordered_inventory_waits_through_real_coordinator(tmp_path, state):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    texts = [f"Blocker {index} remains." for index in range(8)]
+    api.progress_review = _progress_inventory(HEAD, texts)
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    def prior_streak(state):
+        state["enrollments"]["16"]["attempts"] = 3
+        state["actions"][source["key"]]["attempt"] = 3
+        state["enrollments"]["16"]["repair_progress"]["consecutive_no_progress"] = 2
+    StateStore(path)._mutate(prior_streak)
+    head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.complete_task(source["task_id"], source, head_sha=head)
+    refresh_owner_review(api, head, submitted_at="2026-10-01T12:11:00Z")
+    for ordered in (["Additional blocker remains.", *texts],
+                    [*texts, "Additional blocker remains."]):
+        api.progress_review = _progress_inventory(head, ordered, 63003)
+        api.progress_review["state"] = state
+        for _ in range(2):
+            summary = Coordinator(
+                api, StateStore(path), clock=lambda: 1790856660,
+            ).run(apply=True)["pull_requests"][0]
+            assert summary["required_checks_green"] is True
+            if state == "COMMENTED":
+                assert summary["review_valid"] is True
+            enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+            assert enrollment["attempts"] == 3
+            assert enrollment["repair_progress"]["consecutive_no_progress"] == 2
+            assert enrollment["repair_progress"]["evaluated_task_ids"] == []
+            assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+    api.progress_review = _progress_inventory(head, texts, 63004)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
+    assert progress["evaluated_task_ids"] == [source["task_id"]]
+    assert progress["consecutive_no_progress"] == 3
+    assert progress["resolved_fingerprints"] == []
+
+
+@pytest.mark.parametrize("rendered", [
+    "<details><summary>Previously missed (2)</summary>"
+    "<details><summary>Target</summary><p>Fix it.</p></details></details>",
+    "<details",
+    "<details><summary>Unknown inventory</summary><p>Uncertain.</p></details>",
+])
+def test_unknown_rendered_inventory_does_not_evaluate_or_dispatch(tmp_path, rendered):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_inventory(HEAD, ["First blocker remains."])
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.complete_task(source["task_id"], source, head_sha=head)
+    refresh_owner_review(api, head, submitted_at="2026-10-01T12:11:00Z")
+    api.progress_review = _progress_inventory(head, ["First blocker remains."], 63003)
+    api.progress_review["body_html"] = rendered
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 1
+    assert enrollment["repair_progress"]["evaluated_task_ids"] == []
+    assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+    api.progress_review = _progress_inventory(head, ["First blocker remains."], 63004)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
+    assert progress["evaluated_task_ids"] == [source["task_id"]]
+    assert progress["consecutive_no_progress"] == 1
+
+
+def test_target_map_bounds_use_serialized_bytes_and_full_thread_identity():
+    review = _progress_inventory(HEAD, [f"Blocker {index} " + "界" * 600 for index in range(8)])
+    request = repair_request(HEAD, 0, [], [], reviews=[review])
+    target_map = request["repair_target_map"]
+    assert 0 < len(target_map) < len(request["progress_fingerprints"])
+    assert cloud_coordinator._valid_repair_target_map(
+        target_map, request["progress_fingerprints"],
+    )
+    assert len(json.dumps(target_map, sort_keys=True, separators=(",", ":")).encode()) <= 16000
+    long_thread = "PRRT_" + "x" * 100
+    request = repair_request(HEAD, 0, [{
+        "id": long_thread, "isResolved": False, "comments": [{"body": "Fix this target."}],
+    }], [])
+    assert request["progress_fingerprints"] == [
+        cloud_coordinator._repair_fingerprint("thread", long_thread),
+    ]
+    assert request["repair_target_map"] == {}
+
+
+@pytest.mark.parametrize("corruption", [None, "swap", "unmapped", "legacy", "review-map"])
+def test_mapped_partial_resolution_through_real_report_and_restart(tmp_path, corruption):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_inventory(
+        HEAD, ["First blocker remains.", "Second blocker remains."],
+    )
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    target_map = source["repair_target_map"]
+    assert set(target_map) == set(source["repair_fingerprints"])
+    first = next(key for key, target in target_map.items()
+                 if "first blocker" in target["target"])
+    second = next(key for key in target_map if key != first)
+    def corrupt_map(state):
+        saved = state["actions"][source["key"]]
+        if corruption == "swap":
+            saved["repair_target_map"][first] = target_map[second]
+        elif corruption == "unmapped":
+            saved["repair_target_map"].pop(first)
+        elif corruption == "legacy":
+            saved.pop("repair_target_map")
+    StateStore(path)._mutate(corrupt_map)
+    head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.complete_task(source["task_id"], source, head_sha=head)
+    api.progress_review = _progress_inventory(head, ["Second blocker remains."], 63003)
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    store = StateStore(path)
+    reviewer = next(a for a in store.actions().values() if a["kind"] == "review")
+    proof = store.snapshot()["enrollments"]["16"]["receipt_proofs"][-1]
+    assert proof.get("repair_target_map") == store.action(source["key"]).get("repair_target_map")
+    if corruption == "review-map":
+        store.update_action(
+            reviewer["key"], reviewer["status"],
+            progress_target_map={first: target_map[first]},
+        )
+        reviewer = store.action(reviewer["key"])
+    if corruption is None:
+        assert reviewer["progress_target_map"] == target_map
+        assert json.dumps(target_map, sort_keys=True, separators=(",", ":")) in reviewer["body"]
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=store.action(source["key"]),
+        verdict="changes_requested",
+        findings=[{"path": "frontend/styles.css", "comment": "Second blocker remains."}],
+        progress_disposition={"version": 1, "resolved": [first]},
+    )
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    progress = enrollment["repair_progress"]
+    if corruption is None:
+        assert progress["resolved_fingerprints"] == [first]
+        assert second not in progress["resolved_fingerprints"]
+        assert progress["evaluated_task_ids"] == [source["task_id"]]
+        assert enrollment["attempts"] == 2
+    else:
+        assert progress["resolved_fingerprints"] == []
+        assert progress["evaluated_task_ids"] == []
+        assert enrollment["attempts"] == 1
+
+
+@pytest.mark.parametrize("text", [
+    "A long blocker " + "x" * 1100,
+    "Remove synthetic token ghp_" + "x" * 36,
+    "Fix https://example.invalid/private/link",
+])
+def test_clipped_or_redacted_target_is_unresolvable_in_real_review(tmp_path, text):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_inventory(HEAD, [text])
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    assert source["repair_target_map"] == {}
+    assert source["repair_fingerprints"]
+    head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.complete_task(source["task_id"], source, head_sha=head)
+    api.progress_review = _progress_inventory(head, ["New blocker remains."], 63003)
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    store = StateStore(path)
+    reviewer = next(a for a in store.actions().values() if a["kind"] == "review")
+    assert reviewer["progress_target_map"] == {}
+    assert "explicitly unresolvable" in reviewer["body"]
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=store.action(source["key"]),
+        verdict="changes_requested",
+        findings=[{"path": "frontend/styles.css", "comment": "New blocker remains."}],
+        progress_disposition={"version": 1, "resolved": source["repair_fingerprints"]},
+    )
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 1
+    assert enrollment["repair_progress"]["evaluated_task_ids"] == []
+    assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+
+
+def test_blocker_identity_is_independent_of_review_representation():
+    body = repair_request(
+        HEAD, 0, [], [], pull_number=16,
+        reviews=[_progress_review(HEAD, 63002, "Same blocker.", "2026-10-01T12:10:00Z")],
+    )
+    report = review_followup_request(
+        HEAD, 0, {"verdict": "changes_requested", "findings": [
+            {"path": "tests/test_cloud_coordinator.py", "comment": "Synthetic finding Same blocker."},
+        ]}, pull_number=16,
+    )
+    assert body["progress_fingerprints"] == report["progress_fingerprints"]
+    assert body["progress_fingerprints_complete"], cloud_coordinator.review_body_disposition(
+        [_progress_review(HEAD, 63002, "Same blocker.", "2026-10-01T12:10:00Z")],
+        HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+
+
+@pytest.mark.parametrize("sequence,expected", [
+    (["Same blocker."] * 3, [1, 2, 3]),
+    (["Old blocker.", "New blocker."], [1, 0]),
+    (["Old blocker.", "Reworded old blocker."], [1, 2]),
+])
+def test_real_negative_review_source_evaluation(tmp_path, sequence, expected):
+    api = FakeApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    for attempt, text in enumerate(sequence, 1):
+        source = max(
+            (a for a in StateStore(path).actions().values() if a["kind"] == "fix"),
+            key=lambda a: a["attempt"],
+        )
+        head = f"{attempt + 1:040x}"
+        api.head_sha = api.pull["head"]["sha"] = head
+        api.complete_task(source["task_id"], source, head_sha=head)
+        api.unresolved = False
+        for _ in range(2):
+            Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        store = StateStore(path)
+        reviewer = next(
+            a for a in store.actions().values()
+            if a["kind"] == "review" and a["head"] == head
+        )
+        disposition = None
+        if text == "New blocker.":
+            disposition = {"version": 1, "resolved": source["repair_fingerprints"]}
+        api.complete_review_task(
+            reviewer["task_id"], reviewer, source_action=store.action(source["key"]),
+            verdict="changes_requested",
+            findings=[{"path": "frontend/styles.css", "comment": text}],
+            progress_disposition=disposition,
+        )
+        for _ in range(2):
+            result = Coordinator(
+                api, StateStore(path), clock=lambda: 1790856660,
+            ).run(apply=True)["pull_requests"][0]
+        progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
+        assert source["task_id"] in progress["evaluated_task_ids"], store.actions()
+        assert progress["consecutive_no_progress"] == expected[attempt - 1]
+        assert not result["review_valid"] and not result["auto_merge_eligible"]
+    if len(sequence) == 3:
+        assert api.fix_attempts == 3
+        assert not result["repair_requested"]
+        assert "budget" in result["reasons"]
+
+
+@pytest.mark.parametrize("terminal", ["failed", "timed_out", "cancelled"])
+@pytest.mark.parametrize("pending", ["checks", "review"])
+def test_terminal_source_waits_for_evaluation_then_resumes_once(tmp_path, terminal, pending):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "Same blocker.", "2026-10-01T12:10:00Z",
+    )
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    api.tasks[source["task_id"]].update(state=terminal, updated_at="2026-10-01T12:05:30Z")
+    original_get_all = api.get_all
+
+    def incomplete(route, *, collection=None):
+        values = original_get_all(route, collection=collection)
+        if pending == "checks" and collection == "check_runs":
+            return [{**check, "status": "in_progress", "conclusion": None} for check in values]
+        if pending == "review" and route.endswith("/pulls/16/reviews?per_page=100"):
+            return [r for r in values if r["user"]["id"] != OWNER]
+        return values
+
+    api.get_all = incomplete
+    for _ in range(3):
+        result = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+        assert enrollment["attempts"] == 1
+        assert source["task_id"] not in enrollment["repair_progress"]["evaluated_task_ids"]
+        assert not result["pull_requests"][0]["repair_requested"]
+    api.get_all = original_get_all
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 2 and api.fix_attempts == 2
+    assert enrollment["repair_progress"]["evaluated_task_ids"] == [source["task_id"]]
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == 1
+
+
+@pytest.mark.parametrize("conclusion", [
+    "failure", "cancelled", "timed_out", "action_required",
+    "neutral", "skipped", "stale", "startup_failure",
+])
+@pytest.mark.parametrize("hazard", [
+    None, "pending", "null", "unknown", "malformed", "app", "head", "pagination",
+])
+def test_completed_negative_review_evaluates_only_complete_terminal_checks(
+        tmp_path, conclusion, hazard):
+    api = FakeApi(unresolved=True)
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.complete_task(source["task_id"], source, head_sha=head)
+    api.unresolved = False
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    store = StateStore(path)
+    reviewer = next(a for a in store.actions().values() if a["kind"] == "review")
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=store.action(source["key"]),
+        verdict="changes_requested",
+        findings=[{"path": "frontend/styles.css", "comment": "New blocker."}],
+        progress_disposition={"version": 1, "resolved": source["repair_fingerprints"]},
+    )
+    original_get_all = api.get_all
+
+    def checks(route, *, collection=None):
+        values = original_get_all(route, collection=collection)
+        if collection == "check_runs":
+            if hazard == "pagination":
+                raise ApiError("pagination was incomplete")
+            values = [
+                {**check, "head_sha": head, "conclusion": conclusion}
+                if check["name"] == "source-ci" else check for check in values
+            ]
+            check = next(c for c in values if c["name"] == "source-ci")
+            if hazard == "pending":
+                check.update(status="in_progress", conclusion=None)
+            elif hazard in {"null", "unknown", "malformed"}:
+                check["conclusion"] = {"null": None, "unknown": "unknown", "malformed": []}[hazard]
+            elif hazard == "app":
+                check["app"] = {"id": 1}
+            elif hazard == "head":
+                check["head_sha"] = HEAD
+        return values
+
+    api.get_all = checks
+    for _ in range(2):
+        if hazard == "pagination":
+            with pytest.raises(ApiError, match="pagination was incomplete"):
+                Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        else:
+            result = Coordinator(
+                api, StateStore(path), clock=lambda: 1790856660,
+            ).run(apply=True)["pull_requests"][0]
+            assert not result["review_valid"] and not result["required_checks_green"]
+            assert not result["auto_merge_eligible"]
+    progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
+    assert progress["evaluated_task_ids"] == ([source["task_id"]] if hazard is None else [])
+    assert progress["consecutive_no_progress"] == (1 if hazard is None else 0)
+    assert progress["resolved_fingerprints"] == []
+    assert api.fix_attempts == (2 if hazard is None else 1)
+    assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("terminal", ["failed", "timed_out", "cancelled"])
+@pytest.mark.parametrize("task_type", ["source", "neutral"])
+@pytest.mark.parametrize("ordinal", [True, False])
+def test_cold_legacy_terminal_reservation_keeps_consumed_counter(
+        tmp_path, terminal, task_type, ordinal):
+    api = FakeApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    action = next(a for a in store.actions().values() if a["kind"] == "fix")
+    task = api.tasks[action["task_id"]]
+    task["state"] = terminal
+    task["sessions"] = [{
+        "id": f"session-{task['id']}", "task_id": task["id"], "state": terminal,
+        "user": {"id": OWNER}, "owner": {"id": OWNER},
+        "repository": {"id": cloud_coordinator.REPOSITORY_ID},
+        "head_ref": "topic", "base_ref": "main",
+        "created_at": "2026-10-01T12:01:00Z", "completed_at": "2026-10-01T12:05:30Z",
+    }]
+
+    def legacy(state):
+        enrollment = state["enrollments"]["16"]
+        enrollment["attempts"] = 1
+        enrollment.pop("neutral_attempts", None)
+        enrollment.pop("repair_progress", None)
+        record = state["actions"][action["key"]]
+        record.update(status="completed", task_type=task_type)
+        record.pop("repair_policy_version", None)
+        prefix = (
+            f"Neutral reconciliation for PR #16 at exact PR head `{HEAD}`."
+            if task_type == "neutral" else
+            f"Please address bounded review/check follow-up for PR #16 at head `{HEAD}`."
+        )
+        record["body"] = task["sessions"][0]["prompt"] = prefix
+        if not ordinal:
+            record.pop("attempt", None)
+
+    store._mutate(legacy)
+    api.advance_main = True
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull["mergeable_state"] = "behind"
+    result = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    if ordinal:
+        assert enrollment["neutral_attempts_unknown"] is False
+        assert enrollment["attempts"] == (1 if task_type == "source" else 0)
+        assert enrollment["neutral_attempts"] == (2 if task_type == "neutral" else 1)
+        assert api.fix_attempts == 2
+    else:
+        assert enrollment["neutral_attempts_unknown"] is True
+        assert enrollment["attempts"] == 1
+        assert api.fix_attempts == 1
+        assert not result["pull_requests"][0]["repair_requested"]
+    assert not enrollment.get("receipt_proofs", [])
+    assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("malformed", ["empty-body", "missing-comments", "ambiguous-body"])
+def test_negative_review_cannot_clear_incomplete_inventory(tmp_path, malformed):
+    api = FakeApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.complete_task(source["task_id"], source, head_sha=head)
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    store = StateStore(path)
+    reviewer = next(a for a in store.actions().values() if a["kind"] == "review")
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=store.action(source["key"]),
+        verdict="changes_requested",
+        findings=[{"path": "frontend/styles.css", "comment": "New blocker."}],
+        progress_disposition={"version": 1, "resolved": source["repair_fingerprints"]},
+    )
+    original_graphql = api.graphql
+
+    def malformed_threads(query, variables):
+        response = original_graphql(query, variables)
+        if "reviewThreads" in query:
+            nodes = response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            for node in nodes:
+                if malformed == "empty-body":
+                    node["comments"]["nodes"][0]["body"] = ""
+                elif malformed == "missing-comments":
+                    node["comments"]["nodes"] = []
+        return response
+
+    api.graphql = malformed_threads
+    if malformed == "ambiguous-body":
+        original_get_all = api.get_all
+
+        def ambiguous_body(route, *, collection=None):
+            values = original_get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                return [
+                    *[r for r in values if r["user"]["id"] != COPILOT_REVIEWER],
+                    _progress_review(head, 63002, "Same blocker.", "2026-10-01T12:10:00Z")
+                    | {"body_html": "<div>Unknown truncated evidence</div>"},
+                ]
+            return values
+
+        api.get_all = ambiguous_body
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 1
+    assert enrollment["repair_progress"]["evaluated_task_ids"] == []
+    assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+
+
+@pytest.mark.parametrize("corruption", [
+    None, "bool-version", "unknown-version", "duplicate", "unbound-target",
+    "wrong-source", "wrong-base", "edited-review", "superseded-review",
+    "old-baseline", "old-history", "incomplete-baseline",
+])
+def test_resolution_disposition_is_bound_to_real_report_envelope(tmp_path, corruption):
+    api = FakeApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    if corruption in {"old-baseline", "old-history", "incomplete-baseline"}:
+        def prior_encoding(state):
+            action = state["actions"][source["key"]]
+            if corruption == "old-baseline":
+                action.pop("repair_fingerprint_version")
+            elif corruption == "incomplete-baseline":
+                action["repair_fingerprints_complete"] = False
+            else:
+                history = state["enrollments"]["16"]["repair_progress"]
+                history.pop("fingerprint_version")
+                history["resolved_fingerprints"] = ["e" * 64]
+                history["consecutive_no_progress"] = 1
+        StateStore(path)._mutate(prior_encoding)
+    head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.complete_task(source["task_id"], source, head_sha=head)
+    api.unresolved = False
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    store = StateStore(path)
+    reviewer = next(a for a in store.actions().values() if a["kind"] == "review")
+    assert reviewer["progress_targets"] == source["repair_fingerprints"]
+    assert "progress_disposition" in reviewer["body"]
+    disposition = {"version": 1, "resolved": source["repair_fingerprints"]}
+    if corruption == "bool-version":
+        disposition["version"] = True
+    elif corruption == "unknown-version":
+        disposition["version"] = 2
+    elif corruption == "duplicate":
+        disposition["resolved"] = source["repair_fingerprints"] * 2
+    elif corruption == "unbound-target":
+        disposition["resolved"] = ["f" * 64]
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=store.action(source["key"]),
+        verdict="changes_requested",
+        findings=[{"path": "frontend/styles.css", "comment": "A new independent finding."}],
+        progress_disposition=disposition,
+    )
+    if corruption in {"wrong-source", "wrong-base"}:
+        comment = api.comments[-1]
+        prefix, payload = comment["body"].rsplit("\n", 1)
+        report = json.loads(payload)
+        report["source_session_id" if corruption == "wrong-source" else "base"] = "d" * 40
+        comment["body"] = prefix + "\n" + json.dumps(report, separators=(",", ":"))
+    if corruption in {"edited-review", "superseded-review"}:
+        original_get_all = api.get_all
+
+        def invalid_publication(route, *, collection=None):
+            values = original_get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                if corruption == "edited-review":
+                    return [
+                        r | {"updated_at": "2026-10-01T13:00:00Z"}
+                        if r["user"]["id"] == OWNER else r for r in values
+                    ]
+                return values + [{
+                    **api._current_owner_review_record(), "id": 999999,
+                    "submitted_at": "2026-10-01T13:00:00Z",
+                    "body": "A later unrelated owner review.",
+                }]
+            return values
+
+        api.get_all = invalid_publication
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    progress = enrollment["repair_progress"]
+    if corruption is None:
+        assert progress["evaluated_task_ids"] == [source["task_id"]]
+        assert progress["resolved_fingerprints"] == source["repair_fingerprints"]
+        assert progress["consecutive_no_progress"] == 0
+        assert enrollment["attempts"] == 2
+    elif corruption in {"old-baseline", "old-history", "incomplete-baseline"}:
+        assert progress["evaluated_task_ids"] == [source["task_id"]]
+        assert progress["legacy_unknown"] is True
+        assert progress["resolved_fingerprints"] == (["e" * 64] if corruption == "old-history" else [])
+        assert progress["consecutive_no_progress"] == (1 if corruption == "old-history" else 0)
+        assert enrollment["attempts"] == 2
+    else:
+        assert progress["evaluated_task_ids"] == []
+        assert progress["resolved_fingerprints"] == []
+        assert enrollment["attempts"] == 1
+
+
+@pytest.mark.parametrize("pending", ["checks", "review"])
+def test_incomplete_verification_does_not_consume_stagnation_decision(tmp_path, pending):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "A synthetic blocker remains.", "2026-10-01T12:10:00Z",
+    )
+    path = tmp_path / f"{pending}.json"
+    coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    action = next(
+        item for item in StateStore(path).actions().values()
+        if item["kind"] == "fix" and item["status"] == "sent"
+    )
+
+    result_head = "2".zfill(40)
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.complete_task(action["task_id"], action, head_sha=result_head)
+    api.progress_review = None
+    if pending == "checks":
+        refresh_owner_review(api, result_head, submitted_at="2026-10-01T12:06:00Z")
+        api.pending_required = True
+    else:
+        api.pending_required = False
+
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 1
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == 0
+    assert not enrollment["repair_progress"]["evaluated_task_ids"]
+
+    if pending == "checks":
+        api.pending_required = False
+    else:
+        refresh_owner_review(api, result_head, submitted_at="2026-10-01T12:07:00Z")
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 1
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == 0
+    assert enrollment["repair_progress"]["evaluated_task_ids"] == [action["task_id"]]
+
+
 def test_completed_comment_review_on_new_head_releases_handoff_for_repair(tmp_path):
     api = FakeApi(unresolved=True)
     api.pull.update(mergeable=False, mergeable_state="dirty")
@@ -2919,9 +4645,9 @@ def test_neutral_budget_exhaustion_requires_scoped_nondraft_idle_work(
     api = FakeApi(unresolved=True, active_agent=busy)
     api.pull.update(mergeable=True, mergeable_state="behind", draft=draft)
     store = StateStore(tmp_path / "state.json")
-    store.enroll(enrolled_record(attempts=REPAIR_LIMIT))
+    store.enroll(enrolled_record())
     store._mutate(lambda data: data["enrollments"]["16"].update(
-        attempts=REPAIR_LIMIT,
+        neutral_attempts=NEUTRAL_LIMIT,
     ))
 
     result = Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
@@ -2930,6 +4656,8 @@ def test_neutral_budget_exhaustion_requires_scoped_nondraft_idle_work(
     assert "budget" not in plan["reasons"]
     assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == NEUTRAL_LIMIT
     assert api.fix_attempts == 0
 
 
@@ -3616,7 +5344,12 @@ def test_computed_mergeability_resumes_expected_task_on_next_poll(
     task = next(body for route, body in api.writes if route.endswith("/tasks"))
     assert ("Neutral reconciliation" in task["prompt"]) == (mergeable_state != "clean")
     assert api.fix_attempts == 1
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == (
+        0 if mergeable_state != "clean" else 1
+    )
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == (
+        1 if mergeable_state != "clean" else 0
+    )
 
 
 def test_conflicts_are_sent_to_neutral_reconciler_not_ordinary_fixer(tmp_path):
@@ -3654,7 +5387,8 @@ def test_conflict_uses_one_neutral_task_with_both_intents_and_no_force_push(tmp_
 
     coordinator.run(apply=True)
     assert len([body for route, body in api.writes if route.endswith("/tasks")]) == 1
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
 
 
 def test_neutral_and_ordinary_repairs_share_one_task_lock(tmp_path):
@@ -3946,7 +5680,7 @@ def test_reenrollment_preserves_unresolved_fixer_with_empty_task_list(
         assert api.fix_attempts == 1
 
 
-def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
+def test_reenrollment_preserves_lifetime_budget_after_old_task_completion(tmp_path):
     api = FakeApi(source_failure=True)
     path = tmp_path / "state.json"
     store = StateStore(path)
@@ -3982,12 +5716,12 @@ def test_reenrollment_resets_budget_after_exact_old_task_completion(tmp_path):
     assert api.fix_attempts == 4
     enrollment = store.snapshot()["enrollments"]["16"]
     assert enrollment["comment"] == 126 and enrollment["active"] is True
-    assert enrollment["attempts"] == 1
+    assert enrollment["attempts"] == 4
     assert enrollment["sensitive_sha"] is None
     assert store.action(old_fix["key"]) is None
     fixes = [action for action in store.actions().values() if action["kind"] == "fix"]
     assert len(fixes) == 1
-    assert fixes[0]["task_id"] == "task-4" and fixes[0]["attempt"] == 1
+    assert fixes[0]["task_id"] == "task-4" and fixes[0]["attempt"] == 4
     restarted_cycle()
     assert api.fix_attempts == 4
 
@@ -4845,6 +6579,10 @@ def test_completed_partial_review_report_persists_error_and_retries_once(
     assert correction["task_id"] != original_review["task_id"]
     assert correction["dispatch_nonce"] != original_review["dispatch_nonce"]
     assert correction["anchor_comment_id"] != original_review["anchor_comment_id"]
+    assert correction["progress_target_map"] == original_review["progress_target_map"]
+    assert correction["progress_target_map"] == source_fix["repair_target_map"]
+    mapped = json.dumps(correction["progress_target_map"], sort_keys=True, separators=(",", ":"))
+    assert mapped in correction["body"] and mapped in original_review["body"]
     assert StateStore(path).action(source_fix["key"])["task_id"] == source_fix["task_id"]
     assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
     assert StateStore(path).action(original_review["key"])["report_retry_state"] == "reserved"
@@ -5015,6 +6753,9 @@ def test_failed_correction_child_write_recovers_reserved_parent_after_reload(
     attempts_before_recovery = StateStore(path).snapshot()["enrollments"]["16"][
         "attempts"
     ]
+    neutral_before_recovery = StateStore(path).snapshot()["enrollments"]["16"][
+        "neutral_attempts"
+    ]
 
     settled_tasks = None
     for index in range(3):
@@ -5051,9 +6792,9 @@ def test_failed_correction_child_write_recovers_reserved_parent_after_reload(
         comment for comment in api.comments
         if "single safe correction is unavailable or exhausted" in comment.get("body", "")
     ]) == 1
-    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == (
-        attempts_before_recovery + 1
-    )
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == attempts_before_recovery
+    assert enrollment["neutral_attempts"] == neutral_before_recovery + 1
 
 
 @pytest.mark.parametrize("superseding_review", [False, True])
@@ -6662,7 +8403,7 @@ def test_invalid_formal_review_id_stays_uncertain_until_authenticated_readback(
         "id": 81234, "node_id": "PRR_kwDOU3FvNc8AAAAB81234",
         "state": "COMMENTED", "commit_id": correction["head"],
         "submitted_at": "2026-10-01T12:30:00Z",
-        "body": body, "user": {"id": OWNER},
+        "body": body, "user": {"id": OWNER, "login": api.owner_login},
     })
     for _ in range(3):
         Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
@@ -7499,21 +9240,38 @@ def test_crash_after_reservation_cannot_replay_task_post(tmp_path):
     assert store.action(action["key"])["status"] == "uncertain"
 
 
-def test_task_dispatch_is_bounded_to_three_after_verified_completion(tmp_path):
-    api = FakeApi(source_failure=True)
+def test_task_dispatch_is_bounded_to_twenty_after_verified_completion(tmp_path):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "The first synthetic blocker remains.", "2026-10-01T12:10:00Z",
+    )
     store = StateStore(tmp_path / "state.json")
-    coordinator = Coordinator(api, store)
-    for attempt in range(3):
-        coordinator.run(apply=True)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    for attempt in range(REPAIR_LIMIT):
+        result = coordinator.run(apply=True)["pull_requests"][0]
+        assert result["repair_requested"]
         assert api.fix_attempts == attempt + 1
-        task_id = f"task-{attempt + 1}"
-        action = next(item for item in store.actions().values()
-                      if item.get("task_id") == task_id)
-        api.complete_task(task_id, action)
-        api.unresolved = False
+        action = max(
+            (item for item in store.actions().values() if item["kind"] == "fix"),
+            key=lambda item: item["attempt"],
+        )
+        result_head = f"{attempt + 2:040x}"
+        api.head_sha = result_head
+        api.pull["head"]["sha"] = result_head
+        api.complete_task(action["task_id"], action, head_sha=result_head)
+        refresh_owner_review(
+            api, result_head, submitted_at=f"2026-10-01T12:{5 + attempt:02d}:00Z",
+        )
+        api.progress_review = _progress_review(
+            result_head, 63003 + attempt,
+            f"The next synthetic blocker {attempt} remains.",
+            f"2026-10-01T12:{11 + attempt:02d}:00Z",
+        )
+
     result = coordinator.run(apply=True)
-    assert api.fix_attempts == 3
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == 3
+    assert api.fix_attempts == REPAIR_LIMIT
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == REPAIR_LIMIT
     assert "budget" in result["pull_requests"][0]["reasons"]
 
 

@@ -25,6 +25,105 @@ HEAD = "a" * 40
 MERGE = "b" * 40
 
 
+def test_pull_lifecycle_events_preserve_authenticated_linked_issue_identity():
+    linked = pull_event(
+        {
+            "issue": 86, "head": HEAD,
+            "enrollment": {
+                "comment": 127, "starter_admission": {"issue_number": 85},
+            },
+        },
+        "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
+        incident="source-repair-no-progress-3-of-4",
+        stop_detail={
+            "cause": "no-progress", "used": 3, "remaining": 0, "limit": 3,
+            "source_used": 4, "source_ceiling": 20, "stagnation_count": 3,
+        },
+    )
+    unlinked = pull_event(
+        {"issue": 86, "head": HEAD, "enrollment": {"comment": 127}},
+        "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
+        incident="source-repair-limit-20",
+    )
+    linked_policy = pull_event(
+        {
+            "issue": 86, "head": HEAD,
+            "enrollment": {
+                "comment": 127, "starter_admission": {"issue_number": 85},
+            },
+        },
+        "policy_broken", occurred_at="2026-10-01T20:58:00Z",
+        incident="up-to-date-policy",
+    )
+    unlinked_policy = pull_event(
+        {"issue": 86, "head": HEAD, "enrollment": {"comment": 127}},
+        "policy_broken", occurred_at="2026-10-01T20:58:00Z",
+        incident="up-to-date-policy",
+    )
+
+    assert linked["issue_number"] == 85 and linked["pr_number"] == 86
+    assert unlinked["issue_number"] == unlinked["pr_number"] == 86
+    assert linked_policy["issue_number"] == linked_policy["pr_number"] == 86
+    assert linked_policy["event_id"] == unlinked_policy["event_id"]
+
+
+@pytest.mark.parametrize("source_used", [0, 1, 2, 21, True, "3"])
+def test_stop_detail_rejects_impossible_source_reservations(source_used):
+    with pytest.raises(ValueError):
+        event = pull_event(
+            {"issue": 86, "head": HEAD, "enrollment": {"comment": 127}},
+            "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
+            incident="source-repair-no-progress",
+            stop_detail={
+                "cause": "no-progress", "used": 3, "remaining": 0, "limit": 3,
+                "source_used": source_used, "source_ceiling": 20, "stagnation_count": 3,
+            },
+        )
+        from deploy.workflow_lifecycle import validate_event
+        validate_event(event, now=NOW)
+
+
+def test_linked_stop_event_upgrade_preserves_acknowledged_legacy_identity():
+    from deploy.workflow_lifecycle import (
+        filter_acknowledged_replays, merge_events, validate_event,
+    )
+
+    snapshot = {
+        "issue": 86, "head": HEAD,
+        "enrollment": {
+            "comment": 127, "starter_admission": {"issue_number": 85},
+        },
+    }
+    legacy = pull_event(
+        snapshot, "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
+        incident="source-repair-no-progress-3-of-4",
+    )
+    validate_event(legacy, now=NOW)
+    upgraded = pull_event(
+        snapshot, "execution_exhausted", occurred_at="2026-10-01T20:59:00Z",
+        incident="source-repair-no-progress-3-of-4",
+        stop_detail={
+            "cause": "no-progress", "used": 3, "remaining": 0, "limit": 3,
+            "source_used": 4, "source_ceiling": 20, "stagnation_count": 3,
+        },
+    )
+    acknowledgement = {
+        legacy["event_id"]: {
+            "digest": event_digest(legacy), "status": "acked",
+            "inbox_id": "synthetic-legacy-inbox",
+        },
+    }
+
+    assert legacy["issue_number"] == legacy["pr_number"] == 86
+    assert upgraded["issue_number"] == 85 and upgraded["pr_number"] == 86
+    assert upgraded["event_id"] != legacy["event_id"]
+    assert merge_events([legacy], [upgraded], now=NOW) == [legacy, upgraded]
+    assert filter_acknowledged_replays(
+        [legacy, upgraded], context=[legacy], acknowledgements=acknowledgement,
+        now=NOW,
+    ) == [upgraded]
+
+
 class StarterApi:
     def __init__(self, comments):
         self.comments = comments
@@ -1088,7 +1187,7 @@ def test_lifecycle_context_requires_closed_owner_repository_binding(tmp_path, ch
 
 
 def test_context_is_not_ack_authority_and_preserves_persistent_incident_payload():
-    from deploy.workflow_lifecycle import filter_acknowledged_replays
+    from deploy.workflow_lifecycle import canonical_event, filter_acknowledged_replays
 
     original = pull_event(
         {"issue": 31, "head": HEAD, "enrollment": {"comment": 55}},
@@ -1116,6 +1215,26 @@ def test_context_is_not_ack_authority_and_preserves_persistent_incident_payload(
         }},
         now=NOW,
     ) == []
+
+    detail = {
+        "cause": "neutral-ceiling", "used": 3, "remaining": 0, "limit": 3,
+        "source_used": 4, "source_ceiling": 20, "stagnation_count": 1,
+    }
+    exhausted = pull_event(
+        {"issue": 31, "head": HEAD, "enrollment": {"comment": 55}},
+        "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
+        incident="neutral-reconciliation-limit-3", stop_detail=detail,
+    )
+    legacy_exhausted = pull_event(
+        {"issue": 31, "head": HEAD, "enrollment": {"comment": 55}},
+        "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
+        incident="neutral-reconciliation-limit-3",
+    )
+    assert canonical_event(exhausted, legacy_exhausted, now=NOW) == legacy_exhausted
+    altered = exhausted | {"stop_detail": detail | {"source_used": 5}}
+    assert altered["event_id"] == exhausted["event_id"]
+    with pytest.raises(ValueError, match="immutable payload"):
+        canonical_event(altered, exhausted, now=NOW)
 
 
 def test_lifecycle_context_duplicate_json_fields_are_rejected(tmp_path):
