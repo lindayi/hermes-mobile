@@ -3564,12 +3564,22 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
 
     history_visible = False
     original_get_all = api.get_all
+    task_list_records = []
 
     def delayed_task_history(route, *, collection=None):
         values = original_get_all(route, collection=collection)
         if (route.startswith("agents/repos/lindayi/hermes-mobile/tasks?")
                 and not history_visible):
-            return [task for task in values if task.get("id") != "legacy-source-1"]
+            values = [task for task in values if task.get("id") != "legacy-source-1"]
+        if route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
+            values = [
+                {
+                    **{key: value for key, value in task.items() if key != "sessions"},
+                    "session_count": len(task.get("sessions", [])),
+                }
+                for task in values
+            ]
+            task_list_records.extend(values)
         return values
 
     api.get_all = delayed_task_history
@@ -3661,6 +3671,10 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     assert api.fix_attempts == 1
     assert neutral["status"] == "sent"
     assert second_delivery["inbox_items"] == 0
+    assert task_list_records
+    assert all("sessions" not in task and task["session_count"] == 1
+               for task in task_list_records
+               if task["id"].startswith("legacy-source-"))
     assert StateStore(path).snapshot()["lifecycle_events"] == [historical_event]
     recovered_export = json.loads((path.parent / "workflow-events.json").read_text())
     assert recovered_export["events"] == [historical_event]

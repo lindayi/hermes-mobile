@@ -605,6 +605,27 @@ itself establish a historical no-progress streak or replace fresh checks and
 independent review. Source acceptance remains distinct from merge approval and
 deployment.
 
+When a paginated task-list item for a saved retained receipt has `session_count: 1`
+but omits `sessions`, the coordinator may hydrate only that exact, uniquely listed
+task ID with an authenticated task-detail GET. The list record must be terminal and
+bound to the expected owner and repository; the detail must repeat its exact task
+ID and terminal state, match those identities, and contain exactly one authenticated
+terminal session with the saved receipt's task/session/nonce chronology and prompt
+binding. Hydrated details are used only for that retained receipt's migration
+decision; they never replace list inventory used for occupancy or duplicate
+detection. Missing, duplicate, malformed, mismatched, or unauthenticated list/detail
+evidence leaves history unknown and dispatch blocked. Hydration is bounded by the
+saved reservation history and never creates task records or infers missing sessions.
+
+An authenticated historical ready handoff may qualify for neutral reconciliation
+when its recorded base is an ancestor of both the freshly read main and exact PR
+head, and the PR's mergeability fields are a consistent confirmed pair: `true` with
+`behind`, or `false` with `dirty`. All other, unknown, or inconsistent combinations
+remain ineligible. This exception authorizes only the existing bounded neutral
+reservation path; it never treats the historical PR as current-base eligible or
+enables merging. Fresh identity, receipt, ancestry, dispatch, and pre-send fences
+remain mandatory.
+
 Legacy records that predate the separate neutral counter retain a conservative
 unknown marker until every shared reservation is accounted for by retained task
 claims or authenticated receipt proofs. Reservation type comes from the exact
