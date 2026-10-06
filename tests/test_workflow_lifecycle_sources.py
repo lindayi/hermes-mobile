@@ -35,6 +35,10 @@ def test_pull_lifecycle_events_preserve_authenticated_linked_issue_identity():
         },
         "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
         incident="source-repair-no-progress-3-of-4",
+        stop_detail={
+            "cause": "no-progress", "used": 3, "remaining": 0, "limit": 3,
+            "source_used": 4, "source_ceiling": 20, "stagnation_count": 3,
+        },
     )
     unlinked = pull_event(
         {"issue": 86, "head": HEAD, "enrollment": {"comment": 127}},
@@ -78,7 +82,6 @@ def test_linked_stop_event_upgrade_preserves_acknowledged_legacy_identity():
         snapshot, "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
         incident="source-repair-no-progress-3-of-4",
     )
-    legacy["issue_number"] = 86
     validate_event(legacy, now=NOW)
     upgraded = pull_event(
         snapshot, "execution_exhausted", occurred_at="2026-10-01T20:59:00Z",

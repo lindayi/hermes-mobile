@@ -815,9 +815,8 @@ def _message(event):
         detail = event.get('stop_detail')
         if detail is None:
             body = (
-                f'{subject} stopped at a bounded repair limit: source repairs allow at most '
-                '20 lifetime dispatches or stop after 3 consecutive completed repairs without '
-                'verified progress; neutral reconciliation has its own 3-dispatch limit. '
+                f'{subject} stopped after bounded workflow work, but exact stop cause and '
+                'counts are unavailable in this legacy event. '
                 'Review current exact-head checks, independent-review findings and mergeability. '
                 'This is not a billing or deployment status.'
             )

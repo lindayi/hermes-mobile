@@ -174,17 +174,20 @@ def pull_event(snapshot, reason, *, occurred_at, merge_sha=None, decision=None,
     enrollment = snapshot.get("enrollment") or {}
     generation = enrollment.get("comment")
     identity_head = "" if reason in {"execution_exhausted", "policy_broken"} else head
-    identity = f"{issue}:{generation}:{reason}:{identity_head}:{merge_sha or ''}:{incident}"
-    event_id = f"pr:{issue}:{reason}:{hashlib.sha256(identity.encode()).hexdigest()[:32]}"
     admission = enrollment.get("starter_admission")
     linked_issue = (
         admission.get("issue_number")
         if reason == "execution_exhausted"
+        and stop_detail is not None
         and isinstance(admission, dict)
         and type(admission.get("issue_number")) is int
         and 1 <= admission["issue_number"] <= 2**31 - 1
         else issue
     )
+    identity = f"{issue}:{generation}:{reason}:{identity_head}:{merge_sha or ''}:{incident}"
+    if linked_issue != issue:
+        identity += f":linked-issue:{linked_issue}:stop-detail-v1"
+    event_id = f"pr:{issue}:{reason}:{hashlib.sha256(identity.encode()).hexdigest()[:32]}"
     event = {
         "event_id": event_id,
         "outcome": REASON_OUTCOMES[reason],

@@ -1173,6 +1173,7 @@ def test_completed_source_progress_survives_main_advance_with_negative_review(
     progress = cloud_coordinator._completed_repair_progress(
         snapshot, {"source-task-4": action}, [fingerprint], {head},
         review_ok=False, checks_ok=True, current_fingerprints_complete=True,
+        negative_review_complete=True,
     )
 
     assert progress["consecutive_no_progress"] == 1
@@ -1181,6 +1182,15 @@ def test_completed_source_progress_survives_main_advance_with_negative_review(
         head, [], [], pull_author_id=123, threads_complete=True,
         reviews_complete=True, issue=16, review_actions={},
     )
+    unrelated = action | {
+        "receipt_head": "d" * 40, "receipt_result": "ready",
+    }
+    ignored = cloud_coordinator._completed_repair_progress(
+        snapshot, {"source-task-4": unrelated}, [fingerprint], {head},
+        review_ok=False, checks_ok=True, current_fingerprints_complete=True,
+        negative_review_complete=True,
+    )
+    assert ignored["consecutive_no_progress"] == 0
 
 
 def test_legacy_neutral_recovery_splits_shared_counter_atomically(tmp_path):
@@ -3175,6 +3185,31 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             "owner_id": OWNER, "repository_id": 1399942965,
             "pull_id": api.pull["id"], "pull_node_id": api.pull["node_id"],
         })
+        api.tasks[task_id] = {
+            "id": task_id, "state": "completed",
+            "creator": {"id": OWNER}, "owner": {"id": OWNER},
+            "repository": {"id": 1399942965},
+            "artifacts": [
+                {
+                    "provider": "github", "type": "branch",
+                    "data": {"head_ref": "topic", "base_ref": "main"},
+                },
+                {
+                    "provider": "github", "type": "pull",
+                    "data": {"id": 160000016, "global_id": "PR_node_16"},
+                },
+            ],
+            "sessions": [{
+                "id": session_id, "task_id": task_id, "state": "completed",
+                "user": {"id": OWNER}, "owner": {"id": OWNER},
+                "repository": {"id": 1399942965},
+                "head_ref": "topic", "base_ref": "main",
+                "prompt": (
+                    f"Please address bounded review/check follow-up for PR #16 "
+                    f"at head `{start_head}`."
+                ),
+            }],
+        }
         start_head = result_head
 
     api.head_sha = legacy_head
@@ -3250,6 +3285,14 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     assert _legacy_neutral_attempt_count(
         cold_store.snapshot()["enrollments"]["16"], {},
         api.comments,
+        tasks=list(api.tasks.values()),
+        snapshot={
+            "issue": 16,
+            "pull": {
+                "id": api.pull["id"], "node_id": api.pull["node_id"],
+                "head": {"ref": "topic"},
+            },
+        },
     ) == 0
     result = Coordinator(
         api, cold_store, clock=lambda: 1790856660,

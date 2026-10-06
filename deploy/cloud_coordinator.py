@@ -367,11 +367,11 @@ def _renewed_bound_enrollment(prior, incoming):
         "attempts": prior.get("attempts", 0), "sensitive_sha": None,
         "neutral_attempts": prior.get(
             "neutral_attempts",
-            NEUTRAL_LIMIT if prior.get("attempts", 0) else 0,
+            NEUTRAL_LIMIT,
         ),
         "neutral_attempts_unknown": prior.get(
             "neutral_attempts_unknown",
-            prior.get("attempts", 0) > 0 and "neutral_attempts" not in prior,
+            "neutral_attempts" not in prior,
         ),
         "repair_progress": deepcopy(prior.get(
             "repair_progress", _new_repair_progress(legacy_unknown=True),
@@ -1094,26 +1094,13 @@ def review_followup_request(head_sha, attempts, report, *, pull_number):
         "the applicable tests. Do not claim review or CI success.\n\n"
         f"Untrusted evidence: `{evidence}`\n\n<!-- {marker} -->"
     )
-    progress_fingerprints = []
-    progress_fingerprints_complete = True
-    for finding in report["findings"]:
-        if (not isinstance(finding, dict) or not isinstance(finding.get("path"), str)
-                or not isinstance(finding.get("comment"), str)):
-            progress_fingerprints_complete = False
-            continue
-        fingerprint = _repair_fingerprint(
-            f"independent-review:{finding['path']}", finding["comment"],
-        )
-        if fingerprint and fingerprint not in progress_fingerprints:
-            progress_fingerprints.append(fingerprint)
-    if len(progress_fingerprints) > MAX_REPAIR_FINGERPRINTS:
-        progress_fingerprints_complete = False
+    progress_fingerprints, progress_fingerprints_complete = (
+        _review_finding_fingerprints(report["findings"])
+    )
     return {
         "marker": marker, "body": body, "head": head_sha,
         "attempt": attempts + 1, "task_type": "review-followup",
-        "progress_fingerprints": sorted(progress_fingerprints)[
-            :MAX_REPAIR_FINGERPRINTS
-        ],
+        "progress_fingerprints": progress_fingerprints,
         "progress_fingerprints_complete": progress_fingerprints_complete,
     }
 
@@ -1852,6 +1839,58 @@ def _current_review_followup(actions, issue, head_sha):
     return current
 
 
+def _review_finding_fingerprints(findings):
+    if not isinstance(findings, list) or not 1 <= len(findings) <= MAX_REVIEW_REPORT_FINDINGS:
+        return [], False
+    fingerprints = []
+    for finding in findings:
+        if (not isinstance(finding, dict)
+                or set(finding) != set(REVIEW_REPORT_FINDING_FIELDS)
+                or not isinstance(finding.get("path"), str)
+                or not finding["path"].strip()
+                or len(finding["path"]) > MAX_REVIEW_REPORT_TEXT
+                or not isinstance(finding.get("comment"), str)
+                or not finding["comment"].strip()
+                or len(finding["comment"]) > MAX_REVIEW_REPORT_TEXT):
+            return [], False
+        fingerprint = _repair_fingerprint(
+            f"independent-review:{finding['path']}", finding["comment"],
+        )
+        if fingerprint and fingerprint not in fingerprints:
+            fingerprints.append(fingerprint)
+    if not fingerprints or len(fingerprints) > MAX_REPAIR_FINGERPRINTS:
+        return [], False
+    return sorted(fingerprints), True
+
+
+def _negative_review_progress_fingerprints(actions, issue, head_sha, reviews, *,
+                                           reviews_complete):
+    if reviews_complete is not True:
+        return [], False
+    action = _current_review_followup(actions, issue, head_sha)
+    if (not isinstance(action, dict)
+            or action.get("kind") != "review"
+            or action.get("status") != "completed"
+            or action.get("publication_state") != "done"
+            or action.get("report_verdict") != "changes_requested"
+            or not _review_publication_proven(action)):
+        return [], False
+    report = action.get("review_report")
+    if (not isinstance(report, dict)
+            or report.get("pr") != issue
+            or report.get("head") != head_sha
+            or report.get("base") != action.get("main_sha")
+            or report.get("verdict") != "changes_requested"):
+        return [], False
+    published = _matching_owner_review(
+        reviews, head_sha=head_sha, body=action["published_review_body"],
+    )
+    if (not isinstance(published, dict)
+            or published.get("id") != action.get("published_review_id")):
+        return [], False
+    return _review_finding_fingerprints(report.get("findings"))
+
+
 def _current_review_report_failure(actions, issue, head_sha):
     candidates = [
         action for action in actions.values()
@@ -2210,47 +2249,38 @@ def _valid_receipt_proof(action, comments):
 
 
 def _legacy_task_reservation_type(record, tasks, snapshot):
-    task_type = record.get("task_type")
-    if task_type == "neutral":
-        return True
-    if task_type in {"source", "review-followup"}:
-        return False
-    if task_type is not None:
+    if (not isinstance(snapshot, dict)
+            or not isinstance(snapshot.get("pull"), dict)
+            or not isinstance(snapshot["pull"].get("head"), dict)):
         return None
-    if (type(record.get("repair_policy_version")) is int
-            and record["repair_policy_version"] == REPAIR_PROGRESS_VERSION):
-        return False
-    prompt = record.get("body")
-    if not isinstance(prompt, str):
-        if (not isinstance(snapshot, dict)
-                or not isinstance(snapshot.get("pull"), dict)
-                or not isinstance(snapshot["pull"].get("head"), dict)):
-            return None
-        task = tasks.get(record.get("task_id"))
-        if (not isinstance(task, dict)
-                or task.get("id") != record.get("task_id")
-                or task.get("state") != "completed"
-                or not _github_identity(task.get("creator"), OWNER_ID)
-                or not _github_identity(task.get("owner"), OWNER_ID)
-                or not _github_identity(task.get("repository"), REPOSITORY_ID)
-                or not _task_scoped(task, snapshot)):
-            return None
-        sessions = task.get("sessions")
-        if not isinstance(sessions, list) or len(sessions) != 1:
-            return None
-        session = sessions[0]
-        if (not isinstance(session, dict)
-                or session.get("id") != record.get("receipt_session_id")
-                or session.get("task_id") != record.get("task_id")
-                or session.get("state") != "completed"
-                or not _github_identity(session.get("user"), OWNER_ID)
-                or not _github_identity(session.get("owner"), OWNER_ID)
-                or not _github_identity(session.get("repository"), REPOSITORY_ID)
-                or session.get("head_ref") != snapshot["pull"]["head"].get("ref")
-                or session.get("base_ref") != MAIN_BRANCH
-                or not isinstance(session.get("prompt"), str)):
-            return None
-        prompt = session["prompt"]
+    task_id = record.get("receipt_task_id", record.get("task_id"))
+    task = tasks.get(task_id)
+    if (not isinstance(task, dict)
+            or task.get("id") != task_id
+            or task.get("state") != "completed"
+            or not _github_identity(task.get("creator"), OWNER_ID)
+            or not _github_identity(task.get("owner"), OWNER_ID)
+            or not _github_identity(task.get("repository"), REPOSITORY_ID)
+            or not _task_scoped(task, snapshot)):
+        return None
+    sessions = task.get("sessions")
+    if not isinstance(sessions, list) or len(sessions) != 1:
+        return None
+    session = sessions[0]
+    session_id = record.get("receipt_session_id", record.get("session_id"))
+    prompt = session.get("prompt") if isinstance(session, dict) else None
+    if (not isinstance(session, dict)
+            or (session_id is not None and session.get("id") != session_id)
+            or session.get("task_id") != task_id
+            or session.get("state") != "completed"
+            or not _github_identity(session.get("user"), OWNER_ID)
+            or not _github_identity(session.get("owner"), OWNER_ID)
+            or not _github_identity(session.get("repository"), REPOSITORY_ID)
+            or session.get("head_ref") != snapshot["pull"]["head"].get("ref")
+            or session.get("base_ref") != MAIN_BRANCH
+            or not isinstance(prompt, str)
+            or ("body" in record and record.get("body") != prompt)):
+        return None
     issue, head = record.get("issue"), record.get("head")
     if (type(issue) is not int or not _is_sha(head)
             or not isinstance(snapshot, dict)
@@ -2268,8 +2298,23 @@ def _legacy_task_reservation_type(record, tasks, snapshot):
     if prompt.startswith(neutral_prefix):
         return True
     if prompt.startswith(source_prefixes):
-        return False
-    return None
+        reservation_type = False
+    elif prompt.startswith(neutral_prefix):
+        reservation_type = True
+    else:
+        return None
+    task_type = record.get("task_type")
+    if (task_type is not None
+            and task_type not in (
+                {"neutral"} if reservation_type else {"source", "review-followup"}
+            )):
+        return None
+    policy_version = record.get("repair_policy_version")
+    if policy_version is not None and (
+            type(policy_version) is not int
+            or policy_version != REPAIR_PROGRESS_VERSION):
+        return None
+    return reservation_type
 
 
 def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
@@ -2278,8 +2323,6 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
     attempts = enrollment.get("attempts")
     if type(attempts) is not int or attempts < 0:
         return None
-    if attempts == 0:
-        return 0
     task_map = {}
     if isinstance(tasks, list):
         for task in tasks:
@@ -2297,13 +2340,13 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
     ]
     for record in records:
         if (not isinstance(record, dict) or record.get("kind") != "fix"
-                or record.get("issue") != enrollment.get("issue")
-                or type(record.get("attempt")) is not int
+                or record.get("issue") != enrollment.get("issue")):
+            continue
+        if (type(record.get("attempt")) is not int
                 or not 1 <= record["attempt"] <= attempts):
-            continue
-        if ("receipt_result" in record and
-                not _valid_receipt_proof(record, comments)):
-            continue
+            return None
+        if "receipt_result" in record and not _valid_receipt_proof(record, comments):
+            return None
         is_neutral = _legacy_task_reservation_type(record, task_map, snapshot)
         if is_neutral is None:
             return None
@@ -2350,14 +2393,16 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
 
 def _completed_repair_progress(snapshot, actions, current_fingerprints,
                                authorized_heads, *, review_ok, checks_ok,
-                               current_fingerprints_complete):
+                               current_fingerprints_complete,
+                               negative_review_complete=False):
     enrollment = snapshot["enrollment"]
     progress = enrollment.get("repair_progress")
     if progress is None:
         progress = _new_repair_progress(legacy_unknown=True)
     if not _repair_progress_valid(progress):
         return None
-    if (not review_ok or not checks_ok or snapshot.get("scoped") is not True
+    if ((not review_ok and negative_review_complete is not True)
+            or not checks_ok or snapshot.get("scoped") is not True
             or snapshot.get("reviews_complete") is not True
             or snapshot.get("threads_complete") is not True
             or current_fingerprints_complete is not True
@@ -2397,7 +2442,6 @@ def _completed_repair_progress(snapshot, actions, current_fingerprints,
                 or action.get("status") != "completed"
                 or not (ready_receipt or verified_failure)
                 or action.get("head") not in authorized_heads
-                or action.get("main_sha") != snapshot["main_sha"]
                 or (ready_receipt
                     and action.get("receipt_base") != action.get("main_sha"))
                 or action.get("pull_id") != pull.get("id")
@@ -4499,6 +4543,16 @@ class Coordinator:
             current_evidence is None
             or current_evidence.get("progress_fingerprints_complete") is True
         )
+        negative_review_fingerprints, negative_review_complete = (
+            _negative_review_progress_fingerprints(
+                actions, number, head, snapshot["reviews"],
+                reviews_complete=snapshot["reviews_complete"],
+            ) if not review_ok else ([], False)
+        )
+        if negative_review_complete:
+            current_fingerprints = sorted(
+                set(current_fingerprints) | set(negative_review_fingerprints),
+            )
         progress_actions = dict(actions)
         for key, action in actions.items():
             if (not isinstance(action, dict) or action.get("kind") != "fix"
@@ -4537,6 +4591,7 @@ class Coordinator:
             snapshot, progress_actions, current_fingerprints, authorized_heads,
             review_ok=review_ok, checks_ok=checks_ok,
             current_fingerprints_complete=current_fingerprints_complete,
+            negative_review_complete=negative_review_complete,
         )
         if progress is None:
             raise CoordinatorError("Repair progress history is invalid")
@@ -4694,6 +4749,7 @@ class Coordinator:
         )
         source_budget_exhausted = (
             attempts >= REPAIR_LIMIT or no_progress >= NO_PROGRESS_LIMIT
+            or snapshot["enrollment"].get("neutral_attempts_unknown") is True
         )
         if (repair_scoped and not neutral_blocker and not mergeability_unknown
                 and snapshot["pull"].get("draft") is not True):
@@ -4877,13 +4933,24 @@ class Coordinator:
         source_budget_stop = (
             not needs_reconciliation
             and budget_needed
+            and snapshot["enrollment"].get("neutral_attempts_unknown") is not True
             and (attempts >= REPAIR_LIMIT or no_progress >= NO_PROGRESS_LIMIT)
         )
         neutral_budget_stop = (
             needs_reconciliation and budget_needed
+            and snapshot["enrollment"].get("neutral_attempts_unknown") is not True
             and neutral_attempts >= NEUTRAL_LIMIT
         )
-        if source_budget_stop:
+        if (budget_needed
+                and snapshot["enrollment"].get("neutral_attempts_unknown") is True):
+            reasons.append((
+                "budget",
+                f"PR #{number} repair stopped because retained reservation history could "
+                "not be authenticated; the exact count and limit are unavailable. "
+                "Preserve this enrollment and restore trustworthy task/session evidence.",
+            ))
+            snapshot["budget_incident"] = "repair-history-unknown"
+        elif source_budget_stop:
             admission = snapshot["enrollment"].get("starter_admission")
             linked_issue = (
                 admission.get("issue_number")
@@ -5991,10 +6058,8 @@ class StateStore:
             enrollment.setdefault("attempts", REPAIR_LIMIT)
             missing_neutral_count = "neutral_attempts" not in enrollment
             if missing_neutral_count:
-                enrollment["neutral_attempts"] = (
-                    NEUTRAL_LIMIT if enrollment["attempts"] else 0
-                )
-                enrollment["neutral_attempts_unknown"] = enrollment["attempts"] > 0
+                enrollment["neutral_attempts"] = NEUTRAL_LIMIT
+                enrollment["neutral_attempts_unknown"] = True
             else:
                 enrollment.setdefault("neutral_attempts_unknown", False)
             if (type(enrollment["attempts"]) is not int
@@ -6285,11 +6350,11 @@ class StateStore:
                     )
                     neutral_attempts = previous.get(
                         "neutral_attempts",
-                        NEUTRAL_LIMIT if attempts else 0,
+                        NEUTRAL_LIMIT if key in data["enrollments"] else 0,
                     )
                     neutral_attempts_unknown = previous.get(
                         "neutral_attempts_unknown",
-                        attempts > 0 and "neutral_attempts" not in previous,
+                        key in data["enrollments"] and "neutral_attempts" not in previous,
                     )
                     repair_progress = deepcopy(previous.get(
                         "repair_progress",

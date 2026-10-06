@@ -490,12 +490,16 @@ Three consecutive completed source repairs without verified forward progress sto
 dispatch before the lifetime ceiling. Progress is decided only once for a
 coordinator-reserved source task after the authenticated task is terminal and its
 unchanged ready receipt binds the task, session, starting head, result head, PR and
-dispatch base. The result head must be the current authorized PR head. The complete
-current GitHub collections must also prove successful required checks, the latest
-positive owner-published independent-agent review on that exact head, and resolved
-review conversations. Task state, agent prose, a changed SHA, code churn, unrelated
-green checks, elapsed time, changed issue text, cosmetic wording, or new review IDs
-alone cannot count as progress.
+dispatch base. The result head must be the current authorized PR head; the recorded
+dispatch base must still match the receipt, but need not remain current after main
+advances. The complete current GitHub collections must also prove successful
+required checks and resolved review conversations. A positive exact-head review can
+confirm progress as before. A complete authenticated, owner-published
+`changes_requested` report can also prove that tracked independent-review findings
+remain or were resolved; this evidence scores progress only and never grants review
+approval, merge eligibility, or deployment authority. Task state, agent prose, a
+changed SHA, code churn, unrelated green checks, elapsed time, changed issue text,
+cosmetic wording, or new review IDs alone cannot count as progress.
 
 At reservation, the coordinator records at most 32 bounded fingerprints of the
 actual eligible repair targets: stable review-thread identity, normalized body
@@ -507,11 +511,11 @@ previous target is absent from the complete current-head evidence. A previously
 cleared fingerprint that reappears is a regression and prevents progress credit;
 thus alternating A-to-B-to-A findings cannot repeatedly reset the streak.
 Fingerprints ignore review IDs and cosmetic case, whitespace, and punctuation
-changes. If task, receipt, head/base binding, CI, review, pagination, or target
-identity is absent, malformed, partial, stale, or otherwise unverified, the
-attempt remains unevaluated: it neither earns progress nor increments the
-no-progress streak. Three positively observed no-progress decisions stop further
-source repairs. The 20-reservation ceiling remains the ultimate bound; this
+changes. If task, receipt, original dispatch-base binding, CI, review evidence,
+pagination, or target identity is absent, malformed, partial, stale, or otherwise
+unverified, the attempt remains unevaluated: it neither earns progress nor
+increments the no-progress streak. Three positively observed no-progress decisions
+stop further source repairs. The 20-reservation ceiling remains the ultimate bound; this
 bounded text/identity heuristic cannot prove semantic equivalence of arbitrary
 paraphrases.
 
@@ -526,18 +530,20 @@ deployment.
 
 Legacy records that predate the separate neutral counter retain a conservative
 unknown marker until every shared reservation is accounted for by retained task
-claims or current authenticated receipt proofs. An untyped receipt is classified
-only when its matching completed task/session record is complete, PR-bound, and
-contains the controller-generated reservation prompt; a receipt alone never
-implies a source reservation. Missing, conflicting, or incomplete history
-remains at the neutral stop boundary. The shared count is split atomically into
-source and neutral reservations without resetting either budget, starter
-provenance, or receipt history. New
+claims or authenticated receipt proofs. Reservation type comes from the exact
+controller prompt of the uniquely authenticated completed task/session, not saved
+`task_type` or policy-version labels; this applies to both retained v1 and v2
+receipts. A receipt alone never implies a source reservation. Missing, conflicting,
+or incomplete history keeps both repair paths unavailable rather than granting a
+new budget. The shared count is split atomically into source and neutral
+reservations without resetting either budget, starter provenance, or receipt
+history. New
 `execution_exhausted` lifecycle events carry a closed typed stop cause and exact
 used/remaining counts for the source ceiling, no-progress streak, neutral
 ceiling, or review-handoff wait. Older events without this optional detail remain
-readable, and the Inbox consumer renders validated PR and linked-issue identities
-without redesigning its delivery flow.
+readable and preserve their original PR identity. New typed stop events use a
+separate identity when they project a linked issue; the Inbox fallback for events
+without typed detail explicitly says the exact cause and counts are unavailable.
 
 The 20-attempt ceiling is grounded in a small, nonrandom sample of merged cloud
 pull requests, not a percentile or guarantee. The audit used authenticated
