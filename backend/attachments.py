@@ -1,5 +1,6 @@
 """Private, bounded photo storage for authenticated mobile runs."""
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import hashlib
 import io
@@ -21,6 +22,7 @@ MAX_IMAGE_BYTES = 2 * 1024 * 1024
 MAX_IMAGES_PER_RUN = 4
 MAX_IMAGE_PIXELS = 40_000_000
 RESERVATION_BYTES = MAX_INPUT_BYTES + MAX_IMAGE_BYTES
+_IMAGE_DECODE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix='photo-decode')
 ABANDONED_TTL = 24 * 60 * 60
 LINKED_RETENTION = 30 * 24 * 60 * 60
 TERMINAL_RUNS = ('completed', 'failed', 'cancelled')
@@ -260,7 +262,8 @@ class AttachmentStore:
             os.fsync(descriptor)
             os.close(descriptor)
             descriptor = None
-            normalized, content_type, width, height, suffix = await asyncio.to_thread(_normalize_image, stage)
+            normalized, content_type, width, height, suffix = await asyncio.get_running_loop().run_in_executor(
+                _IMAGE_DECODE_EXECUTOR, _normalize_image, stage)
             final_name = attachment_id + '.' + suffix
             temporary = self.objects / (attachment_id + '.tmp')
             final_path = self.objects / final_name
@@ -455,18 +458,24 @@ class AttachmentStore:
 
     def _cleanup_orphans(self, limit):
         with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
             stored = {row[0] for row in db.execute(
                 "SELECT stored_name FROM attachments WHERE stored_name IS NOT NULL")}
-            receiving = {row[0] + '.part' for row in db.execute(
+            receiving_stages = {row[0] + '.part' for row in db.execute(
                 "SELECT id FROM attachments WHERE state='receiving'")}
-        scanned = 0
-        for directory, known in ((self.objects, stored), (self.staging, receiving)):
-            for path in directory.iterdir():
-                scanned += 1
-                if scanned > limit:
-                    return
-                if path.name not in known:
-                    self._unlink(path)
+            receiving_temps = {row[0] + '.tmp' for row in db.execute(
+                "SELECT id FROM attachments WHERE state='receiving'")}
+            scanned = 0
+            for directory, known in ((self.objects, stored | receiving_temps),
+                                     (self.staging, receiving_stages)):
+                for path in directory.iterdir():
+                    scanned += 1
+                    if scanned > limit:
+                        db.commit()
+                        return
+                    if path.name not in known:
+                        self._unlink(path)
+            db.commit()
 
     def metadata_for_history(self, user, session_id, attachment_ids):
         result = []

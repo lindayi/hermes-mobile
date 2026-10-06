@@ -35,7 +35,8 @@ reject malformed/truncated images, SVG/active content, excessive pixels, and
 unsupported HEIC/HEIF with clear guidance to choose JPEG, PNG, or WebP. Normalize
 EXIF orientation, strip metadata including location, never upscale, constrain
 the long edge to 2048 pixels, and re-encode a legible image no larger than
-2 MiB. Decode work is bounded by a fixed pixel ceiling and frame count. Input
+2 MiB. Decode work is bounded by a fixed pixel ceiling and frame count, with one
+image decode at a time per backend process. Input
 filenames are neither retained nor returned.
 
 ## Private storage, quotas, and retention
@@ -125,8 +126,9 @@ activation success.
 | Candidate path | SHA-256 |
 | --- | --- |
 | `backend/app.py` | `77d36934b033ecfe669cc2b5c2581146b776f2c448336d7000183489307682c6` |
-| `backend/attachments.py` | `45bf77c2308a1a4d0eb5b78069c72cd97fa98c115396ca9a4d5444c886a59508` |
+| `backend/attachments.py` | `d62c4df6c9de209e7103e4def1fda2885e5e7600ebf466d962b71714c4d76d47` |
 | `backend/hermes_client.py` | `a607e6f6d71cd6b9bb54f13eda4f40d35e6f6f61b8124ba2090e6c28154d4b97` |
+| `backend/native_catalog.py` | `0d0e5e332a88ea7ff0683dcc9fb4fd9dcaa730ecf341b45f404a2cf2f90fe1e7` |
 | `backend/orchestration.py` | `5e373e9e9c2aaae8128bc32e119e7b5dc439ea899bdb5b2377ae33ba414cfcc1` |
 | `backend/runs.py` | `79b15df9918cb85599cb3a7db5c978d2abb681afe9c355acdfa6e07f5472884f` |
 | `requirements.lock` | `ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04` |

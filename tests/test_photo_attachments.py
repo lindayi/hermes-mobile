@@ -1,9 +1,11 @@
 """Photo upload regressions use only small deterministic in-memory images."""
 import binascii
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import io
 import json
+import sqlite3
 import struct
 import threading
 import time
@@ -15,6 +17,7 @@ from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 from fastapi.testclient import TestClient
 
+from backend import attachments as attachments_module
 from backend.app import Settings, create_app
 from backend.hermes_client import GatewayClient
 from backend.runs import RunConflict
@@ -137,6 +140,92 @@ def test_quota_and_minimum_free_space_fail_before_receiving_bytes(tmp_path):
         rejected = low_space.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
                                   headers={'Idempotency-Key': 'low-space'})
         assert rejected.status_code == 507
+
+
+def test_concurrent_photo_uploads_serialize_image_decoding(tmp_path, monkeypatch):
+    active = maximum_active = 0
+    counter_lock = threading.Lock()
+    normalize = attachments_module._normalize_image
+
+    def observed_normalize(path):
+        nonlocal active, maximum_active
+        with counter_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        try:
+            time.sleep(.05)
+            return normalize(path)
+        finally:
+            with counter_lock:
+                active -= 1
+
+    monkeypatch.setattr(attachments_module, '_normalize_image', observed_normalize)
+    with photo_client(tmp_path) as (_, client):
+        def upload(index):
+            return client.post(
+                BASE + '/sessions/wa-1/attachments', content=png_fixture(index),
+                headers={'Idempotency-Key': f'concurrent-decode-{index}'})
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            responses = list(executor.map(upload, range(6)))
+
+        assert [response.status_code for response in responses] == [201] * 6
+        assert maximum_active == 1
+
+
+def test_orphan_cleanup_preserves_active_temp_and_new_reservation_files(tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        active, _ = store.begin(user, 'wa-1', 'orphan-active-temp')
+        temporary = store.objects / (active['id'] + '.tmp')
+        temporary.write_bytes(b'active normalized output')
+        store._cleanup_orphans(16)
+        assert temporary.exists()
+
+        store.cleanup = lambda **kwargs: 0
+        entered_scan = threading.Event()
+        resume_scan = threading.Event()
+        begin_started = threading.Event()
+        reserved = threading.Event()
+        original_iterdir = type(store.objects).iterdir
+
+        def paused_iterdir(directory):
+            if (directory == store.objects
+                    and threading.current_thread().name == 'orphan-sweep'):
+                entered_scan.set()
+                assert resume_scan.wait(5)
+            return original_iterdir(directory)
+
+        monkeypatch.setattr(type(store.objects), 'iterdir', paused_iterdir)
+        sweep = threading.Thread(target=store._cleanup_orphans, args=(16,), name='orphan-sweep')
+        sweep.start()
+        assert entered_scan.wait(2)
+
+        reservation = {}
+
+        def begin_upload():
+            begin_started.set()
+            reservation['row'] = store.begin(user, 'wa-1', 'orphan-reservation-race')[0]
+            reserved.set()
+
+        begin = threading.Thread(target=begin_upload)
+        begin.start()
+        assert begin_started.wait(2)
+        reserved_during_scan = reserved.wait(.25)
+        raced_stage = None
+        if reserved_during_scan:
+            raced_stage = store.staging / (reservation['row']['id'] + '.part')
+            raced_stage.write_bytes(b'active upload')
+        resume_scan.set()
+        sweep.join(5)
+        begin.join(5)
+        assert not sweep.is_alive() and not begin.is_alive()
+        assert reserved.is_set()
+        if not reserved_during_scan:
+            raced_stage = store.staging / (reservation['row']['id'] + '.part')
+            raced_stage.write_bytes(b'active upload')
+        assert raced_stage.exists()
 
 
 def test_expiry_reclaims_only_attachment_bytes_and_returns_controlled_placeholder(tmp_path):
@@ -299,3 +388,55 @@ def test_expired_linked_photos_keep_history_and_retry_bindings(tmp_path):
         with pytest.raises(RunConflict, match='other photo attachments'):
             app.state.journal.submit(
                 user['id'], 'default', 'wa-1', 'Keep this text', 'expired-linked-run')
+
+
+def test_history_binds_photos_to_proven_native_and_synthetic_user_turns(tmp_path):
+    with photo_client(tmp_path) as (app, client):
+        user = client.get(BASE + '/auth/me').json()['user']
+        attachment_ids = [
+            client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(index),
+                        headers={'Idempotency-Key': f'history-binding-{index}'}).json()['id']
+            for index in range(3)
+        ]
+
+        def submit(key, text, attachment_id):
+            return app.state.journal.submit(
+                user['id'], 'default', 'wa-1', text, key,
+                history_anchor=lambda: app.state.catalog.history_anchor('default', 'wa-1'),
+                attachment_ids=[attachment_id], attachment_store=app.state.attachments)[0]
+
+        native_run = submit('history-native', 'Native photo turn', attachment_ids[0])
+        with sqlite3.connect(app.state.catalog.profiles['default'] / 'state.db') as db:
+            db.executemany(
+                'INSERT INTO messages(id,session_id,role,content,tool_calls,timestamp) VALUES(?,?,?,?,?,?)',
+                [(2, 'wa-1', 'user', 'Native photo turn', None, 3),
+                 (3, 'wa-1', 'assistant', 'Native answer', None, 4)])
+        app.state.journal.finish(user['id'], native_run['id'], 'completed', 'Native answer')
+
+        synthetic_run = submit('history-synthetic', 'Synthetic photo turn', attachment_ids[1])
+        app.state.journal.finish(user['id'], synthetic_run['id'], 'completed', 'Synthetic answer')
+
+        current_run = submit('history-current', 'Current photo turn', attachment_ids[2])
+        with sqlite3.connect(app.state.catalog.profiles['default'] / 'state.db') as db:
+            db.execute(
+                'INSERT INTO messages(id,session_id,role,content,tool_calls,timestamp) VALUES(?,?,?,?,?,?)',
+                (4, 'wa-1', 'user', 'Current photo turn', None, 5))
+        app.state.journal.finish(user['id'], current_run['id'], 'completed', 'Current answer')
+
+        with app.state.attachments.connection() as db:
+            db.execute('UPDATE attachments SET expires_at=0 WHERE id=?', (attachment_ids[1],))
+            db.commit()
+        app.state.attachments.cleanup(now=1)
+
+        response = client.get(BASE + '/sessions/wa-1/messages')
+        assert response.status_code == 200
+        user_items = [item for item in response.json()['items'] if item['role'] == 'user']
+        by_content = {item['content']: item for item in user_items}
+        assert by_content['Native photo turn']['attachments'][0]['id'] == attachment_ids[0]
+        assert by_content['Native photo turn']['attachments'][0]['status'] == 'bound'
+        assert by_content['Synthetic photo turn']['attachments'] == [
+            {'id': attachment_ids[1], 'status': 'expired'}]
+        current = response.json()['run'] or response.json()['last_run']
+        assert current['input'] == 'Current photo turn'
+        assert current['attachments'][0]['id'] == attachment_ids[2]
+        assert current['attachments'][0]['status'] == 'bound'
