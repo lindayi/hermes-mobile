@@ -838,7 +838,7 @@ def repair_request(head_sha, attempts, threads, check_runs, *, pull_number=0,
     evidence = json.dumps({"review_findings": findings, "failed_source_checks": failures},
                           ensure_ascii=True, separators=(",", ":"))
     digest = hashlib.sha256(
-        f"{pull_number}:{head_sha}:{attempts + 1}:{evidence}".encode("utf-8")
+        f"budget-v2:{pull_number}:{head_sha}:{attempts + 1}:{evidence}".encode("utf-8")
     ).hexdigest()[:20]
     marker = f"{FIX_MARKER_PREFIX}{digest}"
     body = (
@@ -875,7 +875,7 @@ def neutral_reconciliation_request(snapshot, attempts):
     }
     encoded_intent = json.dumps(intent, ensure_ascii=True, separators=(",", ":"))
     key = (
-        f"{snapshot['issue']}:{head}:{main_sha}:{base['sha']}:"
+        f"budget-v2:{snapshot['issue']}:{head}:{main_sha}:{base['sha']}:"
         f"{attempts + 1}:{encoded_intent}"
     )
     marker = f"{FIX_MARKER_PREFIX}{hashlib.sha256(key.encode()).hexdigest()[:20]}"
@@ -1235,7 +1235,7 @@ def review_followup_request(head_sha, attempts, report, *, pull_number):
     }, ensure_ascii=True, separators=(",", ":"))
     marker = (
         f"{FIX_MARKER_PREFIX}"
-        f"{hashlib.sha256(f'{pull_number}:{head_sha}:{attempts + 1}:{evidence}'.encode()).hexdigest()[:20]}"
+        f"{hashlib.sha256(f'budget-v2:{pull_number}:{head_sha}:{attempts + 1}:{evidence}'.encode()).hexdigest()[:20]}"
     )
     body = (
         f"Please address bounded independent-review follow-up for PR #{pull_number} "

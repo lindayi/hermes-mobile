@@ -3231,6 +3231,147 @@ def test_progressing_source_repairs_continue_to_the_twenty_attempt_ceiling(
         }
 
 
+@pytest.mark.parametrize("producer", ["source", "review-followup", "neutral"])
+@pytest.mark.parametrize("occupancy", [None, "sending", "uncertain", "sent", "remote-active"])
+def test_cold_legacy_mixed_budget_request_identity(tmp_path, producer, occupancy):
+    from deploy.cloud_coordinator import _legacy_task_reservation_type
+    from deploy.task_receipts import receipt_instruction
+
+    fixture = json.loads((
+        Path(__file__).parent / "fixtures" / "coordinator-budget-v1-requests.json"
+    ).read_text())
+    assert fixture["baseline"] == "a5dbc52d835d85658567c57330a3b29bfdc6b124"
+    assert fixture["source_sha256"] == (
+        "497261d432e5ec8a1a200183ed6a0eca4bdb49f50ab7c8db3a03228bfddafe8a"
+    )
+    api = FakeApi(unresolved=producer == "source")
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    if producer == "neutral":
+        api.current_main_sha = CURRENT_MAIN
+        api.pull["mergeable_state"] = "behind"
+        api.compare_results = {
+            f"{BASE}...{CURRENT_MAIN}": _compare_result(BASE, ahead_by=1),
+            f"{BASE}...{HEAD}": _compare_result(BASE, ahead_by=1),
+        }
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record(authorized_head=HEAD))
+    state = store.snapshot()
+    enrollment = state["enrollments"]["16"]
+    enrollment["attempts"] = 2
+    for field in ("neutral_attempts", "neutral_attempts_unknown", "repair_progress"):
+        enrollment.pop(field, None)
+    names = ["source1", "neutral2"] if producer == "neutral" else [
+        "neutral1", f"{producer}2",
+    ]
+    historical = {}
+    for ordinal, name in enumerate(names, 1):
+        request = fixture["requests"][name]
+        task_id = f"legacy-budget-{ordinal}"
+        nonce = f"synthetic-legacy-budget-{ordinal}"
+        key = f"fix:16:{request['marker']}"
+        base = request.get("main_sha", BASE)
+        action = {
+            **request, "key": key, "kind": "fix", "issue": 16,
+            "head_ref": "topic", "main_sha": base, "status": "completed",
+            "task_id": task_id, "dispatch_nonce": nonce,
+            "owner_id": OWNER, "repository_id": 1399942965,
+            "pull_id": api.pull["id"], "pull_node_id": api.pull["node_id"],
+            "handoff_state": "done",
+            "body": request["body"] + "\n\n" + receipt_instruction(
+                nonce, pull_number=16, start_head=HEAD, base_sha=base,
+            ),
+        }
+        api.tasks[task_id] = {
+            "id": task_id, "creator": {"id": OWNER}, "owner": {"id": OWNER},
+            "repository": {"id": 1399942965},
+            "artifacts": [{"provider": "github", "type": "branch",
+                           "data": {"head_ref": "topic", "base_ref": "main"}}],
+        }
+        api.fix_attempts = ordinal
+        api.complete_task(task_id, action, base_sha=base)
+        comment = api.comments[-1]
+        action.update(
+            receipt_result="ready", receipt_comment_id=comment["id"],
+            receipt_created_at=comment["created_at"], receipt_body=comment["body"],
+            receipt_task_id=task_id, receipt_session_id=f"session-{task_id}",
+            receipt_completed_at="2026-10-01T12:05:30Z",
+            receipt_nonce=nonce, receipt_start_head=HEAD, receipt_head=HEAD,
+            receipt_base=base,
+        )
+        historical[key] = action
+        state["actions"][key] = action
+    enrollment["receipt_proofs"] = list(historical.values())
+    if producer == "review-followup":
+        state["actions"]["review:legacy-budget"] = {
+            "key": "review:legacy-budget", "kind": "review", "issue": 16,
+            "head": HEAD, "status": "completed", "publication_state": "done",
+            "review_report": fixture["report"], "report_verdict": "changes_requested",
+        }
+    if occupancy in {"sending", "uncertain", "sent"}:
+        action = state["actions"][key]
+        action["status"] = occupancy
+        action.pop("handoff_state")
+        for field in list(action):
+            if field.startswith("receipt_"):
+                action.pop(field)
+        enrollment["receipt_proofs"] = [historical[next(iter(historical))]]
+        if occupancy != "sent":
+            action.pop("task_id")
+            api.tasks.pop(task_id)
+        else:
+            api.tasks[task_id]["state"] = "queued"
+            api.tasks[task_id]["sessions"] = []
+    if occupancy == "remote-active":
+        api.active_agent = True
+    store._save(state)
+    before = StateStore(store.path).snapshot()
+    api.fix_attempts = 0
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    after = StateStore(store.path).snapshot()
+    if occupancy is None:
+        assert result["repair_requested"], result
+        assert api.task_posts == 1, (result, after["actions"])
+        fresh = next(
+            action for key, action in after["actions"].items()
+            if key not in before["actions"] and action["kind"] == "fix"
+        )
+        assert fresh["attempt"] == 2 and fresh["status"] == "sent"
+        assert fresh["marker"] != request["marker"]
+        assert after["enrollments"]["16"]["attempts"] == (
+            1 if producer == "neutral" else 2
+        )
+        assert after["enrollments"]["16"]["neutral_attempts"] == (
+            2 if producer == "neutral" else 1
+        )
+        assert after["enrollments"]["16"]["receipt_proofs"] == enrollment["receipt_proofs"]
+        for old_key, old_action in historical.items():
+            assert after["actions"][old_key] == old_action
+            assert _legacy_task_reservation_type(
+                old_action, api.tasks, {"issue": 16, "pull": api.pull},
+            ) is (old_action.get("task_type") == "neutral")
+        api.complete_task(fresh["task_id"], fresh, base_sha=fresh["main_sha"])
+        assert _legacy_task_reservation_type(
+            fresh, api.tasks, {"issue": 16, "pull": api.pull},
+        ) is (producer == "neutral")
+        # Keep the accepted POST active while exercising repeat and cold restart.
+        api.tasks[fresh["task_id"]]["state"] = "queued"
+    else:
+        assert api.task_posts == 0
+        assert after["enrollments"]["16"]["attempts"] == 2
+        for old_key, old_action in before["actions"].items():
+            retained = after["actions"][old_key]
+            for field, value in old_action.items():
+                if field == "status" and value == "sending":
+                    assert retained[field] == "uncertain"
+                else:
+                    assert retained[field] == value
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+    assert api.task_posts == (1 if occupancy is None else 0)
+
+
 def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
         tmp_path):
     api = ProgressApi(unresolved=False)

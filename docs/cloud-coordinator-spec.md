@@ -510,6 +510,12 @@ Terminal source tasks await a verified evaluation before another source reservat
 Pre-upgrade unscored receipts remain explicitly unknown rather than blocking forever.
 Legacy shared counts are split only after authenticating every unique retained
 task/session, prompt, and receipt chain, without inventing ordinals or task types.
+New source, neutral, and independent-review follow-up request hashes include the
+literal `budget-v2:` discriminator so split ordinals cannot collide with retained
+legacy completed keys. Historical keys, bodies, nonces and receipts are unchanged;
+both prompt forms remain authenticated under the same task/session bindings.
+The namespace does not bypass local sent/uncertain claims or remote active tasks,
+and never authorizes replay of a lost task POST.
 Fully observed terminal failed verification allows only a nonprogress decision.
 Completed required check runs with `failure`, `cancelled`, `timed_out`,
 `action_required`, `neutral`, `skipped`, `stale`, or `startup_failure` are terminal
