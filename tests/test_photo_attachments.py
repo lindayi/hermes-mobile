@@ -10,12 +10,14 @@ import time
 import zlib
 
 import httpx
+import pytest
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 from fastapi.testclient import TestClient
 
 from backend.app import Settings, create_app
 from backend.hermes_client import GatewayClient
+from backend.runs import RunConflict
 from test_auth import BASE, BOOTSTRAP, ORIGIN, enroll
 from test_native_catalog import create_native_db
 
@@ -256,3 +258,44 @@ def test_snapshot_batches_ordered_attachment_ids_across_owned_runs(tmp_path, mon
         assert [entry['run'].get('attachment_ids', []) for entry in entries] == expected
         attachment_reads = [query for query in queries if 'FROM attachments' in query]
         assert len(attachment_reads) == 1, attachment_reads
+
+
+def test_expired_linked_photos_keep_history_and_retry_bindings(tmp_path):
+    with photo_client(tmp_path) as (app, client):
+        user = client.get(BASE + '/auth/me').json()['user']
+        ids = [client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(index),
+                           headers={'Idempotency-Key': f'expired-linked-{index}'}).json()['id']
+               for index in range(2)]
+        ids.reverse()
+        run, _ = app.state.journal.submit(
+            user['id'], 'default', 'wa-1', 'Keep this text', 'expired-linked-run',
+            attachment_ids=ids, attachment_store=app.state.attachments)
+        app.state.journal.finish(user['id'], run['id'], 'completed')
+        with app.state.attachments.connection() as db:
+            db.execute('UPDATE attachments SET expires_at=0 WHERE run_id=?', (run['id'],))
+            db.commit()
+        assert app.state.attachments.cleanup(now=1) == 2
+        assert list(app.state.attachments.objects.iterdir()) == []
+
+        snapshot = app.state.journal.snapshot_state(user['id'], 'default', 'wa-1')
+        assert snapshot['run']['attachment_ids'] == ids
+        fetched = client.get(BASE + '/runs/' + run['id'])
+        assert fetched.status_code == 200
+        assert fetched.json()['attachment_ids'] == ids
+        expired = [{'id': attachment_id, 'status': 'expired'} for attachment_id in ids]
+        assert fetched.json()['attachments'] == expired
+        history = client.get(BASE + '/sessions/wa-1/messages')
+        assert history.status_code == 200
+        turn = history.json()['last_run']
+        assert turn['id'] == run['id']
+        assert turn['input'] == 'Keep this text'
+        assert turn['attachments'] == expired
+
+        retry, created = app.state.journal.submit(
+            user['id'], 'default', 'wa-1', 'Keep this text', 'expired-linked-run',
+            attachment_ids=ids, attachment_store=app.state.attachments)
+        assert not created and retry['id'] == run['id']
+        assert retry['attachment_ids'] == ids
+        with pytest.raises(RunConflict, match='other photo attachments'):
+            app.state.journal.submit(
+                user['id'], 'default', 'wa-1', 'Keep this text', 'expired-linked-run')

@@ -124,11 +124,11 @@ activation success.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `backend/app.py` | `108f7469b7c2683f1fa873f84b3792da6dbcfbee3a0cb39a2674f54f27a6b333` |
+| `backend/app.py` | `77d36934b033ecfe669cc2b5c2581146b776f2c448336d7000183489307682c6` |
 | `backend/attachments.py` | `45bf77c2308a1a4d0eb5b78069c72cd97fa98c115396ca9a4d5444c886a59508` |
 | `backend/hermes_client.py` | `a607e6f6d71cd6b9bb54f13eda4f40d35e6f6f61b8124ba2090e6c28154d4b97` |
 | `backend/orchestration.py` | `5e373e9e9c2aaae8128bc32e119e7b5dc439ea899bdb5b2377ae33ba414cfcc1` |
-| `backend/runs.py` | `57b2ef764ee5bdcbd1cef330d7862f29cc5dcde996820454ee38ea3abdcd104b` |
+| `backend/runs.py` | `79b15df9918cb85599cb3a7db5c978d2abb681afe9c355acdfa6e07f5472884f` |
 | `requirements.lock` | `ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04` |
 
 Focused regressions must demonstrate RED before implementation and GREEN after

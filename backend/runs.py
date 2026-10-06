@@ -227,7 +227,7 @@ class RunJournal:
         if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='attachments'").fetchone():
             return []
         return [row[0] for row in c.execute(
-            "SELECT id FROM attachments WHERE run_id=? AND state='bound' ORDER BY position,id",
+            "SELECT id FROM attachments WHERE run_id=? AND state IN ('bound','expired') ORDER BY position,id",
             (run_id,))]
 
     def submit(self, user_id, profile, session_id, text, key, *, history_anchor=None, selection=None,
@@ -414,7 +414,7 @@ class RunJournal:
             if rows and c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='attachments'").fetchone():
                 for attachment in c.execute('''SELECT a.run_id,a.id FROM attachments a
                     JOIN runs r ON r.id=a.run_id
-                    WHERE r.user_id=? AND r.profile=? AND r.session_id=? AND a.state='bound'
+                    WHERE r.user_id=? AND r.profile=? AND r.session_id=? AND a.state IN ('bound','expired')
                     ORDER BY a.run_id,a.position,a.id''', (user_id, profile, session_id)):
                     attachments_by_run.setdefault(attachment['run_id'], []).append(attachment['id'])
             for row in rows[:-1]:

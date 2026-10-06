@@ -8,7 +8,8 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
 const dir=process.env.HERMES_FRONTEND_DIR || fileURLToPath(new URL('../../frontend/',import.meta.url));
-async function browserFixture(t,{visual=false,live=false,startupFailure=false,fallback=false}={}) {
+async function browserFixture(t,{visual=false,live=false,startupFailure=false,fallback=false,csp=false}={}) {
+ const policy=csp?(await readFile(new URL('../../backend/app.py',import.meta.url),'utf8')).match(/^CSP="([^"]+)"$/m)[1]:null;
  const server=createServer(async(req,res)=>{
   const url=new URL(req.url,'http://fixture'),p=url.pathname.replace('/hermes/app-api','');
   const json=o=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(o));};
@@ -25,7 +26,7 @@ async function browserFixture(t,{visual=false,live=false,startupFailure=false,fa
   const name=url.pathname.replace(/^\/hermes\//,'')||'index.html';
   // Match the builder's 24-hex release suffix without intercepting other paths/modules.
   if(startupFailure && /^\/hermes\/ui(?:\.[a-f0-9]{24})?\.mjs$/.test(url.pathname)){res.writeHead(200,{'Content-Type':'text/javascript'});res.end('export async function mountApp(){throw Error("synthetic startup failure")}');return;}
-  try {const data=await readFile(join(dir,name));res.writeHead(200,{'Content-Type':({html:'text/html',css:'text/css',js:'text/javascript',mjs:'text/javascript'})[name.split('.').pop()]||'application/octet-stream'});res.end(data);}catch{res.writeHead(404).end();}
+  try {const data=await readFile(join(dir,name));res.writeHead(200,{'Content-Type':({html:'text/html',css:'text/css',js:'text/javascript',mjs:'text/javascript'})[name.split('.').pop()]||'application/octet-stream',...(policy?{'Content-Security-Policy':policy}:{})});res.end(data);}catch{res.writeHead(404).end();}
  });
  await new Promise(r=>server.listen(0,'127.0.0.1',r));
  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
@@ -53,7 +54,7 @@ async function inside(page,selector,top,height) {
  return box;
 }
 test('compact photo picker uses the real file input and releases failed-send uploads on navigation',{timeout:20000},async t=>{
- const page=await browserFixture(t),deleted=[],uploaded=[];
+ const page=await browserFixture(t,{csp:true}),deleted=[],uploaded=[];
  const id='00000000000000000000000000000001';
  await page.route('**/hermes/app-api/sessions/s/attachments**',async route=>{
  if(route.request().method()==='DELETE'){deleted.push(route.request().url());return route.fulfill({status:204});}
@@ -67,6 +68,9 @@ test('compact photo picker uses the real file input and releases failed-send upl
  const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=','base64');
  await (await chooser).setFiles({name:'synthetic.png',mimeType:'image/png',buffer:bytes});
  await page.getByRole('button',{name:'Remove photo 1'}).waitFor();
+ assert.equal(await page.locator('.photo-preview img').evaluate(async image=>{
+  try{await image.decode();return image.naturalWidth>0;}catch{return false;}
+ }),true,'selected photo decodes under the app CSP');
  const cancel=page.waitForEvent('filechooser');await picker.click();await (await cancel).setFiles([]);
  assert.equal(await page.locator('.photo-preview').count(),1,'cancel does not clear selection');
  await page.getByRole('button',{name:'Send message',exact:true}).click();
