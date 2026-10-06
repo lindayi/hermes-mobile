@@ -63,6 +63,48 @@ def test_pull_lifecycle_events_preserve_authenticated_linked_issue_identity():
     assert linked_policy["event_id"] == unlinked_policy["event_id"]
 
 
+def test_linked_stop_event_upgrade_preserves_acknowledged_legacy_identity():
+    from deploy.workflow_lifecycle import (
+        filter_acknowledged_replays, merge_events, validate_event,
+    )
+
+    snapshot = {
+        "issue": 86, "head": HEAD,
+        "enrollment": {
+            "comment": 127, "starter_admission": {"issue_number": 85},
+        },
+    }
+    legacy = pull_event(
+        snapshot, "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
+        incident="source-repair-no-progress-3-of-4",
+    )
+    legacy["issue_number"] = 86
+    validate_event(legacy, now=NOW)
+    upgraded = pull_event(
+        snapshot, "execution_exhausted", occurred_at="2026-10-01T20:59:00Z",
+        incident="source-repair-no-progress-3-of-4",
+        stop_detail={
+            "cause": "no-progress", "used": 3, "remaining": 0, "limit": 3,
+            "source_used": 4, "source_ceiling": 20, "stagnation_count": 3,
+        },
+    )
+    acknowledgement = {
+        legacy["event_id"]: {
+            "digest": event_digest(legacy), "status": "acked",
+            "inbox_id": "synthetic-legacy-inbox",
+        },
+    }
+
+    assert legacy["issue_number"] == legacy["pr_number"] == 86
+    assert upgraded["issue_number"] == 85 and upgraded["pr_number"] == 86
+    assert upgraded["event_id"] != legacy["event_id"]
+    assert merge_events([legacy], [upgraded], now=NOW) == [legacy, upgraded]
+    assert filter_acknowledged_replays(
+        [legacy, upgraded], context=[legacy], acknowledgements=acknowledgement,
+        now=NOW,
+    ) == [upgraded]
+
+
 class StarterApi:
     def __init__(self, comments):
         self.comments = comments

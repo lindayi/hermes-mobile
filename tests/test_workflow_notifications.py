@@ -361,8 +361,10 @@ def test_meaningful_outcomes_keep_failures_approvals_merge_and_deployment_distin
     assert 'authorize the sensitive action' in notices['Owner decision required for PR #32']
     assert head in notices['Owner decision required for PR #32']
     assert 'separate from deployment' in notices['PR #32 merged']
-    assert '20 lifetime dispatches' in notices['Workflow repair stopped for issue #31']
-    assert '3 consecutive completed repairs' in notices['Workflow repair stopped for issue #31']
+    assert 'Exact stop cause and counts are unavailable' in notices[
+        'Workflow repair stopped for issue #31'
+    ]
+    assert '20 lifetime dispatches' not in notices['Workflow repair stopped for issue #31']
     assert 'not a billing' in notices['Workflow repair stopped for issue #31']
     assert all('deployed' not in title.lower() for title in notices)
 
@@ -376,9 +378,9 @@ def test_repair_stop_notice_names_pull_and_authenticated_linked_issue():
     ))
 
     assert title == 'Workflow repair stopped for PR #86 (linked issue #85)'
-    assert '20 lifetime dispatches' in body
-    assert '3 consecutive completed repairs' in body
-    assert 'mergeability' in body
+    assert 'Exact stop cause and counts are unavailable' in body
+    assert '20 lifetime dispatches' not in body
+    assert '3 consecutive completed repairs' not in body
     assert 'not a billing' in body
 
 

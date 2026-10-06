@@ -9,6 +9,7 @@ import pytest
 from deploy.cloud_coordinator import _authorized_result_heads
 from test_cloud_coordinator import (
     BASE, HEAD, OWNER, COPILOT_AGENT, Coordinator, FakeApi, StateStore,
+    _compare_result,
     refresh_owner_review,
 )
 
@@ -590,6 +591,99 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
     assert neutral["main_sha"] == moved_main
     assert api.owner_review_head_sha == current_head
     assert json.loads(api.owner_review_body)["verdict"] == "changes_requested"
+
+    api.complete_task(
+        neutral["task_id"], neutral, head_sha=current_head, base_sha=moved_main,
+    )
+    api.pull["base"]["sha"] = moved_main
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    after_neutral = Coordinator(
+        api, StateStore(store.path), clock=lambda: NOW,
+    ).run(apply=True)["pull_requests"][0]
+    after_neutral = Coordinator(
+        api, StateStore(store.path), clock=lambda: NOW,
+    ).run(apply=True)["pull_requests"][0]
+
+    reopened = StateStore(store.path)
+    enrollment = reopened.snapshot()["enrollments"]["16"]
+    assert reopened.action(neutral["key"])["status"] == "completed"
+    reviewer = next((
+        action for action in reopened.actions().values()
+        if action.get("kind") == "review"
+    ), None)
+    assert reviewer is not None, (
+        after_neutral["reasons"], enrollment, api.fix_attempts,
+    )
+    assert reviewer["status"] == "sent"
+    api.complete_review_task(
+        reviewer["task_id"], reviewer,
+        source_action=reopened.action(neutral["key"]),
+        verdict="changes_requested",
+        findings=[
+            {"path": "tests/test_cloud_coordinator.py", "comment": "First new finding."},
+            {"path": "tests/test_cloud_coordinator.py", "comment": "Second new finding."},
+        ],
+        files=api.review_file_digests(),
+    )
+    Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)
+    reviewed = Coordinator(
+        api, StateStore(store.path), clock=lambda: NOW,
+    ).run(apply=True)["pull_requests"][0]
+
+    reopened = StateStore(store.path)
+    enrollment = reopened.snapshot()["enrollments"]["16"]
+    assert not reopened.action(reviewer["key"]).get("report_error"), (
+        reopened.action(reviewer["key"]).get("report_error"), reviewed["reasons"],
+    )
+    source = next((
+        action for action in reopened.actions().values()
+        if action.get("kind") == "fix" and action.get("task_type") == "review-followup"
+    ), None)
+    assert source is not None, (reviewed["reasons"], enrollment, api.fix_attempts)
+    assert source["attempt"] == 4 and source["status"] == "sent"
+    assert enrollment["attempts"] == 4
+    assert enrollment["neutral_attempts"] == 1
+    assert enrollment["receipt_proofs"][:len(proofs)] == proofs
+    assert len(enrollment["receipt_proofs"]) == len(proofs) + 1
+    assert enrollment["initial_source"] == original["initial_source"]
+    assert enrollment["starter_admission"] == original["starter_admission"]
+    assert enrollment["repair_progress"]["legacy_unknown"] is True
+    assert api.fix_attempts == 3
+
+    api.complete_task(
+        source["task_id"], source, head_sha=current_head, base_sha=moved_main,
+    )
+    advanced_main = "e" * 40
+    api.current_main_sha = advanced_main
+    api.pull["mergeable_state"] = "behind"
+    api.pull["base"]["sha"] = moved_main
+    api.compare_results = {
+        f"{moved_main}...{advanced_main}": _compare_result(moved_main, ahead_by=1),
+        f"{moved_main}...{current_head}": _compare_result(moved_main, ahead_by=1),
+        f"{BASE}...{advanced_main}": _compare_result(BASE, ahead_by=2),
+        f"{BASE}...{current_head}": _compare_result(BASE, ahead_by=3),
+    }
+    cold = StateStore(store.path)
+    after_main_advance = Coordinator(
+        api, cold, clock=lambda: NOW,
+    ).run(apply=True)["pull_requests"][0]
+
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    next_neutral = next((
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "fix" and action.get("task_type") == "neutral"
+        and action.get("attempt") == 2
+    ), None)
+    assert next_neutral is not None, (
+        after_main_advance["reasons"], enrollment, api.fix_attempts,
+    )
+    assert enrollment["attempts"] == 4
+    assert enrollment["neutral_attempts"] == 2
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == 1
+    assert enrollment["repair_progress"]["legacy_unknown"] is True
+    assert next_neutral["main_sha"] == advanced_main
+    assert next_neutral["attempt"] == 2 and next_neutral["status"] == "sent"
+    assert api.fix_attempts == 4
 
 
 def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(tmp_path):

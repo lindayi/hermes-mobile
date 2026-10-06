@@ -1116,6 +1116,11 @@ def test_legacy_neutral_counter_requires_typed_reservation_history():
 
     enrollment = {"issue": 16, "attempts": 0}
     assert _legacy_neutral_attempt_count(enrollment, {}, []) == 0
+    assert _legacy_neutral_attempt_count(
+        enrollment | {"receipt_proofs": [{
+            "issue": 16, "kind": "fix", "attempt": 1, "task_type": "neutral",
+        }]}, {}, [],
+    ) is None
 
     enrollment["attempts"] = 1
     legacy_proof = {"issue": 16, "kind": "fix", "attempt": 1}
@@ -1126,12 +1131,56 @@ def test_legacy_neutral_counter_requires_typed_reservation_history():
         enrollment | {"receipt_proofs": [{
             **legacy_proof, "task_type": "neutral",
         }]}, {}, [],
-    ) == 1
+    ) is None
     assert _legacy_neutral_attempt_count(
         enrollment | {"receipt_proofs": [{
             **legacy_proof, "repair_policy_version": 1,
         }]}, {}, [],
-    ) == 0
+    ) is None
+
+
+def test_completed_source_progress_survives_main_advance_with_negative_review(
+        monkeypatch):
+    from deploy import cloud_coordinator
+
+    head = "a" * 40
+    old_main = "b" * 40
+    fingerprint = cloud_coordinator._repair_fingerprint(
+        "independent-review:deploy/cloud_coordinator.py", "The finding remains.",
+    )
+    action = {
+        "kind": "fix", "task_type": "review-followup", "issue": 16,
+        "status": "completed", "attempt": 4, "task_id": "source-task-4",
+        "head": head, "main_sha": old_main, "receipt_result": "ready",
+        "receipt_head": head, "receipt_base": old_main,
+        "pull_id": 160000016, "pull_node_id": "PR_node_16",
+        "repository_id": 1399942965, "owner_id": OWNER,
+        "repair_policy_version": 1, "repair_fingerprints": [fingerprint],
+        "repair_fingerprints_complete": True,
+    }
+    monkeypatch.setattr(
+        cloud_coordinator, "_valid_receipt_proof", lambda *_args, **_kwargs: True,
+    )
+    snapshot = {
+        "issue": 16, "head": head, "main_sha": "c" * 40, "comments": [],
+        "scoped": True, "reviews_complete": True, "threads_complete": True,
+        "pull": {"id": 160000016, "node_id": "PR_node_16"},
+        "enrollment": {
+            "repair_progress": cloud_coordinator._new_repair_progress(),
+        },
+    }
+
+    progress = cloud_coordinator._completed_repair_progress(
+        snapshot, {"source-task-4": action}, [fingerprint], {head},
+        review_ok=False, checks_ok=True, current_fingerprints_complete=True,
+    )
+
+    assert progress["consecutive_no_progress"] == 1
+    assert progress["evaluated_task_ids"] == ["source-task-4"]
+    assert not cloud_coordinator.independent_review_valid(
+        head, [], [], pull_author_id=123, threads_complete=True,
+        reviews_complete=True, issue=16, review_actions={},
+    )
 
 
 def test_legacy_neutral_recovery_splits_shared_counter_atomically(tmp_path):
