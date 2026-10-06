@@ -524,6 +524,11 @@ unknown decision only after fresh complete review/check evidence; it cannot clea
 targets or alter the streak. Neutral advancement can leave an older source result
 unscored; this remains explicit unknown history, not a current-head pending lock.
 
+GraphQL review-thread IDs are validated as nonempty strings of at most 256
+characters before entering the inventory. A malformed ID aborts the scan before
+state, cursor, outbox, or external writes; it is never stringified or dropped to
+make a partial page look complete.
+
 At reservation, the coordinator records at most 32 bounded fingerprints of the
 actual eligible repair targets: stable review-thread identity, normalized body
 finding, or source-workflow failure class. The persisted resolved-history bound
@@ -542,6 +547,10 @@ independent review retains its existing resolution semantics. Finding text uses
 one canonical namespace across body sections and independent paths; thread IDs
 and workflow failure classes retain their stable namespaces. All independently
 observed cleared targets enter history even when regression withholds credit.
+Resolution credit additionally requires an authentic `ready` receipt whose result
+head differs from its reserved starting head. A terminal failed task or same-head
+ready receipt may be evaluated as a no-progress decision, but cannot clear targets
+or reset stagnation when later review evidence drops a finding.
 The ready receipt's original dispatch base remains
 bound as historical provenance even after main advances; it is not replaced with
 the current base or treated as a fresh eligibility requirement. A previously
@@ -609,6 +618,11 @@ ceiling, or review-handoff wait. Older events without this optional detail remai
 readable and preserve their original PR identity. New typed stop events use a
 separate identity when they project a linked issue; the Inbox fallback for events
 without typed detail explicitly says the exact cause and counts are unavailable.
+Unknown retained history is recoverable waiting, not budget exhaustion: neither
+source nor neutral work is dispatched, and no exhaustion notice or lifecycle event
+is created. The enrollment, counts, receipt proofs, historical events, and consumer
+acknowledgements remain intact. When complete authenticated task/session history
+returns, the coordinator resumes once using the same counters and proofs.
 
 The 20-attempt ceiling is grounded in a small, nonrandom sample of merged cloud
 pull requests, not a percentile or guarantee. The audit used authenticated

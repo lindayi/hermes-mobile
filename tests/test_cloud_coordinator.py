@@ -1275,6 +1275,75 @@ def test_truncated_graphql_threads_never_become_complete():
     }], threads, threads_complete=complete)
 
 
+@pytest.mark.parametrize("identity", [None, 1, True, {}, "", "x" * 257])
+def test_graphql_thread_identity_must_be_a_bounded_nonempty_string_before_writes(
+        tmp_path, identity):
+    api = FakeApi(unresolved=True)
+    original_graphql = api.graphql
+
+    def malformed_thread(query, variables):
+        response = original_graphql(query, variables)
+        if "reviewThreads" in query:
+            response["data"]["repository"]["pullRequest"]["reviewThreads"][
+                "nodes"
+            ][0]["id"] = identity
+        return response
+
+    api.graphql = malformed_thread
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    before = store.path.read_bytes()
+
+    with pytest.raises(CoordinatorError, match="Review thread identity"):
+        Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+
+    assert store.path.read_bytes() == before
+    assert not api.writes and not api.graphql_writes
+
+
+def test_graphql_review_thread_identity_survives_complete_pagination():
+    class Paginated:
+        def __init__(self):
+            self.calls = []
+
+        def graphql(self, query, variables):
+            self.calls.append(dict(variables))
+            if len(self.calls) == 1:
+                return {"data": {"repository": {"pullRequest": {
+                    "reviewThreads": {
+                        "nodes": [{
+                            "id": "PRRT_valid",
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [{"body": "First page"}],
+                                "pageInfo": {"hasNextPage": False},
+                            },
+                        }],
+                        "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                    },
+                }}}}
+            return {"data": {"repository": {"pullRequest": {
+                "reviewThreads": {
+                    "nodes": [{
+                        "id": "PRRT_second",
+                        "isResolved": True,
+                        "comments": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": False},
+                        },
+                    }],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+            }}}}
+
+    api = Paginated()
+    threads, complete = collect_review_threads(api, 16)
+
+    assert complete
+    assert [thread["id"] for thread in threads] == ["PRRT_valid", "PRRT_second"]
+    assert api.calls == [{"number": 16}, {"number": 16, "cursor": "cursor-1"}]
+
+
 def test_graphql_pagination_rejects_api_errors_without_exposing_payload():
     class Failed:
         def graphql(self, query, variables):
@@ -3321,6 +3390,18 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         },
     }
     store._save(legacy)
+    historical_event = {
+        "event_id": "pr:16:execution_uncertain:historical",
+        "outcome": "execution_uncertain",
+        "reason": "execution_uncertain",
+        "issue_number": 16,
+        "pr_number": 16,
+        "head_sha": legacy_head,
+        "merge_sha": None,
+        "decision": None,
+        "occurred_at": "2026-10-01T12:00:00Z",
+    }
+    store.record_lifecycle(historical_event, now=1790856660)
 
     cold_store = StateStore(path)
     assert cold_store.snapshot()["enrollments"]["16"]["neutral_attempts_unknown"]
@@ -3339,9 +3420,87 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             },
         },
     ) == 0
-    result = Coordinator(
+
+    history_visible = False
+    original_get_all = api.get_all
+
+    def delayed_task_history(route, *, collection=None):
+        values = original_get_all(route, collection=collection)
+        if (route.startswith("agents/repos/lindayi/hermes-mobile/tasks?")
+                and not history_visible):
+            return [task for task in values if task.get("id") != "legacy-source-1"]
+        return values
+
+    api.get_all = delayed_task_history
+    waiting = Coordinator(
         api, cold_store, clock=lambda: 1790856660,
     ).run(apply=True)["pull_requests"][0]
+    waiting_state = StateStore(path).snapshot()
+    waiting_export = json.loads((path.parent / "workflow-events.json").read_text())
+    assert "waiting-for-verified-history" in waiting["reasons"]
+    assert waiting_state["enrollments"]["16"]["neutral_attempts_unknown"] is True
+    assert waiting_state["enrollments"]["16"]["attempts"] == 3
+    assert waiting_state["enrollments"]["16"]["receipt_proofs"] == proofs
+    assert not any(action.get("kind") == "fix"
+                   for action in StateStore(path).actions().values())
+    assert not any(key.endswith(":budget") for key in waiting_state["outbox"])
+    assert waiting_state["lifecycle_events"] == [historical_event]
+    assert waiting_export["events"] == [historical_event]
+    assert not any(event["reason"] == "execution_exhausted"
+                   for event in waiting_export["events"])
+    assert api.fix_attempts == 0
+
+    from backend.notification_policy import default_preferences
+    from backend.notifications import NotificationService
+    from deploy.workflow_notifications import (
+        ADAPTER_STATE_NAME, Paths as WorkflowNotificationPaths,
+        process as process_workflow_events,
+    )
+
+    config = tmp_path / "app-config.json"
+    config.write_text(json.dumps({"state_dir": str(path.parent)}))
+    config.chmod(0o600)
+    auth_path = path.parent / "auth.sqlite"
+    with sqlite3.connect(auth_path) as db:
+        db.execute("CREATE TABLE users(id TEXT,role TEXT,status TEXT,profile TEXT)")
+        db.execute(
+            "INSERT INTO users VALUES(?,?,?,?)",
+            (APP_OWNER_ID, "owner", "ready", "default"),
+        )
+    auth_path.chmod(0o600)
+    notification_service = NotificationService(
+        path.parent / "notifications.sqlite", clock=lambda: 1790856660,
+    )
+    with notification_service._db() as db:
+        preferences = default_preferences()
+        preferences["categories"]["operational"] = True
+        db.execute(
+            "INSERT INTO push_preferences VALUES(?,?,?)",
+            (APP_OWNER_ID, "device-1", json.dumps(preferences)),
+        )
+    notification_paths = WorkflowNotificationPaths(
+        config=config,
+        delivery_state=tmp_path / "delivery" / "state.json",
+        controller_state=tmp_path / "controller",
+    )
+    consumer_now = datetime.fromtimestamp(1790856660, timezone.utc)
+    event_export = path.parent / "workflow-events.json"
+    os.utime(event_export, (consumer_now.timestamp(), consumer_now.timestamp()))
+    first_delivery = process_workflow_events(
+        notification_paths, apply=True, now=consumer_now,
+    )
+    assert first_delivery["inbox_items"] == 1
+    with sqlite3.connect(path.parent / ADAPTER_STATE_NAME) as db:
+        assert db.execute("SELECT status FROM events").fetchone() == ("acked",)
+
+    history_visible = True
+    result = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    os.utime(event_export, (consumer_now.timestamp(), consumer_now.timestamp()))
+    second_delivery = process_workflow_events(
+        notification_paths, apply=True, now=consumer_now,
+    )
 
     enrollment = cold_store.snapshot()["enrollments"]["16"]
     neutral = next((
@@ -3357,8 +3516,15 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     assert enrollment["attempts"] == 3
     assert enrollment["neutral_attempts"] == 1
     assert enrollment["neutral_attempts_unknown"] is False
+    assert enrollment["receipt_proofs"] == proofs
     assert api.fix_attempts == 1
     assert neutral["status"] == "sent"
+    assert second_delivery["inbox_items"] == 0
+    assert StateStore(path).snapshot()["lifecycle_events"] == [historical_event]
+    recovered_export = json.loads((path.parent / "workflow-events.json").read_text())
+    assert recovered_export["events"] == [historical_event]
+    with sqlite3.connect(path.parent / ADAPTER_STATE_NAME) as db:
+        assert db.execute("SELECT status FROM events").fetchone() == ("acked",)
 
     api.complete_task(
         neutral["task_id"], neutral, head_sha=legacy_head, base_sha=CURRENT_MAIN,
@@ -3464,6 +3630,90 @@ def test_authenticated_failed_repair_counts_only_with_fresh_head_evidence(tmp_pa
     assert api.fix_attempts == 2
     assert any(event["reason"] == "task_failed"
                for event in store.snapshot()["lifecycle_events"])
+
+
+@pytest.mark.parametrize("completion", ["failed", "no-op"])
+def test_failed_and_noop_repairs_cannot_credit_dropped_findings(
+        tmp_path, completion):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "Finding A remains.", "2026-10-01T12:10:00Z",
+    )
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    first = max(
+        (action for action in StateStore(path).actions().values()
+         if action.get("kind") == "fix"),
+        key=lambda action: action["attempt"],
+    )
+    changed_head = "2" * 40
+    api.head_sha = api.pull["head"]["sha"] = changed_head
+    api.complete_task(first["task_id"], first, head_sha=changed_head)
+    refresh_owner_review(api, changed_head, submitted_at="2026-10-01T12:06:00Z")
+    api.progress_review = _progress_review(
+        changed_head, 63003, "Finding A remains.", "2026-10-01T12:10:00Z",
+    )
+    result = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    assert result["repair_requested"]
+    assert StateStore(path).snapshot()["enrollments"]["16"][
+        "repair_progress"
+    ]["consecutive_no_progress"] == 1
+
+    second = max(
+        (action for action in StateStore(path).actions().values()
+         if action.get("kind") == "fix"),
+        key=lambda action: action["attempt"],
+    )
+    if completion == "failed":
+        api.tasks[second["task_id"]].update(
+            state="failed", updated_at="2026-10-01T12:05:30Z",
+        )
+    else:
+        api.complete_task(
+            second["task_id"], second, head_sha=second["head"],
+        )
+    api.progress_review = _progress_review(
+        changed_head, 63004, "Finding B remains.", "2026-10-01T12:11:00Z",
+    )
+    result = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+
+    assert result["repair_requested"]
+    assert enrollment["attempts"] == 3
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == 2
+    assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+
+    third = max(
+        (action for action in StateStore(path).actions().values()
+         if action.get("kind") == "fix"),
+        key=lambda action: action["attempt"],
+    )
+    if completion == "failed":
+        api.tasks[third["task_id"]].update(
+            state="failed", updated_at="2026-10-01T12:05:30Z",
+        )
+    else:
+        api.complete_task(third["task_id"], third, head_sha=third["head"])
+    api.progress_review = _progress_review(
+        changed_head, 63005, "Finding B remains.", "2026-10-01T12:12:00Z",
+    )
+    result = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+
+    assert not result["repair_requested"]
+    assert "budget" in result["reasons"]
+    assert enrollment["attempts"] == 3
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == NO_PROGRESS_LIMIT
+    assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+    assert api.fix_attempts == 3
 
 
 def test_a_b_a_finding_cycle_never_reearns_progress_credit(tmp_path):

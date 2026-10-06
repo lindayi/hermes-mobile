@@ -78,6 +78,7 @@ MAX_REPAIR_PROGRESS_HISTORY = REPAIR_LIMIT * MAX_REPAIR_FINGERPRINTS
 REPAIR_PROGRESS_VERSION = 1
 REVIEW_REPORT_CORRECTION_LIMIT = 1
 MAX_SESSION_ID_LENGTH = 256
+MAX_THREAD_ID_LENGTH = 256
 MAX_RECEIPT_POLLS = 3
 MAX_HANDOFF_POLLS = 6
 HANDOFF_ACTIVE_STATES = frozenset({
@@ -1318,12 +1319,16 @@ def collect_review_threads(api, pull_number):
         for raw in page["nodes"]:
             if not isinstance(raw, dict):
                 return threads, False
+            thread_id = raw.get("id")
+            if (not isinstance(thread_id, str)
+                    or not thread_id or len(thread_id) > MAX_THREAD_ID_LENGTH):
+                raise CoordinatorError("Review thread identity is invalid")
             comments = raw.get("comments")
             if not isinstance(comments, dict) or not isinstance(comments.get("nodes"), list):
                 return threads, False
             page_info = comments.get("pageInfo") or {}
             thread = {
-                "id": str(raw.get("id", "")),
+                "id": thread_id,
                 "isResolved": raw.get("isResolved"),
                 "comments": comments["nodes"],
                 "comments_complete": page_info.get("hasNextPage") is False,
@@ -2646,7 +2651,11 @@ def _completed_repair_progress(snapshot, actions, current_fingerprints,
         before = set(action["repair_fingerprints"])
         current = set(current_fingerprints)
         cleared = before - current
-        if not checks_ok:
+        source_delta = (
+            ready_receipt
+            and action.get("receipt_head") != action.get("receipt_start_head")
+        )
+        if not checks_ok or not source_delta:
             cleared.clear()
         if not review_ok:
             cleared.intersection_update(independently_resolved or [])
@@ -5204,12 +5213,11 @@ class Coordinator:
         if (budget_needed
                 and snapshot["enrollment"].get("neutral_attempts_unknown") is True):
             reasons.append((
-                "budget",
-                f"PR #{number} repair stopped because retained reservation history could "
-                "not be authenticated; the exact count and limit are unavailable. "
-                "Preserve this enrollment and restore trustworthy task/session evidence.",
+                "waiting-for-verified-history",
+                f"PR #{number} repair is waiting for authenticated retained reservation "
+                "history; no source or neutral task will be dispatched until its exact "
+                "count can be verified. Preserve this enrollment and receipt history.",
             ))
-            snapshot["budget_incident"] = "repair-history-unknown"
         elif source_budget_stop:
             admission = snapshot["enrollment"].get("starter_admission")
             linked_issue = (
