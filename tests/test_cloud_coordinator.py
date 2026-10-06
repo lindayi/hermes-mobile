@@ -2129,8 +2129,15 @@ def _ready_sha_bound_handoff(tmp_path):
     return api, store, coordinator, first
 
 
-def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
+@pytest.mark.parametrize(
+    "mergeable, mergeable_state",
+    [(True, "behind"), (False, "dirty")],
+    ids=["behind", "dirty"],
+)
+def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(
+        tmp_path, mergeable, mergeable_state):
     api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
+    api.pull.update(mergeable=mergeable, mergeable_state=mergeable_state)
     store._mutate(lambda state: state["actions"].__setitem__(
         "fix:17:uncertain",
         {"kind": "fix", "issue": 17, "status": "uncertain"},
@@ -2578,10 +2585,11 @@ def test_compare_evidence_rejects_inconsistent_equal_sha_status(
 @pytest.mark.parametrize("hazard", [
     "active-task", "uncertain-task", "wrong-ref", "wrong-repository", "wrong-head",
     "wrong-head-repo", "wrong-compare-base", "main-diverged", "head-diverged", "unknown-history",
-    "partial-compare", "edited-receipt",
+    "partial-compare", "edited-receipt", "inconsistent-dirty", "inconsistent-behind",
 ])
 def test_stale_base_reconciliation_fails_closed(tmp_path, hazard):
     api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
+    api.pull.update(mergeable=False, mergeable_state="dirty")
     if hazard == "active-task":
         api.tasks[first["task_id"]]["state"] = "in_progress"
     elif hazard == "uncertain-task":
@@ -2626,6 +2634,10 @@ def test_stale_base_reconciliation_fails_closed(tmp_path, hazard):
         )
         receipt_comment["body"] += "\nedited"
         receipt_comment["updated_at"] = "2026-10-01T12:06:00Z"
+    elif hazard == "inconsistent-dirty":
+        api.pull.update(mergeable=True, mergeable_state="dirty")
+    elif hazard == "inconsistent-behind":
+        api.pull.update(mergeable=False, mergeable_state="behind")
 
     attempts_before = store.snapshot()["enrollments"]["16"]["attempts"]
     try:
@@ -3372,8 +3384,22 @@ def test_cold_legacy_mixed_budget_request_identity(tmp_path, producer, occupancy
     assert api.task_posts == (1 if occupancy is None else 0)
 
 
+@pytest.mark.parametrize(
+    "hydration_hazard",
+    [
+        None, "duplicate-list", "malformed-list", "missing-detail",
+        "foreign-detail", "multiple-sessions", "missing-sessions",
+        "mismatched-detail-id", "mismatched-session", "foreign-session",
+    ],
+    ids=["valid", "duplicate-list", "malformed-list", "missing-detail",
+         "foreign-detail", "multiple-sessions", "missing-sessions",
+         "mismatched-detail-id", "mismatched-session", "foreign-session"],
+)
 def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
-        tmp_path):
+        tmp_path, hydration_hazard):
+    from copy import deepcopy
+    from deploy.task_receipts import receipt_instruction
+
     api = ProgressApi(unresolved=False)
     api.pull["body"] = "Synthetic linked pull request."
     legacy_head = "3" * 40
@@ -3428,8 +3454,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             "created_at": created_at, "updated_at": created_at,
         })
         proofs.append({
-            "issue": 16, "kind": "fix", "task_type": "source",
-            "status": "completed", "attempt": attempt, "head": start_head,
+            "issue": 16, "kind": "fix", "status": "completed",
+            "head": start_head,
             "task_id": task_id, "dispatch_nonce": nonce,
             "receipt_result": "ready", "receipt_comment_id": comment_id,
             "receipt_created_at": created_at, "receipt_body": body,
@@ -3459,9 +3485,13 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                 "user": {"id": OWNER}, "owner": {"id": OWNER},
                 "repository": {"id": 1399942965},
                 "head_ref": "topic", "base_ref": "main",
+                "completed_at": created_at,
                 "prompt": (
                     f"Please address bounded review/check follow-up for PR #16 "
-                    f"at head `{start_head}`."
+                    f"at head `{start_head}`.\n\n"
+                    + receipt_instruction(
+                        nonce, pull_number=16, start_head=start_head, base_sha=BASE,
+                    )
                 ),
             }],
         }
@@ -3470,7 +3500,7 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     api.head_sha = legacy_head
     api.pull["head"]["sha"] = legacy_head
     api.current_main_sha = CURRENT_MAIN
-    api.pull["mergeable_state"] = "behind"
+    api.pull.update(mergeable=False, mergeable_state="dirty")
     api.compare_results = {
         f"{BASE}...{CURRENT_MAIN}": _compare_result(BASE, ahead_by=1),
         f"{BASE}...{legacy_head}": _compare_result(BASE, ahead_by=3),
@@ -3547,6 +3577,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     cold_store = StateStore(path)
     assert cold_store.snapshot()["enrollments"]["16"]["neutral_attempts_unknown"]
     assert not any(action.get("kind") == "fix" for action in cold_store.actions().values())
+    assert all(not ({"attempt", "task_type", "repair_policy_version"} & set(proof))
+               for proof in proofs)
     from deploy.cloud_coordinator import _legacy_neutral_attempt_count, _valid_receipt_proof
     assert all(_valid_receipt_proof(proof, api.comments) for proof in proofs)
     assert _legacy_neutral_attempt_count(
@@ -3565,6 +3597,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     history_visible = False
     original_get_all = api.get_all
     task_list_records = []
+    task_detail_reads = []
+    original_get = api.get
 
     def delayed_task_history(route, *, collection=None):
         values = original_get_all(route, collection=collection)
@@ -3579,10 +3613,46 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                 }
                 for task in values
             ]
+            if history_visible and hydration_hazard == "duplicate-list":
+                values.append(deepcopy(next(
+                    task for task in values if task["id"] == "legacy-source-1"
+                )))
+            if history_visible and hydration_hazard == "malformed-list":
+                next(task for task in values
+                     if task["id"] == "legacy-source-1")["session_count"] = True
             task_list_records.extend(values)
         return values
 
+    def task_details(route):
+        if route.startswith("agents/repos/lindayi/hermes-mobile/tasks/legacy-source-"):
+            task_detail_reads.append(route.rsplit("/", 1)[-1])
+            if (history_visible and hydration_hazard == "missing-detail"
+                    and route.endswith("/legacy-source-1")):
+                raise ApiError("synthetic detail unavailable", status=404)
+            detail = deepcopy(original_get(route))
+            if (history_visible and hydration_hazard == "foreign-detail"
+                    and route.endswith("/legacy-source-1")):
+                detail["creator"] = {"id": OWNER + 1}
+            if (history_visible and hydration_hazard == "multiple-sessions"
+                    and route.endswith("/legacy-source-1")):
+                detail["sessions"].append(deepcopy(detail["sessions"][0]))
+            if (history_visible and hydration_hazard == "missing-sessions"
+                    and route.endswith("/legacy-source-1")):
+                detail.pop("sessions")
+            if (history_visible and hydration_hazard == "mismatched-detail-id"
+                    and route.endswith("/legacy-source-1")):
+                detail["id"] = "legacy-source-other"
+            if (history_visible and hydration_hazard == "mismatched-session"
+                    and route.endswith("/legacy-source-1")):
+                detail["sessions"][0]["task_id"] = "legacy-source-other"
+            if (history_visible and hydration_hazard == "foreign-session"
+                    and route.endswith("/legacy-source-1")):
+                detail["sessions"][0]["owner"] = {"id": OWNER + 1}
+            return detail
+        return original_get(route)
+
     api.get_all = delayed_task_history
+    api.get = task_details
     waiting = Coordinator(
         api, cold_store, clock=lambda: 1790856660,
     ).run(apply=True)["pull_requests"][0]
@@ -3654,6 +3724,29 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     )
 
     enrollment = cold_store.snapshot()["enrollments"]["16"]
+    if hydration_hazard is not None:
+        assert enrollment["attempts"] == 3
+        assert enrollment["neutral_attempts_unknown"] is True
+        assert enrollment["receipt_proofs"] == proofs
+        assert not any(action.get("kind") == "fix"
+                       for action in StateStore(path).actions().values())
+        assert api.fix_attempts == 0
+        assert not any(route.endswith("/tasks") for route, _ in api.writes)
+        if hydration_hazard in {"duplicate-list", "malformed-list"}:
+            assert "legacy-source-1" not in task_detail_reads
+        else:
+            assert "legacy-source-1" in task_detail_reads
+        for _ in range(2):
+            Coordinator(
+                api, StateStore(path), clock=lambda: 1790856660,
+            ).run(apply=True)
+        assert api.fix_attempts == 0
+        assert not any(route.endswith("/tasks") for route, _ in api.writes)
+        assert StateStore(path).snapshot()["enrollments"]["16"][
+            "neutral_attempts_unknown"
+        ] is True
+        return
+
     neutral = next((
         action for action in cold_store.actions().values()
         if action.get("task_type") == "neutral"
@@ -3667,6 +3760,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     assert enrollment["attempts"] == 3
     assert enrollment["neutral_attempts"] == 1
     assert enrollment["neutral_attempts_unknown"] is False
+    assert enrollment["repair_progress"]["legacy_unknown"] is True
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == 0
     assert enrollment["receipt_proofs"] == proofs
     assert api.fix_attempts == 1
     assert neutral["status"] == "sent"
@@ -3675,31 +3770,73 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     assert all("sessions" not in task and task["session_count"] == 1
                for task in task_list_records
                if task["id"].startswith("legacy-source-"))
+    assert set(task_detail_reads) == {
+        "legacy-source-1", "legacy-source-2", "legacy-source-3",
+    }
+    assert task_detail_reads.count("legacy-source-1") == 1
+    assert task_detail_reads.count("legacy-source-2") == 2
+    assert task_detail_reads.count("legacy-source-3") == 2
     assert StateStore(path).snapshot()["lifecycle_events"] == [historical_event]
     recovered_export = json.loads((path.parent / "workflow-events.json").read_text())
     assert recovered_export["events"] == [historical_event]
     with sqlite3.connect(path.parent / ADAPTER_STATE_NAME) as db:
         assert db.execute("SELECT status FROM events").fetchone() == ("acked",)
 
+    neutral_head = "4" * 40
     api.complete_task(
-        neutral["task_id"], neutral, head_sha=legacy_head, base_sha=CURRENT_MAIN,
+        neutral["task_id"], neutral, head_sha=neutral_head, base_sha=CURRENT_MAIN,
     )
+    api.head_sha = api.pull["head"]["sha"] = neutral_head
     api.pull["base"]["sha"] = CURRENT_MAIN
-    api.pull["mergeable_state"] = "clean"
-    resumed = Coordinator(
-        api, StateStore(path), clock=lambda: 1790856660,
-    ).run(apply=True)["pull_requests"][0]
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    resumed_results = []
+    for _ in range(2):
+        resumed = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        resumed_results.append(resumed)
+    reviewer = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "review" and action.get("head") == neutral_head
+    )
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=StateStore(path).action(neutral["key"]),
+        verdict="changes_requested",
+        findings=[{
+            "path": "frontend/styles.css",
+            "comment": "A new post-reconciliation synthetic blocker.",
+        }],
+    )
+    for _ in range(3):
+        resumed = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        resumed_results.append(resumed)
     enrollment = StateStore(path).snapshot()["enrollments"]["16"]
     followup = next((
         action for action in StateStore(path).actions().values()
         if action.get("kind") == "fix" and action.get("task_type") != "neutral"
     ), None)
     assert followup is not None, (resumed["reasons"], resumed, enrollment)
-    assert resumed["repair_requested"]
+    assert any(result["repair_requested"] for result in resumed_results)
+    reviewed = StateStore(path).action(reviewer["key"])
+    assert reviewed["head"] == neutral_head
+    assert reviewed["report_verdict"] == "changes_requested"
+    assert reviewed["publication_state"] == "done"
+    assert api.owner_review_head_sha == neutral_head
+    assert json.loads(api.owner_review_body)["verdict"] == "changes_requested"
     assert enrollment["attempts"] == 4
     assert enrollment["neutral_attempts"] == 1
     assert followup["attempt"] == 4 and followup["status"] == "sent"
+    assert followup["head"] == neutral_head
     assert api.fix_attempts == 2
+    sent_posts = [route for route, _ in api.writes if route.endswith("/tasks")]
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)
+    assert [route for route, _ in api.writes if route.endswith("/tasks")] == sent_posts
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 4
 
 
 def test_three_receipt_verified_no_progress_attempts_stop_after_restart(tmp_path):

@@ -2471,8 +2471,37 @@ def _legacy_task_reservation_type(record, tasks, snapshot):
     return reservation_type
 
 
+def _legacy_task_detail_matches_list(listed, detailed):
+    terminal_states = {"completed", "failed", "timed_out", "cancelled"}
+    if (
+            not isinstance(listed, dict) or "sessions" in listed
+            or type(listed.get("session_count")) is not int
+            or listed["session_count"] != 1
+            or listed.get("state") not in terminal_states
+            or not isinstance(detailed, dict)
+            or detailed.get("id") != listed.get("id")
+            or detailed.get("state") != listed.get("state")
+            or detailed.get("state") not in terminal_states
+            or not isinstance(detailed.get("sessions"), list)
+            or len(detailed["sessions"]) != 1
+            or ("session_count" in detailed
+                and (type(detailed["session_count"]) is not int
+                     or detailed["session_count"] != 1))
+    ):
+        return False
+    return all(
+        _github_identity(listed.get(field), expected_id)
+        and _github_identity(detailed.get(field), expected_id)
+        and listed[field].get("id") == detailed[field].get("id")
+        for field, expected_id in (
+            ("creator", OWNER_ID), ("owner", OWNER_ID),
+            ("repository", REPOSITORY_ID),
+        )
+    )
+
+
 def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
-                                  tasks=None, snapshot=None):
+                                  tasks=None, snapshot=None, task_details=None):
     """Recover the shared budget only when every reservation type is proven."""
     attempts = enrollment.get("attempts")
     if type(attempts) is not int or attempts < 0:
@@ -2487,6 +2516,12 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
                 task_map[task_id] = None
             else:
                 task_map[task_id] = task
+    if isinstance(task_details, dict):
+        for task_id, detailed in task_details.items():
+            listed = task_map.get(task_id)
+            if (isinstance(listed, dict)
+                    and _legacy_task_detail_matches_list(listed, detailed)):
+                task_map[task_id] = detailed
     by_task = {}
     by_attempt = {}
     task_ordinals = {}
@@ -2968,10 +3003,13 @@ class Coordinator:
             )
         return comparison.get("status") == "ahead" and ahead_by > 0
 
-    def _historical_base_is_behind(self, pull, main_sha, head_sha):
+    def _historical_base_can_reconcile(self, pull, main_sha, head_sha):
         base = pull.get("base") if isinstance(pull, dict) else None
-        if (not isinstance(base, dict) or pull.get("mergeable") is not True
-                or pull.get("mergeable_state") != "behind"
+        mergeability_confirms_reconciliation = (
+            (pull.get("mergeable") is True and pull.get("mergeable_state") == "behind")
+            or (pull.get("mergeable") is False and pull.get("mergeable_state") == "dirty")
+        )
+        if (not isinstance(base, dict) or not mergeability_confirms_reconciliation
                 or base.get("ref") != MAIN_BRANCH
                 or not _github_identity(base.get("repo"), REPOSITORY_ID)
                 or not _is_sha(base.get("sha")) or base["sha"] == main_sha
@@ -3381,7 +3419,7 @@ class Coordinator:
         )
         historical_base = (
             not scoped and (has_ready_handoff or has_neutral_claim)
-            and self._historical_base_is_behind(pull, main_sha, sha)
+            and self._historical_base_can_reconcile(pull, main_sha, sha)
         )
         files = _rest_list(
             self.api, f"repos/{REPOSITORY}/pulls/{number}/files?per_page=100",
@@ -3429,6 +3467,63 @@ class Coordinator:
             self._resolve_initial_source(snapshot)
         )
         return snapshot
+
+    def _hydrate_legacy_task_details(self, enrollment, actions, snapshot):
+        attempts = enrollment.get("attempts")
+        if (type(attempts) is not int or not 0 < attempts <= REPAIR_LIMIT
+                or not isinstance(snapshot.get("tasks"), list)):
+            return {}
+        listed_by_id = {}
+        for task in snapshot["tasks"]:
+            task_id = task.get("id") if isinstance(task, dict) else None
+            if not isinstance(task_id, str) or not task_id or len(task_id) > 128:
+                continue
+            if task_id in listed_by_id:
+                listed_by_id[task_id] = None
+            else:
+                listed_by_id[task_id] = task
+        comments = snapshot.get("comments")
+        records = [
+            *actions.values(),
+            *(enrollment.get("receipt_proofs")
+              if isinstance(enrollment.get("receipt_proofs"), list) else []),
+        ]
+        candidates = set()
+        for record in records:
+            if (not isinstance(record, dict) or record.get("kind") != "fix"
+                    or record.get("issue") != enrollment.get("issue")
+                    or record.get("status") != "completed"
+                    or not _valid_receipt_proof(record, comments)):
+                continue
+            task_id = record.get("receipt_task_id")
+            listed = listed_by_id.get(task_id)
+            if (
+                    isinstance(listed, dict)
+                    and "sessions" not in listed
+                    and type(listed.get("session_count")) is int
+                    and listed["session_count"] == 1
+                    and listed.get("state") in {
+                        "completed", "failed", "timed_out", "cancelled",
+                    }
+                    and _github_identity(listed.get("creator"), OWNER_ID)
+                    and _github_identity(listed.get("owner"), OWNER_ID)
+                    and _github_identity(listed.get("repository"), REPOSITORY_ID)
+            ):
+                candidates.add(task_id)
+        if len(candidates) > min(attempts, REPAIR_LIMIT):
+            return {}
+        details = {}
+        for task_id in sorted(candidates):
+            try:
+                detailed = self.api.get(
+                    f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}",
+                )
+            except (ApiError, CoordinatorError, TypeError, ValueError):
+                return {}
+            listed = listed_by_id[task_id]
+            if _legacy_task_detail_matches_list(listed, detailed):
+                details[task_id] = detailed
+        return details
 
     def _verified_stale_ready_handoff(self, action, snapshot):
         pull = snapshot["pull"]
@@ -4043,7 +4138,7 @@ class Coordinator:
             return False
         pull = self._fence_pull(
             action["issue"], action["head"], action["main_sha"],
-            allow_historical_behind=True,
+            allow_historical_reconciliation=True,
         )
         if (not isinstance(pull, dict) or not _pull_identity(pull, action)):
             return False
@@ -4713,9 +4808,13 @@ class Coordinator:
             str(number), {},
         ).get("receipt_proofs", [])
         if enrollment.get("neutral_attempts_unknown") is True:
+            task_details = self._hydrate_legacy_task_details(
+                enrollment, actions, snapshot,
+            )
             recovered_neutral_attempts = _legacy_neutral_attempt_count(
                 enrollment, actions, snapshot["comments"],
                 tasks=snapshot["tasks"], snapshot=snapshot,
+                task_details=task_details,
             )
             if recovered_neutral_attempts is not None:
                 if apply:
@@ -5387,7 +5486,7 @@ class Coordinator:
         }
 
     def _fence_pull(self, number, head, main_sha=None, *,
-                    allow_historical_behind=False, expected_base_sha=None):
+                    allow_historical_reconciliation=False, expected_base_sha=None):
         pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
         base = pull.get("base") if isinstance(pull, dict) else None
         actual = pull.get("head") if isinstance(pull, dict) else None
@@ -5408,8 +5507,8 @@ class Coordinator:
             if not isinstance(current_main, dict) or current_main.get("sha") != main_sha:
                 return False
             if (base.get("sha") != main_sha
-                    and (not allow_historical_behind
-                         or not self._historical_base_is_behind(
+                    and (not allow_historical_reconciliation
+                         or not self._historical_base_can_reconcile(
                              pull, main_sha, head,
                          ))):
                 return False
@@ -5443,7 +5542,7 @@ class Coordinator:
             return "superseded"
         current = self._fence_pull(
             action["issue"], action["head"], action["main_sha"],
-            allow_historical_behind=neutral or report_correction,
+            allow_historical_reconciliation=neutral or report_correction,
             expected_base_sha=(
                 action.get("recorded_base_sha") if neutral else None
             ),
@@ -5550,7 +5649,7 @@ class Coordinator:
                            collection="tasks")
         current = self._fence_pull(
             action["issue"], action["head"], action["main_sha"],
-            allow_historical_behind=neutral or report_correction,
+            allow_historical_reconciliation=neutral or report_correction,
             expected_base_sha=(
                 action.get("recorded_base_sha") if neutral else None
             ),
