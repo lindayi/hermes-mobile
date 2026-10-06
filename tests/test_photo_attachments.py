@@ -1,13 +1,20 @@
 """Photo upload regressions use only small deterministic in-memory images."""
 import binascii
+import base64
 from contextlib import contextmanager
-from pathlib import Path
+import io
+import json
 import struct
+import time
 import zlib
 
+import httpx
+from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 from fastapi.testclient import TestClient
 
 from backend.app import Settings, create_app
+from backend.hermes_client import GatewayClient
 from test_auth import BASE, BOOTSTRAP, ORIGIN, enroll
 from test_native_catalog import create_native_db
 
@@ -26,12 +33,13 @@ def png_fixture(seed=0):
 
 
 @contextmanager
-def photo_client(tmp_path, **settings_options):
+def photo_client(tmp_path, *, gateway_client=None, **settings_options):
     home = tmp_path / 'native'
     home.mkdir(parents=True)
     create_native_db(home / 'state.db')
     app = create_app(Settings(state_dir=tmp_path / 'app', profiles={'default': home},
-                              bootstrap_secret=BOOTSTRAP, **settings_options))
+                              bootstrap_secret=BOOTSTRAP, **settings_options),
+                     gateway_client=gateway_client)
     with TestClient(app, base_url=ORIGIN) as client:
         client.headers['Origin'] = ORIGIN
         enroll(client)
@@ -141,3 +149,68 @@ def test_expiry_reclaims_only_attachment_bytes_and_returns_controlled_placeholde
         assert expired.status_code == 410
         assert 'message text is still available' in expired.json()['detail']
         assert not (app.state.attachments.objects / (uploaded['id'] + '.png')).exists()
+
+
+def test_normalized_image_drops_source_metadata(tmp_path):
+    image = Image.new('RGB', (2, 2), 'navy')
+    metadata = PngInfo()
+    metadata.add_text('GPSLocation', 'synthetic fixture location')
+    source = io.BytesIO()
+    image.save(source, format='PNG', pnginfo=metadata)
+
+    with photo_client(tmp_path) as (app, client):
+        upload = client.post(BASE + '/sessions/wa-1/attachments', content=source.getvalue(),
+                             headers={'Idempotency-Key': 'metadata-photo'})
+        normalized = (app.state.attachments.objects / (upload.json()['id'] + '.png')).read_bytes()
+
+        assert upload.status_code == 201
+        assert b'GPSLocation' not in normalized
+        assert b'synthetic fixture location' not in normalized
+
+
+def test_owned_photo_reaches_the_same_native_run_as_text_without_journal_bytes(tmp_path):
+    native_payloads = []
+
+    async def upstream(request):
+        if request.url.path.endswith('/messages'):
+            return httpx.Response(200, json={'session_id': 'wa-1', 'data': []})
+        if request.url.path == '/v1/runs':
+            native_payloads.append(json.loads(request.content))
+            return httpx.Response(202, json={'run_id': 'native-photo-run'})
+        if request.url.path.endswith('/events'):
+            return httpx.Response(200, text=(
+                'event: run.completed\n'
+                'data: {"run_id":"native-photo-run","output":"A red and blue test image."}\n\n'))
+        return httpx.Response(404)
+
+    gateway = GatewayClient('http://127.0.0.1:8642', 'synthetic-test-token',
+                            execution_ready=True, transport=httpx.MockTransport(upstream))
+    with photo_client(tmp_path, gateway_client=gateway) as (app, client):
+        upload = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+                             headers={'Idempotency-Key': 'run-photo-upload'})
+        attachment_id = upload.json()['id']
+        body = {'session_id': 'wa-1', 'input': 'Describe the attached image.',
+                'idempotency_key': 'photo-run', 'attachments': [attachment_id]}
+
+        submitted = client.post(BASE + '/runs', json=body)
+        duplicate = client.post(BASE + '/runs', json=body)
+        for _ in range(100):
+            run = client.get(BASE + '/runs/' + submitted.json()['id']).json()
+            if run['status'] == 'completed':
+                break
+            time.sleep(.01)
+
+        assert upload.status_code == 201
+        assert submitted.status_code == 200
+        assert duplicate.json()['id'] == submitted.json()['id']
+        assert len(native_payloads) == 1
+        payload = native_payloads[0]
+        assert payload['mobile_attachment_ids'] == [attachment_id]
+        content = payload['input'][-1]['content']
+        assert content[0] == {'type': 'text', 'text': 'Describe the attached image.'}
+        image = content[1]
+        assert image['type'] == 'image_url'
+        assert base64.b64decode(image['image_url']['url'].split(',', 1)[1]) == (
+            app.state.attachments.objects / (attachment_id + '.png')).read_bytes()
+        assert run['status'] == 'completed'
+        assert image['image_url']['url'].encode() not in app.state.journal.path.read_bytes()

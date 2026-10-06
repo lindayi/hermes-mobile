@@ -70,6 +70,8 @@ def _normalize_image(path):
                     raise AttachmentError(415, 'Choose a single-frame JPEG, PNG, or WebP image.')
                 image = ImageOps.exif_transpose(source)
                 image.load()
+                mode = 'RGBA' if 'A' in image.getbands() or 'transparency' in image.info else 'RGB'
+                image = Image.frombytes(mode, image.size, image.convert(mode).tobytes())
         if image.width * image.height > MAX_IMAGE_PIXELS:
             raise AttachmentError(413, 'This image has too many pixels to process safely.')
         image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
