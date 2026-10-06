@@ -346,6 +346,20 @@ The independent policy test fixture pins these exact candidate bytes. The update
 preserves earlier issue #43, #50, and #79 history; it establishes source consistency
 only, not independent review, merge, runtime evidence, or activation permission.
 
+Issue #87 refreshes the current bounded-repair coordinator and lifecycle notification
+pins. The candidate recovers a separate neutral count only from complete retained
+reservation provenance, keeps unknown legacy history conservative, and adds a typed
+exhaustion cause for the existing Inbox path. These exact source pins and their
+independent literal fixture do not establish issue acceptance, independent review,
+merge, runtime evidence, or activation permission:
+
+| Issue #87 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `86b57c4c3312824655e9b65f1eaa024445ba7c1ca9699c7e10ddfa580553f62f` |
+| `deploy/workflow_events.py` | `5759930bb5a15465399c54e37c712d9c3eda5e42fee1a59d05dd50745418d91f` |
+| `deploy/workflow_lifecycle.py` | `a45ea590ae138355792c84117a6a9b11c5bbdc184810b0c0bb415fce8fa957ef` |
+| `deploy/workflow_notifications.py` | `e8f8f371d633574487f9fd247d57a67c9b956bf41cf81b2050b1578d18952203` |
+
 Issue #50's historical receipt-transport candidate overlaid only
 `deploy/cloud_coordinator.py` and `deploy/task_receipts.py` in the source inventory.
 The historical PR40 and issue #43 table hashes above remain unchanged:

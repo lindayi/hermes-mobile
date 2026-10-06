@@ -1107,6 +1107,31 @@ def test_neutral_reconciliation_uses_only_its_own_bounded_counter(tmp_path):
     })
 
 
+def test_neutral_ceiling_exports_typed_stop_detail(tmp_path):
+    api = FakeApi(unresolved=True)
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    store._mutate(lambda state: state["enrollments"]["16"].update(
+        attempts=3, neutral_attempts=NEUTRAL_LIMIT,
+    ))
+
+    result = Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+
+    stopped = next(
+        event for event in store.snapshot()["lifecycle_events"]
+        if event["reason"] == "execution_exhausted"
+    )
+    assert stopped["issue_number"] == 16 and stopped["pr_number"] == 16
+    assert stopped["stop_detail"] == {
+        "cause": "neutral-ceiling", "used": NEUTRAL_LIMIT, "remaining": 0,
+        "limit": NEUTRAL_LIMIT, "source_used": 3,
+        "source_ceiling": REPAIR_LIMIT, "stagnation_count": 0,
+    }
+    assert not result["pull_requests"][0]["repair_requested"]
+    assert api.fix_attempts == 0
+
+
 def test_state_outbox_is_deduplicated_and_apply_lock_is_exclusive(tmp_path):
     store = StateStore(tmp_path / "state.json")
     item = {"issue": 16, "head": HEAD, "body": "safe notification"}
@@ -2965,6 +2990,16 @@ def test_progressing_source_repairs_continue_to_the_twenty_attempt_ceiling(
             event["reason"] == "execution_exhausted"
             for event in store.snapshot()["lifecycle_events"]
         )
+        stopped = next(
+            event for event in store.snapshot()["lifecycle_events"]
+            if event["reason"] == "execution_exhausted"
+        )
+        assert stopped["issue_number"] == 16 and stopped["pr_number"] == 16
+        assert stopped["stop_detail"] == {
+            "cause": "source-ceiling", "used": REPAIR_LIMIT, "remaining": 0,
+            "limit": REPAIR_LIMIT, "source_used": REPAIR_LIMIT,
+            "source_ceiling": REPAIR_LIMIT, "stagnation_count": 0,
+        }
 
 
 def test_three_receipt_verified_no_progress_attempts_stop_after_restart(tmp_path):
@@ -3012,6 +3047,16 @@ def test_three_receipt_verified_no_progress_attempts_stop_after_restart(tmp_path
                 if key.endswith(":budget")
             )
             assert "no verified forward progress" in budget_outcome["body"]
+            stopped = next(
+                event for event in StateStore(path).snapshot()["lifecycle_events"]
+                if event["reason"] == "execution_exhausted"
+            )
+            assert stopped["stop_detail"] == {
+                "cause": "no-progress", "used": NO_PROGRESS_LIMIT, "remaining": 0,
+                "limit": NO_PROGRESS_LIMIT, "source_used": NO_PROGRESS_LIMIT,
+                "source_ceiling": REPAIR_LIMIT,
+                "stagnation_count": NO_PROGRESS_LIMIT,
+            }
 
     assert api.fix_attempts == NO_PROGRESS_LIMIT
 

@@ -457,6 +457,11 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
     original = store.snapshot()["enrollments"]["16"]
     assert original["initial_source"]["head_sha"] == HEAD
     assert original["starter_admission"]["head_sha"] == HEAD
+    assert original["starter_admission"]["version"] == 3
+    assert (
+        original["initial_source"]["start_comment_id"]
+        == original["starter_admission"]["start_comment_id"]
+    )
     proofs = []
     proof_heads = [HEAD, "1" * 40, "2" * 40, "3" * 40]
     for attempt, (start_head, result_head) in enumerate(
@@ -507,6 +512,7 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
 
     store._mutate(make_legacy)
     api.tasks.pop(first_action["task_id"], None)
+    assert not any(action.get("kind") == "fix" for action in store.actions().values())
     current_head = proof_heads[-1]
     moved_main = "d" * 40
     api.head_sha = current_head
@@ -556,6 +562,9 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
     assert enrollment["repair_progress"]["legacy_unknown"] is True
     assert neutral["attempt"] == 1 and neutral["status"] == "sent"
     assert api.fix_attempts == 2
+    assert neutral["main_sha"] == moved_main
+    assert api.owner_review_head_sha == current_head
+    assert json.loads(api.owner_review_body)["verdict"] == "changes_requested"
 
 
 def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(tmp_path):

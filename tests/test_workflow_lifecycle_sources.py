@@ -1109,7 +1109,7 @@ def test_lifecycle_context_requires_closed_owner_repository_binding(tmp_path, ch
 
 
 def test_context_is_not_ack_authority_and_preserves_persistent_incident_payload():
-    from deploy.workflow_lifecycle import filter_acknowledged_replays
+    from deploy.workflow_lifecycle import canonical_event, filter_acknowledged_replays
 
     original = pull_event(
         {"issue": 31, "head": HEAD, "enrollment": {"comment": 55}},
@@ -1137,6 +1137,26 @@ def test_context_is_not_ack_authority_and_preserves_persistent_incident_payload(
         }},
         now=NOW,
     ) == []
+
+    detail = {
+        "cause": "neutral-ceiling", "used": 3, "remaining": 0, "limit": 3,
+        "source_used": 4, "source_ceiling": 20, "stagnation_count": 1,
+    }
+    exhausted = pull_event(
+        {"issue": 31, "head": HEAD, "enrollment": {"comment": 55}},
+        "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
+        incident="neutral-reconciliation-limit-3", stop_detail=detail,
+    )
+    legacy_exhausted = pull_event(
+        {"issue": 31, "head": HEAD, "enrollment": {"comment": 55}},
+        "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
+        incident="neutral-reconciliation-limit-3",
+    )
+    assert canonical_event(exhausted, legacy_exhausted, now=NOW) == legacy_exhausted
+    altered = exhausted | {"stop_detail": detail | {"source_used": 5}}
+    assert altered["event_id"] == exhausted["event_id"]
+    with pytest.raises(ValueError, match="immutable payload"):
+        canonical_event(altered, exhausted, now=NOW)
 
 
 def test_lifecycle_context_duplicate_json_fields_are_rejected(tmp_path):

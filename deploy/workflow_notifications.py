@@ -812,13 +812,31 @@ def _message(event):
         body = f'Issue #{issue} ended unsuccessfully. Review its current workflow status.'
     elif event['reason'] == 'execution_exhausted':
         title = f'Workflow repair stopped for {subject}'
-        body = (
-            f'{subject} stopped at a bounded repair limit: source repairs allow at most '
-            '20 lifetime dispatches or stop after 3 consecutive completed repairs without '
-            'verified progress; neutral reconciliation has its own 3-dispatch limit. '
-            'Review current exact-head checks, independent-review findings and mergeability. '
-            'This is not a billing or deployment status.'
-        )
+        detail = event.get('stop_detail')
+        if detail is None:
+            body = (
+                f'{subject} stopped at a bounded repair limit: source repairs allow at most '
+                '20 lifetime dispatches or stop after 3 consecutive completed repairs without '
+                'verified progress; neutral reconciliation has its own 3-dispatch limit. '
+                'Review current exact-head checks, independent-review findings and mergeability. '
+                'This is not a billing or deployment status.'
+            )
+        else:
+            cause = {
+                'source-ceiling': 'source-repair lifetime ceiling',
+                'no-progress': 'verified no-progress limit',
+                'neutral-ceiling': 'neutral-reconciliation limit',
+                'review-handoff': 'review-handoff poll limit',
+            }[detail['cause']]
+            body = (
+                f'{subject} stopped at the {cause} '
+                f'({detail["used"]}/{detail["limit"]} used; '
+                f'{detail["remaining"]} remaining). Source-repair reservations: '
+                f'{detail["source_used"]}/{detail["source_ceiling"]}; consecutive '
+                f'no-progress repairs: {detail["stagnation_count"]}/3. '
+                'Review current exact-head checks, independent-review findings and mergeability. '
+                'This is not a billing or deployment status.'
+            )
     elif event['reason'] == 'execution_uncertain':
         title = f'Workflow outcome uncertain for {subject}'
         body = f'{subject.capitalize()} has an unresolved execution outcome. Inspect its current status before retrying.'

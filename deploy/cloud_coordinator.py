@@ -1119,14 +1119,29 @@ def review_followup_request(head_sha, attempts, report, *, pull_number):
 
 
 def _lifecycle_event(snapshot, reason, *, occurred_at, merge_sha=None, decision=None,
-                     incident=""):
+                     incident="", stop_detail=None):
     try:
         return build_pull_lifecycle_event(
             snapshot, reason, occurred_at=occurred_at, merge_sha=merge_sha,
-            decision=decision, incident=incident,
+            decision=decision, incident=incident, stop_detail=stop_detail,
         )
     except (TypeError, ValueError) as error:
         raise CoordinatorError("Lifecycle event evidence was incomplete") from error
+
+
+def _exhaustion_detail(snapshot, cause, used, limit):
+    enrollment = snapshot.get("enrollment", {})
+    progress = enrollment.get("repair_progress", {})
+    source_used = enrollment.get("attempts", 0)
+    stagnation_count = progress.get("consecutive_no_progress", 0)
+    if (type(used) is not int or type(limit) is not int or type(source_used) is not int
+            or type(stagnation_count) is not int):
+        raise CoordinatorError("Lifecycle exhaustion counters are malformed")
+    return {
+        "cause": cause, "used": used, "remaining": max(0, limit - used),
+        "limit": limit, "source_used": source_used, "source_ceiling": REPAIR_LIMIT,
+        "stagnation_count": stagnation_count,
+    }
 
 
 def _lifecycle_event_valid(event):
@@ -3773,6 +3788,9 @@ class Coordinator:
                  "enrollment": snapshot["enrollment"]},
                 "execution_exhausted", occurred_at=self._now_string(),
                 incident=incident,
+                stop_detail=_exhaustion_detail(
+                    snapshot, "review-handoff", waits, MAX_HANDOFF_POLLS,
+                ),
             )
             self.store.update_action_with_lifecycle(
                 key, "completed", event, now=self.clock(),
@@ -4197,6 +4215,7 @@ class Coordinator:
                         "budget_incident",
                         f"source-repair-limit-{snapshot['enrollment'].get('attempts', 0)}",
                     ),
+                    stop_detail=snapshot.get("execution_stop_detail"),
                 ))
             elif code in {"up-to-date-policy", "conversation-policy", "status-owner", "scope"}:
                 lifecycle.append(_lifecycle_event(
@@ -4795,6 +4814,9 @@ class Coordinator:
                 snapshot["budget_incident"] = (
                     f"source-repair-no-progress-{no_progress}-of-{attempts}"
                 )
+                snapshot["execution_stop_detail"] = _exhaustion_detail(
+                    snapshot, "no-progress", no_progress, NO_PROGRESS_LIMIT,
+                )
             else:
                 message = (
                     f"Source repair stopped for {subject} at the lifetime ceiling "
@@ -4804,6 +4826,9 @@ class Coordinator:
                     "the existing enrollment and attempt history are retained."
                 )
                 snapshot["budget_incident"] = f"source-repair-limit-{attempts}"
+                snapshot["execution_stop_detail"] = _exhaustion_detail(
+                    snapshot, "source-ceiling", attempts, REPAIR_LIMIT,
+                )
             reasons.append(("budget", message))
         elif neutral_budget_stop:
             reasons.append((
@@ -4814,6 +4839,9 @@ class Coordinator:
                 "Review current mergeability and exact-head evidence.",
             ))
             snapshot["budget_incident"] = f"neutral-reconciliation-limit-{neutral_attempts}"
+            snapshot["execution_stop_detail"] = _exhaustion_detail(
+                snapshot, "neutral-ceiling", neutral_attempts, NEUTRAL_LIMIT,
+            )
         merge = snapshot["scoped"] and eligible_for_auto_merge(
             snapshot["pull"], current_main_sha=snapshot["main_sha"],
             required_checks=required, check_runs=snapshot["check_runs"],

@@ -520,6 +520,18 @@ compacted, but cannot by itself establish a historical no-progress streak or
 replace fresh checks and independent review. Source acceptance remains distinct
 from merge approval and deployment.
 
+Legacy records that predate the separate neutral counter retain a conservative
+unknown marker until every shared reservation is accounted for by retained task
+claims or current authenticated receipt proofs. Only then is the neutral count
+recovered from each reservation's recorded task type; missing, conflicting, or
+incomplete history remains at the neutral stop boundary. This migration does not
+change the source attempt count, starter provenance, or receipt history. New
+`execution_exhausted` lifecycle events carry a closed typed stop cause and exact
+used/remaining counts for the source ceiling, no-progress streak, neutral
+ceiling, or review-handoff wait. Older events without this optional detail remain
+readable, and the Inbox consumer renders validated PR and linked-issue identities
+without redesigning its delivery flow.
+
 The 20-attempt ceiling is grounded in a small, nonrandom sample of merged cloud
 pull requests, not a percentile or guarantee. The audit used authenticated
 repository task lists, task-to-PR artifact IDs, and actual dispatch/session

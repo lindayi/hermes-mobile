@@ -170,6 +170,13 @@ _ISSUE83_INITIAL_REVIEW_FIXTURE = {
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
 }
 
+_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE = {
+    'deploy/cloud_coordinator.py': '86b57c4c3312824655e9b65f1eaa024445ba7c1ca9699c7e10ddfa580553f62f',
+    'deploy/workflow_events.py': '5759930bb5a15465399c54e37c712d9c3eda5e42fee1a59d05dd50745418d91f',
+    'deploy/workflow_lifecycle.py': 'a45ea590ae138355792c84117a6a9b11c5bbdc184810b0c0bb415fce8fa957ef',
+    'deploy/workflow_notifications.py': 'e8f8f371d633574487f9fd247d57a67c9b956bf41cf81b2050b1578d18952203',
+}
+
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
 }
@@ -211,7 +218,8 @@ def _source_files():
             | _PENDING_ISSUE67_WORKFLOW_FIXTURE | _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
             | _PENDING_PR45_NAMING_FIXTURE
             | _ISSUE65_RECEIPT_PRODUCER_FIXTURE | _PENDING_ISSUE77_CLARIFICATION_FIXTURE
-            | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE)
+            | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
+            | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)
 
 
 def _source_ci():
@@ -593,6 +601,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_PENDING_PR45_NAMING_FIXTURE)
     pending |= set(_PENDING_ISSUE77_CLARIFICATION_FIXTURE)
     pending |= set(_ISSUE83_INITIAL_REVIEW_FIXTURE)
+    pending |= set(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
@@ -612,7 +621,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         if path in {'deploy/cloud_coordinator.py', 'deploy/issue_starter.py',
                     'deploy/review_evidence.py'}
     } == {
-        'deploy/cloud_coordinator.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
+        'deploy/cloud_coordinator.py': _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE[
             'deploy/cloud_coordinator.py'
         ],
         'deploy/issue_starter.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
@@ -630,9 +639,11 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_PR40_LIFECYCLE_FIXTURE
         and path not in _PENDING_ISSUE50_RECEIPT_FIXTURE
+        and path not in _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
     } == {
         path: digest for path, digest in _PENDING_PR40_LIFECYCLE_FIXTURE.items()
         if path not in _PENDING_ISSUE50_RECEIPT_FIXTURE
+        and path not in _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
     }
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
@@ -642,6 +653,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         for path, digest in (
             _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
             | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
+            | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
         ).items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
     }
@@ -673,6 +685,13 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: SOURCE_FINGERPRINTS[path] for path in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
     } == _PENDING_ISSUE77_CLARIFICATION_FIXTURE
     for path, digest in _PENDING_ISSUE77_CLARIFICATION_FIXTURE.items():
+        source = Path(__file__).resolve().parents[1] / path
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
+    assert {
+        path: SOURCE_FINGERPRINTS[path]
+        for path in _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
+    } == _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
+    for path, digest in _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE.items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
@@ -716,7 +735,8 @@ def test_issue46_observer_pin_matches_exact_candidate_bytes(pins, path):
 @pytest.mark.parametrize(
     'path', sorted(set(_PENDING_ISSUE43_LAUNCH_FIXTURE) -
                    set(_PENDING_ISSUE50_RECEIPT_FIXTURE) -
-                   set(_ISSUE83_INITIAL_REVIEW_FIXTURE)),
+                   set(_ISSUE83_INITIAL_REVIEW_FIXTURE) -
+                   set(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)),
 )
 def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
     source = Path(__file__).resolve().parents[1] / path
@@ -725,7 +745,8 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
 
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
-    | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE,
+    | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
+    | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
 def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
@@ -736,8 +757,20 @@ def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _ISSUE83_INITIAL_REVIEW_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
-@pytest.mark.parametrize('path', sorted(_ISSUE83_INITIAL_REVIEW_FIXTURE))
+@pytest.mark.parametrize(
+    'path', sorted(set(_ISSUE83_INITIAL_REVIEW_FIXTURE) -
+                   set(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)),
+)
 def test_issue83_initial_review_pin_matches_actual_candidate_bytes(path, pins):
+    source = Path(__file__).resolve().parents[1] / path
+    assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize('pins', [
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE,
+], ids=['policy', 'independent-fixture'])
+@pytest.mark.parametrize('path', sorted(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE))
+def test_issue87_bounded_repair_pin_matches_actual_candidate_bytes(path, pins):
     source = Path(__file__).resolve().parents[1] / path
     assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
 
@@ -753,7 +786,8 @@ def test_issue59_public_http_pin_matches_actual_candidate_bytes(path, pins):
 
 @pytest.mark.parametrize(
     'path', sorted(set(_PENDING_PR40_LIFECYCLE_FIXTURE) -
-                   set(_PENDING_ISSUE50_RECEIPT_FIXTURE)),
+                   set(_PENDING_ISSUE50_RECEIPT_FIXTURE) -
+                   set(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)),
 )
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _PENDING_PR40_LIFECYCLE_FIXTURE,

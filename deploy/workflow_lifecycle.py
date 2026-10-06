@@ -67,6 +67,10 @@ def canonical_event(event, prior, *, now=None):
         and prior.get("pr_number") == event.get("pr_number")
         and prior.get("merge_sha") == event.get("merge_sha")
         and prior.get("decision") == event.get("decision")
+        and (
+            prior.get("stop_detail") == event.get("stop_detail")
+            or prior.get("stop_detail") is None
+        )
     )
     persistent_incident = (
         prior.get("reason") in {
@@ -160,7 +164,7 @@ def build_export(events, owner_user_id, *, now=None):
 
 
 def pull_event(snapshot, reason, *, occurred_at, merge_sha=None, decision=None,
-               incident=""):
+               incident="", stop_detail=None):
     if reason not in REASON_OUTCOMES:
         raise ValueError("Unsupported lifecycle reason")
     issue = snapshot.get("issue")
@@ -180,7 +184,7 @@ def pull_event(snapshot, reason, *, occurred_at, merge_sha=None, decision=None,
         and 1 <= admission["issue_number"] <= 2**31 - 1
         else issue
     )
-    return validate_event({
+    event = {
         "event_id": event_id,
         "outcome": REASON_OUTCOMES[reason],
         "reason": reason,
@@ -190,7 +194,10 @@ def pull_event(snapshot, reason, *, occurred_at, merge_sha=None, decision=None,
         "merge_sha": merge_sha,
         "decision": decision,
         "occurred_at": occurred_at,
-    })
+    }
+    if stop_detail is not None:
+        event["stop_detail"] = stop_detail
+    return validate_event(event)
 
 
 def issue_event(issue_number, reason, *, occurred_at, incident):
