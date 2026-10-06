@@ -52,6 +52,35 @@ async function inside(page,selector,top,height) {
  assert.ok(box.width>=40 && box.x>=0 && box.x+box.width<=await page.evaluate(()=>innerWidth)+1,`${selector} horizontal bounds`);
  return box;
 }
+test('compact photo picker uses the real file input and releases failed-send uploads on navigation',{timeout:20000},async t=>{
+ const page=await browserFixture(t),deleted=[],uploaded=[];
+ const id='00000000000000000000000000000001';
+ await page.route('**/hermes/app-api/sessions/s/attachments**',async route=>{
+ if(route.request().method()==='DELETE'){deleted.push(route.request().url());return route.fulfill({status:204});}
+ uploaded.push(route.request().postDataBuffer());
+ return route.fulfill({status:201,json:{id,status:'pending'}});
+ });
+ await page.route('**/hermes/app-api/runs',route=>route.fulfill({status:503,json:{detail:'Synthetic send failure'}}));
+ const picker=page.getByRole('button',{name:'Add photos',exact:true});
+ await inside(page,'[aria-label="Add photos"]:not(input)',0,844);
+ const chooser=page.waitForEvent('filechooser');await picker.click();
+ const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=','base64');
+ await (await chooser).setFiles({name:'synthetic.png',mimeType:'image/png',buffer:bytes});
+ await page.getByRole('button',{name:'Remove photo 1'}).waitFor();
+ const cancel=page.waitForEvent('filechooser');await picker.click();await (await cancel).setFiles([]);
+ assert.equal(await page.locator('.photo-preview').count(),1,'cancel does not clear selection');
+ await page.getByRole('button',{name:'Send message',exact:true}).click();
+ await page.getByText(/Your text and selected photos are retained/).waitFor();
+ assert.deepEqual(uploaded,[bytes]);
+ assert.equal(await page.locator('.photo-preview').count(),1);
+ await mkdir(artifactURL(),{recursive:true});
+ await page.screenshot({path:fileURLToPath(artifactURL('compact-photo-picker.png'))});
+ const release=page.waitForResponse(response=>response.request().method()==='DELETE');
+ await page.getByRole('button',{name:'Back to chats',exact:true}).click();await release;
+ await page.waitForFunction(()=>!document.querySelector('.photo-preview'));
+ assert.equal(deleted.length,1);
+ assert.ok(deleted[0].endsWith('/sessions/s/attachments/'+id));
+});
 test('browser fallback fits actual short and landscape viewports with native zoom still permitted',{timeout:20000},async t=>{
  const page=await browserFixture(t,{fallback:true});await page.getByRole('textbox',{name:'Message Hermes',exact:true}).fill('Fallback draft');
  for(const size of [{width:390,height:380},{width:844,height:390},{width:390,height:844}]){

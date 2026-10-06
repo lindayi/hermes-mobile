@@ -5,7 +5,7 @@
 .push-master-switch[aria-checked=true]{background:var(--accent);color:var(--surface)}
 .push-preferences{padding:0 4px}.push-preferences>button{align-self:flex-start;min-width:88px}
 .notification-settings [hidden]{display:none!important}
-.photo-input{width:auto;max-width:100%;min-height:44px;font-size:13px;padding:6px}.photo-controls{display:flex;align-items:center;min-height:44px}
+.photo-input[hidden]{display:none!important}
 .photo-tray{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0}.photo-preview{position:relative;width:84px;height:84px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--sand)}
 .photo-preview img{width:100%;height:100%;object-fit:cover}.photo-preview .photo-remove{position:absolute;right:2px;top:2px;min-width:44px;min-height:44px;padding:4px;background:var(--surface);font-size:11px}
 .photo-status{margin:4px 0}.message-photos{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.message-photos img{width:min(100%,320px);max-height:320px;object-fit:contain;border-radius:10px;background:var(--surface)}

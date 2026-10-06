@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import io
 import json
 import struct
+import threading
 import time
 import zlib
 
@@ -168,13 +169,15 @@ def test_normalized_image_drops_source_metadata(tmp_path):
         assert b'synthetic fixture location' not in normalized
 
 
-def test_owned_photo_reaches_the_same_native_run_as_text_without_journal_bytes(tmp_path):
+def test_owned_photo_reaches_the_same_native_run_as_text_without_journal_bytes(tmp_path, monkeypatch):
     native_payloads = []
+    image_threads, gateway_threads = [], []
 
     async def upstream(request):
         if request.url.path.endswith('/messages'):
             return httpx.Response(200, json={'session_id': 'wa-1', 'data': []})
         if request.url.path == '/v1/runs':
+            gateway_threads.append(threading.get_ident())
             native_payloads.append(json.loads(request.content))
             return httpx.Response(202, json={'run_id': 'native-photo-run'})
         if request.url.path.endswith('/events'):
@@ -186,6 +189,13 @@ def test_owned_photo_reaches_the_same_native_run_as_text_without_journal_bytes(t
     gateway = GatewayClient('http://127.0.0.1:8642', 'synthetic-test-token',
                             execution_ready=True, transport=httpx.MockTransport(upstream))
     with photo_client(tmp_path, gateway_client=gateway) as (app, client):
+        run_images = app.state.attachments.run_images
+
+        def observed_images(*args):
+            image_threads.append(threading.get_ident())
+            return run_images(*args)
+
+        monkeypatch.setattr(app.state.attachments, 'run_images', observed_images)
         upload = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
                              headers={'Idempotency-Key': 'run-photo-upload'})
         attachment_id = upload.json()['id']
@@ -204,6 +214,8 @@ def test_owned_photo_reaches_the_same_native_run_as_text_without_journal_bytes(t
         assert submitted.status_code == 200
         assert duplicate.json()['id'] == submitted.json()['id']
         assert len(native_payloads) == 1
+        assert len(image_threads) == 1
+        assert image_threads[0] != gateway_threads[0], 'image I/O must not run on the orchestration loop'
         payload = native_payloads[0]
         assert payload['mobile_attachment_ids'] == [attachment_id]
         content = payload['input'][-1]['content']
@@ -214,3 +226,33 @@ def test_owned_photo_reaches_the_same_native_run_as_text_without_journal_bytes(t
             app.state.attachments.objects / (attachment_id + '.png')).read_bytes()
         assert run['status'] == 'completed'
         assert image['image_url']['url'].encode() not in app.state.journal.path.read_bytes()
+
+
+def test_snapshot_batches_ordered_attachment_ids_across_owned_runs(tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        user = client.get(BASE + '/auth/me').json()['user']
+        expected = []
+        for turn in range(3):
+            ids = [client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(index),
+                               headers={'Idempotency-Key': f'batch-{turn}-{index}'}).json()['id']
+                   for index in range(2 if turn != 1 else 0)]
+            ids.reverse()
+            run, _ = app.state.journal.submit(
+                user['id'], 'default', 'wa-1', 'Synthetic turn', f'batch-run-{turn}',
+                attachment_ids=ids, attachment_store=app.state.attachments)
+            app.state.journal.finish(user['id'], run['id'], 'completed')
+            expected.append(ids)
+        queries = []
+        connect = app.state.journal.connect
+
+        def traced_connect():
+            db = connect()
+            db.set_trace_callback(queries.append)
+            return db
+
+        monkeypatch.setattr(app.state.journal, 'connect', traced_connect)
+        snapshot = app.state.journal.snapshot_state(user['id'], 'default', 'wa-1')
+        entries = snapshot['prior'] + [snapshot]
+        assert [entry['run'].get('attachment_ids', []) for entry in entries] == expected
+        attachment_reads = [query for query in queries if 'FROM attachments' in query]
+        assert len(attachment_reads) == 1, attachment_reads

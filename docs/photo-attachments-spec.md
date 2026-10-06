@@ -75,6 +75,12 @@ The draft and all selected attachment references remain available after a
 recoverable upload or run error. Cancelled file selection does not alter the
 draft. A retry reuses upload and run idempotency keys.
 
+The Photos control shares the existing composer control row so text-only chats
+retain their short-viewport geometry. Navigation and teardown make best-effort
+authenticated DELETE requests for unbound uploads, including uploads that finish
+after navigation. Accepted-run photos are not released. Individual asynchronous
+removal resolves the selected item by identity, not by its earlier list index.
+
 Run admission atomically binds the exact attachment IDs to the existing durable
 run identity. The bridge reads normalized bytes only for that run and sends
 them, with its text, in the native multimodal user message. A run retry cannot
@@ -82,6 +88,10 @@ bind different files to an existing idempotency key. The selected native
 profile/model remains authoritative; an image run fails with an actionable
 error if the configured native vision capability is unavailable, rather than
 pretending an image was analyzed.
+
+Image database/file reads and base64 encoding run off the orchestration event
+loop. Snapshot attachment IDs are fetched in one owned-session query, retaining
+their per-run position order and the snapshot's existing read transaction.
 
 Reopened history uses native message metadata to bind opaque attachment IDs to
 the exact user turn. Authenticated thumbnail/full-image reads are subject to
@@ -105,6 +115,21 @@ does not restart the native service or delete production data. Production,
 real accounts, private photos, and real model calls are never test fixtures.
 
 ## Acceptance evidence
+
+Issue #85 adds `backend/attachments.py` to the fixed execution-source inventory
+and Python closure. Only the following current candidate bindings supersede
+earlier pins; historical fixtures and all review/authorization gates remain
+unchanged. These digests establish source consistency, not review, CI, or
+activation success.
+
+| Candidate path | SHA-256 |
+| --- | --- |
+| `backend/app.py` | `108f7469b7c2683f1fa873f84b3792da6dbcfbee3a0cb39a2674f54f27a6b333` |
+| `backend/attachments.py` | `45bf77c2308a1a4d0eb5b78069c72cd97fa98c115396ca9a4d5444c886a59508` |
+| `backend/hermes_client.py` | `a607e6f6d71cd6b9bb54f13eda4f40d35e6f6f61b8124ba2090e6c28154d4b97` |
+| `backend/orchestration.py` | `5e373e9e9c2aaae8128bc32e119e7b5dc439ea899bdb5b2377ae33ba414cfcc1` |
+| `backend/runs.py` | `57b2ef764ee5bdcbd1cef330d7862f29cc5dcde996820454ee38ea3abdcd104b` |
+| `requirements.lock` | `ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04` |
 
 Focused regressions must demonstrate RED before implementation and GREEN after
 implementation. Synthetic tests cover actual decoded fixtures, malformed and

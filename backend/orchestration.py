@@ -434,7 +434,7 @@ class Orchestrator:
             if attachment_ids:
                 if self.attachments is None:
                     raise IntegrationUnavailable('Private photo storage is unavailable; no image was sent.')
-                kwargs['attachments'] = self.attachments.run_images(
+                kwargs['attachments'] = await asyncio.to_thread(self.attachments.run_images,
                     user['id'], user['profile'], run['session_id'], run['id'], attachment_ids)
                 kwargs['attachment_ids'] = attachment_ids
             async with asyncio.timeout(self.run_timeout):

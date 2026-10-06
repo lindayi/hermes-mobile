@@ -908,18 +908,22 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const textarea = h('textarea',{name:'message',rows:2,placeholder:'Message Hermes…','aria-label':'Message Hermes',maxlength:32000});
     textarea.value=drafts.get(session.id) ?? storage.get(draftKey) ?? '';
     const selectedPhotos=[];
-    const photoInput=h('input',{class:'photo-input',type:'file',multiple:true,accept:'image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif','aria-label':'Add photos'});
+    const photoInput=h('input',{class:'photo-input',type:'file',hidden:true,multiple:true,accept:'image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif','aria-label':'Add photos'});
+    const addPhotos=button('Photos',()=>photoInput.click(),'quiet',{'aria-label':'Add photos',title:'Add up to four JPEG, PNG, or WebP photos'});
     const photoTray=h('div',{class:'photo-tray',hidden:true,'aria-label':'Selected photos'});
     const photoStatus=h('p',{class:'photo-status caption',role:'status','aria-live':'polite',hidden:true});
     const releasePreview=photo=>{if(photo.previewUrl)win.URL?.revokeObjectURL?.(photo.previewUrl);};
-    const clearPhotos=()=>{for(const photo of selectedPhotos)releasePreview(photo);selectedPhotos.length=0;photoTray.replaceChildren();photoTray.hidden=true;photoInput.value='';};
+    const releasePhoto=async photo=>{if(photo.metadata)try{await api.request(`/sessions/${encodeURIComponent(session.id)}/attachments/${photo.metadata.id}`,{method:'DELETE'});}catch{}};
+    const clearPhotos=(release=true)=>{for(const photo of selectedPhotos){if(release)void releasePhoto(photo);releasePreview(photo);}selectedPhotos.length=0;photoTray.replaceChildren();photoTray.hidden=true;photoInput.value='';};
     const renderPhotoSelection=()=>{
       photoTray.replaceChildren();
       selectedPhotos.forEach((photo,index)=>{
         const remove=button('Remove',event=>action(event.currentTarget,async()=>{
           if(photo.metadata)await api.request(`/sessions/${encodeURIComponent(session.id)}/attachments/${photo.metadata.id}`,{method:'DELETE'});
           if(!current())return;
-          releasePreview(photo);selectedPhotos.splice(index,1);photoStatus.hidden=true;renderPhotoSelection();
+          const position=selectedPhotos.indexOf(photo);
+          if(position<0)return;
+          releasePreview(photo);selectedPhotos.splice(position,1);photoStatus.hidden=true;renderPhotoSelection();
         }),'quiet photo-remove',{'aria-label':`Remove photo ${index+1}`});
         photoTray.append(h('div',{class:'photo-preview'},photo.previewUrl?h('img',{src:photo.previewUrl,alt:`Selected photo ${index+1}`}):h('span',{class:'caption'},'Photo selected'),remove));
       });
@@ -1070,11 +1074,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             method:'POST',rawBody:photo.file,headers:{'Idempotency-Key':photo.uploadKey}});
           if(!/^[a-f0-9]{32}$/.test(metadata?.id || '') || metadata.status!=='pending')throw new Error('Photo upload response was invalid.');
           photo.metadata=metadata;
+          if(!current() || !selectedPhotos.includes(photo)){void releasePhoto(photo);return;}
         }
         photoStatus.hidden=false;
         photoStatus.textContent=selectedPhotos.length?'Sending message with photos…':'Sending message…';
         const attachments=selectedPhotos.map(photo=>photo.metadata.id);
-        run=await api.request('/runs',{method:'POST',body:{session_id:session.id,...attempt,attachments}});
+        run=await api.request('/runs',{method:'POST',body:{session_id:session.id,...attempt,...(attachments.length?{attachments}:{})}});
         connection.success(token);
       }catch(error){
         connection.failure(token);
@@ -1094,7 +1099,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }
       if(version!==routeVersion)return;
       messages.querySelector('.empty')?.remove();messages.append(renderMessage({role:'user',content:input,timestamp:run.created_at,run_id:run.id,session_id:session.id,attachments:run.attachments}),...renderReminders(run));
-      clearPhotos();
+      clearPhotos(false);
       messages.scrollTop=messages.scrollHeight;
       await trackRun({...run,session_id:session.id},messages,composerAction);
     }
@@ -1110,7 +1115,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       root.append(overlay);textarea.focus();textarea.setSelectionRange(start,end);
     },'quiet icon-button',{'aria-label':'Expand editor',title:'Expand editor'});
     const editorSlot=h('div',{class:'composer-editor'},textarea,expand);
-    const composer=h('form',{class:'composer',onsubmit:e=>{e.preventDefault();if(dispatch===submit || dispatch===steer)activate();}},editorSlot,photoTray,photoStatus,h('div',{class:'photo-controls'},photoInput),steerHelp,steerStatus,steerRetries,h('div',{class:'composer-bottom'},modelControls.element,send));
+    const composer=h('form',{class:'composer',onsubmit:e=>{e.preventDefault();if(dispatch===submit || dispatch===steer)activate();}},editorSlot,photoTray,photoStatus,photoInput,steerHelp,steerStatus,steerRetries,h('div',{class:'composer-bottom'},modelControls.element,addPhotos,send));
     const technical=h('details',{class:'technical-strip',hidden:true});
     const renderTelemetry=data=>{
       if(version!==routeVersion || !data)return;

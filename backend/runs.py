@@ -411,10 +411,12 @@ class RunJournal:
                 replay_events = self._replay_events(c, rows[-1]['id'])
             prior_replays = {}
             attachments_by_run = {}
-            for row in rows:
-                attachments = self._attachment_ids(c, row['id'])
-                if attachments:
-                    attachments_by_run[row['id']] = attachments
+            if rows and c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='attachments'").fetchone():
+                for attachment in c.execute('''SELECT a.run_id,a.id FROM attachments a
+                    JOIN runs r ON r.id=a.run_id
+                    WHERE r.user_id=? AND r.profile=? AND r.session_id=? AND a.state='bound'
+                    ORDER BY a.run_id,a.position,a.id''', (user_id, profile, session_id)):
+                    attachments_by_run.setdefault(attachment['run_id'], []).append(attachment['id'])
             for row in rows[:-1]:
                 if c.execute("SELECT 1 FROM events WHERE run_id=? AND name IN ('steering','clarification') LIMIT 1",
                              (row['id'],)).fetchone():

@@ -18,6 +18,56 @@ export const click = (doc, text) => {
   assert.ok(el, `control ${text} exists`); el.click(); return el;
 };
 
+for(const outcome of ['abandoned','accepted','late upload','concurrent removal'])test(`photo cleanup: ${outcome}`,async t=>{
+  const deletes=[],pendingDeletes=new Map(),revoked=[];
+  let uploads=0,finishUpload;
+  const {doc,app}=await setup(async(path,options={})=>{
+    if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+    if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+    if(path.includes('/messages'))return {items:[]};
+    if(path==='/sessions/s1/attachments'){
+      const metadata={id:String(++uploads).padStart(32,'0'),status:'pending'};
+      if(outcome==='late upload')return new Promise(resolve=>{finishUpload=()=>resolve(metadata);});
+      return metadata;
+    }
+    if(options.method==='DELETE'){
+      deletes.push(path);
+      if(outcome==='concurrent removal')return new Promise(resolve=>pendingDeletes.set(path,resolve));
+      throw new Error('Synthetic release failure');
+    }
+    if(path==='/runs'){
+      if(outcome==='accepted')return {id:'r1',session_id:'s1',status:'completed'};
+      throw new Error('Synthetic send failure');
+    }
+    if(path==='/runs/r1')return {id:'r1',session_id:'s1',status:'completed'};
+    return {items:[]};
+  },win=>{
+    win.URL.createObjectURL=file=>`blob:${file.name}`;
+    win.URL.revokeObjectURL=url=>revoked.push(url);
+  });
+  t.after(()=>{app.destroy();doc.defaultView.close();});
+  click(doc,'Photo fixture');await tick();
+  const input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+  const count=outcome==='concurrent removal'?3:1;
+  Object.defineProperty(input,'files',{value:Array.from({length:count},(_,i)=>new win.File(['synthetic'],`photo-${i}.png`,{type:'image/png'}))});
+  input.dispatchEvent(new win.Event('change'));
+  click(doc,'Send message');await tick();await tick();
+  if(outcome==='concurrent removal'){
+    click(doc,'Remove photo 1');click(doc,'Remove photo 2');
+    pendingDeletes.get('/sessions/s1/attachments/'+String(1).padStart(32,'0'))();await tick();
+    pendingDeletes.get('/sessions/s1/attachments/'+String(2).padStart(32,'0'))();await tick();
+    assert.deepEqual([...doc.querySelectorAll('.photo-preview img')].map(img=>img.getAttribute('src')),['blob:photo-2.png']);
+  }else if(outcome==='accepted'){
+    assert.equal(doc.querySelectorAll('.photo-preview').length,0);
+    assert.deepEqual(deletes,[],'accepted run photos must not be released');
+  }else{
+    click(doc,'Chats');await tick();
+    if(finishUpload){finishUpload();await tick();}
+    assert.deepEqual(deletes,['/sessions/s1/attachments/'+String(1).padStart(32,'0')]);
+    assert.deepEqual(revoked,['blob:photo-0.png']);
+  }
+});
+
 test('anonymous shell offers passkey login and invite enrollment, not fake conversations', async () => {
   const {doc} = await setup(async () => {throw Object.assign(new Error('Sign in'), {status:401});});
   assert.match(doc.body.textContent, /Hermes/);
@@ -633,7 +683,6 @@ test('notification deep link opens authorized inbox and never submits or approve
   assert.equal(calls.some(c=>c.options.method==='POST'),false);
   assert.equal(doc.querySelector('[aria-current="page"]').getAttribute('aria-label'),'Inbox');
 });
-
 
 
 
