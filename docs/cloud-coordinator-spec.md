@@ -552,6 +552,27 @@ changes. Encoding version 2 is persisted on reservations, proofs and progress.
 Unversioned hashes/history remain retained but are never treated as cleared by
 canonical version-2 observations. Incomparable resolved history cannot grant
 progress credit; lifetime counts and prior stagnation remain unchanged.
+The rendered-body parser reports the total extracted finding count, truncation,
+and inventory completeness separately from its bounded repair findings. A capped,
+malformed, ambiguous, or count-inconsistent inventory is unknown, even with a
+positive owner review and green checks; reordering cannot prove resolution.
+Later complete trustworthy evidence resumes evaluation without spending an
+additional source attempt while evidence is pending.
+
+New source reservations also persist a hash-to-canonical-target map derived only
+from the exact serialized repair targets, not reconstructed from task prose.
+Each entry has exactly `kind` (`finding`, `thread`, or `source-failure`) and
+`target` (the normalized identity text), whose hash must equal its key. The map
+is limited to 32 entries, 1,000 characters per target, and 16,000 ASCII-serialized
+bytes. Clipped or redacted targets that cannot retain their original identity,
+and omitted targets beyond those bounds, are explicitly unresolvable.
+Normal and report-correction reviewer prompts carry the same saved map.
+Nonempty resolution claims must select mapped hashes, with the map and target
+inventory authenticated against the original ready receipt's reservation or
+retained proof. Swapped targets, missing maps on legacy reservations, and guessed
+associations grant no resolution credit and never reset history. The optional
+version-1 report envelope remains compatible; an omitted or empty disposition
+requires no map and grants no negative-review resolution credit.
 If task, receipt, original dispatch-base binding, CI, review evidence,
 pagination, or target identity is absent, malformed, partial, stale, or otherwise
 unverified, the attempt remains unevaluated: it neither earns progress nor

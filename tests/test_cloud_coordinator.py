@@ -3544,6 +3544,214 @@ def _repair_target(text):
     return cloud_coordinator._repair_fingerprint("finding", text)
 
 
+def _progress_inventory(head, texts, review_id=63002):
+    review = _progress_review(head, review_id, texts[0], "2026-10-01T12:10:00Z")
+    sections = "".join(
+        f"<details><summary>Synthetic finding</summary><p>{text}</p></details>"
+        for text in texts
+    )
+    review["body_html"] = (
+        f"<details><summary>Previously missed ({len(texts)})</summary>{sections}</details>"
+    )
+    review["body"] = "<!-- ccr-overview-v2 -->\n" + review["body_html"]
+    return review
+
+
+@pytest.mark.parametrize("state", ["COMMENTED", "CHANGES_REQUESTED"])
+def test_capped_reordered_inventory_waits_through_real_coordinator(tmp_path, state):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    texts = [f"Blocker {index} remains." for index in range(8)]
+    api.progress_review = _progress_inventory(HEAD, texts)
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    def prior_streak(state):
+        state["enrollments"]["16"]["attempts"] = 3
+        state["actions"][source["key"]]["attempt"] = 3
+        state["enrollments"]["16"]["repair_progress"]["consecutive_no_progress"] = 2
+    StateStore(path)._mutate(prior_streak)
+    head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.complete_task(source["task_id"], source, head_sha=head)
+    refresh_owner_review(api, head, submitted_at="2026-10-01T12:11:00Z")
+    for ordered in (["Additional blocker remains.", *texts],
+                    [*texts, "Additional blocker remains."]):
+        api.progress_review = _progress_inventory(head, ordered, 63003)
+        api.progress_review["state"] = state
+        for _ in range(2):
+            summary = Coordinator(
+                api, StateStore(path), clock=lambda: 1790856660,
+            ).run(apply=True)["pull_requests"][0]
+            assert summary["required_checks_green"] is True
+            if state == "COMMENTED":
+                assert summary["review_valid"] is True
+            enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+            assert enrollment["attempts"] == 3
+            assert enrollment["repair_progress"]["consecutive_no_progress"] == 2
+            assert enrollment["repair_progress"]["evaluated_task_ids"] == []
+            assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+    api.progress_review = _progress_inventory(head, texts, 63004)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
+    assert progress["evaluated_task_ids"] == [source["task_id"]]
+    assert progress["consecutive_no_progress"] == 3
+    assert progress["resolved_fingerprints"] == []
+
+
+@pytest.mark.parametrize("rendered", [
+    "<details><summary>Previously missed (2)</summary>"
+    "<details><summary>Target</summary><p>Fix it.</p></details></details>",
+    "<details",
+    "<details><summary>Unknown inventory</summary><p>Uncertain.</p></details>",
+])
+def test_unknown_rendered_inventory_does_not_evaluate_or_dispatch(tmp_path, rendered):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_inventory(HEAD, ["First blocker remains."])
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.complete_task(source["task_id"], source, head_sha=head)
+    refresh_owner_review(api, head, submitted_at="2026-10-01T12:11:00Z")
+    api.progress_review = _progress_inventory(head, ["First blocker remains."], 63003)
+    api.progress_review["body_html"] = rendered
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 1
+    assert enrollment["repair_progress"]["evaluated_task_ids"] == []
+    assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+    api.progress_review = _progress_inventory(head, ["First blocker remains."], 63004)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
+    assert progress["evaluated_task_ids"] == [source["task_id"]]
+    assert progress["consecutive_no_progress"] == 1
+
+
+def test_target_map_bounds_use_serialized_bytes_and_full_thread_identity():
+    review = _progress_inventory(HEAD, [f"Blocker {index} " + "界" * 600 for index in range(8)])
+    request = repair_request(HEAD, 0, [], [], reviews=[review])
+    target_map = request["repair_target_map"]
+    assert 0 < len(target_map) < len(request["progress_fingerprints"])
+    assert cloud_coordinator._valid_repair_target_map(
+        target_map, request["progress_fingerprints"],
+    )
+    assert len(json.dumps(target_map, sort_keys=True, separators=(",", ":")).encode()) <= 16000
+    long_thread = "PRRT_" + "x" * 100
+    request = repair_request(HEAD, 0, [{
+        "id": long_thread, "isResolved": False, "comments": [{"body": "Fix this target."}],
+    }], [])
+    assert request["progress_fingerprints"] == [
+        cloud_coordinator._repair_fingerprint("thread", long_thread),
+    ]
+    assert request["repair_target_map"] == {}
+
+
+@pytest.mark.parametrize("corruption", [None, "swap", "unmapped", "legacy", "review-map"])
+def test_mapped_partial_resolution_through_real_report_and_restart(tmp_path, corruption):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_inventory(
+        HEAD, ["First blocker remains.", "Second blocker remains."],
+    )
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    target_map = source["repair_target_map"]
+    assert set(target_map) == set(source["repair_fingerprints"])
+    first = next(key for key, target in target_map.items()
+                 if "first blocker" in target["target"])
+    second = next(key for key in target_map if key != first)
+    def corrupt_map(state):
+        saved = state["actions"][source["key"]]
+        if corruption == "swap":
+            saved["repair_target_map"][first] = target_map[second]
+        elif corruption == "unmapped":
+            saved["repair_target_map"].pop(first)
+        elif corruption == "legacy":
+            saved.pop("repair_target_map")
+    StateStore(path)._mutate(corrupt_map)
+    head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.complete_task(source["task_id"], source, head_sha=head)
+    api.progress_review = _progress_inventory(head, ["Second blocker remains."], 63003)
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    store = StateStore(path)
+    reviewer = next(a for a in store.actions().values() if a["kind"] == "review")
+    proof = store.snapshot()["enrollments"]["16"]["receipt_proofs"][-1]
+    assert proof.get("repair_target_map") == store.action(source["key"]).get("repair_target_map")
+    if corruption == "review-map":
+        store.update_action(
+            reviewer["key"], reviewer["status"],
+            progress_target_map={first: target_map[first]},
+        )
+        reviewer = store.action(reviewer["key"])
+    if corruption is None:
+        assert reviewer["progress_target_map"] == target_map
+        assert json.dumps(target_map, sort_keys=True, separators=(",", ":")) in reviewer["body"]
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=store.action(source["key"]),
+        verdict="changes_requested",
+        findings=[{"path": "frontend/styles.css", "comment": "Second blocker remains."}],
+        progress_disposition={"version": 1, "resolved": [first]},
+    )
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    progress = enrollment["repair_progress"]
+    if corruption is None:
+        assert progress["resolved_fingerprints"] == [first]
+        assert second not in progress["resolved_fingerprints"]
+        assert progress["evaluated_task_ids"] == [source["task_id"]]
+        assert enrollment["attempts"] == 2
+    else:
+        assert progress["resolved_fingerprints"] == []
+        assert progress["evaluated_task_ids"] == []
+        assert enrollment["attempts"] == 1
+
+
+@pytest.mark.parametrize("text", [
+    "A long blocker " + "x" * 1100,
+    "Remove synthetic token ghp_" + "x" * 36,
+    "Fix https://example.invalid/private/link",
+])
+def test_clipped_or_redacted_target_is_unresolvable_in_real_review(tmp_path, text):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_inventory(HEAD, [text])
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    assert source["repair_target_map"] == {}
+    assert source["repair_fingerprints"]
+    head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.complete_task(source["task_id"], source, head_sha=head)
+    api.progress_review = _progress_inventory(head, ["New blocker remains."], 63003)
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    store = StateStore(path)
+    reviewer = next(a for a in store.actions().values() if a["kind"] == "review")
+    assert reviewer["progress_target_map"] == {}
+    assert "explicitly unresolvable" in reviewer["body"]
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=store.action(source["key"]),
+        verdict="changes_requested",
+        findings=[{"path": "frontend/styles.css", "comment": "New blocker remains."}],
+        progress_disposition={"version": 1, "resolved": source["repair_fingerprints"]},
+    )
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    assert enrollment["attempts"] == 1
+    assert enrollment["repair_progress"]["evaluated_task_ids"] == []
+    assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+
+
 def test_blocker_identity_is_independent_of_review_representation():
     body = repair_request(
         HEAD, 0, [], [], pull_number=16,
@@ -5980,6 +6188,10 @@ def test_completed_partial_review_report_persists_error_and_retries_once(
     assert correction["task_id"] != original_review["task_id"]
     assert correction["dispatch_nonce"] != original_review["dispatch_nonce"]
     assert correction["anchor_comment_id"] != original_review["anchor_comment_id"]
+    assert correction["progress_target_map"] == original_review["progress_target_map"]
+    assert correction["progress_target_map"] == source_fix["repair_target_map"]
+    mapped = json.dumps(correction["progress_target_map"], sort_keys=True, separators=(",", ":"))
+    assert mapped in correction["body"] and mapped in original_review["body"]
     assert StateStore(path).action(source_fix["key"])["task_id"] == source_fix["task_id"]
     assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
     assert StateStore(path).action(original_review["key"])["report_retry_state"] == "reserved"

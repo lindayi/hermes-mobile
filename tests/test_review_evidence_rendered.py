@@ -32,6 +32,36 @@ HTML_ESCAPED = (
 )
 
 
+@pytest.mark.parametrize("count", [0, 1, 8, 9])
+def test_rendered_inventory_reports_total_and_cap(count):
+    rendered = (
+        f"<details><summary>Previously missed ({count})</summary>"
+        + "".join(f"<details><summary>Target {index}</summary><p>Fix target {index}.</p>"
+                  "</details>" for index in range(count))
+        + "</details>"
+    )
+    review = review_pair(OVERVIEW_MARKER + "\nSynthetic inventory", rendered)
+    result = review_body_disposition([review], HEAD, reviewer_id=review["user"]["id"])
+    assert result["findings_total"] == count
+    assert len(result["findings"]) == min(count, 8)
+    assert result["truncated"] is (count > 8)
+    assert result["inventory_complete"] is (count <= 8)
+
+
+@pytest.mark.parametrize("rendered", [
+    "<details><summary>Previously missed (2)</summary>"
+    "<details><summary>One target</summary><p>Fix it.</p></details></details>",
+    "<details><summary>Unknown inventory</summary><p>Uncertain prose.</p></details>",
+    "<details",
+])
+def test_malformed_or_ambiguous_inventory_is_never_complete(rendered):
+    result = parse_body(OVERVIEW_MARKER + "\nSynthetic inventory", "CHANGES_REQUESTED",
+                        body_html=rendered)
+    assert result["inventory_complete"] is False
+    assert result["truncated"] is False
+    assert result["findings_total"] == len(result["findings"])
+
+
 def test_review5392186494_entity_text_is_not_markup():
     review = review_pair(RAW_ESCAPED, HTML_ESCAPED, state="COMMENTED")
     result = review_body_disposition([review], HEAD, reviewer_id=review["user"]["id"])

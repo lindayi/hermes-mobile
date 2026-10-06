@@ -350,14 +350,17 @@ Issue #87 refreshes the current bounded-repair coordinator and lifecycle notific
 pins. The candidate atomically splits legacy source and neutral counts only from
 complete typed reservation provenance, recognizes authenticated retained receipts
 after action compaction, and bounds progress fingerprints to 32 per attempt and
-640 per enrollment. Existing lifecycle event identities remain stable; only new
+640 per enrollment. Rendered finding inventories now expose their completeness,
+and source reservations carry bounded authenticated canonical target maps for
+normal and report-correction review prompts. Existing lifecycle event identities remain stable; only new
 repair-exhaustion events project the linked issue. These exact source pins and
 their independent literal fixture do not establish issue acceptance, independent
 review, merge, runtime evidence, or activation permission:
 
 | Issue #87 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `315c6931fbf6cd320e4bb0a1fe324830be4adee0e5f838df4c49858c85934697` |
+| `deploy/cloud_coordinator.py` | `b0e30ca62566691f3847726125aa42f07b5fcc1bf3f2b40b9b5afb8c8d842ee5` |
+| `deploy/review_evidence.py` | `bc2bea2e4cd17ac28ed96cc5d421f62f63e7ef14ee9bdec5045cf6f26bb8f290` |
 | `deploy/task_receipts.py` | `bfc903eddf33a7b8e4b17ccafd8112af70611ce472a44520ed4fe5842845a1c7` |
 | `deploy/workflow_events.py` | `63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e` |
 | `deploy/workflow_lifecycle.py` | `f8ecf4fa881d907d41a3f8482fa60f1166591dd51e75108aaa4d31f4f2df65b0` |

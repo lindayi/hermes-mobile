@@ -171,7 +171,8 @@ _ISSUE83_INITIAL_REVIEW_FIXTURE = {
 }
 
 _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE = {
-    'deploy/cloud_coordinator.py': '315c6931fbf6cd320e4bb0a1fe324830be4adee0e5f838df4c49858c85934697',
+    'deploy/cloud_coordinator.py': 'b0e30ca62566691f3847726125aa42f07b5fcc1bf3f2b40b9b5afb8c8d842ee5',
+    'deploy/review_evidence.py': 'bc2bea2e4cd17ac28ed96cc5d421f62f63e7ef14ee9bdec5045cf6f26bb8f290',
     'deploy/task_receipts.py': 'bfc903eddf33a7b8e4b17ccafd8112af70611ce472a44520ed4fe5842845a1c7',
     'deploy/workflow_events.py': '63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e',
     'deploy/workflow_lifecycle.py': 'f8ecf4fa881d907d41a3f8482fa60f1166591dd51e75108aaa4d31f4f2df65b0',
@@ -628,7 +629,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         'deploy/issue_starter.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
             'deploy/issue_starter.py'
         ],
-        'deploy/review_evidence.py': _PENDING_ISSUE43_LAUNCH_FIXTURE[
+        'deploy/review_evidence.py': _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE[
             'deploy/review_evidence.py'
         ],
     }
