@@ -3594,6 +3594,40 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         },
     ) == 0
 
+    ordinal_enrollment = deepcopy(
+        cold_store.snapshot()["enrollments"]["16"],
+    )
+    ordinal_enrollment["receipt_proofs"] = deepcopy(proofs)
+    for ordinal, proof in enumerate(ordinal_enrollment["receipt_proofs"], 1):
+        proof["attempt"] = ordinal
+    listed_tasks = [
+        {
+            **{key: value for key, value in task.items() if key != "sessions"},
+            "session_count": len(task.get("sessions", [])),
+        }
+        for task in api.tasks.values()
+    ]
+    for corruption in ("missing-instruction", "wrong-completion-time"):
+        details = deepcopy(api.tasks)
+        session = details["legacy-source-1"]["sessions"][0]
+        if corruption == "missing-instruction":
+            session["prompt"] = session["prompt"].split(
+                "\n\nHermes-Task-Receipt: v2", 1,
+            )[0]
+        else:
+            session["completed_at"] = "2026-10-01T12:59:59Z"
+        assert _legacy_neutral_attempt_count(
+            ordinal_enrollment, {}, api.comments, tasks=listed_tasks,
+            snapshot={
+                "issue": 16,
+                "pull": {
+                    "id": api.pull["id"], "node_id": api.pull["node_id"],
+                    "head": {"ref": "topic"},
+                },
+            },
+            task_details=details,
+        ) is None
+
     history_visible = False
     original_get_all = api.get_all
     task_list_records = []
@@ -7783,6 +7817,52 @@ def _advance_report_recovery_main(api, path):
         f"{BASE}...{CURRENT_MAIN}": _compare_result(BASE, ahead_by=1),
         f"{BASE}...{HEAD}": _compare_result(BASE, ahead_by=1),
     }
+
+
+@pytest.mark.parametrize(
+    "dirty_read", [1, 2], ids=["initial-fence", "fresh-fence"],
+)
+def test_historical_report_correction_never_dispatches_on_dirty_base(
+        tmp_path, dirty_read):
+    api, path, _source_fix, _original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    plan = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._build_plan(apply=False)["pull_requests"][0]
+    action = plan["review_action"]
+    assert action["task_type"] == "report-correction"
+    assert action["head"] == HEAD and action["main_sha"] == CURRENT_MAIN
+
+    pull_states = []
+    start_pull_reads = api.pull_reads
+    original_get = api.get
+
+    def dirty_during_dispatch(route):
+        result = original_get(route)
+        if route == "repos/lindayi/hermes-mobile/pulls/16":
+            read = api.pull_reads - start_pull_reads
+            if read == dirty_read:
+                result = result | {"mergeable": False, "mergeable_state": "dirty"}
+            pull_states.append((result["mergeable"], result["mergeable_state"]))
+        return result
+
+    api.get = dirty_during_dispatch
+    writes_before = list(api.writes)
+    posts_before = api.task_posts
+
+    status = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._dispatch_task(action)
+
+    assert status == "superseded"
+    assert pull_states == (
+        [(False, "dirty")]
+        if dirty_read == 1 else [(True, "behind"), (False, "dirty")]
+    )
+    assert api.task_posts == posts_before
+    assert api.writes == writes_before
+    assert StateStore(path).action(action["key"]) is None
 
 
 def test_historical_report_recovery_uses_fresh_main_and_keeps_retry_separate(
