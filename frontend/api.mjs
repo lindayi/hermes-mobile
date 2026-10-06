@@ -6,16 +6,19 @@ export function createAPI(fetcher = globalThis.fetch.bind(globalThis)) {
   let csrf = '';
   return {
     clear() { csrf = ''; },
-    async request(path, {method = 'GET', body, signal} = {}) {
+    async request(path, {method = 'GET', body, rawBody, headers:extraHeaders, signal} = {}) {
       if (!path.startsWith('/') || path.startsWith('//') || /[\\\r\n]/.test(path) || path.split(/[/?]/).includes('..')) throw new APIError('Invalid API path.');
+      if (body !== undefined && rawBody !== undefined) throw new APIError('Invalid API request body.');
       const headers = {Accept: 'application/json'};
       if (body !== undefined) headers['Content-Type'] = 'application/json';
+      Object.assign(headers, extraHeaders || {});
       if (method !== 'GET' && csrf) headers['X-CSRF-Token'] = csrf;
       let response;
       try {
         response = await fetcher(`${BASE}app-api${path}`, {
           method, headers, credentials:'same-origin', cache:'no-store', signal,
           ...(body !== undefined ? {body:JSON.stringify(body)} : {}),
+          ...(rawBody !== undefined ? {body:rawBody} : {}),
         });
       } catch (error) {
         if (error.name === 'AbortError') throw error;

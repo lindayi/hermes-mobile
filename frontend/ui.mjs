@@ -907,6 +907,54 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const draftKey=key(`draft:${session.id}`);
     const textarea = h('textarea',{name:'message',rows:2,placeholder:'Message Hermes…','aria-label':'Message Hermes',maxlength:32000});
     textarea.value=drafts.get(session.id) ?? storage.get(draftKey) ?? '';
+    const selectedPhotos=[];
+    const photoInput=h('input',{class:'photo-input',type:'file',multiple:true,accept:'image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif','aria-label':'Add photos'});
+    const photoTray=h('div',{class:'photo-tray',hidden:true,'aria-label':'Selected photos'});
+    const photoStatus=h('p',{class:'photo-status caption',role:'status','aria-live':'polite',hidden:true});
+    const releasePreview=photo=>{if(photo.previewUrl)win.URL?.revokeObjectURL?.(photo.previewUrl);};
+    const clearPhotos=()=>{for(const photo of selectedPhotos)releasePreview(photo);selectedPhotos.length=0;photoTray.replaceChildren();photoTray.hidden=true;photoInput.value='';};
+    const renderPhotoSelection=()=>{
+      photoTray.replaceChildren();
+      selectedPhotos.forEach((photo,index)=>{
+        const remove=button('Remove',event=>action(event.currentTarget,async()=>{
+          if(photo.metadata)await api.request(`/sessions/${encodeURIComponent(session.id)}/attachments/${photo.metadata.id}`,{method:'DELETE'});
+          if(!current())return;
+          releasePreview(photo);selectedPhotos.splice(index,1);photoStatus.hidden=true;renderPhotoSelection();
+        }),'quiet photo-remove',{'aria-label':`Remove photo ${index+1}`});
+        photoTray.append(h('div',{class:'photo-preview'},photo.previewUrl?h('img',{src:photo.previewUrl,alt:`Selected photo ${index+1}`}):h('span',{class:'caption'},'Photo selected'),remove));
+      });
+      photoTray.hidden=!selectedPhotos.length;
+    };
+    photoInput.addEventListener('change',()=>{
+      const files=[...(photoInput.files || [])];
+      photoInput.value='';
+      if(!files.length)return;
+      if(selectedPhotos.length+files.length>4){
+        photoStatus.hidden=false;photoStatus.textContent='Choose no more than four photos per message.';
+        return;
+      }
+      const supported=files.map(file=>{
+        const extension=/\.([^.]+)$/.exec(file.name || '')?.[1]?.toLowerCase();
+        const type=(file.type || '').toLowerCase();
+        if(['image/heic','image/heif','image/heic-sequence','image/heif-sequence'].includes(type)
+            || ['heic','heif'].includes(extension)){
+          photoStatus.hidden=false;photoStatus.textContent='HEIC/HEIF photos are not supported yet. Choose JPEG, PNG, or WebP.';
+          return null;
+        }
+        if(!['image/jpeg','image/png','image/webp'].includes(type)
+            && !['jpg','jpeg','png','webp'].includes(extension)){
+          photoStatus.hidden=false;photoStatus.textContent='Choose a JPEG, PNG, or WebP photo.';
+          return null;
+        }
+        let previewUrl='';
+        try{previewUrl=win.URL?.createObjectURL?.(file) || '';}catch{}
+        return {file,previewUrl,uploadKey:win.crypto.randomUUID(),metadata:null};
+      });
+      if(supported.some(photo=>!photo))return;
+      selectedPhotos.push(...supported);
+      photoStatus.hidden=true;photoStatus.textContent='';
+      renderPhotoSelection();
+    });
     const accepted=result.run || result.last_run;
     const approvalNotice=h('div',{class:'approval-notice',role:'status','aria-live':'polite',hidden:true});
     let approvalRevision=0, approvalPending=new Map(), genericApproval=false, currentApprovalRun=accepted?.id;
@@ -1001,9 +1049,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     currentModelSync=(owner,sessionId)=>{if(owner===modelOwner && sessionId===session.id)syncModelLock();};
     const modelObserver=new win.MutationObserver(syncModelLock);modelObserver.observe(send,{attributes:true,attributeFilter:['disabled','data-state']});syncModelLock();
     win.addEventListener('focus',refreshSteering);
-    const previousExtras=stopExtras;stopExtras=()=>{steeringRun=null;win.removeEventListener('focus',refreshSteering);modelObserver.disconnect();modelControls.destroy();previousExtras?.();};
+    const previousExtras=stopExtras;stopExtras=()=>{steeringRun=null;clearPhotos();win.removeEventListener('focus',refreshSteering);modelObserver.disconnect();modelControls.destroy();previousExtras?.();};
     async function submit() {
-      const input=textarea.value.trim(); if(!input) return;
+      if(!textarea.value.trim() && !selectedPhotos.length)return;
+      const input=textarea.value.trim() || 'Please describe the attached image(s), including any visible text.';
       let previous=attempts.get(session.id);
       try { previous ||= JSON.parse(storage.get(key(`attempt:${session.id}`))); } catch {}
       if(previous?.input!==input && !modelControls.canSubmit())throw new Error('Saved model choice could not be checked. Reload before sending.');
@@ -1012,13 +1061,29 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       attempts.set(session.id,attempt);storage.set(key(`attempt:${session.id}`),JSON.stringify(attempt));syncModelLock();
       const owner=state.user?.id;
       composerAction.set('sending');connection.run('sending');const token=connection.token();
-      let run;try{run=await api.request('/runs',{method:'POST',body:{session_id:session.id,...attempt}});connection.success(token);}catch(error){
+      let run;try{
+        for(let index=0;index<selectedPhotos.length;index++){
+          const photo=selectedPhotos[index];
+          if(photo.metadata)continue;
+          photoStatus.hidden=false;photoStatus.textContent=`Uploading photo ${index+1} of ${selectedPhotos.length}…`;
+          const metadata=await api.request(`/sessions/${encodeURIComponent(session.id)}/attachments`,{
+            method:'POST',rawBody:photo.file,headers:{'Idempotency-Key':photo.uploadKey}});
+          if(!/^[a-f0-9]{32}$/.test(metadata?.id || '') || metadata.status!=='pending')throw new Error('Photo upload response was invalid.');
+          photo.metadata=metadata;
+        }
+        photoStatus.hidden=false;
+        photoStatus.textContent=selectedPhotos.length?'Sending message with photos…':'Sending message…';
+        const attachments=selectedPhotos.map(photo=>photo.metadata.id);
+        run=await api.request('/runs',{method:'POST',body:{session_id:session.id,...attempt,attachments}});
+        connection.success(token);
+      }catch(error){
         connection.failure(token);
         if(owner===state.user?.id && [400,422].includes(error.status) && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);currentModelSync?.(owner,session.id);}
-        if(version===routeVersion){composerAction.set('idle');syncModelLock();}
+        if(version===routeVersion){photoStatus.hidden=false;photoStatus.textContent=`Photo or message was not sent. Your text and selected photos are retained. ${error.message || 'Try again.'}`;composerAction.set('idle');syncModelLock();}
         throw error;
       }
       if(owner!==state.user?.id)return;
+      photoStatus.hidden=true;photoStatus.textContent='';
       storage.set(key(`run:${session.id}`),run.id,true);
       if(attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){
         if((drafts.get(session.id) ?? textarea.value).trim()===input){drafts.delete(session.id);storage.set(draftKey,null);}
@@ -1028,7 +1093,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         syncModelLock();
       }
       if(version!==routeVersion)return;
-      messages.querySelector('.empty')?.remove();messages.append(renderMessage({role:'user',content:input,timestamp:run.created_at,run_id:run.id,session_id:session.id}),...renderReminders(run));
+      messages.querySelector('.empty')?.remove();messages.append(renderMessage({role:'user',content:input,timestamp:run.created_at,run_id:run.id,session_id:session.id,attachments:run.attachments}),...renderReminders(run));
+      clearPhotos();
       messages.scrollTop=messages.scrollHeight;
       await trackRun({...run,session_id:session.id},messages,composerAction);
     }
@@ -1044,7 +1110,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       root.append(overlay);textarea.focus();textarea.setSelectionRange(start,end);
     },'quiet icon-button',{'aria-label':'Expand editor',title:'Expand editor'});
     const editorSlot=h('div',{class:'composer-editor'},textarea,expand);
-    const composer=h('form',{class:'composer',onsubmit:e=>{e.preventDefault();if(dispatch===submit || dispatch===steer)activate();}},editorSlot,steerHelp,steerStatus,steerRetries,h('div',{class:'composer-bottom'},modelControls.element,send));
+    const composer=h('form',{class:'composer',onsubmit:e=>{e.preventDefault();if(dispatch===submit || dispatch===steer)activate();}},editorSlot,photoTray,photoStatus,h('div',{class:'photo-controls'},photoInput),steerHelp,steerStatus,steerRetries,h('div',{class:'composer-bottom'},modelControls.element,send));
     const technical=h('details',{class:'technical-strip',hidden:true});
     const renderTelemetry=data=>{
       if(version!==routeVersion || !data)return;
@@ -1217,7 +1283,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     if(Object.hasOwn(result,'run')) {
       if(result.run) {
         messages.querySelector('.empty')?.remove();
-        messages.append(renderMessage({role:'user',content:result.run.input,timestamp:result.run.created_at,run_id:result.run.id,session_id:session.id}),...renderReminders(result.run));
+        messages.append(renderMessage({role:'user',content:result.run.input,timestamp:result.run.created_at,run_id:result.run.id,session_id:session.id,attachments:result.run.attachments}),...renderReminders(result.run));
         messages.scrollTop=messages.scrollHeight;
         await trackRun(result.run,messages,composerAction,result.tool_replay,{follow:shouldFollowInitialRestore,finish:finishInitialRestore});
       } else if(result.last_run?.status==='unknown') {
@@ -1936,11 +2002,25 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     }
     const text=typeof message.content==='string' ? message.content : message.content == null ? '' : JSON.stringify(message.content);
     const tools=(message.tool_calls || []).map(tool=>({...tool,name:tool.function?.name || tool.name}));
-    if(!text.trim())return tools.length ? toolActivity(tools) : doc.createDocumentFragment();
+    const attachments=Array.isArray(message.attachments) ? message.attachments.slice(0,4) : [];
+    const photos=h('div',{class:'message-photos','aria-label':'Attached photos'});
+    for(const item of attachments){
+      if(!item || typeof item.id!=='string' || !/^[a-f0-9]{32}$/.test(item.id) || item.status==='expired'){
+        photos.append(h('p',{class:'expired-photo caption',role:'status'},'Photo expired; message text is still available.'));
+        continue;
+      }
+      const source=`/hermes/app-api/sessions/${encodeURIComponent(message.session_id || state.session?.id || '')}/attachments/${item.id}`;
+      const image=h('img',{src:source,alt:'Attached photo',loading:'lazy'});
+      image.addEventListener('error',()=>image.replaceWith(h('p',{class:'expired-photo caption',role:'status'},'Photo expired or unavailable; message text is still available.')),{once:true});
+      photos.append(image);
+    }
+    const gallery=attachments.length?photos:null;
+    if(!text.trim() && message.role==='assistant' && tools.length)return toolActivity(tools);
+    if(!text.trim() && !tools.length && !gallery)return doc.createDocumentFragment();
     if(message.role==='assistant' && message.channel==='commentary'){const progress=publicActivity(text,message.timed_chunks,Object.hasOwn(message,'timestamp')?message.timestamp:message.observed_at);if(tools.length)progress.append(toolActivity(tools));return progress;}
     const copy=message.role==='assistant' ? button(icon('copy'),e=>action(e.currentTarget,async()=>{if(!win.navigator.clipboard)throw new Error('Copy is unavailable in this browser. Select the text to copy it.');await win.navigator.clipboard.writeText(text);inform('Copied to clipboard.');}),'quiet message-copy',{'aria-label':'Copy message',title:'Copy message'}) : null;
     const node=h('article',{class:`message ${message.role === 'user' ? 'user-message' : 'assistant-message'}`},h('div',{class:'message-author'},message.role === 'user' ? 'You' : 'Hermes',messageTime(message.timestamp),copy),
-      renderMarkdown(doc,text),tools.length ? toolActivity(tools) : null);
+      text.trim()?renderMarkdown(doc,text):null,gallery,tools.length ? toolActivity(tools) : null);
     if(message.role==='user' && message.kind==='guidance' && message.run_id && message.idempotency_key){
       node.dataset.guidanceRun=message.run_id;node.dataset.guidanceKey=message.idempotency_key;
       if(message.steering_id){node.dataset.guidanceId=message.steering_id;node.id=`journal:${message.run_id}:steering:${message.steering_id}`;}
