@@ -473,6 +473,67 @@ mergeability and active tasks. Changed or incomplete evidence suppresses that
 planned request without consuming an attempt; it does not substitute another
 repair or fall back to auto-merge in the same cycle.
 
+### Lifetime repair budget and verified progress
+
+Each enrolled pull request has a hard lifetime ceiling of 20 source-repair
+reservations. A reservation consumes one attempt before the task API POST; failed
+tasks and ambiguous POST outcomes remain consumed and are never replayed. The
+cumulative count, unresolved reservation, authorization, accepted source heads,
+and receipt proofs survive restart, head/base changes, main advances, close/reopen,
+duplicate events, and later owner enrollment commands. A new job or enrollment
+cannot reset the count. Independent review, its separately bounded report
+correction, polling, CI/review waiting, and infrastructure backoff do not consume
+source-repair attempts. Neutral main reconciliation has its own three-reservation
+bound and does not consume the source-repair budget.
+
+Three consecutive completed source repairs without verified forward progress stop
+dispatch before the lifetime ceiling. Progress is decided only once for a
+coordinator-reserved source task after the authenticated task is terminal and its
+unchanged ready receipt binds the task, session, starting head, result head, PR and
+dispatch base. The result head must be the current authorized PR head. The complete
+current GitHub collections must also prove successful required checks, the latest
+positive owner-published independent-agent review on that exact head, and resolved
+review conversations. Task state, agent prose, a changed SHA, code churn, unrelated
+green checks, elapsed time, changed issue text, cosmetic wording, or new review IDs
+alone cannot count as progress.
+
+At reservation, the coordinator records bounded fingerprints of the actual
+eligible repair targets: stable review-thread identity, normalized body finding,
+or source-workflow failure class. A result is progress only when at least one
+previous target is absent from the complete current-head evidence. A previously
+cleared fingerprint that reappears is a regression and prevents progress credit;
+thus alternating A-to-B-to-A findings cannot repeatedly reset the streak.
+Fingerprints ignore review IDs and cosmetic case, whitespace, and punctuation
+changes. If task, receipt, head/base binding, CI, review, pagination, or target
+identity is absent, malformed, partial, stale, or otherwise unverified, the
+attempt remains unevaluated: it neither earns progress nor increments the
+no-progress streak. Three positively observed no-progress decisions stop further
+source repairs. The 20-reservation ceiling remains the ultimate bound; this
+bounded text/identity heuristic cannot prove semantic equivalence of arbitrary
+paraphrases.
+
+Existing records retain their cumulative attempts and receipt proofs. Missing
+pre-upgrade progress history is explicitly unknown; it is not converted to
+zero-progress or retroactively scored. A valid retained ready-receipt chain may
+continue to provide current source provenance after its completed action is
+compacted, but cannot by itself establish a historical no-progress streak or
+replace fresh checks and independent review. Source acceptance remains distinct
+from merge approval and deployment.
+
+The 20-attempt ceiling is grounded in a small, nonrandom sample of merged cloud
+pull requests, not a percentile or guarantee. The audit used authenticated
+repository task lists, task-to-PR artifact IDs, and actual dispatch/session
+prompts, counted each dispatched source correction once, and excluded initial
+implementation, independent review, report-only correction/evidence, and
+transport-only tasks. The observed source-repair counts were PR82: 0, PR76: 0,
+PR74: 1, PR70: 2, PR72: 4, PR84: 8 (including one failed repair task), PR80: 14,
+and PR78: 14 plus one separately excluded neutral integration. PR84's eight
+verified repair task IDs were c0b66de0, 42b11cbe, 002f40ba, c8cdae09, e23eb1f6,
+fa8ec9e1, c4d04ca9, and 1385eae4. PR80's 14 repair tasks were interleaved with
+14 independent reviews; PR78's neutral integration task was 7cd68547. The sample
+supports headroom beyond the former three-attempt cap but cannot predict future
+workloads.
+
 ## Review, checks, and merge
 
 Technical review acceptance requires the latest authenticated owner-published
