@@ -8,7 +8,8 @@ import pytest
 
 from deploy.cloud_coordinator import _authorized_result_heads
 from test_cloud_coordinator import (
-    BASE, HEAD, OWNER, Coordinator, FakeApi, StateStore, refresh_owner_review,
+    BASE, HEAD, OWNER, COPILOT_AGENT, Coordinator, FakeApi, StateStore,
+    refresh_owner_review,
 )
 
 NOW = 1790856660
@@ -449,6 +450,107 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
     Coordinator(api, store, clock=lambda: NOW).run(apply=True)
     action = next(a for a in store.actions().values() if a["kind"] == "fix")
     return api, store, action
+
+
+def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
+    api, store, _ = actual_starter_consumer(tmp_path)
+    original = store.snapshot()["enrollments"]["16"]
+    assert original["initial_source"]["head_sha"] == HEAD
+    assert original["starter_admission"]["head_sha"] == HEAD
+    proofs = []
+    proof_heads = [HEAD, "1" * 40, "2" * 40, "3" * 40]
+    for attempt, (start_head, result_head) in enumerate(
+            zip(proof_heads, proof_heads[1:]), 1):
+        task_id = f"legacy-pr86-task-{attempt}"
+        session_id = f"legacy-pr86-session-{attempt}"
+        nonce = f"legacy-pr86-nonce-{attempt}"
+        comment_id = 900 + attempt
+        created_at = f"2026-10-01T12:0{attempt}:00Z"
+        completed_at = f"2026-10-01T12:0{attempt}:30Z"
+        body = (
+            "Hermes-Task-Receipt: v1\n"
+            f"nonce={nonce}\n"
+            f"task={task_id}\n"
+            f"session={session_id}\n"
+            "pr=16\n"
+            f"start_head={start_head}\n"
+            f"head={result_head}\n"
+            f"base={BASE}\n"
+            "result=ready"
+        )
+        proofs.append({
+            "issue": 16, "kind": "fix", "status": "completed",
+            "head": start_head, "task_id": task_id, "dispatch_nonce": nonce,
+            "receipt_result": "ready", "receipt_comment_id": comment_id,
+            "receipt_created_at": created_at, "receipt_body": body,
+            "receipt_task_id": task_id, "receipt_session_id": session_id,
+            "receipt_completed_at": completed_at,
+            "receipt_session_completed_at": completed_at,
+            "receipt_nonce": nonce, "receipt_start_head": start_head,
+            "receipt_head": result_head, "receipt_base": BASE,
+            "attempt": attempt,
+        })
+        api.comments.append({
+            "id": comment_id, "user": {"id": COPILOT_AGENT},
+            "body": body, "created_at": created_at, "updated_at": created_at,
+        })
+
+    def make_legacy(state):
+        enrollment = state["enrollments"]["16"]
+        enrollment.update(attempts=3, receipt_proofs=proofs)
+        enrollment.pop("neutral_attempts", None)
+        enrollment.pop("repair_progress", None)
+        state["actions"] = {
+            key: action for key, action in state["actions"].items()
+            if action.get("kind") != "fix"
+        }
+
+    store._mutate(make_legacy)
+    current_head = proof_heads[-1]
+    moved_main = "d" * 40
+    api.head_sha = current_head
+    api.pull["head"]["sha"] = current_head
+    api.pull["base"]["sha"] = moved_main
+    api.pull["mergeable"] = True
+    api.pull["mergeable_state"] = "behind"
+    api.advance_main = True
+    api.set_owner_review(
+        review_id=64002,
+        head_sha=current_head,
+        body=json.dumps({
+            "schema": "hermes-independent-agent-review-v1",
+            "reviewed_head_sha": current_head,
+            "review_method": "independent-agent",
+            "verdict": "changes_requested",
+            "evidence_sha256": "f" * 64,
+            "findings": [
+                {"path": "frontend/styles.css", "comment": "First new finding."},
+                {"path": "backend/app.py", "comment": "Second new finding."},
+            ],
+        }, separators=(",", ":")),
+        submitted_at="2026-10-01T12:10:00Z",
+    )
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: NOW,
+    ).run(apply=True)["pull_requests"][0]
+
+    reopened = StateStore(store.path)
+    enrollment = reopened.snapshot()["enrollments"]["16"]
+    neutral = next(
+        action for action in reopened.actions().values()
+        if action.get("kind") == "fix" and action.get("task_type") == "neutral"
+    )
+    assert not result["review_valid"]
+    assert result["repair_requested"]
+    assert enrollment["attempts"] == 3
+    assert enrollment["neutral_attempts"] == 1
+    assert enrollment["receipt_proofs"] == proofs
+    assert enrollment["initial_source"] == original["initial_source"]
+    assert enrollment["starter_admission"] == original["starter_admission"]
+    assert enrollment["repair_progress"]["legacy_unknown"] is True
+    assert neutral["attempt"] == 1 and neutral["status"] == "sent"
+    assert api.fix_attempts == 2
 
 
 def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(tmp_path):
