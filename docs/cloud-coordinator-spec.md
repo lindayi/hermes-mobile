@@ -511,6 +511,12 @@ Pre-upgrade unscored receipts remain explicitly unknown rather than blocking for
 Legacy shared counts are split only after authenticating every unique retained
 task/session, prompt, and receipt chain, without inventing ordinals or task types.
 Fully observed terminal failed verification allows only a nonprogress decision.
+Completed required check runs with `failure`, `cancelled`, `timed_out`,
+`action_required`, `neutral`, `skipped`, `stale`, or `startup_failure` are terminal
+observations, not successful verification. They permit a no-progress evaluation
+when the exact-head task and independent review are complete, but never resolution
+credit or merge eligibility. Pending, null, unknown or malformed conclusions,
+wrong app/head bindings and incomplete pagination keep evaluation pending.
 A bound negative report supplies the review-stage disposition, not a successful
 `agent-review` check; all non-review checks must be observed before scoring.
 An incomplete or older-encoding reservation baseline receives an explicitly
@@ -566,9 +572,12 @@ deployment.
 Legacy records that predate the separate neutral counter retain a conservative
 unknown marker until every shared reservation is accounted for by retained task
 claims or authenticated receipt proofs. Reservation type comes from the exact
-controller prompt of the uniquely authenticated completed task/session, not saved
+controller prompt of the uniquely authenticated terminal task/session (`completed`,
+`failed`, `timed_out`, or `cancelled`), not saved
 `task_type` or policy-version labels; this applies to both retained v1 and v2
-receipts. A receipt alone never implies a source reservation. Missing, conflicting,
+receipts. Ordinal-less reservations still require an authenticated retained receipt
+with its session chronology and nonce-bound instruction; failure cannot manufacture
+a missing receipt. A receipt alone never implies a source reservation. Missing, conflicting,
 or incomplete history keeps both repair paths unavailable rather than granting a
 new budget. The shared count is split atomically into source and neutral
 reservations without resetting either budget, starter provenance, or receipt

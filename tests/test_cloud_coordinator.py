@@ -1676,6 +1676,7 @@ class FakeApi:
             return [
                 {
                     "name": name,
+                    "head_sha": self.head_sha,
                     "app": {"id": app_id} if app_id is not None else {},
                     "status": ("in_progress" if self.pending_required and name == "integration-tests"
                                else "completed"),
@@ -3645,6 +3646,132 @@ def test_terminal_source_waits_for_evaluation_then_resumes_once(tmp_path, termin
     assert enrollment["attempts"] == 2 and api.fix_attempts == 2
     assert enrollment["repair_progress"]["evaluated_task_ids"] == [source["task_id"]]
     assert enrollment["repair_progress"]["consecutive_no_progress"] == 1
+
+
+@pytest.mark.parametrize("conclusion", [
+    "failure", "cancelled", "timed_out", "action_required",
+    "neutral", "skipped", "stale", "startup_failure",
+])
+@pytest.mark.parametrize("hazard", [
+    None, "pending", "null", "unknown", "malformed", "app", "head", "pagination",
+])
+def test_completed_negative_review_evaluates_only_complete_terminal_checks(
+        tmp_path, conclusion, hazard):
+    api = FakeApi(unresolved=True)
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.complete_task(source["task_id"], source, head_sha=head)
+    api.unresolved = False
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    store = StateStore(path)
+    reviewer = next(a for a in store.actions().values() if a["kind"] == "review")
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=store.action(source["key"]),
+        verdict="changes_requested",
+        findings=[{"path": "frontend/styles.css", "comment": "New blocker."}],
+        progress_disposition={"version": 1, "resolved": source["repair_fingerprints"]},
+    )
+    original_get_all = api.get_all
+
+    def checks(route, *, collection=None):
+        values = original_get_all(route, collection=collection)
+        if collection == "check_runs":
+            if hazard == "pagination":
+                raise ApiError("pagination was incomplete")
+            values = [
+                {**check, "head_sha": head, "conclusion": conclusion}
+                if check["name"] == "source-ci" else check for check in values
+            ]
+            check = next(c for c in values if c["name"] == "source-ci")
+            if hazard == "pending":
+                check.update(status="in_progress", conclusion=None)
+            elif hazard in {"null", "unknown", "malformed"}:
+                check["conclusion"] = {"null": None, "unknown": "unknown", "malformed": []}[hazard]
+            elif hazard == "app":
+                check["app"] = {"id": 1}
+            elif hazard == "head":
+                check["head_sha"] = HEAD
+        return values
+
+    api.get_all = checks
+    for _ in range(2):
+        if hazard == "pagination":
+            with pytest.raises(ApiError, match="pagination was incomplete"):
+                Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        else:
+            result = Coordinator(
+                api, StateStore(path), clock=lambda: 1790856660,
+            ).run(apply=True)["pull_requests"][0]
+            assert not result["review_valid"] and not result["required_checks_green"]
+            assert not result["auto_merge_eligible"]
+    progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
+    assert progress["evaluated_task_ids"] == ([source["task_id"]] if hazard is None else [])
+    assert progress["consecutive_no_progress"] == (1 if hazard is None else 0)
+    assert progress["resolved_fingerprints"] == []
+    assert api.fix_attempts == (2 if hazard is None else 1)
+    assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("terminal", ["failed", "timed_out", "cancelled"])
+@pytest.mark.parametrize("task_type", ["source", "neutral"])
+@pytest.mark.parametrize("ordinal", [True, False])
+def test_cold_legacy_terminal_reservation_keeps_consumed_counter(
+        tmp_path, terminal, task_type, ordinal):
+    api = FakeApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    action = next(a for a in store.actions().values() if a["kind"] == "fix")
+    task = api.tasks[action["task_id"]]
+    task["state"] = terminal
+    task["sessions"] = [{
+        "id": f"session-{task['id']}", "task_id": task["id"], "state": terminal,
+        "user": {"id": OWNER}, "owner": {"id": OWNER},
+        "repository": {"id": cloud_coordinator.REPOSITORY_ID},
+        "head_ref": "topic", "base_ref": "main",
+        "created_at": "2026-10-01T12:01:00Z", "completed_at": "2026-10-01T12:05:30Z",
+    }]
+
+    def legacy(state):
+        enrollment = state["enrollments"]["16"]
+        enrollment["attempts"] = 1
+        enrollment.pop("neutral_attempts", None)
+        enrollment.pop("repair_progress", None)
+        record = state["actions"][action["key"]]
+        record.update(status="completed", task_type=task_type)
+        record.pop("repair_policy_version", None)
+        prefix = (
+            f"Neutral reconciliation for PR #16 at exact PR head `{HEAD}`."
+            if task_type == "neutral" else
+            f"Please address bounded review/check follow-up for PR #16 at head `{HEAD}`."
+        )
+        record["body"] = task["sessions"][0]["prompt"] = prefix
+        if not ordinal:
+            record.pop("attempt", None)
+
+    store._mutate(legacy)
+    api.advance_main = True
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull["mergeable_state"] = "behind"
+    result = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    if ordinal:
+        assert enrollment["neutral_attempts_unknown"] is False
+        assert enrollment["attempts"] == (1 if task_type == "source" else 0)
+        assert enrollment["neutral_attempts"] == (2 if task_type == "neutral" else 1)
+        assert api.fix_attempts == 2
+    else:
+        assert enrollment["neutral_attempts_unknown"] is True
+        assert enrollment["attempts"] == 1
+        assert api.fix_attempts == 1
+        assert not result["pull_requests"][0]["repair_requested"]
+    assert not enrollment.get("receipt_proofs", [])
+    assert not api.graphql_writes
 
 
 @pytest.mark.parametrize("malformed", ["empty-body", "missing-comments", "ambiguous-body"])

@@ -524,8 +524,9 @@ def _latest_statuses(statuses):
     return list(latest.values())
 
 
-def required_checks_pass(required, check_runs, statuses, *, complete, terminal_only=False):
-    """Require every configured context to have only completed-success evidence."""
+def required_checks_pass(required, check_runs, statuses, *, complete, terminal_only=False,
+                         head_sha=None):
+    """Require completed success, or terminal evidence for progress evaluation."""
     contexts = _required_contexts(required)
     if (not complete or not contexts or not isinstance(check_runs, list)
             or not isinstance(statuses, list)):
@@ -534,7 +535,8 @@ def required_checks_pass(required, check_runs, statuses, *, complete, terminal_o
     if statuses is None:
         return False
     conclusions = (
-        {"success", "failure", "cancelled", "timed_out", "action_required"}
+        {"success", "failure", "cancelled", "timed_out", "action_required",
+         "neutral", "skipped", "stale", "startup_failure"}
         if terminal_only else {"success"}
     )
     states = {"success", "failure", "error"} if terminal_only else {"success"}
@@ -549,6 +551,10 @@ def required_checks_pass(required, check_runs, statuses, *, complete, terminal_o
         ]
         commits = [status for status in statuses
                    if isinstance(status, dict) and status.get("context") == name]
+        if any(not isinstance(run.get("conclusion"), str)
+               or (head_sha is not None and run.get("head_sha") != head_sha)
+               for run in runs):
+            return False
         if app_id is not None:
             if not runs or any(run.get("status") != "completed"
                                or run.get("conclusion") not in conclusions for run in runs):
@@ -2329,7 +2335,7 @@ def _legacy_task_reservation_type(record, tasks, snapshot):
     task = tasks.get(task_id)
     if (not isinstance(task, dict)
             or task.get("id") != task_id
-            or task.get("state") != "completed"
+            or task.get("state") not in {"completed", "failed", "timed_out", "cancelled"}
             or not _github_identity(task.get("creator"), OWNER_ID)
             or not _github_identity(task.get("owner"), OWNER_ID)
             or not _github_identity(task.get("repository"), REPOSITORY_ID)
@@ -2344,7 +2350,7 @@ def _legacy_task_reservation_type(record, tasks, snapshot):
     if (not isinstance(session, dict)
             or (session_id is not None and session.get("id") != session_id)
             or session.get("task_id") != task_id
-            or session.get("state") != "completed"
+            or session.get("state") not in {"completed", "failed", "timed_out", "cancelled"}
             or not _github_identity(session.get("user"), OWNER_ID)
             or not _github_identity(session.get("owner"), OWNER_ID)
             or not _github_identity(session.get("repository"), REPOSITORY_ID)
@@ -4707,11 +4713,11 @@ class Coordinator:
         ]
         checks_terminal = required_checks_pass(
             progress_required, snapshot["check_runs"], snapshot["statuses"],
-            complete=snapshot["policy_complete"], terminal_only=True,
+            complete=snapshot["policy_complete"], terminal_only=True, head_sha=head,
         )
         progress_checks_ok = required_checks_pass(
             progress_required, snapshot["check_runs"], snapshot["statuses"],
-            complete=snapshot["policy_complete"],
+            complete=snapshot["policy_complete"], head_sha=head,
         )
         progress = _completed_repair_progress(
             snapshot, progress_actions, current_fingerprints, authorized_heads,

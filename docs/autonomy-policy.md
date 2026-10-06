@@ -357,7 +357,7 @@ review, merge, runtime evidence, or activation permission:
 
 | Issue #87 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `f1f7dbf954e3eec7b85f0cca4c6949b8cf9e4c7f5adb477ad28a68fd8952a599` |
+| `deploy/cloud_coordinator.py` | `315c6931fbf6cd320e4bb0a1fe324830be4adee0e5f838df4c49858c85934697` |
 | `deploy/task_receipts.py` | `bfc903eddf33a7b8e4b17ccafd8112af70611ce472a44520ed4fe5842845a1c7` |
 | `deploy/workflow_events.py` | `63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e` |
 | `deploy/workflow_lifecycle.py` | `f8ecf4fa881d907d41a3f8482fa60f1166591dd51e75108aaa4d31f4f2df65b0` |

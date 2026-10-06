@@ -460,7 +460,9 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
 
 
 @pytest.mark.parametrize("corruption", [None, "prompt", "session", "receipt", "count"])
-def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path, corruption):
+@pytest.mark.parametrize("terminal", ["completed", "failed", "timed_out", "cancelled"])
+def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(
+        tmp_path, corruption, terminal):
     from deploy.task_receipts import receipt_instruction
 
     api, store, first_action = actual_starter_consumer(tmp_path)
@@ -509,7 +511,7 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path, 
             "body": body, "created_at": created_at, "updated_at": created_at,
         })
         api.tasks[task_id] = {
-            "id": task_id, "state": "completed",
+            "id": task_id, "state": terminal,
             "creator": {"id": OWNER}, "owner": {"id": OWNER},
             "repository": {"id": 1399942965},
             "artifacts": [
@@ -523,7 +525,7 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path, 
                 },
             ],
             "sessions": [{
-                "id": session_id, "task_id": task_id, "state": "completed",
+                "id": session_id, "task_id": task_id, "state": terminal,
                 "user": {"id": OWNER}, "owner": {"id": OWNER},
                 "repository": {"id": 1399942965},
                 "head_ref": "topic", "base_ref": "main",

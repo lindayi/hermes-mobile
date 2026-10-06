@@ -186,7 +186,7 @@ SOURCE_FINGERPRINTS = {
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     # Issue #87 bounded-repair candidate; source consistency only.
-    'deploy/cloud_coordinator.py': 'f1f7dbf954e3eec7b85f0cca4c6949b8cf9e4c7f5adb477ad28a68fd8952a599',
+    'deploy/cloud_coordinator.py': '315c6931fbf6cd320e4bb0a1fe324830be4adee0e5f838df4c49858c85934697',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
