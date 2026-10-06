@@ -3715,6 +3715,20 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         assert db.execute("SELECT status FROM events").fetchone() == ("acked",)
 
     history_visible = True
+    writes_before_plan = list(api.writes)
+    plan = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._build_plan(apply=False)
+    planned_enrollment = plan["snapshots"][0]["enrollment"]
+    assert planned_enrollment["attempts"] == 3
+    if hydration_hazard is None:
+        assert planned_enrollment["neutral_attempts"] == 0
+        assert planned_enrollment["neutral_attempts_unknown"] is False
+        assert plan["pull_requests"][0]["repair"]["task_type"] == "neutral"
+    else:
+        assert planned_enrollment["neutral_attempts_unknown"] is True
+        assert plan["pull_requests"][0]["repair"] is None
+    assert api.writes == writes_before_plan
     result = Coordinator(
         api, StateStore(path), clock=lambda: 1790856660,
     ).run(apply=True)["pull_requests"][0]
@@ -3773,9 +3787,9 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     assert set(task_detail_reads) == {
         "legacy-source-1", "legacy-source-2", "legacy-source-3",
     }
-    assert task_detail_reads.count("legacy-source-1") == 1
-    assert task_detail_reads.count("legacy-source-2") == 2
-    assert task_detail_reads.count("legacy-source-3") == 2
+    assert task_detail_reads.count("legacy-source-1") == 2
+    assert task_detail_reads.count("legacy-source-2") == 3
+    assert task_detail_reads.count("legacy-source-3") == 3
     assert StateStore(path).snapshot()["lifecycle_events"] == [historical_event]
     recovered_export = json.loads((path.parent / "workflow-events.json").read_text())
     assert recovered_export["events"] == [historical_event]

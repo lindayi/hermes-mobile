@@ -347,24 +347,26 @@ preserves earlier issue #43, #50, and #79 history; it establishes source consist
 only, not independent review, merge, runtime evidence, or activation permission.
 
 Issue #87 refreshes the current bounded-repair coordinator and lifecycle notification
-pins. The candidate atomically splits legacy source and neutral counts only from
-complete typed reservation provenance, recognizes authenticated retained receipts
-after action compaction, and bounds progress fingerprints to 32 per attempt and
-640 per enrollment. Rendered finding inventories now expose their completeness,
-and source reservations carry bounded authenticated canonical target maps for
-normal and report-correction review prompts. The current delta validates raw
-GraphQL thread identities before writes, requires a changed ready-receipt result
-for resolution credit, and leaves unknown reservation history in recoverable
-waiting without emitting an exhaustion notice. New source, neutral and review
-follow-up identities use the `budget-v2:` discriminator without rewriting legacy
-records or bypassing occupancy fences. Existing lifecycle event identities remain stable; only new
-repair-exhaustion events project the linked issue. These exact source pins and
-their independent literal fixture do not establish issue acceptance, independent
-review, merge, runtime evidence, or activation permission:
+pins. Merged PR88 added the 20-attempt source ceiling and verified-progress policy.
+The authorized continuation follow-up additionally hydrates only exact saved task
+IDs from authenticated detail GETs when a unique terminal task-list record reports
+one session but omits its details; complete authenticated task/session/prompt/receipt
+chains can then split legacy source and neutral counts without rewriting their
+history. For a historical base, only consistent `true`/`behind` or `false`/`dirty`
+mergeability and verified ancestry permit the existing neutral reconciliation path.
+These changes retain the progress fingerprint bounds, canonical target maps,
+`budget-v2:` identities, occupancy fences, stable lifecycle identities and distinct
+source/merge/deployment authority. The current delta validates raw GraphQL thread
+identities before writes and leaves incomplete retained history in recoverable
+waiting without an exhaustion notice. The coordinator digest below supersedes the
+merged PR88 candidate digest `9b06e73bc89c38dd7cf6f77532b146f2f73fb3b1e7f6706c6b16425b1356ef23`;
+all other issue #87 pins remain unchanged. These exact source pins and their
+independent literal fixture do not establish issue acceptance, independent review,
+merge, runtime evidence, or activation permission:
 
 | Issue #87 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `9b06e73bc89c38dd7cf6f77532b146f2f73fb3b1e7f6706c6b16425b1356ef23` |
+| `deploy/cloud_coordinator.py` | `f67df620af43c323af52d0fc286bf1ca8a1b1613648926e13b5c86a69f8082c1` |
 | `deploy/review_evidence.py` | `bc2bea2e4cd17ac28ed96cc5d421f62f63e7ef14ee9bdec5045cf6f26bb8f290` |
 | `deploy/task_receipts.py` | `bfc903eddf33a7b8e4b17ccafd8112af70611ce472a44520ed4fe5842845a1c7` |
 | `deploy/workflow_events.py` | `63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e` |
