@@ -1262,7 +1262,7 @@ def test_truncated_graphql_threads_never_become_complete():
     class Truncated:
         def graphql(self, query, variables):
             return {"data": {"repository": {"pullRequest": {"reviewThreads": {
-                "nodes": [{"isResolved": True, "comments": {
+                "nodes": [{"id": "PRRT_truncated", "isResolved": True, "comments": {
                     "nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
                 }}],
                 "pageInfo": {"hasNextPage": True, "endCursor": None},
