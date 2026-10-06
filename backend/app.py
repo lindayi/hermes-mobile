@@ -10,7 +10,7 @@ import subprocess
 from urllib.parse import quote
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Query
-from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers, MutableHeaders
@@ -66,12 +66,35 @@ class SecurityMiddleware:
         headers = Headers(scope=scope)
         if scope['method'] not in ('GET', 'HEAD', 'OPTIONS') and headers.get('origin') != self.origin:
             return await JSONResponse({'detail':'Origin rejected'},403)(scope, receive, secure_send)
-        limit = 1048576
+        path = scope.get('path', '')
+        segments = path.split('/')
+        photo_upload = (scope['method'] == 'POST' and len(segments) == 6
+                        and segments[:4] == ['', 'hermes', 'app-api', 'sessions']
+                        and segments[4] and segments[5] == 'attachments')
+        limit = 10 * 1024 * 1024 if photo_upload else 1048576
         # Compare decimal strings without an unbounded int conversion.
         length = headers.get('content-length', '').lstrip('0') or '0'
         if length.isascii() and length.isdigit() and (len(length) > len(str(limit)) or
                 (len(length) == len(str(limit)) and length > str(limit))):
             return await JSONResponse({'detail':'Request too large'},413)(scope, receive, secure_send)
+
+        if photo_upload:
+            received = 0
+
+            async def bounded_receive():
+                nonlocal received
+                message = await receive()
+                if message['type'] == 'http.request':
+                    received += len(message.get('body', b''))
+                    if received > limit:
+                        raise RequestTooLarge
+                return message
+
+            try:
+                await self.app(scope, bounded_receive, secure_send)
+            except RequestTooLarge:
+                return await JSONResponse({'detail':'Photo upload exceeds the 10 MiB input limit'},413)(scope, receive, secure_send)
+            return
 
         body = bytearray()
         while True:
@@ -99,6 +122,10 @@ class SecurityMiddleware:
         await self.app(scope, bounded_receive, secure_send)
 
 
+class RequestTooLarge(Exception):
+    pass
+
+
 @dataclass
 class Settings:
     state_dir: Path = field(default_factory=lambda: Path.home()/'.local/share/hermes-mobile')
@@ -116,6 +143,9 @@ class Settings:
     job_delivery_targets: dict = field(default_factory=dict)
     profile_creation_enabled: bool = False
     deployment: str = 'local-development'
+    attachment_user_quota_bytes: int = 128 * 1024 * 1024
+    attachment_global_quota_bytes: int = 512 * 1024 * 1024
+    attachment_min_free_bytes: int = 1024 * 1024 * 1024
 
 
 class SessionInput(BaseModel):
@@ -132,6 +162,7 @@ class RunInput(BaseModel):
     input: str=Field(min_length=1,max_length=100000)
     idempotency_key: str=Field(min_length=1,max_length=128)
     selection: dict | None = None
+    attachments: list[str]=Field(default_factory=list,max_length=4)
 
 
 def create_app(settings=None, *, gateway_client=None):
@@ -142,9 +173,15 @@ def create_app(settings=None, *, gateway_client=None):
     auth=AuthService(settings.state_dir/'auth.sqlite',origin=settings.origin,rp_id=settings.rp_id,bootstrap_secret=settings.bootstrap_secret)
     catalog=NativeCatalog(settings.profiles)
     journal=RunJournal(settings.state_dir/'runs.sqlite')
+    from .attachments import AttachmentStore, AttachmentError
+    attachments=AttachmentStore(
+        journal.path, settings.state_dir/'attachments',
+        user_quota_bytes=settings.attachment_user_quota_bytes,
+        global_quota_bytes=settings.attachment_global_quota_bytes,
+        min_free_bytes=settings.attachment_min_free_bytes)
     gateway=gateway_client or GatewayClient(settings.upstream_url,settings.upstream_token,settings.execution_ready)
     notifications=NotificationService(settings.state_dir/'notifications.sqlite',vapid_private_key=settings.vapid_private_key,vapid_public_key=settings.vapid_public_key,session_validator=auth.is_session_active)
-    orchestrator=Orchestrator(journal,gateway,catalog,history_loader=gateway.history)
+    orchestrator=Orchestrator(journal,gateway,catalog,history_loader=gateway.history,attachments=attachments)
     gateways={'default':gateway}
     runtimes={'default':orchestrator}
     for profile,entry in settings.gateway_profiles.items():
@@ -152,7 +189,8 @@ def create_app(settings=None, *, gateway_client=None):
             raise ValueError('Invalid configured profile gateway')
         client=GatewayClient(entry['url'],entry['token'],entry.get('execution_ready',False))
         gateways[profile]=client
-        runtimes[profile]=Orchestrator(journal,client,catalog,history_loader=client.history,profile=profile)
+        runtimes[profile]=Orchestrator(journal,client,catalog,history_loader=client.history,
+                                       attachments=attachments,profile=profile)
 
     binding=RuntimeBinding(auth.store,catalog.profiles,settings.gateway_profiles)
 
@@ -356,6 +394,7 @@ def create_app(settings=None, *, gateway_client=None):
     async def lifespan(app):
         journal.recover()
         orchestrator.steering.recover()
+        await asyncio.to_thread(attachments.cleanup, limit=256)
         for runtime in runtimes.values():
             runtime.start_recovery()
         stop=asyncio.Event()
@@ -405,6 +444,11 @@ def create_app(settings=None, *, gateway_client=None):
                 except Exception:
                     app.state.operational_notification_error=True
                 try:
+                    await asyncio.to_thread(attachments.cleanup, limit=64)
+                    app.state.attachment_cleanup_error=False
+                except Exception:
+                    app.state.attachment_cleanup_error=True
+                try:
                     await asyncio.wait_for(stop.wait(),timeout=15)
                 except asyncio.TimeoutError:
                     pass
@@ -424,6 +468,7 @@ def create_app(settings=None, *, gateway_client=None):
     app.state.auth=auth
     app.state.catalog=catalog
     app.state.journal=journal
+    app.state.attachments=attachments
     app.state.gateway=gateway
     app.state.settings=settings
     app.state.notifications=notifications
@@ -438,6 +483,10 @@ def create_app(settings=None, *, gateway_client=None):
     @app.exception_handler(IntegrationUnavailable)
     async def integration_error(request,exc):
         return JSONResponse({'detail':str(exc)},503)
+
+    @app.exception_handler(AttachmentError)
+    async def attachment_error(request,exc):
+        return JSONResponse({'detail':str(exc),'code':'attachment_error'},exc.status)
 
     @app.exception_handler(KeyError)
     async def not_found(request,exc):
@@ -568,7 +617,59 @@ def create_app(settings=None, *, gateway_client=None):
         journal.require_session(user['id'],user['profile'],sid)
         result = await asyncio.to_thread(conversation_snapshot,catalog,journal,user,sid,limit,offset,latest,turn_boundary=turn_boundary)
         journal.require_session(user['id'],user['profile'],sid)
+        for item in result.get('items', []):
+            if item.get('attachment_ids'):
+                item['attachments']=attachments.metadata_for_history(user,sid,item['attachment_ids'])
+        for key in ('run','last_run'):
+            run=result.get(key)
+            if run and run.get('attachment_ids'):
+                run['attachments']=attachments.metadata_for_history(user,sid,run['attachment_ids'])
         return result
+
+    @app.post(BASE+'/sessions/{sid}/attachments')
+    async def upload_photo(sid:str,request:Request,user=Depends(ready_user)):
+        auth.require_mutation(request,user)
+        journal.require_session(user['id'],user['profile'],sid)
+        try:
+            catalog.messages(user['profile'],sid,limit=1)
+        except KeyError:
+            raise HTTPException(404,'Session not found') from None
+        metadata=await attachments.upload(
+            user,sid,request.headers.get('idempotency-key',''),request.stream())
+        metadata['url']=BASE+'/sessions/'+quote(sid,safe='')+'/attachments/'+metadata['id']
+        return JSONResponse(metadata,status_code=201)
+
+    @app.get(BASE+'/sessions/{sid}/attachments/{attachment_id}')
+    async def read_photo(sid:str,attachment_id:str,user=Depends(ready_user)):
+        journal.require_session(user['id'],user['profile'],sid)
+        try:
+            catalog.messages(user['profile'],sid,limit=1)
+        except KeyError:
+            raise HTTPException(404,'Session not found') from None
+        descriptor,content_type,size=attachments.open_image(user,sid,attachment_id)
+
+        async def image_body():
+            try:
+                remaining=size
+                while remaining:
+                    chunk=await asyncio.to_thread(os.read,descriptor,min(65536,remaining))
+                    if not chunk:
+                        break
+                    remaining-=len(chunk)
+                    yield chunk
+            finally:
+                os.close(descriptor)
+
+        return StreamingResponse(image_body(),media_type=content_type,
+            headers={'Content-Length':str(size),'X-Content-Type-Options':'nosniff',
+                     'Cache-Control':'no-store'})
+
+    @app.delete(BASE+'/sessions/{sid}/attachments/{attachment_id}')
+    async def release_photo(sid:str,attachment_id:str,request:Request,user=Depends(ready_user)):
+        auth.require_mutation(request,user)
+        journal.require_session(user['id'],user['profile'],sid)
+        attachments.release(user,sid,attachment_id)
+        return {'released':True}
 
     @app.get(BASE+'/sessions/{sid}/background')
     def background_results(sid:str,user=Depends(ready_user)):
@@ -618,7 +719,13 @@ def create_app(settings=None, *, gateway_client=None):
         runtime=runtime_for(user)
         runtime.model_options=model_options
         try:
-            return await runtime.submit(user,body.model_dump(exclude_none=True))
+            run=await runtime.submit(user,body.model_dump(exclude_none=True))
+            if run.get('attachment_ids'):
+                run['attachments']=attachments.metadata_for_history(
+                    user,run['session_id'],run['attachment_ids'])
+            return run
+        except AttachmentError:
+            raise
         except RunConflict:
             raise
         except ValueError as exc:
@@ -626,7 +733,11 @@ def create_app(settings=None, *, gateway_client=None):
 
     @app.get(BASE+'/runs/{rid}')
     async def get_run(rid:str,user=Depends(ready_user)):
-        return await runtime_for(user).refresh(user,rid)
+        run=await runtime_for(user).refresh(user,rid)
+        if run.get('attachment_ids'):
+            run['attachments']=attachments.metadata_for_history(
+                user,run['session_id'],run['attachment_ids'])
+        return run
 
     @app.get(BASE+'/runs/{rid}/controls')
     async def run_controls(rid:str,user=Depends(ready_user)):

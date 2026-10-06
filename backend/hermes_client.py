@@ -133,9 +133,25 @@ class GatewayClient:
             raise IntegrationUnavailable('Steering acknowledgement is unresolved')
         return reply
 
-    async def start(self,session_id,text,history=None,*,model=None,provider=None):
+    async def start(self,session_id,text,history=None,*,model=None,provider=None,
+                    attachments=None,attachment_ids=None):
         self.require_execution()
         payload={'session_id':session_id,'input':text,'conversation_history':history or []}
+        if attachments is not None or attachment_ids is not None:
+            if (not isinstance(attachments,list) or not 1 <= len(attachments) <= 4
+                    or not isinstance(attachment_ids,list) or len(attachment_ids)!=len(attachments)
+                    or any(not isinstance(value,dict) or value.get('type')!='image_url'
+                           or not isinstance(value.get('image_url'),dict)
+                           or not isinstance(value['image_url'].get('url'),str)
+                           or not value['image_url']['url'].startswith('data:image/')
+                           for value in attachments)
+                    or any(not isinstance(value,str) or len(value)!=32
+                           or any(char not in '0123456789abcdef' for char in value)
+                           for value in attachment_ids)):
+                raise ValueError('Invalid private photo run binding')
+            payload['input']=[{'role':'user','content':[
+                {'type':'text','text':text}, *attachments]}]
+            payload['mobile_attachment_ids']=attachment_ids
         if model is not None or provider is not None:
             if not model or not provider:
                 raise ValueError('Both model and provider are required')

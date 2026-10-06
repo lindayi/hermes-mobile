@@ -17,8 +17,10 @@ class ClarificationNotSent(IntegrationUnavailable):
 
 
 class Orchestrator:
-    def __init__(self, journal, gateway, catalog, *, history_loader=None, profile="default", run_timeout=3600):
+    def __init__(self, journal, gateway, catalog, *, history_loader=None, attachments=None,
+                 profile="default", run_timeout=3600):
         self.journal, self.gateway, self.catalog = journal, gateway, catalog
+        self.attachments = attachments
         self.profile = profile
         self.history_loader = history_loader
         self.approval_notifier = None
@@ -64,9 +66,16 @@ class Orchestrator:
 
     async def submit(self, user, body):
         limits = {'session_id': 200, 'input': 100000, 'idempotency_key': 128}
-        if (not isinstance(body, dict) or set(body) - {'selection'} != set(limits)
+        if (not isinstance(body, dict) or set(body) - {'selection', 'attachments'} != set(limits)
                 or any(not isinstance(body[k], str) or not body[k].strip() or len(body[k]) > limit for k, limit in limits.items())):
             raise ValueError('Invalid run request')
+        attachment_ids = body.get('attachments', [])
+        if (not isinstance(attachment_ids, list) or len(attachment_ids) > 4
+                or any(not isinstance(value, str) or len(value) != 32
+                       or any(char not in '0123456789abcdef' for char in value)
+                       for value in attachment_ids)
+                or len(set(attachment_ids)) != len(attachment_ids)):
+            raise ValueError('Invalid photo attachment references')
         selection=body.get('selection')
         if selection is not None:
             if (not isinstance(selection,dict) or set(selection) != {'model','provider'}
@@ -87,6 +96,8 @@ class Orchestrator:
             stored=self.journal.get(user['id'],existing['id'])
             if stored.get('selection')!=selection:
                 raise RunConflict('Idempotency key already used for another selection')
+            if stored.get('attachment_ids', []) != attachment_ids:
+                raise RunConflict('Idempotency key already used for other photo attachments')
             return stored
         if selection is not None:
             if not hasattr(self,'model_options'):
@@ -117,7 +128,8 @@ class Orchestrator:
         try:
             run, created = self.journal.submit(user['id'], user['profile'], body['session_id'], body['input'], body['idempotency_key'],
                 history_anchor=lambda: self.catalog.history_anchor(user['profile'], body['session_id'], canonical_id), selection=selection,
-                conversation_roots=lambda ids: self.catalog.conversation_roots(user['profile'], ids))
+                conversation_roots=lambda ids: self.catalog.conversation_roots(user['profile'], ids),
+                attachment_ids=attachment_ids, attachment_store=self.attachments)
         except sqlite3.IntegrityError as exc:
             raise RunConflict('A local run is active or unresolved') from exc
         if created:
@@ -384,7 +396,11 @@ class Orchestrator:
         try:
             await self._stream(user, run, history)
             return
-        except Exception:
+        except Exception as exc:
+            from .attachments import AttachmentError
+            if isinstance(exc, AttachmentError) and not self.get(user, run['id']).get('upstream_id'):
+                self.journal.finish(user['id'], run['id'], 'failed', error=str(exc))
+                return
             self.journal.finish(user['id'], run['id'], 'unknown',
                                 error='Stream interrupted; observing original native run without replay')
         if not self.get(user, run['id'])['upstream_id']:
@@ -414,6 +430,13 @@ class Orchestrator:
             kwargs={'history':history}
             if run.get('selection') is not None:
                 kwargs.update(run['selection'])
+            attachment_ids = run.get('attachment_ids', [])
+            if attachment_ids:
+                if self.attachments is None:
+                    raise IntegrationUnavailable('Private photo storage is unavailable; no image was sent.')
+                kwargs['attachments'] = self.attachments.run_images(
+                    user['id'], user['profile'], run['session_id'], run['id'], attachment_ids)
+                kwargs['attachment_ids'] = attachment_ids
             async with asyncio.timeout(self.run_timeout):
                 upstream = await self.gateway.start(run['session_id'], run['input'], **kwargs)
         finally:
