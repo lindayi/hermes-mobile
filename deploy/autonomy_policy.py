@@ -186,7 +186,7 @@ SOURCE_FINGERPRINTS = {
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     # Issue #87 bounded-repair candidate; source consistency only.
-    'deploy/cloud_coordinator.py': '86b57c4c3312824655e9b65f1eaa024445ba7c1ca9699c7e10ddfa580553f62f',
+    'deploy/cloud_coordinator.py': 'e367d084f99f8f067331efb78511104bbbce1106fd16803cb6f3c22c887147d9',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
@@ -199,7 +199,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/task_receipts.py': 'a7bd1edee10c42c42d992e20d83160095203d792c9a6131b3a915351d2768981',
     # Issue #87 bounded-repair lifecycle overlay; earlier hashes remain historical.
     'deploy/workflow_events.py': '5759930bb5a15465399c54e37c712d9c3eda5e42fee1a59d05dd50745418d91f',
-    'deploy/workflow_lifecycle.py': 'a45ea590ae138355792c84117a6a9b11c5bbdc184810b0c0bb415fce8fa957ef',
+    'deploy/workflow_lifecycle.py': 'da1f8048e36783d1ee8d908e9713fd5f6463f60f34a7a87d5eb222835c8f8d20',
     'deploy/workflow_lifecycle_sources.py': 'dfff5b5ec33b9bd1756a67150827541ea86193b87e6de5b5c3a965f02f19b837',
     'deploy/workflow_notifications.py': 'e8f8f371d633574487f9fd247d57a67c9b956bf41cf81b2050b1578d18952203',
     'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',

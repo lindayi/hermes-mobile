@@ -347,17 +347,19 @@ preserves earlier issue #43, #50, and #79 history; it establishes source consist
 only, not independent review, merge, runtime evidence, or activation permission.
 
 Issue #87 refreshes the current bounded-repair coordinator and lifecycle notification
-pins. The candidate recovers a separate neutral count only from complete retained
-reservation provenance, keeps unknown legacy history conservative, and adds a typed
-exhaustion cause for the existing Inbox path. These exact source pins and their
-independent literal fixture do not establish issue acceptance, independent review,
-merge, runtime evidence, or activation permission:
+pins. The candidate atomically splits legacy source and neutral counts only from
+complete typed reservation provenance, recognizes authenticated retained receipts
+after action compaction, and bounds progress fingerprints to 32 per attempt and
+640 per enrollment. Existing lifecycle event identities remain stable; only new
+repair-exhaustion events project the linked issue. These exact source pins and
+their independent literal fixture do not establish issue acceptance, independent
+review, merge, runtime evidence, or activation permission:
 
 | Issue #87 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `86b57c4c3312824655e9b65f1eaa024445ba7c1ca9699c7e10ddfa580553f62f` |
+| `deploy/cloud_coordinator.py` | `e367d084f99f8f067331efb78511104bbbce1106fd16803cb6f3c22c887147d9` |
 | `deploy/workflow_events.py` | `5759930bb5a15465399c54e37c712d9c3eda5e42fee1a59d05dd50745418d91f` |
-| `deploy/workflow_lifecycle.py` | `a45ea590ae138355792c84117a6a9b11c5bbdc184810b0c0bb415fce8fa957ef` |
+| `deploy/workflow_lifecycle.py` | `da1f8048e36783d1ee8d908e9713fd5f6463f60f34a7a87d5eb222835c8f8d20` |
 | `deploy/workflow_notifications.py` | `e8f8f371d633574487f9fd247d57a67c9b956bf41cf81b2050b1578d18952203` |
 
 Issue #50's historical receipt-transport candidate overlaid only

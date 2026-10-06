@@ -2209,13 +2209,87 @@ def _valid_receipt_proof(action, comments):
     )
 
 
-def _legacy_neutral_attempt_count(enrollment, actions, comments):
-    """Recover the old shared budget only when every reservation has typed history."""
+def _legacy_task_reservation_type(record, tasks, snapshot):
+    task_type = record.get("task_type")
+    if task_type == "neutral":
+        return True
+    if task_type in {"source", "review-followup"}:
+        return False
+    if task_type is not None:
+        return None
+    if (type(record.get("repair_policy_version")) is int
+            and record["repair_policy_version"] == REPAIR_PROGRESS_VERSION):
+        return False
+    prompt = record.get("body")
+    if not isinstance(prompt, str):
+        if (not isinstance(snapshot, dict)
+                or not isinstance(snapshot.get("pull"), dict)
+                or not isinstance(snapshot["pull"].get("head"), dict)):
+            return None
+        task = tasks.get(record.get("task_id"))
+        if (not isinstance(task, dict)
+                or task.get("id") != record.get("task_id")
+                or task.get("state") != "completed"
+                or not _github_identity(task.get("creator"), OWNER_ID)
+                or not _github_identity(task.get("owner"), OWNER_ID)
+                or not _github_identity(task.get("repository"), REPOSITORY_ID)
+                or not _task_scoped(task, snapshot)):
+            return None
+        sessions = task.get("sessions")
+        if not isinstance(sessions, list) or len(sessions) != 1:
+            return None
+        session = sessions[0]
+        if (not isinstance(session, dict)
+                or session.get("id") != record.get("receipt_session_id")
+                or session.get("task_id") != record.get("task_id")
+                or session.get("state") != "completed"
+                or not _github_identity(session.get("user"), OWNER_ID)
+                or not _github_identity(session.get("owner"), OWNER_ID)
+                or not _github_identity(session.get("repository"), REPOSITORY_ID)
+                or session.get("head_ref") != snapshot["pull"]["head"].get("ref")
+                or session.get("base_ref") != MAIN_BRANCH
+                or not isinstance(session.get("prompt"), str)):
+            return None
+        prompt = session["prompt"]
+    issue, head = record.get("issue"), record.get("head")
+    if (type(issue) is not int or not _is_sha(head)
+            or not isinstance(snapshot, dict)
+            or snapshot.get("issue") != issue):
+        return None
+    neutral_prefix = (
+        f"Neutral reconciliation for PR #{issue} at exact PR head `{head}`."
+    )
+    source_prefixes = (
+        f"Please address bounded review/check follow-up for PR #{issue} "
+        f"at head `{head}`.",
+        f"Please address bounded independent-review follow-up for PR #{issue} "
+        f"at head `{head}`.",
+    )
+    if prompt.startswith(neutral_prefix):
+        return True
+    if prompt.startswith(source_prefixes):
+        return False
+    return None
+
+
+def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
+                                  tasks=None, snapshot=None):
+    """Recover the shared budget only when every reservation type is proven."""
     attempts = enrollment.get("attempts")
     if type(attempts) is not int or attempts < 0:
         return None
     if attempts == 0:
         return 0
+    task_map = {}
+    if isinstance(tasks, list):
+        for task in tasks:
+            task_id = task.get("id") if isinstance(task, dict) else None
+            if not isinstance(task_id, str) or not task_id:
+                continue
+            if task_id in task_map:
+                task_map[task_id] = None
+            else:
+                task_map[task_id] = task
     by_attempt = {}
     records = [
         *actions.values(),
@@ -2230,14 +2304,8 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments):
         if ("receipt_result" in record and
                 not _valid_receipt_proof(record, comments)):
             continue
-        task_type = record.get("task_type")
-        if task_type == "neutral":
-            is_neutral = True
-        elif (task_type in {"source", "review-followup"}
-              or (type(record.get("repair_policy_version")) is int
-                  and record["repair_policy_version"] == REPAIR_PROGRESS_VERSION)):
-            is_neutral = False
-        else:
+        is_neutral = _legacy_task_reservation_type(record, task_map, snapshot)
+        if is_neutral is None:
             return None
         previous = by_attempt.setdefault(record["attempt"], is_neutral)
         if previous != is_neutral:
@@ -4381,6 +4449,7 @@ class Coordinator:
         if enrollment.get("neutral_attempts_unknown") is True:
             recovered_neutral_attempts = _legacy_neutral_attempt_count(
                 enrollment, actions, snapshot["comments"],
+                tasks=snapshot["tasks"], snapshot=snapshot,
             )
             if recovered_neutral_attempts is not None:
                 if apply:

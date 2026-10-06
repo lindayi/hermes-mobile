@@ -526,11 +526,13 @@ deployment.
 
 Legacy records that predate the separate neutral counter retain a conservative
 unknown marker until every shared reservation is accounted for by retained task
-claims or current authenticated receipt proofs. Only then is the neutral count
-recovered from each reservation's authenticated task type; missing, conflicting,
-or incomplete history remains at the neutral stop boundary. The shared count is
-split atomically into source and neutral reservations without resetting either
-budget, starter provenance, or receipt history. New
+claims or current authenticated receipt proofs. An untyped receipt is classified
+only when its matching completed task/session record is complete, PR-bound, and
+contains the controller-generated reservation prompt; a receipt alone never
+implies a source reservation. Missing, conflicting, or incomplete history
+remains at the neutral stop boundary. The shared count is split atomically into
+source and neutral reservations without resetting either budget, starter
+provenance, or receipt history. New
 `execution_exhausted` lifecycle events carry a closed typed stop cause and exact
 used/remaining counts for the source ceiling, no-progress streak, neutral
 ceiling, or review-handoff wait. Older events without this optional detail remain

@@ -499,6 +499,31 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(tmp_path):
             "id": comment_id, "user": {"id": COPILOT_AGENT},
             "body": body, "created_at": created_at, "updated_at": created_at,
         })
+        api.tasks[task_id] = {
+            "id": task_id, "state": "completed",
+            "creator": {"id": OWNER}, "owner": {"id": OWNER},
+            "repository": {"id": 1399942965},
+            "artifacts": [
+                {
+                    "provider": "github", "type": "branch",
+                    "data": {"head_ref": "topic", "base_ref": "main"},
+                },
+                {
+                    "provider": "github", "type": "pull",
+                    "data": {"id": 160000016, "global_id": "PR_node_16"},
+                },
+            ],
+            "sessions": [{
+                "id": session_id, "task_id": task_id, "state": "completed",
+                "user": {"id": OWNER}, "owner": {"id": OWNER},
+                "repository": {"id": 1399942965},
+                "head_ref": "topic", "base_ref": "main",
+                "prompt": (
+                    f"Please address bounded review/check follow-up for PR #16 "
+                    f"at head `{start_head}`."
+                ),
+            }],
+        }
 
     def make_legacy(state):
         enrollment = state["enrollments"]["16"]
