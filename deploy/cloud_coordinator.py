@@ -2507,6 +2507,7 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
     if type(attempts) is not int or attempts < 0:
         return None
     task_map = {}
+    hydrated_task_ids = set()
     if isinstance(tasks, list):
         for task in tasks:
             task_id = task.get("id") if isinstance(task, dict) else None
@@ -2522,6 +2523,7 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
             if (isinstance(listed, dict)
                     and _legacy_task_detail_matches_list(listed, detailed)):
                 task_map[task_id] = detailed
+                hydrated_task_ids.add(task_id)
     by_task = {}
     by_attempt = {}
     task_ordinals = {}
@@ -2552,7 +2554,7 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
             return None
         if ordinal is not None and task_ordinals.setdefault(task_id, ordinal) != ordinal:
             return None
-        if ordinal is None:
+        if ordinal is None or task_id in hydrated_task_ids:
             task = task_map[task_id]
             session = task["sessions"][0]
             if (not _valid_receipt_proof(record, comments)
@@ -3003,11 +3005,13 @@ class Coordinator:
             )
         return comparison.get("status") == "ahead" and ahead_by > 0
 
-    def _historical_base_can_reconcile(self, pull, main_sha, head_sha):
+    def _historical_base_can_reconcile(
+            self, pull, main_sha, head_sha, *, allow_dirty=False):
         base = pull.get("base") if isinstance(pull, dict) else None
         mergeability_confirms_reconciliation = (
             (pull.get("mergeable") is True and pull.get("mergeable_state") == "behind")
-            or (pull.get("mergeable") is False and pull.get("mergeable_state") == "dirty")
+            or (allow_dirty and pull.get("mergeable") is False
+                and pull.get("mergeable_state") == "dirty")
         )
         if (not isinstance(base, dict) or not mergeability_confirms_reconciliation
                 or base.get("ref") != MAIN_BRANCH
@@ -3419,7 +3423,9 @@ class Coordinator:
         )
         historical_base = (
             not scoped and (has_ready_handoff or has_neutral_claim)
-            and self._historical_base_can_reconcile(pull, main_sha, sha)
+            and self._historical_base_can_reconcile(
+                pull, main_sha, sha, allow_dirty=True,
+            )
         )
         files = _rest_list(
             self.api, f"repos/{REPOSITORY}/pulls/{number}/files?per_page=100",
@@ -5486,7 +5492,8 @@ class Coordinator:
         }
 
     def _fence_pull(self, number, head, main_sha=None, *,
-                    allow_historical_reconciliation=False, expected_base_sha=None):
+                    allow_historical_reconciliation=False,
+                    allow_historical_dirty=False, expected_base_sha=None):
         pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
         base = pull.get("base") if isinstance(pull, dict) else None
         actual = pull.get("head") if isinstance(pull, dict) else None
@@ -5510,6 +5517,7 @@ class Coordinator:
                     and (not allow_historical_reconciliation
                          or not self._historical_base_can_reconcile(
                              pull, main_sha, head,
+                             allow_dirty=allow_historical_dirty,
                          ))):
                 return False
         return pull
@@ -5543,6 +5551,7 @@ class Coordinator:
         current = self._fence_pull(
             action["issue"], action["head"], action["main_sha"],
             allow_historical_reconciliation=neutral or report_correction,
+            allow_historical_dirty=neutral,
             expected_base_sha=(
                 action.get("recorded_base_sha") if neutral else None
             ),
@@ -5650,6 +5659,7 @@ class Coordinator:
         current = self._fence_pull(
             action["issue"], action["head"], action["main_sha"],
             allow_historical_reconciliation=neutral or report_correction,
+            allow_historical_dirty=neutral,
             expected_base_sha=(
                 action.get("recorded_base_sha") if neutral else None
             ),

@@ -353,7 +353,11 @@ IDs from authenticated detail GETs when a unique terminal task-list record repor
 one session but omits its details; complete authenticated task/session/prompt/receipt
 chains can then split legacy source and neutral counts without rewriting their
 history. For a historical base, only consistent `true`/`behind` or `false`/`dirty`
-mergeability and verified ancestry permit the existing neutral reconciliation path.
+mergeability and verified ancestry permit the existing neutral reconciliation path;
+the `false`/`dirty` case is neutral-only, while report corrections retain the
+supported `true`/`behind` behavior. Receipt chronology and nonce-bound prompt
+checks also apply to hydrated details when their retained proofs carry attempt
+ordinals.
 These changes retain the progress fingerprint bounds, canonical target maps,
 `budget-v2:` identities, occupancy fences, stable lifecycle identities and distinct
 source/merge/deployment authority. The current delta validates raw GraphQL thread
@@ -366,7 +370,7 @@ merge, runtime evidence, or activation permission:
 
 | Issue #87 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `f67df620af43c323af52d0fc286bf1ca8a1b1613648926e13b5c86a69f8082c1` |
+| `deploy/cloud_coordinator.py` | `9fbe3a0d0560843c41ef7b93e6be34050c3d5053fa14d10bd4491847ed705a11` |
 | `deploy/review_evidence.py` | `bc2bea2e4cd17ac28ed96cc5d421f62f63e7ef14ee9bdec5045cf6f26bb8f290` |
 | `deploy/task_receipts.py` | `bfc903eddf33a7b8e4b17ccafd8112af70611ce472a44520ed4fe5842845a1c7` |
 | `deploy/workflow_events.py` | `63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e` |

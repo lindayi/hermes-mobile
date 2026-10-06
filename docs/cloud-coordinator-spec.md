@@ -620,11 +620,12 @@ saved reservation history and never creates task records or infers missing sessi
 An authenticated historical ready handoff may qualify for neutral reconciliation
 when its recorded base is an ancestor of both the freshly read main and exact PR
 head, and the PR's mergeability fields are a consistent confirmed pair: `true` with
-`behind`, or `false` with `dirty`. All other, unknown, or inconsistent combinations
-remain ineligible. This exception authorizes only the existing bounded neutral
-reservation path; it never treats the historical PR as current-base eligible or
-enables merging. Fresh identity, receipt, ancestry, dispatch, and pre-send fences
-remain mandatory.
+`behind`, or `false` with `dirty`. The `false`/`dirty` case is available only to
+neutral reconciliation; report-correction work retains the existing `true`/`behind`
+historical rule. All other, unknown, or inconsistent combinations remain ineligible.
+This exception authorizes only the existing bounded neutral reservation path; it
+never treats the historical PR as current-base eligible or enables merging. Fresh
+identity, receipt, ancestry, dispatch, and pre-send fences remain mandatory.
 
 Legacy records that predate the separate neutral counter retain a conservative
 unknown marker until every shared reservation is accounted for by retained task
@@ -650,6 +651,11 @@ source nor neutral work is dispatched, and no exhaustion notice or lifecycle eve
 is created. The enrollment, counts, receipt proofs, historical events, and consumer
 acknowledgements remain intact. When complete authenticated task/session history
 returns, the coordinator resumes once using the same counters and proofs.
+
+Hydrated task details are checked against each matched retained receipt even when
+the record already carries an attempt ordinal: session completion time and the
+nonce-bound prompt instruction must match. Ordinal-less reservations additionally
+require that authenticated receipt binding and cannot infer a missing receipt.
 
 The 20-attempt ceiling is grounded in a small, nonrandom sample of merged cloud
 pull requests, not a percentile or guarantee. The audit used authenticated
