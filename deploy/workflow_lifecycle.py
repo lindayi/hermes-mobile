@@ -179,7 +179,8 @@ def pull_event(snapshot, reason, *, occurred_at, merge_sha=None, decision=None,
     admission = enrollment.get("starter_admission")
     linked_issue = (
         admission.get("issue_number")
-        if isinstance(admission, dict)
+        if reason == "execution_exhausted"
+        and isinstance(admission, dict)
         and type(admission.get("issue_number")) is int
         and 1 <= admission["issue_number"] <= 2**31 - 1
         else issue

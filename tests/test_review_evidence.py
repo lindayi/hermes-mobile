@@ -10,6 +10,7 @@ import pytest
 
 from deploy.cloud_coordinator import (
     MAX_FINDINGS,
+    REPAIR_LIMIT,
     StateStore,
     _latest_source_failure,
     copilot_review_valid,
@@ -693,7 +694,7 @@ def test_exhausted_budget_reports_body_only_findings_without_dispatch(tmp_path):
     store.enroll(enrolled_record())
     store.record_event("123")
     data = store.snapshot()
-    data["enrollments"]["16"]["attempts"] = 3
+    data["enrollments"]["16"]["attempts"] = REPAIR_LIMIT
     store._save(data)
     result = _managed_cycle(api, path)
     assert api.fix_attempts == 0

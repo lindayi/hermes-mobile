@@ -497,9 +497,12 @@ review conversations. Task state, agent prose, a changed SHA, code churn, unrela
 green checks, elapsed time, changed issue text, cosmetic wording, or new review IDs
 alone cannot count as progress.
 
-At reservation, the coordinator records bounded fingerprints of the actual
-eligible repair targets: stable review-thread identity, normalized body finding,
-or source-workflow failure class. A result is progress only when at least one
+At reservation, the coordinator records at most 32 bounded fingerprints of the
+actual eligible repair targets: stable review-thread identity, normalized body
+finding, or source-workflow failure class. The persisted resolved-history bound
+is 640 fingerprints per enrollment (20 reservations at that per-task limit), so
+the progress ledger and retained receipt proofs stay bounded within coordinator
+state capacity. A result is progress only when at least one
 previous target is absent from the complete current-head evidence. A previously
 cleared fingerprint that reappears is a regression and prevents progress credit;
 thus alternating A-to-B-to-A findings cannot repeatedly reset the streak.
@@ -515,17 +518,19 @@ paraphrases.
 Existing records retain their cumulative attempts and receipt proofs. Missing
 pre-upgrade progress history is explicitly unknown; it is not converted to
 zero-progress or retroactively scored. A valid retained ready-receipt chain may
-continue to provide current source provenance after its completed action is
-compacted, but cannot by itself establish a historical no-progress streak or
-replace fresh checks and independent review. Source acceptance remains distinct
-from merge approval and deployment.
+continue to provide current source provenance and prove an authenticated
+historical-base handoff after its completed action is compacted, but cannot by
+itself establish a historical no-progress streak or replace fresh checks and
+independent review. Source acceptance remains distinct from merge approval and
+deployment.
 
 Legacy records that predate the separate neutral counter retain a conservative
 unknown marker until every shared reservation is accounted for by retained task
 claims or current authenticated receipt proofs. Only then is the neutral count
-recovered from each reservation's recorded task type; missing, conflicting, or
-incomplete history remains at the neutral stop boundary. This migration does not
-change the source attempt count, starter provenance, or receipt history. New
+recovered from each reservation's authenticated task type; missing, conflicting,
+or incomplete history remains at the neutral stop boundary. The shared count is
+split atomically into source and neutral reservations without resetting either
+budget, starter provenance, or receipt history. New
 `execution_exhausted` lifecycle events carry a closed typed stop cause and exact
 used/remaining counts for the source ceiling, no-progress streak, neutral
 ceiling, or review-handoff wait. Older events without this optional detail remain

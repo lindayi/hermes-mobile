@@ -70,7 +70,7 @@ MAIN_BRANCH = "main"
 REPAIR_LIMIT = 20
 NO_PROGRESS_LIMIT = 3
 NEUTRAL_LIMIT = 3
-MAX_REPAIR_FINGERPRINTS = 256
+MAX_REPAIR_FINGERPRINTS = 32
 MAX_REPAIR_PROGRESS_HISTORY = REPAIR_LIMIT * MAX_REPAIR_FINGERPRINTS
 REPAIR_PROGRESS_VERSION = 1
 REVIEW_REPORT_CORRECTION_LIMIT = 1
@@ -2231,9 +2231,14 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments):
                 not _valid_receipt_proof(record, comments)):
             continue
         task_type = record.get("task_type")
-        if task_type not in {None, "neutral", "review-followup"}:
-            continue
-        is_neutral = task_type == "neutral"
+        if task_type == "neutral":
+            is_neutral = True
+        elif (task_type in {"source", "review-followup"}
+              or (type(record.get("repair_policy_version")) is int
+                  and record["repair_policy_version"] == REPAIR_PROGRESS_VERSION)):
+            is_neutral = False
+        else:
+            return None
         previous = by_attempt.setdefault(record["attempt"], is_neutral)
         if previous != is_neutral:
             return None
@@ -3024,9 +3029,21 @@ class Coordinator:
         )
         sha = head.get("sha")
         actions = self.store.actions() if actions is None else actions
+        comments = _all_review_comments(self.api, number, None)
+        receipt_proofs = enrollment.get("receipt_proofs", [])
+        has_retained_ready_handoff = any(
+            isinstance(proof, dict)
+            and proof.get("kind") == "fix"
+            and proof.get("issue") == number
+            and proof.get("receipt_result") == "ready"
+            and proof.get("receipt_head") == sha
+            and proof.get("receipt_base") == base.get("sha")
+            and _valid_receipt_proof(proof, comments)
+            for proof in receipt_proofs
+        ) if isinstance(receipt_proofs, list) else False
         has_ready_handoff = (
             enrollment.get("authorized_head") is not None
-            and any(
+            and (has_retained_ready_handoff or any(
                 isinstance(action, dict)
                 and action.get("kind") == "fix"
                 and action.get("issue") == number
@@ -3040,7 +3057,7 @@ class Coordinator:
                 and action.get("receipt_head") == sha
                 and action.get("receipt_base") == base.get("sha")
                 for action in actions.values()
-            )
+            ))
         )
         has_neutral_claim = any(
             isinstance(action, dict)
@@ -3073,7 +3090,6 @@ class Coordinator:
         statuses = _rest_list(
             self.api, f"repos/{REPOSITORY}/commits/{sha}/statuses?per_page=100",
         )
-        comments = _all_review_comments(self.api, number, None)
         workflows, pull_workflows = _workflow_runs(
             self.api, head.get("ref", ""), number,
         )
@@ -3085,7 +3101,9 @@ class Coordinator:
         snapshot = {
             "issue": number, "enrollment": enrollment, "pull": pull, "head": sha,
             "main_sha": main_sha, "scoped": scoped,
-            "historical_base": historical_base, "files": files,
+            "historical_base": historical_base,
+            "retained_ready_handoff": has_retained_ready_handoff,
+            "files": files,
             "files_complete": True, "reviews": reviews,
             "reviews_complete": True,
             "threads": threads, "threads_complete": threads_complete,
@@ -4371,6 +4389,7 @@ class Coordinator:
                     )
                 enrollment["neutral_attempts"] = recovered_neutral_attempts
                 enrollment["neutral_attempts_unknown"] = False
+                enrollment["attempts"] -= recovered_neutral_attempts
         snapshot["enrollment"] = enrollment
         authorized_head, authorized_heads, blocked_heads = _authorized_result_heads(
             number, enrollment, self.store.actions(),
@@ -4471,7 +4490,8 @@ class Coordinator:
         repair_scoped = (
             snapshot["scoped"]
             or (snapshot.get("historical_base")
-                and bool(snapshot.get("stale_handoff_keys")))
+                and bool(snapshot.get("stale_handoff_keys")
+                         or snapshot.get("retained_ready_handoff")))
         )
         mergeability_unknown = _mergeability_unknown(snapshot["pull"])
         source_handoff = _current_source_handoff(actions, number, head)
@@ -6561,6 +6581,7 @@ class StateStore:
                     or enrollment.get("neutral_attempts_unknown") is not True
                     or enrollment.get("attempts") != source_attempts):
                 return False
+            enrollment["attempts"] = source_attempts - neutral_attempts
             enrollment["neutral_attempts"] = neutral_attempts
             enrollment["neutral_attempts_unknown"] = False
             return True

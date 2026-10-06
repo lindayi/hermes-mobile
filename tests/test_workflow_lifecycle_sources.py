@@ -41,9 +41,26 @@ def test_pull_lifecycle_events_preserve_authenticated_linked_issue_identity():
         "execution_exhausted", occurred_at="2026-10-01T20:58:00Z",
         incident="source-repair-limit-20",
     )
+    linked_policy = pull_event(
+        {
+            "issue": 86, "head": HEAD,
+            "enrollment": {
+                "comment": 127, "starter_admission": {"issue_number": 85},
+            },
+        },
+        "policy_broken", occurred_at="2026-10-01T20:58:00Z",
+        incident="up-to-date-policy",
+    )
+    unlinked_policy = pull_event(
+        {"issue": 86, "head": HEAD, "enrollment": {"comment": 127}},
+        "policy_broken", occurred_at="2026-10-01T20:58:00Z",
+        incident="up-to-date-policy",
+    )
 
     assert linked["issue_number"] == 85 and linked["pr_number"] == 86
     assert unlinked["issue_number"] == unlinked["pr_number"] == 86
+    assert linked_policy["issue_number"] == linked_policy["pr_number"] == 86
+    assert linked_policy["event_id"] == unlinked_policy["event_id"]
 
 
 class StarterApi:
