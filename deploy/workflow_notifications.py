@@ -781,7 +781,12 @@ def _verify_inbox_delivery(path, owner, delivery_id, item, title, body):
 def _message(event):
     issue = event['issue_number']
     pr = event['pr_number']
-    subject = f'issue #{issue}' if issue is not None else f'PR #{pr}'
+    if pr is None:
+        subject = f'issue #{issue}'
+    else:
+        subject = f'PR #{pr}'
+        if issue is not None and issue != pr:
+            subject += f' (linked issue #{issue})'
     if event['outcome'] == 'approval_required':
         title = f'Owner decision required for PR #{pr}'
         body = (f'PR #{pr} at head SHA {event["head_sha"]} requires you to '
@@ -806,8 +811,14 @@ def _message(event):
         title = f'Issue #{issue} needs attention'
         body = f'Issue #{issue} ended unsuccessfully. Review its current workflow status.'
     elif event['reason'] == 'execution_exhausted':
-        title = f'Workflow budget exhausted for {subject}'
-        body = f'{subject.capitalize()} needs owner review after the bounded execution budget was exhausted.'
+        title = f'Workflow repair stopped for {subject}'
+        body = (
+            f'{subject} stopped at a bounded repair limit: source repairs allow at most '
+            '20 lifetime dispatches or stop after 3 consecutive completed repairs without '
+            'verified progress; neutral reconciliation has its own 3-dispatch limit. '
+            'Review current exact-head checks, independent-review findings and mergeability. '
+            'This is not a billing or deployment status.'
+        )
     elif event['reason'] == 'execution_uncertain':
         title = f'Workflow outcome uncertain for {subject}'
         body = f'{subject.capitalize()} has an unresolved execution outcome. Inspect its current status before retrying.'

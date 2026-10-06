@@ -172,11 +172,19 @@ def pull_event(snapshot, reason, *, occurred_at, merge_sha=None, decision=None,
     identity_head = "" if reason in {"execution_exhausted", "policy_broken"} else head
     identity = f"{issue}:{generation}:{reason}:{identity_head}:{merge_sha or ''}:{incident}"
     event_id = f"pr:{issue}:{reason}:{hashlib.sha256(identity.encode()).hexdigest()[:32]}"
+    admission = enrollment.get("starter_admission")
+    linked_issue = (
+        admission.get("issue_number")
+        if isinstance(admission, dict)
+        and type(admission.get("issue_number")) is int
+        and 1 <= admission["issue_number"] <= 2**31 - 1
+        else issue
+    )
     return validate_event({
         "event_id": event_id,
         "outcome": REASON_OUTCOMES[reason],
         "reason": reason,
-        "issue_number": issue,
+        "issue_number": linked_issue,
         "pr_number": issue,
         "head_sha": head,
         "merge_sha": merge_sha,
