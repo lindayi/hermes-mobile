@@ -378,7 +378,16 @@ These changes retain the progress fingerprint bounds, canonical target maps,
 `budget-v2:` identities, occupancy fences, stable lifecycle identities and distinct
 source/merge/deployment authority. The current delta validates raw GraphQL thread
 identities before writes and leaves incomplete retained history in recoverable
-waiting without an exhaustion notice. The coordinator digest below supersedes the
+waiting without an exhaustion notice. The neutral receipt continuation separates
+conflict-decision commentary from one dedicated receipt-only comment and asks the
+task to validate that exact payload with the unchanged strict v2 parser before
+posting it. A narrowly gated compatibility reader recognizes only the original
+saved neutral prompt and its exact bound decision envelope; ordinary v1/v2 grammar
+remains strict. A known-ID uncertain neutral task receives at most one read-only
+reconciliation attempt, with no new POST, wait, event, or budget change; unknown-ID
+uncertainty remains locked. Synthetic cold-state tests do not establish that the
+live task recovered, source4 occurred, or CI/review/merge/deployment gates passed.
+The coordinator digest below supersedes the
 merged PR88 candidate digest `9b06e73bc89c38dd7cf6f77532b146f2f73fb3b1e7f6706c6b16425b1356ef23`;
 all other issue #87 pins remain unchanged. These exact source pins and their
 independent literal fixture do not establish issue acceptance, independent review,
@@ -386,9 +395,9 @@ merge, runtime evidence, or activation permission:
 
 | Issue #87 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `12d7adfa376c34872f99ac7bd2455296ded5e14f2da3f3ff5480d7bf2f4d4871` |
+| `deploy/cloud_coordinator.py` | `9d3885aeaffa0bde23c775a9f6942d52213c2122c4ae3b98fba1593d85159fc8` |
 | `deploy/review_evidence.py` | `bc2bea2e4cd17ac28ed96cc5d421f62f63e7ef14ee9bdec5045cf6f26bb8f290` |
-| `deploy/task_receipts.py` | `bfc903eddf33a7b8e4b17ccafd8112af70611ce472a44520ed4fe5842845a1c7` |
+| `deploy/task_receipts.py` | `aebb19ef819e65f8acb6e7eb8863924a7cb3e0fa45b8b194931c54a6778ec552` |
 | `deploy/workflow_events.py` | `63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e` |
 | `deploy/workflow_lifecycle.py` | `f8ecf4fa881d907d41a3f8482fa60f1166591dd51e75108aaa4d31f4f2df65b0` |
 | `deploy/workflow_notifications.py` | `c599d19bc1f1b1976429d7e5ca834eade37e35c718b4c389ceaef4ad47ecb1ad` |
