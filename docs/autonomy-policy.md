@@ -355,9 +355,14 @@ chains can then split legacy source and neutral counts without rewriting their
 history. For a historical base, only consistent `true`/`behind` or `false`/`dirty`
 mergeability and verified ancestry permit the existing neutral reconciliation path;
 the `false`/`dirty` case is neutral-only, while report corrections retain the
-supported `true`/`behind` behavior. Receipt chronology and nonce-bound prompt
-checks also apply to hydrated details when their retained proofs carry attempt
-ordinals. Authenticated terminal malformed-report waits with an unused retry yield
+supported `true`/`behind` behavior. Every recovered receipt chain, with or without
+an attempt ordinal, uses the existing timezone-aware task/session/receipt chronology;
+ordinal-bearing terminal reservations without a receipt still require valid task,
+session, and completion chronology. Hydrated task creation time must also exactly
+match its authenticated list record.
+Missing, malformed, out-of-order, or inconsistent timestamps leave history unknown
+and block dispatch. Nonce-bound prompt checks remain in force. Authenticated
+terminal malformed-report waits with an unused retry yield
 to neutral reconciliation on confirmed historical dirty ancestry without emitting
 a correction action or anchor. Correction anchors recheck frozen-main eligibility
 before enqueueing and publication; active/uncertain correction claims remain
@@ -376,7 +381,7 @@ merge, runtime evidence, or activation permission:
 
 | Issue #87 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `f16d8a67f6023fb40a4e7f52f428239d2c1a67bef8c280f72b089f3f12f4d671` |
+| `deploy/cloud_coordinator.py` | `e8e6d3aea0701800c50d45633ff3c2b23750215949de3b97bca5ae4c8d5c61f2` |
 | `deploy/review_evidence.py` | `bc2bea2e4cd17ac28ed96cc5d421f62f63e7ef14ee9bdec5045cf6f26bb8f290` |
 | `deploy/task_receipts.py` | `bfc903eddf33a7b8e4b17ccafd8112af70611ce472a44520ed4fe5842845a1c7` |
 | `deploy/workflow_events.py` | `63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e` |

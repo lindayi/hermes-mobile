@@ -510,6 +510,15 @@ Terminal source tasks await a verified evaluation before another source reservat
 Pre-upgrade unscored receipts remain explicitly unknown rather than blocking forever.
 Legacy shared counts are split only after authenticating every unique retained
 task/session, prompt, and receipt chain, without inventing ordinals or task types.
+For every receipt-backed recovered reservation, inline or hydrated and with or
+without a saved attempt ordinal, the existing receipt validator's timezone-aware
+chronology applies: task creation must be at or before session creation, the
+authenticated receipt must fall within the session interval, and session completion
+must not be in the future. Ordinal-bearing terminal reservations without receipts
+still require valid task, session, and completion chronology. Hydrated task
+`created_at` must match the authenticated task-list value exactly.
+Missing, malformed, out-of-order, or list/detail-inconsistent timestamps preserve
+unknown history and block dispatch; no timestamp or ledger value is synthesized.
 New source, neutral, and independent-review follow-up request hashes include the
 literal `budget-v2:` discriminator so split ordinals cannot collide with retained
 legacy completed keys. Historical keys, bodies, nonces and receipts are unchanged;

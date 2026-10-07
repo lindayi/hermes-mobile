@@ -1726,8 +1726,11 @@ class FakeApi:
             query = parse_qs(urlparse(route).query)
             if query.get("since"):
                 since = query["since"][0]
-                values = [comment for comment in values
-                          if comment.get("updated_at", "") >= since]
+                values = [
+                    comment for comment in values
+                    if isinstance(comment.get("updated_at", ""), str)
+                    and comment.get("updated_at", "") >= since
+                ]
             return values
         if route.endswith("/pulls/16/files?per_page=100"):
             return list(self.review_pull_files())
@@ -3294,7 +3297,8 @@ def test_cold_legacy_mixed_budget_request_identity(tmp_path, producer, occupancy
             ),
         }
         api.tasks[task_id] = {
-            "id": task_id, "creator": {"id": OWNER}, "owner": {"id": OWNER},
+            "id": task_id, "created_at": "2026-10-01T12:00:00Z",
+            "creator": {"id": OWNER}, "owner": {"id": OWNER},
             "repository": {"id": 1399942965},
             "artifacts": [{"provider": "github", "type": "branch",
                            "data": {"head_ref": "topic", "base_ref": "main"}}],
@@ -3384,19 +3388,65 @@ def test_cold_legacy_mixed_budget_request_identity(tmp_path, producer, occupancy
     assert api.task_posts == (1 if occupancy is None else 0)
 
 
+_LEGACY_HYDRATION_HAZARDS = [
+    (None, False),
+    (None, True),
+    ("duplicate-list", False),
+    ("malformed-list", False),
+    ("missing-detail", False),
+    ("foreign-detail", False),
+    ("multiple-sessions", False),
+    ("missing-sessions", False),
+    ("mismatched-detail-id", False),
+    ("mismatched-session", False),
+    ("foreign-session", False),
+    ("task-created-missing", False),
+    ("task-created-missing", True),
+    ("task-created-type", False),
+    ("task-created-type", True),
+    ("task-created-invalid", False),
+    ("task-created-invalid", True),
+    ("task-created-after-session", False),
+    ("task-created-after-session", True),
+    ("session-created-missing", False),
+    ("session-created-missing", True),
+    ("session-created-type", False),
+    ("session-created-type", True),
+    ("session-created-invalid", False),
+    ("session-created-invalid", True),
+    ("session-created-after-receipt", False),
+    ("session-created-after-receipt", True),
+    ("session-completed-missing", False),
+    ("session-completed-missing", True),
+    ("session-completed-type", False),
+    ("session-completed-type", True),
+    ("session-completed-invalid", False),
+    ("session-completed-invalid", True),
+    ("receipt-created-missing", False),
+    ("receipt-created-missing", True),
+    ("receipt-created-type", False),
+    ("receipt-created-type", True),
+    ("receipt-created-invalid", False),
+    ("receipt-created-invalid", True),
+    ("receipt-created-before-session", False),
+    ("receipt-created-before-session", True),
+    ("receipt-created-after-completion", False),
+    ("receipt-created-after-completion", True),
+    ("list-detail-created-mismatch", False),
+    ("list-detail-created-mismatch", True),
+]
+
+
 @pytest.mark.parametrize(
-    "hydration_hazard",
-    [
-        None, "duplicate-list", "malformed-list", "missing-detail",
-        "foreign-detail", "multiple-sessions", "missing-sessions",
-        "mismatched-detail-id", "mismatched-session", "foreign-session",
+    "hydration_hazard,attempt_ordinals",
+    _LEGACY_HYDRATION_HAZARDS,
+    ids=[
+        f"{hazard or 'valid'}{'-ordinal' if ordinals else ''}"
+        for hazard, ordinals in _LEGACY_HYDRATION_HAZARDS
     ],
-    ids=["valid", "duplicate-list", "malformed-list", "missing-detail",
-         "foreign-detail", "multiple-sessions", "missing-sessions",
-         "mismatched-detail-id", "mismatched-session", "foreign-session"],
 )
 def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
-        tmp_path, hydration_hazard):
+        tmp_path, hydration_hazard, attempt_ordinals):
     from copy import deepcopy
     from deploy.task_receipts import receipt_instruction
 
@@ -3443,7 +3493,10 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         session_id = f"legacy-session-{attempt}"
         nonce = f"legacy-nonce-{attempt}"
         comment_id = 8000 + attempt
-        created_at = f"2026-09-30T10:0{attempt}:00Z"
+        created_at = (
+            "2026-09-30T09:30:00Z" if attempt == 1
+            else f"2026-09-30T10:0{attempt}:00Z"
+        )
         body = (
             "Hermes-Task-Receipt: v2\n"
             f"nonce={nonce}\npr=16\nstart_head={start_head}\n"
@@ -3460,7 +3513,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             "receipt_result": "ready", "receipt_comment_id": comment_id,
             "receipt_created_at": created_at, "receipt_body": body,
             "receipt_task_id": task_id, "receipt_session_id": session_id,
-            "receipt_completed_at": created_at, "receipt_nonce": nonce,
+            "receipt_completed_at": "2026-09-30T10:15:00Z",
+            "receipt_nonce": nonce,
             "receipt_start_head": start_head, "receipt_head": result_head,
             "receipt_base": BASE, "receipt_version": "v2", "main_sha": BASE,
             "owner_id": OWNER, "repository_id": 1399942965,
@@ -3468,6 +3522,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         })
         api.tasks[task_id] = {
             "id": task_id, "state": "completed",
+            "created_at": "2026-09-30T09:00:00Z",
+            "updated_at": "2026-09-30T10:20:00Z",
             "creator": {"id": OWNER}, "owner": {"id": OWNER},
             "repository": {"id": 1399942965},
             "artifacts": [
@@ -3485,7 +3541,11 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                 "user": {"id": OWNER}, "owner": {"id": OWNER},
                 "repository": {"id": 1399942965},
                 "head_ref": "topic", "base_ref": "main",
-                "completed_at": created_at,
+                "created_at": (
+                    "2026-09-30T10:30:00+01:00" if attempt == 1
+                    else "2026-09-30T10:00:00Z"
+                ),
+                "completed_at": "2026-09-30T10:15:00Z",
                 "prompt": (
                     f"Please address bounded review/check follow-up for PR #16 "
                     f"at head `{start_head}`.\n\n"
@@ -3585,6 +3645,7 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         cold_store.snapshot()["enrollments"]["16"], {},
         api.comments,
         tasks=list(api.tasks.values()),
+        now=datetime.fromtimestamp(1790856660, timezone.utc),
         snapshot={
             "issue": 16,
             "pull": {
@@ -3598,8 +3659,9 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         cold_store.snapshot()["enrollments"]["16"],
     )
     ordinal_enrollment["receipt_proofs"] = deepcopy(proofs)
-    for ordinal, proof in enumerate(ordinal_enrollment["receipt_proofs"], 1):
-        proof["attempt"] = ordinal
+    if attempt_ordinals:
+        for ordinal, proof in enumerate(ordinal_enrollment["receipt_proofs"], 1):
+            proof["attempt"] = ordinal
     listed_tasks = [
         {
             **{key: value for key, value in task.items() if key != "sessions"},
@@ -3618,6 +3680,7 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             session["completed_at"] = "2026-10-01T12:59:59Z"
         assert _legacy_neutral_attempt_count(
             ordinal_enrollment, {}, api.comments, tasks=listed_tasks,
+            now=datetime.fromtimestamp(1790856660, timezone.utc),
             snapshot={
                 "issue": 16,
                 "pull": {
@@ -3647,6 +3710,25 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                 }
                 for task in values
             ]
+            if (history_visible and isinstance(hydration_hazard, str)
+                    and hydration_hazard.startswith("task-created-")):
+                task = next(
+                    task for task in values if task["id"] == "legacy-source-1"
+                )
+                if hydration_hazard == "task-created-missing":
+                    task.pop("created_at")
+                elif hydration_hazard == "task-created-type":
+                    task["created_at"] = 123
+                elif hydration_hazard == "task-created-invalid":
+                    task["created_at"] = "not-a-timestamp"
+                else:
+                    task["created_at"] = "2026-09-30T09:45:00Z"
+            if (history_visible
+                    and hydration_hazard == "list-detail-created-mismatch"):
+                next(task for task in values
+                     if task["id"] == "legacy-source-1")["created_at"] = (
+                         "2026-09-30T08:00:00Z"
+                     )
             if history_visible and hydration_hazard == "duplicate-list":
                 values.append(deepcopy(next(
                     task for task in values if task["id"] == "legacy-source-1"
@@ -3682,11 +3764,51 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             if (history_visible and hydration_hazard == "foreign-session"
                     and route.endswith("/legacy-source-1")):
                 detail["sessions"][0]["owner"] = {"id": OWNER + 1}
+            if (history_visible and isinstance(hydration_hazard, str)
+                    and hydration_hazard.startswith("task-created-")
+                    and route.endswith("/legacy-source-1")):
+                task = detail
+                if hydration_hazard == "task-created-missing":
+                    task.pop("created_at")
+                elif hydration_hazard == "task-created-type":
+                    task["created_at"] = 123
+                elif hydration_hazard == "task-created-invalid":
+                    task["created_at"] = "not-a-timestamp"
+                else:
+                    task["created_at"] = "2026-09-30T09:45:00Z"
+            if (history_visible and isinstance(hydration_hazard, str)
+                    and hydration_hazard.startswith("session-created-")
+                    and route.endswith("/legacy-source-1")):
+                session = detail["sessions"][0]
+                if hydration_hazard == "session-created-missing":
+                    session.pop("created_at")
+                elif hydration_hazard == "session-created-type":
+                    session["created_at"] = 123
+                elif hydration_hazard == "session-created-invalid":
+                    session["created_at"] = "not-a-timestamp"
+                else:
+                    session["created_at"] = "2026-09-30T09:30:01Z"
+            if (history_visible and isinstance(hydration_hazard, str)
+                    and hydration_hazard.startswith("session-completed-")
+                    and route.endswith("/legacy-source-1")):
+                session = detail["sessions"][0]
+                if hydration_hazard == "session-completed-missing":
+                    session.pop("completed_at")
+                elif hydration_hazard == "session-completed-type":
+                    session["completed_at"] = 123
+                else:
+                    session["completed_at"] = "not-a-timestamp"
             return detail
         return original_get(route)
 
     api.get_all = delayed_task_history
     api.get = task_details
+    if attempt_ordinals:
+        for ordinal, proof in enumerate(proofs, 1):
+            proof["attempt"] = ordinal
+        cold_state = StateStore(path).snapshot()
+        cold_state["enrollments"]["16"]["receipt_proofs"] = deepcopy(proofs)
+        StateStore(path)._save(cold_state)
     waiting = Coordinator(
         api, cold_store, clock=lambda: 1790856660,
     ).run(apply=True)["pull_requests"][0]
@@ -3748,6 +3870,34 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     with sqlite3.connect(path.parent / ADAPTER_STATE_NAME) as db:
         assert db.execute("SELECT status FROM events").fetchone() == ("acked",)
 
+    if isinstance(hydration_hazard, str) and hydration_hazard.startswith(
+            "receipt-created-"):
+        comment = next(
+            comment for comment in api.comments
+            if comment.get("body", "").startswith("Hermes-Task-Receipt:")
+            and "legacy-nonce-1" in comment["body"]
+        )
+        proof = next(proof for proof in proofs if proof["task_id"] == "legacy-source-1")
+        if hydration_hazard == "receipt-created-missing":
+            comment.pop("created_at")
+            comment.pop("updated_at")
+        elif hydration_hazard == "receipt-created-type":
+            comment["created_at"] = 123
+            comment["updated_at"] = 123
+        elif hydration_hazard == "receipt-created-invalid":
+            comment["created_at"] = "not-a-timestamp"
+            comment["updated_at"] = "not-a-timestamp"
+            proof["receipt_created_at"] = comment["created_at"]
+        elif hydration_hazard == "receipt-created-before-session":
+            comment["created_at"] = comment["updated_at"] = "2026-09-30T09:29:59Z"
+            proof["receipt_created_at"] = comment["created_at"]
+        else:
+            comment["created_at"] = comment["updated_at"] = "2026-09-30T10:15:01Z"
+            proof["receipt_created_at"] = comment["created_at"]
+        state = StateStore(path).snapshot()
+        state["enrollments"]["16"]["receipt_proofs"] = deepcopy(proofs)
+        StateStore(path)._save(state)
+
     history_visible = True
     writes_before_plan = list(api.writes)
     plan = Coordinator(
@@ -3780,7 +3930,10 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                        for action in StateStore(path).actions().values())
         assert api.fix_attempts == 0
         assert not any(route.endswith("/tasks") for route, _ in api.writes)
-        if hydration_hazard in {"duplicate-list", "malformed-list"}:
+        if hydration_hazard in {
+                "duplicate-list", "malformed-list",
+                "receipt-created-missing", "receipt-created-type",
+        }:
             assert "legacy-source-1" not in task_detail_reads
         else:
             assert "legacy-source-1" in task_detail_reads

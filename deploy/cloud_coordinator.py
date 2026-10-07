@@ -52,8 +52,10 @@ from deploy.task_receipts import (
     REVIEW_REPORT_REQUIRED_FIELDS,
     REVIEW_REPORT_ROLE,
     REVIEW_REPORT_SCHEMA,
+    _time,
     _bounded_path,
     find_review_report,
+    find_receipt,
     receipt_body_matches,
     receipt_instruction,
     validate_task_receipt,
@@ -2482,6 +2484,7 @@ def _legacy_task_detail_matches_list(listed, detailed):
             or detailed.get("id") != listed.get("id")
             or detailed.get("state") != listed.get("state")
             or detailed.get("state") not in terminal_states
+            or detailed.get("created_at") != listed.get("created_at")
             or not isinstance(detailed.get("sessions"), list)
             or len(detailed["sessions"]) != 1
             or ("session_count" in detailed
@@ -2501,13 +2504,13 @@ def _legacy_task_detail_matches_list(listed, detailed):
 
 
 def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
-                                  tasks=None, snapshot=None, task_details=None):
+                                  tasks=None, snapshot=None, task_details=None,
+                                  now=None):
     """Recover the shared budget only when every reservation type is proven."""
     attempts = enrollment.get("attempts")
     if type(attempts) is not int or attempts < 0:
         return None
     task_map = {}
-    hydrated_task_ids = set()
     if isinstance(tasks, list):
         for task in tasks:
             task_id = task.get("id") if isinstance(task, dict) else None
@@ -2523,7 +2526,6 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
             if (isinstance(listed, dict)
                     and _legacy_task_detail_matches_list(listed, detailed)):
                 task_map[task_id] = detailed
-                hydrated_task_ids.add(task_id)
     by_task = {}
     by_attempt = {}
     task_ordinals = {}
@@ -2554,15 +2556,48 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
             return None
         if ordinal is not None and task_ordinals.setdefault(task_id, ordinal) != ordinal:
             return None
-        if ordinal is None or task_id in hydrated_task_ids:
-            task = task_map[task_id]
-            session = task["sessions"][0]
+        task = task_map[task_id]
+        sessions = task.get("sessions")
+        if not isinstance(sessions, list) or len(sessions) != 1:
+            return None
+        session = sessions[0]
+        if not isinstance(session, dict):
+            return None
+        if "receipt_result" in record or ordinal is None:
             if (not _valid_receipt_proof(record, comments)
-                    or session.get("completed_at") != record.get("receipt_completed_at")
+                    or session.get("completed_at")
+                        != record.get("receipt_completed_at")
                     or receipt_instruction(
                         record["dispatch_nonce"], pull_number=record["issue"],
                         start_head=record["head"], base_sha=record["receipt_base"],
                     ) not in session["prompt"]):
+                return None
+            try:
+                receipt = find_receipt(
+                    comments, complete=True,
+                    nonce=record["dispatch_nonce"], task_id=task_id,
+                    session_id=session["id"], pull_number=record["issue"],
+                    start_head=record["head"], head_sha=record["receipt_head"],
+                    base_sha=record["receipt_base"],
+                    dispatch_base_sha=record.get("main_sha"),
+                    task_created_at=task.get("created_at"),
+                    session_created_at=session.get("created_at"),
+                    session_completed_at=session.get("completed_at"),
+                    now=now,
+                )
+                if receipt is None:
+                    return None
+            except (OverflowError, TypeError, ValueError):
+                return None
+        else:
+            try:
+                task_time = _time(task.get("created_at"))
+                session_time = _time(session.get("created_at"))
+                completed_time = _time(session.get("completed_at"))
+                if not task_time <= session_time <= completed_time <= now.astimezone(
+                        timezone.utc):
+                    return None
+            except (AttributeError, OverflowError, TypeError, ValueError):
                 return None
     if len(by_task) != attempts:
         return None
@@ -4836,6 +4871,7 @@ class Coordinator:
                 enrollment, actions, snapshot["comments"],
                 tasks=snapshot["tasks"], snapshot=snapshot,
                 task_details=task_details,
+                now=datetime.fromtimestamp(self.clock(), timezone.utc),
             )
             if recovered_neutral_attempts is not None:
                 if apply:
