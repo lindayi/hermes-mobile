@@ -3391,6 +3391,16 @@ def test_cold_legacy_mixed_budget_request_identity(tmp_path, producer, occupancy
 _LEGACY_HYDRATION_HAZARDS = [
     (None, False),
     (None, True),
+    (("task-state", []), False),
+    (("task-state", {}), False),
+    (("session-state", []), False),
+    (("session-state", {}), False),
+    (("reservation-type", []), False),
+    (("reservation-type", {}), False),
+    (("task-id", []), False),
+    (("task-id", {}), False),
+    (("session-id", []), False),
+    (("session-id", {}), False),
     ("duplicate-list", False),
     ("malformed-list", False),
     ("missing-detail", False),
@@ -3607,6 +3617,21 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     enrollment.pop("neutral_attempts")
     enrollment.pop("neutral_attempts_unknown")
     enrollment.pop("repair_progress")
+    if (isinstance(hydration_hazard, tuple)
+            and hydration_hazard[0] in {
+                "reservation-type", "task-id", "session-id",
+            }):
+        field = {
+            "reservation-type": "task_type",
+            "task-id": "task_id",
+            "session-id": "session_id",
+        }[hydration_hazard[0]]
+        value = deepcopy(hydration_hazard[1])
+        enrollment["receipt_proofs"][0][field] = value
+        proofs[0][field] = deepcopy(value)
+        if field == "task_id":
+            enrollment["receipt_proofs"][0].pop("receipt_result")
+            proofs[0].pop("receipt_result")
     legacy["actions"][f"review:negative:{legacy_head}"] = {
         "key": f"review:negative:{legacy_head}",
         "kind": "review", "task_type": "independent-review", "issue": 16,
@@ -3746,6 +3771,13 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                     and route.endswith("/legacy-source-1")):
                 raise ApiError("synthetic detail unavailable", status=404)
             detail = deepcopy(original_get(route))
+            if (history_visible and isinstance(hydration_hazard, tuple)
+                    and route.endswith("/legacy-source-1")):
+                field, value = hydration_hazard
+                if field == "task-state":
+                    detail["state"] = deepcopy(value)
+                elif field == "session-state":
+                    detail["sessions"][0]["state"] = deepcopy(value)
             if (history_visible and hydration_hazard == "foreign-detail"
                     and route.endswith("/legacy-source-1")):
                 detail["creator"] = {"id": OWNER + 1}
