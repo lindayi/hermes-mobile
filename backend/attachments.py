@@ -143,6 +143,7 @@ class AttachmentStore:
         self._orphan_iterators = [None, None]
         self._orphan_directory = 0
         self._orphan_reconciled = False
+        self._orphan_scan_clean = True
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.root.chmod(0o700)
         for directory in (self.objects, self.staging):
@@ -335,17 +336,25 @@ class AttachmentStore:
                 self._upload_leases[attachment_id] = descriptor
             return dict(db.execute('SELECT * FROM attachments WHERE id=?', (attachment_id,)).fetchone()), True
 
-    async def _upload_io(self, operation, *args):
+    async def _upload_io(self, operation, *args, cancel_result=None, on_submit=None):
         async with self._upload_io_slots:
             future = asyncio.get_running_loop().run_in_executor(
                 _UPLOAD_IO_EXECUTOR, operation, *args)
+            if on_submit is not None:
+                on_submit()
             try:
                 return await asyncio.shield(future)
             except asyncio.CancelledError:
                 try:
-                    await asyncio.shield(future)
+                    result = await asyncio.shield(future)
                 except BaseException:
                     pass
+                else:
+                    if cancel_result is not None:
+                        try:
+                            cancel_result(result)
+                        except OSError:
+                            pass
                 raise
 
     def _publish_upload(self, attachment_id, user_id, stage, digest, normalized,
@@ -405,7 +414,8 @@ class AttachmentStore:
             if fresh:
                 flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
                 flags |= getattr(os, 'O_NOFOLLOW', 0)
-                descriptor = await self._upload_io(os.open, stage, flags, 0o600)
+                descriptor = await self._upload_io(
+                    os.open, stage, flags, 0o600, cancel_result=os.close)
             async for chunk in chunks:
                 if not isinstance(chunk, bytes):
                     raise AttachmentError(400, 'The photo upload body is invalid.')
@@ -423,8 +433,12 @@ class AttachmentStore:
                 if row['state'] not in ('pending', 'bound'):
                     raise AttachmentError(410, 'This photo upload expired; select the photo again.')
                 return _metadata(row)
-            await self._upload_io(_sync_and_close, descriptor)
-            descriptor = None
+            def transfer_descriptor():
+                nonlocal descriptor
+                descriptor = None
+
+            await self._upload_io(
+                _sync_and_close, descriptor, on_submit=transfer_descriptor)
             normalized, content_type, width, height, suffix = await asyncio.get_running_loop().run_in_executor(
                 _IMAGE_DECODE_EXECUTOR, _normalize_image, stage)
             return await self._upload_io(
@@ -464,16 +478,37 @@ class AttachmentStore:
     @staticmethod
     def _unlink(path):
         try:
-            info = path.lstat()
-            if not path.is_symlink() and path.is_file():
-                path.unlink()
+            path.lstat()
         except FileNotFoundError:
-            pass
+            return True
+        if path.is_symlink() or not path.is_file():
+            return False
+        path.unlink()
+        return True
+
+    def _unlink_if_unread(self, attachment_id, name):
+        if name not in (attachment_id + '.jpg', attachment_id + '.png',
+                        attachment_id + '.webp'):
+            raise AttachmentError(410, 'This photo is unavailable; its message text is still available.')
+        path = self.objects / name
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        except FileNotFoundError:
+            return True
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            self._unlink(path)
+            return not path.exists()
+        finally:
+            os.close(descriptor)
 
     def metadata(self, user, session_id, attachment_id):
         with self.connection() as db:
             row = self._owned_row(db, user, session_id, attachment_id)
-            if (row['state'] == 'expired' or not row['stored_name']
+            if (row['state'] in ('expired', 'releasing') or not row['stored_name']
                     or (row['expires_at'] <= time.time()
                         and (row['state'] != 'bound' or not self._run_pinned(db, row['run_id'])))):
                 raise AttachmentError(410, 'This photo has expired; its message text is still available.')
@@ -488,8 +523,9 @@ class AttachmentStore:
 
     def open_image(self, user, session_id, attachment_id):
         with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
             row = self._owned_row(db, user, session_id, attachment_id)
-            if (row['state'] == 'expired' or not row['stored_name']
+            if (row['state'] in ('expired', 'releasing') or not row['stored_name']
                     or (row['expires_at'] <= time.time()
                         and (row['state'] != 'bound' or not self._run_pinned(db, row['run_id'])))):
                 raise AttachmentError(410, 'This photo has expired; its message text is still available.')
@@ -505,11 +541,28 @@ class AttachmentStore:
                 descriptor = os.open(path, flags)
             except OSError as exc:
                 raise AttachmentError(410, 'This photo is unavailable; its message text is still available.') from exc
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode) or info.st_size != row['size'] or info.st_size > MAX_IMAGE_BYTES:
-                os.close(descriptor)
-                raise AttachmentError(410, 'This photo is unavailable; its message text is still available.')
-            return descriptor, row['content_type'], row['size']
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH)
+                info = os.fstat(descriptor)
+                current = self._owned_row(db, user, session_id, attachment_id)
+                if (current['state'] not in ('pending', 'bound') or not current['stored_name']
+                        or current['stored_name'] != name or current['size'] != row['size']
+                        or (current['expires_at'] <= time.time()
+                            and (current['state'] != 'bound'
+                                 or not self._run_pinned(db, current['run_id'])))):
+                    raise AttachmentError(410, 'This photo is unavailable; its message text is still available.')
+                if (not stat.S_ISREG(info.st_mode) or info.st_size != row['size']
+                        or info.st_size > MAX_IMAGE_BYTES):
+                    raise AttachmentError(410, 'This photo is unavailable; its message text is still available.')
+                db.commit()
+                return descriptor, row['content_type'], row['size']
+            except BaseException:
+                db.rollback()
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                raise
 
     def bind(self, db, user_id, profile, session_id, attachment_ids, run_id):
         if (not isinstance(attachment_ids, list) or len(attachment_ids) > MAX_IMAGES_PER_RUN
@@ -563,23 +616,43 @@ class AttachmentStore:
         images = []
         with self.connection() as db:
             for attachment_id in attachment_ids:
-                row = db.execute('''SELECT * FROM attachments WHERE id=? AND user_id=? AND profile=?
-                    AND session_id=? AND run_id=? AND state='bound' ''',
-                    (attachment_id, user_id, profile, session_id, run_id)).fetchone()
-                if (row is None or not row['stored_name']
-                        or (row['expires_at'] <= time.time()
-                            and not self._run_pinned(db, row['run_id']))):
-                    raise AttachmentError(410, 'A photo expired before the native run could use it.')
-                path = self.objects / row['stored_name']
-                flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+                db.execute('BEGIN IMMEDIATE')
+                descriptor = None
                 try:
-                    descriptor = os.open(path, flags)
-                except OSError as exc:
-                    raise AttachmentError(410, 'A selected photo is no longer available.') from exc
-                try:
+                    row = db.execute('''SELECT * FROM attachments WHERE id=? AND user_id=? AND profile=?
+                        AND session_id=? AND run_id=? AND state='bound' ''',
+                        (attachment_id, user_id, profile, session_id, run_id)).fetchone()
+                    if (row is None or row['stored_name'] not in
+                            (attachment_id + '.jpg', attachment_id + '.png', attachment_id + '.webp')
+                            or (row['expires_at'] <= time.time()
+                                and not self._run_pinned(db, row['run_id']))):
+                        raise AttachmentError(410, 'A photo expired before the native run could use it.')
+                    path = self.objects / row['stored_name']
+                    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+                    try:
+                        descriptor = os.open(path, flags)
+                    except OSError as exc:
+                        raise AttachmentError(410, 'A selected photo is no longer available.') from exc
+                    fcntl.flock(descriptor, fcntl.LOCK_SH)
                     info = os.fstat(descriptor)
                     if not stat.S_ISREG(info.st_mode) or info.st_size != row['size'] or info.st_size > MAX_IMAGE_BYTES:
                         raise AttachmentError(410, 'A selected photo is no longer available.')
+                    current = db.execute('''SELECT state,stored_name,size,expires_at FROM attachments
+                        WHERE id=? AND user_id=? AND profile=? AND session_id=? AND run_id=?''',
+                        (attachment_id, user_id, profile, session_id, run_id)).fetchone()
+                    if (current is None or current['state'] != 'bound'
+                            or current['stored_name'] != row['stored_name']
+                            or current['size'] != row['size']
+                            or (current['expires_at'] <= time.time()
+                                and not self._run_pinned(db, run_id))):
+                        raise AttachmentError(410, 'A selected photo is no longer available.')
+                    db.commit()
+                except BaseException:
+                    db.rollback()
+                    if descriptor is not None:
+                        os.close(descriptor)
+                    raise
+                try:
                     with os.fdopen(descriptor, 'rb', closefd=False) as source:
                         data = source.read(MAX_IMAGE_BYTES + 1)
                 finally:
@@ -600,6 +673,7 @@ class AttachmentStore:
             rows = db.execute('''SELECT a.* FROM attachments a LEFT JOIN runs r ON r.id=a.run_id
                 WHERE (a.state='receiving' AND a.created_at<=?)
                    OR (a.state='pending' AND a.expires_at<=?)
+                   OR (a.state='releasing')
                    OR (a.state='bound' AND a.expires_at<=?
                        AND r.status IN ('completed','failed','cancelled'))
                    OR (a.state='expired' AND a.run_id IS NULL AND a.metadata_expires_at<=?)
@@ -609,7 +683,17 @@ class AttachmentStore:
                 if row['state'] == 'receiving' and self._upload_is_live(row['id']):
                     continue
                 if row['stored_name']:
-                    self._unlink(self.objects / row['stored_name'])
+                    if row['stored_name'] not in (
+                            row['id'] + '.jpg', row['id'] + '.png', row['id'] + '.webp'):
+                        continue
+                    try:
+                        removed_image = self._unlink_if_unread(row['id'], row['stored_name'])
+                    except OSError:
+                        continue
+                    if not removed_image:
+                        db.execute("UPDATE attachments SET state='releasing' WHERE id=?",
+                                   (row['id'],))
+                        continue
                 self._unlink(self.staging / (row['id'] + '.part'))
                 self._unlink(self.objects / (row['id'] + '.tmp'))
                 if row['state'] == 'expired' or row['state'] == 'receiving':
@@ -619,10 +703,10 @@ class AttachmentStore:
                         stored_name=NULL WHERE id=?''', (row['id'],))
                 removed += 1
             db.commit()
-        if rescan and self._orphan_reconciled:
+        if rescan and self._orphan_directory >= 2:
             self._orphan_iterators = [None, None]
             self._orphan_directory = 0
-            self._orphan_reconciled = False
+            self._orphan_scan_clean = True
         self._cleanup_orphans(max(1, min(int(limit), 256)))
         return removed
 
@@ -654,9 +738,11 @@ class AttachmentStore:
                 else:
                     known = None
                 if not known:
-                    self._unlink(path)
+                    self._orphan_reconciled = False
+                    if not self._unlink(path):
+                        self._orphan_scan_clean = False
             if self._orphan_directory == len(directories):
-                self._orphan_reconciled = True
+                self._orphan_reconciled = self._orphan_scan_clean
             db.commit()
 
     def metadata_for_history(self, user, session_id, attachment_ids):
@@ -698,8 +784,15 @@ class AttachmentStore:
             if row['state'] == 'bound':
                 raise AttachmentError(409, 'A photo already sent with a message cannot be removed here.')
             if row['state'] == 'pending':
-                self._unlink(self.objects / row['stored_name'])
-                db.execute('''UPDATE attachments SET state='expired',size=0,reserved_bytes=0,
-                    stored_name=NULL,metadata_expires_at=? WHERE id=?''',
-                    (time.time() + LINKED_RETENTION, attachment_id))
+                if not row['stored_name'] or row['stored_name'] not in (
+                        attachment_id + '.jpg', attachment_id + '.png',
+                        attachment_id + '.webp'):
+                    raise AttachmentError(410, 'This photo is unavailable; its message text is still available.')
+                if self._unlink_if_unread(attachment_id, row['stored_name']):
+                    db.execute('''UPDATE attachments SET state='expired',size=0,reserved_bytes=0,
+                        stored_name=NULL,metadata_expires_at=? WHERE id=?''',
+                        (time.time() + LINKED_RETENTION, attachment_id))
+                else:
+                    db.execute("UPDATE attachments SET state='releasing' WHERE id=?",
+                               (attachment_id,))
             db.commit()

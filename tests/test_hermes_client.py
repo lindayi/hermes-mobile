@@ -1,5 +1,6 @@
 import importlib.util
 import httpx
+import json
 import pytest
 
 
@@ -114,8 +115,14 @@ async def test_gateway_timeout_is_not_classified_as_native_run_not_found():
 @pytest.mark.asyncio
 async def test_native_photo_rejection_is_distinct_from_ambiguous_dispatch(outcome):
     from backend.hermes_client import GatewayClient, IntegrationUnavailable, NativeRunRejected
+    requests = []
 
     async def handle(request):
+        requests.append((request.method, request.url.path, request.content))
+        if request.url.path == '/v1/capabilities':
+            return httpx.Response(200, json={'mobile_photos': {
+                'version': 1, 'max_images': 4, 'max_image_bytes': 2 * 1024 * 1024,
+                'max_request_bytes': 20_000_000, 'private_persistence': True}})
         if outcome == 'timeout':
             raise httpx.ReadTimeout('synthetic timeout')
         return httpx.Response(int(outcome), json={'error': {'code': 'body_too_large'}})
@@ -124,8 +131,18 @@ async def test_native_photo_rejection_is_distinct_from_ambiguous_dispatch(outcom
                            transport=httpx.MockTransport(handle))
     try:
         with pytest.raises(IntegrationUnavailable) as error:
-            await client.start('synthetic-session', 'Inspect a photo')
+            await client.start(
+                'synthetic-session', 'Inspect a photo',
+                attachments=[{'type': 'image_url', 'image_url': {
+                    'url': 'data:image/png;base64,c3ludGhldGlj'}}],
+                attachment_ids=['a' * 32])
         assert type(error.value) is (NativeRunRejected if outcome == '413' else IntegrationUnavailable)
+        assert [request[:2] for request in requests] == [
+            ('GET', '/v1/capabilities'), ('POST', '/v1/runs')]
+        sent = json.loads(requests[1][2])
+        assert sent['mobile_attachment_ids'] == ['a' * 32]
+        assert sent['input'][0]['content'][1]['image_url']['url'] == (
+            'data:image/png;base64,c3ludGhldGlj')
     finally:
         await client.close()
 

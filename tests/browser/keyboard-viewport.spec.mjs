@@ -63,7 +63,7 @@ test('compact photo picker uses the real file input and releases failed-send upl
  uploaded.push(route.request().postDataBuffer());
  return route.fulfill({status:201,json:{id,status:'pending'}});
  });
- await page.route('**/hermes/app-api/runs',route=>route.fulfill({status:503,json:{detail:'Synthetic send failure'}}));
+ await page.route('**/hermes/app-api/runs',route=>route.fulfill({status:413,json:{detail:'Synthetic definite rejection'}}));
  const picker=page.getByRole('button',{name:'Add photos',exact:true});
  await inside(page,'[aria-label="Add photos"]:not(input)',0,844);
  const chooser=page.waitForEvent('filechooser');await picker.click();
@@ -76,7 +76,7 @@ test('compact photo picker uses the real file input and releases failed-send upl
  const cancel=page.waitForEvent('filechooser');await picker.click();await (await cancel).setFiles([]);
  assert.equal(await page.locator('.photo-preview').count(),1,'cancel does not clear selection');
  await page.getByRole('button',{name:'Send message',exact:true}).click();
- await page.getByText(/Your text and selected photos are retained/).waitFor();
+ await page.getByText(/Photo or message was not sent\. Your text and selected photos are retained/).waitFor();
  assert.deepEqual(uploaded,[bytes]);
  assert.equal(await page.locator('.photo-preview').count(),1);
  await mkdir(artifactURL(),{recursive:true});
@@ -86,6 +86,48 @@ test('compact photo picker uses the real file input and releases failed-send upl
  await page.waitForFunction(()=>!document.querySelector('.photo-preview'));
  assert.equal(deleted.length,1);
  assert.ok(deleted[0].endsWith('/sessions/s/attachments/'+id));
+});
+test('ambiguous photo-send failure preserves the original request and selected IDs',{timeout:20000},async t=>{
+ const page=await browserFixture(t,{csp:true}),uploads=[],runs=[],deletes=[];
+ const id='00000000000000000000000000000001';
+ await page.route('**/hermes/app-api/sessions/s/attachments**',async route=>{
+  if(route.request().method()==='DELETE'){deletes.push(route.request().url());return route.fulfill({status:204});}
+  uploads.push(route.request().postDataBuffer());
+  return route.fulfill({status:201,json:{id,status:'pending'}});
+ });
+ await page.route('**/hermes/app-api/runs',async route=>{
+  runs.push(route.request().postDataJSON());
+  return route.fulfill({status:503,json:{detail:'Synthetic ambiguous outcome'}});
+ });
+ const picker=page.getByRole('button',{name:'Add photos',exact:true});
+ const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jXioAAAAASUVORK5CYII=','base64');
+ const text=page.getByRole('textbox',{name:'Message Hermes',exact:true});
+ await text.fill('Keep this exact request');
+ const firstChooser=page.waitForEvent('filechooser');await picker.click();
+ await (await firstChooser).setFiles({name:'original.png',mimeType:'image/png',buffer:bytes});
+ await page.getByRole('button',{name:'Send message',exact:true}).click();
+ await page.getByText(/The send outcome is uncertain/).waitFor();
+ assert.match(await page.locator('.photo-status').textContent(),/submitted photos are retained/);
+ const firstPayload=runs[0];
+ assert.equal(firstPayload.input,'Keep this exact request');
+ assert.deepEqual(firstPayload.attachments,[id]);
+ assert.equal(await page.getByRole('button',{name:'Remove photo 1'}).isDisabled(),true);
+
+ const secondChooser=page.waitForEvent('filechooser');await picker.click();
+ await (await secondChooser).setFiles({name:'new.png',mimeType:'image/png',buffer:bytes});
+ await page.getByRole('button',{name:'Send message',exact:true}).click();
+ await page.getByText(/Retry the original text and photo selection unchanged/).waitFor();
+ assert.equal(runs.length,1,'a changed selection cannot replay an uncertain attempt');
+ await page.getByRole('button',{name:'Remove photo 2'}).click();
+ await page.getByRole('button',{name:'Send message',exact:true}).click();
+ await page.getByText(/The send outcome is uncertain/).waitFor();
+ assert.equal(runs.length,2);
+ assert.deepEqual(runs[1],firstPayload);
+ assert.deepEqual(uploads,[bytes]);
+ assert.deepEqual(deletes,[]);
+ const saved=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('hermes:keyboard-fixture:attempt:s')));
+ assert.equal(saved.idempotency_key,firstPayload.idempotency_key);
+ assert.deepEqual(saved.attachment_ids,[id]);
 });
 test('selected photo previews decode under the deployed Apache content security policy',{timeout:20000},async t=>{
  const page=await browserFixture(t,{csp:'apache'});

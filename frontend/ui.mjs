@@ -5,6 +5,7 @@ import {createModelControls} from './model-controls.mjs';
 import {createSessionSwipe} from './session-swipe.mjs';
 import {observeDisclosureReachability} from './disclosure-reachability.mjs';
 import {markHistoryNode,backgroundPlacement} from './background-placement.mjs';
+import {BASE} from './api.mjs';
 
 // Presentation only: these dates never participate in transcript ordering.
 export function formatMessageTime(value, {locale, timeZone} = {}) {
@@ -52,6 +53,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   const deletionKey=(owner,id)=>JSON.stringify([owner,id]);
   const storage = {get(key,persistent=false) { try { return (persistent ? win.localStorage : win.sessionStorage).getItem(key); } catch { return null; } }, set(key,value,persistent=false) {try { const store=persistent ? win.localStorage : win.sessionStorage;value == null ? store.removeItem(key) : store.setItem(key,value); } catch { /* private browsing may disable storage */ }}};
   const key = name => `hermes:${state.user?.id}:${name}`;
+  const photoURL=(sessionId,id)=>`${BASE}app-api/sessions/${encodeURIComponent(sessionId)}/attachments/${id}`;
   const h = (tag, attrs = {}, ...children) => {
     const el = doc.createElement(tag);
     for (const [key,value] of Object.entries(attrs)) {
@@ -982,8 +984,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       for(const id of pending.attachment_ids){
         if(typeof id!=='string' || !/^[a-f0-9]{32}$/.test(id))continue;
         selectedPhotos.push({file:null,previewUrl:'',uploadKey:'',metadata:{
-          id,status:'pending',url:`/sessions/${encodeURIComponent(session.id)}/attachments/${id}`}});
+          id,status:'pending',url:photoURL(session.id,id)}});
       }
+      pendingPhotoSubmission={attachmentIds:[...pending.attachment_ids],photos:[...selectedPhotos]};
       renderPhotoSelection();
     }
     let draftRevision=0;
@@ -2073,7 +2076,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         photos.append(h('p',{class:'expired-photo caption',role:'status'},'Photo expired; message text is still available.'));
         continue;
       }
-      const source=`/hermes/app-api/sessions/${encodeURIComponent(message.session_id || state.session?.id || '')}/attachments/${item.id}`;
+      const source=photoURL(message.session_id || state.session?.id || '',item.id);
       const image=h('img',{src:source,alt:'Attached photo',loading:'lazy'});
       image.addEventListener('error',()=>image.replaceWith(h('p',{class:'expired-photo caption',role:'status'},'Photo expired or unavailable; message text is still available.')),{once:true});
       photos.append(image);

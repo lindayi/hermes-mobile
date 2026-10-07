@@ -214,14 +214,14 @@ SOURCE_FINGERPRINTS = {
     'deploy/hermes-mobile-issue-starter.service': '1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69',
     'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
-    'backend/attachments.py': '93181c8474a25a29977b82809e865fa6285ef47354d0fe4ebbb6e218011b4b7b',
+    'backend/attachments.py': 'be2c19dd82ac47eea9b9860193a69cb8f00d74d323c82a0c2f710874c9a30832',
     'backend/clarifications.py': '6a6f042beb98881a482efdd85c20555d88a375156a024481ab18a0d5c80e94fd',
     'backend/model_controls.py': 'd6e351bc68e09aba15a128c61d1d50d09ba5945db7a6438ddac51ddf61c41341',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',  # gitleaks:allow
     'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
     'backend/runs.py': '79b15df9918cb85599cb3a7db5c978d2abb681afe9c355acdfa6e07f5472884f',
     # Accepted PR45 naming bytes in this assembly; no naming-source rewrite.
-    'backend/app.py': '11dde94d9e1574ebab579ea1b45c43d4270deffc8175aac2257f5652a14c8cf6',
+    'backend/app.py': '7fbd46d9b0512ea8d8c0c1e51dd79b71bf363e7a6f17d5fa9eb2af093b215513',
     'backend/auth.py': '411529a1d53bdcd01eae4bf5e35c44d3d5099e4dc9e77eb9dbbe67df6433f335',  # gitleaks:allow
     'backend/auth_store.py': '8827856de744de03648924b0ff83011bdb70417781620724acd84078181c193e',  # gitleaks:allow
     'backend/background_delivery.py': '2da2bdd89d27f18beee0e0099d1bb39b325a9f70dcba099d55ceb3dea2e88629',

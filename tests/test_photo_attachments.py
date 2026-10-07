@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import errno
 import io
 import json
+import os
 import sqlite3
 import struct
 import threading
@@ -238,6 +239,45 @@ def test_cancelled_photo_upload_waits_for_worker_write_before_cleanup(tmp_path, 
         assert list(store.objects.iterdir()) == []
 
 
+def test_cancelled_photo_upload_closes_descriptor_returned_by_delayed_open(tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        started, resume = threading.Event(), threading.Event()
+        opened = []
+        original_open = attachments_module.os.open
+
+        def delayed_open(path, *args, **kwargs):
+            descriptor = original_open(path, *args, **kwargs)
+            if str(path).endswith('.part'):
+                opened.append(descriptor)
+                started.set()
+                assert resume.wait(5)
+            return descriptor
+
+        monkeypatch.setattr(attachments_module.os, 'open', delayed_open)
+
+        async def chunks():
+            yield png_fixture()
+
+        async def cancel_upload():
+            upload = asyncio.create_task(store.upload(user, 'wa-1', 'cancel-open', chunks()))
+            assert await asyncio.to_thread(started.wait, 2)
+            upload.cancel()
+            resume.set()
+            with pytest.raises(asyncio.CancelledError):
+                await upload
+
+        asyncio.run(cancel_upload())
+
+        assert len(opened) == 1
+        with pytest.raises(OSError):
+            os.fstat(opened[0])
+        with store.connection() as db:
+            assert db.execute(
+                "SELECT count(*) FROM attachments WHERE state='receiving'").fetchone()[0] == 0
+
+
 def test_cancelled_reservation_worker_releases_its_lease_and_reservation(tmp_path, monkeypatch):
     with photo_client(tmp_path) as (app, client):
         store = app.state.attachments
@@ -449,6 +489,205 @@ def test_crashed_receiving_reservation_is_reclaimed_for_same_upload_key(tmp_path
         assert not (store.objects / (reservation['id'] + '.tmp')).exists()
         with store.connection() as db:
             assert db.execute('SELECT count(*) FROM attachments').fetchone()[0] == 1
+
+
+def test_fsync_disk_full_returns_507_cleans_reservation_and_allows_same_key_retry(
+        tmp_path, monkeypatch):
+    with photo_client(tmp_path, raise_server_exceptions=False) as (app, client):
+        store = app.state.attachments
+        original_fsync = attachments_module.os.fsync
+
+        def fail_fsync(_descriptor):
+            raise OSError(errno.ENOSPC, 'synthetic full disk')
+
+        monkeypatch.setattr(attachments_module.os, 'fsync', fail_fsync)
+        response = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'retry-after-fsync'})
+
+        assert response.status_code == 507
+        with store.connection() as db:
+            assert db.execute('SELECT count(*) FROM attachments').fetchone()[0] == 0
+        assert list(store.staging.iterdir()) == []
+        assert list(store.objects.iterdir()) == []
+
+        monkeypatch.setattr(attachments_module.os, 'fsync', original_fsync)
+        retry = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'retry-after-fsync'})
+        assert retry.status_code == 201
+
+
+def test_open_photo_reader_keeps_released_bytes_charged_until_closed(tmp_path):
+    with photo_client(tmp_path) as (app, client):
+        user = client.get(BASE + '/auth/me').json()['user']
+        result = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'reader-lifetime'}).json()
+        store = app.state.attachments
+        descriptor, _, size = store.open_image(user, 'wa-1', result['id'])
+
+        store.release(user, 'wa-1', result['id'])
+        with store.connection() as db:
+            row = db.execute('SELECT state,size,stored_name FROM attachments WHERE id=?',
+                             (result['id'],)).fetchone()
+        assert row['state'] == 'releasing'
+        assert row['size'] == size
+        assert row['stored_name']
+        with store.connection() as db:
+            assert store._usage(db) >= size
+        assert os.read(descriptor, size)
+
+        store.cleanup()
+        with store.connection() as db:
+            assert db.execute('SELECT size FROM attachments WHERE id=?',
+                              (result['id'],)).fetchone()[0] == size
+        os.close(descriptor)
+        store.cleanup()
+        with store.connection() as db:
+            row = db.execute('SELECT state,size,stored_name FROM attachments WHERE id=?',
+                             (result['id'],)).fetchone()
+        assert (row['state'], row['size'], row['stored_name']) == ('expired', 0, None)
+
+
+def test_photo_open_and_release_serialize_until_reader_lock_is_acquired(tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        user = client.get(BASE + '/auth/me').json()['user']
+        result = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'reader-open-race'}).json()
+        store = app.state.attachments
+        entered, resume = threading.Event(), threading.Event()
+        original_flock = attachments_module.fcntl.flock
+
+        def delayed_flock(descriptor, operation):
+            if operation == attachments_module.fcntl.LOCK_SH:
+                entered.set()
+                assert resume.wait(5)
+            return original_flock(descriptor, operation)
+
+        monkeypatch.setattr(attachments_module.fcntl, 'flock', delayed_flock)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            opening = executor.submit(store.open_image, user, 'wa-1', result['id'])
+            assert entered.wait(2)
+            releasing = executor.submit(store.release, user, 'wa-1', result['id'])
+            time.sleep(.05)
+            assert not releasing.done(), 'release waits until the reader lock is established'
+            resume.set()
+            descriptor, _, size = opening.result(timeout=2)
+            releasing.result(timeout=2)
+
+        with store.connection() as db:
+            row = db.execute('SELECT state,size FROM attachments WHERE id=?',
+                             (result['id'],)).fetchone()
+        assert row['state'] == 'releasing'
+        assert row['size'] == size
+        os.close(descriptor)
+        store.cleanup()
+        with store.connection() as db:
+            assert db.execute('SELECT size FROM attachments WHERE id=?',
+                              (result['id'],)).fetchone()[0] == 0
+
+
+def test_release_rejects_corrupt_stored_name_without_unlinking_outside_root(tmp_path):
+    with photo_client(tmp_path) as (app, client):
+        user = client.get(BASE + '/auth/me').json()['user']
+        result = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'corrupt-photo-name'}).json()
+        store = app.state.attachments
+        sentinel = store.root / 'sentinel'
+        sentinel.write_bytes(b'preserve')
+        with store.connection() as db:
+            db.execute('UPDATE attachments SET stored_name=? WHERE id=?',
+                       ('../sentinel', result['id']))
+            db.commit()
+
+        with pytest.raises(attachments_module.AttachmentError) as error:
+            store.release(user, 'wa-1', result['id'])
+
+        assert error.value.status == 410
+        assert sentinel.read_bytes() == b'preserve'
+        with store.connection() as db:
+            row = db.execute('SELECT state,size FROM attachments WHERE id=?',
+                             (result['id'],)).fetchone()
+        assert row['state'] == 'pending'
+        assert row['size'] > 0
+
+
+def test_delete_photo_release_keeps_event_loop_responsive_under_writer_lock(tmp_path):
+    with photo_client(tmp_path) as (app, client):
+        result = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'release-lock'}).json()
+        csrf = client.get(BASE + '/auth/me').json()['csrf_token']
+        connection = sqlite3.connect(app.state.attachments.database,
+                                     timeout=10, check_same_thread=False)
+        connection.execute('BEGIN IMMEDIATE')
+        unlocked = threading.Event()
+
+        def release_lock():
+            time.sleep(.15)
+            connection.rollback()
+            connection.close()
+            unlocked.set()
+
+        unlocker = threading.Thread(target=release_lock)
+        unlocker.start()
+
+        async def delete_with_heartbeat():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                    transport=transport, base_url=ORIGIN, cookies=dict(client.cookies),
+                    headers={'Origin': ORIGIN, 'X-CSRF-Token': csrf}) as async_client:
+                request = asyncio.create_task(async_client.delete(
+                    BASE + '/sessions/wa-1/attachments/' + result['id']))
+                heartbeats = 0
+                while not request.done():
+                    heartbeats += 1
+                    await asyncio.sleep(.01)
+                return heartbeats, await request
+
+        heartbeats, response = asyncio.run(delete_with_heartbeat())
+        unlocker.join(2)
+
+        assert unlocked.is_set()
+        assert response.status_code == 200
+        assert heartbeats >= 5
+
+
+def test_periodic_orphan_rescan_does_not_block_known_storage_admission(tmp_path):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        store.cleanup(limit=256, rescan=True)
+        now = time.time()
+        with store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for index in range(120):
+                attachment_id = f'{index + 1:032x}'
+                name = attachment_id + '.png'
+                db.execute('''INSERT INTO attachments(
+                    id,user_id,profile,session_id,upload_key,content_type,width,height,size,
+                    stored_name,state,created_at,expires_at,metadata_expires_at)
+                    VALUES(?,?,?,?,?,'image/png',1,1,1,?,'bound',?,?,?)''',
+                    (attachment_id, 'u', 'default', 'wa-1', f'known-{index}', name,
+                     now, now + 1000, now + 2000))
+                (store.objects / name).write_bytes(b'x')
+            db.commit()
+        orphan = store.objects / 'newly-orphaned.tmp'
+        orphan.write_bytes(b'unknown bytes')
+
+        store.cleanup(limit=64, rescan=True)
+        user = client.get(BASE + '/auth/me').json()['user']
+        reservation, fresh = store.begin(user, 'wa-1', 'known-storage-admission')
+
+        assert fresh
+        assert reservation['state'] == 'receiving'
+        for _ in range(20):
+            store.cleanup(limit=64)
+            if not orphan.exists():
+                break
+        assert not orphan.exists()
 
 
 def test_retry_does_not_reclaim_a_live_upload_lease(tmp_path):

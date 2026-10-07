@@ -56,6 +56,11 @@ also requires at least 1 GiB of free space. Concurrent uploads and cleanup use
 the same serialized accounting; no non-expired linked image is evicted to make
 space. Disk-full, low-space, quota, decode, and interrupted-body failures return
 bounded actionable errors and release or expire their reservation safely.
+An image reader holds a shared lock on its open file descriptor. Release and
+expiry remove the image and clear its charged size only after they acquire the
+exclusive lock; otherwise they retain the charge and retry cleanup later. Kernel
+locks end when a reader process exits, so the same rule works across workers and
+after a crash or restart.
 
 Unlinked uploads expire after 24 hours. Linked photos expire 30 days after
 upload, independently of the abandoned-upload TTL. Runs in queued, active, or
@@ -64,7 +69,10 @@ reconciliation; pins do not waive quotas or free-space checks. Expiry removes
 only the private image bytes and retains bounded metadata so history can render
 an explicit expired-photo placeholder without deleting message text. Startup
 reconciliation and a periodic bounded cleanup reclaim expired staging files and
-durable orphans without traversing unrelated state.
+durable orphans without traversing unrelated state. The first inventory must
+finish before admission. Routine scans resume across known files without
+re-closing admission; discovering an unaccounted orphan fails admission closed
+until the bounded reconciliation pass completes.
 
 ## Run, history, and recovery
 
@@ -74,8 +82,11 @@ sends. Images-only sends use the explicit default request “Please describe the
 attached image(s), including any visible text.” Upload status is announced to
 assistive technology; unsupported formats and retryable failures are explicit.
 The draft and all selected attachment references remain available after a
-recoverable upload or run error. Cancelled file selection does not alter the
-draft. A retry reuses upload and run idempotency keys.
+recoverable upload or run error, including after navigation and reload when the
+run outcome is uncertain. Restored photo previews use authenticated API paths,
+and unresolved submitted IDs remain locked against removal until a definite
+pre-admission rejection. Cancelled file selection does not alter the draft. A
+retry reuses upload and run idempotency keys.
 
 The Photos control shares the existing composer control row so text-only chats
 retain their short-viewport geometry. Navigation and teardown make best-effort
@@ -155,9 +166,9 @@ boundary so duplicate findings do not create duplicate fixes.
 | --- | --- | --- |
 | Native transport and persistence | Four normalized images within the advertised limits reach the pinned native handler and model input in the same run; complete request size is bounded before admission; unsupported vision is explicit; snapshots, transcripts, caches, and backups retain no image bytes beyond the attachment lifecycle. | Hosted test against the exact pinned-and-patched native source, with synthetic images and model-boundary capture. |
 | Run and history binding | Requested and canonical Session aliases resolve the same owned attachments; native multimodal placeholder turns and completed latest turns retain ordered opaque IDs on the exact user turn without duplicate synthetic turns. | Route-to-native run, then native-persisted history fixture using the pinned serializer and anchored journal identity. |
-| Reservation and storage recovery | Lost responses retry the immutable attachment IDs; dead receiving reservations recover without disturbing live uploads; failed publication leaves no unaccounted file; linked tombstones survive with their run; bounded orphan scans eventually account for every byte before admitting more uploads. | Restart/race, injected publication failure, pagination through more than one cleanup batch, and quota accounting over private storage. |
-| Capacity, expiry, and I/O | Queued, active, and unknown runs pin images consistently through run-time reads; terminal expiry preserves text and bounded tombstones; ENOSPC/EDQUOT produce actionable responses and release reservations; history metadata queries are batched off the event loop. | Synthetic run-state expiry cases, injected filesystem failures, query-count assertions, and event-loop concurrency check. |
-| Composer lifecycle and preview | Retry uses the original submitted IDs; navigation cannot delete an in-flight submission; photos selected while a run is pending remain available; removal restores composer state; rejected batches revoke every preview; steering cannot silently discard photos; selected previews decode under deployed CSP. | Real browser file-input flows for retry, pending selection/removal/navigation, unsupported mixed batches, steering, and both ASGI and Apache CSP. |
+| Reservation and storage recovery | Lost responses retry the immutable attachment IDs; dead receiving reservations recover without disturbing live uploads; failed publication leaves no unaccounted file; linked tombstones survive with their run; bounded orphan scans eventually account for every byte before admitting more uploads; periodic known-file sweeps do not interrupt admission. | Restart/race, injected publication failure, pagination through more than one cleanup batch, and quota accounting over private storage. |
+| Capacity, expiry, and I/O | Queued, active, and unknown runs pin images consistently through run-time reads; active download bytes remain charged until the reader closes, including across workers and restart; terminal expiry preserves text and bounded tombstones; ENOSPC/EDQUOT produce actionable responses and release reservations; history metadata queries are batched off the event loop. | Synthetic run-state expiry cases, delayed-open cancellation, locked-reader release/cleanup, injected filesystem failures, query-count assertions, and event-loop heartbeat under writer contention. |
+| Composer lifecycle and preview | Retry uses the original submitted IDs, input, and model; navigation and reload cannot delete an uncertain submission; added photos remain selectable without changing the frozen retry; definite rejection unlocks photos; steering cannot silently discard photos; selected and restored previews use authenticated URLs and decode under deployed CSP. | Real browser file-input flows for retry, pending selection/removal/navigation/reload, unsupported mixed batches, steering, and both ASGI and Apache CSP. |
 
 Issue #85 adds `backend/attachments.py` to the fixed execution-source inventory
 and Python closure. Only the following current candidate bindings supersede
@@ -170,8 +181,8 @@ activation success.
 | `backend/native_run_controls.py` | `d3e3894fab4ea1809c6c085f883e9d04afae5fd9a031684ee7b8abaf09d5b8e3` |
 | `backend/model_controls.py` | `d6e351bc68e09aba15a128c61d1d50d09ba5945db7a6438ddac51ddf61c41341` |
 | `deploy/native_controls_release.py` | `108b000cbeb1776e0db3edae2f523526ad1e28790265f6ebf402406f11e810d5` |
-| `backend/app.py` | `11dde94d9e1574ebab579ea1b45c43d4270deffc8175aac2257f5652a14c8cf6` |
-| `backend/attachments.py` | `93181c8474a25a29977b82809e865fa6285ef47354d0fe4ebbb6e218011b4b7b` |
+| `backend/app.py` | `7fbd46d9b0512ea8d8c0c1e51dd79b71bf363e7a6f17d5fa9eb2af093b215513` |
+| `backend/attachments.py` | `be2c19dd82ac47eea9b9860193a69cb8f00d74d323c82a0c2f710874c9a30832` |
 | `backend/hermes_client.py` | `b1d5cb9a6485ed6b53caca597e27cd0a34d1e82af5545e2738d271b48b10d623` |
 | `backend/native_catalog.py` | `d6a758a7007dd23f8921bacccdf69adf81ee7b6fa212f9766493eeba43769653` |
 | `backend/orchestration.py` | `4a62bc9ffd9eac78b2ad85bb09247f9c8b2519f4226b296537820683c169b3e1` |

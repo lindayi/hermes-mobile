@@ -650,7 +650,8 @@ def create_app(settings=None, *, gateway_client=None):
             catalog.messages(user['profile'],sid,limit=1)
         except KeyError:
             raise HTTPException(404,'Session not found') from None
-        descriptor,content_type,size=attachments.open_image(user,sid,attachment_id)
+        descriptor,content_type,size=await asyncio.to_thread(
+            attachments.open_image,user,sid,attachment_id)
 
         async def image_body():
             try:
@@ -662,7 +663,7 @@ def create_app(settings=None, *, gateway_client=None):
                     remaining-=len(chunk)
                     yield chunk
             finally:
-                os.close(descriptor)
+                await asyncio.to_thread(os.close,descriptor)
 
         return StreamingResponse(image_body(),media_type=content_type,
             headers={'Content-Length':str(size),'X-Content-Type-Options':'nosniff',
@@ -672,7 +673,7 @@ def create_app(settings=None, *, gateway_client=None):
     async def release_photo(sid:str,attachment_id:str,request:Request,user=Depends(ready_user)):
         auth.require_mutation(request,user)
         journal.require_session(user['id'],user['profile'],sid)
-        attachments.release(user,sid,attachment_id)
+        await asyncio.to_thread(attachments.release,user,sid,attachment_id)
         return {'released':True}
 
     @app.get(BASE+'/sessions/{sid}/background')
