@@ -378,11 +378,49 @@ classification, decision, and rationale explaining preservation of both branch
 intents (or genuine incompatibility). This is a deliverable under the existing
 task receipt and independent-review contract, not a new receipt schema or an
 automatic semantic approval. A current-main fence is rechecked before dispatch.
+The decision commentary and receipt are separate comments: first post the
+conflict decisions as a PR comment, then construct and validate the exact
+receipt-only payload before posting one dedicated receipt comment. That comment
+contains only the canonical v2 header and its seven bound fields, in the
+documented order, with no quote, fence, prose, or extra fields. Do not combine
+the decision commentary and receipt in one comment. The receipt comment is
+completion evidence only; it is not CI, review, merge, or deployment approval.
 The prompt directs genuinely incompatible requirements or broken required policy
 to a fixed typed result; these stop further repair for that exact head. Waiting or
 uncertain tasks retain the shared lock. Ordinary technical conflicts are repaired
 within the shared budget; exhaustion or ambiguous execution becomes a meaningful
 owner blocker rather than an unbounded retry.
+
+One bounded compatibility rule covers the already-dispatched legacy neutral
+reservation whose original prompt asked for the conflict decisions in a PR
+comment while requiring a prose-free receipt in that same comment. Only the
+saved neutral reservation and its byte-identical authenticated task-session
+prompt can enable recognition; comment labels or body text cannot opt in. The
+comment must be from the immutable Copilot bot author, unchanged, within the
+ordinary v2 byte and line limits, and contain exactly one final canonical v2
+receipt. Before it, the parser accepts only the observed legacy decision-envelope
+shape: its provider quote is inert and must match the saved starting head. The
+quoted outcome marker may be either complete or exactly provider-truncated as
+`<20 lowercase hex characters> -...`; neither marker form is authority. It is
+followed by one unquoted reconciliation assertion matching the reserved PR,
+starting head, dispatch base, and receipt result head, the conflict-decision
+section, and a bounded test summary. The existing separated summary and the
+single observed combined backticked `deploy/autonomy_policy.py` summary are the
+only supported summary forms. Quoted/fenced/HTML assertions, arbitrary prose,
+ambiguous headers, extra fields, trailing content, or any mismatch remain
+invalid. Receipt fields and all ordinary v1/v2 parsing rules stay strict.
+
+When main advances before the original receipt is adopted, recovery is bounded
+across two cold scans. The first scan validates the original dispatch-base receipt
+and persists its unchanged proof, extending the authorized head chain without
+making its already-collected stale scope current. The next scan can establish
+historical-base eligibility from that retained proof and positive ancestry, then
+reserve the necessary next neutral task against fresh main. Accepting that task
+supersedes the original pending handoff; normal retirement may remove the original
+action, but never its receipt proof, source count, or lifecycle history. Cold replay
+does not dispatch the original task again or reset its receipt waits. After the
+next neutral completes, fresh independent review may authorize genuine source
+repair 4; neutral reservations remain separately counted.
 
 A durable action claim is written before POSTing a task through
 `/agents/repos/{owner}/{repo}/tasks` with the bounded prompt, `base_ref=main`
@@ -451,6 +489,33 @@ identities matching the fixed owner/repository before any terminal failure can
 release the lock or emit `task_failed`. Missing or malformed identity evidence
 retains the sent claim, then reaches bounded `execution_uncertain`; it never
 blindly starts another task. Task and session IDs remain opaque strings.
+After the bounded receipt-poll limit, an uncertain neutral reservation with a
+known persisted task ID and creation time receives at most one additional
+read-only reconciliation attempt. It can resolve only from a fresh GET of that
+exact task with complete original task/session/branch/repository identity,
+positive terminal completion, and the unchanged authenticated receipt contract
+above. Preserve its existing waits, uncertainty event, counters, and reservation.
+An absent, nonterminal, malformed, or incomplete read remains uncertain and
+cannot be polled again by this recovery path. No recovery path reads or replays a
+lost-create reservation with no known task ID, posts another task, or re-executes
+the neutral task. If that bounded read was already consumed by the prior receipt
+codec, one additional read may be reserved only for the new legacy-neutral carrier
+codec revision on that same known-ID uncertain neutral action. Planning only
+collects recovery candidates; read-only planning neither claims nor GETs them.
+After the complete scan and its commit fences succeed, recheck the live pull,
+main, and original pull identity under the existing apply execution lock. A
+no-GET preflight abort leaves the revision unclaimed for a later valid scan.
+Atomically claim the exact unchanged original reservation through the existing
+state transaction before GET; prepared-state updates are not durable claims.
+Preserve the prior attempted flag and all history, and never repeat that codec
+read after an interruption, cold restart, later failure, or main change. Failed
+claim persistence prevents GET. It still resolves only
+from complete positive unchanged task/session/receipt proof; every other response
+remains uncertain without another read. Successful recovery refreshes downstream
+planning without repeating reconciliation; newly derived lifecycle events are
+canonicalized against active/retained history and the same verified ACK snapshot,
+then durably recorded before their outcomes are published. Acknowledged incidents
+remain retired rather than being reinserted with conflicting replay payloads.
 Live REST pull numbers, pull IDs, and head/base repository IDs must be positive
 integers at collection and every dispatch, ready/review handoff, and merge fence;
 booleans, floats, strings, and missing values are not identity proof.
@@ -635,6 +700,21 @@ historical rule. All other, unknown, or inconsistent combinations remain ineligi
 This exception authorizes only the existing bounded neutral reservation path; it
 never treats the historical PR as current-base eligible or enables merging. Fresh
 identity, receipt, ancestry, dispatch, and pre-send fences remain mandatory.
+
+Before a legacy neutral result has an adopted receipt proof, only its exact
+one-shot recovery read may cross the `false`/`dirty` fence without a ready proof.
+This requires the already-reserved uncertain action's known task ID and creation
+time, unchanged legacy-neutral dispatch prompt/nonce, owner/repository/PR identity,
+original recorded PR base as captured in that prompt, exhausted receipt-wait count,
+and unconsumed codec recovery revision. Under the execution lock, the fresh pull's
+base must still equal the authenticated task checkout base, and both ancestry
+comparisons must positively prove that checkout base is an ancestor of current
+main and the exact result head. The ordinary task-detail, session, dispatch,
+timestamp, unique actual receipt, and immutable comment checks still govern
+adoption after GET. This recovery-only allowance does not make the result head
+generally authorized and is not passed to source dispatch, report
+correction/publication, review/status publication, or merge fences; failure or
+unknown evidence remains blocked without repeating the claimed read.
 
 A completed authenticated malformed review with an unused correction does not
 occupy the historical `false`/`dirty` neutral path: planning emits neither a

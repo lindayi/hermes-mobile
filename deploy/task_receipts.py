@@ -36,7 +36,25 @@ class ReceiptError(ValueError):
     """A receipt is missing, conflicting, edited, stale, or unbound."""
 
 
-def receipt_instruction(nonce, *, pull_number, start_head, base_sha):
+def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=False):
+    posting_instruction = (
+        "After pushing your result and running focused checks, first post the "
+        "conflict decisions in a separate PR comment without the receipt nonce. "
+        "Then construct the complete receipt-only payload below as a separate "
+        "value and validate that exact value with the existing `_v2_fields` "
+        "parser, checking every field against its expected value. Post that "
+        "validated payload as exactly one dedicated PR comment, with no quote, "
+        "fence, prose, extra fields, or trailing content. Never combine the "
+        "decision commentary and receipt, and do not post a second receipt."
+    ) if neutral else (
+        "After pushing your result and running focused checks, post exactly one "
+        "issue comment on this PR. Put the exact receipt fields below in one "
+        "contiguous, unquoted final block, with no extra fields or unquoted prose. "
+        "The posting transport may prepend an unchanged Markdown blockquote, "
+        "separated from the receipt by an ASCII blank line (empty or only spaces/tabs), "
+        "or reorder fields; do not quote or fence the receipt itself, and include each "
+        "field exactly once."
+    )
     return (
         "Before any source edits, verify that nonce, pr, start_head and base are all "
         "present and complete in the template below, and read a nonblank "
@@ -44,13 +62,7 @@ def receipt_instruction(nonce, *, pull_number, start_head, base_sha):
         "binding is missing or incomplete, or the session variable is missing or "
         "blank, stop without source edits and report an explicit blocker; do not "
         "guess, substitute values, or emit any receipt.\n\n"
-        "After pushing your result and running focused checks, post exactly one "
-        "issue comment on this PR. Put the exact receipt fields below in one "
-        "contiguous, unquoted final block, with no extra fields or unquoted prose. "
-        "The posting transport may prepend an unchanged Markdown blockquote, "
-        "separated from the receipt by an ASCII blank line (empty or only spaces/tabs), "
-        "or reorder fields; do not quote or fence the receipt itself, and include each "
-        "field exactly once. Keep the entire comment within "
+        f"{posting_instruction} Keep the entire comment within "
         f"{V2_TRANSPORT_MAX_BYTES} UTF-8 bytes and {V2_TRANSPORT_MAX_LINES} LF-delimited lines. "
         "Copy nonce, pr, start_head and base exactly: base is the fixed dispatch-time "
         "main SHA, not main at completion. The parent "
@@ -166,7 +178,8 @@ def _v2_fields(body):
 
 
 def receipt_body_matches(body, nonce, task_id, session_id, pull_number,
-                         start_head, head_sha, base_sha, result, *, version):
+                         start_head, head_sha, base_sha, result, *, version,
+                         legacy_neutral=False):
     if version == "v1":
         return body == _expected_body(
             nonce, task_id, session_id, pull_number, start_head, head_sha,
@@ -174,6 +187,16 @@ def receipt_body_matches(body, nonce, task_id, session_id, pull_number,
         )
     if version != "v2":
         return False
+    if legacy_neutral:
+        fields = _legacy_neutral_receipt_fields(
+            body, nonce=nonce, pull_number=pull_number, start_head=start_head,
+            head_sha=head_sha, base_sha=base_sha,
+        )
+        return fields == {
+            "nonce": nonce, "session": session_id, "pr": str(pull_number),
+            "start_head": start_head, "head": head_sha, "base": base_sha,
+            "result": result,
+        }
     try:
         fields = _v2_fields(body)
     except ReceiptError:
@@ -189,10 +212,161 @@ def receipt_body_matches(body, nonce, task_id, session_id, pull_number,
     }
 
 
+def _legacy_neutral_receipt_fields(body, *, nonce, pull_number, start_head,
+                                   head_sha, base_sha):
+    if not isinstance(body, str) or len(body) > V2_TRANSPORT_MAX_BYTES:
+        return None
+    try:
+        if len(body.encode("utf-8")) > V2_TRANSPORT_MAX_BYTES:
+            return None
+    except UnicodeEncodeError:
+        return None
+    if (body.count("\n") >= V2_TRANSPORT_MAX_LINES or "\r" in body
+            or body.endswith("\n") or body.count(V2_RECEIPT_HEADER) != 1):
+        return None
+    lines = body.split("\n")
+    if len(lines) < 17 or lines[0] != "":
+        return None
+    if (
+            lines[1] != (
+                "> Hermes coordinator: The pull request is not based on the current "
+                f"same-repository main branch. (head `{start_head}`)."
+            )
+            or lines[2] != "> "
+            or re.fullmatch(
+                r"> <!-- hermes-coordinator-outcome:[0-9a-f]{20} (?:-->|-\.\.\.)",
+                lines[3],
+            ) is None
+            or lines[4] != ""
+            or lines[5] != (
+                f"Reconciliation of current main `{base_sha}` into PR #{pull_number} "
+                f"at `{start_head}` is pushed as merge commit `{head_sha}`."
+            )
+            or lines[6] != ""
+            or lines[7] != "Conflict decisions:"
+    ):
+        return None
+
+    index = 8
+    decisions = 0
+    while index < len(lines) and re.fullmatch(r"[1-8]\. .{1,2048}", lines[index]):
+        line = lines[index]
+        if ("Decision: " not in line or "Rationale: " not in line
+                or "<" in line or ">" in line or "```" in line):
+            return None
+        decisions += 1
+        if decisions > 8 or line.startswith(f"{decisions}. ") is False:
+            return None
+        index += 1
+    if not decisions or index >= len(lines) or lines[index] != "":
+        return None
+
+    separated_summary = (
+        index + 13 == len(lines)
+        and re.fullmatch(
+            r"[A-Za-z0-9_./-]+ merged automatically, "
+            r"[A-Za-z0-9 ,.'-]{1,256}\.",
+            lines[index + 1],
+        ) is not None
+        and lines[index + 2] == ""
+        and re.fullmatch(
+            r"Focused managed checks observed: "
+            r"[A-Za-z0-9 ,.'-]{1,512}\. "
+            r"No CI or review result is claimed\.",
+            lines[index + 3],
+        ) is not None
+        and lines[index + 4] == ""
+    )
+    combined_summary = (
+        index + 11 == len(lines)
+        and lines[index + 1] == (
+            "`deploy/autonomy_policy.py` merged automatically, retaining the photo "
+            "inventory and pins together with main's bounded-repair pins. Focused "
+            "managed checks observed: 3,008 Python tests passed, 553 additional "
+            "Python tests passed, 38 JS tests passed, and 14 browser tests passed. "
+            "No CI or review result is claimed."
+        )
+        and lines[index + 2] == ""
+    )
+    if separated_summary:
+        receipt_start = index + 5
+    elif combined_summary:
+        receipt_start = index + 3
+    else:
+        return None
+    if receipt_start + 8 != len(lines):
+        return None
+    session_line = lines[receipt_start + 5]
+    if not session_line.startswith("session="):
+        return None
+    session = session_line.removeprefix("session=")
+    if (not _nonblank_string(session)
+            or lines[receipt_start:] != [
+                V2_RECEIPT_HEADER,
+                f"nonce={nonce}",
+                f"pr={pull_number}",
+                f"start_head={start_head}",
+                f"base={base_sha}",
+                f"session={session}",
+                f"head={head_sha}",
+                "result=ready",
+            ]):
+        return None
+    return {
+        "nonce": nonce, "pr": str(pull_number), "start_head": start_head,
+        "base": base_sha, "session": session, "head": head_sha, "result": "ready",
+    }
+
+
+def _legacy_neutral_prompt_matches(action, session):
+    if (
+            not _legacy_neutral_dispatch_matches(action)
+            or not isinstance(session, dict)
+            or session.get("prompt") != action.get("body")
+    ):
+        return False
+    return True
+
+
+def _legacy_neutral_dispatch_matches(action):
+    if (
+            not isinstance(action, dict)
+            or action.get("kind") != "fix"
+            or action.get("task_type") != "neutral"
+            or type(action.get("issue")) is not int or action["issue"] < 1
+            or not _nonblank_string(action.get("dispatch_nonce"), limit=128)
+            or not isinstance(action.get("body"), str)
+            or not isinstance(action.get("marker"), str)
+            or re.fullmatch(r"hermes-coordinator-fix:[0-9a-f]{20}", action["marker"]) is None
+            or not isinstance(action.get("main_sha"), str)
+            or SHA_RE.fullmatch(action["main_sha"]) is None
+            or not isinstance(action.get("head"), str)
+            or SHA_RE.fullmatch(action["head"]) is None
+    ):
+        return False
+    instruction = receipt_instruction(
+        action["dispatch_nonce"], pull_number=action["issue"],
+        start_head=action["head"], base_sha=action["main_sha"],
+    )
+    if not action["body"].endswith(f"\n\n{instruction}"):
+        return False
+    request = action["body"][:-len(instruction) - 2]
+    return (
+        request.startswith(
+            f"Neutral reconciliation for PR #{action['issue']} at exact PR head "
+            f"`{action['head']}`. The current target main is `{action['main_sha']}`; "
+        )
+        and request.endswith(f"<!-- {action['marker']} -->")
+        and "record its file/hunk identity, classification, decision, and rationale "
+            "in a PR comment" in request
+        and "before returning a `ready` receipt under the existing task receipt contract" in request
+    )
+
+
 def find_receipt(comments, *, complete, nonce, task_id, session_id,
                  pull_number, start_head, head_sha, base_sha,
                  task_created_at, session_created_at, session_completed_at,
-                 now, dispatch_base_sha=None):
+                 now, dispatch_base_sha=None, legacy_neutral=False):
     if (complete is not True or not isinstance(comments, list)
             or len(comments) > 10000
             or not all(isinstance(comment, dict) for comment in comments)
@@ -226,21 +400,35 @@ def find_receipt(comments, *, complete, nonce, task_id, session_id,
         receipt_base = dispatch_base_sha if version == "v2" else base_sha
         if not isinstance(receipt_base, str) or SHA_RE.fullmatch(receipt_base) is None:
             raise ReceiptError("Receipt dispatch base is missing")
-        matches = [
-            result for result in RECEIPT_RESULTS
+        matches = []
+        legacy_envelope = None
+        for result in RECEIPT_RESULTS:
             if receipt_body_matches(
-                body, nonce, task_id, session_id, pull_number,
-                start_head, head_sha, receipt_base, result, version=version,
-            )
-        ]
+                    body, nonce, task_id, session_id, pull_number,
+                    start_head, head_sha, receipt_base, result, version=version):
+                matches.append(result)
+            elif legacy_neutral and version == "v2" and result == "ready":
+                legacy_envelope = _legacy_neutral_receipt_fields(
+                    body, nonce=nonce, pull_number=pull_number,
+                    start_head=start_head, head_sha=head_sha, base_sha=receipt_base,
+                )
+                if (legacy_envelope == {
+                        "nonce": nonce, "pr": str(pull_number),
+                        "start_head": start_head, "base": receipt_base,
+                        "session": session_id, "head": head_sha, "result": "ready",
+                }):
+                    matches.append(result)
         if len(matches) != 1:
             raise ReceiptError("Task receipt fields or result do not match")
         comment_id = comment.get("id")
         if type(comment_id) is not int or comment_id <= 0:
             raise ReceiptError("Task receipt comment identity is malformed")
-        found.append({"result": matches[0], "comment_id": comment_id,
-                      "created_at": comment["created_at"], "body": body,
-                      **({"version": "v2"} if version == "v2" else {})})
+        found.append({
+            "result": matches[0], "comment_id": comment_id,
+            "created_at": comment["created_at"], "body": body,
+            **({"version": "v2"} if version == "v2" else {}),
+            **({"legacy_neutral": True} if legacy_envelope is not None else {}),
+        })
     if len(found) > 1:
         raise ReceiptError("Conflicting or duplicate task receipts")
     return found[0] if found else None
@@ -496,6 +684,9 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     if len(matches) != 1:
         raise ReceiptError("Task nonce does not identify exactly one returned session")
     session = matches[0]
+    legacy_neutral = (
+        len(sessions) == 1 and _legacy_neutral_prompt_matches(action, session)
+    )
     task_updated = _time(task.get("updated_at"))
     completed_at = _time(session.get("completed_at"))
     if task_updated < completed_at or task_updated > now.astimezone(timezone.utc):
@@ -515,6 +706,7 @@ def validate_task_receipt(task, action, pull, comments, *, now):
         session_created_at=session.get("created_at"),
         session_completed_at=session.get("completed_at"),
         now=now,
+        legacy_neutral=legacy_neutral,
     )
     if receipt is None:
         return None

@@ -19,6 +19,7 @@ from deploy.cloud_coordinator import (
     CoordinatorError,
     GhApi,
     MAX_HANDOFF_POLLS,
+    MAX_RECEIPT_POLLS,
     MAX_REPAIR_FINGERPRINTS,
     MAX_REPAIR_PROGRESS_HISTORY,
     MAX_STATE_BYTES,
@@ -2544,7 +2545,9 @@ def test_neutral_restart_after_head_advance_never_advances_predecessor(
     assert api.fix_attempts == 2
 
 
-def test_ambiguous_neutral_post_stays_locked_and_is_never_retried(tmp_path):
+@pytest.mark.parametrize("advance_main", [False, True])
+def test_ambiguous_neutral_post_stays_locked_and_is_never_retried(
+        tmp_path, advance_main):
     api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
     api.fail_fix = True
 
@@ -2556,6 +2559,11 @@ def test_ambiguous_neutral_post_stays_locked_and_is_never_retried(tmp_path):
     assert store.action(first["key"]) is None
     assert api.fix_attempts == 2
 
+    if advance_main:
+        api.current_main_sha = "f" * 40
+        api.compare_results[f"{BASE}...{'f' * 40}"] = _compare_result(
+            BASE, ahead_by=22,
+        )
     Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
 
     assert api.fix_attempts == 2
@@ -2563,6 +2571,69 @@ def test_ambiguous_neutral_post_stays_locked_and_is_never_retried(tmp_path):
     assert store.action(first["key"]) is None
     assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
+
+
+@pytest.mark.parametrize("advance_main", [False, True])
+def test_known_id_uncertain_neutral_with_unproven_completion_is_read_once(
+        tmp_path, advance_main):
+    api, store, coordinator, _ = _ready_sha_bound_handoff(tmp_path)
+    coordinator.run(apply=True)
+    neutral = next(
+        action for action in store.actions().values()
+        if action.get("task_type") == "neutral"
+    )
+    neutral_head = NEXT_RESULT_HEAD
+    api.complete_task(
+        neutral["task_id"], neutral, head_sha=neutral_head,
+        base_sha=CURRENT_MAIN,
+    )
+    api.tasks[neutral["task_id"]]["creator"] = {"id": OWNER + 1}
+    api.head_sha = api.pull["head"]["sha"] = neutral_head
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    if advance_main:
+        api.current_main_sha = "f" * 40
+        api.pull["mergeable_state"] = "behind"
+        api.compare_results.update({
+            f"{CURRENT_MAIN}...{api.current_main_sha}": _compare_result(
+                CURRENT_MAIN, ahead_by=1,
+            ),
+            f"{CURRENT_MAIN}...{neutral_head}": _compare_result(
+                CURRENT_MAIN, ahead_by=2,
+            ),
+        })
+    event = coordinator._record_uncertain_task(neutral)
+    store.update_action_with_lifecycle(
+        neutral["key"], "uncertain", event, now=1790856660,
+        blocker="execution_uncertain", receipt_waits=MAX_RECEIPT_POLLS,
+    )
+    original_get = api.get
+    task_reads = []
+
+    def count_neutral_read(route):
+        if route.endswith(f"/{neutral['task_id']}"):
+            task_reads.append(route)
+        return original_get(route)
+
+    api.get = count_neutral_read
+    initial_posts = api.task_posts
+    initial_events = store.snapshot()["lifecycle_events"]
+
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+
+    recovered = StateStore(store.path)
+    uncertain = recovered.action(neutral["key"])
+    assert uncertain["status"] == "uncertain"
+    assert uncertain["receipt_recovery_attempted"] is True
+    assert uncertain["receipt_waits"] == MAX_RECEIPT_POLLS
+    assert recovered.snapshot()["lifecycle_events"] == initial_events
+    assert recovered.snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert recovered.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
+    assert len(task_reads) == 1
+    assert api.task_posts == initial_posts
 
 
 @pytest.mark.parametrize(
@@ -3469,7 +3540,11 @@ _LEGACY_HYDRATION_HAZARDS = [
     ],
 )
 def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
-        tmp_path, hydration_hazard, attempt_ordinals):
+        tmp_path, hydration_hazard, attempt_ordinals, legacy_neutral_status=None,
+        advance_main=False, legacy_neutral_receipt_valid=True,
+        legacy_neutral_dispatch_valid=True, recovery_interruption=None,
+        recovery_lifecycle_probe=False, advance_main_dirty=False,
+        recovery_fence_probe=False):
     from copy import deepcopy
     from deploy.task_receipts import receipt_instruction
 
@@ -3777,6 +3852,9 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     original_get_all = api.get_all
     task_list_records = []
     task_detail_reads = []
+    neutral_task_reads = []
+    ancestry_reads = []
+    neutral_task_id = None
     original_get = api.get
 
     def delayed_task_history(route, *, collection=None):
@@ -3834,6 +3912,10 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         return values
 
     def task_details(route):
+        if route.startswith("repos/lindayi/hermes-mobile/compare/"):
+            ancestry_reads.append(route)
+        if neutral_task_id is not None and route.endswith(f"/{neutral_task_id}"):
+            neutral_task_reads.append(route)
         if route.startswith("agents/repos/lindayi/hermes-mobile/tasks/legacy-source-"):
             task_detail_reads.append(route.rsplit("/", 1)[-1])
             if (history_visible and hydration_hazard == "missing-detail"
@@ -4078,6 +4160,7 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         api.fix_attempts,
     )
     assert result["repair_requested"]
+    neutral_task_id = neutral["task_id"]
     assert "starter-source-provenance" not in result["reasons"]
     assert enrollment["attempts"] == 3
     assert enrollment["neutral_attempts"] == 1
@@ -4105,18 +4188,475 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         assert db.execute("SELECT status FROM events").fetchone() == ("acked",)
 
     neutral_head = "4" * 40
+    neutral_instruction = None
+    if legacy_neutral_status is not None:
+        from deploy.task_receipts import receipt_instruction
+
+        neutral_instruction = receipt_instruction(
+            neutral["dispatch_nonce"], pull_number=neutral["issue"],
+            start_head=neutral["head"], base_sha=neutral["main_sha"], neutral=True,
+        )
+        legacy_instruction = receipt_instruction(
+            neutral["dispatch_nonce"], pull_number=neutral["issue"],
+            start_head=neutral["head"], base_sha=neutral["main_sha"],
+        )
+        assert neutral["body"].endswith(f"\n\n{neutral_instruction}")
+        neutral["body"] = (
+            neutral["body"][:-len(neutral_instruction) - 2]
+            + "\n\n" + legacy_instruction
+        )
+        StateStore(path).update_action(neutral["key"], "sent", body=neutral["body"])
     api.complete_task(
         neutral["task_id"], neutral, head_sha=neutral_head, base_sha=CURRENT_MAIN,
     )
+    neutral_comment = api.comments[-1]
+    if legacy_neutral_status is not None:
+        neutral_comment["body"] = _legacy_neutral_decision_comment(
+            neutral, session_id=f"session-{neutral['task_id']}", result_head=neutral_head,
+        )
+        if not legacy_neutral_receipt_valid:
+            neutral_comment["body"] = neutral_comment["body"].replace(
+                "photo inventory and pins", "unverified photo inventory and pins",
+            )
     api.head_sha = api.pull["head"]["sha"] = neutral_head
     api.pull["base"]["sha"] = CURRENT_MAIN
     api.pull.update(mergeable=True, mergeable_state="clean")
+    advanced_main = None
+    if advance_main:
+        advanced_main = "5" * 40
+        api.current_main_sha = advanced_main
+        api.pull.update(
+            mergeable=not advance_main_dirty,
+            mergeable_state="dirty" if advance_main_dirty else "behind",
+        )
+        api.compare_results.update({
+            f"{CURRENT_MAIN}...{advanced_main}": _compare_result(
+                CURRENT_MAIN, ahead_by=1,
+            ),
+            f"{CURRENT_MAIN}...{neutral_head}": _compare_result(
+                CURRENT_MAIN, ahead_by=2,
+            ),
+        })
+    if legacy_neutral_status is not None:
+        from deploy.task_receipts import (
+            _legacy_neutral_prompt_matches, validate_task_receipt,
+        )
+
+        if legacy_neutral_dispatch_valid:
+            assert _legacy_neutral_prompt_matches(
+                neutral, api.tasks[neutral["task_id"]]["sessions"][0],
+            ), neutral["body"]
+        if legacy_neutral_receipt_valid and legacy_neutral_dispatch_valid:
+            assert validate_task_receipt(
+                api.tasks[neutral["task_id"]], neutral, api.pull, api.comments,
+                now=datetime.fromtimestamp(1790856660, timezone.utc),
+            )["legacy_neutral"] is True
+    if legacy_neutral_status == "uncertain":
+        neutral_store = StateStore(path)
+        if not legacy_neutral_dispatch_valid:
+            neutral["body"] += " altered"
+            neutral_store.update_action(neutral["key"], "sent", body=neutral["body"])
+        neutral_action = neutral_store.action(neutral["key"])
+        event = Coordinator(
+            api, neutral_store, clock=lambda: 1790856660,
+        )._record_uncertain_task(neutral_action)
+        neutral_store.update_action_with_lifecycle(
+            neutral["key"], "uncertain", event, now=1790856660,
+            blocker="execution_uncertain", receipt_waits=MAX_RECEIPT_POLLS,
+            receipt_recovery_attempted=True,
+        )
+        neutral_action = neutral_store.action(neutral["key"])
+        before_recovery_events = neutral_store.snapshot()["lifecycle_events"]
+        before_recovery_proofs = deepcopy(
+            neutral_store.snapshot()["enrollments"]["16"]["receipt_proofs"],
+        )
+        if advance_main_dirty and recovery_fence_probe:
+            coordinator = Coordinator(api, neutral_store, clock=lambda: 1790856660)
+            snapshot = coordinator._snapshot_pull(
+                16, neutral_store.snapshot()["enrollments"]["16"], advanced_main,
+                actions=neutral_store.actions(),
+            )
+            assert snapshot["historical_base"] is False
+            assert not any(
+                proof.get("receipt_head") == neutral_head
+                for proof in before_recovery_proofs
+            )
+            assert not coordinator._fence_pull(
+                16, neutral_head, advanced_main,
+                allow_historical_reconciliation=True,
+                expected_base_sha=CURRENT_MAIN,
+            )
+            assert coordinator._fence_pull(
+                16, neutral_head, advanced_main,
+                allow_historical_reconciliation=True,
+                expected_base_sha=CURRENT_MAIN,
+                neutral_receipt_recovery_action=neutral_action,
+            )
+            api.pull["base"]["sha"] = advanced_main
+            assert coordinator._fence_pull(
+                16, neutral_head, advanced_main,
+                expected_base_sha=advanced_main,
+            )
+            api.pull["base"]["sha"] = CURRENT_MAIN
+            api.pull.update(mergeable=True, mergeable_state="behind")
+            assert coordinator._fence_pull(
+                16, neutral_head, advanced_main,
+                allow_historical_reconciliation=True,
+                expected_base_sha=CURRENT_MAIN,
+            )
+            api.pull.update(mergeable=False, mergeable_state="dirty")
+            for changes in (
+                {"issue": 17}, {"head": "9" * 40},
+                {"recorded_base_sha": "9" * 40}, {"task_id": ""},
+                {"task_created_at": "invalid"}, {"owner_id": OWNER + 1},
+                {"repository_id": 0}, {"pull_id": api.pull["id"] + 1},
+                {"pull_node_id": "foreign"}, {"receipt_waits": 0},
+                {"receipt_recovery_attempted": False},
+                {"receipt_recovery_revision": 1},
+                {"body": neutral_action["body"] + " changed"},
+            ):
+                assert not coordinator._fence_pull(
+                    16, neutral_head, advanced_main,
+                    allow_historical_reconciliation=True,
+                    expected_base_sha=CURRENT_MAIN,
+                    neutral_receipt_recovery_action={
+                        **neutral_action, **changes,
+                    },
+                )
+            valid_comparisons = deepcopy(api.compare_results)
+            for comparison in (
+                    f"{CURRENT_MAIN}...{advanced_main}",
+                    f"{CURRENT_MAIN}...{neutral_head}"):
+                api.compare_results[comparison] = {
+                    **valid_comparisons[comparison],
+                    "merge_base_commit": {"sha": "9" * 40},
+                }
+                assert not coordinator._fence_pull(
+                    16, neutral_head, advanced_main,
+                    allow_historical_reconciliation=True,
+                    expected_base_sha=CURRENT_MAIN,
+                    neutral_receipt_recovery_action=neutral_action,
+                )
+                api.compare_results = deepcopy(valid_comparisons)
+            for mergeable, mergeable_state in (
+                    (None, "dirty"), (True, "dirty"), (False, "unknown")):
+                api.pull.update(
+                    mergeable=mergeable, mergeable_state=mergeable_state,
+                )
+                assert not coordinator._fence_pull(
+                    16, neutral_head, advanced_main,
+                    allow_historical_reconciliation=True,
+                    expected_base_sha=CURRENT_MAIN,
+                    neutral_receipt_recovery_action=neutral_action,
+                )
+            api.pull.update(mergeable=False, mergeable_state="dirty")
+            original_head_repo = api.pull["head"]["repo"]
+            api.pull["head"]["repo"] = {"id": 1399942966}
+            assert not coordinator._fence_pull(
+                16, neutral_head, advanced_main,
+                allow_historical_reconciliation=True,
+                expected_base_sha=CURRENT_MAIN,
+                neutral_receipt_recovery_action=neutral_action,
+            )
+            api.pull["head"]["repo"] = original_head_repo
     resumed_results = []
-    for _ in range(2):
+    neutral_reads_before_recovery = len(neutral_task_reads)
+    if recovery_lifecycle_probe:
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+        notifications = coordinator._notification_outcomes
+        events = []
+        acknowledged = recovery_lifecycle_probe == "acknowledged"
+        if acknowledged:
+            from deploy.workflow_lifecycle_sources import LifecycleSourcePaths
+
+            snapshot = coordinator._build_plan(apply=False)["snapshots"][0]
+            canonical = cloud_coordinator._lifecycle_event(
+                snapshot, "execution_exhausted",
+                occurred_at="2026-10-01T10:30:00Z",
+                incident="synthetic-refreshed-budget",
+            )
+            coordinator.store.record_lifecycle(canonical, now=1790856660)
+            coordinator.store.write_lifecycle_export(
+                now=1790856660, owner_user_id=APP_OWNER_ID,
+            )
+            os.utime(event_export, (consumer_now.timestamp(), consumer_now.timestamp()))
+            assert process_workflow_events(
+                notification_paths, apply=True, now=consumer_now,
+            )["inbox_items"] == 2
+            coordinator.lifecycle_source_paths = LifecycleSourcePaths(
+                notifications=notification_paths,
+                starter_state=tmp_path / "absent-starter.json",
+            )
+
+        def refreshed_notifications(snapshot, reasons):
+            outcomes, lifecycle = notifications(snapshot, reasons)
+            if coordinator.store.action(neutral["key"]).get("status") == "completed":
+                event = cloud_coordinator._lifecycle_event(
+                    snapshot, "execution_exhausted", occurred_at=coordinator._now_string(),
+                    incident="synthetic-refreshed-budget",
+                )
+                events.append(event)
+                lifecycle.append(event)
+            return outcomes, lifecycle
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(coordinator, "_notification_outcomes", refreshed_notifications)
+            coordinator.run(apply=True)
+        assert len(events) == 1
+        recovered = StateStore(path).snapshot()
+        if acknowledged:
+            assert not any(event["event_id"] == canonical["event_id"]
+                           for event in recovered["lifecycle_events"])
+            assert canonical in recovered["lifecycle_context"]["events"]
+            Coordinator(
+                api, StateStore(path), clock=lambda: 1790856660,
+                lifecycle_source_paths=coordinator.lifecycle_source_paths,
+            ).run(apply=True)
+            assert canonical in StateStore(path).snapshot()["lifecycle_context"]["events"]
+        else:
+            assert events[0] in recovered["lifecycle_events"]
+            exported = json.loads(event_export.read_text())
+            assert events[0] in exported["events"]
+            assert recovered["lifecycle_events"][:len(before_recovery_events)] == (
+                before_recovery_events
+            )
+        assert recovered["enrollments"]["16"]["attempts"] == 3
+        assert recovered["enrollments"]["16"]["neutral_attempts"] == 1
+        assert recovered["enrollments"]["16"]["receipt_proofs"][:3] == before_recovery_proofs
+        assert len(neutral_task_reads) == neutral_reads_before_recovery + 1
+        assert api.fix_attempts == 1
+        return
+    if recovery_interruption is not None:
+        before = StateStore(path).snapshot()
+        posts = [write for write in api.writes if write[0].endswith("/tasks")]
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run()
+        assert StateStore(path).snapshot() == before
+        assert len(neutral_task_reads) == neutral_reads_before_recovery
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+        with pytest.MonkeyPatch.context() as patch:
+            if recovery_interruption in {"after-get", "concurrent"}:
+                get = api.get
+
+                def interrupt_get(route):
+                    result = get(route)
+                    if route.endswith(f"/{neutral_task_id}"):
+                        if recovery_interruption == "concurrent":
+                            with pytest.raises(CoordinatorError, match="already running"):
+                                Coordinator(
+                                    api, StateStore(path), clock=lambda: 1790856660,
+                                ).run(apply=True)
+                            Coordinator(
+                                api, StateStore(path), clock=lambda: 1790856660,
+                            ).run()
+                        raise RuntimeError("interrupted after actual GET")
+                    return result
+
+                patch.setattr(api, "get", interrupt_get)
+            elif recovery_interruption == "later-snapshot":
+                build = coordinator._build_plan
+
+                def interrupt_snapshot(*, apply):
+                    build(apply=apply)
+                    raise RuntimeError("later snapshot failed")
+
+                patch.setattr(coordinator, "_build_plan", interrupt_snapshot)
+            elif recovery_interruption == "commit-fence":
+                def interrupt_fence(*args, **kwargs):
+                    raise RuntimeError("scan commit fence failed")
+
+                patch.setattr(coordinator, "_fence_starter_sources", interrupt_fence)
+            elif recovery_interruption == "claim-failure":
+                claim = coordinator.store.claim_receipt_recovery
+
+                def failed_save(*args, **kwargs):
+                    raise RuntimeError("claim transaction failed")
+
+                def interrupt_claim(*args, **kwargs):
+                    with pytest.MonkeyPatch.context() as transaction:
+                        transaction.setattr(coordinator.store, "_save", failed_save)
+                        return claim(*args, **kwargs)
+
+                patch.setattr(coordinator.store, "claim_receipt_recovery", interrupt_claim)
+            elif recovery_interruption in {"head-changed", "main-changed", "pull-changed"}:
+                get = api.get
+
+                def changed_binding(route):
+                    result = deepcopy(get(route))
+                    if route == "repos/lindayi/hermes-mobile/pulls/16":
+                        if recovery_interruption == "head-changed":
+                            result["head"]["sha"] = "9" * 40
+                        elif recovery_interruption == "pull-changed":
+                            result["id"] += 1
+                    if (recovery_interruption == "main-changed"
+                            and route == "repos/lindayi/hermes-mobile/commits/main"):
+                        result["sha"] = "9" * 40
+                    return result
+
+                fence = coordinator._fence_pull
+
+                def changed_preflight(*args, **kwargs):
+                    with pytest.MonkeyPatch.context() as preflight:
+                        preflight.setattr(api, "get", changed_binding)
+                        return fence(*args, **kwargs)
+
+                patch.setattr(coordinator, "_fence_pull", changed_preflight)
+            else:
+                patch.setattr(coordinator, "_fence_pull", lambda *a, **kw: False)
+            if recovery_interruption in {
+                    "preflight-abort", "head-changed", "main-changed", "pull-changed",
+            }:
+                coordinator.run(apply=True)
+            else:
+                with pytest.raises(RuntimeError, match="GET|snapshot|fence|transaction"):
+                    coordinator.run(apply=True)
+        interrupted = StateStore(path).snapshot()
+        saved = interrupted["actions"][neutral["key"]]
+        consumed = recovery_interruption in {"after-get", "concurrent"}
+        assert len(neutral_task_reads) == neutral_reads_before_recovery + int(consumed)
+        if not consumed:
+            assert "receipt_recovery_revision" not in saved
+        assert saved["receipt_recovery_attempted"] is True
+        assert saved["receipt_waits"] == MAX_RECEIPT_POLLS
+        assert saved["status"] == "uncertain"
+        assert interrupted["enrollments"]["16"]["attempts"] == 3
+        assert interrupted["enrollments"]["16"]["neutral_attempts"] == 1
+        assert interrupted["enrollments"]["16"]["receipt_proofs"] == before_recovery_proofs
+        assert interrupted["lifecycle_events"] == before_recovery_events
+        for _ in range(2):
+            Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        assert len(neutral_task_reads) == neutral_reads_before_recovery + 1
+        if consumed:
+            assert saved["receipt_recovery_revision"] == (
+                cloud_coordinator.LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION
+            )
+        assert [write for write in api.writes if write[0].endswith("/tasks")] == posts
+        cold = StateStore(path).snapshot()
+        assert cold["enrollments"]["16"]["attempts"] == 3
+        assert cold["enrollments"]["16"]["neutral_attempts"] == 1
+        assert cold["enrollments"]["16"]["receipt_proofs"] == before_recovery_proofs
+        assert cold["lifecycle_events"] == before_recovery_events
+        return
+    for _ in range(1 if advance_main else 2):
         resumed = Coordinator(
             api, StateStore(path), clock=lambda: 1790856660,
         ).run(apply=True)["pull_requests"][0]
         resumed_results.append(resumed)
+        if not legacy_neutral_receipt_valid or not legacy_neutral_dispatch_valid:
+            still_uncertain = StateStore(path).action(neutral["key"])
+            assert still_uncertain["status"] == "uncertain"
+            assert still_uncertain["receipt_recovery_attempted"] is True
+            assert still_uncertain["receipt_waits"] == MAX_RECEIPT_POLLS
+            if legacy_neutral_dispatch_valid:
+                assert still_uncertain["receipt_recovery_revision"] == (
+                    cloud_coordinator.LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION
+                )
+                assert len(neutral_task_reads) == neutral_reads_before_recovery + 1
+            else:
+                assert "receipt_recovery_revision" not in still_uncertain
+                assert len(neutral_task_reads) == neutral_reads_before_recovery
+    if not legacy_neutral_receipt_valid or not legacy_neutral_dispatch_valid:
+        uncertain_state = StateStore(path).snapshot()
+        assert uncertain_state["enrollments"]["16"]["attempts"] == 3
+        assert uncertain_state["enrollments"]["16"]["neutral_attempts"] == 1
+        assert uncertain_state["enrollments"]["16"]["receipt_proofs"] == proofs
+        assert uncertain_state["lifecycle_events"][:len(before_recovery_events)] == (
+            before_recovery_events
+        )
+        assert api.fix_attempts == 1
+        return
+    if legacy_neutral_status is not None:
+        recovered = StateStore(path)
+        recovered_neutral = recovered.action(neutral["key"])
+        assert recovered_neutral is not None, (
+            resumed_results, recovered.snapshot(), api.fix_attempts,
+        )
+        assert recovered_neutral["status"] == "completed"
+        assert recovered_neutral["receipt_legacy_neutral"] is True
+        assert recovered_neutral["receipt_body"] == neutral_comment["body"]
+        assert recovered_neutral["main_sha"] == CURRENT_MAIN
+        assert recovered_neutral["receipt_base"] == CURRENT_MAIN
+        assert recovered_neutral["receipt_head"] == neutral_head
+        assert recovered_neutral["receipt_start_head"] == neutral["head"]
+        assert recovered_neutral["receipt_task_id"] == neutral["task_id"]
+        assert recovered.snapshot()["enrollments"]["16"]["attempts"] == 3
+        assert recovered.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
+        assert recovered.snapshot()["enrollments"]["16"]["receipt_proofs"][:3] == proofs
+        assert api.fix_attempts == 1
+        if legacy_neutral_status == "uncertain":
+            assert recovered_neutral["receipt_waits"] == MAX_RECEIPT_POLLS
+            assert recovered_neutral["receipt_recovery_attempted"] is True
+            assert recovered_neutral["receipt_recovery_revision"] == (
+                cloud_coordinator.LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION
+            )
+            assert recovered.snapshot()["lifecycle_events"][:len(before_recovery_events)] == (
+                before_recovery_events
+            )
+            assert recovered.snapshot()["enrollments"]["16"]["receipt_proofs"][:3] == (
+                before_recovery_proofs
+            )
+    if advance_main:
+        assert legacy_neutral_status in {"sent", "uncertain"}
+        recovered_state = recovered.snapshot()
+        if advance_main_dirty:
+            assert (
+                f"repos/lindayi/hermes-mobile/compare/{CURRENT_MAIN}...{advanced_main}"
+                in ancestry_reads
+            )
+            assert (
+                f"repos/lindayi/hermes-mobile/compare/{CURRENT_MAIN}...{neutral_head}"
+                in ancestry_reads
+            )
+        assert recovered_state["enrollments"]["16"]["attempts"] == 3
+        assert recovered_state["enrollments"]["16"]["neutral_attempts"] == 1
+        initial, authorized, blocked = _authorized_result_heads(
+            16, recovered_state["enrollments"]["16"], recovered.actions(),
+            api.comments, advanced_main,
+        )
+        assert initial == recovered_state["enrollments"]["16"]["authorized_head"]
+        assert neutral["head"] in authorized and neutral_head in authorized
+        assert not blocked
+        before_posts = api.fix_attempts
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        advanced_state = StateStore(path).snapshot()
+        next_neutrals = [
+            item for item in advanced_state["actions"].values()
+            if item.get("kind") == "fix" and item.get("task_type") == "neutral"
+        ]
+        assert len(next_neutrals) == 1
+        assert next_neutrals[0]["status"] == "sent"
+        assert next_neutrals[0]["head"] == neutral_head
+        assert next_neutrals[0]["main_sha"] == advanced_main
+        assert next_neutrals[0]["recorded_base_sha"] == CURRENT_MAIN
+        assert advanced_state["enrollments"]["16"]["attempts"] == 3
+        assert advanced_state["enrollments"]["16"]["neutral_attempts"] == 2
+        assert advanced_state["enrollments"]["16"]["receipt_proofs"][:3] == proofs
+        assert advanced_state["enrollments"]["16"]["receipt_proofs"] == (
+            recovered_state["enrollments"]["16"]["receipt_proofs"]
+        )
+        assert advanced_state["enrollments"]["16"]["authorized_head"] == (
+            recovered_state["enrollments"]["16"]["authorized_head"]
+        )
+        assert advanced_state["lifecycle_events"] == recovered_state["lifecycle_events"]
+        assert neutral["key"] not in advanced_state["actions"]
+        assert recovered_neutral["handoff_state"] == "pending"
+        assert api.fix_attempts == before_posts + 1
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        assert api.fix_attempts == before_posts + 1
+        assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 3
+        assert StateStore(path).snapshot()["enrollments"]["16"]["neutral_attempts"] == 2
+        neutral = next_neutrals[0]
+        neutral_head = "6" * 40
+        api.complete_task(
+            neutral["task_id"], neutral, head_sha=neutral_head,
+            base_sha=advanced_main,
+        )
+        api.head_sha = api.pull["head"]["sha"] = neutral_head
+        api.pull["base"]["sha"] = advanced_main
+        api.pull.update(mergeable=True, mergeable_state="clean")
+        for _ in range(2):
+            Coordinator(
+                api, StateStore(path), clock=lambda: 1790856660,
+            ).run(apply=True)
     reviewer = next(
         action for action in StateStore(path).actions().values()
         if action.get("kind") == "review" and action.get("head") == neutral_head
@@ -4148,10 +4688,12 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     assert api.owner_review_head_sha == neutral_head
     assert json.loads(api.owner_review_body)["verdict"] == "changes_requested"
     assert enrollment["attempts"] == 4
-    assert enrollment["neutral_attempts"] == 1
+    assert enrollment["neutral_attempts"] == (2 if advance_main else 1)
+    assert enrollment["receipt_proofs"][:3] == proofs
     assert followup["attempt"] == 4 and followup["status"] == "sent"
     assert followup["head"] == neutral_head
-    assert api.fix_attempts == 2
+    assert followup["main_sha"] == (advanced_main if advance_main else CURRENT_MAIN)
+    assert api.fix_attempts == (3 if advance_main else 2)
     sent_posts = [route for route, _ in api.writes if route.endswith("/tasks")]
     for _ in range(2):
         Coordinator(
@@ -4159,6 +4701,112 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         ).run(apply=True)
     assert [route for route, _ in api.writes if route.endswith("/tasks")] == sent_posts
     assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 4
+
+
+def _legacy_neutral_decision_comment(action, *, session_id, result_head):
+    start_head = action["head"]
+    base_sha = action["main_sha"]
+    issue = action["issue"]
+    return (
+        "\n> Hermes coordinator: The pull request is not based on the current "
+        f"same-repository main branch. (head `{start_head}`).\n> \n"
+        "> <!-- hermes-coordinator-outcome:0123456789abcdef0123 -...\n\n"
+        f"Reconciliation of current main `{base_sha}` into PR #{issue} at "
+        f"`{start_head}` is pushed as merge commit `{result_head}`.\n\n"
+        "Conflict decisions:\n"
+        "1. `tests/test_autonomy_policy.py::_source_files` (fixture-union hunk): "
+        "routine additive technical conflict. Decision: retain both "
+        "`_ISSUE85_PHOTO_FIXTURE` and `_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE`. "
+        "Rationale: the fixtures independently bind the PR photo sources and "
+        "main bounded-repair sources; unioning them preserves both branches' "
+        "source-inventory assertions.\n"
+        "2. `tests/test_autonomy_policy.py::"
+        "test_reviewed_source_fixture_matches_complete_required_contract` "
+        "(pending-set hunk): routine additive technical conflict. Decision: "
+        "include both fixture sets in `pending` and retain both exact-fingerprint "
+        "verification blocks. Rationale: both PR and main candidate bindings "
+        "must remain excluded from historical baselines and checked against "
+        "their actual bytes.\n\n"
+        "`deploy/autonomy_policy.py` merged automatically, retaining the photo "
+        "inventory and pins together with main's bounded-repair pins. Focused "
+        "managed checks observed: 3,008 Python tests passed, 553 additional "
+        "Python tests passed, 38 JS tests passed, and 14 browser tests passed. "
+        "No CI or review result is claimed.\n\n"
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={action['dispatch_nonce']}\n"
+        f"pr={issue}\n"
+        f"start_head={start_head}\n"
+        f"base={base_sha}\n"
+        f"session={session_id}\n"
+        f"head={result_head}\n"
+        "result=ready"
+    )
+
+
+@pytest.mark.parametrize("recovery_status", ["sent", "uncertain"])
+def test_cold_legacy_neutral_receipt_reconciles_bound_completion_once(
+        tmp_path, recovery_status):
+    case_path = tmp_path / recovery_status
+    case_path.mkdir()
+    test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        case_path, None, False, legacy_neutral_status=recovery_status,
+    )
+
+
+@pytest.mark.parametrize("recovery_status", ["sent", "uncertain"])
+def test_cold_known_id_uncertainty_recovers_after_main_advances(
+        tmp_path, recovery_status):
+    case_path = tmp_path / "main-advanced"
+    case_path.mkdir()
+    test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        case_path, None, False, legacy_neutral_status=recovery_status, advance_main=True,
+    )
+
+
+def test_cold_known_id_uncertainty_recovers_on_ancestry_proven_dirty_result(
+        tmp_path):
+    case_path = tmp_path / "main-advanced-dirty"
+    case_path.mkdir()
+    test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        case_path, None, False, legacy_neutral_status="uncertain", advance_main=True,
+        advance_main_dirty=True, recovery_fence_probe=True,
+    )
+
+
+def test_legacy_neutral_codec_recovery_is_not_repeated_after_restart(tmp_path):
+    test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        tmp_path, None, False, legacy_neutral_status="uncertain",
+        legacy_neutral_receipt_valid=False,
+    )
+
+
+@pytest.mark.parametrize("advance_main", [False, True])
+@pytest.mark.parametrize("interruption", [
+    "after-get", "later-snapshot", "commit-fence", "concurrent", "preflight-abort",
+    "claim-failure", "head-changed", "main-changed", "pull-changed",
+])
+def test_codec_recovery_claim_survives_interrupted_execution(
+        tmp_path, interruption, advance_main):
+    test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        tmp_path, None, False, legacy_neutral_status="uncertain",
+        legacy_neutral_receipt_valid=False, advance_main=advance_main,
+        recovery_interruption=interruption,
+    )
+
+
+def test_codec_recovery_rejects_incomplete_saved_dispatch_metadata(tmp_path):
+    test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        tmp_path, None, False, legacy_neutral_status="uncertain",
+        legacy_neutral_dispatch_valid=False,
+    )
+
+
+@pytest.mark.parametrize("acknowledged", [False, True])
+def test_codec_recovery_persists_refreshed_lifecycle_before_export(tmp_path, acknowledged):
+    test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        tmp_path, None, False, legacy_neutral_status="uncertain",
+        recovery_lifecycle_probe="acknowledged" if acknowledged else True,
+    )
 
 
 def test_three_receipt_verified_no_progress_attempts_stop_after_restart(tmp_path):

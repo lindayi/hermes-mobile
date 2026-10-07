@@ -4,8 +4,8 @@ import json
 import pytest
 
 from deploy.task_receipts import (
-    MAX_REVIEW_REPORT_BYTES, ReceiptError, find_review_report, receipt_instruction,
-    validate_task_receipt,
+    MAX_REVIEW_REPORT_BYTES, ReceiptError, find_receipt, find_review_report,
+    receipt_instruction, validate_task_receipt,
 )
 
 
@@ -79,6 +79,136 @@ def v2_binding(result="ready"):
         "Hermes-Task-Receipt: v1", "Hermes-Task-Receipt: v2",
     ).replace(f"task={TASK_ID}\n", "")
     return task, action, pull, comments
+
+
+def legacy_neutral_v2_body():
+    return (
+        "\n> Hermes coordinator: The pull request is not based on the current "
+        "same-repository main branch. (head `"
+        f"{START_HEAD}`).\n> \n"
+        "> <!-- hermes-coordinator-outcome:0123456789abcdef0123 -->\n\n"
+        f"Reconciliation of current main `{BASE}` into PR #16 at `{START_HEAD}` "
+        f"is pushed as merge commit `{RESULT_HEAD}`.\n\n"
+        "Conflict decisions:\n"
+        "1. `frontend/styles.css` (fixture-union hunk): routine additive "
+        "technical conflict. Decision: retain both behaviors. Rationale: "
+        "both branch intents remain preserved.\n\n"
+        "deploy/autonomy_policy.py merged automatically, retaining both source "
+        "inventories and pins.\n\n"
+        "Focused managed checks observed: 3,008 Python tests passed, 553 "
+        "additional Python tests passed, 38 JS tests passed, and 14 browser "
+        "tests passed. No CI or review result is claimed.\n\n"
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={NONCE}\n"
+        "pr=16\n"
+        f"start_head={START_HEAD}\n"
+        f"base={BASE}\n"
+        f"session={SESSION_ID}\n"
+        f"head={RESULT_HEAD}\n"
+        "result=ready"
+    )
+
+
+def actual_legacy_neutral_v2_body():
+    return (
+        "\n> Hermes coordinator: The pull request is not based on the current "
+        "same-repository main branch. (head `"
+        f"{START_HEAD}`).\n> \n"
+        "> <!-- hermes-coordinator-outcome:0123456789abcdef0123 -...\n\n"
+        f"Reconciliation of current main `{BASE}` into PR #16 at `{START_HEAD}` "
+        f"is pushed as merge commit `{RESULT_HEAD}`.\n\n"
+        "Conflict decisions:\n"
+        "1. `tests/test_autonomy_policy.py::_source_files` (fixture-union hunk): "
+        "routine additive technical conflict. Decision: retain both "
+        "`_ISSUE85_PHOTO_FIXTURE` and `_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE`. "
+        "Rationale: the fixtures independently bind the PR photo sources and "
+        "main bounded-repair sources; unioning them preserves both branches' "
+        "source-inventory assertions.\n"
+        "2. `tests/test_autonomy_policy.py::"
+        "test_reviewed_source_fixture_matches_complete_required_contract` "
+        "(pending-set hunk): routine additive technical conflict. Decision: "
+        "include both fixture sets in `pending` and retain both exact-fingerprint "
+        "verification blocks. Rationale: both PR and main candidate bindings "
+        "must remain excluded from historical baselines and checked against "
+        "their actual bytes.\n\n"
+        "`deploy/autonomy_policy.py` merged automatically, retaining the photo "
+        "inventory and pins together with main's bounded-repair pins. Focused "
+        "managed checks observed: 3,008 Python tests passed, 553 additional "
+        "Python tests passed, 38 JS tests passed, and 14 browser tests passed. "
+        "No CI or review result is claimed.\n\n"
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={NONCE}\n"
+        "pr=16\n"
+        f"start_head={START_HEAD}\n"
+        f"base={BASE}\n"
+        f"session={SESSION_ID}\n"
+        f"head={RESULT_HEAD}\n"
+        "result=ready"
+    )
+
+
+def legacy_neutral_binding():
+    task, action, pull, comments = v2_binding()
+    action.update(kind="fix", task_type="neutral", recorded_base_sha=BASE)
+    request = (
+        f"Neutral reconciliation for PR #16 at exact PR head `{START_HEAD}`. "
+        f"The current target main is `{BASE}`; the PR's recorded base is `{BASE}`.\n\n"
+        "Preserve both branch intents and merge current main into the PR branch. "
+        "For each conflict hunk, record its file/hunk identity, classification, "
+        "decision, and rationale in a PR comment before returning a `ready` receipt "
+        "under the existing task receipt contract.\n\n"
+        "<!-- hermes-coordinator-fix:0123456789abcdefabcd -->"
+    )
+    action["marker"] = "hermes-coordinator-fix:0123456789abcdefabcd"
+    action["body"] = request + "\n\n" + receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+    )
+    task["sessions"][0]["prompt"] = action["body"]
+    comments[0]["body"] = legacy_neutral_v2_body()
+    return task, action, pull, comments
+
+
+def test_actual_legacy_neutral_carrier_shape_is_recognized_standalone():
+    from deploy.task_receipts import _legacy_neutral_receipt_fields
+
+    body = actual_legacy_neutral_v2_body()
+    fields = _legacy_neutral_receipt_fields(
+        body, nonce=NONCE, pull_number=16,
+        start_head=START_HEAD, head_sha=RESULT_HEAD, base_sha=BASE,
+    )
+
+    assert fields == {
+        "nonce": NONCE, "pr": "16", "start_head": START_HEAD, "base": BASE,
+        "session": SESSION_ID, "head": RESULT_HEAD, "result": "ready",
+    }
+    task, action, pull, comments = legacy_neutral_binding()
+    comments[0]["body"] = body
+    proof = validate_task_receipt(task, action, pull, comments, now=NOW)
+    assert proof["body"] == body
+    assert proof["legacy_neutral"] is True
+
+
+@pytest.mark.parametrize("change", [
+    "truncated-marker", "combined-summary", "extra-paragraph",
+])
+def test_actual_legacy_neutral_carrier_rejects_nearby_shapes(change):
+    from deploy.task_receipts import _legacy_neutral_receipt_fields
+
+    body = actual_legacy_neutral_v2_body()
+    if change == "truncated-marker":
+        body = body.replace("0123456789abcdef0123 -...", "0123456789abcdef0123 -... -->")
+    elif change == "combined-summary":
+        body = body.replace("photo inventory and pins", "unverified photo inventory and pins")
+    else:
+        body = body.replace(
+            "No CI or review result is claimed.\n\nHermes-Task-Receipt:",
+            "No CI or review result is claimed.\n\nExtra prose.\n\nHermes-Task-Receipt:",
+        )
+
+    assert _legacy_neutral_receipt_fields(
+        body, nonce=NONCE, pull_number=16, start_head=START_HEAD,
+        head_sha=RESULT_HEAD, base_sha=BASE,
+    ) is None
 
 
 def transported_v2_body(nonce=NONCE, session_id=SESSION_ID,
@@ -264,6 +394,194 @@ def test_v2_instruction_requires_complete_context_before_source_edits():
     assert "the head label with the pushed PR head SHA" in instruction
     assert "replacement labels are not receipt values" in instruction
     assert "one result from the closed list" in instruction
+
+
+def test_neutral_instruction_separates_decisions_from_validated_receipt_payload():
+    from deploy.task_receipts import _v2_fields
+
+    standard = receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+    )
+    neutral = receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE, neutral=True,
+    )
+    assert "post exactly one issue comment on this PR" in standard
+    assert "separate PR comment without the receipt nonce" not in standard
+    assert "separate PR comment without the receipt nonce" in neutral
+    assert "receipt-only payload below as a separate value" in neutral
+    assert "validate that exact value with the existing `_v2_fields` parser" in neutral
+    assert "Never combine the decision commentary and receipt" in neutral
+    assert "do not post a second receipt" in neutral
+
+    payload = (
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={NONCE}\n"
+        "pr=16\n"
+        f"start_head={START_HEAD}\n"
+        f"base={BASE}\n"
+        f"session={SESSION_ID}\n"
+        f"head={RESULT_HEAD}\n"
+        "result=ready"
+    )
+    assert _v2_fields(payload) == {
+        "nonce": NONCE, "pr": "16", "start_head": START_HEAD,
+        "base": BASE, "session": SESSION_ID, "head": RESULT_HEAD,
+        "result": "ready",
+    }
+
+
+def test_legacy_neutral_decision_envelope_accepts_only_its_bound_final_receipt():
+    from deploy.task_receipts import _v2_fields
+
+    task, action, pull, comments = legacy_neutral_binding()
+    with pytest.raises(ReceiptError):
+        _v2_fields(comments[0]["body"])
+
+    proof = validate_task_receipt(task, action, pull, comments, now=NOW)
+
+    assert proof["result"] == "ready"
+    assert proof["legacy_neutral"] is True
+    assert proof["body"] == comments[0]["body"]
+
+
+@pytest.mark.parametrize("change", [
+    "arbitrary-quote", "quoted-assertion", "fenced-assertion", "html-assertion",
+    "fenced-decision", "html-provider-marker", "malformed-provider-marker",
+    "fake-assertion", "fake-pr",
+    "fake-start-head", "fake-result-head", "arbitrary-prose", "duplicate-header",
+    "duplicate-field", "malformed-field", "extra-field", "trailing-text",
+    "wrong-author", "edited",
+    "wrong-comment-time", "wrong-session-prompt", "non-neutral", "wrong-role",
+    "multiple-sessions", "multiple-sessions-unrelated", "foreign-session",
+    "wrong-session-id", "wrong-task-id", "wrong-task-owner", "wrong-repository",
+    "wrong-branch", "wrong-start-head", "wrong-result-head", "wrong-base",
+    "wrong-comment-session", "wrong-nonce",
+])
+def test_legacy_neutral_envelope_requires_exact_authenticated_context(change):
+    import copy
+
+    task, action, pull, comments = copy.deepcopy(legacy_neutral_binding())
+    body = comments[0]["body"]
+    assertion = (
+        f"Reconciliation of current main `{BASE}` into PR #16 at `{START_HEAD}` "
+        f"is pushed as merge commit `{RESULT_HEAD}`."
+    )
+    if change == "arbitrary-quote":
+        body = body.replace(
+            "> Hermes coordinator: The pull request is not based on the current "
+            "same-repository main branch.",
+            "> An unrelated quoted statement.",
+        )
+    elif change == "quoted-assertion":
+        body = body.replace(assertion, f"> {assertion}")
+    elif change == "fenced-assertion":
+        body = body.replace(assertion, f"```\n{assertion}\n```")
+    elif change == "fenced-decision":
+        body = body.replace(
+            "Decision: retain both behaviors.",
+            "Decision: ```untrusted``` retain both behaviors.",
+        )
+    elif change == "html-assertion":
+        body = body.replace(assertion, f"<p>{assertion}</p>")
+    elif change == "html-provider-marker":
+        body = body.replace(
+            "> <!-- hermes-coordinator-outcome:0123456789abcdef0123 -->",
+            "> <p>hermes-coordinator-outcome</p>",
+        )
+    elif change == "malformed-provider-marker":
+        body = body.replace(
+            "hermes-coordinator-outcome:0123456789abcdef0123 -->",
+            "hermes-coordinator-outcome:0123456789abcdef0123 -... -->",
+        )
+    elif change == "fake-assertion":
+        body = body.replace(f"`{BASE}` into PR #16", f"`{'d' * 40}` into PR #16")
+    elif change == "fake-pr":
+        body = body.replace("into PR #16 at", "into PR #17 at")
+    elif change == "fake-start-head":
+        body = body.replace(f"at `{START_HEAD}` is pushed", f"at `{'d' * 40}` is pushed")
+    elif change == "fake-result-head":
+        body = body.replace(f"merge commit `{RESULT_HEAD}`", f"merge commit `{'d' * 40}`")
+    elif change == "arbitrary-prose":
+        body = body.replace("Conflict decisions:", "Unrelated prose.\n\nConflict decisions:")
+    elif change == "duplicate-header":
+        body = body.replace(
+            "Hermes-Task-Receipt: v2\n",
+            "Hermes-Task-Receipt: v2\nHermes-Task-Receipt: v2\n",
+        )
+    elif change == "duplicate-field":
+        body = body.replace("pr=16\n", "pr=16\npr=16\n")
+    elif change == "malformed-field":
+        body = body.replace("pr=16\n", "pr\n")
+    elif change == "extra-field":
+        body = body.replace("result=ready", "extra=value\nresult=ready")
+    elif change == "trailing-text":
+        body += "\n"
+    elif change == "wrong-author":
+        comments[0]["user"] = {"id": 42}
+    elif change == "edited":
+        comments[0]["updated_at"] = "2026-10-01T12:05:01Z"
+    elif change == "wrong-comment-time":
+        comments[0].update(
+            created_at="2026-10-01T12:05:31Z",
+            updated_at="2026-10-01T12:05:31Z",
+        )
+    elif change == "wrong-session-prompt":
+        task["sessions"][0]["prompt"] += " altered"
+    elif change == "non-neutral":
+        action["task_type"] = "source"
+    elif change == "wrong-role":
+        action["kind"] = "review"
+    elif change == "multiple-sessions":
+        task["sessions"].append(copy.deepcopy(task["sessions"][0]))
+    elif change == "multiple-sessions-unrelated":
+        task["sessions"].append({
+            **copy.deepcopy(task["sessions"][0]),
+            "id": "another-session", "prompt": "Unrelated session.",
+        })
+    elif change == "foreign-session":
+        task["sessions"][0]["repository"] = {"id": 1}
+    elif change == "wrong-session-id":
+        task["sessions"][0]["id"] = "other-session"
+    elif change == "wrong-task-id":
+        task["id"] = "other-task"
+    elif change == "wrong-task-owner":
+        task["owner"] = {"id": 1}
+    elif change == "wrong-repository":
+        task["repository"] = {"id": 1}
+    elif change == "wrong-branch":
+        task["sessions"][0]["head_ref"] = "other"
+    elif change == "wrong-start-head":
+        action["head"] = "d" * 40
+    elif change == "wrong-result-head":
+        pull["head"]["sha"] = "d" * 40
+    elif change == "wrong-base":
+        action["main_sha"] = "d" * 40
+    elif change == "wrong-comment-session":
+        body = body.replace(f"session={SESSION_ID}", "session=other-session")
+    elif change == "wrong-nonce":
+        action["dispatch_nonce"] = "other-nonce"
+    comments[0]["body"] = body
+
+    if change == "wrong-author":
+        assert validate_task_receipt(task, action, pull, comments, now=NOW) is None
+    else:
+        with pytest.raises(ReceiptError):
+            validate_task_receipt(task, action, pull, comments, now=NOW)
+
+
+def test_truncated_comment_collection_cannot_validate_legacy_neutral_receipt():
+    task, action, pull, comments = legacy_neutral_binding()
+    session = task["sessions"][0]
+    with pytest.raises(ReceiptError):
+        find_receipt(
+            comments, complete=False, nonce=NONCE, task_id=TASK_ID,
+            session_id=SESSION_ID, pull_number=16, start_head=START_HEAD,
+            head_sha=RESULT_HEAD, base_sha=BASE,
+            task_created_at=action["task_created_at"],
+            session_created_at=session["created_at"],
+            session_completed_at=session["completed_at"], now=NOW,
+            dispatch_base_sha=BASE, legacy_neutral=True,
+        )
 
 
 @pytest.mark.parametrize("result", ["ready", "conflict_incompatible", "policy_broken"])
