@@ -262,18 +262,101 @@ def test_native_conversation_loop_rejects_image_4xx_without_text_retry(tmp_path,
     run_native_probe(tmp_path, '''
         import base64
         import json
+        import io
+        import logging
         import socket
+        from unittest.mock import Mock, patch
+        from agent import conversation_loop
+        import httpx
+        from openai import BadRequestError
+        import run_agent
+        from backend.native_run_controls import private_photo_agent
+
+        marker = base64.b64encode(b'SYNTHETIC_4XX_PHOTO' * 4096).decode()
+        url = 'data:image/png;base64,' + marker
+        client = Mock()
+        client.chat.completions.create.side_effect = BadRequestError(
+            'Provider echoed ' + url,
+            response=httpx.Response(400, request=httpx.Request('POST', 'http://127.0.0.1/synthetic')),
+            body={'error': 'Provider echoed ' + url})
+        def no_network(*args, **kwargs):
+            raise AssertionError('Synthetic native test attempted a network connection')
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        logger = logging.getLogger(conversation_loop.__name__)
+        previous_level = logger.level
+        logger.setLevel(logging.ERROR)
+        logger.addHandler(handler)
+        try:
+            with patch.object(socket.socket, 'connect', no_network), \
+                 patch.object(run_agent, 'OpenAI', return_value=client):
+                agent = run_agent.AIAgent(
+                    model='synthetic-photo-model', provider='custom',
+                    base_url='http://127.0.0.1:1/v1', api_key='synthetic-not-a-provider-key',
+                    enabled_toolsets=[], skip_memory=True, skip_background_review=True,
+                    skip_context_files=True, max_iterations=1, quiet_mode=True,
+                    session_id='photo-4xx-fixture', platform='api_server')
+                agent = private_photo_agent(agent)
+                agent.client = client
+                agent._model_supports_vision = lambda: SUPPORTS_NATIVE_VISION
+                message = [
+                    {'type': 'text', 'text': 'Inspect synthetic photo'},
+                    {'type': 'image_url', 'image_url': {'url': url}},
+                ]
+                try:
+                    result = agent.run_conversation(message, conversation_history=[], task_id='photo-4xx-fixture')
+                except RuntimeError as error:
+                    assert 'vision' in str(error).lower() or 'photo' in str(error).lower()
+                else:
+                    assert result.get('failed') is True, result
+                assert client.chat.completions.create.call_count == int(SUPPORTS_NATIVE_VISION)
+                assert message[1]['type'] == 'image_url'
+                assert marker in json.dumps(message)
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous_level)
+        logged = stream.getvalue()
+        assert marker not in logged
+        assert 'data:image/' not in logged
+        if SUPPORTS_NATIVE_VISION:
+            assert 'Non-retryable client error' in logged
+    '''.replace('SUPPORTS_NATIVE_VISION', repr(supports_vision)))
+
+
+def test_native_model_boundary_receives_four_distinct_near_limit_photos_in_order(tmp_path):
+    run_native_probe(tmp_path, '''
+        import base64
+        import hashlib
+        import socket
+        import struct
+        import zlib
         from unittest.mock import Mock, patch
         import httpx
         from openai import BadRequestError
         import run_agent
         from backend.native_run_controls import private_photo_agent
 
+        def chunk(kind, data):
+            return (struct.pack('!I', len(data)) + kind + data
+                    + struct.pack('!I', zlib.crc32(kind + data) & 0xffffffff))
+
+        images = []
+        for index in range(4):
+            png = (b'\\x89PNG\\r\\n\\x1a\\n'
+                   + chunk(b'IHDR', struct.pack('!IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+                   + chunk(b'IDAT', zlib.compress(bytes([0, index, 17, 239])))
+                   + chunk(b'tEXt', b'Synthetic\\0fixture-' + str(index).encode()
+                           + b':' + b'A' * (2 * 1024 * 1024 - 256))
+                   + chunk(b'IEND', b''))
+            assert png.startswith(b'\\x89PNG\\r\\n\\x1a\\n')
+            assert 2 * 1024 * 1024 - 256 <= len(png) <= 2 * 1024 * 1024
+            images.append(png)
+
         client = Mock()
         client.chat.completions.create.side_effect = BadRequestError(
-            "Only 'text' content type is supported.",
+            'Synthetic model-boundary capture',
             response=httpx.Response(400, request=httpx.Request('POST', 'http://127.0.0.1/synthetic')),
-            body={'error': "Only 'text' content type is supported."})
+            body={'error': 'Synthetic provider boundary'})
         def no_network(*args, **kwargs):
             raise AssertionError('Synthetic native test attempted a network connection')
         with patch.object(socket.socket, 'connect', no_network), \
@@ -283,22 +366,32 @@ def test_native_conversation_loop_rejects_image_4xx_without_text_retry(tmp_path,
                 base_url='http://127.0.0.1:1/v1', api_key='synthetic-not-a-provider-key',
                 enabled_toolsets=[], skip_memory=True, skip_background_review=True,
                 skip_context_files=True, max_iterations=1, quiet_mode=True,
-                session_id='photo-4xx-fixture', platform='api_server')
+                session_id='photo-model-boundary-fixture', platform='api_server')
             agent = private_photo_agent(agent)
             agent.client = client
-            agent._model_supports_vision = lambda: SUPPORTS_NATIVE_VISION
-            marker = base64.b64encode(b'SYNTHETIC_4XX_PHOTO' * 4096).decode()
-            message = [
-                {'type': 'text', 'text': 'Inspect synthetic photo'},
-                {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + marker}},
+            agent._model_supports_vision = lambda: True
+            user_message = [
+                {'type': 'text', 'text': 'Inspect four synthetic normalized photos'},
+                *[{'type': 'image_url', 'image_url': {
+                    'url': 'data:image/png;base64,' + base64.b64encode(image).decode('ascii')}}
+                  for image in images],
             ]
             try:
-                result = agent.run_conversation(message, conversation_history=[], task_id='photo-4xx-fixture')
+                result = agent.run_conversation(
+                    user_message, conversation_history=[], task_id='photo-model-boundary-fixture')
             except RuntimeError as error:
-                assert 'vision' in str(error).lower() or 'photo' in str(error).lower()
+                assert 'photo' in str(error).lower() or 'vision' in str(error).lower()
             else:
                 assert result.get('failed') is True, result
-            assert client.chat.completions.create.call_count == int(SUPPORTS_NATIVE_VISION)
-            assert message[1]['type'] == 'image_url'
-            assert marker in json.dumps(message)
-    '''.replace('SUPPORTS_NATIVE_VISION', repr(supports_vision)))
+
+        assert client.chat.completions.create.call_count == 1
+        captured = client.chat.completions.create.call_args.kwargs['messages']
+        actual_urls = [part['image_url']['url'] for message in captured
+                       for part in message.get('content', [])
+                       if isinstance(part, dict) and part.get('type') == 'image_url']
+        assert len(actual_urls) == 4
+        actual = [base64.b64decode(url.split(',', 1)[1], validate=True) for url in actual_urls]
+        assert [hashlib.sha256(image).hexdigest() for image in actual] == [
+            hashlib.sha256(image).hexdigest() for image in images]
+        assert actual == images
+    ''')

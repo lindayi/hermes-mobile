@@ -36,6 +36,36 @@ def photo_persistence_copy(value):
     return value
 
 
+def _install_photo_log_filters():
+    import logging
+
+    class PhotoLogFilter(logging.Filter):
+        _mobile_photo_log_filter = True
+
+        def filter(self, record):
+            try:
+                message = record.getMessage()
+            except Exception:
+                return True
+            sanitized = photo_persistence_copy(message)
+            if sanitized != message:
+                record.msg, record.args = sanitized, ()
+            error = record.exc_info[1] if record.exc_info else None
+            seen = set()
+            while error is not None and id(error) not in seen:
+                seen.add(id(error))
+                if _INLINE_PHOTO.search(str(error)):
+                    record.exc_info = record.exc_text = None
+                    break
+                error = error.__cause__ or error.__context__
+            return True
+
+    for name in ('agent.conversation_loop', 'gateway.platforms.api_server'):
+        logger = logging.getLogger(name)
+        if not any(getattr(item, '_mobile_photo_log_filter', False) for item in logger.filters):
+            logger.addFilter(PhotoLogFilter())
+
+
 def validate_photo_payload(body):
     if not isinstance(body, dict):
         raise ValueError('Expected a JSON object')
@@ -171,6 +201,7 @@ def _private_db_method(method):
 
 
 def private_photo_agent(agent):
+    _install_photo_log_filters()
     agent.__class__ = _private_photo_class(type(agent))
     db = getattr(agent, '_session_db', None)
     if db is not None and not getattr(db, '_mobile_photo_private', False):

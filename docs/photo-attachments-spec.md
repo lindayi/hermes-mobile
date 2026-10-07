@@ -178,12 +178,13 @@ activation success.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `backend/native_run_controls.py` | `d3e3894fab4ea1809c6c085f883e9d04afae5fd9a031684ee7b8abaf09d5b8e3` |
-| `backend/model_controls.py` | `d6e351bc68e09aba15a128c61d1d50d09ba5945db7a6438ddac51ddf61c41341` |
-| `deploy/native_controls_release.py` | `108b000cbeb1776e0db3edae2f523526ad1e28790265f6ebf402406f11e810d5` |
+| `backend/native_run_controls.py` | `174377e30136ee87d8712c572e0d0de68112959c3368f7b5c9a539b06a544360` |
+| `backend/model_controls.py` | `f688e9d2a3b0948200642ede5696628370d6d3d5833740b772195287dc61ae9b` |
+| `deploy/native_controls_release.py` | `6fe51e401a0f8e333faf49577788785014830b43e18640407efb47382494ba0e` |
 | `backend/app.py` | `7fbd46d9b0512ea8d8c0c1e51dd79b71bf363e7a6f17d5fa9eb2af093b215513` |
 | `backend/attachments.py` | `be2c19dd82ac47eea9b9860193a69cb8f00d74d323c82a0c2f710874c9a30832` |
-| `backend/hermes_client.py` | `b1d5cb9a6485ed6b53caca597e27cd0a34d1e82af5545e2738d271b48b10d623` |
+| `backend/hermes_client.py` | `20e16f9028437d980df83c9ea07083b987501902375f544d6b72a1fcbca28d83` |
+| `backend/task_reminder_presentation.py` | `22f47f3f7b888ca4f0a0370414a8716fb9d1e5d5ebdfe8bb868a0d9b6bb00540` |
 | `backend/native_catalog.py` | `d6a758a7007dd23f8921bacccdf69adf81ee7b6fa212f9766493eeba43769653` |
 | `backend/orchestration.py` | `4a62bc9ffd9eac78b2ad85bb09247f9c8b2519f4226b296537820683c169b3e1` |
 | `backend/runs.py` | `79b15df9918cb85599cb3a7db5c978d2abb681afe9c355acdfa6e07f5472884f` |
