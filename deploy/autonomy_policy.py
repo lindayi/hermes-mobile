@@ -186,21 +186,23 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    'deploy/cloud_coordinator.py': '497261d432e5ec8a1a200183ed6a0eca4bdb49f50ab7c8db3a03228bfddafe8a',
+    # Issue #87 bounded-repair candidate; source consistency only.
+    'deploy/cloud_coordinator.py': '12d7adfa376c34872f99ac7bd2455296ded5e14f2da3f3ff5480d7bf2f4d4871',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
-    'deploy/review_evidence.py': 'bd391f404a26ebe8b3b1d9c3ba3e0ac18bba0c4b5a4cef563c04a1d7572735b8',
+    'deploy/review_evidence.py': 'bc2bea2e4cd17ac28ed96cc5d421f62f63e7ef14ee9bdec5045cf6f26bb8f290',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     # Issue #65 producer-only overlay; historical receipt hashes remain documented.
     # Issue #79 recovery candidate bytes; not independent acceptance or activation.
-    'deploy/task_receipts.py': 'a7bd1edee10c42c42d992e20d83160095203d792c9a6131b3a915351d2768981',
-    'deploy/workflow_events.py': '5234980515c0909d5170a3a9047766a0b355aa35372bedc2961b703afc37b9af',
-    'deploy/workflow_lifecycle.py': '71be9101223f40511818bde2db9f6bd6b021736f35152e16cb3e1c9c3e2085a3',
+    'deploy/task_receipts.py': 'bfc903eddf33a7b8e4b17ccafd8112af70611ce472a44520ed4fe5842845a1c7',
+    # Issue #87 bounded-repair lifecycle overlay; earlier hashes remain historical.
+    'deploy/workflow_events.py': '63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e',
+    'deploy/workflow_lifecycle.py': 'f8ecf4fa881d907d41a3f8482fa60f1166591dd51e75108aaa4d31f4f2df65b0',
     'deploy/workflow_lifecycle_sources.py': 'dfff5b5ec33b9bd1756a67150827541ea86193b87e6de5b5c3a965f02f19b837',
-    'deploy/workflow_notifications.py': 'f0af01bdc797e0abd0494fa7a1fa304060c734ed8fc2ba1fa2b4515a9a3bcda2',
+    'deploy/workflow_notifications.py': 'c599d19bc1f1b1976429d7e5ca834eade37e35c718b4c389ceaef4ad47ecb1ad',
     'scripts/cloud_coordinator.py': '992d448a9ddfdd75abdab14fc48ad0dbff98e1c93a943f483d0788ef5ca57790',
     'scripts/issue_starter.py': '09008da255c56f370f73af6d2f8e8587f6a999c76a99e1bd798e8ac4bbd927f1',
     'scripts/workflow_notifications.py': '03731f93e1aa3ce297107ea3d0126e990c72d88401dda04e4499f0a7f505b55f',

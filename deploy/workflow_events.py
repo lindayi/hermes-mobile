@@ -16,6 +16,16 @@ _EVENT_KEYS = {
     'event_id', 'outcome', 'reason', 'issue_number', 'pr_number',
     'head_sha', 'merge_sha', 'decision', 'occurred_at',
 }
+_STOP_DETAIL_KEYS = {
+    'cause', 'used', 'remaining', 'limit', 'source_used', 'source_ceiling',
+    'stagnation_count',
+}
+_STOP_LIMITS = {
+    'source-ceiling': 20,
+    'no-progress': 3,
+    'neutral-ceiling': 3,
+    'review-handoff': 6,
+}
 _REASONS = {
     'issue_failed': 'failed',
     'task_failed': 'failed',
@@ -59,7 +69,8 @@ def _timestamp(value):
 
 
 def _event(value, generated_at):
-    if not isinstance(value, dict) or set(value) != _EVENT_KEYS:
+    if (not isinstance(value, dict)
+            or set(value) not in (_EVENT_KEYS, _EVENT_KEYS | {'stop_detail'})):
         raise ValueError('Invalid lifecycle event fields')
     if (not isinstance(value['event_id'], str) or not _EVENT_ID.fullmatch(value['event_id'])
             or not isinstance(value['reason'], str) or value['reason'] not in _REASONS
@@ -96,6 +107,35 @@ def _event(value, generated_at):
         raise ValueError('Merge SHA is only valid for merged or deployed events')
     if value['reason'] in ('issue_failed', 'execution_exhausted') and value['issue_number'] is None:
         raise ValueError('Issue lifecycle event requires its issue number')
+    if 'stop_detail' in value:
+        detail = value['stop_detail']
+        if (value['reason'] != 'execution_exhausted'
+                or not isinstance(detail, dict)
+                or set(detail) != _STOP_DETAIL_KEYS
+                or not isinstance(detail.get('cause'), str)
+                or detail.get('cause') not in _STOP_LIMITS
+                or type(detail.get('used')) is not int
+                or type(detail.get('remaining')) is not int
+                or type(detail.get('limit')) is not int
+                or type(detail.get('source_used')) is not int
+                or type(detail.get('source_ceiling')) is not int
+                or type(detail.get('stagnation_count')) is not int
+                or detail['limit'] != _STOP_LIMITS[detail['cause']]
+                or not 0 <= detail['used'] <= 2**31 - 1
+                or detail['remaining'] != max(0, detail['limit'] - detail['used'])
+                or not 0 <= detail['source_used'] <= detail['source_ceiling']
+                or detail['source_ceiling'] != 20
+                or not 0 <= detail['stagnation_count'] <= 3
+                or (detail['cause'] == 'source-ceiling'
+                    and (detail['source_used'] != detail['used']
+                         or detail['used'] < detail['limit']))
+                or (detail['cause'] == 'no-progress'
+                    and (detail['used'] != 3 or detail['stagnation_count'] != 3
+                         or detail['source_used'] < 3))
+                or (detail['cause'] == 'neutral-ceiling' and detail['used'] < detail['limit'])
+                or (detail['cause'] == 'review-handoff'
+                    and detail['used'] < detail['limit'])):
+            raise ValueError('Invalid lifecycle exhaustion detail')
     occurred_at = _timestamp(value['occurred_at'])
     if occurred_at > generated_at:
         raise ValueError('Lifecycle event is newer than its export')

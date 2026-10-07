@@ -298,8 +298,23 @@ def _valid_review_report(report, *, nonce, session_id, pull_number, head_sha, ba
                          anchor_comment_id):
     if not isinstance(report, dict):
         return None
-    if set(report) != set(REVIEW_REPORT_REQUIRED_FIELDS):
+    if set(report) not in (
+            set(REVIEW_REPORT_REQUIRED_FIELDS),
+            set(REVIEW_REPORT_REQUIRED_FIELDS) | {"progress_disposition"}):
         return None
+    if "progress_disposition" in report:
+        disposition = report["progress_disposition"]
+        if (not isinstance(disposition, dict)
+                or set(disposition) != {"version", "resolved"}
+                or type(disposition.get("version")) is not int
+                or disposition["version"] != 1
+                or not isinstance(disposition.get("resolved"), list)
+                or len(disposition["resolved"]) > 32
+                or any(not isinstance(target, str)
+                       or SHA256_RE.fullmatch(target) is None
+                       for target in disposition["resolved"])
+                or len(set(disposition["resolved"])) != len(disposition["resolved"])):
+            return None
     if (
             report.get("schema") != REVIEW_REPORT_SCHEMA
             or report.get("nonce") != nonce

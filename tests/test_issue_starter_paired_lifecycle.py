@@ -8,7 +8,9 @@ import pytest
 
 from deploy.cloud_coordinator import _authorized_result_heads
 from test_cloud_coordinator import (
-    BASE, HEAD, OWNER, Coordinator, FakeApi, StateStore, refresh_owner_review,
+    BASE, HEAD, OWNER, COPILOT_AGENT, Coordinator, FakeApi, StateStore,
+    _compare_result,
+    refresh_owner_review,
 )
 
 NOW = 1790856660
@@ -297,6 +299,11 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     assert not first_review["review_valid"]
     assert not second_review["review_valid"]
     assert not third_review["review_valid"]
+    assert not third_review["repair_requested"]
+    assert api.fix_attempts == 1
+    api.pending_required = False
+    run()
+    assert first["task_id"] in store.snapshot()["enrollments"]["16"]["repair_progress"]["evaluated_task_ids"]
     api.review_sha = RESULT_HEAD
     second = next(
         a for a in store.actions().values()
@@ -310,6 +317,7 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     durable = StateStore(store.path).snapshot()["enrollments"]["16"]["receipt_proofs"][0]
     assert durable["receipt_session_completed_at"] == "2026-10-01T12:05:30Z"
     final_head = "d" * 40
+    api.pending_required = True
     api.complete_task(second["task_id"], second, head_sha=final_head)
     api.head_sha = final_head
     api.pull["head"]["sha"] = final_head
@@ -449,6 +457,300 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
     Coordinator(api, store, clock=lambda: NOW).run(apply=True)
     action = next(a for a in store.actions().values() if a["kind"] == "fix")
     return api, store, action
+
+
+@pytest.mark.parametrize("corruption", [None, "prompt", "session", "receipt", "count"])
+@pytest.mark.parametrize("terminal", ["completed", "failed", "timed_out", "cancelled"])
+def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(
+        tmp_path, corruption, terminal):
+    from deploy.task_receipts import receipt_instruction
+
+    api, store, first_action = actual_starter_consumer(tmp_path)
+    original = store.snapshot()["enrollments"]["16"]
+    assert original["initial_source"]["head_sha"] == HEAD
+    assert original["starter_admission"]["head_sha"] == HEAD
+    assert original["starter_admission"]["version"] == 3
+    assert (
+        original["initial_source"]["start_comment_id"]
+        == original["starter_admission"]["start_comment_id"]
+    )
+    proofs = []
+    proof_heads = [HEAD, "1" * 40, "2" * 40, "3" * 40]
+    for attempt, (start_head, result_head) in enumerate(
+            zip(proof_heads, proof_heads[1:]), 1):
+        task_id = f"legacy-pr86-task-{attempt}"
+        session_id = f"legacy-pr86-session-{attempt}"
+        nonce = f"legacy-pr86-nonce-{attempt}"
+        comment_id = 900 + attempt
+        created_at = f"2026-10-01T12:0{attempt}:00Z"
+        completed_at = f"2026-10-01T12:0{attempt}:30Z"
+        body = (
+            "Hermes-Task-Receipt: v2\n"
+            f"nonce={nonce}\n"
+            f"session={session_id}\n"
+            "pr=16\n"
+            f"start_head={start_head}\n"
+            f"head={result_head}\n"
+            f"base={BASE}\n"
+            "result=ready"
+        )
+        proofs.append({
+            "issue": 16, "kind": "fix", "status": "completed",
+            "head": start_head, "task_id": task_id, "dispatch_nonce": nonce,
+            "receipt_result": "ready", "receipt_comment_id": comment_id,
+            "receipt_created_at": created_at, "receipt_body": body,
+            "receipt_task_id": task_id, "receipt_session_id": session_id,
+            "receipt_completed_at": completed_at,
+            "receipt_session_completed_at": completed_at,
+            "receipt_nonce": nonce, "receipt_start_head": start_head,
+            "receipt_head": result_head, "receipt_base": BASE,
+            "main_sha": BASE, "receipt_version": "v2",
+        })
+        api.comments.append({
+            "id": comment_id, "user": {"id": COPILOT_AGENT},
+            "body": body, "created_at": created_at, "updated_at": created_at,
+        })
+        api.tasks[task_id] = {
+            "id": task_id, "state": terminal,
+            "created_at": "2026-10-01T12:00:00Z",
+            "updated_at": completed_at,
+            "creator": {"id": OWNER}, "owner": {"id": OWNER},
+            "repository": {"id": 1399942965},
+            "artifacts": [
+                {
+                    "provider": "github", "type": "branch",
+                    "data": {"head_ref": "topic", "base_ref": "main"},
+                },
+                {
+                    "provider": "github", "type": "pull",
+                    "data": {"id": 160000016, "global_id": "PR_node_16"},
+                },
+            ],
+            "sessions": [{
+                "id": session_id, "task_id": task_id, "state": terminal,
+                "user": {"id": OWNER}, "owner": {"id": OWNER},
+                "repository": {"id": 1399942965},
+                "head_ref": "topic", "base_ref": "main",
+                "prompt": (
+                    f"Please address bounded review/check follow-up for PR #16 "
+                    f"at head `{start_head}`.\n\n"
+                    + receipt_instruction(
+                        nonce, pull_number=16, start_head=start_head, base_sha=BASE,
+                    )
+                ),
+                "created_at": created_at, "completed_at": completed_at,
+            }],
+        }
+
+    def make_legacy(state):
+        enrollment = state["enrollments"]["16"]
+        enrollment.update(attempts=3, receipt_proofs=proofs)
+        enrollment.pop("neutral_attempts", None)
+        enrollment.pop("repair_progress", None)
+        state["actions"] = {
+            key: action for key, action in state["actions"].items()
+            if action.get("kind") != "fix"
+        }
+
+    store._mutate(make_legacy)
+    api.tasks.pop(first_action["task_id"], None)
+    assert not any(action.get("kind") == "fix" for action in store.actions().values())
+    current_head = proof_heads[-1]
+    moved_main = "d" * 40
+    api.head_sha = current_head
+    api.pull["head"]["sha"] = current_head
+    api.pull["base"]["sha"] = moved_main
+    api.pull["mergeable"] = True
+    api.pull["mergeable_state"] = "behind"
+    api.advance_main = True
+    api.set_owner_review(
+        review_id=64002,
+        head_sha=current_head,
+        body=json.dumps({
+            "schema": "hermes-independent-agent-review-v1",
+            "reviewed_head_sha": current_head,
+            "review_method": "independent-agent",
+            "verdict": "changes_requested",
+            "evidence_sha256": "f" * 64,
+            "findings": [
+                {"path": "frontend/styles.css", "comment": "First new finding."},
+                {"path": "backend/app.py", "comment": "Second new finding."},
+            ],
+        }, separators=(",", ":")),
+        submitted_at="2026-10-01T12:10:00Z",
+    )
+
+    if corruption is not None:
+        original_tasks = deepcopy(api.tasks)
+        original_comments = deepcopy(api.comments)
+        if corruption == "prompt":
+            api.tasks[proofs[0]["task_id"]]["sessions"][0]["prompt"] = "Unbound synthetic prompt."
+        elif corruption == "session":
+            api.tasks[proofs[0]["task_id"]]["sessions"][0]["owner"] = {"id": 1}
+        elif corruption == "receipt":
+            api.comments[-1]["updated_at"] = "2026-10-01T12:09:00Z"
+        else:
+            api.tasks.pop(proofs[0]["task_id"])
+        waiting = Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)
+        enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+        assert enrollment["neutral_attempts_unknown"] is True
+        assert enrollment["attempts"] == 3 and enrollment["receipt_proofs"] == proofs
+        assert not waiting["pull_requests"][0]["repair_requested"]
+        assert api.fix_attempts == 1
+        api.tasks, api.comments = original_tasks, original_comments
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: NOW,
+    ).run(apply=True)["pull_requests"][0]
+
+    reopened = StateStore(store.path)
+    enrollment = reopened.snapshot()["enrollments"]["16"]
+    neutral = next((
+        action for action in reopened.actions().values()
+        if action.get("kind") == "fix" and action.get("task_type") == "neutral"
+    ), None)
+    assert neutral is not None, (
+        result["reasons"], enrollment["neutral_attempts"],
+        enrollment.get("neutral_attempts_unknown"), api.fix_attempts,
+    )
+    assert not result["review_valid"]
+    assert result["repair_requested"]
+    assert enrollment["attempts"] == 3
+    assert enrollment["neutral_attempts"] == 1
+    assert enrollment["receipt_proofs"] == proofs
+    assert enrollment["initial_source"] == original["initial_source"]
+    assert enrollment["starter_admission"] == original["starter_admission"]
+    assert enrollment["repair_progress"]["legacy_unknown"] is True
+    assert neutral["attempt"] == 1 and neutral["status"] == "sent"
+    assert api.fix_attempts == 2
+    assert neutral["main_sha"] == moved_main
+    assert api.owner_review_head_sha == current_head
+    assert json.loads(api.owner_review_body)["verdict"] == "changes_requested"
+
+    api.complete_task(
+        neutral["task_id"], neutral, head_sha=current_head, base_sha=moved_main,
+    )
+    api.pull["base"]["sha"] = moved_main
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    after_neutral = Coordinator(
+        api, StateStore(store.path), clock=lambda: NOW,
+    ).run(apply=True)["pull_requests"][0]
+    after_neutral = Coordinator(
+        api, StateStore(store.path), clock=lambda: NOW,
+    ).run(apply=True)["pull_requests"][0]
+
+    reopened = StateStore(store.path)
+    enrollment = reopened.snapshot()["enrollments"]["16"]
+    assert reopened.action(neutral["key"])["status"] == "completed"
+    reviewer = next((
+        action for action in reopened.actions().values()
+        if action.get("kind") == "review"
+    ), None)
+    assert reviewer is not None, (
+        after_neutral["reasons"], enrollment, api.fix_attempts,
+    )
+    assert reviewer["status"] == "sent"
+    api.complete_review_task(
+        reviewer["task_id"], reviewer,
+        source_action=reopened.action(neutral["key"]),
+        verdict="changes_requested",
+        findings=[
+            {"path": "tests/test_cloud_coordinator.py", "comment": "First new finding."},
+            {"path": "tests/test_cloud_coordinator.py", "comment": "Second new finding."},
+        ],
+        files=api.review_file_digests(),
+    )
+    Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)
+    reviewed = Coordinator(
+        api, StateStore(store.path), clock=lambda: NOW,
+    ).run(apply=True)["pull_requests"][0]
+
+    reopened = StateStore(store.path)
+    enrollment = reopened.snapshot()["enrollments"]["16"]
+    assert not reopened.action(reviewer["key"]).get("report_error"), (
+        reopened.action(reviewer["key"]).get("report_error"), reviewed["reasons"],
+    )
+    source = next((
+        action for action in reopened.actions().values()
+        if action.get("kind") == "fix" and action.get("task_type") == "review-followup"
+    ), None)
+    assert source is not None, (reviewed["reasons"], enrollment, api.fix_attempts)
+    assert source["attempt"] == 4 and source["status"] == "sent"
+    assert enrollment["attempts"] == 4
+    assert enrollment["neutral_attempts"] == 1
+    assert enrollment["receipt_proofs"][:len(proofs)] == proofs
+    assert len(enrollment["receipt_proofs"]) == len(proofs) + 1
+    assert enrollment["initial_source"] == original["initial_source"]
+    assert enrollment["starter_admission"] == original["starter_admission"]
+    assert enrollment["repair_progress"]["legacy_unknown"] is True
+    assert api.fix_attempts == 3
+
+    result_head = "4" * 40
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.complete_task(
+        source["task_id"], source, head_sha=result_head, base_sha=moved_main,
+    )
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)
+    reopened = StateStore(store.path)
+    completed_source = reopened.action(source["key"])
+    reviewer = next(
+        action for action in reopened.actions().values()
+        if action.get("kind") == "review" and action.get("head") == result_head
+    )
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=completed_source,
+        verdict="changes_requested",
+        findings=[
+            {"path": "tests/test_cloud_coordinator.py", "comment": "First new finding."},
+            {"path": "tests/test_cloud_coordinator.py", "comment": "Second new finding."},
+        ],
+        files=api.review_file_digests(),
+    )
+    # Publish a real bound negative report while verification remains pending.
+    original_get_all = api.get_all
+
+    def pending_checks(route, *, collection=None):
+        values = original_get_all(route, collection=collection)
+        if collection == "check_runs":
+            return [
+                {**check, "status": "in_progress", "conclusion": None}
+                for check in values
+            ]
+        return values
+
+    api.get_all = pending_checks
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)
+    persisted = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert source["task_id"] not in persisted["repair_progress"]["evaluated_task_ids"]
+    assert persisted["attempts"] == 4
+    assert StateStore(store.path).action(reviewer["key"])["publication_state"] == "done"
+
+    # A new main does not revoke the source receipt or its completed review.
+    api.current_main_sha = "e" * 40
+    api.pull["mergeable_state"] = "behind"
+    api.compare_results[f"{moved_main}...{'e' * 40}"] = _compare_result(
+        moved_main, ahead_by=1,
+    )
+    api.compare_results[f"{moved_main}...{result_head}"] = _compare_result(
+        moved_main, ahead_by=1,
+    )
+    api.get_all = original_get_all
+    evaluated = Coordinator(
+        api, StateStore(store.path), clock=lambda: NOW,
+    ).run(apply=True)["pull_requests"][0]
+    persisted = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert not evaluated["review_valid"]
+    assert source["task_id"] in persisted["repair_progress"]["evaluated_task_ids"]
+    assert persisted["repair_progress"]["consecutive_no_progress"] == 1
+    assert persisted["repair_progress"]["legacy_unknown"] is True
+    assert persisted["receipt_proofs"][:3] == proofs
+    assert persisted["attempts"] == 4
+    assert persisted["initial_source"] == original["initial_source"]
+    assert persisted["starter_admission"] == original["starter_admission"]
+    assert api.fix_attempts == 4  # Only a separate neutral reservation may follow.
 
 
 def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(tmp_path):
@@ -783,7 +1085,8 @@ def test_actual_paired_v2_main_advance_keeps_authority_but_requires_neutral_repa
     assert merged["auto_merge_requested"], merged["reasons"]
     assert api.graphql_writes[-1][1]["expectedHeadOid"] == repaired_head
     run()
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == 2
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
     assert len(api.graphql_writes) == 1 and api.fix_attempts == 2
     api.head_sha = "f" * 40
     api.pull["head"]["sha"] = api.head_sha

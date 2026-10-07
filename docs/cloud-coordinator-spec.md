@@ -473,6 +473,226 @@ mergeability and active tasks. Changed or incomplete evidence suppresses that
 planned request without consuming an attempt; it does not substitute another
 repair or fall back to auto-merge in the same cycle.
 
+### Lifetime repair budget and verified progress
+
+Each enrolled pull request has a hard lifetime ceiling of 20 source-repair
+reservations. A reservation consumes one attempt before the task API POST; failed
+tasks and ambiguous POST outcomes remain consumed and are never replayed. The
+cumulative count, unresolved reservation, authorization, accepted source heads,
+and receipt proofs survive restart, head/base changes, main advances, close/reopen,
+duplicate events, and later owner enrollment commands. A new job or enrollment
+cannot reset the count. Independent review, its separately bounded report
+correction, polling, CI/review waiting, and infrastructure backoff do not consume
+source-repair attempts. Neutral main reconciliation has its own three-reservation
+bound and does not consume the source-repair budget.
+
+Three consecutive completed source repairs without verified forward progress stop
+dispatch before the lifetime ceiling. Progress is decided only once for a
+coordinator-reserved source task after the authenticated task is terminal and its
+unchanged ready receipt binds the task, session, starting head, result head, PR and
+dispatch base. The result head must be the current authorized PR head; the recorded
+dispatch base must still match the receipt, but need not remain current after main
+advances. The complete current GitHub collections must also prove successful
+required checks and a complete review-conversation inventory. A positive exact-head review can
+confirm progress as before. A complete authenticated, owner-published
+`changes_requested` report for the current head can also prove which tracked
+independent-review findings remain or were resolved; the negative disposition is
+progress evidence only and never grants review approval, merge eligibility, or
+deployment authority. Task state, agent prose, a
+changed SHA, code churn, unrelated green checks, elapsed time, changed issue text,
+cosmetic wording, or new review IDs alone cannot count as progress.
+
+Evidence collection is independent of dispatch caps and usable repair prose.
+An unresolved thread with missing comments is not an empty inventory. Historical
+main advancement does not invalidate a bound source receipt or its exact-head
+completed review/check evaluation; it still cannot authorize current-main dispatch.
+Terminal source tasks await a verified evaluation before another source reservation.
+Pre-upgrade unscored receipts remain explicitly unknown rather than blocking forever.
+Legacy shared counts are split only after authenticating every unique retained
+task/session, prompt, and receipt chain, without inventing ordinals or task types.
+For every receipt-backed recovered reservation, inline or hydrated and with or
+without a saved attempt ordinal, the existing receipt validator's timezone-aware
+chronology applies: task creation must be at or before session creation, the
+authenticated receipt must fall within the session interval, and session completion
+must not be in the future. Ordinal-bearing terminal reservations without receipts
+still require valid task, session, and completion chronology. Hydrated task
+`created_at` must match the authenticated task-list value exactly.
+Missing, malformed, out-of-order, or list/detail-inconsistent timestamps preserve
+unknown history and block dispatch; no timestamp or ledger value is synthesized.
+New source, neutral, and independent-review follow-up request hashes include the
+literal `budget-v2:` discriminator so split ordinals cannot collide with retained
+legacy completed keys. Historical keys, bodies, nonces and receipts are unchanged;
+both prompt forms remain authenticated under the same task/session bindings.
+The namespace does not bypass local sent/uncertain claims or remote active tasks,
+and never authorizes replay of a lost task POST.
+Fully observed terminal failed verification allows only a nonprogress decision.
+Completed required check runs with `failure`, `cancelled`, `timed_out`,
+`action_required`, `neutral`, `skipped`, `stale`, or `startup_failure` are terminal
+observations, not successful verification. They permit a no-progress evaluation
+when the exact-head task and independent review are complete, but never resolution
+credit or merge eligibility. Pending, null, unknown or malformed conclusions,
+wrong app/head bindings and incomplete pagination keep evaluation pending.
+A bound negative report supplies the review-stage disposition, not a successful
+`agent-review` check; all non-review checks must be observed before scoring.
+An incomplete or older-encoding reservation baseline receives an explicitly
+unknown decision only after fresh complete review/check evidence; it cannot clear
+targets or alter the streak. Neutral advancement can leave an older source result
+unscored; this remains explicit unknown history, not a current-head pending lock.
+
+GraphQL review-thread IDs are validated as nonempty strings of at most 256
+characters before entering the inventory. A malformed ID aborts the scan before
+state, cursor, outbox, or external writes; it is never stringified or dropped to
+make a partial page look complete.
+
+At reservation, the coordinator records at most 32 bounded fingerprints of the
+actual eligible repair targets: stable review-thread identity, normalized body
+finding, or source-workflow failure class. The persisted resolved-history bound
+is 640 fingerprints per enrollment (20 reservations at that per-task limit), so
+the progress ledger and retained receipt proofs stay bounded within coordinator
+state capacity. A result is progress only when at least one previous target is absent from the
+complete current-head evidence and independently verified as resolved. Negative
+reports may include optional `progress_disposition` with exactly `version: 1` and
+`resolved`: up to 32 unique lowercase SHA-256 target fingerprints from the saved
+source reservation. The reviewer receives that inventory and source evidence,
+must inspect the exact source delta, and must not infer resolution from wording,
+new IDs, or a moved finding. The authenticated report envelope binds this assertion
+to source receipt/session/head/base; the owner publication digest includes it.
+Absent disposition on a negative report earns no resolution credit. Positive
+independent review retains its existing resolution semantics. Finding text uses
+one canonical namespace across body sections and independent paths; thread IDs
+and workflow failure classes retain their stable namespaces. All independently
+observed cleared targets enter history even when regression withholds credit.
+Resolution credit additionally requires an authentic `ready` receipt whose result
+head differs from its reserved starting head. A terminal failed task or same-head
+ready receipt may be evaluated as a no-progress decision, but cannot clear targets
+or reset stagnation when later review evidence drops a finding.
+The ready receipt's original dispatch base remains
+bound as historical provenance even after main advances; it is not replaced with
+the current base or treated as a fresh eligibility requirement. A previously
+cleared fingerprint that reappears is a regression and prevents progress credit;
+thus alternating A-to-B-to-A findings cannot repeatedly reset the streak.
+Fingerprints ignore review IDs and cosmetic case, whitespace, and punctuation
+changes. Encoding version 2 is persisted on reservations, proofs and progress.
+Unversioned hashes/history remain retained but are never treated as cleared by
+canonical version-2 observations. Incomparable resolved history cannot grant
+progress credit; lifetime counts and prior stagnation remain unchanged.
+The rendered-body parser reports the total extracted finding count, truncation,
+and inventory completeness separately from its bounded repair findings. A capped,
+malformed, ambiguous, or count-inconsistent inventory is unknown, even with a
+positive owner review and green checks; reordering cannot prove resolution.
+Later complete trustworthy evidence resumes evaluation without spending an
+additional source attempt while evidence is pending.
+
+New source reservations also persist a hash-to-canonical-target map derived only
+from the exact serialized repair targets, not reconstructed from task prose.
+Each entry has exactly `kind` (`finding`, `thread`, or `source-failure`) and
+`target` (the normalized identity text), whose hash must equal its key. The map
+is limited to 32 entries, 1,000 characters per target, and 16,000 ASCII-serialized
+bytes. Clipped or redacted targets that cannot retain their original identity,
+and omitted targets beyond those bounds, are explicitly unresolvable.
+Normal and report-correction reviewer prompts carry the same saved map.
+Nonempty resolution claims must select mapped hashes, with the map and target
+inventory authenticated against the original ready receipt's reservation or
+retained proof. Swapped targets, missing maps on legacy reservations, and guessed
+associations grant no resolution credit and never reset history. The optional
+version-1 report envelope remains compatible; an omitted or empty disposition
+requires no map and grants no negative-review resolution credit.
+If task, receipt, original dispatch-base binding, CI, review evidence,
+pagination, or target identity is absent, malformed, partial, stale, or otherwise
+unverified, the attempt remains unevaluated: it neither earns progress nor
+increments the no-progress streak. Three positively observed no-progress decisions
+stop further source repairs. The 20-reservation ceiling remains the ultimate bound; this
+bounded text/identity heuristic cannot prove semantic equivalence of arbitrary
+paraphrases.
+
+Existing records retain their cumulative attempts and receipt proofs. Missing
+pre-upgrade progress history is explicitly unknown; it is not converted to
+zero-progress or retroactively scored. A valid retained ready-receipt chain may
+continue to provide current source provenance and prove an authenticated
+historical-base handoff after its completed action is compacted, but cannot by
+itself establish a historical no-progress streak or replace fresh checks and
+independent review. Source acceptance remains distinct from merge approval and
+deployment.
+
+When a paginated task-list item for a saved retained receipt has `session_count: 1`
+but omits `sessions`, the coordinator may hydrate only that exact, uniquely listed
+task ID with an authenticated task-detail GET. The list record must be terminal and
+bound to the expected owner and repository; the detail must repeat its exact task
+ID and terminal state, match those identities, and contain exactly one authenticated
+terminal session with the saved receipt's task/session/nonce chronology and prompt
+binding. Hydrated details are used only for that retained receipt's migration
+decision; they never replace list inventory used for occupancy or duplicate
+detection. Missing, duplicate, malformed, mismatched, or unauthenticated list/detail
+evidence leaves history unknown and dispatch blocked. Hydration is bounded by the
+saved reservation history and never creates task records or infers missing sessions.
+
+An authenticated historical ready handoff may qualify for neutral reconciliation
+when its recorded base is an ancestor of both the freshly read main and exact PR
+head, and the PR's mergeability fields are a consistent confirmed pair: `true` with
+`behind`, or `false` with `dirty`. The `false`/`dirty` case is available only to
+neutral reconciliation; report-correction work retains the existing `true`/`behind`
+historical rule. All other, unknown, or inconsistent combinations remain ineligible.
+This exception authorizes only the existing bounded neutral reservation path; it
+never treats the historical PR as current-base eligible or enables merging. Fresh
+identity, receipt, ancestry, dispatch, and pre-send fences remain mandatory.
+
+A completed authenticated malformed review with an unused correction does not
+occupy the historical `false`/`dirty` neutral path: planning emits neither a
+correction action nor a correction anchor, and the available report retry is
+retained. Active or uncertain correction reservations still occupy the workflow.
+Correction anchors recheck their frozen main and behind-only historical eligibility
+before enqueueing and publication; a newly dirty base suppresses publication and
+yields to neutral reconciliation on the next scan. An unpublished anchor remains
+pending while mergeability or ancestry eligibility is unavailable, so recovery to
+the same confirmed behind binding can resume without replaying a publication.
+Proven head or main changes still supersede it. Correction task dispatch and
+review/status publication retain their independent fresh fences. Lost task POST
+responses remain reserved and cannot cause a second neutral dispatch.
+
+Legacy records that predate the separate neutral counter retain a conservative
+unknown marker until every shared reservation is accounted for by retained task
+claims or authenticated receipt proofs. Reservation type comes from the exact
+controller prompt of the uniquely authenticated terminal task/session (`completed`,
+`failed`, `timed_out`, or `cancelled`), not saved
+`task_type` or policy-version labels; this applies to both retained v1 and v2
+receipts. Ordinal-less reservations still require an authenticated retained receipt
+with its session chronology and nonce-bound instruction; failure cannot manufacture
+a missing receipt. A receipt alone never implies a source reservation. Missing, conflicting,
+or incomplete history keeps both repair paths unavailable rather than granting a
+new budget. The shared count is split atomically into source and neutral
+reservations without resetting either budget, starter provenance, or receipt
+history. New
+`execution_exhausted` lifecycle events carry a closed typed stop cause and exact
+used/remaining counts for the source ceiling, no-progress streak, neutral
+ceiling, or review-handoff wait. Older events without this optional detail remain
+readable and preserve their original PR identity. New typed stop events use a
+separate identity when they project a linked issue; the Inbox fallback for events
+without typed detail explicitly says the exact cause and counts are unavailable.
+Unknown retained history is recoverable waiting, not budget exhaustion: neither
+source nor neutral work is dispatched, and no exhaustion notice or lifecycle event
+is created. The enrollment, counts, receipt proofs, historical events, and consumer
+acknowledgements remain intact. When complete authenticated task/session history
+returns, the coordinator resumes once using the same counters and proofs.
+
+Hydrated task details are checked against each matched retained receipt even when
+the record already carries an attempt ordinal: session completion time and the
+nonce-bound prompt instruction must match. Ordinal-less reservations additionally
+require that authenticated receipt binding and cannot infer a missing receipt.
+
+The 20-attempt ceiling is grounded in a small, nonrandom sample of merged cloud
+pull requests, not a percentile or guarantee. The audit used authenticated
+repository task lists, task-to-PR artifact IDs, and actual dispatch/session
+prompts, counted each dispatched source correction once, and excluded initial
+implementation, independent review, report-only correction/evidence, and
+transport-only tasks. The observed source-repair counts were PR82: 0, PR76: 0,
+PR74: 1, PR70: 2, PR72: 4, PR84: 8 (including one failed repair task), PR80: 14,
+and PR78: 14 plus one separately excluded neutral integration. PR84's eight
+verified repair task IDs were c0b66de0, 42b11cbe, 002f40ba, c8cdae09, e23eb1f6,
+fa8ec9e1, c4d04ca9, and 1385eae4. PR80's 14 repair tasks were interleaved with
+14 independent reviews; PR78's neutral integration task was 7cd68547. The sample
+supports headroom beyond the former three-attempt cap but cannot predict future
+workloads.
+
 ## Review, checks, and merge
 
 Technical review acceptance requires the latest authenticated owner-published

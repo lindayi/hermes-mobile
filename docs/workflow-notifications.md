@@ -67,6 +67,21 @@ silently truncate it.
 | `closed_without_merge` | `closed` | Exact PR and head; no merge SHA or decision |
 | `conflict_incompatible`, `policy_broken` | `blocked` | Exact PR and head; no merge SHA or decision |
 
+`execution_exhausted` may include the optional bounded `stop_detail` object for
+new producers; older events without it remain valid. Its exact fields are `cause`,
+`used`, `remaining`, `limit`, `source_used`, `source_ceiling`, and
+`stagnation_count`. Causes are `source-ceiling`, `no-progress`,
+`neutral-ceiling`, and `review-handoff`; values are typed nonnegative integers,
+`remaining` is zero or `limit - used`, and the cause selects its fixed policy
+limit. The source ceiling is 20 and the no-progress count is bounded at 3. The
+consumer renders only these validated values, along with the existing PR and
+linked-issue identity; it never infers an exhaustion cause from free text.
+When legacy events lack `stop_detail`, the consumer keeps generic stop wording and
+explicitly states that the exact cause and counts are unavailable; it does not
+guess from a former attempt limit or review-poll count. Linked-issue projection
+with typed stop detail uses a distinct event identity, leaving persisted legacy
+event IDs and PR identities unchanged.
+
 For a `sensitive_approval` event, the exporter must recheck that the exact PR
 head and requested decision are still current and pending before including it
 in a fresh snapshot. The Inbox record is informational only: this adapter never
