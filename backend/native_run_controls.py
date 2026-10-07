@@ -42,8 +42,9 @@ def validate_photo_payload(body):
     ids = body.get('mobile_attachment_ids')
     image_types = {'image_url', 'input_image', 'image'}
 
-    def contains_image_part(value):
+    def image_parts(value):
         pending = [value]
+        found = []
         while pending:
             current = pending.pop()
             if isinstance(current, list):
@@ -51,12 +52,12 @@ def validate_photo_payload(body):
             elif isinstance(current, dict):
                 kind = current.get('type')
                 if isinstance(kind, str) and kind in image_types:
-                    return True
+                    found.append(current)
                 pending.extend(current.values())
-        return False
+        return found
 
     if ids is None:
-        if contains_image_part(body):
+        if image_parts(body):
             raise ValueError('Private photo input requires attachment binding')
         if len(json.dumps(body).encode()) > TEXT_REQUEST_BYTES:
             raise ValueError('Native text request exceeds the existing limit')
@@ -68,10 +69,14 @@ def validate_photo_payload(body):
         raise ValueError('Invalid private photo input')
     images = [part for part in content[0]['content']
               if isinstance(part, dict) and part.get('type') == 'image_url']
-    if (not isinstance(ids, list) or not 1 <= len(ids) <= 4 or len(set(ids)) != len(ids)
-            or len(images) != len(ids)
+    all_images = image_parts(body)
+    allowed_images = {id(part) for part in images}
+    if (not isinstance(ids, list) or not 1 <= len(ids) <= 4
             or any(not isinstance(item, str) or not re.fullmatch('[0-9a-f]{32}', item)
-                   for item in ids)):
+                   for item in ids)
+            or len(set(ids)) != len(ids) or len(images) != len(ids)
+            or len(all_images) != len(images)
+            or any(id(part) not in allowed_images for part in all_images)):
         raise ValueError('Invalid private photo binding')
     for part in images:
         image = part.get('image_url')
@@ -103,7 +108,12 @@ def _private_photo_class(base):
                 isinstance(part, dict) and part.get('type') == 'image_url' for part in user_message)
             if self._mobile_photo_turn and not getattr(self, '_vision_supported', True):
                 raise NativePhotoFailure('The configured model does not support photos; select a vision-capable model and resend.')
-            result = super().run_conversation(user_message, *args, **kwargs)
+            try:
+                result = super().run_conversation(user_message, *args, **kwargs)
+            except Exception:
+                if self._mobile_photo_turn:
+                    raise NativePhotoFailure('The photo run failed; check the configured model and retry.') from None
+                raise
             if self._mobile_photo_turn and getattr(self, '_mobile_photo_failed', False):
                 raise NativePhotoFailure('The configured vision analyzer could not process the attached image.')
             return result

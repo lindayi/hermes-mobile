@@ -109,6 +109,27 @@ async def test_background_run_preserves_complete_native_history_and_durable_even
 
 
 @pytest.mark.asyncio
+async def test_proven_local_photo_rejection_fails_run_and_releases_dispatch_slot(tmp_path):
+    from backend.hermes_client import NativeRunRejected
+    from backend.orchestration import Orchestrator
+
+    class RejectingGateway(FakeGateway):
+        async def start(self, session_id, text, history=None):
+            raise NativeRunRejected('Synthetic request exceeded the native size limit')
+
+    journal, gateway = RunJournal(tmp_path / 'runs.db'), RejectingGateway()
+    runtime = Orchestrator(journal, gateway, catalog_at(tmp_path), history_loader=complete_context)
+    try:
+        run = await runtime.submit(USER, dict(BODY, idempotency_key='oversized-photo'))
+        await until(lambda: journal.get('owner', run['id'])['status'] == 'failed')
+        assert runtime.get(USER, run['id'])['upstream_id'] is None
+        assert run['id'] not in runtime._dispatching
+        assert not gateway.requests
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('context', [None, {}, {'complete': False},
     {'complete': False, 'profile': 'default', 'session_id': 'native', 'history': []},
     {'complete': True, 'profile': 'other', 'session_id': 'native', 'history': [{'role': 'user', 'content': 'hi'}]},

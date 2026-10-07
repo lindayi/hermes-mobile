@@ -71,6 +71,10 @@ def test_native_transcript_and_json_snapshot_omit_image_bytes(tmp_path):
         ).fetchone()
         assert row is not None
         assert '[screenshot]' in row['content']
+        from backend.task_reminder_presentation import matches_user
+        photo_run = {'id': 'photo-fixture-run', 'input': 'Describe this synthetic photo.',
+                     'attachment_ids': ['a' * 32]}
+        assert matches_user({'id': 1, 'role': 'user', 'content': row['content']}, photo_run)
 
         agent._session_json_enabled = True
         agent.logs_dir = home / 'sessions'
@@ -113,7 +117,80 @@ def test_native_transcript_and_json_snapshot_omit_image_bytes(tmp_path):
         assert marker not in str([tuple(row) for row in rows])
         assert 'data:image/' not in str([tuple(row) for row in rows])
         assert all('Describe this synthetic photo.' in row['content'] for row in rows)
+        encoded_photo_rows = [row['content'] for row in rows
+                              if row['content'].startswith('\\x00json:')]
+        assert encoded_photo_rows
+        assert all(matches_user({'id': index + 2, 'role': 'user', 'content': content}, photo_run)
+                   for index, content in enumerate(encoded_photo_rows))
     ''')
+
+
+def test_native_photo_exception_is_sanitized_before_handler_logging(tmp_path):
+    run_native_probe(tmp_path, '''
+        import base64
+        import io
+        import logging
+        from backend.native_run_controls import NativePhotoFailure, private_photo_agent
+
+        marker = base64.b64encode(b'SYNTHETIC_LOGGED_PHOTO' * 4096).decode()
+        url = 'data:image/png;base64,' + marker
+        class Agent:
+            def run_conversation(self, message, *args, **kwargs):
+                raise RuntimeError('provider failure echoed ' + url)
+
+        agent = private_photo_agent(Agent())
+        stream = io.StringIO()
+        logger = logging.getLogger('synthetic.native.photo.handler')
+        handler = logging.StreamHandler(stream)
+        logger.addHandler(handler)
+        try:
+            try:
+                agent.run_conversation([{'type': 'image_url', 'image_url': {'url': url}}])
+            except NativePhotoFailure:
+                logger.exception('native run failed')
+            else:
+                raise AssertionError('photo exception was not normalized')
+        finally:
+            logger.removeHandler(handler)
+        output = stream.getvalue()
+        assert marker not in output
+        assert 'data:image/' not in output
+        assert 'photo run failed' in output
+    ''')
+
+
+@pytest.mark.parametrize('location', ['history', 'body'])
+def test_installed_authenticated_runs_handler_rejects_unbound_images(tmp_path, location):
+    run_native_probe(tmp_path, '''
+        import asyncio
+        import os
+        from types import SimpleNamespace
+        from backend.native_run_controls import run_controls_adapter
+        from gateway.platforms.api_server import APIServerAdapter
+
+        image = {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,YQ=='}}
+        payload = {
+            'input': [{'role': 'user', 'content': [
+                {'type': 'text', 'text': 'Inspect this photo'}, image]}],
+            'mobile_attachment_ids': ['a' * 32],
+        }
+        if LOCATION == 'history':
+            payload['conversation_history'] = [{'role': 'user', 'content': [image]}]
+        else:
+            payload['request_metadata'] = {'input_image': image}
+        class Request:
+            headers = {'Authorization': '******'}
+            async def json(self):
+                import json
+                return json.loads(json.dumps(payload))
+        handler = object.__new__(run_controls_adapter(APIServerAdapter))
+        def authenticate(request):
+            assert request.headers['Authorization'] == '******'
+            return None
+        handler._check_auth = authenticate
+        response = asyncio.run(handler._handle_runs(Request()))
+        assert response.status == 413
+    '''.replace('LOCATION', repr(location)))
 
 
 def test_native_provider_error_dump_omits_inline_photo_and_echoed_error(tmp_path):

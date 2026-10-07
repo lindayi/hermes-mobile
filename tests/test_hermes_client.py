@@ -147,6 +147,26 @@ async def test_native_photo_rejection_is_distinct_from_ambiguous_dispatch(outcom
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_locally_oversized_photo_request_is_proven_rejected_before_dispatch():
+    from backend.hermes_client import GatewayClient, NativeRunRejected
+    requests = []
+    client = GatewayClient(
+        'http://127.0.0.1:8642', 'synthetic-token', execution_ready=True,
+        transport=httpx.MockTransport(lambda request: requests.append(request)))
+    images = [{'type': 'image_url', 'image_url': {
+        'url': 'data:image/png;base64,' + 'A' * 2_796_200}} for _ in range(4)]
+    try:
+        with pytest.raises(NativeRunRejected, match='native handler limit'):
+            await client.start(
+                'synthetic-session', 'Inspect these photos',
+                history=[{'role': 'user', 'content': 'x' * 9_000_000}],
+                attachments=images, attachment_ids=['a' * 32, 'b' * 32, 'c' * 32, 'd' * 32])
+        assert requests == []
+    finally:
+        await client.close()
+
+
 @pytest.mark.parametrize('capability', ['missing', 'unverified', 'private'])
 @pytest.mark.asyncio
 async def test_photo_dispatch_requires_versioned_private_native_listener(capability):

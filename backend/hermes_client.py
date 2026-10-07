@@ -150,7 +150,7 @@ class GatewayClient:
                                   attachments=attachments,attachment_ids=attachment_ids)
         request=self.client.build_request('POST','/v1/runs',json=payload)
         if len(request.content)>MAX_NATIVE_RUN_REQUEST_BYTES:
-            raise ValueError('Photo request exceeds the native handler limit; remove photos or shorten earlier context.')
+            raise NativeRunRejected('Photo request exceeds the native handler limit; remove photos or shorten earlier context.')
         if attachments:
             try:
                 capabilities = await self.request('GET', '/v1/capabilities')

@@ -82,7 +82,8 @@ test('real file input removal aborts an undispatched photo batch and retries rem
   assert.deepEqual(calls.filter(call=>call==='POST /runs').length,1);
 });
 
-test('uncertain photo retry survives navigation and reload with authenticated previews',{timeout:30000},async t=>{
+for (const inputText of ['Describe both photos.','']) {
+ test(`uncertain photo retry survives navigation and reload (${inputText?'text plus photos':'photos only'})`,{timeout:30000},async t=>{
    const uploads=[],runs=[],deletes=[],imageURLs=[];
    const photoBytes=[
      Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jXioAAAAASUVORK5CYII=','base64'),
@@ -137,7 +138,7 @@ test('uncertain photo retry survives navigation and reload with authenticated pr
    await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);
    await page.getByRole('button',{name:'Photo recovery'}).click();
    const text=page.getByRole('textbox',{name:'Message Hermes',exact:true});
-   await text.fill('Describe both photos.');
+   await text.fill(inputText);
    const model=page.getByRole('combobox',{name:'Model'});
    await model.waitFor({state:'visible'});
    await model.selectOption('0');
@@ -149,7 +150,7 @@ test('uncertain photo retry survives navigation and reload with authenticated pr
    await page.getByRole('button',{name:'Send message'}).click();
    await page.getByText(/The send outcome is uncertain/).waitFor();
    const original=runs[0];
-   assert.equal(original.input,'Describe both photos.');
+   assert.equal(original.input,inputText||'Please describe the attached image(s), including any visible text.');
    assert.deepEqual(original.attachments,ids);
    assert.deepEqual(original.selection,{model:'vision-model',provider:'synthetic'});
    assert.deepEqual(uploads,photoBytes);
@@ -193,4 +194,5 @@ test('uncertain photo retry survives navigation and reload with authenticated pr
    assert.deepEqual(runs[1],original);
    assert.deepEqual(uploads,photoBytes,'retry uses server-side IDs and does not replace the original bytes');
    assert.deepEqual(deletes,[]);
-});
+ });
+}
