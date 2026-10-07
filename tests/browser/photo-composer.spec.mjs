@@ -173,6 +173,14 @@ test('uncertain photo retry survives navigation and reload with authenticated pr
    assert.equal(await page.getByRole('button',{name:'Remove photo 1'}).isDisabled(),true);
    assert.equal(await page.getByRole('button',{name:'Remove photo 2'}).isDisabled(),true);
 
+   await page.getByRole('button',{name:'Back to chats'}).click();
+   assert.deepEqual(deletes,[],'a second navigation still retains the unresolved IDs');
+   await page.getByRole('button',{name:'Photo recovery'}).click();
+   await page.getByRole('button',{name:'Remove photo 1'}).waitFor();
+   assert.equal(await page.locator('.photo-preview').count(),2);
+   assert.equal(await page.getByRole('button',{name:'Remove photo 1'}).isDisabled(),true);
+   assert.equal(await page.getByRole('button',{name:'Remove photo 2'}).isDisabled(),true);
+
    const additional={name:'new.png',mimeType:'image/png',buffer:photoBytes[0]};
    await page.locator('input[type=file]').setInputFiles([additional]);
    assert.equal(await page.locator('.photo-preview').count(),3,'a new selection remains visible while the old request is locked');
