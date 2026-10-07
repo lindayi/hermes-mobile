@@ -2282,10 +2282,10 @@ def _review_source_action(actions, issue, report_action, comments, initial_sourc
     return None
 
 
-def _review_report_recovery_busy(actions, report_action):
+def _review_report_recovery_busy(actions, report_action, *, allow_retry=True):
     correction = _review_report_correction(actions, report_action)
     if correction is None:
-        return report_action.get("report_retry_allowed") is True
+        return allow_retry and report_action.get("report_retry_allowed") is True
     if correction.get("publication_disposition") == "stale":
         return False
     if correction.get("status") in {"sending", "uncertain", "sent"}:
@@ -3602,6 +3602,11 @@ class Coordinator:
         review_publications = [] if review_publications is None else review_publications
         number = snapshot["issue"]
         busy = False
+        historical_dirty = (
+            snapshot.get("historical_base") is True
+            and snapshot["pull"].get("mergeable") is False
+            and snapshot["pull"].get("mergeable_state") == "dirty"
+        )
         if apply:
             # Recover ambiguous ownership before advancing any predecessor,
             # regardless of the detached scan snapshot's iteration order.
@@ -3738,7 +3743,10 @@ class Coordinator:
                             )
                         if report_recovery_superseded:
                             snapshot["superseded_report_failure_key"] = key
-                        busy = retry_allowed and not report_recovery_superseded
+                        busy = (
+                            retry_allowed and not report_recovery_superseded
+                            and not historical_dirty
+                        ) or busy
                         if not apply:
                             continue
                         self.store.update_action(
@@ -3820,7 +3828,9 @@ class Coordinator:
                     if action.get("task_type") != "report-correction":
                         if action.get("key") != snapshot.get(
                                 "superseded_report_failure_key"):
-                            busy = _review_report_recovery_busy(actions, action) or busy
+                            busy = _review_report_recovery_busy(
+                                actions, action, allow_retry=not historical_dirty,
+                            ) or busy
                     continue
                 if (status == "completed"
                         and _review_report_correction_parent_needs_recovery(
@@ -4053,7 +4063,12 @@ class Coordinator:
         if old_base == snapshot["main_sha"]:
             return snapshot.get("scoped") is True
         if (snapshot["enrollment"].get("authorized_head") is None
-                or not (snapshot.get("scoped") or snapshot.get("historical_base"))):
+                or not (
+                    snapshot.get("scoped")
+                    or (snapshot.get("historical_base")
+                        and snapshot["pull"].get("mergeable") is True
+                        and snapshot["pull"].get("mergeable_state") == "behind")
+                )):
             return False
         _, authorized_heads, blocked_heads = _authorized_result_heads(
             snapshot["issue"], snapshot["enrollment"], self.store.actions(),
@@ -6049,6 +6064,12 @@ class Coordinator:
                     pr_plan.get("review_correction_anchor")):
                 if review_anchor is None:
                     continue
+                if (review_anchor.get("correction")
+                        and not self._fence_pull(
+                            snapshot["issue"], snapshot["head"], snapshot["main_sha"],
+                            allow_historical_reconciliation=True,
+                        )):
+                    continue
                 self.store.add_outbox(
                     review_anchor["key"], review_anchor,
                 )
@@ -6078,7 +6099,10 @@ class Coordinator:
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") != "pending"):
                     continue
-                if not self._fence_pull(entry["issue"], entry["head"]):
+                if not self._fence_pull(
+                        entry["issue"], entry["head"],
+                        entry.get("main_sha") if entry.get("correction") else None,
+                        allow_historical_reconciliation=bool(entry.get("correction"))):
                     self.store.update_outbox(key, "superseded")
                     continue
                 marker = entry.get("marker")

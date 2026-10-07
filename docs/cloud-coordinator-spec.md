@@ -627,6 +627,16 @@ This exception authorizes only the existing bounded neutral reservation path; it
 never treats the historical PR as current-base eligible or enables merging. Fresh
 identity, receipt, ancestry, dispatch, and pre-send fences remain mandatory.
 
+A completed authenticated malformed review with an unused correction does not
+occupy the historical `false`/`dirty` neutral path: planning emits neither a
+correction action nor a correction anchor, and the available report retry is
+retained. Active or uncertain correction reservations still occupy the workflow.
+Correction anchors recheck their frozen main and behind-only historical eligibility
+before enqueueing and publication; a newly dirty base suppresses publication and
+yields to neutral reconciliation on the next scan. Correction task dispatch and
+review/status publication retain their independent fresh fences. Lost task POST
+responses remain reserved and cannot cause a second neutral dispatch.
+
 Legacy records that predate the separate neutral counter retain a conservative
 unknown marker until every shared reservation is accounted for by retained task
 claims or authenticated receipt proofs. Reservation type comes from the exact

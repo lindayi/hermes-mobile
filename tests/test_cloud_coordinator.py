@@ -7819,6 +7819,259 @@ def _advance_report_recovery_main(api, path):
     }
 
 
+@pytest.mark.parametrize("persisted_failure", [False, True])
+@pytest.mark.parametrize("lost_response", [False, True])
+def test_historical_dirty_report_failure_plans_only_one_neutral(
+        tmp_path, persisted_failure, lost_response):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    if persisted_failure:
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660)._build_plan(
+            apply=True,
+        )
+    before = StateStore(path).snapshot()["enrollments"]["16"]
+    source_receipt = StateStore(path).action(source_fix["key"])["receipt_body"]
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    api.fail_fix = lost_response
+    posts_before = api.task_posts
+    plan = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._build_plan(apply=False)["pull_requests"][0]
+
+    assert plan["review_correction_anchor"] is None
+    assert plan["review_action"] is None
+    assert plan["repair"] is not None, plan["reasons"]
+    assert plan["repair"]["task_type"] == "neutral"
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    store = StateStore(path)
+    neutrals = [
+        action for action in store.actions().values()
+        if action.get("task_type") == "neutral"
+    ]
+    assert len(neutrals) == 1
+    assert neutrals[0]["status"] == ("uncertain" if lost_response else "sent")
+    assert api.task_posts == posts_before + 1
+    assert not any(
+        action.get("task_type") == "report-correction"
+        for action in store.actions().values()
+    )
+    assert not any(
+        item.get("correction") for item in store.snapshot()["outbox"].values()
+    )
+    parent = store.action(original["key"])
+    assert parent["status"] == "completed" and parent["report_error"]
+    assert parent["report_retry_allowed"] is True
+    assert parent["report_retry_state"] == "available"
+    assert store.action(source_fix["key"])["receipt_body"] == source_receipt
+    after = store.snapshot()["enrollments"]["16"]
+    assert after["attempts"] == before["attempts"] == 1
+    assert after["neutral_attempts"] == before["neutral_attempts"] + 1
+    assert after.get("receipt_proofs", []) == before.get("receipt_proofs", [])
+    assert api.graphql_writes == []
+
+
+def test_historical_dirty_plan_ignores_existing_correction_anchor(tmp_path):
+    api, path, _source_fix, _original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    behind = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._build_plan(apply=False)["pull_requests"][0]
+    assert behind["review_action"]["task_type"] == "report-correction"
+    anchors = {
+        key: entry for key, entry in StateStore(path).snapshot()["outbox"].items()
+        if entry.get("correction")
+    }
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    dirty = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._build_plan(apply=False)["pull_requests"][0]
+    assert dirty["review_action"] is None
+    assert dirty["review_correction_anchor"] is None
+    assert dirty["repair"]["task_type"] == "neutral"
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert all(
+        StateStore(path).snapshot()["outbox"][key] == entry
+        for key, entry in anchors.items()
+    )
+    assert not any(
+        action.get("task_type") == "report-correction"
+        for action in StateStore(path).actions().values()
+    )
+    assert StateStore(path).snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
+
+
+@pytest.mark.parametrize("hazard", [
+    "unknown", "true-dirty", "false-behind", "missing-main-ancestry",
+    "missing-head-ancestry",
+])
+def test_historical_report_failure_rejects_unconfirmed_reconciliation(
+        tmp_path, hazard):
+    api, path, _source_fix, _original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660)._build_plan(apply=True)
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    if hazard == "unknown":
+        api.pull.update(mergeable=None, mergeable_state="unknown")
+    elif hazard == "true-dirty":
+        api.pull["mergeable"] = True
+    elif hazard == "false-behind":
+        api.pull["mergeable_state"] = "behind"
+    else:
+        tip = CURRENT_MAIN if hazard == "missing-main-ancestry" else HEAD
+        api.compare_results[f"{BASE}...{tip}"] = {}
+    posts_before = api.task_posts
+    for _ in range(3):
+        plan = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        )._build_plan(apply=False)["pull_requests"][0]
+        assert plan["review_action"] is None
+        assert plan["review_correction_anchor"] is None
+        assert plan["repair"] is None
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert api.task_posts == posts_before
+
+
+def test_historical_report_correction_yields_if_dirty_before_plan_writes(
+        tmp_path, monkeypatch):
+    api, path, _source_fix, _original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    apply_plan = CloudCoordinator._apply
+
+    def become_dirty(coordinator, plan, **kwargs):
+        assert plan["pull_requests"][0]["review_correction_anchor"] is not None
+        api.pull.update(mergeable=False, mergeable_state="dirty")
+        return apply_plan(coordinator, plan, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(CloudCoordinator, "_apply", become_dirty)
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    store = StateStore(path)
+    assert not any(
+        item.get("correction") for item in store.snapshot()["outbox"].values()
+    )
+    assert not any(
+        action.get("task_type") == "report-correction"
+        for action in store.actions().values()
+    )
+    assert len([
+        action for action in store.actions().values()
+        if action.get("task_type") == "neutral"
+    ]) == 1
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
+
+
+def test_pending_historical_correction_anchor_never_publishes_when_dirty(
+        tmp_path, monkeypatch):
+    api, path, _source_fix, _original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    add_outbox = StateStore.add_outbox
+
+    def become_dirty(store, key, entry):
+        result = add_outbox(store, key, entry)
+        if entry.get("correction"):
+            api.pull.update(mergeable=False, mergeable_state="dirty")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(StateStore, "add_outbox", become_dirty)
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    anchors = [
+        item for item in StateStore(path).snapshot()["outbox"].values()
+        if item.get("correction")
+    ]
+    assert len(anchors) == 1
+    assert anchors[0]["status"] == "superseded"
+    assert not any(anchors[0]["marker"] in comment["body"] for comment in api.comments)
+    assert len([
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "neutral"
+    ]) == 1
+
+
+@pytest.mark.parametrize("lost_response", [False, True])
+def test_historical_dirty_keeps_active_correction_occupied(tmp_path, lost_response):
+    api, path, _source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    api.fail_fix = lost_response
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    assert correction["status"] == ("uncertain" if lost_response else "sent")
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    posts_before = api.task_posts
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert api.task_posts == posts_before
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "reserved"
+    assert not any(
+        action.get("task_type") == "neutral"
+        for action in StateStore(path).actions().values()
+    )
+
+
+@pytest.mark.parametrize("dirty_phase", ["review", "status"])
+def test_historical_correction_publication_stops_when_dirty(
+        tmp_path, monkeypatch, dirty_phase):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="pass", files=api.review_file_digests(),
+    )
+    if dirty_phase == "review":
+        api.pull.update(mergeable=False, mergeable_state="dirty")
+    else:
+        publish_status = CloudCoordinator._advance_agent_review_publication
+
+        def become_dirty(coordinator, key, action):
+            api.pull.update(mergeable=False, mergeable_state="dirty")
+            return publish_status(coordinator, key, action)
+
+        monkeypatch.setattr(CloudCoordinator, "_advance_agent_review_publication", become_dirty)
+    publications_before = len([
+        route for route, _body in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ])
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    saved = StateStore(path).action(correction["key"])
+    assert saved["publication_disposition"] == "stale"
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "exhausted"
+    assert len([
+        route for route, _body in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ]) == publications_before + (dirty_phase == "status")
+    assert not any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for statuses in api.status_log.values() for status in statuses
+    )
+    assert len([
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "neutral"
+    ]) == 1
+
+
 @pytest.mark.parametrize(
     "dirty_read", [1, 2], ids=["initial-fence", "fresh-fence"],
 )
