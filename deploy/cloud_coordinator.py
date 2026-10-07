@@ -2917,6 +2917,41 @@ def _pull_identity(pull, binding):
             and pull.get("node_id") == binding["pull_node_id"])
 
 
+def _legacy_neutral_receipt_recovery_binding(action, pull, number, expected_base_sha):
+    base = pull.get("base") if isinstance(pull, dict) else None
+    return (
+        isinstance(action, dict)
+        and action.get("status") == "uncertain"
+        and action.get("kind") == "fix"
+        and action.get("task_type") == "neutral"
+        and action.get("issue") == number
+        and isinstance(action.get("task_id"), str)
+        and 0 < len(action["task_id"]) <= 128
+        and _valid_timestamp(action.get("task_created_at"))
+        and type(action.get("receipt_waits")) is int
+        and action["receipt_waits"] == MAX_RECEIPT_POLLS
+        and action.get("receipt_recovery_attempted") is True
+        and "receipt_recovery_revision" not in action
+        and action.get("owner_id") == OWNER_ID
+        and action.get("repository_id") == REPOSITORY_ID
+        and type(action.get("pull_id")) is int
+        and action["pull_id"] > 0
+        and isinstance(action.get("pull_node_id"), str)
+        and bool(action["pull_node_id"])
+        and _is_sha(action.get("recorded_base_sha"))
+        and action.get("main_sha") == expected_base_sha
+        and f"the PR's recorded base is `{action['recorded_base_sha']}`." in (
+            action.get("body", "")
+        )
+        and _legacy_neutral_dispatch_matches(action)
+        and _pull_identity(pull, action)
+        and isinstance(base, dict)
+        and base.get("ref") == MAIN_BRANCH
+        and _github_identity(base.get("repo"), REPOSITORY_ID)
+        and base.get("sha") == expected_base_sha
+    )
+
+
 def _mergeability_unknown(pull):
     state = pull.get("mergeable_state")
     return (type(pull.get("mergeable")) is not bool or type(state) is not str
@@ -5677,7 +5712,8 @@ class Coordinator:
 
     def _fence_pull(self, number, head, main_sha=None, *,
                     allow_historical_reconciliation=False,
-                    allow_historical_dirty=False, expected_base_sha=None):
+                    allow_historical_dirty=False, expected_base_sha=None,
+                    neutral_receipt_recovery_action=None):
         pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
         base = pull.get("base") if isinstance(pull, dict) else None
         actual = pull.get("head") if isinstance(pull, dict) else None
@@ -5698,11 +5734,24 @@ class Coordinator:
             if not isinstance(current_main, dict) or current_main.get("sha") != main_sha:
                 return False
             if (base.get("sha") != main_sha
-                    and (not allow_historical_reconciliation
-                         or not self._historical_base_can_reconcile(
-                             pull, main_sha, head,
-                             allow_dirty=allow_historical_dirty,
-                         ))):
+                    and not (
+                        allow_historical_reconciliation
+                        and self._historical_base_can_reconcile(
+                            pull, main_sha, head,
+                            allow_dirty=allow_historical_dirty,
+                        )
+                    )
+                    and not (
+                        pull.get("mergeable") is False
+                        and pull.get("mergeable_state") == "dirty"
+                        and _legacy_neutral_receipt_recovery_binding(
+                            neutral_receipt_recovery_action, pull, number,
+                            expected_base_sha,
+                        )
+                        and self._historical_base_can_reconcile(
+                            pull, main_sha, head, allow_dirty=True,
+                        )
+                    )):
                 return False
         return pull
 
@@ -6223,11 +6272,15 @@ class Coordinator:
                 snapshot["issue"], snapshot["head"], snapshot["main_sha"],
             )
             for key in pr_plan.get("receipt_recoveries", ()):
+                recovery_action = self.store.action(key)
+                if recovery_action is None:
+                    continue
                 current = self._fence_pull(
                     snapshot["issue"], snapshot["head"], snapshot["main_sha"],
                     allow_historical_reconciliation=True,
                     allow_historical_dirty=snapshot.get("historical_base") is True,
                     expected_base_sha=snapshot["pull"]["base"]["sha"],
+                    neutral_receipt_recovery_action=recovery_action,
                 )
                 if (not current or current.get("id") != snapshot["pull"].get("id")
                         or current.get("node_id") != snapshot["pull"].get("node_id")):

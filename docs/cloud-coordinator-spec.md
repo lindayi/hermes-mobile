@@ -701,6 +701,21 @@ This exception authorizes only the existing bounded neutral reservation path; it
 never treats the historical PR as current-base eligible or enables merging. Fresh
 identity, receipt, ancestry, dispatch, and pre-send fences remain mandatory.
 
+Before a legacy neutral result has an adopted receipt proof, only its exact
+one-shot recovery read may cross the `false`/`dirty` fence without a ready proof.
+This requires the already-reserved uncertain action's known task ID and creation
+time, unchanged legacy-neutral dispatch prompt/nonce, owner/repository/PR identity,
+original recorded PR base as captured in that prompt, exhausted receipt-wait count,
+and unconsumed codec recovery revision. Under the execution lock, the fresh pull's
+base must still equal the authenticated task checkout base, and both ancestry
+comparisons must positively prove that checkout base is an ancestor of current
+main and the exact result head. The ordinary task-detail, session, dispatch,
+timestamp, unique actual receipt, and immutable comment checks still govern
+adoption after GET. This recovery-only allowance does not make the result head
+generally authorized and is not passed to source dispatch, report
+correction/publication, review/status publication, or merge fences; failure or
+unknown evidence remains blocked without repeating the claimed read.
+
 A completed authenticated malformed review with an unused correction does not
 occupy the historical `false`/`dirty` neutral path: planning emits neither a
 correction action nor a correction anchor, and the available report retry is

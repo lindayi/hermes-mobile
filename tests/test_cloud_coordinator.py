@@ -3543,7 +3543,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         tmp_path, hydration_hazard, attempt_ordinals, legacy_neutral_status=None,
         advance_main=False, legacy_neutral_receipt_valid=True,
         legacy_neutral_dispatch_valid=True, recovery_interruption=None,
-        recovery_lifecycle_probe=False):
+        recovery_lifecycle_probe=False, advance_main_dirty=False,
+        recovery_fence_probe=False):
     from copy import deepcopy
     from deploy.task_receipts import receipt_instruction
 
@@ -3852,6 +3853,7 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     task_list_records = []
     task_detail_reads = []
     neutral_task_reads = []
+    ancestry_reads = []
     neutral_task_id = None
     original_get = api.get
 
@@ -3910,6 +3912,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         return values
 
     def task_details(route):
+        if route.startswith("repos/lindayi/hermes-mobile/compare/"):
+            ancestry_reads.append(route)
         if neutral_task_id is not None and route.endswith(f"/{neutral_task_id}"):
             neutral_task_reads.append(route)
         if route.startswith("agents/repos/lindayi/hermes-mobile/tasks/legacy-source-"):
@@ -4221,7 +4225,10 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     if advance_main:
         advanced_main = "5" * 40
         api.current_main_sha = advanced_main
-        api.pull.update(mergeable=True, mergeable_state="behind")
+        api.pull.update(
+            mergeable=not advance_main_dirty,
+            mergeable_state="dirty" if advance_main_dirty else "behind",
+        )
         api.compare_results.update({
             f"{CURRENT_MAIN}...{advanced_main}": _compare_result(
                 CURRENT_MAIN, ahead_by=1,
@@ -4258,10 +4265,100 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             blocker="execution_uncertain", receipt_waits=MAX_RECEIPT_POLLS,
             receipt_recovery_attempted=True,
         )
+        neutral_action = neutral_store.action(neutral["key"])
         before_recovery_events = neutral_store.snapshot()["lifecycle_events"]
         before_recovery_proofs = deepcopy(
             neutral_store.snapshot()["enrollments"]["16"]["receipt_proofs"],
         )
+        if advance_main_dirty and recovery_fence_probe:
+            coordinator = Coordinator(api, neutral_store, clock=lambda: 1790856660)
+            snapshot = coordinator._snapshot_pull(
+                16, neutral_store.snapshot()["enrollments"]["16"], advanced_main,
+                actions=neutral_store.actions(),
+            )
+            assert snapshot["historical_base"] is False
+            assert not any(
+                proof.get("receipt_head") == neutral_head
+                for proof in before_recovery_proofs
+            )
+            assert not coordinator._fence_pull(
+                16, neutral_head, advanced_main,
+                allow_historical_reconciliation=True,
+                expected_base_sha=CURRENT_MAIN,
+            )
+            assert coordinator._fence_pull(
+                16, neutral_head, advanced_main,
+                allow_historical_reconciliation=True,
+                expected_base_sha=CURRENT_MAIN,
+                neutral_receipt_recovery_action=neutral_action,
+            )
+            api.pull["base"]["sha"] = advanced_main
+            assert coordinator._fence_pull(
+                16, neutral_head, advanced_main,
+                expected_base_sha=advanced_main,
+            )
+            api.pull["base"]["sha"] = CURRENT_MAIN
+            api.pull.update(mergeable=True, mergeable_state="behind")
+            assert coordinator._fence_pull(
+                16, neutral_head, advanced_main,
+                allow_historical_reconciliation=True,
+                expected_base_sha=CURRENT_MAIN,
+            )
+            api.pull.update(mergeable=False, mergeable_state="dirty")
+            for changes in (
+                {"issue": 17}, {"head": "9" * 40},
+                {"recorded_base_sha": "9" * 40}, {"task_id": ""},
+                {"task_created_at": "invalid"}, {"owner_id": OWNER + 1},
+                {"repository_id": 0}, {"pull_id": api.pull["id"] + 1},
+                {"pull_node_id": "foreign"}, {"receipt_waits": 0},
+                {"receipt_recovery_attempted": False},
+                {"receipt_recovery_revision": 1},
+                {"body": neutral_action["body"] + " changed"},
+            ):
+                assert not coordinator._fence_pull(
+                    16, neutral_head, advanced_main,
+                    allow_historical_reconciliation=True,
+                    expected_base_sha=CURRENT_MAIN,
+                    neutral_receipt_recovery_action={
+                        **neutral_action, **changes,
+                    },
+                )
+            valid_comparisons = deepcopy(api.compare_results)
+            for comparison in (
+                    f"{CURRENT_MAIN}...{advanced_main}",
+                    f"{CURRENT_MAIN}...{neutral_head}"):
+                api.compare_results[comparison] = {
+                    **valid_comparisons[comparison],
+                    "merge_base_commit": {"sha": "9" * 40},
+                }
+                assert not coordinator._fence_pull(
+                    16, neutral_head, advanced_main,
+                    allow_historical_reconciliation=True,
+                    expected_base_sha=CURRENT_MAIN,
+                    neutral_receipt_recovery_action=neutral_action,
+                )
+                api.compare_results = deepcopy(valid_comparisons)
+            for mergeable, mergeable_state in (
+                    (None, "dirty"), (True, "dirty"), (False, "unknown")):
+                api.pull.update(
+                    mergeable=mergeable, mergeable_state=mergeable_state,
+                )
+                assert not coordinator._fence_pull(
+                    16, neutral_head, advanced_main,
+                    allow_historical_reconciliation=True,
+                    expected_base_sha=CURRENT_MAIN,
+                    neutral_receipt_recovery_action=neutral_action,
+                )
+            api.pull.update(mergeable=False, mergeable_state="dirty")
+            original_head_repo = api.pull["head"]["repo"]
+            api.pull["head"]["repo"] = {"id": 1399942966}
+            assert not coordinator._fence_pull(
+                16, neutral_head, advanced_main,
+                allow_historical_reconciliation=True,
+                expected_base_sha=CURRENT_MAIN,
+                neutral_receipt_recovery_action=neutral_action,
+            )
+            api.pull["head"]["repo"] = original_head_repo
     resumed_results = []
     neutral_reads_before_recovery = len(neutral_task_reads)
     if recovery_lifecycle_probe:
@@ -4500,6 +4597,15 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     if advance_main:
         assert legacy_neutral_status in {"sent", "uncertain"}
         recovered_state = recovered.snapshot()
+        if advance_main_dirty:
+            assert (
+                f"repos/lindayi/hermes-mobile/compare/{CURRENT_MAIN}...{advanced_main}"
+                in ancestry_reads
+            )
+            assert (
+                f"repos/lindayi/hermes-mobile/compare/{CURRENT_MAIN}...{neutral_head}"
+                in ancestry_reads
+            )
         assert recovered_state["enrollments"]["16"]["attempts"] == 3
         assert recovered_state["enrollments"]["16"]["neutral_attempts"] == 1
         initial, authorized, blocked = _authorized_result_heads(
@@ -4654,6 +4760,16 @@ def test_cold_known_id_uncertainty_recovers_after_main_advances(
     case_path.mkdir()
     test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
         case_path, None, False, legacy_neutral_status=recovery_status, advance_main=True,
+    )
+
+
+def test_cold_known_id_uncertainty_recovers_on_ancestry_proven_dirty_result(
+        tmp_path):
+    case_path = tmp_path / "main-advanced-dirty"
+    case_path.mkdir()
+    test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        case_path, None, False, legacy_neutral_status="uncertain", advance_main=True,
+        advance_main_dirty=True, recovery_fence_probe=True,
     )
 
 
