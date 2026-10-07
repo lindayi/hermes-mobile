@@ -6187,7 +6187,7 @@ class Coordinator:
                     or current.get("initial_source") != expected_source):
                 raise CoordinatorError("Initial starter source evidence changed before state commit")
 
-    def _apply(self, plan, *, after_commit=None):
+    def _apply(self, plan, *, after_commit=None, acknowledgements=None):
         self._fence_starter_admissions(plan.get("starter_admissions", ()))
         self._fence_starter_sources(
             plan.get("starter_sources", ()), plan["enrollments"], plan["main_sha"],
@@ -6246,7 +6246,20 @@ class Coordinator:
                     refreshed.setdefault("review_publications", []).extend(
                         pr_plan.get("review_publications", ()),
                     )
-                    for event in refreshed.get("lifecycle_events", ()):
+                    state = self.store.snapshot()
+                    try:
+                        events = filter_acknowledged_replays(
+                            refreshed.get("lifecycle_events", []),
+                            active=state["lifecycle_events"],
+                            context=(state.get("lifecycle_context") or {}).get("events", []),
+                            acknowledgements=acknowledgements,
+                            now=datetime.fromtimestamp(plan["now"], timezone.utc),
+                        )
+                    except (TypeError, ValueError) as error:
+                        raise CoordinatorError(
+                            "Recovered lifecycle evidence is unavailable"
+                        ) from error
+                    for event in events:
                         self.store.record_lifecycle(event, now=plan["now"])
                     pr_plan = refreshed
             # Handoff mutations require the successfully committed scan above.
@@ -6489,7 +6502,8 @@ class Coordinator:
                             "Lifecycle owner binding changed before state commit"
                         )
                 pull_requests = self._apply(
-                    plan, after_commit=lambda: self.store.write_lifecycle_export(
+                    plan, acknowledgements=acknowledgements,
+                    after_commit=lambda: self.store.write_lifecycle_export(
                         now=self.clock(), owner_user_id=owner_user_id,
                         directory=export_directory,
                     ),

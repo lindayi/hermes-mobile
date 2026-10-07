@@ -513,7 +513,9 @@ claim persistence prevents GET. It still resolves only
 from complete positive unchanged task/session/receipt proof; every other response
 remains uncertain without another read. Successful recovery refreshes downstream
 planning without repeating reconciliation; newly derived lifecycle events are
-durably recorded before their outcomes are published.
+canonicalized against active/retained history and the same verified ACK snapshot,
+then durably recorded before their outcomes are published. Acknowledged incidents
+remain retired rather than being reinserted with conflicting replay payloads.
 Live REST pull numbers, pull IDs, and head/base repository IDs must be positive
 integers at collection and every dispatch, ready/review handoff, and merge fence;
 booleans, floats, strings, and missing values are not identity proof.

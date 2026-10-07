@@ -4268,6 +4268,28 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
         notifications = coordinator._notification_outcomes
         events = []
+        acknowledged = recovery_lifecycle_probe == "acknowledged"
+        if acknowledged:
+            from deploy.workflow_lifecycle_sources import LifecycleSourcePaths
+
+            snapshot = coordinator._build_plan(apply=False)["snapshots"][0]
+            canonical = cloud_coordinator._lifecycle_event(
+                snapshot, "execution_exhausted",
+                occurred_at="2026-10-01T10:30:00Z",
+                incident="synthetic-refreshed-budget",
+            )
+            coordinator.store.record_lifecycle(canonical, now=1790856660)
+            coordinator.store.write_lifecycle_export(
+                now=1790856660, owner_user_id=APP_OWNER_ID,
+            )
+            os.utime(event_export, (consumer_now.timestamp(), consumer_now.timestamp()))
+            assert process_workflow_events(
+                notification_paths, apply=True, now=consumer_now,
+            )["inbox_items"] == 2
+            coordinator.lifecycle_source_paths = LifecycleSourcePaths(
+                notifications=notification_paths,
+                starter_state=tmp_path / "absent-starter.json",
+            )
 
         def refreshed_notifications(snapshot, reasons):
             outcomes, lifecycle = notifications(snapshot, reasons)
@@ -4285,12 +4307,22 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             coordinator.run(apply=True)
         assert len(events) == 1
         recovered = StateStore(path).snapshot()
-        assert events[0] in recovered["lifecycle_events"]
-        exported = json.loads(event_export.read_text())
-        assert events[0] in exported["events"]
-        assert recovered["lifecycle_events"][:len(before_recovery_events)] == (
-            before_recovery_events
-        )
+        if acknowledged:
+            assert not any(event["event_id"] == canonical["event_id"]
+                           for event in recovered["lifecycle_events"])
+            assert canonical in recovered["lifecycle_context"]["events"]
+            Coordinator(
+                api, StateStore(path), clock=lambda: 1790856660,
+                lifecycle_source_paths=coordinator.lifecycle_source_paths,
+            ).run(apply=True)
+            assert canonical in StateStore(path).snapshot()["lifecycle_context"]["events"]
+        else:
+            assert events[0] in recovered["lifecycle_events"]
+            exported = json.loads(event_export.read_text())
+            assert events[0] in exported["events"]
+            assert recovered["lifecycle_events"][:len(before_recovery_events)] == (
+                before_recovery_events
+            )
         assert recovered["enrollments"]["16"]["attempts"] == 3
         assert recovered["enrollments"]["16"]["neutral_attempts"] == 1
         assert recovered["enrollments"]["16"]["receipt_proofs"][:3] == before_recovery_proofs
@@ -4653,10 +4685,11 @@ def test_codec_recovery_rejects_incomplete_saved_dispatch_metadata(tmp_path):
     )
 
 
-def test_codec_recovery_persists_refreshed_lifecycle_before_export(tmp_path):
+@pytest.mark.parametrize("acknowledged", [False, True])
+def test_codec_recovery_persists_refreshed_lifecycle_before_export(tmp_path, acknowledged):
     test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
         tmp_path, None, False, legacy_neutral_status="uncertain",
-        recovery_lifecycle_probe=True,
+        recovery_lifecycle_probe="acknowledged" if acknowledged else True,
     )
 
 
