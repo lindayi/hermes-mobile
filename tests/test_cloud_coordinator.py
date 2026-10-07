@@ -2545,7 +2545,9 @@ def test_neutral_restart_after_head_advance_never_advances_predecessor(
     assert api.fix_attempts == 2
 
 
-def test_ambiguous_neutral_post_stays_locked_and_is_never_retried(tmp_path):
+@pytest.mark.parametrize("advance_main", [False, True])
+def test_ambiguous_neutral_post_stays_locked_and_is_never_retried(
+        tmp_path, advance_main):
     api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
     api.fail_fix = True
 
@@ -2557,6 +2559,11 @@ def test_ambiguous_neutral_post_stays_locked_and_is_never_retried(tmp_path):
     assert store.action(first["key"]) is None
     assert api.fix_attempts == 2
 
+    if advance_main:
+        api.current_main_sha = "f" * 40
+        api.compare_results[f"{BASE}...{'f' * 40}"] = _compare_result(
+            BASE, ahead_by=22,
+        )
     Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
 
     assert api.fix_attempts == 2
@@ -2566,7 +2573,9 @@ def test_ambiguous_neutral_post_stays_locked_and_is_never_retried(tmp_path):
                    for event in store.snapshot()["lifecycle_events"])
 
 
-def test_known_id_uncertain_neutral_with_unproven_completion_is_read_once(tmp_path):
+@pytest.mark.parametrize("advance_main", [False, True])
+def test_known_id_uncertain_neutral_with_unproven_completion_is_read_once(
+        tmp_path, advance_main):
     api, store, coordinator, _ = _ready_sha_bound_handoff(tmp_path)
     coordinator.run(apply=True)
     neutral = next(
@@ -2582,6 +2591,9 @@ def test_known_id_uncertain_neutral_with_unproven_completion_is_read_once(tmp_pa
     api.head_sha = api.pull["head"]["sha"] = neutral_head
     api.pull["base"]["sha"] = CURRENT_MAIN
     api.pull.update(mergeable=True, mergeable_state="clean")
+    if advance_main:
+        api.current_main_sha = "f" * 40
+        api.pull["mergeable_state"] = "behind"
     event = coordinator._record_uncertain_task(neutral)
     store.update_action_with_lifecycle(
         neutral["key"], "uncertain", event, now=1790856660,
@@ -4226,7 +4238,7 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             neutral_store.snapshot()["enrollments"]["16"]["receipt_proofs"],
         )
     resumed_results = []
-    for _ in range(2):
+    for _ in range(1 if advance_main else 2):
         resumed = Coordinator(
             api, StateStore(path), clock=lambda: 1790856660,
         ).run(apply=True)["pull_requests"][0]
@@ -4234,9 +4246,17 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     if legacy_neutral_status is not None:
         recovered = StateStore(path)
         recovered_neutral = recovered.action(neutral["key"])
+        assert recovered_neutral is not None, (
+            resumed_results, recovered.snapshot(), api.fix_attempts,
+        )
         assert recovered_neutral["status"] == "completed"
         assert recovered_neutral["receipt_legacy_neutral"] is True
         assert recovered_neutral["receipt_body"] == neutral_comment["body"]
+        assert recovered_neutral["main_sha"] == CURRENT_MAIN
+        assert recovered_neutral["receipt_base"] == CURRENT_MAIN
+        assert recovered_neutral["receipt_head"] == neutral_head
+        assert recovered_neutral["receipt_start_head"] == neutral["head"]
+        assert recovered_neutral["receipt_task_id"] == neutral["task_id"]
         assert recovered.snapshot()["enrollments"]["16"]["attempts"] == 3
         assert recovered.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
         assert recovered.snapshot()["enrollments"]["16"]["receipt_proofs"][:3] == proofs
@@ -4251,9 +4271,17 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                 before_recovery_proofs
             )
     if advance_main:
-        assert legacy_neutral_status == "uncertain"
-        assert recovered.snapshot()["enrollments"]["16"]["attempts"] == 3
-        assert recovered.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
+        assert legacy_neutral_status in {"sent", "uncertain"}
+        recovered_state = recovered.snapshot()
+        assert recovered_state["enrollments"]["16"]["attempts"] == 3
+        assert recovered_state["enrollments"]["16"]["neutral_attempts"] == 1
+        initial, authorized, blocked = _authorized_result_heads(
+            16, recovered_state["enrollments"]["16"], recovered.actions(),
+            api.comments, advanced_main,
+        )
+        assert initial == recovered_state["enrollments"]["16"]["authorized_head"]
+        assert neutral["head"] in authorized and neutral_head in authorized
+        assert not blocked
         before_posts = api.fix_attempts
         Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
         advanced_state = StateStore(path).snapshot()
@@ -4264,15 +4292,38 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         assert len(next_neutrals) == 1
         assert next_neutrals[0]["status"] == "sent"
         assert next_neutrals[0]["head"] == neutral_head
+        assert next_neutrals[0]["main_sha"] == advanced_main
+        assert next_neutrals[0]["recorded_base_sha"] == CURRENT_MAIN
         assert advanced_state["enrollments"]["16"]["attempts"] == 3
         assert advanced_state["enrollments"]["16"]["neutral_attempts"] == 2
         assert advanced_state["enrollments"]["16"]["receipt_proofs"][:3] == proofs
+        assert advanced_state["enrollments"]["16"]["receipt_proofs"] == (
+            recovered_state["enrollments"]["16"]["receipt_proofs"]
+        )
+        assert advanced_state["enrollments"]["16"]["authorized_head"] == (
+            recovered_state["enrollments"]["16"]["authorized_head"]
+        )
+        assert advanced_state["lifecycle_events"] == recovered_state["lifecycle_events"]
+        assert neutral["key"] not in advanced_state["actions"]
+        assert recovered_neutral["handoff_state"] == "pending"
         assert api.fix_attempts == before_posts + 1
         Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
         assert api.fix_attempts == before_posts + 1
         assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 3
         assert StateStore(path).snapshot()["enrollments"]["16"]["neutral_attempts"] == 2
-        return
+        neutral = next_neutrals[0]
+        neutral_head = "6" * 40
+        api.complete_task(
+            neutral["task_id"], neutral, head_sha=neutral_head,
+            base_sha=advanced_main,
+        )
+        api.head_sha = api.pull["head"]["sha"] = neutral_head
+        api.pull["base"]["sha"] = advanced_main
+        api.pull.update(mergeable=True, mergeable_state="clean")
+        for _ in range(2):
+            Coordinator(
+                api, StateStore(path), clock=lambda: 1790856660,
+            ).run(apply=True)
     reviewer = next(
         action for action in StateStore(path).actions().values()
         if action.get("kind") == "review" and action.get("head") == neutral_head
@@ -4304,10 +4355,12 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     assert api.owner_review_head_sha == neutral_head
     assert json.loads(api.owner_review_body)["verdict"] == "changes_requested"
     assert enrollment["attempts"] == 4
-    assert enrollment["neutral_attempts"] == 1
+    assert enrollment["neutral_attempts"] == (2 if advance_main else 1)
+    assert enrollment["receipt_proofs"][:3] == proofs
     assert followup["attempt"] == 4 and followup["status"] == "sent"
     assert followup["head"] == neutral_head
-    assert api.fix_attempts == 2
+    assert followup["main_sha"] == (advanced_main if advance_main else CURRENT_MAIN)
+    assert api.fix_attempts == (3 if advance_main else 2)
     sent_posts = [route for route, _ in api.writes if route.endswith("/tasks")]
     for _ in range(2):
         Coordinator(
@@ -4357,11 +4410,13 @@ def test_cold_legacy_neutral_receipt_reconciles_bound_completion_once(
     )
 
 
-def test_cold_known_id_uncertainty_recovers_after_main_advances(tmp_path):
+@pytest.mark.parametrize("recovery_status", ["sent", "uncertain"])
+def test_cold_known_id_uncertainty_recovers_after_main_advances(
+        tmp_path, recovery_status):
     case_path = tmp_path / "main-advanced"
     case_path.mkdir()
     test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
-        case_path, None, False, legacy_neutral_status="uncertain", advance_main=True,
+        case_path, None, False, legacy_neutral_status=recovery_status, advance_main=True,
     )
 
 

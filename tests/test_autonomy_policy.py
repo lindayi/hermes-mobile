@@ -171,7 +171,7 @@ _ISSUE83_INITIAL_REVIEW_FIXTURE = {
 }
 
 _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE = {
-    'deploy/cloud_coordinator.py': '9d3885aeaffa0bde23c775a9f6942d52213c2122c4ae3b98fba1593d85159fc8',
+    'deploy/cloud_coordinator.py': 'd4f4fb84ff6ac31799dd10e6026cee5d466c28f039a4befafab789181bcb7660',
     'deploy/review_evidence.py': 'bc2bea2e4cd17ac28ed96cc5d421f62f63e7ef14ee9bdec5045cf6f26bb8f290',
     'deploy/task_receipts.py': 'aebb19ef819e65f8acb6e7eb8863924a7cb3e0fa45b8b194931c54a6778ec552',
     'deploy/workflow_events.py': '63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e',

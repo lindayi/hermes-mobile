@@ -406,6 +406,18 @@ its bounded test summary. Quoted/fenced/HTML assertions, arbitrary prose,
 ambiguous headers, extra fields, trailing content, or any mismatch remain
 invalid. Receipt fields and all ordinary v1/v2 parsing rules stay strict.
 
+When main advances before the original receipt is adopted, recovery is bounded
+across two cold scans. The first scan validates the original dispatch-base receipt
+and persists its unchanged proof, extending the authorized head chain without
+making its already-collected stale scope current. The next scan can establish
+historical-base eligibility from that retained proof and positive ancestry, then
+reserve the necessary next neutral task against fresh main. Accepting that task
+supersedes the original pending handoff; normal retirement may remove the original
+action, but never its receipt proof, source count, or lifecycle history. Cold replay
+does not dispatch the original task again or reset its receipt waits. After the
+next neutral completes, fresh independent review may authorize genuine source
+repair 4; neutral reservations remain separately counted.
+
 A durable action claim is written before POSTing a task through
 `/agents/repos/{owner}/{repo}/tasks` with the bounded prompt, `base_ref=main`
 and the enrolled PR's current same-repository `head_ref`. The returned task ID
