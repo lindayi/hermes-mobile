@@ -134,7 +134,8 @@ class Orchestrator:
             raise RunConflict('A local run is active or unresolved') from exc
         if created:
             self.journal.event(user['id'], run['id'], 'status', {'status': 'queued'})
-            native_run = dict(run, session_id=context.get('canonical_session_id', run['session_id']))
+            native_run = dict(run, session_id=context.get('canonical_session_id', run['session_id']),
+                              attachment_session_id=run['session_id'])
             task = asyncio.create_task(self._execute(user, native_run, context['history']))
             self._tasks[task] = (dict(user), run)
             task.add_done_callback(lambda done: self._tasks.pop(done, None))
@@ -435,7 +436,8 @@ class Orchestrator:
                 if self.attachments is None:
                     raise IntegrationUnavailable('Private photo storage is unavailable; no image was sent.')
                 kwargs['attachments'] = await asyncio.to_thread(self.attachments.run_images,
-                    user['id'], user['profile'], run['session_id'], run['id'], attachment_ids)
+                    user['id'], user['profile'], run.get('attachment_session_id', run['session_id']),
+                    run['id'], attachment_ids)
                 kwargs['attachment_ids'] = attachment_ids
             async with asyncio.timeout(self.run_timeout):
                 upstream = await self.gateway.start(run['session_id'], run['input'], **kwargs)

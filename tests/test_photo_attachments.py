@@ -3,6 +3,7 @@ import binascii
 import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+import errno
 import io
 import json
 import sqlite3
@@ -39,14 +40,15 @@ def png_fixture(seed=0):
 
 
 @contextmanager
-def photo_client(tmp_path, *, gateway_client=None, **settings_options):
+def photo_client(tmp_path, *, gateway_client=None, raise_server_exceptions=True, **settings_options):
     home = tmp_path / 'native'
     home.mkdir(parents=True)
     create_native_db(home / 'state.db')
     app = create_app(Settings(state_dir=tmp_path / 'app', profiles={'default': home},
                               bootstrap_secret=BOOTSTRAP, **settings_options),
                      gateway_client=gateway_client)
-    with TestClient(app, base_url=ORIGIN) as client:
+    with TestClient(app, base_url=ORIGIN,
+                    raise_server_exceptions=raise_server_exceptions) as client:
         client.headers['Origin'] = ORIGIN
         enroll(client)
         yield app, client
@@ -243,6 +245,50 @@ def test_expiry_reclaims_only_attachment_bytes_and_returns_controlled_placeholde
         assert not (app.state.attachments.objects / (uploaded['id'] + '.png')).exists()
 
 
+@pytest.mark.parametrize('status', ['queued', 'running', 'unknown'])
+def test_run_images_honor_nonterminal_attachment_pins_after_expiry(tmp_path, status):
+    with photo_client(tmp_path) as (app, client):
+        user = client.get(BASE + '/auth/me').json()['user']
+        uploaded = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': f'pinned-{status}'}).json()
+        run, _ = app.state.journal.submit(
+            user['id'], 'default', 'wa-1', 'Use this photo', f'pinned-{status}',
+            attachment_ids=[uploaded['id']], attachment_store=app.state.attachments)
+        if status == 'running':
+            app.state.journal.set_upstream(user['id'], run['id'], 'native-pinned')
+        elif status == 'unknown':
+            app.state.journal.finish(user['id'], run['id'], 'unknown')
+        with app.state.attachments.connection() as db:
+            db.execute('UPDATE attachments SET expires_at=0 WHERE id=?', (uploaded['id'],))
+            db.commit()
+
+        images = app.state.attachments.run_images(
+            user['id'], 'default', 'wa-1', run['id'], [uploaded['id']])
+
+        assert len(images) == 1
+        assert base64.b64decode(images[0]['image_url']['url'].split(',', 1)[1]) == (
+            app.state.attachments.objects / (uploaded['id'] + '.png')).read_bytes()
+
+
+def test_disk_full_upload_returns_actionable_error_and_releases_reservation(tmp_path, monkeypatch):
+    with photo_client(tmp_path, raise_server_exceptions=False) as (app, client):
+        def disk_full(*_args):
+            raise OSError(errno.ENOSPC, 'synthetic full disk')
+
+        monkeypatch.setattr(attachments_module.os, 'write', disk_full)
+        response = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'disk-full'})
+
+        assert response.status_code == 507
+        assert 'storage' in response.json()['detail'].lower()
+        with app.state.attachments.connection() as db:
+            assert db.execute('SELECT count(*) FROM attachments').fetchone()[0] == 0
+        assert list(app.state.attachments.staging.iterdir()) == []
+        assert list(app.state.attachments.objects.iterdir()) == []
+
+
 def test_normalized_image_drops_source_metadata(tmp_path):
     image = Image.new('RGB', (2, 2), 'navy')
     metadata = PngInfo()
@@ -409,7 +455,7 @@ def test_history_binds_photos_to_proven_native_and_synthetic_user_turns(tmp_path
         with sqlite3.connect(app.state.catalog.profiles['default'] / 'state.db') as db:
             db.executemany(
                 'INSERT INTO messages(id,session_id,role,content,tool_calls,timestamp) VALUES(?,?,?,?,?,?)',
-                [(2, 'wa-1', 'user', 'Native photo turn', None, 3),
+                [(2, 'wa-1', 'user', 'Native photo turn\n[screenshot]', None, 3),
                  (3, 'wa-1', 'assistant', 'Native answer', None, 4)])
         app.state.journal.finish(user['id'], native_run['id'], 'completed', 'Native answer')
 
@@ -418,9 +464,10 @@ def test_history_binds_photos_to_proven_native_and_synthetic_user_turns(tmp_path
 
         current_run = submit('history-current', 'Current photo turn', attachment_ids[2])
         with sqlite3.connect(app.state.catalog.profiles['default'] / 'state.db') as db:
-            db.execute(
+            db.executemany(
                 'INSERT INTO messages(id,session_id,role,content,tool_calls,timestamp) VALUES(?,?,?,?,?,?)',
-                (4, 'wa-1', 'user', 'Current photo turn', None, 5))
+                [(4, 'wa-1', 'user', 'Current photo turn\n[screenshot]', None, 5),
+                 (5, 'wa-1', 'assistant', 'Current answer', None, 6)])
         app.state.journal.finish(user['id'], current_run['id'], 'completed', 'Current answer')
 
         with app.state.attachments.connection() as db:
@@ -432,8 +479,13 @@ def test_history_binds_photos_to_proven_native_and_synthetic_user_turns(tmp_path
         assert response.status_code == 200
         user_items = [item for item in response.json()['items'] if item['role'] == 'user']
         by_content = {item['content']: item for item in user_items}
-        assert by_content['Native photo turn']['attachments'][0]['id'] == attachment_ids[0]
-        assert by_content['Native photo turn']['attachments'][0]['status'] == 'bound'
+        native_photo_turn = by_content['Native photo turn\n[screenshot]']
+        assert native_photo_turn['attachments'][0]['id'] == attachment_ids[0]
+        assert native_photo_turn['attachments'][0]['status'] == 'bound'
+        current_photo_turn = by_content['Current photo turn\n[screenshot]']
+        assert current_photo_turn['attachments'][0]['id'] == attachment_ids[2]
+        assert current_photo_turn['attachments'][0]['status'] == 'bound'
+        assert sum(item['content'].startswith('Current photo turn') for item in user_items) == 1
         assert by_content['Synthetic photo turn']['attachments'] == [
             {'id': attachment_ids[1], 'status': 'expired'}]
         current = response.json()['run'] or response.json()['last_run']

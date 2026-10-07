@@ -2,6 +2,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+import errno
 import hashlib
 import io
 import os
@@ -297,6 +298,14 @@ class AttachmentStore:
                 completed = db.execute('SELECT * FROM attachments WHERE id=?',
                                        (attachment_id,)).fetchone()
                 return _metadata(completed)
+        except OSError as exc:
+            if descriptor is not None:
+                os.close(descriptor)
+            if fresh:
+                self.abort(attachment_id)
+            if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                raise AttachmentError(507, 'Photo storage is full; free space or try again later.') from exc
+            raise AttachmentError(503, 'Photo storage is unavailable; try again later.') from exc
         except BaseException:
             if descriptor is not None:
                 os.close(descriptor)
@@ -312,6 +321,8 @@ class AttachmentStore:
             if row is not None:
                 self._unlink(self.staging / (attachment_id + '.part'))
                 self._unlink(self.objects / (attachment_id + '.tmp'))
+                for suffix in ('jpg', 'png', 'webp'):
+                    self._unlink(self.objects / (attachment_id + '.' + suffix))
                 db.execute("DELETE FROM attachments WHERE id=? AND state='receiving'", (attachment_id,))
             db.commit()
 
@@ -404,7 +415,9 @@ class AttachmentStore:
                 row = db.execute('''SELECT * FROM attachments WHERE id=? AND user_id=? AND profile=?
                     AND session_id=? AND run_id=? AND state='bound' ''',
                     (attachment_id, user_id, profile, session_id, run_id)).fetchone()
-                if row is None or not row['stored_name'] or row['expires_at'] <= time.time():
+                if (row is None or not row['stored_name']
+                        or (row['expires_at'] <= time.time()
+                            and not self._run_pinned(db, row['run_id']))):
                     raise AttachmentError(410, 'A photo expired before the native run could use it.')
                 path = self.objects / row['stored_name']
                 flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)

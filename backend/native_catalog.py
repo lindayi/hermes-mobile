@@ -568,9 +568,18 @@ class NativeCatalog:
                 if (run['status'] == 'completed' and isinstance(run['output'], str)
                         and anchor['canonical_session_id'] == session_id):
                     call_field = ',tool_call_id' if 'tool_call_id' in columns else ''
-                    tail = c.execute('SELECT id,role,content,tool_calls' + call_field + ' FROM messages WHERE session_id=? AND id>?'
-                                     + visibility + ' ORDER BY id', (session_id, anchor['message_id']))
-                    if not has_guidance and not has_public_text and _completed_turn(iter(tail), run, snapshot.get('tool_events', ()), processes, reminders):
+                    query = ('SELECT id,role,content,tool_calls' + call_field
+                             + ' FROM messages WHERE session_id=? AND id>?'
+                             + visibility + ' ORDER BY id')
+                    args = (session_id, anchor['message_id'])
+                    first = _first_turn_row(iter(c.execute(query, args)), processes)
+                    complete = (not has_guidance and not has_public_text
+                                and matches_user(first, run, reminders)
+                                and _completed_turn(iter(c.execute(query, args)), run,
+                                                    snapshot.get('tool_events', ()), processes, reminders))
+                    if complete:
+                        if run.get('attachment_ids'):
+                            native_attachments[first['id']] = (run['id'], list(run['attachment_ids']))
                         overlay = None
                 if overlay and rewritten_turn is not None:
                     owned, conservative = rewritten_turn

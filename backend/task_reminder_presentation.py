@@ -199,7 +199,13 @@ def reminder_projections(connection, session_id, columns, snapshot, compressions
 
 
 def matches_user(row, run, reminders=()):
-    return (row is not None and row['role'] == 'user' and
-            (row['content'] == run['input'] or
-             (row['id'] in reminders and reminders[row['id']]['run_id'] == run['id']
-              and reminders[row['id']]['content'] == run['input'])))
+    if row is None or row['role'] != 'user':
+        return False
+    if row['content'] == run['input']:
+        return True
+    if (row['id'] in reminders and reminders[row['id']]['run_id'] == run['id']
+            and reminders[row['id']]['content'] == run['input']):
+        return True
+    attachment_ids = run.get('attachment_ids', [])
+    return (isinstance(attachment_ids, list) and bool(attachment_ids)
+            and row['content'] == run['input'] + '\n[screenshot]' * len(attachment_ids))
