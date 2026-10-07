@@ -320,11 +320,19 @@ def _legacy_neutral_receipt_fields(body, *, nonce, pull_number, start_head,
 
 def _legacy_neutral_prompt_matches(action, session):
     if (
+            not _legacy_neutral_dispatch_matches(action)
+            or not isinstance(session, dict)
+            or session.get("prompt") != action.get("body")
+    ):
+        return False
+    return True
+
+
+def _legacy_neutral_dispatch_matches(action):
+    if (
             not isinstance(action, dict)
             or action.get("kind") != "fix"
             or action.get("task_type") != "neutral"
-            or not isinstance(session, dict)
-            or session.get("prompt") != action.get("body")
             or type(action.get("issue")) is not int or action["issue"] < 1
             or not _nonblank_string(action.get("dispatch_nonce"), limit=128)
             or not isinstance(action.get("body"), str)

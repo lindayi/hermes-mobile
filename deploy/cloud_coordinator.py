@@ -54,6 +54,7 @@ from deploy.task_receipts import (
     REVIEW_REPORT_SCHEMA,
     _time,
     _bounded_path,
+    _legacy_neutral_dispatch_matches,
     find_review_report,
     find_receipt,
     receipt_body_matches,
@@ -82,6 +83,7 @@ REVIEW_REPORT_CORRECTION_LIMIT = 1
 MAX_SESSION_ID_LENGTH = 256
 MAX_THREAD_ID_LENGTH = 256
 MAX_RECEIPT_POLLS = 3
+LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION = "legacy-neutral-v2-carrier-2"
 MAX_HANDOFF_POLLS = 6
 HANDOFF_ACTIVE_STATES = frozenset({
     "pending", "waiting_review", "ready_uncertain", "review_request_uncertain",
@@ -3965,17 +3967,39 @@ class Coordinator:
             if status == "completed" and action.get("handoff_state") == "failed":
                 busy = True
                 continue
-            receipt_recovery = (
+            receipt_recovery_identity = (
                 status == "uncertain"
                 and action.get("kind") == "fix"
                 and action.get("task_type") == "neutral"
                 and isinstance(action.get("task_id"), str)
                 and 0 < len(action["task_id"]) <= 128
                 and _valid_timestamp(action.get("task_created_at"))
+            )
+            initial_receipt_recovery = (
+                receipt_recovery_identity
+                and "receipt_recovery_revision" not in action
                 and (
                     "receipt_recovery_attempted" not in action
                     or action.get("receipt_recovery_attempted") is False
                 )
+            )
+            codec_revision_recovery = (
+                receipt_recovery_identity
+                and action.get("receipt_recovery_attempted") is True
+                and "receipt_recovery_revision" not in action
+                and _legacy_neutral_dispatch_matches(action)
+                and action.get("owner_id") == OWNER_ID
+                and action.get("repository_id") == REPOSITORY_ID
+                and type(action.get("pull_id")) is int
+                and action["pull_id"] > 0
+                and isinstance(action.get("pull_node_id"), str)
+                and bool(action["pull_node_id"])
+                and action.get("issue") == number
+                and action["pull_id"] == snapshot["pull"].get("id")
+                and action["pull_node_id"] == snapshot["pull"].get("node_id")
+            )
+            receipt_recovery = (
+                initial_receipt_recovery or codec_revision_recovery
             )
             if status in {"sending", "uncertain"} and not receipt_recovery:
                 busy = True
@@ -3986,6 +4010,9 @@ class Coordinator:
                     continue
                 self.store.update_action(
                     key, "uncertain", receipt_recovery_attempted=True,
+                    receipt_recovery_revision=(
+                        LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION
+                    ),
                 )
                 action = self.store.action(key)
             if status == "sent" or receipt_recovery:

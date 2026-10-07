@@ -399,10 +399,14 @@ prompt can enable recognition; comment labels or body text cannot opt in. The
 comment must be from the immutable Copilot bot author, unchanged, within the
 ordinary v2 byte and line limits, and contain exactly one final canonical v2
 receipt. Before it, the parser accepts only the observed legacy decision-envelope
-shape: its provider quote is inert and must match the saved starting head, followed
-by one unquoted reconciliation assertion matching the reserved PR, starting
-head, dispatch base, and receipt result head, the conflict-decision section, and
-its bounded test summary. Quoted/fenced/HTML assertions, arbitrary prose,
+shape: its provider quote is inert and must match the saved starting head. The
+quoted outcome marker may be either complete or exactly provider-truncated as
+`<20 lowercase hex characters> -...`; neither marker form is authority. It is
+followed by one unquoted reconciliation assertion matching the reserved PR,
+starting head, dispatch base, and receipt result head, the conflict-decision
+section, and a bounded test summary. The existing separated summary and the
+single observed combined backticked `deploy/autonomy_policy.py` summary are the
+only supported summary forms. Quoted/fenced/HTML assertions, arbitrary prose,
 ambiguous headers, extra fields, trailing content, or any mismatch remain
 invalid. Receipt fields and all ordinary v1/v2 parsing rules stay strict.
 
@@ -494,7 +498,13 @@ above. Preserve its existing waits, uncertainty event, counters, and reservation
 An absent, nonterminal, malformed, or incomplete read remains uncertain and
 cannot be polled again by this recovery path. No recovery path reads or replays a
 lost-create reservation with no known task ID, posts another task, or re-executes
-the neutral task.
+the neutral task. If that bounded read was already consumed by the prior receipt
+codec, one additional read may be reserved only for the new legacy-neutral carrier
+codec revision on that same known-ID uncertain neutral action. Persist the codec
+revision before GET, preserve the prior attempted flag and all history, and never
+repeat that codec read after a cold restart or main change. It still resolves only
+from complete positive unchanged task/session/receipt proof; every other response
+remains uncertain without another read.
 Live REST pull numbers, pull IDs, and head/base repository IDs must be positive
 integers at collection and every dispatch, ready/review handoff, and merge fence;
 booleans, floats, strings, and missing values are not identity proof.

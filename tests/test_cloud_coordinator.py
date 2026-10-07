@@ -3533,7 +3533,8 @@ _LEGACY_HYDRATION_HAZARDS = [
 )
 def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
         tmp_path, hydration_hazard, attempt_ordinals, legacy_neutral_status=None,
-        advance_main=False):
+        advance_main=False, legacy_neutral_receipt_valid=True,
+        legacy_neutral_dispatch_valid=True):
     from copy import deepcopy
     from deploy.task_receipts import receipt_instruction
 
@@ -3841,6 +3842,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     original_get_all = api.get_all
     task_list_records = []
     task_detail_reads = []
+    neutral_task_reads = []
+    neutral_task_id = None
     original_get = api.get
 
     def delayed_task_history(route, *, collection=None):
@@ -3898,6 +3901,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         return values
 
     def task_details(route):
+        if neutral_task_id is not None and route.endswith(f"/{neutral_task_id}"):
+            neutral_task_reads.append(route)
         if route.startswith("agents/repos/lindayi/hermes-mobile/tasks/legacy-source-"):
             task_detail_reads.append(route.rsplit("/", 1)[-1])
             if (history_visible and hydration_hazard == "missing-detail"
@@ -4142,6 +4147,7 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         api.fix_attempts,
     )
     assert result["repair_requested"]
+    neutral_task_id = neutral["task_id"]
     assert "starter-source-provenance" not in result["reasons"]
     assert enrollment["attempts"] == 3
     assert enrollment["neutral_attempts"] == 1
@@ -4195,6 +4201,10 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         neutral_comment["body"] = _legacy_neutral_decision_comment(
             neutral, session_id=f"session-{neutral['task_id']}", result_head=neutral_head,
         )
+        if not legacy_neutral_receipt_valid:
+            neutral_comment["body"] = neutral_comment["body"].replace(
+                "photo inventory and pins", "unverified photo inventory and pins",
+            )
     api.head_sha = api.pull["head"]["sha"] = neutral_head
     api.pull["base"]["sha"] = CURRENT_MAIN
     api.pull.update(mergeable=True, mergeable_state="clean")
@@ -4216,15 +4226,20 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             _legacy_neutral_prompt_matches, validate_task_receipt,
         )
 
-        assert _legacy_neutral_prompt_matches(
-            neutral, api.tasks[neutral["task_id"]]["sessions"][0],
-        ), neutral["body"]
-        assert validate_task_receipt(
-            api.tasks[neutral["task_id"]], neutral, api.pull, api.comments,
-            now=datetime.fromtimestamp(1790856660, timezone.utc),
-        )["legacy_neutral"] is True
+        if legacy_neutral_dispatch_valid:
+            assert _legacy_neutral_prompt_matches(
+                neutral, api.tasks[neutral["task_id"]]["sessions"][0],
+            ), neutral["body"]
+        if legacy_neutral_receipt_valid and legacy_neutral_dispatch_valid:
+            assert validate_task_receipt(
+                api.tasks[neutral["task_id"]], neutral, api.pull, api.comments,
+                now=datetime.fromtimestamp(1790856660, timezone.utc),
+            )["legacy_neutral"] is True
     if legacy_neutral_status == "uncertain":
         neutral_store = StateStore(path)
+        if not legacy_neutral_dispatch_valid:
+            neutral["body"] += " altered"
+            neutral_store.update_action(neutral["key"], "sent", body=neutral["body"])
         neutral_action = neutral_store.action(neutral["key"])
         event = Coordinator(
             api, neutral_store, clock=lambda: 1790856660,
@@ -4232,17 +4247,42 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         neutral_store.update_action_with_lifecycle(
             neutral["key"], "uncertain", event, now=1790856660,
             blocker="execution_uncertain", receipt_waits=MAX_RECEIPT_POLLS,
+            receipt_recovery_attempted=True,
         )
         before_recovery_events = neutral_store.snapshot()["lifecycle_events"]
         before_recovery_proofs = deepcopy(
             neutral_store.snapshot()["enrollments"]["16"]["receipt_proofs"],
         )
     resumed_results = []
+    neutral_reads_before_recovery = len(neutral_task_reads)
     for _ in range(1 if advance_main else 2):
         resumed = Coordinator(
             api, StateStore(path), clock=lambda: 1790856660,
         ).run(apply=True)["pull_requests"][0]
         resumed_results.append(resumed)
+        if not legacy_neutral_receipt_valid or not legacy_neutral_dispatch_valid:
+            still_uncertain = StateStore(path).action(neutral["key"])
+            assert still_uncertain["status"] == "uncertain"
+            assert still_uncertain["receipt_recovery_attempted"] is True
+            assert still_uncertain["receipt_waits"] == MAX_RECEIPT_POLLS
+            if legacy_neutral_dispatch_valid:
+                assert still_uncertain["receipt_recovery_revision"] == (
+                    cloud_coordinator.LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION
+                )
+                assert len(neutral_task_reads) == neutral_reads_before_recovery + 1
+            else:
+                assert "receipt_recovery_revision" not in still_uncertain
+                assert len(neutral_task_reads) == neutral_reads_before_recovery
+    if not legacy_neutral_receipt_valid or not legacy_neutral_dispatch_valid:
+        uncertain_state = StateStore(path).snapshot()
+        assert uncertain_state["enrollments"]["16"]["attempts"] == 3
+        assert uncertain_state["enrollments"]["16"]["neutral_attempts"] == 1
+        assert uncertain_state["enrollments"]["16"]["receipt_proofs"] == proofs
+        assert uncertain_state["lifecycle_events"][:len(before_recovery_events)] == (
+            before_recovery_events
+        )
+        assert api.fix_attempts == 1
+        return
     if legacy_neutral_status is not None:
         recovered = StateStore(path)
         recovered_neutral = recovered.action(neutral["key"])
@@ -4264,6 +4304,9 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         if legacy_neutral_status == "uncertain":
             assert recovered_neutral["receipt_waits"] == MAX_RECEIPT_POLLS
             assert recovered_neutral["receipt_recovery_attempted"] is True
+            assert recovered_neutral["receipt_recovery_revision"] == (
+                cloud_coordinator.LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION
+            )
             assert recovered.snapshot()["lifecycle_events"][:len(before_recovery_events)] == (
                 before_recovery_events
             )
@@ -4377,18 +4420,28 @@ def _legacy_neutral_decision_comment(action, *, session_id, result_head):
     return (
         "\n> Hermes coordinator: The pull request is not based on the current "
         f"same-repository main branch. (head `{start_head}`).\n> \n"
-        "> <!-- hermes-coordinator-outcome:0123456789abcdef0123 -->\n\n"
+        "> <!-- hermes-coordinator-outcome:0123456789abcdef0123 -...\n\n"
         f"Reconciliation of current main `{base_sha}` into PR #{issue} at "
         f"`{start_head}` is pushed as merge commit `{result_head}`.\n\n"
         "Conflict decisions:\n"
-        "1. `tests/synthetic.py` (fixture-union hunk): routine additive "
-        "technical conflict. Decision: retain both behaviors. Rationale: "
-        "both branch intents remain preserved.\n\n"
-        "deploy/autonomy_policy.py merged automatically, retaining both source "
-        "inventories and pins.\n\n"
-        "Focused managed checks observed: 3,008 Python tests passed, 553 "
-        "additional Python tests passed, 38 JS tests passed, and 14 browser "
-        "tests passed. No CI or review result is claimed.\n\n"
+        "1. `tests/test_autonomy_policy.py::_source_files` (fixture-union hunk): "
+        "routine additive technical conflict. Decision: retain both "
+        "`_ISSUE85_PHOTO_FIXTURE` and `_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE`. "
+        "Rationale: the fixtures independently bind the PR photo sources and "
+        "main bounded-repair sources; unioning them preserves both branches' "
+        "source-inventory assertions.\n"
+        "2. `tests/test_autonomy_policy.py::"
+        "test_reviewed_source_fixture_matches_complete_required_contract` "
+        "(pending-set hunk): routine additive technical conflict. Decision: "
+        "include both fixture sets in `pending` and retain both exact-fingerprint "
+        "verification blocks. Rationale: both PR and main candidate bindings "
+        "must remain excluded from historical baselines and checked against "
+        "their actual bytes.\n\n"
+        "`deploy/autonomy_policy.py` merged automatically, retaining the photo "
+        "inventory and pins together with main's bounded-repair pins. Focused "
+        "managed checks observed: 3,008 Python tests passed, 553 additional "
+        "Python tests passed, 38 JS tests passed, and 14 browser tests passed. "
+        "No CI or review result is claimed.\n\n"
         "Hermes-Task-Receipt: v2\n"
         f"nonce={action['dispatch_nonce']}\n"
         f"pr={issue}\n"
@@ -4417,6 +4470,20 @@ def test_cold_known_id_uncertainty_recovers_after_main_advances(
     case_path.mkdir()
     test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
         case_path, None, False, legacy_neutral_status=recovery_status, advance_main=True,
+    )
+
+
+def test_legacy_neutral_codec_recovery_is_not_repeated_after_restart(tmp_path):
+    test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        tmp_path, None, False, legacy_neutral_status="uncertain",
+        legacy_neutral_receipt_valid=False,
+    )
+
+
+def test_codec_recovery_rejects_incomplete_saved_dispatch_metadata(tmp_path):
+    test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        tmp_path, None, False, legacy_neutral_status="uncertain",
+        legacy_neutral_dispatch_valid=False,
     )
 
 

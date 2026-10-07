@@ -171,8 +171,9 @@ def legacy_neutral_binding():
 def test_actual_legacy_neutral_carrier_shape_is_recognized_standalone():
     from deploy.task_receipts import _legacy_neutral_receipt_fields
 
+    body = actual_legacy_neutral_v2_body()
     fields = _legacy_neutral_receipt_fields(
-        actual_legacy_neutral_v2_body(), nonce=NONCE, pull_number=16,
+        body, nonce=NONCE, pull_number=16,
         start_head=START_HEAD, head_sha=RESULT_HEAD, base_sha=BASE,
     )
 
@@ -180,6 +181,34 @@ def test_actual_legacy_neutral_carrier_shape_is_recognized_standalone():
         "nonce": NONCE, "pr": "16", "start_head": START_HEAD, "base": BASE,
         "session": SESSION_ID, "head": RESULT_HEAD, "result": "ready",
     }
+    task, action, pull, comments = legacy_neutral_binding()
+    comments[0]["body"] = body
+    proof = validate_task_receipt(task, action, pull, comments, now=NOW)
+    assert proof["body"] == body
+    assert proof["legacy_neutral"] is True
+
+
+@pytest.mark.parametrize("change", [
+    "truncated-marker", "combined-summary", "extra-paragraph",
+])
+def test_actual_legacy_neutral_carrier_rejects_nearby_shapes(change):
+    from deploy.task_receipts import _legacy_neutral_receipt_fields
+
+    body = actual_legacy_neutral_v2_body()
+    if change == "truncated-marker":
+        body = body.replace("0123456789abcdef0123 -...", "0123456789abcdef0123 -... -->")
+    elif change == "combined-summary":
+        body = body.replace("photo inventory and pins", "unverified photo inventory and pins")
+    else:
+        body = body.replace(
+            "No CI or review result is claimed.\n\nHermes-Task-Receipt:",
+            "No CI or review result is claimed.\n\nExtra prose.\n\nHermes-Task-Receipt:",
+        )
+
+    assert _legacy_neutral_receipt_fields(
+        body, nonce=NONCE, pull_number=16, start_head=START_HEAD,
+        head_sha=RESULT_HEAD, base_sha=BASE,
+    ) is None
 
 
 def transported_v2_body(nonce=NONCE, session_id=SESSION_ID,
