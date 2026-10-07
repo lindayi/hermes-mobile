@@ -117,6 +117,18 @@ real accounts, private photos, and real model calls are never test fixtures.
 
 ## Acceptance evidence
 
+The feature is accepted only when these assembled boundaries pass; helper-only
+tests are insufficient. The listed review symptoms are grouped by shared failure
+boundary so duplicate findings do not create duplicate fixes.
+
+| Boundary | Observable acceptance | Regression seam |
+| --- | --- | --- |
+| Native transport and persistence | Four normalized images within the advertised limits reach the pinned native handler and model input in the same run; complete request size is bounded before admission; unsupported vision is explicit; snapshots, transcripts, caches, and backups retain no image bytes beyond the attachment lifecycle. | Hosted test against the exact pinned-and-patched native source, with synthetic images and model-boundary capture. |
+| Run and history binding | Requested and canonical Session aliases resolve the same owned attachments; native multimodal placeholder turns and completed latest turns retain ordered opaque IDs on the exact user turn without duplicate synthetic turns. | Route-to-native run, then native-persisted history fixture using the pinned serializer and anchored journal identity. |
+| Reservation and storage recovery | Lost responses retry the immutable attachment IDs; dead receiving reservations recover without disturbing live uploads; failed publication leaves no unaccounted file; linked tombstones survive with their run; bounded orphan scans eventually account for every byte before admitting more uploads. | Restart/race, injected publication failure, pagination through more than one cleanup batch, and quota accounting over private storage. |
+| Capacity, expiry, and I/O | Queued, active, and unknown runs pin images consistently through run-time reads; terminal expiry preserves text and bounded tombstones; ENOSPC/EDQUOT produce actionable responses and release reservations; history metadata queries are batched off the event loop. | Synthetic run-state expiry cases, injected filesystem failures, query-count assertions, and event-loop concurrency check. |
+| Composer lifecycle and preview | Retry uses the original submitted IDs; navigation cannot delete an in-flight submission; photos selected while a run is pending remain available; removal restores composer state; rejected batches revoke every preview; steering cannot silently discard photos; selected previews decode under deployed CSP. | Real browser file-input flows for retry, pending selection/removal/navigation, unsupported mixed batches, steering, and both ASGI and Apache CSP. |
+
 Issue #85 adds `backend/attachments.py` to the fixed execution-source inventory
 and Python closure. Only the following current candidate bindings supersede
 earlier pins; historical fixtures and all review/authorization gates remain
