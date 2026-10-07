@@ -37,7 +37,7 @@ for(const outcome of ['abandoned','accepted','late upload','concurrent removal']
     }
     if(path==='/runs'){
       if(outcome==='accepted')return {id:'r1',session_id:'s1',status:'completed'};
-      throw new Error('Synthetic send failure');
+      throw Object.assign(new Error('Synthetic send failure'),{status:422});
     }
     if(path==='/runs/r1')return {id:'r1',session_id:'s1',status:'completed'};
     return {items:[]};
@@ -121,7 +121,7 @@ test('photos selected while a run is pending survive its accepted response',asyn
     ['blob:later.png']);
 });
 
-test('photo retry keeps submitted attachment IDs when a newer photo is selected',async t=>{
+test('ambiguous photo retry blocks a changed photo selection',async t=>{
   const requests=[];
   let uploads=0,runs=0;
   const {doc,app}=await setup(async(path,options={})=>{
@@ -149,11 +149,92 @@ test('photo retry keeps submitted attachment IDs when a newer photo is selected'
   assert.ok(firstKey);
   click(doc,'Photos');select('later.png');
   click(doc,'Send message');await tick();await tick();await tick();
+  assert.equal(requests.length,1,'changed selection must not retry the ambiguous request');
+  assert.equal(requests[0].idempotency_key,firstKey);
+  assert.match(doc.querySelector('.photo-status').textContent,/original text and photo selection unchanged/i);
+  assert.equal(doc.querySelectorAll('.photo-preview').length,2,'neither the original photo nor new selection is discarded');
+});
+
+test('ambiguous text-only retry blocks newly selected photos with recovery guidance',async t=>{
+  const requests=[];
+  const {doc,app}=await setup(async(path,options={})=>{
+    if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+    if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+    if(path.includes('/messages'))return {items:[]};
+    if(path==='/runs'){requests.push(options.body);throw new Error('response lost');}
+    return {items:[]};
+  },win=>{win.URL.createObjectURL=file=>`blob:${file.name}`;});
+  t.after(()=>{app.destroy();doc.defaultView.close();});
+  click(doc,'Photo fixture');await tick();
+  const textarea=doc.querySelector('textarea'),input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+  textarea.value='Describe the next photo';textarea.dispatchEvent(new win.Event('input'));
+  click(doc,'Send message');await tick();await tick();
+  Object.defineProperty(input,'files',{configurable:true,value:[
+    new win.File(['synthetic'],'new-photo.png',{type:'image/png'}),
+  ]});
+  input.dispatchEvent(new win.Event('change'));
+  click(doc,'Send message');await tick();
+  assert.equal(requests.length,1,'new photos cannot be omitted from an ambiguous text-only retry');
+  assert.match(doc.querySelector('.photo-status').textContent,/uncertain outcome.*original text and photo selection unchanged/i);
+  assert.equal(textarea.value,'Describe the next photo');
+  assert.equal(doc.querySelectorAll('.photo-preview').length,1);
+});
+
+test('ambiguous photo retry keeps the submitted photos locked and reuses the exact request',async t=>{
+  const requests=[];
+  let uploads=0,runs=0;
+  const {doc,app}=await setup(async(path,options={})=>{
+    if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+    if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+    if(path.includes('/messages'))return {items:[]};
+    if(path==='/sessions/s1/attachments')
+      return {id:String(++uploads).padStart(32,'0'),status:'pending'};
+    if(path==='/runs'){
+      requests.push(options.body);
+      if(++runs===1)throw new Error('response lost');
+      return {id:'r1',session_id:'s1',status:'completed'};
+    }
+    if(path==='/runs/r1')return {id:'r1',session_id:'s1',status:'completed'};
+    return {items:[]};
+  },win=>{win.URL.createObjectURL=file=>`blob:${file.name}`;});
+  t.after(()=>{app.destroy();doc.defaultView.close();});
+  click(doc,'Photo fixture');await tick();
+  const input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+  Object.defineProperty(input,'files',{configurable:true,value:[
+    new win.File(['synthetic'],'submitted.png',{type:'image/png'}),
+  ]});
+  input.dispatchEvent(new win.Event('change'));
+  click(doc,'Send message');await tick();await tick();await tick();
+  const remove=doc.querySelector('[aria-label="Remove photo 1"]');
+  assert.equal(remove.disabled,true,'ambiguous submitted photos cannot be released');
+  click(doc,'Send message');await tick();await tick();await tick();
   assert.equal(requests.length,2);
-  assert.equal(requests[1].idempotency_key,firstKey);
-  assert.deepEqual(requests[1].attachments,[String(1).padStart(32,'0')]);
+  assert.equal(requests[1].idempotency_key,requests[0].idempotency_key);
+  assert.deepEqual(requests[1].attachments,requests[0].attachments);
+  assert.deepEqual([...doc.querySelectorAll('.photo-preview img')].map(img=>img.getAttribute('src')),[]);
+  assert.equal(uploads,1,'retry reuses the uploaded attachment');
+});
+
+test('cancelled photo selection leaves the draft and selected photos unchanged',async t=>{
+  const {doc,app}=await setup(async path=>{
+    if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+    if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+    if(path.includes('/messages'))return {items:[]};
+    return {items:[]};
+  },win=>{win.URL.createObjectURL=file=>`blob:${file.name}`;});
+  t.after(()=>{app.destroy();doc.defaultView.close();});
+  click(doc,'Photo fixture');await tick();
+  const input=doc.querySelector('input[type=file]'),win=doc.defaultView,textarea=doc.querySelector('textarea');
+  textarea.value='Keep my draft';textarea.dispatchEvent(new win.Event('input'));
+  Object.defineProperty(input,'files',{configurable:true,value:[
+    new win.File(['synthetic'],'selected.png',{type:'image/png'}),
+  ]});
+  input.dispatchEvent(new win.Event('change'));
+  Object.defineProperty(input,'files',{configurable:true,value:[]});
+  input.dispatchEvent(new win.Event('change'));
+  assert.equal(textarea.value,'Keep my draft');
   assert.deepEqual([...doc.querySelectorAll('.photo-preview img')].map(img=>img.getAttribute('src')),
-    ['blob:later.png']);
+    ['blob:selected.png']);
 });
 
 test('removing a photo during its upload restores the composer for retry',async t=>{
@@ -862,8 +943,6 @@ test('notification deep link opens authorized inbox and never submits or approve
   assert.equal(calls.some(c=>c.options.method==='POST'),false);
   assert.equal(doc.querySelector('[aria-current="page"]').getAttribute('aria-label'),'Inbox');
 });
-
-
 
 
 

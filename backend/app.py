@@ -725,8 +725,8 @@ def create_app(settings=None, *, gateway_client=None):
         try:
             run=await runtime.submit(user,body.model_dump(exclude_none=True))
             if run.get('attachment_ids'):
-                run['attachments']=attachments.metadata_for_history(
-                    user,run['session_id'],run['attachment_ids'])
+                run['attachments']=await asyncio.to_thread(
+                    attachments.metadata_for_history,user,run['session_id'],run['attachment_ids'])
             return run
         except AttachmentError:
             raise

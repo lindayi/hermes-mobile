@@ -1064,8 +1064,16 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const input=textarea.value.trim() || 'Please describe the attached image(s), including any visible text.';
       let previous=attempts.get(session.id);
       try { previous ||= JSON.parse(storage.get(key(`attempt:${session.id}`))); } catch {}
-      if(previous?.attachment_ids && previous.input!==input)
-        throw new Error('A previous photo send is unresolved. Retry it unchanged before sending a new message.');
+      if(Array.isArray(previous?.attachment_ids)){
+        const submittedPhotos=selectedPhotos.filter(photo=>previous.attachment_ids.includes(photo.metadata?.id));
+        const changedPhotoSelection=submittedPhotos.length!==selectedPhotos.length
+          || submittedPhotos.length!==previous.attachment_ids.length;
+        if(changedPhotoSelection || (previous.attachment_ids.length && previous.input!==input)){
+          photoStatus.hidden=false;
+          photoStatus.textContent='This send has an uncertain outcome. Retry the original text and photo selection unchanged; remove any newly selected photos before retrying.';
+          throw new Error('The original text and photo selection must be retried unchanged while the send outcome is uncertain.');
+        }
+      }
       if(previous?.input!==input && !modelControls.canSubmit())throw new Error('Saved model choice could not be checked. Reload before sending.');
       const selection=modelControls.selection();
       const attempt=previous?.input===input ? previous : {input,idempotency_key:win.crypto.randomUUID(),...(selection?{selection}:{} )};
@@ -1093,14 +1101,26 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         attempt.attachment_ids=attachments;
         attempts.set(session.id,attempt);storage.set(key(`attempt:${session.id}`),JSON.stringify(attempt));
         pendingPhotoSubmission={attachmentIds:attachments,photos:submittedPhotos};
+        renderPhotoSelection();
         const {attachment_ids: savedAttachmentIds,...requestAttempt}=attempt;
         run=await api.request('/runs',{method:'POST',body:{session_id:session.id,...requestAttempt,...(attachments.length?{attachments}:{})}});
         connection.success(token);
       }catch(error){
-        pendingPhotoSubmission=null;
         connection.failure(token);
-        if(owner===state.user?.id && [400,422].includes(error.status) && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);currentModelSync?.(owner,session.id);}
-        if(version===routeVersion){photoStatus.hidden=false;photoStatus.textContent=`Photo or message was not sent. Your text and selected photos are retained. ${error.message || 'Try again.'}`;composerAction.set('idle');syncModelLock();}
+        const rejectedBeforeAdmission=[400,413,422,507].includes(error.status);
+        if(rejectedBeforeAdmission){
+          pendingPhotoSubmission=null;
+          if(owner===state.user?.id && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){
+            attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);currentModelSync?.(owner,session.id);
+          }
+        }
+        if(version===routeVersion){
+          photoStatus.hidden=false;
+          photoStatus.textContent=rejectedBeforeAdmission
+            ? `Photo or message was not sent. Your text and selected photos are retained. ${error.message || 'Correct the issue and try again.'}`
+            : `The send outcome is uncertain. Your text and submitted photos are retained; retry the original request unchanged. ${error.message || ''}`;
+          renderPhotoSelection();composerAction.set('idle');syncModelLock();
+        }
         throw error;
       }
       if(owner!==state.user?.id)return;

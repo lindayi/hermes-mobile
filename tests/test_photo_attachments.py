@@ -451,7 +451,7 @@ def test_normalized_image_drops_source_metadata(tmp_path):
 
 
 def test_owned_photo_reaches_the_same_native_run_as_text_without_journal_bytes(tmp_path, monkeypatch):
-    native_payloads = []
+    native_payloads, metadata_threads = [], []
     image_threads, gateway_threads = [], []
 
     async def upstream(request):
@@ -471,12 +471,23 @@ def test_owned_photo_reaches_the_same_native_run_as_text_without_journal_bytes(t
                             execution_ready=True, transport=httpx.MockTransport(upstream))
     with photo_client(tmp_path, gateway_client=gateway) as (app, client):
         run_images = app.state.attachments.run_images
+        metadata_for_history = app.state.attachments.metadata_for_history
 
         def observed_images(*args):
             image_threads.append(threading.get_ident())
             return run_images(*args)
 
+        def observed_metadata(*args):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                metadata_threads.append(False)
+            else:
+                metadata_threads.append(True)
+            return metadata_for_history(*args)
+
         monkeypatch.setattr(app.state.attachments, 'run_images', observed_images)
+        monkeypatch.setattr(app.state.attachments, 'metadata_for_history', observed_metadata)
         upload = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
                              headers={'Idempotency-Key': 'run-photo-upload'})
         attachment_id = upload.json()['id']
@@ -497,6 +508,8 @@ def test_owned_photo_reaches_the_same_native_run_as_text_without_journal_bytes(t
         assert len(native_payloads) == 1
         assert len(image_threads) == 1
         assert image_threads[0] != gateway_threads[0], 'image I/O must not run on the orchestration loop'
+        assert metadata_threads and not any(metadata_threads), (
+            'attachment SQL must not run on the request event loop')
         payload = native_payloads[0]
         assert payload['mobile_attachment_ids'] == [attachment_id]
         content = payload['input'][-1]['content']
