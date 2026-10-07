@@ -378,11 +378,33 @@ classification, decision, and rationale explaining preservation of both branch
 intents (or genuine incompatibility). This is a deliverable under the existing
 task receipt and independent-review contract, not a new receipt schema or an
 automatic semantic approval. A current-main fence is rechecked before dispatch.
+The decision commentary and receipt are separate comments: first post the
+conflict decisions as a PR comment, then construct and validate the exact
+receipt-only payload before posting one dedicated receipt comment. That comment
+contains only the canonical v2 header and its seven bound fields, in the
+documented order, with no quote, fence, prose, or extra fields. Do not combine
+the decision commentary and receipt in one comment. The receipt comment is
+completion evidence only; it is not CI, review, merge, or deployment approval.
 The prompt directs genuinely incompatible requirements or broken required policy
 to a fixed typed result; these stop further repair for that exact head. Waiting or
 uncertain tasks retain the shared lock. Ordinary technical conflicts are repaired
 within the shared budget; exhaustion or ambiguous execution becomes a meaningful
 owner blocker rather than an unbounded retry.
+
+One bounded compatibility rule covers the already-dispatched legacy neutral
+reservation whose original prompt asked for the conflict decisions in a PR
+comment while requiring a prose-free receipt in that same comment. Only the
+saved neutral reservation and its byte-identical authenticated task-session
+prompt can enable recognition; comment labels or body text cannot opt in. The
+comment must be from the immutable Copilot bot author, unchanged, within the
+ordinary v2 byte and line limits, and contain exactly one final canonical v2
+receipt. Before it, the parser accepts only the observed legacy decision-envelope
+shape: its provider quote is inert and must match the saved starting head, followed
+by one unquoted reconciliation assertion matching the reserved PR, starting
+head, dispatch base, and receipt result head, the conflict-decision section, and
+its bounded test summary. Quoted/fenced/HTML assertions, arbitrary prose,
+ambiguous headers, extra fields, trailing content, or any mismatch remain
+invalid. Receipt fields and all ordinary v1/v2 parsing rules stay strict.
 
 A durable action claim is written before POSTing a task through
 `/agents/repos/{owner}/{repo}/tasks` with the bounded prompt, `base_ref=main`
@@ -451,6 +473,16 @@ identities matching the fixed owner/repository before any terminal failure can
 release the lock or emit `task_failed`. Missing or malformed identity evidence
 retains the sent claim, then reaches bounded `execution_uncertain`; it never
 blindly starts another task. Task and session IDs remain opaque strings.
+After the bounded receipt-poll limit, an uncertain neutral reservation with a
+known persisted task ID and creation time receives at most one additional
+read-only reconciliation attempt. It can resolve only from a fresh GET of that
+exact task with complete original task/session/branch/repository identity,
+positive terminal completion, and the unchanged authenticated receipt contract
+above. Preserve its existing waits, uncertainty event, counters, and reservation.
+An absent, nonterminal, malformed, or incomplete read remains uncertain and
+cannot be polled again by this recovery path. No recovery path reads or replays a
+lost-create reservation with no known task ID, posts another task, or re-executes
+the neutral task.
 Live REST pull numbers, pull IDs, and head/base repository IDs must be positive
 integers at collection and every dispatch, ready/review handoff, and merge fence;
 booleans, floats, strings, and missing values are not identity proof.
