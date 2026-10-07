@@ -234,7 +234,7 @@ def _legacy_neutral_receipt_fields(body, *, nonce, pull_number, start_head,
             )
             or lines[2] != "> "
             or re.fullmatch(
-                r"> <!-- hermes-coordinator-outcome:[0-9a-f]{20} -->",
+                r"> <!-- hermes-coordinator-outcome:[0-9a-f]{20} (?:-->|-\.\.\.)",
                 lines[3],
             ) is None
             or lines[4] != ""
@@ -258,25 +258,42 @@ def _legacy_neutral_receipt_fields(body, *, nonce, pull_number, start_head,
         if decisions > 8 or line.startswith(f"{decisions}. ") is False:
             return None
         index += 1
-    if (not decisions or index + 5 + 8 != len(lines)
-            or lines[index] != ""
-            or re.fullmatch(
-                r"[A-Za-z0-9_./-]+ merged automatically, "
-                r"[A-Za-z0-9 ,.'-]{1,256}\.",
-                lines[index + 1],
-            ) is None
-            or lines[index + 2] != ""
-            or re.fullmatch(
-                r"Focused managed checks observed: "
-                r"[A-Za-z0-9 ,.'-]{1,512}\. "
-                r"No CI or review result is claimed\.",
-                lines[index + 3],
-            ) is None
-            or lines[index + 4] != ""
-    ):
+    if not decisions or index >= len(lines) or lines[index] != "":
         return None
 
-    receipt_start = index + 5
+    separated_summary = (
+        index + 13 == len(lines)
+        and re.fullmatch(
+            r"[A-Za-z0-9_./-]+ merged automatically, "
+            r"[A-Za-z0-9 ,.'-]{1,256}\.",
+            lines[index + 1],
+        ) is not None
+        and lines[index + 2] == ""
+        and re.fullmatch(
+            r"Focused managed checks observed: "
+            r"[A-Za-z0-9 ,.'-]{1,512}\. "
+            r"No CI or review result is claimed\.",
+            lines[index + 3],
+        ) is not None
+        and lines[index + 4] == ""
+    )
+    combined_summary = (
+        index + 11 == len(lines)
+        and lines[index + 1] == (
+            "`deploy/autonomy_policy.py` merged automatically, retaining the photo "
+            "inventory and pins together with main's bounded-repair pins. Focused "
+            "managed checks observed: 3,008 Python tests passed, 553 additional "
+            "Python tests passed, 38 JS tests passed, and 14 browser tests passed. "
+            "No CI or review result is claimed."
+        )
+        and lines[index + 2] == ""
+    )
+    if separated_summary:
+        receipt_start = index + 5
+    elif combined_summary:
+        receipt_start = index + 3
+    else:
+        return None
     if receipt_start + 8 != len(lines):
         return None
     session_line = lines[receipt_start + 5]
@@ -303,11 +320,19 @@ def _legacy_neutral_receipt_fields(body, *, nonce, pull_number, start_head,
 
 def _legacy_neutral_prompt_matches(action, session):
     if (
+            not _legacy_neutral_dispatch_matches(action)
+            or not isinstance(session, dict)
+            or session.get("prompt") != action.get("body")
+    ):
+        return False
+    return True
+
+
+def _legacy_neutral_dispatch_matches(action):
+    if (
             not isinstance(action, dict)
             or action.get("kind") != "fix"
             or action.get("task_type") != "neutral"
-            or not isinstance(session, dict)
-            or session.get("prompt") != action.get("body")
             or type(action.get("issue")) is not int or action["issue"] < 1
             or not _nonblank_string(action.get("dispatch_nonce"), limit=128)
             or not isinstance(action.get("body"), str)

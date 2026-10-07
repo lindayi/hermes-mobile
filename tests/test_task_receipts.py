@@ -109,6 +109,44 @@ def legacy_neutral_v2_body():
     )
 
 
+def actual_legacy_neutral_v2_body():
+    return (
+        "\n> Hermes coordinator: The pull request is not based on the current "
+        "same-repository main branch. (head `"
+        f"{START_HEAD}`).\n> \n"
+        "> <!-- hermes-coordinator-outcome:0123456789abcdef0123 -...\n\n"
+        f"Reconciliation of current main `{BASE}` into PR #16 at `{START_HEAD}` "
+        f"is pushed as merge commit `{RESULT_HEAD}`.\n\n"
+        "Conflict decisions:\n"
+        "1. `tests/test_autonomy_policy.py::_source_files` (fixture-union hunk): "
+        "routine additive technical conflict. Decision: retain both "
+        "`_ISSUE85_PHOTO_FIXTURE` and `_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE`. "
+        "Rationale: the fixtures independently bind the PR photo sources and "
+        "main bounded-repair sources; unioning them preserves both branches' "
+        "source-inventory assertions.\n"
+        "2. `tests/test_autonomy_policy.py::"
+        "test_reviewed_source_fixture_matches_complete_required_contract` "
+        "(pending-set hunk): routine additive technical conflict. Decision: "
+        "include both fixture sets in `pending` and retain both exact-fingerprint "
+        "verification blocks. Rationale: both PR and main candidate bindings "
+        "must remain excluded from historical baselines and checked against "
+        "their actual bytes.\n\n"
+        "`deploy/autonomy_policy.py` merged automatically, retaining the photo "
+        "inventory and pins together with main's bounded-repair pins. Focused "
+        "managed checks observed: 3,008 Python tests passed, 553 additional "
+        "Python tests passed, 38 JS tests passed, and 14 browser tests passed. "
+        "No CI or review result is claimed.\n\n"
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={NONCE}\n"
+        "pr=16\n"
+        f"start_head={START_HEAD}\n"
+        f"base={BASE}\n"
+        f"session={SESSION_ID}\n"
+        f"head={RESULT_HEAD}\n"
+        "result=ready"
+    )
+
+
 def legacy_neutral_binding():
     task, action, pull, comments = v2_binding()
     action.update(kind="fix", task_type="neutral", recorded_base_sha=BASE)
@@ -128,6 +166,49 @@ def legacy_neutral_binding():
     task["sessions"][0]["prompt"] = action["body"]
     comments[0]["body"] = legacy_neutral_v2_body()
     return task, action, pull, comments
+
+
+def test_actual_legacy_neutral_carrier_shape_is_recognized_standalone():
+    from deploy.task_receipts import _legacy_neutral_receipt_fields
+
+    body = actual_legacy_neutral_v2_body()
+    fields = _legacy_neutral_receipt_fields(
+        body, nonce=NONCE, pull_number=16,
+        start_head=START_HEAD, head_sha=RESULT_HEAD, base_sha=BASE,
+    )
+
+    assert fields == {
+        "nonce": NONCE, "pr": "16", "start_head": START_HEAD, "base": BASE,
+        "session": SESSION_ID, "head": RESULT_HEAD, "result": "ready",
+    }
+    task, action, pull, comments = legacy_neutral_binding()
+    comments[0]["body"] = body
+    proof = validate_task_receipt(task, action, pull, comments, now=NOW)
+    assert proof["body"] == body
+    assert proof["legacy_neutral"] is True
+
+
+@pytest.mark.parametrize("change", [
+    "truncated-marker", "combined-summary", "extra-paragraph",
+])
+def test_actual_legacy_neutral_carrier_rejects_nearby_shapes(change):
+    from deploy.task_receipts import _legacy_neutral_receipt_fields
+
+    body = actual_legacy_neutral_v2_body()
+    if change == "truncated-marker":
+        body = body.replace("0123456789abcdef0123 -...", "0123456789abcdef0123 -... -->")
+    elif change == "combined-summary":
+        body = body.replace("photo inventory and pins", "unverified photo inventory and pins")
+    else:
+        body = body.replace(
+            "No CI or review result is claimed.\n\nHermes-Task-Receipt:",
+            "No CI or review result is claimed.\n\nExtra prose.\n\nHermes-Task-Receipt:",
+        )
+
+    assert _legacy_neutral_receipt_fields(
+        body, nonce=NONCE, pull_number=16, start_head=START_HEAD,
+        head_sha=RESULT_HEAD, base_sha=BASE,
+    ) is None
 
 
 def transported_v2_body(nonce=NONCE, session_id=SESSION_ID,

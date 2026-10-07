@@ -54,6 +54,7 @@ from deploy.task_receipts import (
     REVIEW_REPORT_SCHEMA,
     _time,
     _bounded_path,
+    _legacy_neutral_dispatch_matches,
     find_review_report,
     find_receipt,
     receipt_body_matches,
@@ -82,6 +83,7 @@ REVIEW_REPORT_CORRECTION_LIMIT = 1
 MAX_SESSION_ID_LENGTH = 256
 MAX_THREAD_ID_LENGTH = 256
 MAX_RECEIPT_POLLS = 3
+LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION = "legacy-neutral-v2-carrier-2"
 MAX_HANDOFF_POLLS = 6
 HANDOFF_ACTIVE_STATES = frozenset({
     "pending", "waiting_review", "ready_uncertain", "review_request_uncertain",
@@ -2915,6 +2917,41 @@ def _pull_identity(pull, binding):
             and pull.get("node_id") == binding["pull_node_id"])
 
 
+def _legacy_neutral_receipt_recovery_binding(action, pull, number, expected_base_sha):
+    base = pull.get("base") if isinstance(pull, dict) else None
+    return (
+        isinstance(action, dict)
+        and action.get("status") == "uncertain"
+        and action.get("kind") == "fix"
+        and action.get("task_type") == "neutral"
+        and action.get("issue") == number
+        and isinstance(action.get("task_id"), str)
+        and 0 < len(action["task_id"]) <= 128
+        and _valid_timestamp(action.get("task_created_at"))
+        and type(action.get("receipt_waits")) is int
+        and action["receipt_waits"] == MAX_RECEIPT_POLLS
+        and action.get("receipt_recovery_attempted") is True
+        and "receipt_recovery_revision" not in action
+        and action.get("owner_id") == OWNER_ID
+        and action.get("repository_id") == REPOSITORY_ID
+        and type(action.get("pull_id")) is int
+        and action["pull_id"] > 0
+        and isinstance(action.get("pull_node_id"), str)
+        and bool(action["pull_node_id"])
+        and _is_sha(action.get("recorded_base_sha"))
+        and action.get("main_sha") == expected_base_sha
+        and f"the PR's recorded base is `{action['recorded_base_sha']}`." in (
+            action.get("body", "")
+        )
+        and _legacy_neutral_dispatch_matches(action)
+        and _pull_identity(pull, action)
+        and isinstance(base, dict)
+        and base.get("ref") == MAIN_BRANCH
+        and _github_identity(base.get("repo"), REPOSITORY_ID)
+        and base.get("sha") == expected_base_sha
+    )
+
+
 def _mergeability_unknown(pull):
     state = pull.get("mergeable_state")
     return (type(pull.get("mergeable")) is not bool or type(state) is not str
@@ -3686,10 +3723,12 @@ class Coordinator:
         )
 
     def _reconcile_actions(self, snapshot, actions, *, apply, handoffs=None,
-                           review_publications=None):
+                           review_publications=None, receipt_recoveries=None,
+                           recovery_keys=None):
         # Reconciliation never performs handoff mutations; it only collects them.
         handoffs = [] if handoffs is None else handoffs
         review_publications = [] if review_publications is None else review_publications
+        receipt_recoveries = [] if receipt_recoveries is None else receipt_recoveries
         number = snapshot["issue"]
         busy = False
         historical_dirty = (
@@ -3701,6 +3740,8 @@ class Coordinator:
             # Recover ambiguous ownership before advancing any predecessor,
             # regardless of the detached scan snapshot's iteration order.
             for key, action in actions.items():
+                if recovery_keys is not None and key not in recovery_keys:
+                    continue
                 if (action.get("issue") == number and action.get("kind") == "fix"
                         and action.get("status") in {"sending", "uncertain"}
                         and (action.get("status") == "sending"
@@ -3714,6 +3755,8 @@ class Coordinator:
             # its stale waiting_review scan record back over that transition.
             actions = self.store.actions()
         for key, action in actions.items():
+            if recovery_keys is not None and key not in recovery_keys:
+                continue
             if action.get("issue") != number:
                 continue
             status = action.get("status")
@@ -3965,17 +4008,39 @@ class Coordinator:
             if status == "completed" and action.get("handoff_state") == "failed":
                 busy = True
                 continue
-            receipt_recovery = (
+            receipt_recovery_identity = (
                 status == "uncertain"
                 and action.get("kind") == "fix"
                 and action.get("task_type") == "neutral"
                 and isinstance(action.get("task_id"), str)
                 and 0 < len(action["task_id"]) <= 128
                 and _valid_timestamp(action.get("task_created_at"))
+            )
+            initial_receipt_recovery = (
+                receipt_recovery_identity
+                and "receipt_recovery_revision" not in action
                 and (
                     "receipt_recovery_attempted" not in action
                     or action.get("receipt_recovery_attempted") is False
                 )
+            )
+            codec_revision_recovery = (
+                receipt_recovery_identity
+                and action.get("receipt_recovery_attempted") is True
+                and "receipt_recovery_revision" not in action
+                and _legacy_neutral_dispatch_matches(action)
+                and action.get("owner_id") == OWNER_ID
+                and action.get("repository_id") == REPOSITORY_ID
+                and type(action.get("pull_id")) is int
+                and action["pull_id"] > 0
+                and isinstance(action.get("pull_node_id"), str)
+                and bool(action["pull_node_id"])
+                and action.get("issue") == number
+                and action["pull_id"] == snapshot["pull"].get("id")
+                and action["pull_node_id"] == snapshot["pull"].get("node_id")
+            )
+            receipt_recovery = (
+                initial_receipt_recovery or codec_revision_recovery
             )
             if status in {"sending", "uncertain"} and not receipt_recovery:
                 busy = True
@@ -3984,9 +4049,13 @@ class Coordinator:
                 if not apply:
                     busy = True
                     continue
-                self.store.update_action(
-                    key, "uncertain", receipt_recovery_attempted=True,
-                )
+                if recovery_keys is None:
+                    receipt_recoveries.append(key)
+                    busy = True
+                    continue
+                if not self.store.claim_receipt_recovery(key, action):
+                    busy = True
+                    continue
                 action = self.store.action(key)
             if status == "sent" or receipt_recovery:
                 task_id = action.get("task_id")
@@ -4855,7 +4924,7 @@ class Coordinator:
             return "observation"
         return None
 
-    def _plan_pull(self, snapshot, actions, *, apply):
+    def _plan_pull(self, snapshot, actions, *, apply, reconciled_busy=None):
         number, head = snapshot["issue"], snapshot["head"]
         if snapshot.get("terminal"):
             lifecycle = []
@@ -4929,10 +4998,14 @@ class Coordinator:
         status_action = None
         handoffs = []
         review_publications = []
-        agent_busy = self._reconcile_actions(
-            snapshot, actions, apply=apply, handoffs=handoffs,
-            review_publications=review_publications,
-        )
+        receipt_recoveries = []
+        agent_busy = reconciled_busy
+        if agent_busy is None:
+            agent_busy = self._reconcile_actions(
+                snapshot, actions, apply=apply, handoffs=handoffs,
+                review_publications=review_publications,
+                receipt_recoveries=receipt_recoveries,
+            )
         if apply:
             actions = self.store.actions()
         if not report_recovery_superseded:
@@ -4988,6 +5061,7 @@ class Coordinator:
                 "required_checks_green": checks_ok, "auto_merge_eligible": False,
                 "reasons": ["task-result-blocked"], "repair": None,
                 "status_action": None, "merge_action": None, "outcomes": [outcome],
+                "receipt_recoveries": receipt_recoveries, "handoffs": handoffs,
             }
         if authorized_head is not None and (
                 not _is_sha(authorized_head) or head not in authorized_heads):
@@ -4997,6 +5071,7 @@ class Coordinator:
                 "required_checks_green": checks_ok, "auto_merge_eligible": False,
                 "reasons": ["unauthorized-continuation"], "repair": None,
                 "status_action": None, "merge_action": None, "outcomes": [],
+                "receipt_recoveries": receipt_recoveries, "handoffs": handoffs,
             }
         current_evidence = _repair_evidence(
             head, snapshot["threads"],
@@ -5576,7 +5651,8 @@ class Coordinator:
                 "status_action": status_action,
                 "merge_action": merge_action, "auto_merge_requested": merge_requested,
                 "outcomes": notification_outcomes,
-                "lifecycle_events": lifecycle_events, "handoffs": handoffs}
+                "lifecycle_events": lifecycle_events, "handoffs": handoffs,
+                "receipt_recoveries": receipt_recoveries}
 
     def _build_plan(self, *, apply):
         state = self.store.snapshot()
@@ -5636,7 +5712,8 @@ class Coordinator:
 
     def _fence_pull(self, number, head, main_sha=None, *,
                     allow_historical_reconciliation=False,
-                    allow_historical_dirty=False, expected_base_sha=None):
+                    allow_historical_dirty=False, expected_base_sha=None,
+                    neutral_receipt_recovery_action=None):
         pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
         base = pull.get("base") if isinstance(pull, dict) else None
         actual = pull.get("head") if isinstance(pull, dict) else None
@@ -5657,11 +5734,24 @@ class Coordinator:
             if not isinstance(current_main, dict) or current_main.get("sha") != main_sha:
                 return False
             if (base.get("sha") != main_sha
-                    and (not allow_historical_reconciliation
-                         or not self._historical_base_can_reconcile(
-                             pull, main_sha, head,
-                             allow_dirty=allow_historical_dirty,
-                         ))):
+                    and not (
+                        allow_historical_reconciliation
+                        and self._historical_base_can_reconcile(
+                            pull, main_sha, head,
+                            allow_dirty=allow_historical_dirty,
+                        )
+                    )
+                    and not (
+                        pull.get("mergeable") is False
+                        and pull.get("mergeable_state") == "dirty"
+                        and _legacy_neutral_receipt_recovery_binding(
+                            neutral_receipt_recovery_action, pull, number,
+                            expected_base_sha,
+                        )
+                        and self._historical_base_can_reconcile(
+                            pull, main_sha, head, allow_dirty=True,
+                        )
+                    )):
                 return False
         return pull
 
@@ -6146,7 +6236,7 @@ class Coordinator:
                     or current.get("initial_source") != expected_source):
                 raise CoordinatorError("Initial starter source evidence changed before state commit")
 
-    def _apply(self, plan, *, after_commit=None):
+    def _apply(self, plan, *, after_commit=None, acknowledgements=None):
         self._fence_starter_admissions(plan.get("starter_admissions", ()))
         self._fence_starter_sources(
             plan.get("starter_sources", ()), plan["enrollments"], plan["main_sha"],
@@ -6181,6 +6271,50 @@ class Coordinator:
             self.store.retire(
                 snapshot["issue"], snapshot["head"], snapshot["main_sha"],
             )
+            for key in pr_plan.get("receipt_recoveries", ()):
+                recovery_action = self.store.action(key)
+                if recovery_action is None:
+                    continue
+                current = self._fence_pull(
+                    snapshot["issue"], snapshot["head"], snapshot["main_sha"],
+                    allow_historical_reconciliation=True,
+                    allow_historical_dirty=snapshot.get("historical_base") is True,
+                    expected_base_sha=snapshot["pull"]["base"]["sha"],
+                    neutral_receipt_recovery_action=recovery_action,
+                )
+                if (not current or current.get("id") != snapshot["pull"].get("id")
+                        or current.get("node_id") != snapshot["pull"].get("node_id")):
+                    continue
+                busy = self._reconcile_actions(
+                    snapshot, self.store.actions(), apply=True,
+                    handoffs=pr_plan["handoffs"], recovery_keys=(key,),
+                )
+                recovered = self.store.action(key)
+                if recovered and recovered.get("status") == "completed":
+                    refreshed = self._plan_pull(
+                        snapshot, self.store.actions(), apply=True,
+                        reconciled_busy=busy,
+                    )
+                    refreshed["handoffs"].extend(pr_plan["handoffs"])
+                    refreshed.setdefault("review_publications", []).extend(
+                        pr_plan.get("review_publications", ()),
+                    )
+                    state = self.store.snapshot()
+                    try:
+                        events = filter_acknowledged_replays(
+                            refreshed.get("lifecycle_events", []),
+                            active=state["lifecycle_events"],
+                            context=(state.get("lifecycle_context") or {}).get("events", []),
+                            acknowledgements=acknowledgements,
+                            now=datetime.fromtimestamp(plan["now"], timezone.utc),
+                        )
+                    except (TypeError, ValueError) as error:
+                        raise CoordinatorError(
+                            "Recovered lifecycle evidence is unavailable"
+                        ) from error
+                    for event in events:
+                        self.store.record_lifecycle(event, now=plan["now"])
+                    pr_plan = refreshed
             # Handoff mutations require the successfully committed scan above.
             for key in pr_plan.get("handoffs", ()):
                 handoff = self.store.action(key)
@@ -6421,7 +6555,8 @@ class Coordinator:
                             "Lifecycle owner binding changed before state commit"
                         )
                 pull_requests = self._apply(
-                    plan, after_commit=lambda: self.store.write_lifecycle_export(
+                    plan, acknowledgements=acknowledgements,
+                    after_commit=lambda: self.store.write_lifecycle_export(
                         now=self.clock(), owner_user_id=owner_user_id,
                         directory=export_directory,
                     ),
@@ -7132,6 +7267,23 @@ class StateStore:
                 action["status"] = status
                 action.update(fields)
         self._mutate(update)
+
+    def claim_receipt_recovery(self, key, expected):
+        if self._prepared is not None:
+            raise CoordinatorError("Receipt recovery requires a committed scan")
+
+        def claim(data):
+            action = data["actions"].get(key)
+            if (action != expected or not isinstance(action, dict)
+                    or action.get("status") != "uncertain"
+                    or "receipt_recovery_revision" in action):
+                return False
+            action.update(
+                receipt_recovery_attempted=True,
+                receipt_recovery_revision=LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION,
+            )
+            return True
+        return self._mutate(claim)
 
     @staticmethod
     def _supersede_neutral_predecessors(data, action):
