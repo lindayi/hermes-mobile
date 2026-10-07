@@ -500,11 +500,20 @@ cannot be polled again by this recovery path. No recovery path reads or replays 
 lost-create reservation with no known task ID, posts another task, or re-executes
 the neutral task. If that bounded read was already consumed by the prior receipt
 codec, one additional read may be reserved only for the new legacy-neutral carrier
-codec revision on that same known-ID uncertain neutral action. Persist the codec
-revision before GET, preserve the prior attempted flag and all history, and never
-repeat that codec read after a cold restart or main change. It still resolves only
+codec revision on that same known-ID uncertain neutral action. Planning only
+collects recovery candidates; read-only planning neither claims nor GETs them.
+After the complete scan and its commit fences succeed, recheck the live pull,
+main, and original pull identity under the existing apply execution lock. A
+no-GET preflight abort leaves the revision unclaimed for a later valid scan.
+Atomically claim the exact unchanged original reservation through the existing
+state transaction before GET; prepared-state updates are not durable claims.
+Preserve the prior attempted flag and all history, and never repeat that codec
+read after an interruption, cold restart, later failure, or main change. Failed
+claim persistence prevents GET. It still resolves only
 from complete positive unchanged task/session/receipt proof; every other response
-remains uncertain without another read.
+remains uncertain without another read. Successful recovery refreshes downstream
+planning without repeating reconciliation; newly derived lifecycle events are
+durably recorded before their outcomes are published.
 Live REST pull numbers, pull IDs, and head/base repository IDs must be positive
 integers at collection and every dispatch, ready/review handoff, and merge fence;
 booleans, floats, strings, and missing values are not identity proof.

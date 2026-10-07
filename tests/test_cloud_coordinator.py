@@ -2594,6 +2594,14 @@ def test_known_id_uncertain_neutral_with_unproven_completion_is_read_once(
     if advance_main:
         api.current_main_sha = "f" * 40
         api.pull["mergeable_state"] = "behind"
+        api.compare_results.update({
+            f"{CURRENT_MAIN}...{api.current_main_sha}": _compare_result(
+                CURRENT_MAIN, ahead_by=1,
+            ),
+            f"{CURRENT_MAIN}...{neutral_head}": _compare_result(
+                CURRENT_MAIN, ahead_by=2,
+            ),
+        })
     event = coordinator._record_uncertain_task(neutral)
     store.update_action_with_lifecycle(
         neutral["key"], "uncertain", event, now=1790856660,
@@ -3534,7 +3542,8 @@ _LEGACY_HYDRATION_HAZARDS = [
 def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
         tmp_path, hydration_hazard, attempt_ordinals, legacy_neutral_status=None,
         advance_main=False, legacy_neutral_receipt_valid=True,
-        legacy_neutral_dispatch_valid=True):
+        legacy_neutral_dispatch_valid=True, recovery_interruption=None,
+        recovery_lifecycle_probe=False):
     from copy import deepcopy
     from deploy.task_receipts import receipt_instruction
 
@@ -4255,6 +4264,149 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         )
     resumed_results = []
     neutral_reads_before_recovery = len(neutral_task_reads)
+    if recovery_lifecycle_probe:
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+        notifications = coordinator._notification_outcomes
+        events = []
+
+        def refreshed_notifications(snapshot, reasons):
+            outcomes, lifecycle = notifications(snapshot, reasons)
+            if coordinator.store.action(neutral["key"]).get("status") == "completed":
+                event = cloud_coordinator._lifecycle_event(
+                    snapshot, "execution_exhausted", occurred_at=coordinator._now_string(),
+                    incident="synthetic-refreshed-budget",
+                )
+                events.append(event)
+                lifecycle.append(event)
+            return outcomes, lifecycle
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(coordinator, "_notification_outcomes", refreshed_notifications)
+            coordinator.run(apply=True)
+        assert len(events) == 1
+        recovered = StateStore(path).snapshot()
+        assert events[0] in recovered["lifecycle_events"]
+        exported = json.loads(event_export.read_text())
+        assert events[0] in exported["events"]
+        assert recovered["lifecycle_events"][:len(before_recovery_events)] == (
+            before_recovery_events
+        )
+        assert recovered["enrollments"]["16"]["attempts"] == 3
+        assert recovered["enrollments"]["16"]["neutral_attempts"] == 1
+        assert recovered["enrollments"]["16"]["receipt_proofs"][:3] == before_recovery_proofs
+        assert len(neutral_task_reads) == neutral_reads_before_recovery + 1
+        assert api.fix_attempts == 1
+        return
+    if recovery_interruption is not None:
+        before = StateStore(path).snapshot()
+        posts = [write for write in api.writes if write[0].endswith("/tasks")]
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run()
+        assert StateStore(path).snapshot() == before
+        assert len(neutral_task_reads) == neutral_reads_before_recovery
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+        with pytest.MonkeyPatch.context() as patch:
+            if recovery_interruption in {"after-get", "concurrent"}:
+                get = api.get
+
+                def interrupt_get(route):
+                    result = get(route)
+                    if route.endswith(f"/{neutral_task_id}"):
+                        if recovery_interruption == "concurrent":
+                            with pytest.raises(CoordinatorError, match="already running"):
+                                Coordinator(
+                                    api, StateStore(path), clock=lambda: 1790856660,
+                                ).run(apply=True)
+                            Coordinator(
+                                api, StateStore(path), clock=lambda: 1790856660,
+                            ).run()
+                        raise RuntimeError("interrupted after actual GET")
+                    return result
+
+                patch.setattr(api, "get", interrupt_get)
+            elif recovery_interruption == "later-snapshot":
+                build = coordinator._build_plan
+
+                def interrupt_snapshot(*, apply):
+                    build(apply=apply)
+                    raise RuntimeError("later snapshot failed")
+
+                patch.setattr(coordinator, "_build_plan", interrupt_snapshot)
+            elif recovery_interruption == "commit-fence":
+                def interrupt_fence(*args, **kwargs):
+                    raise RuntimeError("scan commit fence failed")
+
+                patch.setattr(coordinator, "_fence_starter_sources", interrupt_fence)
+            elif recovery_interruption == "claim-failure":
+                claim = coordinator.store.claim_receipt_recovery
+
+                def failed_save(*args, **kwargs):
+                    raise RuntimeError("claim transaction failed")
+
+                def interrupt_claim(*args, **kwargs):
+                    with pytest.MonkeyPatch.context() as transaction:
+                        transaction.setattr(coordinator.store, "_save", failed_save)
+                        return claim(*args, **kwargs)
+
+                patch.setattr(coordinator.store, "claim_receipt_recovery", interrupt_claim)
+            elif recovery_interruption in {"head-changed", "main-changed", "pull-changed"}:
+                get = api.get
+
+                def changed_binding(route):
+                    result = deepcopy(get(route))
+                    if route == "repos/lindayi/hermes-mobile/pulls/16":
+                        if recovery_interruption == "head-changed":
+                            result["head"]["sha"] = "9" * 40
+                        elif recovery_interruption == "pull-changed":
+                            result["id"] += 1
+                    if (recovery_interruption == "main-changed"
+                            and route == "repos/lindayi/hermes-mobile/commits/main"):
+                        result["sha"] = "9" * 40
+                    return result
+
+                fence = coordinator._fence_pull
+
+                def changed_preflight(*args, **kwargs):
+                    with pytest.MonkeyPatch.context() as preflight:
+                        preflight.setattr(api, "get", changed_binding)
+                        return fence(*args, **kwargs)
+
+                patch.setattr(coordinator, "_fence_pull", changed_preflight)
+            else:
+                patch.setattr(coordinator, "_fence_pull", lambda *a, **kw: False)
+            if recovery_interruption in {
+                    "preflight-abort", "head-changed", "main-changed", "pull-changed",
+            }:
+                coordinator.run(apply=True)
+            else:
+                with pytest.raises(RuntimeError, match="GET|snapshot|fence|transaction"):
+                    coordinator.run(apply=True)
+        interrupted = StateStore(path).snapshot()
+        saved = interrupted["actions"][neutral["key"]]
+        consumed = recovery_interruption in {"after-get", "concurrent"}
+        assert len(neutral_task_reads) == neutral_reads_before_recovery + int(consumed)
+        if not consumed:
+            assert "receipt_recovery_revision" not in saved
+        assert saved["receipt_recovery_attempted"] is True
+        assert saved["receipt_waits"] == MAX_RECEIPT_POLLS
+        assert saved["status"] == "uncertain"
+        assert interrupted["enrollments"]["16"]["attempts"] == 3
+        assert interrupted["enrollments"]["16"]["neutral_attempts"] == 1
+        assert interrupted["enrollments"]["16"]["receipt_proofs"] == before_recovery_proofs
+        assert interrupted["lifecycle_events"] == before_recovery_events
+        for _ in range(2):
+            Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        assert len(neutral_task_reads) == neutral_reads_before_recovery + 1
+        if consumed:
+            assert saved["receipt_recovery_revision"] == (
+                cloud_coordinator.LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION
+            )
+        assert [write for write in api.writes if write[0].endswith("/tasks")] == posts
+        cold = StateStore(path).snapshot()
+        assert cold["enrollments"]["16"]["attempts"] == 3
+        assert cold["enrollments"]["16"]["neutral_attempts"] == 1
+        assert cold["enrollments"]["16"]["receipt_proofs"] == before_recovery_proofs
+        assert cold["lifecycle_events"] == before_recovery_events
+        return
     for _ in range(1 if advance_main else 2):
         resumed = Coordinator(
             api, StateStore(path), clock=lambda: 1790856660,
@@ -4480,10 +4632,31 @@ def test_legacy_neutral_codec_recovery_is_not_repeated_after_restart(tmp_path):
     )
 
 
+@pytest.mark.parametrize("advance_main", [False, True])
+@pytest.mark.parametrize("interruption", [
+    "after-get", "later-snapshot", "commit-fence", "concurrent", "preflight-abort",
+    "claim-failure", "head-changed", "main-changed", "pull-changed",
+])
+def test_codec_recovery_claim_survives_interrupted_execution(
+        tmp_path, interruption, advance_main):
+    test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        tmp_path, None, False, legacy_neutral_status="uncertain",
+        legacy_neutral_receipt_valid=False, advance_main=advance_main,
+        recovery_interruption=interruption,
+    )
+
+
 def test_codec_recovery_rejects_incomplete_saved_dispatch_metadata(tmp_path):
     test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
         tmp_path, None, False, legacy_neutral_status="uncertain",
         legacy_neutral_dispatch_valid=False,
+    )
+
+
+def test_codec_recovery_persists_refreshed_lifecycle_before_export(tmp_path):
+    test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
+        tmp_path, None, False, legacy_neutral_status="uncertain",
+        recovery_lifecycle_probe=True,
     )
 
 
