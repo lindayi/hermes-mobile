@@ -512,6 +512,8 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(
         })
         api.tasks[task_id] = {
             "id": task_id, "state": terminal,
+            "created_at": "2026-10-01T12:00:00Z",
+            "updated_at": completed_at,
             "creator": {"id": OWNER}, "owner": {"id": OWNER},
             "repository": {"id": 1399942965},
             "artifacts": [

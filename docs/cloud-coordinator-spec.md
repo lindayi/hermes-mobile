@@ -510,6 +510,15 @@ Terminal source tasks await a verified evaluation before another source reservat
 Pre-upgrade unscored receipts remain explicitly unknown rather than blocking forever.
 Legacy shared counts are split only after authenticating every unique retained
 task/session, prompt, and receipt chain, without inventing ordinals or task types.
+For every receipt-backed recovered reservation, inline or hydrated and with or
+without a saved attempt ordinal, the existing receipt validator's timezone-aware
+chronology applies: task creation must be at or before session creation, the
+authenticated receipt must fall within the session interval, and session completion
+must not be in the future. Ordinal-bearing terminal reservations without receipts
+still require valid task, session, and completion chronology. Hydrated task
+`created_at` must match the authenticated task-list value exactly.
+Missing, malformed, out-of-order, or list/detail-inconsistent timestamps preserve
+unknown history and block dispatch; no timestamp or ledger value is synthesized.
 New source, neutral, and independent-review follow-up request hashes include the
 literal `budget-v2:` discriminator so split ordinals cannot collide with retained
 legacy completed keys. Historical keys, bodies, nonces and receipts are unchanged;
@@ -605,6 +614,41 @@ itself establish a historical no-progress streak or replace fresh checks and
 independent review. Source acceptance remains distinct from merge approval and
 deployment.
 
+When a paginated task-list item for a saved retained receipt has `session_count: 1`
+but omits `sessions`, the coordinator may hydrate only that exact, uniquely listed
+task ID with an authenticated task-detail GET. The list record must be terminal and
+bound to the expected owner and repository; the detail must repeat its exact task
+ID and terminal state, match those identities, and contain exactly one authenticated
+terminal session with the saved receipt's task/session/nonce chronology and prompt
+binding. Hydrated details are used only for that retained receipt's migration
+decision; they never replace list inventory used for occupancy or duplicate
+detection. Missing, duplicate, malformed, mismatched, or unauthenticated list/detail
+evidence leaves history unknown and dispatch blocked. Hydration is bounded by the
+saved reservation history and never creates task records or infers missing sessions.
+
+An authenticated historical ready handoff may qualify for neutral reconciliation
+when its recorded base is an ancestor of both the freshly read main and exact PR
+head, and the PR's mergeability fields are a consistent confirmed pair: `true` with
+`behind`, or `false` with `dirty`. The `false`/`dirty` case is available only to
+neutral reconciliation; report-correction work retains the existing `true`/`behind`
+historical rule. All other, unknown, or inconsistent combinations remain ineligible.
+This exception authorizes only the existing bounded neutral reservation path; it
+never treats the historical PR as current-base eligible or enables merging. Fresh
+identity, receipt, ancestry, dispatch, and pre-send fences remain mandatory.
+
+A completed authenticated malformed review with an unused correction does not
+occupy the historical `false`/`dirty` neutral path: planning emits neither a
+correction action nor a correction anchor, and the available report retry is
+retained. Active or uncertain correction reservations still occupy the workflow.
+Correction anchors recheck their frozen main and behind-only historical eligibility
+before enqueueing and publication; a newly dirty base suppresses publication and
+yields to neutral reconciliation on the next scan. An unpublished anchor remains
+pending while mergeability or ancestry eligibility is unavailable, so recovery to
+the same confirmed behind binding can resume without replaying a publication.
+Proven head or main changes still supersede it. Correction task dispatch and
+review/status publication retain their independent fresh fences. Lost task POST
+responses remain reserved and cannot cause a second neutral dispatch.
+
 Legacy records that predate the separate neutral counter retain a conservative
 unknown marker until every shared reservation is accounted for by retained task
 claims or authenticated receipt proofs. Reservation type comes from the exact
@@ -629,6 +673,11 @@ source nor neutral work is dispatched, and no exhaustion notice or lifecycle eve
 is created. The enrollment, counts, receipt proofs, historical events, and consumer
 acknowledgements remain intact. When complete authenticated task/session history
 returns, the coordinator resumes once using the same counters and proofs.
+
+Hydrated task details are checked against each matched retained receipt even when
+the record already carries an attempt ordinal: session completion time and the
+nonce-bound prompt instruction must match. Ordinal-less reservations additionally
+require that authenticated receipt binding and cannot infer a missing receipt.
 
 The 20-attempt ceiling is grounded in a small, nonrandom sample of merged cloud
 pull requests, not a percentile or guarantee. The audit used authenticated

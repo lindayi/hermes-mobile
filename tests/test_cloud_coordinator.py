@@ -1726,8 +1726,11 @@ class FakeApi:
             query = parse_qs(urlparse(route).query)
             if query.get("since"):
                 since = query["since"][0]
-                values = [comment for comment in values
-                          if comment.get("updated_at", "") >= since]
+                values = [
+                    comment for comment in values
+                    if isinstance(comment.get("updated_at", ""), str)
+                    and comment.get("updated_at", "") >= since
+                ]
             return values
         if route.endswith("/pulls/16/files?per_page=100"):
             return list(self.review_pull_files())
@@ -2129,8 +2132,15 @@ def _ready_sha_bound_handoff(tmp_path):
     return api, store, coordinator, first
 
 
-def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(tmp_path):
+@pytest.mark.parametrize(
+    "mergeable, mergeable_state",
+    [(True, "behind"), (False, "dirty")],
+    ids=["behind", "dirty"],
+)
+def test_stale_base_ready_receipt_allows_one_neutral_reconciliation(
+        tmp_path, mergeable, mergeable_state):
     api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
+    api.pull.update(mergeable=mergeable, mergeable_state=mergeable_state)
     store._mutate(lambda state: state["actions"].__setitem__(
         "fix:17:uncertain",
         {"kind": "fix", "issue": 17, "status": "uncertain"},
@@ -2578,10 +2588,11 @@ def test_compare_evidence_rejects_inconsistent_equal_sha_status(
 @pytest.mark.parametrize("hazard", [
     "active-task", "uncertain-task", "wrong-ref", "wrong-repository", "wrong-head",
     "wrong-head-repo", "wrong-compare-base", "main-diverged", "head-diverged", "unknown-history",
-    "partial-compare", "edited-receipt",
+    "partial-compare", "edited-receipt", "inconsistent-dirty", "inconsistent-behind",
 ])
 def test_stale_base_reconciliation_fails_closed(tmp_path, hazard):
     api, store, coordinator, first = _ready_sha_bound_handoff(tmp_path)
+    api.pull.update(mergeable=False, mergeable_state="dirty")
     if hazard == "active-task":
         api.tasks[first["task_id"]]["state"] = "in_progress"
     elif hazard == "uncertain-task":
@@ -2626,6 +2637,10 @@ def test_stale_base_reconciliation_fails_closed(tmp_path, hazard):
         )
         receipt_comment["body"] += "\nedited"
         receipt_comment["updated_at"] = "2026-10-01T12:06:00Z"
+    elif hazard == "inconsistent-dirty":
+        api.pull.update(mergeable=True, mergeable_state="dirty")
+    elif hazard == "inconsistent-behind":
+        api.pull.update(mergeable=False, mergeable_state="behind")
 
     attempts_before = store.snapshot()["enrollments"]["16"]["attempts"]
     try:
@@ -3282,7 +3297,8 @@ def test_cold_legacy_mixed_budget_request_identity(tmp_path, producer, occupancy
             ),
         }
         api.tasks[task_id] = {
-            "id": task_id, "creator": {"id": OWNER}, "owner": {"id": OWNER},
+            "id": task_id, "created_at": "2026-10-01T12:00:00Z",
+            "creator": {"id": OWNER}, "owner": {"id": OWNER},
             "repository": {"id": 1399942965},
             "artifacts": [{"provider": "github", "type": "branch",
                            "data": {"head_ref": "topic", "base_ref": "main"}}],
@@ -3372,8 +3388,91 @@ def test_cold_legacy_mixed_budget_request_identity(tmp_path, producer, occupancy
     assert api.task_posts == (1 if occupancy is None else 0)
 
 
+_LEGACY_HYDRATION_HAZARDS = [
+    (None, False),
+    (None, True),
+    *[
+        ((field, value), ordinals)
+        for field in (
+            "listed-task-state", "detail-task-state", "session-state",
+            "reservation-type", "task-id", "receipt-task-id", "session-id",
+            "receipt-session-id", "detail-task-id", "detail-session-id",
+            "detail-session-task-id",
+        )
+        for value in ([], {}, None, False, 7)
+        for ordinals in (False, True)
+    ],
+    ("duplicate-list", False),
+    ("malformed-list", False),
+    ("missing-detail", False),
+    ("foreign-detail", False),
+    ("multiple-sessions", False),
+    ("missing-sessions", False),
+    ("mismatched-detail-id", False),
+    ("mismatched-session", False),
+    ("foreign-session", False),
+    ("task-created-missing", False),
+    ("task-created-missing", True),
+    ("task-created-type", False),
+    ("task-created-type", True),
+    ("task-created-invalid", False),
+    ("task-created-invalid", True),
+    ("task-updated-missing", False),
+    ("task-updated-missing", True),
+    ("task-updated-type", False),
+    ("task-updated-type", True),
+    ("task-updated-invalid", False),
+    ("task-updated-invalid", True),
+    ("task-updated-before-completion", False),
+    ("task-updated-before-completion", True),
+    ("task-updated-after-now", False),
+    ("task-updated-after-now", True),
+    ("list-detail-updated-mismatch", False),
+    ("list-detail-updated-mismatch", True),
+    ("task-created-after-session", False),
+    ("task-created-after-session", True),
+    ("session-created-missing", False),
+    ("session-created-missing", True),
+    ("session-created-type", False),
+    ("session-created-type", True),
+    ("session-created-invalid", False),
+    ("session-created-invalid", True),
+    ("session-created-after-receipt", False),
+    ("session-created-after-receipt", True),
+    ("session-completed-missing", False),
+    ("session-completed-missing", True),
+    ("session-completed-type", False),
+    ("session-completed-type", True),
+    ("session-completed-invalid", False),
+    ("session-completed-invalid", True),
+    ("receipt-created-missing", False),
+    ("receipt-created-missing", True),
+    ("receipt-created-type", False),
+    ("receipt-created-type", True),
+    ("receipt-created-invalid", False),
+    ("receipt-created-invalid", True),
+    ("receipt-created-before-session", False),
+    ("receipt-created-before-session", True),
+    ("receipt-created-after-completion", False),
+    ("receipt-created-after-completion", True),
+    ("list-detail-created-mismatch", False),
+    ("list-detail-created-mismatch", True),
+]
+
+
+@pytest.mark.parametrize(
+    "hydration_hazard,attempt_ordinals",
+    _LEGACY_HYDRATION_HAZARDS,
+    ids=[
+        f"{hazard or 'valid'}{'-ordinal' if ordinals else ''}"
+        for hazard, ordinals in _LEGACY_HYDRATION_HAZARDS
+    ],
+)
 def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advance(
-        tmp_path):
+        tmp_path, hydration_hazard, attempt_ordinals):
+    from copy import deepcopy
+    from deploy.task_receipts import receipt_instruction
+
     api = ProgressApi(unresolved=False)
     api.pull["body"] = "Synthetic linked pull request."
     legacy_head = "3" * 40
@@ -3417,7 +3516,10 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         session_id = f"legacy-session-{attempt}"
         nonce = f"legacy-nonce-{attempt}"
         comment_id = 8000 + attempt
-        created_at = f"2026-09-30T10:0{attempt}:00Z"
+        created_at = (
+            "2026-09-30T09:30:00Z" if attempt == 1
+            else f"2026-09-30T10:0{attempt}:00Z"
+        )
         body = (
             "Hermes-Task-Receipt: v2\n"
             f"nonce={nonce}\npr=16\nstart_head={start_head}\n"
@@ -3428,13 +3530,14 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             "created_at": created_at, "updated_at": created_at,
         })
         proofs.append({
-            "issue": 16, "kind": "fix", "task_type": "source",
-            "status": "completed", "attempt": attempt, "head": start_head,
+            "issue": 16, "kind": "fix", "status": "completed",
+            "head": start_head,
             "task_id": task_id, "dispatch_nonce": nonce,
             "receipt_result": "ready", "receipt_comment_id": comment_id,
             "receipt_created_at": created_at, "receipt_body": body,
             "receipt_task_id": task_id, "receipt_session_id": session_id,
-            "receipt_completed_at": created_at, "receipt_nonce": nonce,
+            "receipt_completed_at": "2026-09-30T10:15:00Z",
+            "receipt_nonce": nonce,
             "receipt_start_head": start_head, "receipt_head": result_head,
             "receipt_base": BASE, "receipt_version": "v2", "main_sha": BASE,
             "owner_id": OWNER, "repository_id": 1399942965,
@@ -3442,6 +3545,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         })
         api.tasks[task_id] = {
             "id": task_id, "state": "completed",
+            "created_at": "2026-09-30T09:00:00Z",
+            "updated_at": "2026-09-30T10:20:00Z",
             "creator": {"id": OWNER}, "owner": {"id": OWNER},
             "repository": {"id": 1399942965},
             "artifacts": [
@@ -3459,18 +3564,40 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                 "user": {"id": OWNER}, "owner": {"id": OWNER},
                 "repository": {"id": 1399942965},
                 "head_ref": "topic", "base_ref": "main",
+                "created_at": (
+                    "2026-09-30T10:30:00+01:00" if attempt == 1
+                    else "2026-09-30T10:00:00Z"
+                ),
+                "completed_at": "2026-09-30T10:15:00Z",
                 "prompt": (
                     f"Please address bounded review/check follow-up for PR #16 "
-                    f"at head `{start_head}`."
+                    f"at head `{start_head}`.\n\n"
+                    + receipt_instruction(
+                        nonce, pull_number=16, start_head=start_head, base_sha=BASE,
+                    )
                 ),
             }],
         }
         start_head = result_head
 
+    if (isinstance(hydration_hazard, str)
+            and hydration_hazard.startswith("task-updated-")):
+        task = api.tasks["legacy-source-1"]
+        if hydration_hazard == "task-updated-missing":
+            task.pop("updated_at")
+        elif hydration_hazard == "task-updated-type":
+            task["updated_at"] = 123
+        elif hydration_hazard == "task-updated-invalid":
+            task["updated_at"] = "not-a-timestamp"
+        elif hydration_hazard == "task-updated-before-completion":
+            task["updated_at"] = "2026-09-30T10:14:59Z"
+        else:
+            task["updated_at"] = "2026-10-01T12:11:01Z"
+
     api.head_sha = legacy_head
     api.pull["head"]["sha"] = legacy_head
     api.current_main_sha = CURRENT_MAIN
-    api.pull["mergeable_state"] = "behind"
+    api.pull.update(mergeable=False, mergeable_state="dirty")
     api.compare_results = {
         f"{BASE}...{CURRENT_MAIN}": _compare_result(BASE, ahead_by=1),
         f"{BASE}...{legacy_head}": _compare_result(BASE, ahead_by=3),
@@ -3517,6 +3644,24 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     enrollment.pop("neutral_attempts")
     enrollment.pop("neutral_attempts_unknown")
     enrollment.pop("repair_progress")
+    if (isinstance(hydration_hazard, tuple)
+            and hydration_hazard[0] in {
+                "reservation-type", "task-id", "receipt-task-id", "session-id",
+                "receipt-session-id",
+            }):
+        field = {
+            "reservation-type": "task_type",
+            "task-id": "task_id",
+            "receipt-task-id": "receipt_task_id",
+            "session-id": "session_id",
+            "receipt-session-id": "receipt_session_id",
+        }[hydration_hazard[0]]
+        value = deepcopy(hydration_hazard[1])
+        enrollment["receipt_proofs"][0][field] = value
+        proofs[0][field] = deepcopy(value)
+        if field in {"task_id", "receipt_task_id"}:
+            enrollment["receipt_proofs"][0].pop("receipt_result")
+            proofs[0].pop("receipt_result")
     legacy["actions"][f"review:negative:{legacy_head}"] = {
         "key": f"review:negative:{legacy_head}",
         "kind": "review", "task_type": "independent-review", "issue": 16,
@@ -3547,12 +3692,28 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     cold_store = StateStore(path)
     assert cold_store.snapshot()["enrollments"]["16"]["neutral_attempts_unknown"]
     assert not any(action.get("kind") == "fix" for action in cold_store.actions().values())
+    for index, proof in enumerate(proofs):
+        fields = {"attempt", "task_type", "repair_policy_version"} & set(proof)
+        expected_fields = (
+            {"task_type"}
+            if index == 0 and isinstance(hydration_hazard, tuple)
+            and hydration_hazard[0] == "reservation-type"
+            else set()
+        )
+        assert fields == expected_fields
     from deploy.cloud_coordinator import _legacy_neutral_attempt_count, _valid_receipt_proof
-    assert all(_valid_receipt_proof(proof, api.comments) for proof in proofs)
-    assert _legacy_neutral_attempt_count(
+    if not (
+            isinstance(hydration_hazard, tuple)
+            and hydration_hazard[0] in {
+                "task-id", "receipt-task-id", "receipt-session-id",
+            }
+    ):
+        assert all(_valid_receipt_proof(proof, api.comments) for proof in proofs)
+    recovered_count = _legacy_neutral_attempt_count(
         cold_store.snapshot()["enrollments"]["16"], {},
         api.comments,
         tasks=list(api.tasks.values()),
+        now=datetime.fromtimestamp(1790856660, timezone.utc),
         snapshot={
             "issue": 16,
             "pull": {
@@ -3560,25 +3721,215 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                 "head": {"ref": "topic"},
             },
         },
-    ) == 0
+    )
+    expected_count = (
+        None
+        if isinstance(hydration_hazard, tuple)
+        and hydration_hazard[0] in {
+            "reservation-type", "task-id", "receipt-task-id", "session-id",
+            "receipt-session-id",
+        }
+        or (isinstance(hydration_hazard, str) and hydration_hazard in {
+            "task-updated-missing", "task-updated-type", "task-updated-invalid",
+            "task-updated-before-completion", "task-updated-after-now",
+        })
+        else 0
+    )
+    assert recovered_count == expected_count
+
+    ordinal_enrollment = deepcopy(
+        cold_store.snapshot()["enrollments"]["16"],
+    )
+    ordinal_enrollment["receipt_proofs"] = deepcopy(proofs)
+    if attempt_ordinals:
+        for ordinal, proof in enumerate(ordinal_enrollment["receipt_proofs"], 1):
+            proof["attempt"] = ordinal
+    listed_tasks = [
+        {
+            **{key: value for key, value in task.items() if key != "sessions"},
+            "session_count": len(task.get("sessions", [])),
+        }
+        for task in api.tasks.values()
+    ]
+    for corruption in ("missing-instruction", "wrong-completion-time"):
+        details = deepcopy(api.tasks)
+        session = details["legacy-source-1"]["sessions"][0]
+        if corruption == "missing-instruction":
+            session["prompt"] = session["prompt"].split(
+                "\n\nHermes-Task-Receipt: v2", 1,
+            )[0]
+        else:
+            session["completed_at"] = "2026-10-01T12:59:59Z"
+        assert _legacy_neutral_attempt_count(
+            ordinal_enrollment, {}, api.comments, tasks=listed_tasks,
+            now=datetime.fromtimestamp(1790856660, timezone.utc),
+            snapshot={
+                "issue": 16,
+                "pull": {
+                    "id": api.pull["id"], "node_id": api.pull["node_id"],
+                    "head": {"ref": "topic"},
+                },
+            },
+            task_details=details,
+        ) is None
 
     history_visible = False
     original_get_all = api.get_all
+    task_list_records = []
+    task_detail_reads = []
+    original_get = api.get
 
     def delayed_task_history(route, *, collection=None):
         values = original_get_all(route, collection=collection)
         if (route.startswith("agents/repos/lindayi/hermes-mobile/tasks?")
                 and not history_visible):
-            return [task for task in values if task.get("id") != "legacy-source-1"]
+            values = [task for task in values if task.get("id") != "legacy-source-1"]
+        if route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
+            values = [
+                {
+                    **{key: value for key, value in task.items() if key != "sessions"},
+                    "session_count": len(task.get("sessions", [])),
+                }
+                for task in values
+            ]
+            if (history_visible and isinstance(hydration_hazard, str)
+                    and hydration_hazard.startswith("task-created-")):
+                task = next(
+                    task for task in values if task["id"] == "legacy-source-1"
+                )
+                if hydration_hazard == "task-created-missing":
+                    task.pop("created_at")
+                elif hydration_hazard == "task-created-type":
+                    task["created_at"] = 123
+                elif hydration_hazard == "task-created-invalid":
+                    task["created_at"] = "not-a-timestamp"
+                else:
+                    task["created_at"] = "2026-09-30T09:45:00Z"
+            if (history_visible and isinstance(hydration_hazard, tuple)
+                    and hydration_hazard[0] == "listed-task-state"):
+                next(task for task in values
+                     if task["id"] == "legacy-source-1")["state"] = deepcopy(
+                         hydration_hazard[1]
+                     )
+            if (history_visible
+                    and hydration_hazard == "list-detail-updated-mismatch"):
+                next(task for task in values
+                     if task["id"] == "legacy-source-1")["updated_at"] = (
+                         "2026-09-30T10:20:01Z"
+                     )
+            if (history_visible
+                    and hydration_hazard == "list-detail-created-mismatch"):
+                next(task for task in values
+                     if task["id"] == "legacy-source-1")["created_at"] = (
+                         "2026-09-30T08:00:00Z"
+                     )
+            if history_visible and hydration_hazard == "duplicate-list":
+                values.append(deepcopy(next(
+                    task for task in values if task["id"] == "legacy-source-1"
+                )))
+            if history_visible and hydration_hazard == "malformed-list":
+                next(task for task in values
+                     if task["id"] == "legacy-source-1")["session_count"] = True
+            task_list_records.extend(values)
         return values
 
+    def task_details(route):
+        if route.startswith("agents/repos/lindayi/hermes-mobile/tasks/legacy-source-"):
+            task_detail_reads.append(route.rsplit("/", 1)[-1])
+            if (history_visible and hydration_hazard == "missing-detail"
+                    and route.endswith("/legacy-source-1")):
+                raise ApiError("synthetic detail unavailable", status=404)
+            detail = deepcopy(original_get(route))
+            if (history_visible and isinstance(hydration_hazard, tuple)
+                    and route.endswith("/legacy-source-1")):
+                field, value = hydration_hazard
+                if field == "detail-task-state":
+                    detail["state"] = deepcopy(value)
+                elif field == "session-state":
+                    detail["sessions"][0]["state"] = deepcopy(value)
+                elif field == "detail-task-id":
+                    detail["id"] = deepcopy(value)
+                elif field == "detail-session-id":
+                    detail["sessions"][0]["id"] = deepcopy(value)
+                elif field == "detail-session-task-id":
+                    detail["sessions"][0]["task_id"] = deepcopy(value)
+            if (history_visible and hydration_hazard == "foreign-detail"
+                    and route.endswith("/legacy-source-1")):
+                detail["creator"] = {"id": OWNER + 1}
+            if (history_visible and hydration_hazard == "multiple-sessions"
+                    and route.endswith("/legacy-source-1")):
+                detail["sessions"].append(deepcopy(detail["sessions"][0]))
+            if (history_visible and hydration_hazard == "missing-sessions"
+                    and route.endswith("/legacy-source-1")):
+                detail.pop("sessions")
+            if (history_visible and hydration_hazard == "mismatched-detail-id"
+                    and route.endswith("/legacy-source-1")):
+                detail["id"] = "legacy-source-other"
+            if (history_visible and hydration_hazard == "mismatched-session"
+                    and route.endswith("/legacy-source-1")):
+                detail["sessions"][0]["task_id"] = "legacy-source-other"
+            if (history_visible and hydration_hazard == "foreign-session"
+                    and route.endswith("/legacy-source-1")):
+                detail["sessions"][0]["owner"] = {"id": OWNER + 1}
+            if (history_visible and isinstance(hydration_hazard, str)
+                    and hydration_hazard.startswith("task-created-")
+                    and route.endswith("/legacy-source-1")):
+                task = detail
+                if hydration_hazard == "task-created-missing":
+                    task.pop("created_at")
+                elif hydration_hazard == "task-created-type":
+                    task["created_at"] = 123
+                elif hydration_hazard == "task-created-invalid":
+                    task["created_at"] = "not-a-timestamp"
+                else:
+                    task["created_at"] = "2026-09-30T09:45:00Z"
+            if (history_visible and isinstance(hydration_hazard, str)
+                    and hydration_hazard.startswith("session-created-")
+                    and route.endswith("/legacy-source-1")):
+                session = detail["sessions"][0]
+                if hydration_hazard == "session-created-missing":
+                    session.pop("created_at")
+                elif hydration_hazard == "session-created-type":
+                    session["created_at"] = 123
+                elif hydration_hazard == "session-created-invalid":
+                    session["created_at"] = "not-a-timestamp"
+                else:
+                    session["created_at"] = "2026-09-30T09:30:01Z"
+            if (history_visible and isinstance(hydration_hazard, str)
+                    and hydration_hazard.startswith("session-completed-")
+                    and route.endswith("/legacy-source-1")):
+                session = detail["sessions"][0]
+                if hydration_hazard == "session-completed-missing":
+                    session.pop("completed_at")
+                elif hydration_hazard == "session-completed-type":
+                    session["completed_at"] = 123
+                else:
+                    session["completed_at"] = "not-a-timestamp"
+            return detail
+        return original_get(route)
+
     api.get_all = delayed_task_history
+    api.get = task_details
+    if attempt_ordinals:
+        for ordinal, proof in enumerate(proofs, 1):
+            proof["attempt"] = ordinal
+        cold_state = StateStore(path).snapshot()
+        cold_state["enrollments"]["16"]["receipt_proofs"] = deepcopy(proofs)
+        StateStore(path)._save(cold_state)
     waiting = Coordinator(
         api, cold_store, clock=lambda: 1790856660,
     ).run(apply=True)["pull_requests"][0]
     waiting_state = StateStore(path).snapshot()
     waiting_export = json.loads((path.parent / "workflow-events.json").read_text())
-    assert "waiting-for-verified-history" in waiting["reasons"]
+    expected_wait_reason = (
+        "unauthorized-continuation"
+        if isinstance(hydration_hazard, tuple)
+        and hydration_hazard[0] in {
+            "task-id", "receipt-task-id", "receipt-session-id",
+        }
+        else "waiting-for-verified-history"
+    )
+    assert expected_wait_reason in waiting["reasons"]
     assert waiting_state["enrollments"]["16"]["neutral_attempts_unknown"] is True
     assert waiting_state["enrollments"]["16"]["attempts"] == 3
     assert waiting_state["enrollments"]["16"]["receipt_proofs"] == proofs
@@ -3634,7 +3985,49 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     with sqlite3.connect(path.parent / ADAPTER_STATE_NAME) as db:
         assert db.execute("SELECT status FROM events").fetchone() == ("acked",)
 
+    if isinstance(hydration_hazard, str) and hydration_hazard.startswith(
+            "receipt-created-"):
+        comment = next(
+            comment for comment in api.comments
+            if comment.get("body", "").startswith("Hermes-Task-Receipt:")
+            and "legacy-nonce-1" in comment["body"]
+        )
+        proof = next(proof for proof in proofs if proof["task_id"] == "legacy-source-1")
+        if hydration_hazard == "receipt-created-missing":
+            comment.pop("created_at")
+            comment.pop("updated_at")
+        elif hydration_hazard == "receipt-created-type":
+            comment["created_at"] = 123
+            comment["updated_at"] = 123
+        elif hydration_hazard == "receipt-created-invalid":
+            comment["created_at"] = "not-a-timestamp"
+            comment["updated_at"] = "not-a-timestamp"
+            proof["receipt_created_at"] = comment["created_at"]
+        elif hydration_hazard == "receipt-created-before-session":
+            comment["created_at"] = comment["updated_at"] = "2026-09-30T09:29:59Z"
+            proof["receipt_created_at"] = comment["created_at"]
+        else:
+            comment["created_at"] = comment["updated_at"] = "2026-09-30T10:15:01Z"
+            proof["receipt_created_at"] = comment["created_at"]
+        state = StateStore(path).snapshot()
+        state["enrollments"]["16"]["receipt_proofs"] = deepcopy(proofs)
+        StateStore(path)._save(state)
+
     history_visible = True
+    writes_before_plan = list(api.writes)
+    plan = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._build_plan(apply=False)
+    planned_enrollment = plan["snapshots"][0]["enrollment"]
+    assert planned_enrollment["attempts"] == 3
+    if hydration_hazard is None:
+        assert planned_enrollment["neutral_attempts"] == 0
+        assert planned_enrollment["neutral_attempts_unknown"] is False
+        assert plan["pull_requests"][0]["repair"]["task_type"] == "neutral"
+    else:
+        assert planned_enrollment["neutral_attempts_unknown"] is True
+        assert plan["pull_requests"][0]["repair"] is None
+    assert api.writes == writes_before_plan
     result = Coordinator(
         api, StateStore(path), clock=lambda: 1790856660,
     ).run(apply=True)["pull_requests"][0]
@@ -3644,6 +4037,38 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     )
 
     enrollment = cold_store.snapshot()["enrollments"]["16"]
+    if hydration_hazard is not None:
+        assert enrollment["attempts"] == 3
+        assert enrollment["neutral_attempts_unknown"] is True
+        assert enrollment["receipt_proofs"] == proofs
+        assert not any(action.get("kind") == "fix"
+                       for action in StateStore(path).actions().values())
+        assert api.fix_attempts == 0
+        assert not any(route.endswith("/tasks") for route, _ in api.writes)
+        if isinstance(hydration_hazard, str) and hydration_hazard in {
+                "duplicate-list", "malformed-list",
+                "receipt-created-missing", "receipt-created-type",
+        }:
+            assert "legacy-source-1" not in task_detail_reads
+        elif (isinstance(hydration_hazard, tuple)
+              and hydration_hazard[0] in {
+                  "listed-task-state", "task-id", "receipt-task-id",
+                  "receipt-session-id",
+              }):
+            assert "legacy-source-1" not in task_detail_reads
+        else:
+            assert "legacy-source-1" in task_detail_reads
+        for _ in range(2):
+            Coordinator(
+                api, StateStore(path), clock=lambda: 1790856660,
+            ).run(apply=True)
+        assert api.fix_attempts == 0
+        assert not any(route.endswith("/tasks") for route, _ in api.writes)
+        assert StateStore(path).snapshot()["enrollments"]["16"][
+            "neutral_attempts_unknown"
+        ] is True
+        return
+
     neutral = next((
         action for action in cold_store.actions().values()
         if action.get("task_type") == "neutral"
@@ -3657,35 +4082,83 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     assert enrollment["attempts"] == 3
     assert enrollment["neutral_attempts"] == 1
     assert enrollment["neutral_attempts_unknown"] is False
+    assert enrollment["repair_progress"]["legacy_unknown"] is True
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == 0
     assert enrollment["receipt_proofs"] == proofs
     assert api.fix_attempts == 1
     assert neutral["status"] == "sent"
     assert second_delivery["inbox_items"] == 0
+    assert task_list_records
+    assert all("sessions" not in task and task["session_count"] == 1
+               for task in task_list_records
+               if task["id"].startswith("legacy-source-"))
+    assert set(task_detail_reads) == {
+        "legacy-source-1", "legacy-source-2", "legacy-source-3",
+    }
+    assert task_detail_reads.count("legacy-source-1") == 2
+    assert task_detail_reads.count("legacy-source-2") == 3
+    assert task_detail_reads.count("legacy-source-3") == 3
     assert StateStore(path).snapshot()["lifecycle_events"] == [historical_event]
     recovered_export = json.loads((path.parent / "workflow-events.json").read_text())
     assert recovered_export["events"] == [historical_event]
     with sqlite3.connect(path.parent / ADAPTER_STATE_NAME) as db:
         assert db.execute("SELECT status FROM events").fetchone() == ("acked",)
 
+    neutral_head = "4" * 40
     api.complete_task(
-        neutral["task_id"], neutral, head_sha=legacy_head, base_sha=CURRENT_MAIN,
+        neutral["task_id"], neutral, head_sha=neutral_head, base_sha=CURRENT_MAIN,
     )
+    api.head_sha = api.pull["head"]["sha"] = neutral_head
     api.pull["base"]["sha"] = CURRENT_MAIN
-    api.pull["mergeable_state"] = "clean"
-    resumed = Coordinator(
-        api, StateStore(path), clock=lambda: 1790856660,
-    ).run(apply=True)["pull_requests"][0]
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    resumed_results = []
+    for _ in range(2):
+        resumed = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        resumed_results.append(resumed)
+    reviewer = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("kind") == "review" and action.get("head") == neutral_head
+    )
+    api.complete_review_task(
+        reviewer["task_id"], reviewer, source_action=StateStore(path).action(neutral["key"]),
+        verdict="changes_requested",
+        findings=[{
+            "path": "frontend/styles.css",
+            "comment": "A new post-reconciliation synthetic blocker.",
+        }],
+    )
+    for _ in range(3):
+        resumed = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        resumed_results.append(resumed)
     enrollment = StateStore(path).snapshot()["enrollments"]["16"]
     followup = next((
         action for action in StateStore(path).actions().values()
         if action.get("kind") == "fix" and action.get("task_type") != "neutral"
     ), None)
     assert followup is not None, (resumed["reasons"], resumed, enrollment)
-    assert resumed["repair_requested"]
+    assert any(result["repair_requested"] for result in resumed_results)
+    reviewed = StateStore(path).action(reviewer["key"])
+    assert reviewed["head"] == neutral_head
+    assert reviewed["report_verdict"] == "changes_requested"
+    assert reviewed["publication_state"] == "done"
+    assert api.owner_review_head_sha == neutral_head
+    assert json.loads(api.owner_review_body)["verdict"] == "changes_requested"
     assert enrollment["attempts"] == 4
     assert enrollment["neutral_attempts"] == 1
     assert followup["attempt"] == 4 and followup["status"] == "sent"
+    assert followup["head"] == neutral_head
     assert api.fix_attempts == 2
+    sent_posts = [route for route, _ in api.writes if route.endswith("/tasks")]
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)
+    assert [route for route, _ in api.writes if route.endswith("/tasks")] == sent_posts
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 4
 
 
 def test_three_receipt_verified_no_progress_attempts_stop_after_restart(tmp_path):
@@ -7618,6 +8091,350 @@ def _advance_report_recovery_main(api, path):
         f"{BASE}...{CURRENT_MAIN}": _compare_result(BASE, ahead_by=1),
         f"{BASE}...{HEAD}": _compare_result(BASE, ahead_by=1),
     }
+
+
+@pytest.mark.parametrize("persisted_failure", [False, True])
+@pytest.mark.parametrize("lost_response", [False, True])
+def test_historical_dirty_report_failure_plans_only_one_neutral(
+        tmp_path, persisted_failure, lost_response):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    if persisted_failure:
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660)._build_plan(
+            apply=True,
+        )
+    before = StateStore(path).snapshot()["enrollments"]["16"]
+    source_receipt = StateStore(path).action(source_fix["key"])["receipt_body"]
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    api.fail_fix = lost_response
+    posts_before = api.task_posts
+    plan = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._build_plan(apply=False)["pull_requests"][0]
+
+    assert plan["review_correction_anchor"] is None
+    assert plan["review_action"] is None
+    assert plan["repair"] is not None, plan["reasons"]
+    assert plan["repair"]["task_type"] == "neutral"
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    store = StateStore(path)
+    neutrals = [
+        action for action in store.actions().values()
+        if action.get("task_type") == "neutral"
+    ]
+    assert len(neutrals) == 1
+    assert neutrals[0]["status"] == ("uncertain" if lost_response else "sent")
+    assert api.task_posts == posts_before + 1
+    assert not any(
+        action.get("task_type") == "report-correction"
+        for action in store.actions().values()
+    )
+    assert not any(
+        item.get("correction") for item in store.snapshot()["outbox"].values()
+    )
+    parent = store.action(original["key"])
+    assert parent["status"] == "completed" and parent["report_error"]
+    assert parent["report_retry_allowed"] is True
+    assert parent["report_retry_state"] == "available"
+    assert store.action(source_fix["key"])["receipt_body"] == source_receipt
+    after = store.snapshot()["enrollments"]["16"]
+    assert after["attempts"] == before["attempts"] == 1
+    assert after["neutral_attempts"] == before["neutral_attempts"] + 1
+    assert after.get("receipt_proofs", []) == before.get("receipt_proofs", [])
+    assert api.graphql_writes == []
+
+
+def test_historical_dirty_plan_ignores_existing_correction_anchor(tmp_path):
+    api, path, _source_fix, _original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    behind = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._build_plan(apply=False)["pull_requests"][0]
+    assert behind["review_action"]["task_type"] == "report-correction"
+    anchors = {
+        key: entry for key, entry in StateStore(path).snapshot()["outbox"].items()
+        if entry.get("correction")
+    }
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    dirty = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._build_plan(apply=False)["pull_requests"][0]
+    assert dirty["review_action"] is None
+    assert dirty["review_correction_anchor"] is None
+    assert dirty["repair"]["task_type"] == "neutral"
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert all(
+        StateStore(path).snapshot()["outbox"][key] == entry
+        for key, entry in anchors.items()
+    )
+    assert not any(
+        action.get("task_type") == "report-correction"
+        for action in StateStore(path).actions().values()
+    )
+    assert StateStore(path).snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
+
+
+@pytest.mark.parametrize("hazard", [
+    "unknown", "true-dirty", "false-behind", "missing-main-ancestry",
+    "missing-head-ancestry",
+])
+def test_historical_report_failure_rejects_unconfirmed_reconciliation(
+        tmp_path, hazard):
+    api, path, _source_fix, _original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660)._build_plan(apply=True)
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    if hazard == "unknown":
+        api.pull.update(mergeable=None, mergeable_state="unknown")
+    elif hazard == "true-dirty":
+        api.pull["mergeable"] = True
+    elif hazard == "false-behind":
+        api.pull["mergeable_state"] = "behind"
+    else:
+        tip = CURRENT_MAIN if hazard == "missing-main-ancestry" else HEAD
+        api.compare_results[f"{BASE}...{tip}"] = {}
+    posts_before = api.task_posts
+    for _ in range(3):
+        plan = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        )._build_plan(apply=False)["pull_requests"][0]
+        assert plan["review_action"] is None
+        assert plan["review_correction_anchor"] is None
+        assert plan["repair"] is None
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert api.task_posts == posts_before
+
+
+def test_historical_report_correction_yields_if_dirty_before_plan_writes(
+        tmp_path, monkeypatch):
+    api, path, _source_fix, _original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    apply_plan = CloudCoordinator._apply
+
+    def become_dirty(coordinator, plan, **kwargs):
+        assert plan["pull_requests"][0]["review_correction_anchor"] is not None
+        api.pull.update(mergeable=False, mergeable_state="dirty")
+        return apply_plan(coordinator, plan, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(CloudCoordinator, "_apply", become_dirty)
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    store = StateStore(path)
+    assert not any(
+        item.get("correction") for item in store.snapshot()["outbox"].values()
+    )
+    assert not any(
+        action.get("task_type") == "report-correction"
+        for action in store.actions().values()
+    )
+    assert len([
+        action for action in store.actions().values()
+        if action.get("task_type") == "neutral"
+    ]) == 1
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
+
+
+def test_pending_historical_correction_anchor_never_publishes_when_dirty(
+        tmp_path, monkeypatch):
+    api, path, _source_fix, _original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    add_outbox = StateStore.add_outbox
+
+    def become_dirty(store, key, entry):
+        result = add_outbox(store, key, entry)
+        if entry.get("correction"):
+            api.pull.update(mergeable=False, mergeable_state="dirty")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(StateStore, "add_outbox", become_dirty)
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+
+    anchors = [
+        item for item in StateStore(path).snapshot()["outbox"].values()
+        if item.get("correction")
+    ]
+    assert len(anchors) == 1
+    assert anchors[0]["status"] == "pending"
+    assert not any(anchors[0]["marker"] in comment["body"] for comment in api.comments)
+    assert len([
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "neutral"
+    ]) == 1
+
+
+@pytest.mark.parametrize("hazard", ["unknown", "ancestry", "dirty"])
+def test_pending_historical_correction_anchor_resumes_after_transient_fence(
+        tmp_path, monkeypatch, hazard):
+    api, path, _source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    add_outbox = StateStore.add_outbox
+
+    def lose_eligibility(store, key, entry):
+        result = add_outbox(store, key, entry)
+        if entry.get("correction"):
+            if hazard == "ancestry":
+                api.compare_results[f"{BASE}...{CURRENT_MAIN}"] = {}
+            else:
+                api.pull.update(
+                    mergeable=False if hazard == "dirty" else None,
+                    mergeable_state=hazard,
+                )
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(StateStore, "add_outbox", lose_eligibility)
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    anchor = next(
+        item for item in StateStore(path).snapshot()["outbox"].values()
+        if item.get("correction")
+    )
+    assert anchor["status"] == "pending"
+    assert not any(anchor["marker"] in comment["body"] for comment in api.comments)
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "available"
+    _advance_report_recovery_main(api, path)
+    posts_before = api.task_posts
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert api.task_posts == posts_before + 1
+    assert sum(
+        anchor["marker"] in comment["body"] for comment in api.comments
+    ) == 1
+    assert len([
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]) == 1
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "reserved"
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
+
+
+@pytest.mark.parametrize("lost_response", [False, True])
+def test_historical_dirty_keeps_active_correction_occupied(tmp_path, lost_response):
+    api, path, _source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    api.fail_fix = lost_response
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    assert correction["status"] == ("uncertain" if lost_response else "sent")
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    posts_before = api.task_posts
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert api.task_posts == posts_before
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "reserved"
+    assert not any(
+        action.get("task_type") == "neutral"
+        for action in StateStore(path).actions().values()
+    )
+
+
+@pytest.mark.parametrize("dirty_phase", ["review", "status"])
+def test_historical_correction_publication_stops_when_dirty(
+        tmp_path, monkeypatch, dirty_phase):
+    api, path, source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    for _ in range(2):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    correction = next(
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    )
+    api.complete_review_task(
+        correction["task_id"], correction,
+        source_action=StateStore(path).action(source_fix["key"]),
+        verdict="pass", files=api.review_file_digests(),
+    )
+    if dirty_phase == "review":
+        api.pull.update(mergeable=False, mergeable_state="dirty")
+    else:
+        publish_status = CloudCoordinator._advance_agent_review_publication
+
+        def become_dirty(coordinator, key, action):
+            api.pull.update(mergeable=False, mergeable_state="dirty")
+            return publish_status(coordinator, key, action)
+
+        monkeypatch.setattr(CloudCoordinator, "_advance_agent_review_publication", become_dirty)
+    publications_before = len([
+        route for route, _body in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ])
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    saved = StateStore(path).action(correction["key"])
+    assert saved["publication_disposition"] == "stale"
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "exhausted"
+    assert len([
+        route for route, _body in api.writes
+        if route == "repos/lindayi/hermes-mobile/pulls/16/reviews"
+    ]) == publications_before + (dirty_phase == "status")
+    assert not any(
+        status.get("context") == "agent-review" and status.get("state") == "success"
+        for statuses in api.status_log.values() for status in statuses
+    )
+    assert len([
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "neutral"
+    ]) == 1
+
+
+@pytest.mark.parametrize(
+    "dirty_read", [1, 2], ids=["initial-fence", "fresh-fence"],
+)
+def test_historical_report_correction_never_dispatches_on_dirty_base(
+        tmp_path, dirty_read):
+    api, path, _source_fix, _original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    plan = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._build_plan(apply=False)["pull_requests"][0]
+    action = plan["review_action"]
+    assert action["task_type"] == "report-correction"
+    assert action["head"] == HEAD and action["main_sha"] == CURRENT_MAIN
+
+    pull_states = []
+    start_pull_reads = api.pull_reads
+    original_get = api.get
+
+    def dirty_during_dispatch(route):
+        result = original_get(route)
+        if route == "repos/lindayi/hermes-mobile/pulls/16":
+            read = api.pull_reads - start_pull_reads
+            if read == dirty_read:
+                result = result | {"mergeable": False, "mergeable_state": "dirty"}
+            pull_states.append((result["mergeable"], result["mergeable_state"]))
+        return result
+
+    api.get = dirty_during_dispatch
+    writes_before = list(api.writes)
+    posts_before = api.task_posts
+
+    status = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    )._dispatch_task(action)
+
+    assert status == "superseded"
+    assert pull_states == (
+        [(False, "dirty")]
+        if dirty_read == 1 else [(True, "behind"), (False, "dirty")]
+    )
+    assert api.task_posts == posts_before
+    assert api.writes == writes_before
+    assert StateStore(path).action(action["key"]) is None
 
 
 def test_historical_report_recovery_uses_fresh_main_and_keeps_retry_separate(
