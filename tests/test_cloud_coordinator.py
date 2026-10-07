@@ -7991,12 +7991,57 @@ def test_pending_historical_correction_anchor_never_publishes_when_dirty(
         if item.get("correction")
     ]
     assert len(anchors) == 1
-    assert anchors[0]["status"] == "superseded"
+    assert anchors[0]["status"] == "pending"
     assert not any(anchors[0]["marker"] in comment["body"] for comment in api.comments)
     assert len([
         action for action in StateStore(path).actions().values()
         if action.get("task_type") == "neutral"
     ]) == 1
+
+
+@pytest.mark.parametrize("hazard", ["unknown", "ancestry", "dirty"])
+def test_pending_historical_correction_anchor_resumes_after_transient_fence(
+        tmp_path, monkeypatch, hazard):
+    api, path, _source_fix, original = _prepare_malformed_review_report(tmp_path)
+    _advance_report_recovery_main(api, path)
+    add_outbox = StateStore.add_outbox
+
+    def lose_eligibility(store, key, entry):
+        result = add_outbox(store, key, entry)
+        if entry.get("correction"):
+            if hazard == "ancestry":
+                api.compare_results[f"{BASE}...{CURRENT_MAIN}"] = {}
+            else:
+                api.pull.update(
+                    mergeable=False if hazard == "dirty" else None,
+                    mergeable_state=hazard,
+                )
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(StateStore, "add_outbox", lose_eligibility)
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    anchor = next(
+        item for item in StateStore(path).snapshot()["outbox"].values()
+        if item.get("correction")
+    )
+    assert anchor["status"] == "pending"
+    assert not any(anchor["marker"] in comment["body"] for comment in api.comments)
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "available"
+    _advance_report_recovery_main(api, path)
+    posts_before = api.task_posts
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert api.task_posts == posts_before + 1
+    assert sum(
+        anchor["marker"] in comment["body"] for comment in api.comments
+    ) == 1
+    assert len([
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "report-correction"
+    ]) == 1
+    assert StateStore(path).action(original["key"])["report_retry_state"] == "reserved"
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 1
 
 
 @pytest.mark.parametrize("lost_response", [False, True])

@@ -6099,12 +6099,22 @@ class Coordinator:
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") != "pending"):
                     continue
-                if not self._fence_pull(
-                        entry["issue"], entry["head"],
-                        entry.get("main_sha") if entry.get("correction") else None,
-                        allow_historical_reconciliation=bool(entry.get("correction"))):
+                current = self._fence_pull(entry["issue"], entry["head"])
+                if not current:
                     self.store.update_outbox(key, "superseded")
                     continue
+                if entry.get("correction"):
+                    main = self.api.get(f"repos/{REPOSITORY}/commits/{MAIN_BRANCH}")
+                    if not isinstance(main, dict) or not _is_sha(main.get("sha")):
+                        continue
+                    if main["sha"] != entry.get("main_sha"):
+                        self.store.update_outbox(key, "superseded")
+                        continue
+                    if (current.get("base", {}).get("sha") != main["sha"]
+                            and not self._historical_base_can_reconcile(
+                                current, main["sha"], entry["head"],
+                            )):
+                        continue
                 marker = entry.get("marker")
                 existing = _matching_owner_comment(
                     comments, marker, expected_body=entry.get("body"),

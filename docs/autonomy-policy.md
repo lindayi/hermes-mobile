@@ -361,7 +361,9 @@ ordinals. Authenticated terminal malformed-report waits with an unused retry yie
 to neutral reconciliation on confirmed historical dirty ancestry without emitting
 a correction action or anchor. Correction anchors recheck frozen-main eligibility
 before enqueueing and publication; active/uncertain correction claims remain
-occupied, and task/review/status dispatch fences are not relaxed.
+occupied, and task/review/status dispatch fences are not relaxed. Unpublished
+anchors defer transiently unavailable eligibility without exhausting their key;
+proven head or main changes still supersede them.
 These changes retain the progress fingerprint bounds, canonical target maps,
 `budget-v2:` identities, occupancy fences, stable lifecycle identities and distinct
 source/merge/deployment authority. The current delta validates raw GraphQL thread
@@ -374,7 +376,7 @@ merge, runtime evidence, or activation permission:
 
 | Issue #87 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `9f189d985a3d7a95ffcf0ee0936b8e819ff61d252689b94dd5e33dee42a91fee` |
+| `deploy/cloud_coordinator.py` | `f16d8a67f6023fb40a4e7f52f428239d2c1a67bef8c280f72b089f3f12f4d671` |
 | `deploy/review_evidence.py` | `bc2bea2e4cd17ac28ed96cc5d421f62f63e7ef14ee9bdec5045cf6f26bb8f290` |
 | `deploy/task_receipts.py` | `bfc903eddf33a7b8e4b17ccafd8112af70611ce472a44520ed4fe5842845a1c7` |
 | `deploy/workflow_events.py` | `63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e` |

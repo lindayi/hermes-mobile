@@ -633,7 +633,10 @@ correction action nor a correction anchor, and the available report retry is
 retained. Active or uncertain correction reservations still occupy the workflow.
 Correction anchors recheck their frozen main and behind-only historical eligibility
 before enqueueing and publication; a newly dirty base suppresses publication and
-yields to neutral reconciliation on the next scan. Correction task dispatch and
+yields to neutral reconciliation on the next scan. An unpublished anchor remains
+pending while mergeability or ancestry eligibility is unavailable, so recovery to
+the same confirmed behind binding can resume without replaying a publication.
+Proven head or main changes still supersede it. Correction task dispatch and
 review/status publication retain their independent fresh fences. Lost task POST
 responses remain reserved and cannot cause a second neutral dispatch.
 
