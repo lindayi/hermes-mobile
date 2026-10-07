@@ -39,6 +39,7 @@ def versions(tmp_path, monkeypatch):
     for root in roots:
         (root / 'backend/model_controls.py').write_text(
             '_CONTROL_HASHES = ' + repr(maps[1])
+            + '\n_PRE_PHOTO_CONTROL_HASHES = ' + repr(release.PRE_PHOTO_CONTROL_HASHES)
             + '\n_PRE_CLARIFICATION_CONTROL_HASHES = ' + repr(release.PRE_CLARIFICATION_CONTROL_HASHES)
             + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(release.PRE_ROUTING_CONTROL_HASHES)
             + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(maps[0])

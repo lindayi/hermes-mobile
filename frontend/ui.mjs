@@ -928,7 +928,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         }),'quiet photo-remove',{'aria-label':`Remove photo ${index+1}`});
         const inFlight=pendingPhotoSubmission?.attachmentIds.includes(photo.metadata?.id);
         remove.disabled=!!inFlight;remove.dataset.locked=String(!!inFlight);
-        photoTray.append(h('div',{class:'photo-preview'},photo.previewUrl?h('img',{src:photo.previewUrl,alt:`Selected photo ${index+1}`}):h('span',{class:'caption'},'Photo selected'),remove));
+        const preview=photo.previewUrl || photo.metadata?.url;
+        photoTray.append(h('div',{class:'photo-preview'},preview?h('img',{src:preview,alt:`Selected photo ${index+1}`}):h('span',{class:'caption'},'Photo selected'),remove));
       });
       photoTray.hidden=!selectedPhotos.length;
     };
@@ -975,6 +976,15 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     if(accepted?.idempotency_key && accepted.idempotency_key===pending?.idempotency_key){
       attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);
       if(textarea.value.trim()===pending.input){textarea.value='';drafts.delete(session.id);storage.set(draftKey,null);}
+      pending=null;
+    }
+    if(Array.isArray(pending?.attachment_ids) && pending.attachment_ids.length<=4){
+      for(const id of pending.attachment_ids){
+        if(typeof id!=='string' || !/^[a-f0-9]{32}$/.test(id))continue;
+        selectedPhotos.push({file:null,previewUrl:'',uploadKey:'',metadata:{
+          id,status:'pending',url:`/sessions/${encodeURIComponent(session.id)}/attachments/${id}`}});
+      }
+      renderPhotoSelection();
     }
     let draftRevision=0;
     textarea.addEventListener('input',()=>{if(version!==routeVersion)return;draftRevision++;drafts.set(session.id,textarea.value);storage.set(draftKey,textarea.value);});
@@ -1094,6 +1104,17 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           photo.metadata=metadata;
           if(!current() || !selectedPhotos.includes(photo)){void releasePhoto(photo);if(current()){connection.failure(token);composerAction.set('idle');syncModelLock();}return;}
         }
+        if(submittedPhotos.some(photo=>!selectedPhotos.includes(photo))){
+          pendingPhotoSubmission=null;
+          if(owner===state.user?.id && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){
+            attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);currentModelSync?.(owner,session.id);
+          }
+          connection.failure(token);composerAction.set('idle');syncModelLock();
+          photoStatus.hidden=false;
+          photoStatus.textContent='Photo selection changed before sending. The remaining selected photos are ready to send.';
+          renderPhotoSelection();
+          return;
+        }
         photoStatus.hidden=false;
         photoStatus.textContent=submittedPhotos.length?'Sending message with photos…':'Sending message…';
         const attachments=Array.isArray(attempt.attachment_ids)
@@ -1107,7 +1128,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         connection.success(token);
       }catch(error){
         connection.failure(token);
-        const rejectedBeforeAdmission=[400,413,422,507].includes(error.status);
+        const rejectedBeforeAdmission=[400,413,422,507].includes(error.status)
+          || error.status===409 && error.code==='attachment_error';
         if(rejectedBeforeAdmission){
           pendingPhotoSubmission=null;
           if(owner===state.user?.id && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){

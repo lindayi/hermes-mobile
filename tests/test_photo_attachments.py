@@ -176,6 +176,102 @@ def test_concurrent_photo_uploads_serialize_image_decoding(tmp_path, monkeypatch
         assert maximum_active == 1
 
 
+def test_upload_filesystem_work_keeps_the_event_loop_responsive(tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        original_fsync = attachments_module.os.fsync
+
+        def slow_fsync(descriptor):
+            time.sleep(.12)
+            return original_fsync(descriptor)
+
+        monkeypatch.setattr(attachments_module.os, 'fsync', slow_fsync)
+
+        async def chunks():
+            yield png_fixture()
+
+        async def upload_with_heartbeat():
+            upload = asyncio.create_task(store.upload(user, 'wa-1', 'heartbeat-photo', chunks()))
+            heartbeats = 0
+            while not upload.done():
+                heartbeats += 1
+                await asyncio.sleep(.01)
+            return heartbeats, await upload
+
+        heartbeats, metadata = asyncio.run(upload_with_heartbeat())
+
+        assert heartbeats >= 10
+        assert metadata['status'] == 'pending'
+
+
+def test_cancelled_photo_upload_waits_for_worker_write_before_cleanup(tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        started = threading.Event()
+        write_all = attachments_module._write_all
+
+        def slow_write(descriptor, value):
+            started.set()
+            time.sleep(.1)
+            write_all(descriptor, value)
+
+        monkeypatch.setattr(attachments_module, '_write_all', slow_write)
+
+        async def chunks():
+            yield png_fixture()
+
+        async def cancel_upload():
+            upload = asyncio.create_task(store.upload(user, 'wa-1', 'cancel-photo', chunks()))
+            assert await asyncio.to_thread(started.wait, 2)
+            upload.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await upload
+
+        asyncio.run(cancel_upload())
+
+        with store.connection() as db:
+            assert db.execute(
+                "SELECT count(*) FROM attachments WHERE state='receiving'").fetchone()[0] == 0
+        assert list(store.staging.iterdir()) == []
+        assert list(store.objects.iterdir()) == []
+
+
+def test_cancelled_reservation_worker_releases_its_lease_and_reservation(tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        started = threading.Event()
+        begin = store.begin
+
+        def slow_begin(*args, **kwargs):
+            result = begin(*args, **kwargs)
+            started.set()
+            time.sleep(.1)
+            return result
+
+        monkeypatch.setattr(store, 'begin', slow_begin)
+
+        async def chunks():
+            yield png_fixture()
+
+        async def cancel_upload():
+            upload = asyncio.create_task(store.upload(user, 'wa-1', 'cancel-reservation', chunks()))
+            assert await asyncio.to_thread(started.wait, 2)
+            upload.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await upload
+
+        asyncio.run(cancel_upload())
+
+        with store.connection() as db:
+            assert db.execute(
+                "SELECT count(*) FROM attachments WHERE state='receiving'").fetchone()[0] == 0
+        assert list(store.staging.iterdir()) == []
+        assert store._upload_leases == {}
+
+
 def test_orphan_cleanup_preserves_active_temp_and_new_reservation_files(tmp_path, monkeypatch):
     with photo_client(tmp_path) as (app, client):
         store = app.state.attachments

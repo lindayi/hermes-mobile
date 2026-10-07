@@ -43,11 +43,16 @@ def validate_photo_payload(body):
     image_types = {'image_url', 'input_image', 'image'}
 
     def contains_image_part(value):
-        if isinstance(value, list):
-            return any(contains_image_part(item) for item in value)
-        if isinstance(value, dict):
-            return (value.get('type') in image_types
-                    or any(contains_image_part(item) for item in value.values()))
+        pending = [value]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, list):
+                pending.extend(current)
+            elif isinstance(current, dict):
+                kind = current.get('type')
+                if isinstance(kind, str) and kind in image_types:
+                    return True
+                pending.extend(current.values())
         return False
 
     if ids is None:

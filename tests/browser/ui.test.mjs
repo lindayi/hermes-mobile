@@ -571,6 +571,149 @@ for (const failure of ['cancelled','rejected','unsupported']) test(`job mutation
   assert.doesNotMatch(doc.body.textContent,/Job change saved/);
 });
 
+  test('removing an uploaded photo during the next upload cancels before run admission',async t=>{
+    let finishSecond;
+    const uploads=[],runs=[],deletes=[];
+    const {doc,app}=await setup(async(path,options={})=>{
+      if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+      if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+      if(path.includes('/messages'))return {items:[]};
+      if(path==='/sessions/s1/attachments'){
+        const id=String(uploads.length+1).padStart(32,'0');uploads.push(id);
+        if(uploads.length===2)return new Promise(resolve=>{finishSecond=()=>resolve({id,status:'pending'});});
+        return {id,status:'pending'};
+      }
+      if(options.method==='DELETE'){deletes.push(path);return {released:true};}
+      if(path==='/runs'){runs.push(options.body);return {id:'r1',session_id:'s1',status:'completed'};}
+      return {items:[]};
+    },win=>{win.URL.createObjectURL=file=>`blob:${file.name}`;});
+    t.after(()=>{app.destroy();doc.defaultView.close();});
+    click(doc,'Photo fixture');await tick();
+    const input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+    Object.defineProperty(input,'files',{value:[
+      new win.File(['a'],'first.png',{type:'image/png'}),
+      new win.File(['b'],'second.png',{type:'image/png'}),
+    ]});
+    input.dispatchEvent(new win.Event('change'));
+    click(doc,'Send message');
+    for(let i=0;i<20&&!finishSecond;i++)await tick();
+    assert.equal(typeof finishSecond,'function');
+    click(doc,'Remove photo 1');await tick();
+    finishSecond();await tick();await tick();
+    assert.deepEqual(runs,[]);
+    assert.deepEqual(deletes,['/sessions/s1/attachments/'+uploads[0]]);
+    assert.deepEqual([...doc.querySelectorAll('.photo-preview img')].map(img=>img.getAttribute('src')),
+      ['blob:second.png']);
+    click(doc,'Send message');await tick();await tick();
+    assert.deepEqual(runs[0].attachments,[uploads[1]]);
+  });
+
+  test('reopened ambiguous photo attempt restores opaque IDs and retries without image bytes',async t=>{
+    const runs=[];
+    let uploadCount=0,runCount=0;
+    const {doc,app}=await setup(async(path,options={})=>{
+      if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+      if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+      if(path.includes('/messages'))return {items:[]};
+      if(path==='/sessions/s1/attachments')return {
+        id:String(++uploadCount).padStart(32,'0'),status:'pending'};
+      if(path==='/runs'){
+        runs.push(options.body);
+        if(++runCount===1)throw new Error('response lost');
+        return {id:'r1',session_id:'s1',status:'completed'};
+      }
+      return {items:[]};
+    },win=>{win.URL.createObjectURL=file=>`blob:${file.name}`;});
+    t.after(()=>{app.destroy();doc.defaultView.close();});
+    click(doc,'Photo fixture');await tick();
+    const input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+    Object.defineProperty(input,'files',{value:[
+      new win.File(['synthetic'],'recover.png',{type:'image/png'}),
+    ]});
+    input.dispatchEvent(new win.Event('change'));
+    const textarea=doc.querySelector('textarea');
+    textarea.value='Keep this image request';textarea.dispatchEvent(new win.Event('input'));
+    click(doc,'Send message');await tick();await tick();await tick();
+    const original=runs[0];
+    assert.ok(original);
+    click(doc,'Chats');await tick();click(doc,'Photo fixture');await tick();
+    const preview=doc.querySelector('.photo-preview img');
+    assert.match(preview.getAttribute('src'),/attachments\/00000000000000000000000000000001$/);
+    click(doc,'Send message');await tick();await tick();await tick();
+    assert.equal(uploadCount,1);
+    assert.equal(runs[1].idempotency_key,original.idempotency_key);
+    assert.equal(runs[1].input,original.input);
+    assert.deepEqual(runs[1].attachments,original.attachments);
+  });
+
+  test('definitive attachment 409 unlocks removal and selection retry',async t=>{
+    const runs=[];
+    let uploadCount=0;
+    const {doc,app}=await setup(async(path,options={})=>{
+      if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+      if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+      if(path.includes('/messages'))return {items:[]};
+      if(path==='/sessions/s1/attachments')return {
+        id:String(++uploadCount).padStart(32,'0'),status:'pending'};
+      if(path==='/runs'){
+        runs.push(options.body);
+        if(runs.length===1)throw Object.assign(new Error('Attachment expired'),{
+          status:409,code:'attachment_error'});
+        return {id:'r1',session_id:'s1',status:'completed'};
+      }
+      return {items:[]};
+    },win=>{win.URL.createObjectURL=file=>`blob:${file.name}`;});
+    t.after(()=>{app.destroy();doc.defaultView.close();});
+    click(doc,'Photo fixture');await tick();
+    const input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+    const select=name=>{
+      Object.defineProperty(input,'files',{configurable:true,value:[
+        new win.File(['synthetic'],name,{type:'image/png'}),
+      ]});
+      input.dispatchEvent(new win.Event('change'));
+    };
+    select('expired.png');click(doc,'Send message');await tick();await tick();await tick();
+    assert.equal(doc.querySelector('[aria-label="Remove photo 1"]').disabled,false);
+    click(doc,'Remove photo 1');await tick();await tick();
+    assert.equal(doc.querySelectorAll('.photo-preview').length,0);
+    select('replacement.png');
+    click(doc,'Send message');await tick();await tick();await tick();
+    assert.equal(uploadCount,2,doc.querySelector('.photo-status')?.textContent);
+    assert.equal(runs.length,2,doc.querySelector('.photo-status')?.textContent);
+    assert.notEqual(runs[1].idempotency_key,runs[0].idempotency_key);
+    assert.deepEqual(runs[1].attachments,['00000000000000000000000000000002']);
+  });
+
+  test('run conflict 409 keeps the original photo attempt locked and idempotent',async t=>{
+    const runs=[];
+    let uploadCount=0;
+    const {doc,app}=await setup(async(path,options={})=>{
+      if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+      if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+      if(path.includes('/messages'))return {items:[]};
+      if(path==='/sessions/s1/attachments')return {
+        id:String(++uploadCount).padStart(32,'0'),status:'pending'};
+      if(path==='/runs'){
+        runs.push(options.body);
+        if(runs.length===1)throw Object.assign(new Error('Run admission is uncertain'),{status:409});
+        return {id:'r1',session_id:'s1',status:'completed'};
+      }
+      return {items:[]};
+    },win=>{win.URL.createObjectURL=file=>`blob:${file.name}`;});
+    t.after(()=>{app.destroy();doc.defaultView.close();});
+    click(doc,'Photo fixture');await tick();
+    const input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+    Object.defineProperty(input,'files',{value:[
+      new win.File(['synthetic'],'conflict.png',{type:'image/png'}),
+    ]});
+    input.dispatchEvent(new win.Event('change'));
+    click(doc,'Send message');await tick();await tick();await tick();
+    assert.equal(doc.querySelector('[aria-label="Remove photo 1"]').disabled,true);
+    click(doc,'Send message');await tick();await tick();await tick();
+    assert.equal(uploadCount,1);
+    assert.equal(runs[1].idempotency_key,runs[0].idempotency_key);
+    assert.deepEqual(runs[1].attachments,runs[0].attachments);
+  });
 test('owner creates invitations only after passkey verification and sees the code once',async()=>{
   const calls=[];
   const {doc}=await setup(async(path,options={})=>{
@@ -943,8 +1086,3 @@ test('notification deep link opens authorized inbox and never submits or approve
   assert.equal(calls.some(c=>c.options.method==='POST'),false);
   assert.equal(doc.querySelector('[aria-current="page"]').getAttribute('aria-label'),'Inbox');
 });
-
-
-
-
-

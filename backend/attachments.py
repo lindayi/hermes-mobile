@@ -24,8 +24,9 @@ MAX_IMAGE_BYTES = 2 * 1024 * 1024
 MAX_IMAGES_PER_RUN = 4
 MAX_IMAGE_PIXELS = 40_000_000
 RESERVATION_BYTES = MAX_INPUT_BYTES + MAX_IMAGE_BYTES
+UPLOAD_IO_WORKERS = 4
 _IMAGE_DECODE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix='photo-decode')
-_UPLOAD_IO_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix='photo-storage')
+_UPLOAD_IO_EXECUTOR = ThreadPoolExecutor(max_workers=UPLOAD_IO_WORKERS, thread_name_prefix='photo-storage')
 ABANDONED_TTL = 24 * 60 * 60
 LINKED_RETENTION = 30 * 24 * 60 * 60
 TERMINAL_RUNS = ('completed', 'failed', 'cancelled')
@@ -138,7 +139,7 @@ class AttachmentStore:
         self.global_quota_bytes = global_quota_bytes
         self.min_free_bytes = min_free_bytes
         self._upload_leases = {}
-        self._upload_io_slots = asyncio.Semaphore(_UPLOAD_IO_EXECUTOR._max_workers)
+        self._upload_io_slots = asyncio.Semaphore(UPLOAD_IO_WORKERS)
         self._orphan_iterators = [None, None]
         self._orphan_directory = 0
         self._orphan_reconciled = False
@@ -380,8 +381,21 @@ class AttachmentStore:
             return _metadata(completed)
 
     async def upload(self, user, session_id, upload_key, chunks):
-        row, fresh = await self._upload_io(
-            lambda: self.begin(user, session_id, upload_key, worker=True))
+        reservation = {}
+
+        def begin_upload():
+            reservation['result'] = self.begin(user, session_id, upload_key, worker=True)
+            return reservation['result']
+
+        try:
+            row, fresh = await self._upload_io(begin_upload)
+        except asyncio.CancelledError:
+            result = reservation.get('result')
+            if result and result[1]:
+                attachment_id = result[0]['id']
+                await self._upload_io(self.abort, attachment_id)
+                await self._upload_io(self._release_upload_lease, attachment_id)
+            raise
         attachment_id = row['id']
         digest = hashlib.sha256()
         total = 0

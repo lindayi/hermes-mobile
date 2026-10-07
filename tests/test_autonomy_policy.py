@@ -212,14 +212,17 @@ _PENDING_ISSUE77_CLARIFICATION_FIXTURE = {
 
 
 _ISSUE85_PHOTO_FIXTURE = {
-    'backend/model_controls.py': '32f135929eb1392dcc53c2431204bda943b8b33d0d55d40e61284fd3e1b19d9d',
-    'deploy/native_controls_release.py': '2c1feb072e7cd4283f4d323841be0e650c17c713fa2a203ce38c29185016148f',
-    'backend/app.py': '77d36934b033ecfe669cc2b5c2581146b776f2c448336d7000183489307682c6',
-    'backend/attachments.py': 'd62c4df6c9de209e7103e4def1fda2885e5e7600ebf466d962b71714c4d76d47',
+    'backend/model_controls.py': 'd6e351bc68e09aba15a128c61d1d50d09ba5945db7a6438ddac51ddf61c41341',
+    'deploy/native_controls_release.py': '108b000cbeb1776e0db3edae2f523526ad1e28790265f6ebf402406f11e810d5',
+    'backend/app.py': '11dde94d9e1574ebab579ea1b45c43d4270deffc8175aac2257f5652a14c8cf6',
+    'backend/attachments.py': '93181c8474a25a29977b82809e865fa6285ef47354d0fe4ebbb6e218011b4b7b',
     'backend/hermes_client.py': 'b1d5cb9a6485ed6b53caca597e27cd0a34d1e82af5545e2738d271b48b10d623',
-    'backend/native_catalog.py': '0d0e5e332a88ea7ff0683dcc9fb4fd9dcaa730ecf341b45f404a2cf2f90fe1e7',
+    'backend/native_catalog.py': 'd6a758a7007dd23f8921bacccdf69adf81ee7b6fa212f9766493eeba43769653',
     'backend/orchestration.py': '4a62bc9ffd9eac78b2ad85bb09247f9c8b2519f4226b296537820683c169b3e1',
     'backend/runs.py': '79b15df9918cb85599cb3a7db5c978d2abb681afe9c355acdfa6e07f5472884f',
+    'backend/task_reminder_presentation.py': '6ddf2e7389a1c13069bf4ffe0b39c722396c0c42bf68e9f9d39ba5be71a200b2',
+    '.github/host-tests.json': 'fc1cf7b7acccae5a948d8cfbd67f3fc82c7d1fd645328b92e357f81b3827a9f9',
+    '.github/native-tests.json': '2da051240c05c0c53192439a9dbc4e7cc80939d2f3089e502f34906bf658e5df',
     'requirements.lock': 'ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04',
 }
 
