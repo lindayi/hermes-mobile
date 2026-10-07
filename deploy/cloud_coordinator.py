@@ -2381,7 +2381,12 @@ def _valid_receipt_proof(action, comments):
             or not isinstance(comments, list)):
         return False
     version = action.get("receipt_version", "v1")
+    legacy_neutral = action.get("receipt_legacy_neutral", False)
     if (version not in {"v1", "v2"}
+            or type(legacy_neutral) is not bool
+            or (legacy_neutral and (
+                version != "v2" or action.get("task_type") != "neutral"
+            ))
             or (version == "v2" and action["receipt_base"] != action.get("main_sha"))
             or not receipt_body_matches(
                 action["receipt_body"],
@@ -2389,6 +2394,7 @@ def _valid_receipt_proof(action, comments):
                 action["receipt_session_id"], action.get("issue"),
                 action["receipt_start_head"], action["receipt_head"],
                 action["receipt_base"], action["receipt_result"], version=version,
+                legacy_neutral=legacy_neutral,
             )):
         return False
     candidates = [
@@ -2592,13 +2598,28 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
         if not isinstance(session, dict):
             return None
         if "receipt_result" in record or ordinal is None:
+            expected_instruction = receipt_instruction(
+                record["dispatch_nonce"], pull_number=record["issue"],
+                start_head=record["head"], base_sha=record["receipt_base"],
+            )
+            neutral_instruction = receipt_instruction(
+                record["dispatch_nonce"], pull_number=record["issue"],
+                start_head=record["head"], base_sha=record["receipt_base"],
+                neutral=True,
+            )
             if (not _valid_receipt_proof(record, comments)
                     or session.get("completed_at")
                         != record.get("receipt_completed_at")
-                    or receipt_instruction(
-                        record["dispatch_nonce"], pull_number=record["issue"],
-                        start_head=record["head"], base_sha=record["receipt_base"],
-                    ) not in session["prompt"]):
+                    or not isinstance(session.get("prompt"), str)
+                    or not (
+                        expected_instruction in session["prompt"]
+                        or (
+                            is_neutral
+                            and session["prompt"].endswith(
+                                f"\n\n{neutral_instruction}",
+                            )
+                        )
+                    )):
                 return None
             try:
                 task_updated = _time(task.get("updated_at"))
@@ -3943,13 +3964,33 @@ class Coordinator:
             if status == "completed" and action.get("handoff_state") == "failed":
                 busy = True
                 continue
-            if status in {"sending", "uncertain"}:
+            receipt_recovery = (
+                status == "uncertain"
+                and action.get("kind") == "fix"
+                and action.get("task_type") == "neutral"
+                and isinstance(action.get("task_id"), str)
+                and 0 < len(action["task_id"]) <= 128
+                and _valid_timestamp(action.get("task_created_at"))
+                and (
+                    "receipt_recovery_attempted" not in action
+                    or action.get("receipt_recovery_attempted") is False
+                )
+            )
+            if status in {"sending", "uncertain"} and not receipt_recovery:
                 busy = True
                 continue
-            if status == "sent":
+            if receipt_recovery:
+                if not apply:
+                    busy = True
+                    continue
+                self.store.update_action(
+                    key, "uncertain", receipt_recovery_attempted=True,
+                )
+                action = self.store.action(key)
+            if status == "sent" or receipt_recovery:
                 task_id = action.get("task_id")
                 if not isinstance(task_id, str) or not task_id or len(task_id) > 128:
-                    if apply:
+                    if apply and not receipt_recovery:
                         self._record_receipt_wait(key, action)
                     busy = True
                     continue
@@ -3958,7 +3999,7 @@ class Coordinator:
                         f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}"
                     )
                 except CoordinatorError:
-                    if apply:
+                    if apply and not receipt_recovery:
                         self._record_receipt_wait(key, action)
                     busy = True
                     continue
@@ -3969,7 +4010,7 @@ class Coordinator:
                                        ("repository", REPOSITORY_ID),
                                    ))
                         or not _task_scoped(task, snapshot)):
-                    if apply:
+                    if apply and not receipt_recovery:
                         self._record_receipt_wait(key, action)
                     busy = True
                     continue
@@ -3983,8 +4024,21 @@ class Coordinator:
                              or task["repository"].get("id") != REPOSITORY_ID)):
                     busy = True
                     continue
+                if receipt_recovery:
+                    sessions = task.get("sessions")
+                    if (
+                            task.get("state") != "completed"
+                            or not isinstance(sessions, list) or len(sessions) != 1
+                            or not isinstance(sessions[0], dict)
+                            or sessions[0].get("prompt") != action.get("body")
+                    ):
+                        busy = True
+                        continue
                 if _task_terminal(task):
                     if task.get("state") in {"failed", "timed_out", "cancelled"}:
+                        if receipt_recovery:
+                            busy = True
+                            continue
                         if apply:
                             event = _lifecycle_event(
                                 {"issue": number, "head": action["head"],
@@ -4004,7 +4058,7 @@ class Coordinator:
                                 snapshot["pull"].get("base", {}).get("sha"),
                             )
                             if action.get("head") not in authorized_heads:
-                                if apply:
+                                if apply and not receipt_recovery:
                                     self._record_receipt_wait(key, action)
                                 busy = True
                                 continue
@@ -4032,6 +4086,8 @@ class Coordinator:
                                     "receipt_completed_at": receipt["completed_at"],
                                     "receipt_session_completed_at": receipt["completed_at"],
                                 }
+                                if receipt.get("legacy_neutral") is True:
+                                    fields["receipt_legacy_neutral"] = True
                                 if receipt["result"] == "ready":
                                     fields["handoff_state"] = "pending"
                                     self.store.update_action_with_lifecycle(
@@ -4052,7 +4108,7 @@ class Coordinator:
                                         key, "completed", event, now=self.clock(),
                                         blocker=receipt["result"], **fields,
                                     )
-                        elif apply:
+                        elif apply and not receipt_recovery:
                             self._record_receipt_wait(key, action)
                         if not receipt:
                             busy = True
@@ -7054,6 +7110,7 @@ class StateStore:
                 instruction = receipt_instruction(
                     nonce, pull_number=claimed.get("issue"),
                     start_head=claimed.get("head"), base_sha=claimed.get("main_sha"),
+                    neutral=neutral,
                 )
                 claimed["body"] = f"{claimed.get('body', '')}\n\n{instruction}"
             data["actions"][key] = {**claimed, "status": "sending",
@@ -7138,6 +7195,7 @@ class StateStore:
                     "receipt_body", "receipt_task_id", "receipt_session_id",
                     "receipt_completed_at", "receipt_session_completed_at",
                     "receipt_nonce", "receipt_start_head", "receipt_head", "receipt_base",
+                    "receipt_legacy_neutral",
                     "attempt", "owner_id", "repository_id", "pull_id", "pull_node_id",
                     "repair_policy_version", "repair_fingerprints",
                     "repair_fingerprints_complete", "repair_fingerprint_version",
