@@ -37,6 +37,7 @@ def test_native_transcript_and_json_snapshot_omit_image_bytes(tmp_path):
         import os
         from hermes_state import SessionDB
         from run_agent import AIAgent
+        from backend.native_run_controls import private_photo_agent
 
         home = Path(os.environ['HERMES_HOME'])
         db = SessionDB(home / 'state.db')
@@ -50,7 +51,9 @@ def test_native_transcript_and_json_snapshot_omit_image_bytes(tmp_path):
         agent._db_flush_scan_prefix = None
         agent._persist_disabled = False
         agent.session_id = 'photo-fixture'
-        marker = 'SYNTHETIC_IMAGE_PAYLOAD'
+        agent = private_photo_agent(agent)
+        import base64
+        marker = base64.b64encode(b'SYNTHETIC_IMAGE_PAYLOAD' * 4096).decode()
         data_url = 'data:image/png;base64,' + marker
         message = {
             'role': 'user',
@@ -71,7 +74,7 @@ def test_native_transcript_and_json_snapshot_omit_image_bytes(tmp_path):
 
         agent._session_json_enabled = True
         agent.logs_dir = home / 'sessions'
-        agent.logs_dir.mkdir()
+        agent.logs_dir.mkdir(exist_ok=True)
         agent.model = 'synthetic-model'
         agent.base_url = 'http://127.0.0.1'
         agent.platform = 'api_server'
@@ -84,6 +87,19 @@ def test_native_transcript_and_json_snapshot_omit_image_bytes(tmp_path):
         assert marker not in snapshot
         assert 'data:image/' not in snapshot
         assert '[photo attachment omitted after processing]' in snapshot
+        agent.api_mode = 'chat_completions'
+        agent.client = None
+        agent.log_prefix = ''
+        agent._vprint = lambda *args, **kwargs: None
+        dump = agent._dump_api_request_debug(
+            {'messages': [message]}, reason='provider-error',
+            error=RuntimeError('Provider echoed ' + data_url))
+        assert dump is not None
+        dump_text = dump.read_text()
+        assert marker not in dump_text
+        assert 'data:image/' not in dump_text
+        assert 'Describe this synthetic photo.' in dump_text
+        assert message['content'][1]['image_url']['url'] == data_url
     ''')
 
 
@@ -93,6 +109,7 @@ def test_native_vision_failure_is_reported_without_synthetic_description(tmp_pat
         import sys
         import types
         from run_agent import AIAgent
+        from backend.native_run_controls import private_photo_agent
 
         async def unavailable(**kwargs):
             raise RuntimeError('synthetic provider unavailable')
@@ -101,6 +118,7 @@ def test_native_vision_failure_is_reported_without_synthetic_description(tmp_pat
             vision_analyze_tool=unavailable,
         )
         agent = AIAgent.__new__(AIAgent)
+        agent = private_photo_agent(agent)
         agent._anthropic_image_fallback_cache = {}
         agent._materialize_data_url_for_vision = lambda source: (source, None)
         try:

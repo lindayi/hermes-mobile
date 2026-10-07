@@ -9,6 +9,16 @@ _OWNER_SOURCE = Path('/home/lindayi/projects/hermes-mobile')
 _OWNER_RELEASES = Path('/home/lindayi/.local/share/hermes-mobile-deploy/releases')
 _CONTROL_HASHES = {
     'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
+    'backend/native_run_controls.py': 'f2be2298117985e1c6ede147a9381d68fade725f14d826e44512cadf444d72ef',
+    'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/native_maintenance.py': 'e79cfee2bf8d32c3f51dd3ee9247e23029376e10c5e55ea21aa373d6d72535c5',
+    'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
+    'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
+}
+
+# Exact pre-photo source set, retained for drain/rollback.
+_PRE_PHOTO_CONTROL_HASHES = {
+    'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
     'backend/native_run_controls.py': '564f0ab912a1d138f2ac5b1271935ef5aa2c99cdd2ab48d0527363f1a031e65c',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': 'e79cfee2bf8d32c3f51dd3ee9247e23029376e10c5e55ea21aa373d6d72535c5',
@@ -66,7 +76,7 @@ def _control_source_hashes(root):
     """Select an exact approved version, never a per-file mixture."""
     import hashlib
     try:
-        versions = (_CONTROL_HASHES, _PRE_CLARIFICATION_CONTROL_HASHES,
+        versions = (_CONTROL_HASHES, _PRE_PHOTO_CONTROL_HASHES, _PRE_CLARIFICATION_CONTROL_HASHES,
                     _PRE_ROUTING_CONTROL_HASHES,
                     _TIMEOUT_BASELINE_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES)
         for hashes in versions:

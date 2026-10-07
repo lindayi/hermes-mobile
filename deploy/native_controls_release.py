@@ -24,6 +24,9 @@ PROC_ROOT = Path('/proc')
 LEGACY_LAUNCHER = 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22'
 INSTALLED_API = '187c92509b3769c04756f0dc800d3597ea891ea21262e8a32ceaf3972ac95300'
 NATIVE_DEPENDENCIES = {
+    Path('/usr/local/lib/hermes-agent/run_agent.py'): 'fb58e81ac57c0f49370d72146d21250d1cfeaa0b964c9996e972954bbc343609',
+    Path('/usr/local/lib/hermes-agent/agent/conversation_loop.py'): '9904134bef009978bf95477a7ba8663421448e3e7735e0ba041ca672dfd33b45',
+    Path('/usr/local/lib/hermes-agent/agent/agent_runtime_helpers.py'): '6634b15aa5ab3d73a0f17e1d77adccbd605e3a3944b0c60adb6d84dedca9ea05',
     Path('/usr/local/lib/hermes-agent/hermes_state.py'): '70c69963f39902bad1b3ed1b943aaa1dc195b986ebd267fe1b0ce49a0c6d6723',
     Path('/usr/local/lib/hermes-agent/tools/process_registry.py'): '5eace294ba298a08ff2a5e0503a75720f5eb2bf9c3117e2588746f207ab915a9',
     Path('/usr/local/lib/hermes-agent/tools/async_delegation.py'): 'eadedad768e3b327bfa9755daf8b0ee00f330ce3f787336986d8b50dad5f9391',
@@ -41,6 +44,17 @@ def _full_sha(value):
 
 
 APPROVED_CONTROL_HASHES = {
+    'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
+    'backend/native_run_controls.py': 'f2be2298117985e1c6ede147a9381d68fade725f14d826e44512cadf444d72ef',
+    'backend/native_api_service.py':
+        'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/native_maintenance.py': 'e79cfee2bf8d32c3f51dd3ee9247e23029376e10c5e55ea21aa373d6d72535c5',
+    'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
+    'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
+}
+
+# Exact pre-photo source set, retained for drain/rollback.
+PRE_PHOTO_CONTROL_HASHES = {
     'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
     'backend/native_run_controls.py': '564f0ab912a1d138f2ac5b1271935ef5aa2c99cdd2ab48d0527363f1a031e65c',
     'backend/native_api_service.py':
@@ -95,7 +109,7 @@ PREVIOUS_CONTROL_HASHES = {
 def attested_controls(root):
     """Runtime/rollback approval accepts only one complete known source set."""
     from backend.model_controls import (
-        _CONTROL_HASHES, _PRE_CLARIFICATION_CONTROL_HASHES, _PRE_ROUTING_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES,
+        _CONTROL_HASHES, _PRE_PHOTO_CONTROL_HASHES, _PRE_CLARIFICATION_CONTROL_HASHES, _PRE_ROUTING_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES,
         _TIMEOUT_BASELINE_CONTROL_HASHES, _control_source_hashes)
     actual = _control_source_hashes(root)
     if (set(APPROVED_CONTROL_HASHES) != {
@@ -108,12 +122,14 @@ def attested_controls(root):
                 'backend/native_controls_service.py', 'backend/native_run_controls.py',
                 'backend/native_api_service.py', 'backend/native_maintenance.py'}
             or _CONTROL_HASHES != APPROVED_CONTROL_HASHES
+            or _PRE_PHOTO_CONTROL_HASHES != PRE_PHOTO_CONTROL_HASHES
+            or set(PRE_PHOTO_CONTROL_HASHES) != set(APPROVED_CONTROL_HASHES)
             or _PRE_ROUTING_CONTROL_HASHES != PRE_ROUTING_CONTROL_HASHES
             or _PRE_CLARIFICATION_CONTROL_HASHES != PRE_CLARIFICATION_CONTROL_HASHES
             or _PREVIOUS_CONTROL_HASHES != PREVIOUS_CONTROL_HASHES
             or set(TIMEOUT_BASELINE_CONTROL_HASHES) != set(APPROVED_CONTROL_HASHES)
             or _TIMEOUT_BASELINE_CONTROL_HASHES != TIMEOUT_BASELINE_CONTROL_HASHES
-            or actual not in (APPROVED_CONTROL_HASHES, PRE_CLARIFICATION_CONTROL_HASHES,
+            or actual not in (APPROVED_CONTROL_HASHES, PRE_PHOTO_CONTROL_HASHES, PRE_CLARIFICATION_CONTROL_HASHES,
                               PRE_ROUTING_CONTROL_HASHES,
                               TIMEOUT_BASELINE_CONTROL_HASHES, PREVIOUS_CONTROL_HASHES)):
         raise RuntimeError('Native controls do not match approved source version')
@@ -124,6 +140,7 @@ def approved_controls(root):
     try:
         tree = ast.parse((root / 'backend/model_controls.py').read_bytes())
         for name, expected in (('_CONTROL_HASHES', APPROVED_CONTROL_HASHES),
+                               ('_PRE_PHOTO_CONTROL_HASHES', PRE_PHOTO_CONTROL_HASHES),
                                ('_PRE_CLARIFICATION_CONTROL_HASHES', PRE_CLARIFICATION_CONTROL_HASHES),
                                ('_PRE_ROUTING_CONTROL_HASHES', PRE_ROUTING_CONTROL_HASHES),
                                ('_PREVIOUS_CONTROL_HASHES', PREVIOUS_CONTROL_HASHES),

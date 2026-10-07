@@ -14,6 +14,10 @@ class NativeRunNotFound(IntegrationUnavailable):
     """An authenticated lookup proved that this process no longer owns the run."""
 
 
+class NativeRunRejected(IntegrationUnavailable):
+    """The native handler positively rejected a request before run admission."""
+
+
 class NativeClarificationRejected(IntegrationUnavailable):
     """The bound native waiter definitively rejected this answer dispatch."""
 
@@ -36,6 +40,9 @@ class GatewayClient:
             raise IntegrationUnavailable('Private Hermes API is not configured')
         try:
             response=await self.client.request(method,path,**kwargs)
+            if (method.upper() == 'POST' and urlparse(path).path == '/v1/runs'
+                    and response.status_code == 413):
+                raise NativeRunRejected('Photo request was rejected before admission; remove photos or shorten context and resend.')
             segments = urlparse(path).path.split('/')
             if (method.upper() == 'GET' and len(segments) == 4
                     and segments[:3] == ['', 'v1', 'runs'] and segments[3]

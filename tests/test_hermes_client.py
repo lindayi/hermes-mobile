@@ -110,6 +110,26 @@ async def test_gateway_timeout_is_not_classified_as_native_run_not_found():
         await client.close()
 
 
+@pytest.mark.parametrize('outcome', ['413', 'timeout', '503'])
+@pytest.mark.asyncio
+async def test_native_photo_rejection_is_distinct_from_ambiguous_dispatch(outcome):
+    from backend.hermes_client import GatewayClient, IntegrationUnavailable, NativeRunRejected
+
+    async def handle(request):
+        if outcome == 'timeout':
+            raise httpx.ReadTimeout('synthetic timeout')
+        return httpx.Response(int(outcome), json={'error': {'code': 'body_too_large'}})
+
+    client = GatewayClient('http://127.0.0.1:8642', 'synthetic-token', execution_ready=True,
+                           transport=httpx.MockTransport(handle))
+    try:
+        with pytest.raises(IntegrationUnavailable) as error:
+            await client.start('synthetic-session', 'Inspect a photo')
+        assert type(error.value) is (NativeRunRejected if outcome == '413' else IntegrationUnavailable)
+    finally:
+        await client.close()
+
+
 @pytest.mark.parametrize(('status', 'body', 'typed'), [
     (409, {}, False),
     (409, {'error': {'code': 'clarification_conflict'}}, False),

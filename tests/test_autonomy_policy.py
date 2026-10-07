@@ -214,9 +214,9 @@ _PENDING_ISSUE77_CLARIFICATION_FIXTURE = {
 _ISSUE85_PHOTO_FIXTURE = {
     'backend/app.py': '77d36934b033ecfe669cc2b5c2581146b776f2c448336d7000183489307682c6',
     'backend/attachments.py': 'd62c4df6c9de209e7103e4def1fda2885e5e7600ebf466d962b71714c4d76d47',
-    'backend/hermes_client.py': 'a607e6f6d71cd6b9bb54f13eda4f40d35e6f6f61b8124ba2090e6c28154d4b97',
+    'backend/hermes_client.py': '07d782913519cc59c38dd95b6d8047fdc11ae5a8bc3cafa2f0edde0bb4c23f9a',
     'backend/native_catalog.py': '0d0e5e332a88ea7ff0683dcc9fb4fd9dcaa730ecf341b45f404a2cf2f90fe1e7',
-    'backend/orchestration.py': '5e373e9e9c2aaae8128bc32e119e7b5dc439ea899bdb5b2377ae33ba414cfcc1',
+    'backend/orchestration.py': '4a62bc9ffd9eac78b2ad85bb09247f9c8b2519f4226b296537820683c169b3e1',
     'backend/runs.py': '79b15df9918cb85599cb3a7db5c978d2abb681afe9c355acdfa6e07f5472884f',
     'requirements.lock': 'ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04',
 }

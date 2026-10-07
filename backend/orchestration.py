@@ -408,7 +408,8 @@ class Orchestrator:
             return
         except Exception as exc:
             from .attachments import AttachmentError
-            if isinstance(exc, AttachmentError) and not self.get(user, run['id']).get('upstream_id'):
+            from .hermes_client import NativeRunRejected
+            if isinstance(exc, (AttachmentError, NativeRunRejected)) and not self.get(user, run['id']).get('upstream_id'):
                 self.journal.finish(user['id'], run['id'], 'failed', error=str(exc))
                 return
             self.journal.finish(user['id'], run['id'], 'unknown',
@@ -519,6 +520,8 @@ class Orchestrator:
             self.steering.observe(user, current, event)
             self.clarifications.observe(user, current, event)
             self.journal.finish(user['id'], rid, event['event'].split('.')[1], output=event.get('output'),
+                                error=('The photo could not be analyzed; choose a vision-capable model or resend.'
+                                       if event['event'] == 'run.failed' and current.get('attachment_ids') else None),
                                 expected={k: current[k] for k in ('profile', 'upstream_id')})
 
     def _matches(self, run, result):
@@ -564,6 +567,8 @@ class Orchestrator:
                     self.clarifications.observe(user, run, result)
                 if result.get('run_id') == run['upstream_id'] and result.get('status') in ('completed', 'failed', 'cancelled'):
                     self.journal.finish(user['id'], rid, result['status'], output=result.get('output'),
+                                        error=('The photo could not be analyzed; choose a vision-capable model or resend.'
+                                               if result['status'] == 'failed' and run.get('attachment_ids') else None),
                                         expected={k: run[k] for k in ('profile', 'upstream_id')})
                     return
                 if result.get('status') == 'stopping':

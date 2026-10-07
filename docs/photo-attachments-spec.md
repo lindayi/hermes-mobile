@@ -14,10 +14,11 @@ The mobile backend currently accepts only text in `/runs`; the composer has no
 file input. The pinned Hermes source is
 `NousResearch/hermes-agent@8911e2e0edf750b104edbdc106d63d6cdac88524`.
 Its OpenAI-compatible API accepts normalized `image_url`/`input_image` parts,
-and the agent pipeline persists multimodal user content as bounded text
-placeholders rather than image bytes in native history. The mobile bridge must
-send a validated image as part of the same `/v1/runs` input and preserve only
-opaque attachment metadata in history. Native image copies, public static URLs,
+and its SQLite transcript serializer strips multimodal user image parts. Its
+enabled JSON snapshots and provider-error dumps do not provide that protection
+by themselves. The mobile bridge must send a validated image as part of the same
+`/v1/runs` input and preserve only opaque attachment metadata in history.
+Native image copies, public static URLs,
 or base64 in app history/journals/events are prohibited.
 
 ## Upload and image contract
@@ -101,6 +102,27 @@ placeholder and keeps the associated text. No filename, image bytes, local
 path, or user-controlled URL is placed in logs, events, notifications, or
 native history.
 
+The dedicated owner listener loads the versioned `native_run_controls` adapter
+from the staged repository release. It admits complete photo requests up to
+20,000,000 bytes, with at most four 2 MiB inline JPEG/PNG/WebP parts and matching
+opaque IDs. The existing 10,000,000-byte text/history budget remains independent
+of the image bytes. Validation occurs before native run creation. A proven HTTP
+413 is terminal rejection, not an unknown network outcome; ambiguous dispatch
+still observes the original run without replay.
+
+The adapter copies and sanitizes data at the actual enabled snapshot, request
+dump, SQLite batch/`api_content`, trajectory, and API-request hook boundaries.
+Only transient live provider input keeps image bytes. Analyzer fallback does not
+materialize an unaccounted temporary copy; unavailable analysis or an image
+rejection produces an actionable failed photo run instead of a text-only retry.
+No new native photo files are retained, so native copies add zero bytes to the
+attachment store footprint. This does not certify historical copies or other
+listeners. Native source dependencies are fingerprinted by the existing guarded
+release; cloud and deployed listeners use the same repository adapter with the
+same installed baseline, not a cloud-only compatibility patch. Activation remains
+an independently reviewed exact-main guarded release, with the pre-photo source
+map retained for drain and rollback. No installed source is hot-edited.
+
 ## Security and rollout
 
 Writes retain same-origin and CSRF enforcement. The streaming body limit applies
@@ -139,9 +161,9 @@ activation success.
 | --- | --- |
 | `backend/app.py` | `77d36934b033ecfe669cc2b5c2581146b776f2c448336d7000183489307682c6` |
 | `backend/attachments.py` | `d62c4df6c9de209e7103e4def1fda2885e5e7600ebf466d962b71714c4d76d47` |
-| `backend/hermes_client.py` | `a607e6f6d71cd6b9bb54f13eda4f40d35e6f6f61b8124ba2090e6c28154d4b97` |
+| `backend/hermes_client.py` | `07d782913519cc59c38dd95b6d8047fdc11ae5a8bc3cafa2f0edde0bb4c23f9a` |
 | `backend/native_catalog.py` | `0d0e5e332a88ea7ff0683dcc9fb4fd9dcaa730ecf341b45f404a2cf2f90fe1e7` |
-| `backend/orchestration.py` | `5e373e9e9c2aaae8128bc32e119e7b5dc439ea899bdb5b2377ae33ba414cfcc1` |
+| `backend/orchestration.py` | `4a62bc9ffd9eac78b2ad85bb09247f9c8b2519f4226b296537820683c169b3e1` |
 | `backend/runs.py` | `79b15df9918cb85599cb3a7db5c978d2abb681afe9c355acdfa6e07f5472884f` |
 | `requirements.lock` | `ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04` |
 

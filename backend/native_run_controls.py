@@ -1,15 +1,171 @@
 """Process-local compatibility for the dedicated mobile owner listener only."""
 import json
+import base64
+import re
 import threading
 import time
 import uuid
 from contextlib import contextmanager
+from functools import lru_cache
 
 from aiohttp import web
 
 
+PHOTO_REQUEST_BYTES = 20_000_000
+TEXT_REQUEST_BYTES = 10_000_000
+PHOTO_OMITTED = '[screenshot] [photo attachment omitted after processing]'
+_INLINE_PHOTO = re.compile(r'data:image/[^;,\s"\\]+;base64,[A-Za-z0-9+/=_-]*', re.I)
+
+
+def photo_persistence_copy(value):
+    """Copy only at retention boundaries; live provider input is never changed."""
+    if isinstance(value, str):
+        return _INLINE_PHOTO.sub(PHOTO_OMITTED, value)
+    if isinstance(value, list):
+        return [photo_persistence_copy(item) for item in value]
+    if isinstance(value, dict):
+        if value.get('type') in {'image_url', 'input_image', 'image'}:
+            return {'type': 'text', 'text': PHOTO_OMITTED}
+        return {key: (None if key == 'api_content' and _INLINE_PHOTO.search(str(item))
+                      else photo_persistence_copy(item)) for key, item in value.items()}
+    return value
+
+
+def validate_photo_payload(body):
+    if not isinstance(body, dict):
+        raise ValueError('Expected a JSON object')
+    ids = body.get('mobile_attachment_ids')
+    if ids is None:
+        if len(json.dumps(body).encode()) > TEXT_REQUEST_BYTES:
+            raise ValueError('Native text request exceeds the existing limit')
+        return
+    content = body.get('input')
+    if (not isinstance(content, list) or len(content) != 1
+            or not isinstance(content[0], dict) or content[0].get('role') != 'user'
+            or not isinstance(content[0].get('content'), list)):
+        raise ValueError('Invalid private photo input')
+    images = [part for part in content[0]['content']
+              if isinstance(part, dict) and part.get('type') == 'image_url']
+    if (not isinstance(ids, list) or not 1 <= len(ids) <= 4 or len(set(ids)) != len(ids)
+            or len(images) != len(ids)
+            or any(not isinstance(item, str) or not re.fullmatch('[0-9a-f]{32}', item)
+                   for item in ids)):
+        raise ValueError('Invalid private photo binding')
+    for part in images:
+        image = part.get('image_url')
+        url = image.get('url') if isinstance(image, dict) else None
+        if not isinstance(url, str) or not re.fullmatch(
+                r'data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}', url):
+            raise ValueError('Only normalized inline photos are allowed')
+        try:
+            size = len(base64.b64decode(url.split(',', 1)[1], validate=True))
+        except ValueError:
+            raise ValueError('Invalid photo encoding') from None
+        if not 0 < size <= 2 * 1024 * 1024:
+            raise ValueError('Photo exceeds the normalized image limit')
+    if len(json.dumps(photo_persistence_copy(body)).encode()) > TEXT_REQUEST_BYTES:
+        raise ValueError('Native text request exceeds the existing limit')
+
+
+@lru_cache(maxsize=16)
+def _private_photo_class(base):
+    class PrivatePhotoAgent(base):
+        def __setattr__(self, name, value):
+            if name == '_vision_supported' and value is False and getattr(self, '_mobile_photo_turn', False):
+                super().__setattr__('_mobile_photo_failed', True)
+                raise RuntimeError('The configured model rejected photo input; select a vision-capable model and resend.')
+            super().__setattr__(name, value)
+
+        def run_conversation(self, user_message, *args, **kwargs):
+            self._mobile_photo_turn = isinstance(user_message, list) and any(
+                isinstance(part, dict) and part.get('type') == 'image_url' for part in user_message)
+            if self._mobile_photo_turn and not getattr(self, '_vision_supported', True):
+                raise RuntimeError('The configured model does not support photos; select a vision-capable model and resend.')
+            result = super().run_conversation(user_message, *args, **kwargs)
+            if self._mobile_photo_turn and getattr(self, '_mobile_photo_failed', False):
+                raise RuntimeError('The configured vision analyzer could not process the attached image.')
+            return result
+
+        def _describe_image_for_anthropic_fallback(self, image_url, role):
+            # Do not materialize a second, unaccounted native temporary image.
+            self._mobile_photo_failed = True
+            raise RuntimeError('The configured vision analyzer could not process the attached image.')
+
+        def _save_session_log(self, messages=None):
+            return super()._save_session_log(photo_persistence_copy(
+                messages if messages is not None else self._session_messages))
+
+        def _dump_api_request_debug(self, api_kwargs, *, reason, error=None):
+            safe_error = RuntimeError(photo_persistence_copy(str(error))) if error is not None else None
+            return super()._dump_api_request_debug(photo_persistence_copy(api_kwargs),
+                                                  reason=reason, error=safe_error)
+
+        def _convert_to_trajectory_format(self, messages, user_query, completed):
+            return super()._convert_to_trajectory_format(
+                photo_persistence_copy(messages), photo_persistence_copy(user_query), completed)
+
+        def _api_request_payload_for_hook(self, api_kwargs):
+            return photo_persistence_copy(super()._api_request_payload_for_hook(api_kwargs))
+
+    return PrivatePhotoAgent
+
+
+def private_photo_agent(agent):
+    agent.__class__ = _private_photo_class(type(agent))
+    db = getattr(agent, '_session_db', None)
+    if db is not None and not getattr(db, '_mobile_photo_private', False):
+        original = db.append_messages_batch
+        def append_messages_batch(*args, **kwargs):
+            if 'messages' in kwargs:
+                kwargs['messages'] = photo_persistence_copy(kwargs['messages'])
+            return original(*args, **kwargs)
+        db.append_messages_batch = append_messages_batch
+        db._mobile_photo_private = True
+    return agent
+
+
 def run_controls_adapter(base):
     class RunControlsAdapter(base):
+        async def connect(self, **kwargs):
+            # This entrypoint is a dedicated listener, not the shared gateway.
+            from gateway.platforms import api_server
+            api_server.MAX_REQUEST_BYTES = PHOTO_REQUEST_BYTES
+            original_limit = api_server.body_limit_middleware
+            if not getattr(original_limit, '_mobile_photo_limit', False):
+                @web.middleware
+                async def body_limit(request, handler):
+                    limit = (PHOTO_REQUEST_BYTES if request.path.endswith('/v1/runs')
+                             else TEXT_REQUEST_BYTES)
+                    length = request.headers.get('Content-Length')
+                    if length is not None:
+                        try:
+                            if int(length) > limit:
+                                return web.json_response({'error': {'code': 'body_too_large'}}, status=413)
+                        except ValueError:
+                            return web.json_response({'error': {'code': 'invalid_content_length'}}, status=400)
+                    return await original_limit(request.clone(client_max_size=limit), handler)
+                body_limit._mobile_photo_limit = True
+                api_server.body_limit_middleware = body_limit
+            # Keep parsing requests visible to the native drain fence too.
+            if not getattr(type(self), '_photo_admission_wrapped', False):
+                type(self)._handle_runs = api_server._admit_api_agent_request(type(self)._handle_runs)
+                type(self)._photo_admission_wrapped = True
+            return await super().connect(**kwargs)
+
+        async def _handle_runs(self, request):
+            auth = self._check_auth(request)
+            if auth is not None:
+                return auth
+            try:
+                body = await request.json()
+                validate_photo_payload(body)
+            except web.HTTPRequestEntityTooLarge:
+                return web.json_response({'error': {'code': 'body_too_large'}}, status=413)
+            except (ValueError, TypeError):
+                return web.json_response({'error': {'code': 'photo_input_rejected',
+                    'message': 'Photo payload is invalid or exceeds the photo/text limits.'}}, status=413)
+            return await super()._handle_runs(request)
+
         def __init__(self, *args, **kwargs):
             self._controls_lock = threading.RLock()
             self._controls = {}
@@ -147,6 +303,8 @@ def run_controls_adapter(base):
 
         def _create_agent(self, *args, **kwargs):
             agent = super()._create_agent(*args, **kwargs)
+            if hasattr(agent, '_save_session_log'):
+                agent = private_photo_agent(agent)
             run_id = getattr(kwargs.get('tool_progress_callback'), '_mobile_run_id', None)
             if run_id is None:
                 return agent  # Other native entry points retain their ordinary lifecycle.
