@@ -202,7 +202,8 @@ def reminder_projections(connection, session_id, columns, snapshot, compressions
 def matches_user(row, run, reminders=()):
     if row is None or row['role'] != 'user':
         return False
-    attachment_ids = run.get('attachment_ids', [])
+    attachment_ids = (run['attachment_ids']
+                      if 'attachment_ids' in run.keys() else [])
     if isinstance(attachment_ids, list) and attachment_ids:
         content = row['content']
         if isinstance(content, str) and content.startswith('\x00json:'):

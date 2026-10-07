@@ -123,7 +123,6 @@ def test_persistence_sanitization_preserves_live_bytes_and_metadata():
 
 def test_photo_run_history_requires_a_photo_marked_exact_user_turn():
     from backend.task_reminder_presentation import matches_user
-
     run = {'id': 'photo-run', 'input': 'Inspect this photo', 'attachment_ids': ['a' * 32]}
     assert not matches_user({'id': 1, 'role': 'user', 'content': run['input']}, run)
     assert matches_user({'id': 2, 'role': 'user',
@@ -137,6 +136,21 @@ def test_photo_run_history_requires_a_photo_marked_exact_user_turn():
                              'content': run['input'] + '\n[screenshot]\n[screenshot]'}, run)
     text_run = {'id': 'text-run', 'input': run['input'], 'attachment_ids': []}
     assert matches_user({'id': 5, 'role': 'user', 'content': run['input']}, text_run)
+
+
+def test_photo_history_matcher_accepts_sqlite_rows_for_text_runs():
+    import sqlite3
+    from backend.task_reminder_presentation import matches_user
+
+    db = sqlite3.connect(':memory:')
+    db.row_factory = sqlite3.Row
+    db.execute('CREATE TABLE runs (id TEXT, input TEXT, status TEXT)')
+    db.execute('INSERT INTO runs VALUES (?, ?, ?)', ('text-run', 'Ordinary text', 'completed'))
+    db.execute('CREATE TABLE messages (id INTEGER, role TEXT, content TEXT)')
+    db.execute('INSERT INTO messages VALUES (?, ?, ?)', (1, 'user', 'Ordinary text'))
+
+    assert matches_user(db.execute('SELECT * FROM messages').fetchone(),
+                        db.execute('SELECT * FROM runs').fetchone())
 
 
 def test_photo_agent_refuses_strip_retry_and_analyzer_fallback():
