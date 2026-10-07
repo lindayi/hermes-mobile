@@ -3391,16 +3391,16 @@ def test_cold_legacy_mixed_budget_request_identity(tmp_path, producer, occupancy
 _LEGACY_HYDRATION_HAZARDS = [
     (None, False),
     (None, True),
-    (("task-state", []), False),
-    (("task-state", {}), False),
-    (("session-state", []), False),
-    (("session-state", {}), False),
-    (("reservation-type", []), False),
-    (("reservation-type", {}), False),
-    (("task-id", []), False),
-    (("task-id", {}), False),
-    (("session-id", []), False),
-    (("session-id", {}), False),
+    *[
+        ((field, value), ordinals)
+        for field in (
+            "listed-task-state", "detail-task-state", "session-state",
+            "reservation-type", "task-id", "receipt-task-id", "session-id",
+            "detail-task-id", "detail-session-id", "detail-session-task-id",
+        )
+        for value in ([], {}, None, False, 7)
+        for ordinals in (False, True)
+    ],
     ("duplicate-list", False),
     ("malformed-list", False),
     ("missing-detail", False),
@@ -3619,17 +3619,18 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     enrollment.pop("repair_progress")
     if (isinstance(hydration_hazard, tuple)
             and hydration_hazard[0] in {
-                "reservation-type", "task-id", "session-id",
+                "reservation-type", "task-id", "receipt-task-id", "session-id",
             }):
         field = {
             "reservation-type": "task_type",
             "task-id": "task_id",
+            "receipt-task-id": "receipt_task_id",
             "session-id": "session_id",
         }[hydration_hazard[0]]
         value = deepcopy(hydration_hazard[1])
         enrollment["receipt_proofs"][0][field] = value
         proofs[0][field] = deepcopy(value)
-        if field == "task_id":
+        if field in {"task_id", "receipt_task_id"}:
             enrollment["receipt_proofs"][0].pop("receipt_result")
             proofs[0].pop("receipt_result")
     legacy["actions"][f"review:negative:{legacy_head}"] = {
@@ -3662,11 +3663,22 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     cold_store = StateStore(path)
     assert cold_store.snapshot()["enrollments"]["16"]["neutral_attempts_unknown"]
     assert not any(action.get("kind") == "fix" for action in cold_store.actions().values())
-    assert all(not ({"attempt", "task_type", "repair_policy_version"} & set(proof))
-               for proof in proofs)
+    for index, proof in enumerate(proofs):
+        fields = {"attempt", "task_type", "repair_policy_version"} & set(proof)
+        expected_fields = (
+            {"task_type"}
+            if index == 0 and isinstance(hydration_hazard, tuple)
+            and hydration_hazard[0] == "reservation-type"
+            else set()
+        )
+        assert fields == expected_fields
     from deploy.cloud_coordinator import _legacy_neutral_attempt_count, _valid_receipt_proof
-    assert all(_valid_receipt_proof(proof, api.comments) for proof in proofs)
-    assert _legacy_neutral_attempt_count(
+    if not (
+            isinstance(hydration_hazard, tuple)
+            and hydration_hazard[0] in {"task-id", "receipt-task-id"}
+    ):
+        assert all(_valid_receipt_proof(proof, api.comments) for proof in proofs)
+    recovered_count = _legacy_neutral_attempt_count(
         cold_store.snapshot()["enrollments"]["16"], {},
         api.comments,
         tasks=list(api.tasks.values()),
@@ -3678,7 +3690,16 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                 "head": {"ref": "topic"},
             },
         },
-    ) == 0
+    )
+    expected_count = (
+        None
+        if isinstance(hydration_hazard, tuple)
+        and hydration_hazard[0] in {
+            "reservation-type", "task-id", "receipt-task-id", "session-id",
+        }
+        else 0
+    )
+    assert recovered_count == expected_count
 
     ordinal_enrollment = deepcopy(
         cold_store.snapshot()["enrollments"]["16"],
@@ -3748,6 +3769,12 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                     task["created_at"] = "not-a-timestamp"
                 else:
                     task["created_at"] = "2026-09-30T09:45:00Z"
+            if (history_visible and isinstance(hydration_hazard, tuple)
+                    and hydration_hazard[0] == "listed-task-state"):
+                next(task for task in values
+                     if task["id"] == "legacy-source-1")["state"] = deepcopy(
+                         hydration_hazard[1]
+                     )
             if (history_visible
                     and hydration_hazard == "list-detail-created-mismatch"):
                 next(task for task in values
@@ -3774,10 +3801,16 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             if (history_visible and isinstance(hydration_hazard, tuple)
                     and route.endswith("/legacy-source-1")):
                 field, value = hydration_hazard
-                if field == "task-state":
+                if field == "detail-task-state":
                     detail["state"] = deepcopy(value)
                 elif field == "session-state":
                     detail["sessions"][0]["state"] = deepcopy(value)
+                elif field == "detail-task-id":
+                    detail["id"] = deepcopy(value)
+                elif field == "detail-session-id":
+                    detail["sessions"][0]["id"] = deepcopy(value)
+                elif field == "detail-session-task-id":
+                    detail["sessions"][0]["task_id"] = deepcopy(value)
             if (history_visible and hydration_hazard == "foreign-detail"
                     and route.endswith("/legacy-source-1")):
                 detail["creator"] = {"id": OWNER + 1}
@@ -3846,7 +3879,13 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     ).run(apply=True)["pull_requests"][0]
     waiting_state = StateStore(path).snapshot()
     waiting_export = json.loads((path.parent / "workflow-events.json").read_text())
-    assert "waiting-for-verified-history" in waiting["reasons"]
+    expected_wait_reason = (
+        "unauthorized-continuation"
+        if isinstance(hydration_hazard, tuple)
+        and hydration_hazard[0] in {"task-id", "receipt-task-id"}
+        else "waiting-for-verified-history"
+    )
+    assert expected_wait_reason in waiting["reasons"]
     assert waiting_state["enrollments"]["16"]["neutral_attempts_unknown"] is True
     assert waiting_state["enrollments"]["16"]["attempts"] == 3
     assert waiting_state["enrollments"]["16"]["receipt_proofs"] == proofs
@@ -3962,10 +4001,15 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                        for action in StateStore(path).actions().values())
         assert api.fix_attempts == 0
         assert not any(route.endswith("/tasks") for route, _ in api.writes)
-        if hydration_hazard in {
+        if isinstance(hydration_hazard, str) and hydration_hazard in {
                 "duplicate-list", "malformed-list",
                 "receipt-created-missing", "receipt-created-type",
         }:
+            assert "legacy-source-1" not in task_detail_reads
+        elif (isinstance(hydration_hazard, tuple)
+              and hydration_hazard[0] in {
+                  "listed-task-state", "task-id", "receipt-task-id",
+              }):
             assert "legacy-source-1" not in task_detail_reads
         else:
             assert "legacy-source-1" in task_detail_reads

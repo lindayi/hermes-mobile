@@ -359,7 +359,9 @@ supported `true`/`behind` behavior. Every recovered receipt chain, with or witho
 an attempt ordinal, uses the existing timezone-aware task/session/receipt chronology;
 ordinal-bearing terminal reservations without a receipt still require valid task,
 session, and completion chronology. Hydrated task creation time must also exactly
-match its authenticated list record.
+match its authenticated list record. Task/session states, reservation types, and
+bound task/session IDs are type-checked before enum or mapping lookups; malformed
+JSON values preserve unknown history and never authorize dispatch.
 Missing, malformed, out-of-order, or inconsistent timestamps leave history unknown
 and block dispatch. Nonce-bound prompt checks remain in force. Authenticated
 terminal malformed-report waits with an unused retry yield
@@ -381,7 +383,7 @@ merge, runtime evidence, or activation permission:
 
 | Issue #87 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `e8e6d3aea0701800c50d45633ff3c2b23750215949de3b97bca5ae4c8d5c61f2` |
+| `deploy/cloud_coordinator.py` | `9d34a34bc5bc17f83ba3392444e74581a2d56a514ad724acd691e75f52708c86` |
 | `deploy/review_evidence.py` | `bc2bea2e4cd17ac28ed96cc5d421f62f63e7ef14ee9bdec5045cf6f26bb8f290` |
 | `deploy/task_receipts.py` | `bfc903eddf33a7b8e4b17ccafd8112af70611ce472a44520ed4fe5842845a1c7` |
 | `deploy/workflow_events.py` | `63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e` |

@@ -2343,10 +2343,14 @@ def _review_task_terminal(action, task):
 
 def _task_terminal(task):
     terminal = {"completed", "failed", "timed_out", "cancelled"}
+    if not isinstance(task, dict) or not isinstance(task.get("state"), str):
+        return False
     sessions = task.get("sessions")
     return (task.get("state") in terminal
             and (sessions is None or (isinstance(sessions, list) and all(
-                isinstance(session, dict) and session.get("state") in terminal
+                isinstance(session, dict)
+                and isinstance(session.get("state"), str)
+                and session.get("state") in terminal
                 for session in sessions
             ))))
 
@@ -2412,9 +2416,15 @@ def _legacy_task_reservation_type(record, tasks, snapshot):
             or not isinstance(snapshot["pull"].get("head"), dict)):
         return None
     task_id = record.get("receipt_task_id", record.get("task_id"))
+    if (not isinstance(task_id, str) or not task_id or len(task_id) > 128
+            or record.get("task_id") != task_id
+            or not isinstance(tasks, dict)):
+        return None
     task = tasks.get(task_id)
     if (not isinstance(task, dict)
+            or not isinstance(task.get("id"), str)
             or task.get("id") != task_id
+            or not isinstance(task.get("state"), str)
             or task.get("state") not in {"completed", "failed", "timed_out", "cancelled"}
             or not _github_identity(task.get("creator"), OWNER_ID)
             or not _github_identity(task.get("owner"), OWNER_ID)
@@ -2426,10 +2436,20 @@ def _legacy_task_reservation_type(record, tasks, snapshot):
         return None
     session = sessions[0]
     session_id = record.get("receipt_session_id", record.get("session_id"))
+    if (("receipt_session_id" in record
+         and not _valid_session_id(record.get("receipt_session_id")))
+            or ("session_id" in record
+                and not _valid_session_id(record.get("session_id")))
+            or ("session_id" in record and "receipt_session_id" in record
+                and record["session_id"] != record["receipt_session_id"])):
+        return None
     prompt = session.get("prompt") if isinstance(session, dict) else None
     if (not isinstance(session, dict)
+            or not _valid_session_id(session.get("id"))
             or (session_id is not None and session.get("id") != session_id)
+            or not isinstance(session.get("task_id"), str)
             or session.get("task_id") != task_id
+            or not isinstance(session.get("state"), str)
             or session.get("state") not in {"completed", "failed", "timed_out", "cancelled"}
             or not _github_identity(session.get("user"), OWNER_ID)
             or not _github_identity(session.get("owner"), OWNER_ID)
@@ -2460,8 +2480,9 @@ def _legacy_task_reservation_type(record, tasks, snapshot):
     else:
         return None
     task_type = record.get("task_type")
-    if (task_type is not None
-            and task_type not in (
+    if "task_type" in record and (
+            not isinstance(task_type, str)
+            or task_type not in (
                 {"neutral"} if reservation_type else {"source", "review-followup"}
             )):
         return None
@@ -2479,9 +2500,13 @@ def _legacy_task_detail_matches_list(listed, detailed):
             not isinstance(listed, dict) or "sessions" in listed
             or type(listed.get("session_count")) is not int
             or listed["session_count"] != 1
-            or listed.get("state") not in terminal_states
             or not isinstance(detailed, dict)
+            or not isinstance(listed.get("id"), str)
+            or not isinstance(detailed.get("id"), str)
+            or not isinstance(listed.get("state"), str)
+            or listed.get("state") not in terminal_states
             or detailed.get("id") != listed.get("id")
+            or not isinstance(detailed.get("state"), str)
             or detailed.get("state") != listed.get("state")
             or detailed.get("state") not in terminal_states
             or detailed.get("created_at") != listed.get("created_at")
@@ -3543,6 +3568,7 @@ class Coordinator:
                     and "sessions" not in listed
                     and type(listed.get("session_count")) is int
                     and listed["session_count"] == 1
+                    and isinstance(listed.get("state"), str)
                     and listed.get("state") in {
                         "completed", "failed", "timed_out", "cancelled",
                     }
@@ -5248,10 +5274,12 @@ class Coordinator:
                 )
                 and not _other_task_active([
                     task for task in snapshot["tasks"]
-                    if isinstance(task, dict) and task.get("state") in {
+                    if (isinstance(task, dict)
+                        and isinstance(task.get("state"), str)
+                        and task.get("state") in {
                         "queued", "in_progress", "waiting_for_user", "idle",
                         "requested", "pending",
-                    }
+                        })
                 ], snapshot)
                 and not any(
                     action.get("issue") == number
