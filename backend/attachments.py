@@ -25,6 +25,7 @@ MAX_IMAGES_PER_RUN = 4
 MAX_IMAGE_PIXELS = 40_000_000
 RESERVATION_BYTES = MAX_INPUT_BYTES + MAX_IMAGE_BYTES
 _IMAGE_DECODE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix='photo-decode')
+_UPLOAD_IO_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix='photo-storage')
 ABANDONED_TTL = 24 * 60 * 60
 LINKED_RETENTION = 30 * 24 * 60 * 60
 TERMINAL_RUNS = ('completed', 'failed', 'cancelled')
@@ -56,6 +57,20 @@ def _metadata(row):
         'expires_at': row['expires_at'],
         'status': row['state'],
     }
+
+
+def _write_all(descriptor, value):
+    view = memoryview(value)
+    while view:
+        written = os.write(descriptor, view)
+        view = view[written:]
+
+
+def _sync_and_close(descriptor):
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _normalize_image(path):
@@ -123,6 +138,7 @@ class AttachmentStore:
         self.global_quota_bytes = global_quota_bytes
         self.min_free_bytes = min_free_bytes
         self._upload_leases = {}
+        self._upload_io_slots = asyncio.Semaphore(_UPLOAD_IO_EXECUTOR._max_workers)
         self._orphan_iterators = [None, None]
         self._orphan_directory = 0
         self._orphan_reconciled = False
@@ -318,8 +334,54 @@ class AttachmentStore:
                 self._upload_leases[attachment_id] = descriptor
             return dict(db.execute('SELECT * FROM attachments WHERE id=?', (attachment_id,)).fetchone()), True
 
+    async def _upload_io(self, operation, *args):
+        async with self._upload_io_slots:
+            future = asyncio.get_running_loop().run_in_executor(
+                _UPLOAD_IO_EXECUTOR, operation, *args)
+            try:
+                return await asyncio.shield(future)
+            except asyncio.CancelledError:
+                try:
+                    await asyncio.shield(future)
+                except BaseException:
+                    pass
+                raise
+
+    def _publish_upload(self, attachment_id, user_id, stage, digest, normalized,
+                        content_type, width, height, suffix):
+        final_name = attachment_id + '.' + suffix
+        temporary = self.objects / (attachment_id + '.tmp')
+        final_path = self.objects / final_name
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0)
+        out_fd = os.open(temporary, flags, 0o600)
+        try:
+            _write_all(out_fd, normalized)
+            os.fsync(out_fd)
+        finally:
+            os.close(out_fd)
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current = db.execute('SELECT state FROM attachments WHERE id=? AND user_id=?',
+                                 (attachment_id, user_id)).fetchone()
+            if current is None or current['state'] != 'receiving':
+                raise AttachmentError(409, 'This photo upload reservation is no longer active.')
+            os.replace(temporary, final_path)
+            os.unlink(stage)
+            now = time.time()
+            db.execute('''UPDATE attachments SET sha256=?,content_type=?,width=?,height=?,
+                size=?,reserved_bytes=0,stored_name=?,state='pending',expires_at=?,
+                metadata_expires_at=? WHERE id=? AND state='receiving' ''',
+                (digest, content_type, width, height, len(normalized), final_name,
+                 now + ABANDONED_TTL, now + ABANDONED_TTL + LINKED_RETENTION,
+                 attachment_id))
+            db.commit()
+            completed = db.execute('SELECT * FROM attachments WHERE id=?',
+                                   (attachment_id,)).fetchone()
+            return _metadata(completed)
+
     async def upload(self, user, session_id, upload_key, chunks):
-        row, fresh = self.begin(user, session_id, upload_key, worker=True)
+        row, fresh = await self._upload_io(
+            lambda: self.begin(user, session_id, upload_key, worker=True))
         attachment_id = row['id']
         digest = hashlib.sha256()
         total = 0
@@ -329,7 +391,7 @@ class AttachmentStore:
             if fresh:
                 flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
                 flags |= getattr(os, 'O_NOFOLLOW', 0)
-                descriptor = os.open(stage, flags, 0o600)
+                descriptor = await self._upload_io(os.open, stage, flags, 0o600)
             async for chunk in chunks:
                 if not isinstance(chunk, bytes):
                     raise AttachmentError(400, 'The photo upload body is invalid.')
@@ -338,10 +400,7 @@ class AttachmentStore:
                     raise AttachmentError(413, 'Each original photo must be 10 MiB or smaller.')
                 digest.update(chunk)
                 if descriptor is not None:
-                    view = memoryview(chunk)
-                    while view:
-                        written = os.write(descriptor, view)
-                        view = view[written:]
+                    await self._upload_io(_write_all, descriptor, chunk)
             if not total:
                 raise AttachmentError(422, 'Choose a photo before uploading.')
             if descriptor is None:
@@ -350,61 +409,30 @@ class AttachmentStore:
                 if row['state'] not in ('pending', 'bound'):
                     raise AttachmentError(410, 'This photo upload expired; select the photo again.')
                 return _metadata(row)
-            os.fsync(descriptor)
-            os.close(descriptor)
+            await self._upload_io(_sync_and_close, descriptor)
             descriptor = None
             normalized, content_type, width, height, suffix = await asyncio.get_running_loop().run_in_executor(
                 _IMAGE_DECODE_EXECUTOR, _normalize_image, stage)
-            final_name = attachment_id + '.' + suffix
-            temporary = self.objects / (attachment_id + '.tmp')
-            final_path = self.objects / final_name
-            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-            flags |= getattr(os, 'O_NOFOLLOW', 0)
-            out_fd = os.open(temporary, flags, 0o600)
-            try:
-                view = memoryview(normalized)
-                while view:
-                    written = os.write(out_fd, view)
-                    view = view[written:]
-                os.fsync(out_fd)
-            finally:
-                os.close(out_fd)
-            with self.connection() as db:
-                db.execute('BEGIN IMMEDIATE')
-                current = db.execute('SELECT state FROM attachments WHERE id=? AND user_id=?',
-                                     (attachment_id, user['id'])).fetchone()
-                if current is None or current['state'] != 'receiving':
-                    raise AttachmentError(409, 'This photo upload reservation is no longer active.')
-                os.replace(temporary, final_path)
-                os.unlink(stage)
-                now = time.time()
-                db.execute('''UPDATE attachments SET sha256=?,content_type=?,width=?,height=?,
-                    size=?,reserved_bytes=0,stored_name=?,state='pending',expires_at=?,
-                    metadata_expires_at=? WHERE id=? AND state='receiving' ''',
-                    (digest.hexdigest(), content_type, width, height, len(normalized),
-                     final_name, now + ABANDONED_TTL,
-                     now + ABANDONED_TTL + LINKED_RETENTION, attachment_id))
-                db.commit()
-                completed = db.execute('SELECT * FROM attachments WHERE id=?',
-                                       (attachment_id,)).fetchone()
-                return _metadata(completed)
+            return await self._upload_io(
+                self._publish_upload, attachment_id, user['id'], stage, digest.hexdigest(),
+                normalized, content_type, width, height, suffix)
         except OSError as exc:
             if descriptor is not None:
-                os.close(descriptor)
+                await self._upload_io(os.close, descriptor)
             if fresh:
-                self.abort(attachment_id)
+                await self._upload_io(self.abort, attachment_id)
             if exc.errno in (errno.ENOSPC, errno.EDQUOT):
                 raise AttachmentError(507, 'Photo storage is full; free space or try again later.') from exc
             raise AttachmentError(503, 'Photo storage is unavailable; try again later.') from exc
         except BaseException:
             if descriptor is not None:
-                os.close(descriptor)
+                await self._upload_io(os.close, descriptor)
             if fresh:
-                self.abort(attachment_id)
+                await self._upload_io(self.abort, attachment_id)
             raise
         finally:
             if fresh:
-                self._release_upload_lease(attachment_id)
+                await self._upload_io(self._release_upload_lease, attachment_id)
 
     def abort(self, attachment_id):
         with self.connection() as db:

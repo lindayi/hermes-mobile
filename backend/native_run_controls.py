@@ -40,7 +40,19 @@ def validate_photo_payload(body):
     if not isinstance(body, dict):
         raise ValueError('Expected a JSON object')
     ids = body.get('mobile_attachment_ids')
+    image_types = {'image_url', 'input_image', 'image'}
+
+    def contains_image_part(value):
+        if isinstance(value, list):
+            return any(contains_image_part(item) for item in value)
+        if isinstance(value, dict):
+            return (value.get('type') in image_types
+                    or any(contains_image_part(item) for item in value.values()))
+        return False
+
     if ids is None:
+        if contains_image_part(body):
+            raise ValueError('Private photo input requires attachment binding')
         if len(json.dumps(body).encode()) > TEXT_REQUEST_BYTES:
             raise ValueError('Native text request exceeds the existing limit')
         return

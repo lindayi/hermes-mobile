@@ -2,6 +2,7 @@ import base64
 import json
 
 import pytest
+from aiohttp import web
 
 from backend import native_run_controls as controls
 
@@ -25,6 +26,41 @@ def test_four_photos_fit_complete_native_payload_without_expanding_text_limit():
     payload['conversation_history'] = [{'role': 'user', 'content': 'x' * 10_000_000}]
     with pytest.raises(ValueError, match='text'):
         controls.validate_photo_payload(payload)
+
+
+@pytest.mark.parametrize('part_type', ['image_url', 'input_image', 'image'])
+def test_unbound_image_parts_are_rejected_but_image_text_is_ordinary_text(part_type):
+    image = {'type': part_type, 'image_url': {'url': 'data:image/png;base64,YQ=='},
+             'url': 'data:image/png;base64,YQ=='}
+    with pytest.raises(ValueError, match='binding'):
+        controls.validate_photo_payload({'input': [{'role': 'user', 'content': [image]}]})
+    controls.validate_photo_payload({
+        'input': [{'role': 'user', 'content': [{'type': 'text', 'text': 'describe this image'}]}]})
+
+
+def test_actual_native_run_handler_rejects_unbound_images_before_admission():
+    class Native:
+        admitted = 0
+
+        def _check_auth(self, request):
+            return None
+
+        async def _handle_runs(self, request):
+            self.admitted += 1
+            return web.Response(status=200)
+
+    class Request:
+        headers = {}
+        match_info = {}
+
+        async def json(self):
+            return {'input': [{'role': 'user', 'content': [
+                {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,YQ=='}}]}]}
+
+    handler = controls.run_controls_adapter(Native)()
+    response = __import__('asyncio').run(handler._handle_runs(Request()))
+    assert response.status == 413
+    assert handler.admitted == 0
 
 
 def test_persistence_sanitization_preserves_live_bytes_and_metadata():
