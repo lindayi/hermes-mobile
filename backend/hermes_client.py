@@ -3,6 +3,9 @@ from urllib.parse import urlparse
 import httpx
 
 
+MAX_NATIVE_RUN_REQUEST_BYTES = 20_000_000
+
+
 class IntegrationUnavailable(RuntimeError):
     pass
 
@@ -136,6 +139,17 @@ class GatewayClient:
     async def start(self,session_id,text,history=None,*,model=None,provider=None,
                     attachments=None,attachment_ids=None):
         self.require_execution()
+        payload=self._run_payload(session_id,text,history,model=model,provider=provider,
+                                  attachments=attachments,attachment_ids=attachment_ids)
+        request=self.client.build_request('POST','/v1/runs',json=payload)
+        if len(request.content)>MAX_NATIVE_RUN_REQUEST_BYTES:
+            raise ValueError('Photo request exceeds the native handler limit; remove photos or shorten earlier context.')
+        return await self.request('POST','/v1/runs',content=request.content,
+                                  headers={'Content-Type':'application/json'})
+
+    @staticmethod
+    def _run_payload(session_id,text,history=None,*,model=None,provider=None,
+                     attachments=None,attachment_ids=None):
         payload={'session_id':session_id,'input':text,'conversation_history':history or []}
         if attachments is not None or attachment_ids is not None:
             if (not isinstance(attachments,list) or not 1 <= len(attachments) <= 4
@@ -156,7 +170,18 @@ class GatewayClient:
             if not model or not provider:
                 raise ValueError('Both model and provider are required')
             payload.update(model=model,provider=provider)
-        return await self.request('POST','/v1/runs',json=payload)
+        return payload
+
+    def validate_run_size(self,session_id,text,history,attachment_ids,image_sizes,*,model=None,provider=None):
+        attachments=[{'type':'image_url','image_url':{
+            'url':f'data:{content_type};base64,'}} for content_type,_ in image_sizes]
+        payload=self._run_payload(session_id,text,history,model=model,provider=provider,
+                                  attachments=attachments,attachment_ids=attachment_ids)
+        body=self.client.build_request('POST','/v1/runs',json=payload).content
+        size=len(body)+sum(((image_size+2)//3)*4 for _,image_size in image_sizes)
+        if size>MAX_NATIVE_RUN_REQUEST_BYTES:
+            raise ValueError('Photo request exceeds the native handler limit; remove photos or shorten earlier context.')
+        return size
 
     async def stop(self,run_id):
         from urllib.parse import quote

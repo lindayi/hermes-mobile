@@ -125,6 +125,15 @@ class Orchestrator:
             if (not isinstance(message, dict) or 'role' not in message or 'content' not in message
                     or (message['role'] == 'tool' and not message.get('tool_call_id'))):
                 raise IntegrationUnavailable('Native tool context is incomplete')
+        if attachment_ids:
+            if self.attachments is None or not hasattr(self.gateway, 'validate_run_size'):
+                raise IntegrationUnavailable('Native photo request budgeting is unavailable.')
+            image_sizes = await asyncio.to_thread(
+                self.attachments.run_image_sizes, user['id'], user['profile'],
+                body['session_id'], attachment_ids)
+            self.gateway.validate_run_size(
+                body['session_id'], body['input'], context['history'], attachment_ids,
+                image_sizes, **(selection or {}))
         try:
             run, created = self.journal.submit(user['id'], user['profile'], body['session_id'], body['input'], body['idempotency_key'],
                 history_anchor=lambda: self.catalog.history_anchor(user['profile'], body['session_id'], canonical_id), selection=selection,

@@ -67,6 +67,39 @@ with tempfile.TemporaryDirectory(prefix='hermes-native-startup-') as d:
                     assert (await response.json())['pending_approvals']==[]
                 async with client.post(url+'/v1/runs/missing/steer',headers=headers,json={'input':'fixture','idempotency_key':'fixture-key'}) as response:
                     assert response.status==404
+                captured={}
+                class CapturingAgent:
+                    def run_conversation(self, user_message, conversation_history, task_id):
+                        captured.update(user_message=user_message,history=conversation_history)
+                        return {'final_response':'synthetic-no-model'}
+                adapter=holder['adapter']
+                adapter._create_agent=lambda **kwargs: CapturingAgent()
+                encoded_image='A'*((2*1024*1024+2)//3*4-1)+'='
+                image_part={'type':'image_url','image_url':{
+                    'url':'data:image/jpeg;base64,'+encoded_image}}
+                payload={
+                    'session_id':'photo-native-synthetic',
+                    'input':[{'role':'user','content':[
+                        {'type':'text','text':'Inspect four synthetic photos.'},
+                        image_part,image_part,image_part,image_part,
+                    ]}],
+                    'conversation_history':[],
+                    'mobile_attachment_ids':[f'{index:032x}' for index in range(4)],
+                }
+                import base64
+                assert len(base64.b64decode(encoded_image))==2*1024*1024
+                request_size=len(json.dumps(payload).encode())
+                from gateway.platforms.api_server import MAX_REQUEST_BYTES
+                assert 10_000_000<request_size<MAX_REQUEST_BYTES
+                async with client.post(url+'/v1/runs',headers=headers,json=payload) as response:
+                    assert response.status==202
+                    run_id=(await response.json())['run_id']
+                for _ in range(100):
+                    if captured:
+                        break
+                    await asyncio.sleep(.05)
+                assert captured['user_message'][1]['image_url']['url']==image_part['image_url']['url']
+                assert len(captured['user_message'])==5
             os.kill(os.getpid(),signal.SIGTERM)
             await asyncio.wait_for(task,10)
             print(json.dumps({'native_http_startup':True,'anonymous_denied':True,'versioned_controls':True,'missing_run_rejected':True,'models_invoked':0}))

@@ -9,7 +9,9 @@ import {fileURLToPath} from 'node:url';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
 const dir=process.env.HERMES_FRONTEND_DIR || fileURLToPath(new URL('../../frontend/',import.meta.url));
 async function browserFixture(t,{visual=false,live=false,startupFailure=false,fallback=false,csp=false}={}) {
- const policy=csp?(await readFile(new URL('../../backend/app.py',import.meta.url),'utf8')).match(/^CSP="([^"]+)"$/m)[1]:null;
+ const policy=csp==='apache'
+  ? (await readFile(new URL('../../deploy/apache-hermes-mobile.conf',import.meta.url),'utf8')).match(/Content-Security-Policy "([^"]+)"/)[1]
+  : csp?(await readFile(new URL('../../backend/app.py',import.meta.url),'utf8')).match(/^CSP="([^"]+)"$/m)[1]:null;
  const server=createServer(async(req,res)=>{
   const url=new URL(req.url,'http://fixture'),p=url.pathname.replace('/hermes/app-api','');
   const json=o=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(o));};
@@ -84,6 +86,17 @@ test('compact photo picker uses the real file input and releases failed-send upl
  await page.waitForFunction(()=>!document.querySelector('.photo-preview'));
  assert.equal(deleted.length,1);
  assert.ok(deleted[0].endsWith('/sessions/s/attachments/'+id));
+});
+test('selected photo previews decode under the deployed Apache content security policy',{timeout:20000},async t=>{
+ const page=await browserFixture(t,{csp:'apache'});
+ const picker=page.getByRole('button',{name:'Add photos',exact:true});
+ const chooser=page.waitForEvent('filechooser');await picker.click();
+ const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=','base64');
+ await (await chooser).setFiles({name:'apache-policy.png',mimeType:'image/png',buffer:bytes});
+ await page.getByRole('button',{name:'Remove photo 1'}).waitFor();
+ assert.equal(await page.locator('.photo-preview img').evaluate(async image=>{
+  try{await image.decode();return image.naturalWidth>0;}catch{return false;}
+ }),true);
 });
 test('browser fallback fits actual short and landscape viewports with native zoom still permitted',{timeout:20000},async t=>{
  const page=await browserFixture(t,{fallback:true});await page.getByRole('textbox',{name:'Message Hermes',exact:true}).fill('Fallback draft');

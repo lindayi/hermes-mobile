@@ -12,6 +12,7 @@
   "tests/test_native_maintenance.py": "Exercises native maintenance behavior with synthetic state against the pinned public runtime.",
   "tests/test_native_notifications.py": "Exercises native notifications with synthetic fixtures against the pinned public runtime.",
   "tests/test_native_parallel_lease_contract.py": "Checks the native lease contract with isolated synthetic fixtures against the pinned public runtime.",
+  "tests/test_native_photo_compat.py": "Checks pinned native photo persistence and vision failure behavior with synthetic payloads and no model calls.",
   "tests/test_native_run_controls.py": "Exercises native run controls with synthetic state against the pinned public runtime.",
   "tests/test_native_session_deletion.py": "Exercises session deletion with isolated synthetic state against the pinned public runtime.",
   "tests/test_native_session_deletion_review.py": "Checks reconstructed public source fingerprints only; no private operator or production files are needed."

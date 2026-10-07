@@ -1,6 +1,7 @@
 """Photo upload regressions use only small deterministic in-memory images."""
 import binascii
 import base64
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import errno
@@ -185,7 +186,6 @@ def test_orphan_cleanup_preserves_active_temp_and_new_reservation_files(tmp_path
         store._cleanup_orphans(16)
         assert temporary.exists()
 
-        store.cleanup = lambda **kwargs: 0
         entered_scan = threading.Event()
         resume_scan = threading.Event()
         begin_started = threading.Event()
@@ -200,7 +200,8 @@ def test_orphan_cleanup_preserves_active_temp_and_new_reservation_files(tmp_path
             return original_iterdir(directory)
 
         monkeypatch.setattr(type(store.objects), 'iterdir', paused_iterdir)
-        sweep = threading.Thread(target=store._cleanup_orphans, args=(16,), name='orphan-sweep')
+        sweep = threading.Thread(target=lambda: store.cleanup(limit=16, rescan=True),
+                                 name='orphan-sweep')
         sweep.start()
         assert entered_scan.wait(2)
 
@@ -271,10 +272,12 @@ def test_run_images_honor_nonterminal_attachment_pins_after_expiry(tmp_path, sta
             app.state.attachments.objects / (uploaded['id'] + '.png')).read_bytes()
 
 
-def test_disk_full_upload_returns_actionable_error_and_releases_reservation(tmp_path, monkeypatch):
+@pytest.mark.parametrize('error_number', [errno.ENOSPC, errno.EDQUOT])
+def test_disk_full_upload_returns_actionable_error_and_releases_reservation(
+        tmp_path, monkeypatch, error_number):
     with photo_client(tmp_path, raise_server_exceptions=False) as (app, client):
         def disk_full(*_args):
-            raise OSError(errno.ENOSPC, 'synthetic full disk')
+            raise OSError(error_number, 'synthetic full disk')
 
         monkeypatch.setattr(attachments_module.os, 'write', disk_full)
         response = client.post(
@@ -287,6 +290,147 @@ def test_disk_full_upload_returns_actionable_error_and_releases_reservation(tmp_
             assert db.execute('SELECT count(*) FROM attachments').fetchone()[0] == 0
         assert list(app.state.attachments.staging.iterdir()) == []
         assert list(app.state.attachments.objects.iterdir()) == []
+
+
+def test_publication_failure_removes_final_file_and_reservation(tmp_path, monkeypatch):
+    with photo_client(tmp_path, raise_server_exceptions=False) as (app, client):
+        store = app.state.attachments
+        original_connection = store.connection
+        failed = False
+
+        class CommitFailure:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+            def commit(self):
+                nonlocal failed
+                state = self.connection.execute(
+                    'SELECT state FROM attachments ORDER BY rowid DESC LIMIT 1').fetchone()
+                if state and state['state'] == 'pending' and not failed:
+                    failed = True
+                    raise OSError(errno.ENOSPC, 'synthetic publication failure')
+                self.connection.commit()
+
+        @contextmanager
+        def failing_connection():
+            connection = store.connect()
+            try:
+                yield CommitFailure(connection)
+            finally:
+                connection.close()
+
+        monkeypatch.setattr(store, 'connection', failing_connection)
+        response = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'publish-full'})
+
+        assert response.status_code == 507
+        assert failed
+        with original_connection() as db:
+            assert db.execute('SELECT count(*) FROM attachments').fetchone()[0] == 0
+        assert list(store.staging.iterdir()) == []
+        assert list(store.objects.iterdir()) == []
+
+
+def test_crashed_receiving_reservation_is_reclaimed_for_same_upload_key(tmp_path):
+    with photo_client(tmp_path) as (app, client):
+        user = client.get(BASE + '/auth/me').json()['user']
+        store = app.state.attachments
+        reservation, _ = store.begin(user, 'wa-1', 'retry-dead-worker')
+        (store.staging / (reservation['id'] + '.part')).write_bytes(b'interrupted')
+        (store.objects / (reservation['id'] + '.tmp')).write_bytes(b'interrupted')
+
+        response = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'retry-dead-worker'})
+
+        assert response.status_code == 201
+        assert response.json()['id'] == reservation['id']
+        assert not (store.staging / (reservation['id'] + '.part')).exists()
+        assert not (store.objects / (reservation['id'] + '.tmp')).exists()
+        with store.connection() as db:
+            assert db.execute('SELECT count(*) FROM attachments').fetchone()[0] == 1
+
+
+def test_retry_does_not_reclaim_a_live_upload_lease(tmp_path):
+    with photo_client(tmp_path) as (app, client):
+        user = client.get(BASE + '/auth/me').json()['user']
+        store = app.state.attachments
+        entered, resume = threading.Event(), threading.Event()
+
+        async def chunks():
+            yield png_fixture()
+            entered.set()
+            await asyncio.to_thread(resume.wait)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            upload = executor.submit(lambda: asyncio.run(
+                store.upload(user, 'wa-1', 'live-worker', chunks())))
+            assert entered.wait(2)
+            duplicate = client.post(
+                BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+                headers={'Idempotency-Key': 'live-worker'})
+            assert duplicate.status_code == 409
+            resume.set()
+            result = upload.result(timeout=5)
+
+        assert result['status'] == 'pending'
+        assert client.get(BASE + '/sessions/wa-1/attachments/' + result['id']).status_code == 200
+
+
+def test_upload_admission_waits_for_bounded_orphan_reconciliation(tmp_path):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        for index in range(300):
+            (store.objects / f'orphan-{index:04}.tmp').write_bytes(b'x')
+        store.cleanup(limit=16, rescan=True)
+
+        blocked = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'wait-for-sweep'})
+
+        assert blocked.status_code == 503
+        for _ in range(20):
+            store.cleanup(limit=64)
+            if store._orphan_reconciled:
+                break
+        assert store._orphan_reconciled
+        accepted = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'wait-for-sweep'})
+        assert accepted.status_code == 201
+
+
+def test_orphan_sweep_resumes_past_retained_files(tmp_path):
+    with photo_client(tmp_path) as (app, _):
+        store = app.state.attachments
+        now = time.time()
+        retained = []
+        with store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for index in range(300):
+                attachment_id = f'{index + 1:032x}'
+                name = attachment_id + '.png'
+                retained.append(name)
+                db.execute('''INSERT INTO attachments(
+                    id,user_id,profile,session_id,upload_key,content_type,width,height,size,
+                    stored_name,state,run_id,position,created_at,expires_at,metadata_expires_at)
+                    VALUES(?,?,?,?,?,'image/png',1,1,1,?,'bound','cleanup-fixture',?, ?, ?, ?)''',
+                    (attachment_id, 'u', 'default', 'wa-1', f'cleanup-{index}', name,
+                     index, now, now + 1000, now + 2000))
+                (store.objects / name).write_bytes(b'x')
+            db.commit()
+        orphan = store.objects / (f'{999:032x}.png')
+        orphan.write_bytes(b'orphan')
+
+        for _ in range(6):
+            store.cleanup(limit=64, rescan=True)
+
+        assert all((store.objects / name).exists() for name in retained)
+        assert not orphan.exists()
 
 
 def test_normalized_image_drops_source_metadata(tmp_path):
@@ -407,9 +551,11 @@ def test_expired_linked_photos_keep_history_and_retry_bindings(tmp_path):
             attachment_ids=ids, attachment_store=app.state.attachments)
         app.state.journal.finish(user['id'], run['id'], 'completed')
         with app.state.attachments.connection() as db:
-            db.execute('UPDATE attachments SET expires_at=0 WHERE run_id=?', (run['id'],))
+            db.execute('UPDATE attachments SET expires_at=0,metadata_expires_at=0 WHERE run_id=?',
+                       (run['id'],))
             db.commit()
         assert app.state.attachments.cleanup(now=1) == 2
+        assert app.state.attachments.cleanup(now=2) == 0
         assert list(app.state.attachments.objects.iterdir()) == []
 
         snapshot = app.state.journal.snapshot_state(user['id'], 'default', 'wa-1')
@@ -436,7 +582,7 @@ def test_expired_linked_photos_keep_history_and_retry_bindings(tmp_path):
                 user['id'], 'default', 'wa-1', 'Keep this text', 'expired-linked-run')
 
 
-def test_history_binds_photos_to_proven_native_and_synthetic_user_turns(tmp_path):
+def test_history_binds_photos_to_proven_native_and_synthetic_user_turns(tmp_path, monkeypatch):
     with photo_client(tmp_path) as (app, client):
         user = client.get(BASE + '/auth/me').json()['user']
         attachment_ids = [
@@ -474,6 +620,30 @@ def test_history_binds_photos_to_proven_native_and_synthetic_user_turns(tmp_path
             db.execute('UPDATE attachments SET expires_at=0 WHERE id=?', (attachment_ids[1],))
             db.commit()
         app.state.attachments.cleanup(now=1)
+        store = app.state.attachments
+        attachment_queries, off_loop = [], []
+        connect = store.connect
+
+        def traced_connect():
+            db = connect()
+            db.set_trace_callback(
+                lambda sql: attachment_queries.append(sql)
+                if 'FROM attachments a' in sql else None)
+            return db
+
+        batch = store.metadata_for_history_batch
+
+        def traced_batch(*args):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                off_loop.append(True)
+            else:
+                off_loop.append(False)
+            return batch(*args)
+
+        monkeypatch.setattr(store, 'connect', traced_connect)
+        monkeypatch.setattr(store, 'metadata_for_history_batch', traced_batch)
 
         response = client.get(BASE + '/sessions/wa-1/messages')
         assert response.status_code == 200
@@ -492,3 +662,5 @@ def test_history_binds_photos_to_proven_native_and_synthetic_user_turns(tmp_path
         assert current['input'] == 'Current photo turn'
         assert current['attachments'][0]['id'] == attachment_ids[2]
         assert current['attachments'][0]['status'] == 'bound'
+        assert off_loop == [True]
+        assert len(attachment_queries) == 1

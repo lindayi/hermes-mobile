@@ -908,13 +908,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const textarea = h('textarea',{name:'message',rows:2,placeholder:'Message Hermes…','aria-label':'Message Hermes',maxlength:32000});
     textarea.value=drafts.get(session.id) ?? storage.get(draftKey) ?? '';
     const selectedPhotos=[];
+    let pendingPhotoSubmission=null;
     const photoInput=h('input',{class:'photo-input',type:'file',hidden:true,multiple:true,accept:'image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif','aria-label':'Add photos'});
     const addPhotos=button('Photos',()=>photoInput.click(),'quiet',{'aria-label':'Add photos',title:'Add up to four JPEG, PNG, or WebP photos'});
     const photoTray=h('div',{class:'photo-tray',hidden:true,'aria-label':'Selected photos'});
     const photoStatus=h('p',{class:'photo-status caption',role:'status','aria-live':'polite',hidden:true});
     const releasePreview=photo=>{if(photo.previewUrl)win.URL?.revokeObjectURL?.(photo.previewUrl);};
     const releasePhoto=async photo=>{if(photo.metadata)try{await api.request(`/sessions/${encodeURIComponent(session.id)}/attachments/${photo.metadata.id}`,{method:'DELETE'});}catch{}};
-    const clearPhotos=(release=true)=>{for(const photo of selectedPhotos){if(release)void releasePhoto(photo);releasePreview(photo);}selectedPhotos.length=0;photoTray.replaceChildren();photoTray.hidden=true;photoInput.value='';};
+    const clearPhotos=(release=true)=>{const retained=new Set(pendingPhotoSubmission?.attachmentIds || []);for(const photo of selectedPhotos){if(release && !retained.has(photo.metadata?.id))void releasePhoto(photo);releasePreview(photo);}selectedPhotos.length=0;photoTray.replaceChildren();photoTray.hidden=true;photoInput.value='';};
     const renderPhotoSelection=()=>{
       photoTray.replaceChildren();
       selectedPhotos.forEach((photo,index)=>{
@@ -925,6 +926,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           if(position<0)return;
           releasePreview(photo);selectedPhotos.splice(position,1);photoStatus.hidden=true;renderPhotoSelection();
         }),'quiet photo-remove',{'aria-label':`Remove photo ${index+1}`});
+        const inFlight=pendingPhotoSubmission?.attachmentIds.includes(photo.metadata?.id);
+        remove.disabled=!!inFlight;remove.dataset.locked=String(!!inFlight);
         photoTray.append(h('div',{class:'photo-preview'},photo.previewUrl?h('img',{src:photo.previewUrl,alt:`Selected photo ${index+1}`}):h('span',{class:'caption'},'Photo selected'),remove));
       });
       photoTray.hidden=!selectedPhotos.length;
@@ -954,7 +957,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         try{previewUrl=win.URL?.createObjectURL?.(file) || '';}catch{}
         return {file,previewUrl,uploadKey:win.crypto.randomUUID(),metadata:null};
       });
-      if(supported.some(photo=>!photo))return;
+      if(supported.some(photo=>!photo)){for(const photo of supported)if(photo)releasePreview(photo);return;}
       selectedPhotos.push(...supported);
       photoStatus.hidden=true;photoStatus.textContent='';
       renderPhotoSelection();
@@ -1005,6 +1008,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     async function steer(retryAttempt){
       if(version!==routeVersion || state.user?.id!==steeringOwner || !steeringEnabled || steeringStatus!=='running' || steeringBusy || !steeringRun)return;
+      if(selectedPhotos.length){steerStatus.hidden=false;steerStatus.textContent='Photos cannot be sent as guidance to an active run. Keep them selected and send them in a new message after this run finishes.';return;}
       const input=retryAttempt?.input || textarea.value.trim();if(!input)return;
       const runId=steeringRun,submittedRevision=draftRevision,attemptKey=key(`steer:${session.id}:${runId}`);
       controlsRevision++;
@@ -1037,6 +1041,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       dispatch=supported?steer:idle?submit:null;
       send.disabled=supported?status!=='running' || steeringBusy:!idle;
       send.dataset.locked=String(send.disabled);send.dataset.state=status;
+      addPhotos.disabled=supported;photoInput.disabled=supported;
       send.setAttribute('aria-label',label);send.title=status==='stopping'?'Stop requested':label;
       send.replaceChildren(icon('send'));
       if(supported)send.setAttribute('aria-describedby','steering-help');else send.removeAttribute('aria-describedby');
@@ -1059,29 +1064,40 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const input=textarea.value.trim() || 'Please describe the attached image(s), including any visible text.';
       let previous=attempts.get(session.id);
       try { previous ||= JSON.parse(storage.get(key(`attempt:${session.id}`))); } catch {}
+      if(previous?.attachment_ids && previous.input!==input)
+        throw new Error('A previous photo send is unresolved. Retry it unchanged before sending a new message.');
       if(previous?.input!==input && !modelControls.canSubmit())throw new Error('Saved model choice could not be checked. Reload before sending.');
       const selection=modelControls.selection();
       const attempt=previous?.input===input ? previous : {input,idempotency_key:win.crypto.randomUUID(),...(selection?{selection}:{} )};
+      const submittedPhotos=Array.isArray(attempt.attachment_ids)
+        ? selectedPhotos.filter(photo=>attempt.attachment_ids.includes(photo.metadata?.id))
+        : [...selectedPhotos];
       attempts.set(session.id,attempt);storage.set(key(`attempt:${session.id}`),JSON.stringify(attempt));syncModelLock();
       const owner=state.user?.id;
       composerAction.set('sending');connection.run('sending');const token=connection.token();
       let run;try{
-        for(let index=0;index<selectedPhotos.length;index++){
-          const photo=selectedPhotos[index];
+        for(let index=0;index<submittedPhotos.length;index++){
+          const photo=submittedPhotos[index];
           if(photo.metadata)continue;
-          photoStatus.hidden=false;photoStatus.textContent=`Uploading photo ${index+1} of ${selectedPhotos.length}…`;
+          photoStatus.hidden=false;photoStatus.textContent=`Uploading photo ${index+1} of ${submittedPhotos.length}…`;
           const metadata=await api.request(`/sessions/${encodeURIComponent(session.id)}/attachments`,{
             method:'POST',rawBody:photo.file,headers:{'Idempotency-Key':photo.uploadKey}});
           if(!/^[a-f0-9]{32}$/.test(metadata?.id || '') || metadata.status!=='pending')throw new Error('Photo upload response was invalid.');
           photo.metadata=metadata;
-          if(!current() || !selectedPhotos.includes(photo)){void releasePhoto(photo);return;}
+          if(!current() || !selectedPhotos.includes(photo)){void releasePhoto(photo);if(current()){connection.failure(token);composerAction.set('idle');syncModelLock();}return;}
         }
         photoStatus.hidden=false;
-        photoStatus.textContent=selectedPhotos.length?'Sending message with photos…':'Sending message…';
-        const attachments=selectedPhotos.map(photo=>photo.metadata.id);
-        run=await api.request('/runs',{method:'POST',body:{session_id:session.id,...attempt,...(attachments.length?{attachments}:{})}});
+        photoStatus.textContent=submittedPhotos.length?'Sending message with photos…':'Sending message…';
+        const attachments=Array.isArray(attempt.attachment_ids)
+          ? attempt.attachment_ids : submittedPhotos.map(photo=>photo.metadata.id);
+        attempt.attachment_ids=attachments;
+        attempts.set(session.id,attempt);storage.set(key(`attempt:${session.id}`),JSON.stringify(attempt));
+        pendingPhotoSubmission={attachmentIds:attachments,photos:submittedPhotos};
+        const {attachment_ids: savedAttachmentIds,...requestAttempt}=attempt;
+        run=await api.request('/runs',{method:'POST',body:{session_id:session.id,...requestAttempt,...(attachments.length?{attachments}:{})}});
         connection.success(token);
       }catch(error){
+        pendingPhotoSubmission=null;
         connection.failure(token);
         if(owner===state.user?.id && [400,422].includes(error.status) && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);currentModelSync?.(owner,session.id);}
         if(version===routeVersion){photoStatus.hidden=false;photoStatus.textContent=`Photo or message was not sent. Your text and selected photos are retained. ${error.message || 'Try again.'}`;composerAction.set('idle');syncModelLock();}
@@ -1099,7 +1115,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }
       if(version!==routeVersion)return;
       messages.querySelector('.empty')?.remove();messages.append(renderMessage({role:'user',content:input,timestamp:run.created_at,run_id:run.id,session_id:session.id,attachments:run.attachments}),...renderReminders(run));
-      clearPhotos(false);
+      for(const photo of submittedPhotos){const position=selectedPhotos.indexOf(photo);if(position>=0){releasePreview(photo);selectedPhotos.splice(position,1);}}
+      pendingPhotoSubmission=null;renderPhotoSelection();
       messages.scrollTop=messages.scrollHeight;
       await trackRun({...run,session_id:session.id},messages,composerAction);
     }

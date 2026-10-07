@@ -68,6 +68,185 @@ for(const outcome of ['abandoned','accepted','late upload','concurrent removal']
   }
 });
 
+test('rejected mixed photo batches revoke previews created before validation completes',async t=>{
+  const created=[],revoked=[];
+  const {doc,app}=await setup(async path=>{
+    if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+    if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+    if(path.includes('/messages'))return {items:[]};
+    return {items:[]};
+  },win=>{
+    win.URL.createObjectURL=file=>{const url=`blob:${file.name}`;created.push(url);return url;};
+    win.URL.revokeObjectURL=url=>revoked.push(url);
+  });
+  t.after(()=>{app.destroy();doc.defaultView.close();});
+  click(doc,'Photo fixture');await tick();
+  const input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+  Object.defineProperty(input,'files',{configurable:true,value:[
+    new win.File(['synthetic'],'valid.png',{type:'image/png'}),
+    new win.File(['synthetic'],'unsupported.heic',{type:'image/heic'}),
+  ]});
+  input.dispatchEvent(new win.Event('change'));
+  assert.deepEqual(created,['blob:valid.png']);
+  assert.deepEqual(revoked,['blob:valid.png']);
+  assert.equal(doc.querySelectorAll('.photo-preview').length,0);
+});
+
+test('photos selected while a run is pending survive its accepted response',async t=>{
+  let acceptRun;
+  let uploadNumber=0;
+  const {doc,app}=await setup(async(path,options={})=>{
+    if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+    if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+    if(path.includes('/messages'))return {items:[]};
+    if(path==='/sessions/s1/attachments')
+      return {id:String(++uploadNumber).padStart(32,'0'),status:'pending'};
+    if(path==='/runs')return new Promise(resolve=>{acceptRun=resolve;});
+    if(path==='/runs/r1')return {id:'r1',session_id:'s1',status:'completed'};
+    return {items:[]};
+  },win=>{win.URL.createObjectURL=file=>`blob:${file.name}`;});
+  t.after(()=>{app.destroy();doc.defaultView.close();});
+  click(doc,'Photo fixture');await tick();
+  const input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+  const select=file=>{Object.defineProperty(input,'files',{configurable:true,value:[
+    new win.File(['synthetic'],file,{type:'image/png'}),
+  ]});input.dispatchEvent(new win.Event('change'));};
+  select('submitted.png');click(doc,'Send message');
+  for(let i=0;i<20&&!acceptRun;i++)await tick();
+  assert.equal(typeof acceptRun,'function');
+  click(doc,'Photos');select('later.png');
+  acceptRun({id:'r1',session_id:'s1',status:'completed'});
+  await tick();await tick();
+  assert.deepEqual([...doc.querySelectorAll('.photo-preview img')].map(img=>img.getAttribute('src')),
+    ['blob:later.png']);
+});
+
+test('photo retry keeps submitted attachment IDs when a newer photo is selected',async t=>{
+  const requests=[];
+  let uploads=0,runs=0;
+  const {doc,app}=await setup(async(path,options={})=>{
+    if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+    if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+    if(path.includes('/messages'))return {items:[]};
+    if(path==='/sessions/s1/attachments')
+      return {id:String(++uploads).padStart(32,'0'),status:'pending'};
+    if(path==='/runs'){
+      requests.push(options.body);
+      if(++runs===1)throw new Error('response lost');
+      return {id:'r1',session_id:'s1',status:'completed'};
+    }
+    if(path==='/runs/r1')return {id:'r1',session_id:'s1',status:'completed'};
+    return {items:[]};
+  },win=>{win.URL.createObjectURL=file=>`blob:${file.name}`;});
+  t.after(()=>{app.destroy();doc.defaultView.close();});
+  click(doc,'Photo fixture');await tick();
+  const input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+  const select=file=>{Object.defineProperty(input,'files',{configurable:true,value:[
+    new win.File(['synthetic'],file,{type:'image/png'}),
+  ]});input.dispatchEvent(new win.Event('change'));};
+  select('first.png');click(doc,'Send message');await tick();await tick();await tick();
+  const firstKey=requests[0]?.idempotency_key;
+  assert.ok(firstKey);
+  click(doc,'Photos');select('later.png');
+  click(doc,'Send message');await tick();await tick();await tick();
+  assert.equal(requests.length,2);
+  assert.equal(requests[1].idempotency_key,firstKey);
+  assert.deepEqual(requests[1].attachments,[String(1).padStart(32,'0')]);
+  assert.deepEqual([...doc.querySelectorAll('.photo-preview img')].map(img=>img.getAttribute('src')),
+    ['blob:later.png']);
+});
+
+test('removing a photo during its upload restores the composer for retry',async t=>{
+  let finishUpload;
+  const {doc,app}=await setup(async path=>{
+    if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+    if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+    if(path.includes('/messages'))return {items:[]};
+    if(path==='/sessions/s1/attachments')
+      return new Promise(resolve=>{finishUpload=()=>resolve({
+        id:'00000000000000000000000000000001',status:'pending',
+      });});
+    return {items:[]};
+  },win=>{win.URL.createObjectURL=file=>`blob:${file.name}`;});
+  t.after(()=>{app.destroy();doc.defaultView.close();});
+  click(doc,'Photo fixture');await tick();
+  const input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+  Object.defineProperty(input,'files',{value:[
+    new win.File(['synthetic'],'remove-during-upload.png',{type:'image/png'}),
+  ]});
+  input.dispatchEvent(new win.Event('change'));
+  click(doc,'Send message');await tick();
+  assert.equal(typeof finishUpload,'function');
+  click(doc,'Remove photo 1');await tick();
+  finishUpload();await tick();await tick();
+  assert.equal(doc.querySelector('[aria-label="Send message"]').disabled,false);
+  assert.equal(doc.querySelectorAll('.photo-preview').length,0);
+});
+
+test('navigation during native run admission does not delete submitted photos',async t=>{
+  let acceptRun;
+  const deletes=[];
+  const {doc,app}=await setup(async(path,options={})=>{
+    if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+    if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+    if(path.includes('/messages'))return {items:[]};
+    if(path==='/sessions/s1/attachments')
+      return {id:'00000000000000000000000000000001',status:'pending'};
+    if(options.method==='DELETE'){deletes.push(path);return {released:true};}
+    if(path==='/runs')return new Promise(resolve=>{acceptRun=resolve;});
+    return {items:[]};
+  },win=>{win.URL.createObjectURL=file=>`blob:${file.name}`;});
+  t.after(()=>{app.destroy();doc.defaultView.close();});
+  click(doc,'Photo fixture');await tick();
+  const input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+  Object.defineProperty(input,'files',{value:[
+    new win.File(['synthetic'],'navigation-pending.png',{type:'image/png'}),
+  ]});
+  input.dispatchEvent(new win.Event('change'));
+  click(doc,'Send message');
+  for(let i=0;i<20&&!acceptRun;i++)await tick();
+  assert.equal(typeof acceptRun,'function');
+  click(doc,'Chats');await tick();
+  assert.deepEqual(deletes,[]);
+  acceptRun({id:'r1',session_id:'s1',status:'completed'});
+  await tick();
+});
+
+test('photo selection cannot be silently dropped by text-only steering',async t=>{
+  const calls=[];
+  class Events{
+    addEventListener(){}
+    close(){}
+  }
+  const {doc,app}=await setup(async(path,options={})=>{
+    calls.push({path,options});
+    if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+    if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Photo fixture'}],total:1};
+    if(path.includes('/messages'))return {items:[]};
+    if(path==='/runs' || path==='/runs/r1')return {id:'r1',session_id:'s1',status:'running'};
+    if(path==='/runs/r1/controls')return {steering:true,attempts:[]};
+    return {items:[]};
+  },win=>{win.EventSource=Events;win.URL.createObjectURL=file=>`blob:${file.name}`;});
+  t.after(()=>{app.destroy();doc.defaultView.close();});
+  click(doc,'Photo fixture');await tick();
+  const textarea=doc.querySelector('textarea');
+  textarea.value='Start run';textarea.dispatchEvent(new doc.defaultView.Event('input'));
+  click(doc,'Send message');
+  for(let i=0;i<20&&!doc.querySelector('.composer [aria-label="Steer current run"]');i++)await tick();
+  const picker=doc.querySelector('.composer-bottom [aria-label="Add photos"]');
+  assert.equal(picker.disabled,true);
+  const input=doc.querySelector('input[type=file]'),win=doc.defaultView;
+  Object.defineProperty(input,'files',{value:[
+    new win.File(['synthetic'],'late-photo.png',{type:'image/png'}),
+  ]});
+  input.dispatchEvent(new win.Event('change'));
+  textarea.value='Analyze this photo';textarea.dispatchEvent(new win.Event('input'));
+  click(doc,'Steer current run');await tick();
+  assert.equal(calls.some(call=>call.path==='/runs/r1/steer'),false);
+  assert.match(doc.querySelector('.steering-status').textContent,/send them in a new message/i);
+  assert.equal(doc.querySelectorAll('.photo-preview').length,1);
+});
+
 test('anonymous shell offers passkey login and invite enrollment, not fake conversations', async () => {
   const {doc} = await setup(async () => {throw Object.assign(new Error('Sign in'), {status:401});});
   assert.match(doc.body.textContent, /Hermes/);
@@ -683,9 +862,6 @@ test('notification deep link opens authorized inbox and never submits or approve
   assert.equal(calls.some(c=>c.options.method==='POST'),false);
   assert.equal(doc.querySelector('[aria-current="page"]').getAttribute('aria-label'),'Inbox');
 });
-
-
-
 
 
 

@@ -3,6 +3,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import errno
+import fcntl
 import hashlib
 import io
 import os
@@ -121,6 +122,10 @@ class AttachmentStore:
         self.user_quota_bytes = user_quota_bytes
         self.global_quota_bytes = global_quota_bytes
         self.min_free_bytes = min_free_bytes
+        self._upload_leases = {}
+        self._orphan_iterators = [None, None]
+        self._orphan_directory = 0
+        self._orphan_reconciled = False
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.root.chmod(0o700)
         for directory in (self.objects, self.staging):
@@ -188,10 +193,55 @@ class AttachmentStore:
                          params).fetchone()
         return row[0]
 
-    def begin(self, user, session_id, upload_key):
+    def _acquire_upload_lease(self, attachment_id):
+        path = self.staging / (attachment_id + '.lease')
+        descriptor = None
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(descriptor)
+            return None
+        except OSError as exc:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise AttachmentError(503, 'Photo upload recovery is unavailable; try again later.') from exc
+        return descriptor
+
+    def _upload_is_live(self, attachment_id):
+        path = self.staging / (attachment_id + '.lease')
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return False
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(descriptor)
+
+    def _release_upload_lease(self, attachment_id):
+        descriptor = self._upload_leases.pop(attachment_id, None)
+        if descriptor is None:
+            return
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        self._unlink(self.staging / (attachment_id + '.lease'))
+
+    def begin(self, user, session_id, upload_key, *, worker=False):
         if not isinstance(upload_key, str) or not UPLOAD_KEY.fullmatch(upload_key):
             raise AttachmentError(422, 'A valid photo upload idempotency key is required.')
         self.cleanup(limit=16)
+        if not self._orphan_reconciled:
+            raise AttachmentError(503, 'Photo storage is reconciling; retry the upload shortly.')
         now = time.time()
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -200,7 +250,38 @@ class AttachmentStore:
                 (user['id'], user['profile'], session_id, upload_key)).fetchone()
             if existing:
                 if existing['state'] == 'receiving':
-                    raise AttachmentError(409, 'This photo upload is still being processed; try again shortly.')
+                    if not worker:
+                        raise AttachmentError(409, 'This photo upload is still being processed; try again shortly.')
+                    try:
+                        free = shutil.disk_usage(self.root).free
+                    except OSError as exc:
+                        raise AttachmentError(503, 'Photo storage is unavailable; try again later.') from exc
+                    reserved = db.execute(
+                        "SELECT COALESCE(SUM(reserved_bytes),0) FROM attachments WHERE state='receiving'"
+                    ).fetchone()[0]
+                    if free - reserved < self.min_free_bytes:
+                        raise AttachmentError(507, 'The server is preserving required free space; photo upload is unavailable.')
+                    descriptor = self._acquire_upload_lease(existing['id'])
+                    if descriptor is None:
+                        raise AttachmentError(409, 'This photo upload is still being processed; try again shortly.')
+                    self._unlink(self.staging / (existing['id'] + '.part'))
+                    self._unlink(self.objects / (existing['id'] + '.tmp'))
+                    for suffix in ('jpg', 'png', 'webp'):
+                        self._unlink(self.objects / (existing['id'] + '.' + suffix))
+                    db.execute('''UPDATE attachments SET sha256=NULL,content_type=NULL,width=NULL,height=NULL,
+                        size=0,stored_name=NULL,created_at=?,expires_at=?,metadata_expires_at=?
+                        WHERE id=? AND state='receiving' ''',
+                        (now, now + ABANDONED_TTL, now + ABANDONED_TTL + LINKED_RETENTION, existing['id']))
+                    self._upload_leases[existing['id']] = descriptor
+                    try:
+                        db.commit()
+                    except BaseException:
+                        self._upload_leases.pop(existing['id'], None)
+                        os.close(descriptor)
+                        self._unlink(self.staging / (existing['id'] + '.lease'))
+                        raise
+                    return dict(db.execute('SELECT * FROM attachments WHERE id=?',
+                                           (existing['id'],)).fetchone()), True
                 if existing['state'] == 'expired':
                     raise AttachmentError(410, 'This photo upload expired; select the photo again.')
                 return dict(existing), False
@@ -219,17 +300,26 @@ class AttachmentStore:
             if free - reserved_pending - RESERVATION_BYTES < self.min_free_bytes:
                 raise AttachmentError(507, 'The server is preserving required free space; photo upload is unavailable.')
             attachment_id = secrets.token_hex(16)
-            db.execute('''INSERT INTO attachments(id,user_id,profile,session_id,upload_key,
-                reserved_bytes,state,created_at,expires_at,metadata_expires_at)
-                VALUES(?,?,?,?,?,?, 'receiving',?,?,?)''',
-                (attachment_id, user['id'], user['profile'], session_id, upload_key,
-                 RESERVATION_BYTES, now, now + ABANDONED_TTL,
-                 now + ABANDONED_TTL + LINKED_RETENTION))
-            db.commit()
+            descriptor = self._acquire_upload_lease(attachment_id) if worker else None
+            try:
+                db.execute('''INSERT INTO attachments(id,user_id,profile,session_id,upload_key,
+                    reserved_bytes,state,created_at,expires_at,metadata_expires_at)
+                    VALUES(?,?,?,?,?,?, 'receiving',?,?,?)''',
+                    (attachment_id, user['id'], user['profile'], session_id, upload_key,
+                     RESERVATION_BYTES, now, now + ABANDONED_TTL,
+                     now + ABANDONED_TTL + LINKED_RETENTION))
+                db.commit()
+            except BaseException:
+                if descriptor is not None:
+                    os.close(descriptor)
+                    self._unlink(self.staging / (attachment_id + '.lease'))
+                raise
+            if descriptor is not None:
+                self._upload_leases[attachment_id] = descriptor
             return dict(db.execute('SELECT * FROM attachments WHERE id=?', (attachment_id,)).fetchone()), True
 
     async def upload(self, user, session_id, upload_key, chunks):
-        row, fresh = self.begin(user, session_id, upload_key)
+        row, fresh = self.begin(user, session_id, upload_key, worker=True)
         attachment_id = row['id']
         digest = hashlib.sha256()
         total = 0
@@ -312,6 +402,9 @@ class AttachmentStore:
             if fresh:
                 self.abort(attachment_id)
             raise
+        finally:
+            if fresh:
+                self._release_upload_lease(attachment_id)
 
     def abort(self, attachment_id):
         with self.connection() as db:
@@ -408,6 +501,22 @@ class AttachmentStore:
             "SELECT id FROM attachments WHERE run_id=? AND state='bound' ORDER BY position,id",
             (run_id,))]
 
+    def run_image_sizes(self, user_id, profile, session_id, attachment_ids):
+        sizes = []
+        now = time.time()
+        with self.connection() as db:
+            for attachment_id in attachment_ids:
+                row = db.execute('''SELECT content_type,size,stored_name,state,expires_at
+                    FROM attachments WHERE id=? AND user_id=? AND profile=? AND session_id=?''',
+                    (attachment_id, user_id, profile, session_id)).fetchone()
+                if (row is None or row['state'] != 'pending' or row['expires_at'] <= now
+                        or row['stored_name'] not in
+                        (attachment_id + '.jpg', attachment_id + '.png', attachment_id + '.webp')
+                        or type(row['size']) is not int or not 0 < row['size'] <= MAX_IMAGE_BYTES):
+                    raise AttachmentError(409, 'A selected photo is no longer available for this Session.')
+                sizes.append((row['content_type'], row['size']))
+        return sizes
+
     def run_images(self, user_id, profile, session_id, run_id, attachment_ids):
         images = []
         with self.connection() as db:
@@ -441,7 +550,7 @@ class AttachmentStore:
                                'image_url': {'url': f"data:{row['content_type']};base64,{encoded}"}})
         return images
 
-    def cleanup(self, *, limit=64, now=None):
+    def cleanup(self, *, limit=64, now=None, rescan=False):
         now = time.time() if now is None else now
         removed = 0
         with self.connection() as db:
@@ -451,10 +560,12 @@ class AttachmentStore:
                    OR (a.state='pending' AND a.expires_at<=?)
                    OR (a.state='bound' AND a.expires_at<=?
                        AND r.status IN ('completed','failed','cancelled'))
-                   OR (a.state='expired' AND a.metadata_expires_at<=?)
+                   OR (a.state='expired' AND a.run_id IS NULL AND a.metadata_expires_at<=?)
                 ORDER BY a.created_at LIMIT ?''',
                 (now - ABANDONED_TTL, now, now, now, max(1, min(int(limit), 256)))).fetchall()
             for row in rows:
+                if row['state'] == 'receiving' and self._upload_is_live(row['id']):
+                    continue
                 if row['stored_name']:
                     self._unlink(self.objects / row['stored_name'])
                 self._unlink(self.staging / (row['id'] + '.part'))
@@ -466,45 +577,76 @@ class AttachmentStore:
                         stored_name=NULL WHERE id=?''', (row['id'],))
                 removed += 1
             db.commit()
+        if rescan and self._orphan_reconciled:
+            self._orphan_iterators = [None, None]
+            self._orphan_directory = 0
+            self._orphan_reconciled = False
         self._cleanup_orphans(max(1, min(int(limit), 256)))
         return removed
 
     def _cleanup_orphans(self, limit):
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            stored = {row[0] for row in db.execute(
-                "SELECT stored_name FROM attachments WHERE stored_name IS NOT NULL")}
-            receiving_stages = {row[0] + '.part' for row in db.execute(
-                "SELECT id FROM attachments WHERE state='receiving'")}
-            receiving_temps = {row[0] + '.tmp' for row in db.execute(
-                "SELECT id FROM attachments WHERE state='receiving'")}
             scanned = 0
-            for directory, known in ((self.objects, stored | receiving_temps),
-                                     (self.staging, receiving_stages)):
-                for path in directory.iterdir():
-                    scanned += 1
-                    if scanned > limit:
-                        db.commit()
-                        return
-                    if path.name not in known:
-                        self._unlink(path)
+            directories = (self.objects, self.staging)
+            while scanned < limit and self._orphan_directory < len(directories):
+                index = self._orphan_directory
+                iterator = self._orphan_iterators[index]
+                if iterator is None:
+                    iterator = self._orphan_iterators[index] = directories[index].iterdir()
+                try:
+                    path = next(iterator)
+                except StopIteration:
+                    self._orphan_iterators[index] = None
+                    self._orphan_directory += 1
+                    continue
+                scanned += 1
+                if index == 0 and path.name.endswith(('.jpg', '.png', '.webp')):
+                    known = db.execute('SELECT 1 FROM attachments WHERE stored_name=? LIMIT 1',
+                                       (path.name,)).fetchone()
+                elif path.name.endswith(('.tmp', '.lease', '.part')):
+                    attachment_id, suffix = path.name.rsplit('.', 1)
+                    known = (db.execute("SELECT 1 FROM attachments WHERE id=? AND state='receiving' LIMIT 1",
+                                        (attachment_id,)).fetchone()
+                             if suffix in ('tmp', 'lease', 'part') else None)
+                else:
+                    known = None
+                if not known:
+                    self._unlink(path)
+            if self._orphan_directory == len(directories):
+                self._orphan_reconciled = True
             db.commit()
 
     def metadata_for_history(self, user, session_id, attachment_ids):
-        result = []
+        metadata = self.metadata_for_history_batch(user, session_id, attachment_ids)
+        return [metadata.get(attachment_id, {'id': attachment_id, 'status': 'expired'})
+                for attachment_id in attachment_ids[:MAX_IMAGES_PER_RUN]]
+
+    def metadata_for_history_batch(self, user, session_id, attachment_ids):
+        ids = list(dict.fromkeys(
+            attachment_id for attachment_id in attachment_ids
+            if isinstance(attachment_id, str) and ATTACHMENT_ID.fullmatch(attachment_id)))
+        result = {}
+        now = time.time()
         with self.connection() as db:
-            for attachment_id in attachment_ids[:MAX_IMAGES_PER_RUN]:
-                if not isinstance(attachment_id, str) or not ATTACHMENT_ID.fullmatch(attachment_id):
-                    continue
-                row = db.execute('''SELECT * FROM attachments WHERE id=? AND user_id=?
-                    AND profile=? AND session_id=?''',
-                    (attachment_id, user['id'], user['profile'], session_id)).fetchone()
-                if (row is None or row['state'] == 'expired'
-                        or (row['expires_at'] <= time.time()
-                            and (row['state'] != 'bound' or not self._run_pinned(db, row['run_id'])))):
-                    result.append({'id': attachment_id, 'status': 'expired'})
-                else:
-                    result.append(_metadata(row))
+            for offset in range(0, len(ids), 250):
+                batch = ids[offset:offset + 250]
+                rows = db.execute('''SELECT a.*,r.status AS run_status FROM attachments a
+                    LEFT JOIN runs r ON r.id=a.run_id
+                    WHERE a.id IN (''' + ','.join('?' for _ in batch) + ''')
+                    AND a.user_id=? AND a.profile=? AND a.session_id=?''',
+                    (*batch, user['id'], user['profile'], session_id)).fetchall()
+                for row in rows:
+                    pinned = bool(row['run_id']) and (
+                        row['run_status'] is None or row['run_status'] not in TERMINAL_RUNS)
+                    if (row['state'] == 'expired'
+                            or (row['expires_at'] <= now
+                                and (row['state'] != 'bound' or not pinned))):
+                        result[row['id']] = {'id': row['id'], 'status': 'expired'}
+                    else:
+                        result[row['id']] = _metadata(row)
+        for attachment_id in ids:
+            result.setdefault(attachment_id, {'id': attachment_id, 'status': 'expired'})
         return result
 
     def release(self, user, session_id, attachment_id):

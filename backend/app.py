@@ -394,7 +394,7 @@ def create_app(settings=None, *, gateway_client=None):
     async def lifespan(app):
         journal.recover()
         orchestrator.steering.recover()
-        await asyncio.to_thread(attachments.cleanup, limit=256)
+        await asyncio.to_thread(attachments.cleanup, limit=256, rescan=True)
         for runtime in runtimes.values():
             runtime.start_recovery()
         stop=asyncio.Event()
@@ -444,7 +444,7 @@ def create_app(settings=None, *, gateway_client=None):
                 except Exception:
                     app.state.operational_notification_error=True
                 try:
-                    await asyncio.to_thread(attachments.cleanup, limit=64)
+                    await asyncio.to_thread(attachments.cleanup, limit=64, rescan=True)
                     app.state.attachment_cleanup_error=False
                 except Exception:
                     app.state.attachment_cleanup_error=True
@@ -617,13 +617,17 @@ def create_app(settings=None, *, gateway_client=None):
         journal.require_session(user['id'],user['profile'],sid)
         result = await asyncio.to_thread(conversation_snapshot,catalog,journal,user,sid,limit,offset,latest,turn_boundary=turn_boundary)
         journal.require_session(user['id'],user['profile'],sid)
-        for item in result.get('items', []):
-            if item.get('attachment_ids'):
-                item['attachments']=attachments.metadata_for_history(user,sid,item['attachment_ids'])
-        for key in ('run','last_run'):
-            run=result.get(key)
-            if run and run.get('attachment_ids'):
-                run['attachments']=attachments.metadata_for_history(user,sid,run['attachment_ids'])
+        owners = [item for item in result.get('items', []) if item.get('attachment_ids')]
+        owners.extend(run for key in ('run','last_run')
+                      if (run := result.get(key)) and run.get('attachment_ids'))
+        if owners:
+            ids = [attachment_id for owner in owners for attachment_id in owner['attachment_ids']]
+            metadata = await asyncio.to_thread(
+                attachments.metadata_for_history_batch, user, sid, ids)
+            for owner in owners:
+                owner['attachments'] = [
+                    metadata.get(attachment_id, {'id': attachment_id, 'status': 'expired'})
+                    for attachment_id in owner['attachment_ids'][:4]]
         return result
 
     @app.post(BASE+'/sessions/{sid}/attachments')
@@ -735,8 +739,8 @@ def create_app(settings=None, *, gateway_client=None):
     async def get_run(rid:str,user=Depends(ready_user)):
         run=await runtime_for(user).refresh(user,rid)
         if run.get('attachment_ids'):
-            run['attachments']=attachments.metadata_for_history(
-                user,run['session_id'],run['attachment_ids'])
+            run['attachments']=await asyncio.to_thread(
+                attachments.metadata_for_history, user, run['session_id'], run['attachment_ids'])
         return run
 
     @app.get(BASE+'/runs/{rid}/controls')
