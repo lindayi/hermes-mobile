@@ -196,9 +196,12 @@ class AttachmentStore:
     def _owned_row(self, db, user, session_id, attachment_id):
         if not ATTACHMENT_ID.fullmatch(attachment_id):
             raise AttachmentError(404, 'Photo attachment not found.')
-        row = db.execute('''SELECT * FROM attachments WHERE id=? AND user_id=?
-            AND profile=? AND session_id=?''',
-            (attachment_id, user['id'], user['profile'], session_id)).fetchone()
+        row = db.execute('''SELECT a.* FROM attachments a WHERE a.id=? AND a.user_id=?
+            AND a.profile=? AND (a.session_id=? OR EXISTS (
+                SELECT 1 FROM runs r JOIN run_history_anchors h ON h.run_id=r.id
+                WHERE r.id=a.run_id AND r.user_id=a.user_id AND r.profile=a.profile
+                AND ? IN (r.session_id,h.session_id,h.canonical_session_id)))''',
+            (attachment_id, user['id'], user['profile'], session_id, session_id)).fetchone()
         if row is None:
             raise AttachmentError(404, 'Photo attachment not found.')
         return row
@@ -762,12 +765,16 @@ class AttachmentStore:
                 rows = db.execute('''SELECT a.*,r.status AS run_status FROM attachments a
                     LEFT JOIN runs r ON r.id=a.run_id
                     WHERE a.id IN (''' + ','.join('?' for _ in batch) + ''')
-                    AND a.user_id=? AND a.profile=? AND a.session_id=?''',
-                    (*batch, user['id'], user['profile'], session_id)).fetchall()
+                    AND a.user_id=? AND a.profile=? AND (a.session_id=? OR EXISTS (
+                        SELECT 1 FROM runs alias_run JOIN run_history_anchors h ON h.run_id=alias_run.id
+                        WHERE alias_run.id=a.run_id AND alias_run.user_id=a.user_id
+                        AND alias_run.profile=a.profile
+                        AND ? IN (alias_run.session_id,h.session_id,h.canonical_session_id)))''',
+                    (*batch, user['id'], user['profile'], session_id, session_id)).fetchall()
                 for row in rows:
                     pinned = bool(row['run_id']) and (
                         row['run_status'] is None or row['run_status'] not in TERMINAL_RUNS)
-                    if (row['state'] == 'expired'
+                    if (row['state'] in ('expired', 'releasing')
                             or (row['expires_at'] <= now
                                 and (row['state'] != 'bound' or not pinned))):
                         result[row['id']] = {'id': row['id'], 'status': 'expired'}

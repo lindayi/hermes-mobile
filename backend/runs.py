@@ -227,7 +227,7 @@ class RunJournal:
         if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='attachments'").fetchone():
             return []
         return [row[0] for row in c.execute(
-            "SELECT id FROM attachments WHERE run_id=? AND state IN ('bound','expired') ORDER BY position,id",
+            "SELECT id FROM attachments WHERE run_id=? AND state IN ('bound','expired','releasing') ORDER BY position,id",
             (run_id,))]
 
     def submit(self, user_id, profile, session_id, text, key, *, history_anchor=None, selection=None,
@@ -399,11 +399,23 @@ class RunJournal:
         with closing(self.connect()) as c:
             c.execute('BEGIN')
             self._require_session(c, user_id, profile, session_id)
-            rows = c.execute('''SELECT r.*, a.message_id AS anchor_message_id,
+            candidates = c.execute('''SELECT r.*, a.message_id AS anchor_message_id,
                 a.session_id AS anchor_session_id, a.canonical_session_id AS anchor_canonical_session_id
                 FROM runs r LEFT JOIN run_history_anchors a ON a.run_id=r.id
-                WHERE r.user_id=? AND r.profile=? AND r.session_id=?
-                ORDER BY r.rowid''', (user_id, profile, session_id)).fetchall()
+                WHERE r.user_id=? AND r.profile=? ORDER BY r.rowid''',
+                (user_id, profile)).fetchall()
+            aliases, selected = {session_id}, {}
+            while True:
+                before = len(aliases)
+                for row in candidates:
+                    identities = {row['session_id'], row['anchor_session_id'],
+                                  row['anchor_canonical_session_id']} - {None}
+                    if aliases & identities:
+                        aliases.update(identities)
+                        selected[row['id']] = row
+                if before == len(aliases):
+                    break
+            rows = [row for row in candidates if row['id'] in selected]
             replay_events, event_cursor = [], 0
             if rows:
                 event_cursor = c.execute('SELECT COALESCE(MAX(id),0) FROM events WHERE run_id=?',
@@ -412,11 +424,15 @@ class RunJournal:
             prior_replays = {}
             attachments_by_run = {}
             if rows and c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='attachments'").fetchone():
-                for attachment in c.execute('''SELECT a.run_id,a.id FROM attachments a
-                    JOIN runs r ON r.id=a.run_id
-                    WHERE r.user_id=? AND r.profile=? AND r.session_id=? AND a.state IN ('bound','expired')
-                    ORDER BY a.run_id,a.position,a.id''', (user_id, profile, session_id)):
-                    attachments_by_run.setdefault(attachment['run_id'], []).append(attachment['id'])
+                run_ids = [row['id'] for row in rows]
+                for offset in range(0, len(run_ids), 250):
+                    batch = run_ids[offset:offset + 250]
+                    for attachment in c.execute('''SELECT a.run_id,a.id FROM attachments a
+                        WHERE a.user_id=? AND a.profile=? AND a.run_id IN ('''
+                        + ','.join('?' for _ in batch) + ''')
+                        AND a.state IN ('bound','expired','releasing')
+                        ORDER BY a.run_id,a.position,a.id''', (user_id, profile, *batch)):
+                        attachments_by_run.setdefault(attachment['run_id'], []).append(attachment['id'])
             for row in rows[:-1]:
                 if c.execute("SELECT 1 FROM events WHERE run_id=? AND name IN ('steering','clarification') LIMIT 1",
                              (row['id'],)).fetchone():

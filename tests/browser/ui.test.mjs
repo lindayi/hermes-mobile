@@ -572,7 +572,7 @@ for (const failure of ['cancelled','rejected','unsupported']) test(`job mutation
 });
 
   test('removing an uploaded photo during the next upload cancels before run admission',async t=>{
-    let finishSecond;
+    let finishSecond,finishDelete,deleteCount=0;
     const uploads=[],runs=[],deletes=[];
     const {doc,app}=await setup(async(path,options={})=>{
       if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
@@ -583,7 +583,11 @@ for (const failure of ['cancelled','rejected','unsupported']) test(`job mutation
         if(uploads.length===2)return new Promise(resolve=>{finishSecond=()=>resolve({id,status:'pending'});});
         return {id,status:'pending'};
       }
-      if(options.method==='DELETE'){deletes.push(path);return {released:true};}
+      if(options.method==='DELETE'){
+        deletes.push(path);
+        if(++deleteCount===1)return new Promise((resolve,reject)=>{finishDelete={resolve,reject};});
+        return {released:true};
+      }
       if(path==='/runs'){runs.push(options.body);return {id:'r1',session_id:'s1',status:'completed'};}
       return {items:[]};
     },win=>{win.URL.createObjectURL=file=>`blob:${file.name}`;});
@@ -601,7 +605,11 @@ for (const failure of ['cancelled','rejected','unsupported']) test(`job mutation
     click(doc,'Remove photo 1');await tick();
     finishSecond();await tick();await tick();
     assert.deepEqual(runs,[]);
+    finishDelete.reject(new Error('Synthetic delete failure'));await tick();await tick();
+    assert.equal(doc.querySelectorAll('.photo-preview').length,2,'failed removal retains both selected photos');
+    assert.match(doc.querySelector('.photo-status').textContent,/could not remove|try again/i);
     assert.deepEqual(deletes,['/sessions/s1/attachments/'+uploads[0]]);
+    click(doc,'Remove photo 1');await tick();await tick();
     assert.deepEqual([...doc.querySelectorAll('.photo-preview img')].map(img=>img.getAttribute('src')),
       ['blob:second.png']);
     click(doc,'Send message');await tick();await tick();

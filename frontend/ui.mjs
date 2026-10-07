@@ -921,15 +921,28 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const renderPhotoSelection=()=>{
       photoTray.replaceChildren();
       selectedPhotos.forEach((photo,index)=>{
-        const remove=button('Remove',event=>action(event.currentTarget,async()=>{
-          if(photo.metadata)await api.request(`/sessions/${encodeURIComponent(session.id)}/attachments/${photo.metadata.id}`,{method:'DELETE'});
-          if(!current())return;
-          const position=selectedPhotos.indexOf(photo);
-          if(position<0)return;
-          releasePreview(photo);selectedPhotos.splice(position,1);photoStatus.hidden=true;renderPhotoSelection();
-        }),'quiet photo-remove',{'aria-label':`Remove photo ${index+1}`});
+        const remove=button('Remove',event=>{
+          if(photo.removing)return;
+          photo.removing=true;
+          event.currentTarget.dataset.locked='true';
+          void action(event.currentTarget,async()=>{
+            try{
+              if(photo.metadata)await api.request(`/sessions/${encodeURIComponent(session.id)}/attachments/${photo.metadata.id}`,{method:'DELETE'});
+            }catch(error){
+              photo.removing=false;
+              photoStatus.hidden=false;
+              photoStatus.textContent='Could not remove photo. Your text and selected photos are retained; try again.';
+              renderPhotoSelection();
+              throw error;
+            }
+            if(!current())return;
+            const position=selectedPhotos.indexOf(photo);
+            if(position<0)return;
+            releasePreview(photo);selectedPhotos.splice(position,1);photoStatus.hidden=true;renderPhotoSelection();
+          });
+        },'quiet photo-remove',{'aria-label':`Remove photo ${index+1}`});
         const inFlight=pendingPhotoSubmission?.attachmentIds.includes(photo.metadata?.id);
-        remove.disabled=!!inFlight;remove.dataset.locked=String(!!inFlight);
+        remove.disabled=!!inFlight || !!photo.removing;remove.dataset.locked=String(!!inFlight || !!photo.removing);
         const preview=photo.previewUrl || photo.metadata?.url;
         photoTray.append(h('div',{class:'photo-preview'},preview?h('img',{src:preview,alt:`Selected photo ${index+1}`}):h('span',{class:'caption'},'Photo selected'),remove));
       });
@@ -1105,9 +1118,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             method:'POST',rawBody:photo.file,headers:{'Idempotency-Key':photo.uploadKey}});
           if(!/^[a-f0-9]{32}$/.test(metadata?.id || '') || metadata.status!=='pending')throw new Error('Photo upload response was invalid.');
           photo.metadata=metadata;
-          if(!current() || !selectedPhotos.includes(photo)){void releasePhoto(photo);if(current()){connection.failure(token);composerAction.set('idle');syncModelLock();}return;}
+          if(!current() || !selectedPhotos.includes(photo) || photo.removing){void releasePhoto(photo);if(current()){connection.failure(token);composerAction.set('idle');syncModelLock();}return;}
         }
-        if(submittedPhotos.some(photo=>!selectedPhotos.includes(photo))){
+        if(submittedPhotos.some(photo=>!selectedPhotos.includes(photo) || photo.removing)){
           pendingPhotoSubmission=null;
           if(owner===state.user?.id && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){
             attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);currentModelSync?.(owner,session.id);

@@ -153,6 +153,32 @@ def test_photo_history_matcher_accepts_sqlite_rows_for_text_runs():
                         db.execute('SELECT * FROM runs').fetchone())
 
 
+def test_native_photo_database_copy_uses_flush_text_and_preserves_message_metadata():
+    from backend.native_run_controls import _canonical_photo_message
+
+    message = {
+        'id': 'native-message-id',
+        'role': 'user',
+        'content': [
+            {'type': 'text', 'text': 'Inspect this image'},
+            {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,ZmFrZQ=='}},
+        ],
+        'timestamp': 42.5,
+        'metadata': {'turn': 'same-turn'},
+    }
+
+    persisted = _canonical_photo_message(message)
+
+    assert persisted == {
+        'id': 'native-message-id',
+        'role': 'user',
+        'content': 'Inspect this image\n[screenshot]',
+        'timestamp': 42.5,
+        'metadata': {'turn': 'same-turn'},
+    }
+    assert message['content'][1]['image_url']['url'].startswith('data:image/')
+
+
 def test_photo_agent_refuses_strip_retry_and_analyzer_fallback():
     class Agent:
         _vision_supported = True

@@ -36,6 +36,34 @@ def photo_persistence_copy(value):
     return value
 
 
+def _canonical_photo_content(content):
+    if not isinstance(content, list):
+        return photo_persistence_copy(content)
+    image_count = sum(isinstance(part, dict)
+                      and part.get('type') in {'image_url', 'input_image', 'image'}
+                      for part in content)
+    if not image_count or any(not isinstance(part, dict)
+                              or part.get('type') not in {'text', 'image_url', 'input_image', 'image'}
+                              for part in content):
+        return photo_persistence_copy(content)
+    text = '\n'.join(part['text'] for part in content
+                     if part.get('type') == 'text' and isinstance(part.get('text'), str))
+    return text + '\n[screenshot]' * image_count if text else '[screenshot]' * image_count
+
+
+def _canonical_photo_message(value):
+    if isinstance(value, list):
+        return [_canonical_photo_message(item) for item in value]
+    if not isinstance(value, dict):
+        return photo_persistence_copy(value)
+    copied = {key: (None if key == 'api_content' and _INLINE_PHOTO.search(str(item))
+                    else _canonical_photo_message(item))
+              for key, item in value.items()}
+    if value.get('role') == 'user' and isinstance(value.get('content'), list):
+        copied['content'] = _canonical_photo_content(value['content'])
+    return copied
+
+
 def _install_photo_log_filters():
     import logging
 
@@ -194,8 +222,16 @@ def _private_db_method(method):
         for key in ('messages', 'content', 'api_content'):
             if key in bound.arguments:
                 value = bound.arguments[key]
-                bound.arguments[key] = (None if key == 'api_content' and _INLINE_PHOTO.search(str(value))
-                                        else photo_persistence_copy(value))
+                if key == 'api_content' and _INLINE_PHOTO.search(str(value)):
+                    bound.arguments[key] = None
+                elif key == 'content' and bound.arguments.get('role') == 'user':
+                    bound.arguments[key] = _canonical_photo_content(value)
+                elif key == 'messages':
+                    bound.arguments[key] = _canonical_photo_message(value)
+                elif key == 'content':
+                    bound.arguments[key] = photo_persistence_copy(value)
+                else:
+                    bound.arguments[key] = photo_persistence_copy(value)
         return method(*bound.args, **bound.kwargs)
     return private_write
 
@@ -205,7 +241,8 @@ def private_photo_agent(agent):
     agent.__class__ = _private_photo_class(type(agent))
     db = getattr(agent, '_session_db', None)
     if db is not None and not getattr(db, '_mobile_photo_private', False):
-        for name in ('_insert_message_rows', 'append_message', 'set_latest_user_api_content'):
+        for name in ('_insert_message_rows', 'append_message', 'archive_and_compact',
+                     'set_latest_user_api_content'):
             setattr(db, name, _private_db_method(getattr(db, name)))
         db._mobile_photo_private = True
     return agent

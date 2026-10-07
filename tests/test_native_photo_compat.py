@@ -17,6 +17,7 @@ def run_native_probe(tmp_path, code):
         'HERMES_HOME': str(home),
         'LANG': 'C.UTF-8',
         'PATH': '/usr/local/bin:/usr/bin:/bin',
+        'LD_LIBRARY_PATH': os.environ.get('LD_LIBRARY_PATH', ''),
         'PYTHONPATH': f'{ROOT}:/usr/local/lib/hermes-agent',
     }
     result = subprocess.run(
@@ -119,9 +120,11 @@ def test_native_transcript_and_json_snapshot_omit_image_bytes(tmp_path):
         assert all('Describe this synthetic photo.' in row['content'] for row in rows)
         encoded_photo_rows = [row['content'] for row in rows
                               if row['content'].startswith('\\x00json:')]
-        assert encoded_photo_rows
-        assert all(matches_user({'id': index + 2, 'role': 'user', 'content': content}, photo_run)
-                   for index, content in enumerate(encoded_photo_rows))
+        assert not encoded_photo_rows
+        assert all(row['content'] == 'Describe this synthetic photo.\\n[screenshot]'
+                   for row in rows)
+        assert all(matches_user({'id': index + 2, 'role': 'user', 'content': row['content']}, photo_run)
+                   for index, row in enumerate(rows))
     ''')
 
 

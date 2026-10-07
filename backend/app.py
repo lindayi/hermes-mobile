@@ -146,6 +146,7 @@ class Settings:
     attachment_user_quota_bytes: int = 128 * 1024 * 1024
     attachment_global_quota_bytes: int = 512 * 1024 * 1024
     attachment_min_free_bytes: int = 1024 * 1024 * 1024
+    photos_enabled: bool = True
 
 
 class SessionInput(BaseModel):
@@ -167,6 +168,8 @@ class RunInput(BaseModel):
 
 def create_app(settings=None, *, gateway_client=None):
     settings=settings or Settings()
+    if type(settings.photos_enabled) is not bool:
+        raise ValueError('Photo feature setting must be boolean')
     settings.state_dir=private_path(settings.state_dir)
     settings.state_dir.mkdir(parents=True,exist_ok=True,mode=0o700)
     settings.state_dir.chmod(0o700)
@@ -181,7 +184,8 @@ def create_app(settings=None, *, gateway_client=None):
         min_free_bytes=settings.attachment_min_free_bytes)
     gateway=gateway_client or GatewayClient(settings.upstream_url,settings.upstream_token,settings.execution_ready)
     notifications=NotificationService(settings.state_dir/'notifications.sqlite',vapid_private_key=settings.vapid_private_key,vapid_public_key=settings.vapid_public_key,session_validator=auth.is_session_active)
-    orchestrator=Orchestrator(journal,gateway,catalog,history_loader=gateway.history,attachments=attachments)
+    orchestrator=Orchestrator(journal,gateway,catalog,history_loader=gateway.history,
+                              attachments=attachments,photos_enabled=settings.photos_enabled)
     gateways={'default':gateway}
     runtimes={'default':orchestrator}
     for profile,entry in settings.gateway_profiles.items():
@@ -190,7 +194,8 @@ def create_app(settings=None, *, gateway_client=None):
         client=GatewayClient(entry['url'],entry['token'],entry.get('execution_ready',False))
         gateways[profile]=client
         runtimes[profile]=Orchestrator(journal,client,catalog,history_loader=client.history,
-                                       attachments=attachments,profile=profile)
+                                       attachments=attachments,profile=profile,
+                                       photos_enabled=settings.photos_enabled)
 
     binding=RuntimeBinding(auth.store,catalog.profiles,settings.gateway_profiles)
 
@@ -634,6 +639,8 @@ def create_app(settings=None, *, gateway_client=None):
     async def upload_photo(sid:str,request:Request,user=Depends(ready_user)):
         auth.require_mutation(request,user)
         journal.require_session(user['id'],user['profile'],sid)
+        if not settings.photos_enabled:
+            raise HTTPException(503,'New photo uploads are disabled; existing photos and text runs remain available.')
         try:
             catalog.messages(user['profile'],sid,limit=1)
         except KeyError:

@@ -151,10 +151,16 @@ owner/profile/Session binding. Staging cleanup is bounded and cannot follow
 symlinks or delete outside the attachment root.
 
 Storage and metadata changes are additive. Text-only requests and legacy
-history remain readable. Rollback disables new photo uploads while preserving
-the existing text-only API and files until normal retention cleanup; rollout
-does not restart the native service or delete production data. Production,
-real accounts, private photos, and real model calls are never test fixtures.
+history remain readable. The guarded photo-only rollback sets the private
+application configuration field `photos_enabled` to `false` through the normal
+reviewed release path. This rejects new uploads and new photo-bearing runs, but
+keeps text runs, retries of already admitted photo runs, authenticated reads,
+metadata, and normal cleanup available. Re-enable photos through the same
+guarded path by setting the field to `true`; do not edit a live config or
+immutable release. A rollback to pre-photo code does not preserve photo reads or
+cleanup and is not a retention-safe rollback. Neither path deletes production
+data or activates production as part of development. Production, real accounts,
+private photos, and real model calls are never test fixtures.
 
 ## Acceptance evidence
 

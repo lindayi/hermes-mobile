@@ -18,9 +18,10 @@ class ClarificationNotSent(IntegrationUnavailable):
 
 class Orchestrator:
     def __init__(self, journal, gateway, catalog, *, history_loader=None, attachments=None,
-                 profile="default", run_timeout=3600):
+                 profile="default", run_timeout=3600, photos_enabled=True):
         self.journal, self.gateway, self.catalog = journal, gateway, catalog
         self.attachments = attachments
+        self.photos_enabled = photos_enabled
         self.profile = profile
         self.history_loader = history_loader
         self.approval_notifier = None
@@ -99,6 +100,8 @@ class Orchestrator:
             if stored.get('attachment_ids', []) != attachment_ids:
                 raise RunConflict('Idempotency key already used for other photo attachments')
             return stored
+        if attachment_ids and not self.photos_enabled:
+            raise IntegrationUnavailable('New photo-bearing runs are disabled; retry existing runs or send text only.')
         if selection is not None:
             if not hasattr(self,'model_options'):
                 raise IntegrationUnavailable('Model controls are unavailable')

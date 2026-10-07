@@ -3,7 +3,7 @@ import binascii
 import base64
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import errno
 import io
 import json
@@ -1053,3 +1053,171 @@ def test_history_binds_photos_to_proven_native_and_synthetic_user_turns(tmp_path
         assert current['attachments'][0]['status'] == 'bound'
         assert off_loop == [True]
         assert len(attachment_queries) == 1
+
+
+def test_photo_alias_history_reads_and_delayed_expiry_keep_owned_ids(tmp_path):
+    with photo_client(tmp_path) as (app, client):
+        user = client.get(BASE + '/auth/me').json()['user']
+        canonical = 'canonical-photo-session'
+        with sqlite3.connect(app.state.catalog.profiles['default'] / 'state.db') as db:
+            db.execute('INSERT INTO sessions VALUES(?,?,?,?,?,?)',
+                       (canonical, 'Canonical photo session', 'api_server', 7, 8, None))
+            db.executemany(
+                'INSERT INTO messages(id,session_id,role,content,tool_calls,timestamp) VALUES(?,?,?,?,?,?)',
+                [(2, canonical, 'user', 'Alias photo turn\n[screenshot]', None, 9),
+                 (3, canonical, 'assistant', 'Alias answer', None, 10)])
+
+        upload = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+                             headers={'Idempotency-Key': 'alias-photo-upload'})
+        attachment_id = upload.json()['id']
+        run, _ = app.state.journal.submit(
+            user['id'], 'default', 'wa-1', 'Alias photo turn', 'alias-photo-run',
+            history_anchor=lambda: app.state.catalog.history_anchor(
+                'default', 'wa-1', canonical),
+            attachment_ids=[attachment_id], attachment_store=app.state.attachments)
+        app.state.journal.finish(user['id'], run['id'], 'completed', 'Alias answer')
+
+        reopened = client.get(BASE + f'/sessions/{canonical}/messages?latest=true')
+        assert reopened.status_code == 200, reopened.text
+        native_user = next(item for item in reopened.json()['items']
+                           if item['role'] == 'user' and item['content'].startswith('Alias photo turn'))
+        assert native_user['attachment_ids'] == [attachment_id]
+        assert native_user['attachments'][0]['status'] == 'bound'
+        for session_id in ('wa-1', canonical):
+            image = client.get(BASE + f'/sessions/{session_id}/attachments/{attachment_id}')
+            assert image.status_code == 200
+            assert image.content.startswith(b'\x89PNG')
+
+        store = app.state.attachments
+        reverse_id = client.post(
+            BASE + f'/sessions/{canonical}/attachments', content=png_fixture(1),
+            headers={'Idempotency-Key': 'reverse-alias-photo-upload'}).json()['id']
+        reverse_run, _ = app.state.journal.submit(
+            user['id'], 'default', canonical, 'Reverse alias turn', 'reverse-alias-photo-run',
+            history_anchor=lambda: app.state.catalog.history_anchor(
+                'default', canonical, 'wa-1'),
+            attachment_ids=[reverse_id], attachment_store=store)
+        with sqlite3.connect(app.state.catalog.profiles['default'] / 'state.db') as db:
+            db.executemany(
+                'INSERT INTO messages(id,session_id,role,content,tool_calls,timestamp) VALUES(?,?,?,?,?,?)',
+                [(4, 'wa-1', 'user', 'Reverse alias turn\n[screenshot]', None, 11),
+                 (5, 'wa-1', 'assistant', 'Reverse alias answer', None, 12)])
+        app.state.journal.finish(user['id'], reverse_run['id'], 'completed', 'Reverse alias answer')
+        reverse = client.get(BASE + '/sessions/wa-1/messages?latest=true')
+        assert reverse.status_code == 200, reverse.text
+        reverse_user = next(item for item in reverse.json()['items']
+                            if item['role'] == 'user' and item['content'].startswith('Reverse alias turn'))
+        assert reverse_user['attachment_ids'] == [reverse_id]
+        assert reverse_user['attachments'][0]['status'] == 'bound'
+        reverse_image = client.get(BASE + f'/sessions/wa-1/attachments/{reverse_id}')
+        assert reverse_image.status_code == 200
+
+        with pytest.raises(attachments_module.AttachmentError) as other_user:
+            store.open_image({'id': 'another-user', 'profile': 'default'}, canonical, attachment_id)
+        assert other_user.value.status == 404
+        with pytest.raises(attachments_module.AttachmentError) as other_profile:
+            store.open_image({'id': user['id'], 'profile': 'other'}, canonical, attachment_id)
+        assert other_profile.value.status == 404
+        with pytest.raises(attachments_module.AttachmentError) as unknown_alias:
+            store.open_image(user, 'unrelated-session', attachment_id)
+        assert unknown_alias.value.status == 404
+
+        descriptor, _, _ = store.open_image(user, canonical, attachment_id)
+        try:
+            with store.connection() as db:
+                db.execute('UPDATE attachments SET expires_at=0 WHERE id=?', (attachment_id,))
+                db.commit()
+            cleanup_now = time.time() + 1
+            assert store.cleanup(now=cleanup_now) == 0
+            with closing(app.state.journal.connect()) as db:
+                assert app.state.journal._attachment_ids(db, run['id']) == [attachment_id]
+            snapshot = app.state.journal.snapshot_state(user['id'], 'default', canonical)
+            prior = next(entry for entry in snapshot['prior'] if entry['run']['id'] == run['id'])
+            assert prior['run']['attachment_ids'] == [attachment_id]
+            retry, created = app.state.journal.submit(
+                user['id'], 'default', 'wa-1', 'Alias photo turn', 'alias-photo-run',
+                attachment_ids=[attachment_id], attachment_store=store)
+            assert not created and retry['id'] == run['id']
+            placeholder = client.get(BASE + f'/sessions/{canonical}/messages?latest=true').json()
+            current_user = next(item for item in placeholder['items']
+                                if item.get('attachment_ids') == [attachment_id])
+            assert current_user['attachments'] == [{'id': attachment_id, 'status': 'expired'}]
+        finally:
+            os.close(descriptor)
+        assert store.cleanup(now=cleanup_now) == 1
+        snapshot = app.state.journal.snapshot_state(user['id'], 'default', canonical)
+        prior = next(entry for entry in snapshot['prior'] if entry['run']['id'] == run['id'])
+        assert prior['run']['attachment_ids'] == [attachment_id]
+
+
+def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
+    native_requests = []
+
+    async def upstream(request):
+            if request.url.path == '/api/sessions/wa-1/messages':
+                return httpx.Response(200, json={
+                    'session_id': 'wa-1', 'requested_session_id': 'wa-1', 'data': []})
+            if request.url.path == '/v1/capabilities':
+                return httpx.Response(200, json={'mobile_photos': {
+                    'version': 1, 'max_images': 4, 'max_image_bytes': 2 * 1024 * 1024,
+                    'max_request_bytes': 20_000_000, 'private_persistence': True}})
+            if request.url.path == '/v1/runs':
+                payload = json.loads(request.content)
+                native_requests.append(payload)
+                run_id = f'rollback-run-{len(native_requests)}'
+                return httpx.Response(202, json={'run_id': run_id})
+            if request.url.path.endswith('/events'):
+                run_id = request.url.path.split('/')[-2]
+                return httpx.Response(200, text=(
+                    'event: run.completed\n'
+                    f'data: {{"run_id":"{run_id}","output":"Synthetic answer"}}\n\n'))
+            return httpx.Response(404)
+
+    gateway = GatewayClient('http://127.0.0.1:8642', 'synthetic-test-token',
+                                execution_ready=True, transport=httpx.MockTransport(upstream))
+    with photo_client(tmp_path, gateway_client=gateway) as (app, client):
+        first_id = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'rollback-existing-photo'}).json()['id']
+        original = {'session_id': 'wa-1', 'input': 'Analyze retained photo',
+                    'idempotency_key': 'rollback-original', 'attachments': [first_id]}
+        accepted = client.post(BASE + '/runs', json=original)
+        assert accepted.status_code == 200, accepted.text
+        for _ in range(100):
+            completed = client.get(BASE + '/runs/' + accepted.json()['id']).json()
+            if completed['status'] == 'completed':
+                break
+            time.sleep(.01)
+
+        pending_id = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(1),
+            headers={'Idempotency-Key': 'rollback-pending-photo'}).json()['id']
+        app.state.settings.photos_enabled = False
+        app.state.orchestrator.photos_enabled = False
+
+        blocked_upload = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(2),
+            headers={'Idempotency-Key': 'rollback-new-photo'})
+        assert blocked_upload.status_code == 503
+        assert 'disabled' in blocked_upload.json()['detail']
+        blocked_run = client.post(BASE + '/runs', json={
+            'session_id': 'wa-1', 'input': 'New photo run',
+            'idempotency_key': 'rollback-new-photo-run', 'attachments': [pending_id]})
+        assert blocked_run.status_code == 503
+        assert 'disabled' in blocked_run.json()['detail']
+        text_run = client.post(BASE + '/runs', json={
+            'session_id': 'wa-1', 'input': 'Text still works',
+            'idempotency_key': 'rollback-text-only'})
+        assert text_run.status_code == 200, text_run.text
+        retried = client.post(BASE + '/runs', json=original)
+        assert retried.status_code == 200
+        assert retried.json()['id'] == accepted.json()['id']
+        assert len(native_requests) == 2
+        assert 'mobile_attachment_ids' not in native_requests[-1]
+        assert client.get(BASE + f'/sessions/wa-1/attachments/{first_id}').status_code == 200
+
+        with app.state.attachments.connection() as db:
+            db.execute('UPDATE attachments SET expires_at=0 WHERE id=?', (pending_id,))
+            db.commit()
+        assert app.state.attachments.cleanup(now=time.time() + 1) == 1
+        assert not (app.state.attachments.objects / f'{pending_id}.png').exists()
