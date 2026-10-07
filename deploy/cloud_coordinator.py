@@ -2598,6 +2598,11 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
         if not isinstance(session, dict):
             return None
         if "receipt_result" in record or ordinal is None:
+            if (not _valid_receipt_proof(record, comments)
+                    or session.get("completed_at")
+                        != record.get("receipt_completed_at")
+                    or not isinstance(session.get("prompt"), str)):
+                return None
             expected_instruction = receipt_instruction(
                 record["dispatch_nonce"], pull_number=record["issue"],
                 start_head=record["head"], base_sha=record["receipt_base"],
@@ -2607,19 +2612,15 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
                 start_head=record["head"], base_sha=record["receipt_base"],
                 neutral=True,
             )
-            if (not _valid_receipt_proof(record, comments)
-                    or session.get("completed_at")
-                        != record.get("receipt_completed_at")
-                    or not isinstance(session.get("prompt"), str)
-                    or not (
-                        expected_instruction in session["prompt"]
-                        or (
-                            is_neutral
-                            and session["prompt"].endswith(
-                                f"\n\n{neutral_instruction}",
-                            )
+            if not (
+                    expected_instruction in session["prompt"]
+                    or (
+                        is_neutral
+                        and session["prompt"].endswith(
+                            f"\n\n{neutral_instruction}",
                         )
-                    )):
+                    )
+            ):
                 return None
             try:
                 task_updated = _time(task.get("updated_at"))
