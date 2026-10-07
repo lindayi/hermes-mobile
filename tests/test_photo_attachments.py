@@ -457,6 +457,10 @@ def test_owned_photo_reaches_the_same_native_run_as_text_without_journal_bytes(t
     async def upstream(request):
         if request.url.path.endswith('/messages'):
             return httpx.Response(200, json={'session_id': 'wa-1', 'data': []})
+        if request.url.path == '/v1/capabilities':
+            return httpx.Response(200, json={'mobile_photos': {
+                'version': 1, 'max_images': 4, 'max_image_bytes': 2 * 1024 * 1024,
+                'max_request_bytes': 20_000_000, 'private_persistence': True}})
         if request.url.path == '/v1/runs':
             gateway_threads.append(threading.get_ident())
             native_payloads.append(json.loads(request.content))
@@ -520,6 +524,43 @@ def test_owned_photo_reaches_the_same_native_run_as_text_without_journal_bytes(t
             app.state.attachments.objects / (attachment_id + '.png')).read_bytes()
         assert run['status'] == 'completed'
         assert image['image_url']['url'].encode() not in app.state.journal.path.read_bytes()
+
+
+@pytest.mark.parametrize('rejection', ['capacity', 'capability'])
+def test_native_predispatch_photo_rejection_is_failed_not_unknown(tmp_path, rejection):
+    native_posts = []
+
+    async def upstream(request):
+        if request.url.path.endswith('/messages'):
+            return httpx.Response(200, json={'session_id': 'wa-1', 'data': []})
+        if request.url.path == '/v1/capabilities':
+            return httpx.Response(200, json={'mobile_photos': {
+                'version': 1, 'max_images': 4, 'max_image_bytes': 2 * 1024 * 1024,
+                'max_request_bytes': 20_000_000, 'private_persistence': True}}
+                if rejection == 'capacity' else {})
+        if request.method == 'POST':
+            native_posts.append(request.url.path)
+            return httpx.Response(413, json={'error': {'code': 'body_too_large'}})
+        return httpx.Response(404)
+
+    gateway = GatewayClient('http://127.0.0.1:8642', 'synthetic-test-token',
+                            execution_ready=True, transport=httpx.MockTransport(upstream))
+    with photo_client(tmp_path, gateway_client=gateway) as (app, client):
+        upload = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+                             headers={'Idempotency-Key': 'rejected-photo-upload'})
+        submitted = client.post(BASE + '/runs', json={
+            'session_id': 'wa-1', 'input': 'Inspect synthetic photo',
+            'idempotency_key': 'rejected-photo-run', 'attachments': [upload.json()['id']]})
+        assert submitted.status_code == 200
+        for _ in range(100):
+            run = client.get(BASE + '/runs/' + submitted.json()['id']).json()
+            if run['status'] == 'failed':
+                break
+            time.sleep(.01)
+        assert run['status'] == 'failed'
+        assert run['upstream_id'] is None
+        assert run['error']
+        assert native_posts == (['/v1/runs'] if rejection == 'capacity' else [])
 
 
 def test_snapshot_batches_ordered_attachment_ids_across_owned_runs(tmp_path, monkeypatch):

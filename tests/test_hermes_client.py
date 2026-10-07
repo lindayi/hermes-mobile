@@ -130,6 +130,33 @@ async def test_native_photo_rejection_is_distinct_from_ambiguous_dispatch(outcom
         await client.close()
 
 
+@pytest.mark.parametrize('capability', ['missing', 'unverified', 'private'])
+@pytest.mark.asyncio
+async def test_photo_dispatch_requires_versioned_private_native_listener(capability):
+    from backend.hermes_client import GatewayClient, NativeRunRejected
+    calls = []
+
+    async def handle(request):
+        calls.append(request.method)
+        if capability == 'unverified':
+            raise httpx.ReadTimeout('synthetic capability timeout')
+        return httpx.Response(200, json={'mobile_photos': {
+            'version': 1, 'max_images': 4, 'max_image_bytes': 2 * 1024 * 1024,
+            'max_request_bytes': 20_000_000, 'private_persistence': False}}
+            if capability == 'private' else {})
+
+    client = GatewayClient('http://127.0.0.1:8642', 'synthetic-token', execution_ready=True,
+                           transport=httpx.MockTransport(handle))
+    try:
+        with pytest.raises(NativeRunRejected):
+            await client.start('synthetic-session', 'Inspect photo',
+                attachments=[{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,YQ=='}}],
+                attachment_ids=['0' * 32])
+        assert calls == ['GET']
+    finally:
+        await client.close()
+
+
 @pytest.mark.parametrize(('status', 'body', 'typed'), [
     (409, {}, False),
     (409, {'error': {'code': 'clarification_conflict'}}, False),

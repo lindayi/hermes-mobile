@@ -212,9 +212,11 @@ _PENDING_ISSUE77_CLARIFICATION_FIXTURE = {
 
 
 _ISSUE85_PHOTO_FIXTURE = {
+    'backend/model_controls.py': '32f135929eb1392dcc53c2431204bda943b8b33d0d55d40e61284fd3e1b19d9d',
+    'deploy/native_controls_release.py': '2c1feb072e7cd4283f4d323841be0e650c17c713fa2a203ce38c29185016148f',
     'backend/app.py': '77d36934b033ecfe669cc2b5c2581146b776f2c448336d7000183489307682c6',
     'backend/attachments.py': 'd62c4df6c9de209e7103e4def1fda2885e5e7600ebf466d962b71714c4d76d47',
-    'backend/hermes_client.py': '07d782913519cc59c38dd95b6d8047fdc11ae5a8bc3cafa2f0edde0bb4c23f9a',
+    'backend/hermes_client.py': 'b1d5cb9a6485ed6b53caca597e27cd0a34d1e82af5545e2738d271b48b10d623',
     'backend/native_catalog.py': '0d0e5e332a88ea7ff0683dcc9fb4fd9dcaa730ecf341b45f404a2cf2f90fe1e7',
     'backend/orchestration.py': '4a62bc9ffd9eac78b2ad85bb09247f9c8b2519f4226b296537820683c169b3e1',
     'backend/runs.py': '79b15df9918cb85599cb3a7db5c978d2abb681afe9c355acdfa6e07f5472884f',

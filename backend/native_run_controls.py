@@ -1,6 +1,7 @@
 """Process-local compatibility for the dedicated mobile owner listener only."""
 import json
 import base64
+import inspect
 import re
 import threading
 import time
@@ -15,6 +16,10 @@ PHOTO_REQUEST_BYTES = 20_000_000
 TEXT_REQUEST_BYTES = 10_000_000
 PHOTO_OMITTED = '[screenshot] [photo attachment omitted after processing]'
 _INLINE_PHOTO = re.compile(r'data:image/[^;,\s"\\]+;base64,[A-Za-z0-9+/=_-]*', re.I)
+
+
+class NativePhotoFailure(RuntimeError):
+    status_code = 422
 
 
 def photo_persistence_copy(value):
@@ -73,23 +78,23 @@ def _private_photo_class(base):
         def __setattr__(self, name, value):
             if name == '_vision_supported' and value is False and getattr(self, '_mobile_photo_turn', False):
                 super().__setattr__('_mobile_photo_failed', True)
-                raise RuntimeError('The configured model rejected photo input; select a vision-capable model and resend.')
+                raise NativePhotoFailure('The configured model rejected photo input; select a vision-capable model and resend.')
             super().__setattr__(name, value)
 
         def run_conversation(self, user_message, *args, **kwargs):
             self._mobile_photo_turn = isinstance(user_message, list) and any(
                 isinstance(part, dict) and part.get('type') == 'image_url' for part in user_message)
             if self._mobile_photo_turn and not getattr(self, '_vision_supported', True):
-                raise RuntimeError('The configured model does not support photos; select a vision-capable model and resend.')
+                raise NativePhotoFailure('The configured model does not support photos; select a vision-capable model and resend.')
             result = super().run_conversation(user_message, *args, **kwargs)
             if self._mobile_photo_turn and getattr(self, '_mobile_photo_failed', False):
-                raise RuntimeError('The configured vision analyzer could not process the attached image.')
+                raise NativePhotoFailure('The configured vision analyzer could not process the attached image.')
             return result
 
         def _describe_image_for_anthropic_fallback(self, image_url, role):
             # Do not materialize a second, unaccounted native temporary image.
             self._mobile_photo_failed = True
-            raise RuntimeError('The configured vision analyzer could not process the attached image.')
+            raise NativePhotoFailure('The configured vision analyzer could not process the attached image.')
 
         def _save_session_log(self, messages=None):
             return super()._save_session_log(photo_persistence_copy(
@@ -107,19 +112,43 @@ def _private_photo_class(base):
         def _api_request_payload_for_hook(self, api_kwargs):
             return photo_persistence_copy(super()._api_request_payload_for_hook(api_kwargs))
 
+        def _invoke_api_request_error_hook(self, **kwargs):
+            return super()._invoke_api_request_error_hook(**photo_persistence_copy(kwargs))
+
+        def _vprint(self, *args, **kwargs):
+            return super()._vprint(*(photo_persistence_copy(arg) for arg in args), **kwargs)
+
+        def _emit_status(self, message):
+            return super()._emit_status(photo_persistence_copy(message))
+
+        def _buffer_vprint(self, message):
+            return super()._buffer_vprint(photo_persistence_copy(message))
+
+        def _clean_error_message(self, error_msg):
+            return super()._clean_error_message(photo_persistence_copy(error_msg))
+
     return PrivatePhotoAgent
+
+
+def _private_db_method(method):
+    signature = inspect.signature(method)
+    def private_write(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        for key in ('messages', 'content', 'api_content'):
+            if key in bound.arguments:
+                value = bound.arguments[key]
+                bound.arguments[key] = (None if key == 'api_content' and _INLINE_PHOTO.search(str(value))
+                                        else photo_persistence_copy(value))
+        return method(*bound.args, **bound.kwargs)
+    return private_write
 
 
 def private_photo_agent(agent):
     agent.__class__ = _private_photo_class(type(agent))
     db = getattr(agent, '_session_db', None)
     if db is not None and not getattr(db, '_mobile_photo_private', False):
-        original = db.append_messages_batch
-        def append_messages_batch(*args, **kwargs):
-            if 'messages' in kwargs:
-                kwargs['messages'] = photo_persistence_copy(kwargs['messages'])
-            return original(*args, **kwargs)
-        db.append_messages_batch = append_messages_batch
+        for name in ('_insert_message_rows', 'append_message', 'set_latest_user_api_content'):
+            setattr(db, name, _private_db_method(getattr(db, name)))
         db._mobile_photo_private = True
     return agent
 
@@ -164,7 +193,10 @@ def run_controls_adapter(base):
             except (ValueError, TypeError):
                 return web.json_response({'error': {'code': 'photo_input_rejected',
                     'message': 'Photo payload is invalid or exceeds the photo/text limits.'}}, status=413)
-            return await super()._handle_runs(request)
+            native = super()._handle_runs
+            if getattr(type(self), '_photo_admission_wrapped', False) and hasattr(native, '__wrapped__'):
+                return await native.__wrapped__(self, request)
+            return await native(request)
 
         def __init__(self, *args, **kwargs):
             self._controls_lock = threading.RLock()
@@ -604,5 +636,8 @@ def run_controls_adapter(base):
                 'version': 1, 'steering': True, 'live_commentary': True,
                 'clarifications': True}
             data['mobile_run_controls_v1'] = True
+            data['mobile_photos'] = {
+                'version': 1, 'max_images': 4, 'max_image_bytes': 2 * 1024 * 1024,
+                'max_request_bytes': PHOTO_REQUEST_BYTES, 'private_persistence': True}
             return web.json_response(data)
     return RunControlsAdapter

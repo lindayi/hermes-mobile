@@ -45,7 +45,7 @@ def _full_sha(value):
 
 APPROVED_CONTROL_HASHES = {
     'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
-    'backend/native_run_controls.py': 'f2be2298117985e1c6ede147a9381d68fade725f14d826e44512cadf444d72ef',
+    'backend/native_run_controls.py': '21720e0dcd6947b7629610cb4530299a0856d6a6ce660e5ba602dbcf746962a3',
     'backend/native_api_service.py':
         'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': 'e79cfee2bf8d32c3f51dd3ee9247e23029376e10c5e55ea21aa373d6d72535c5',

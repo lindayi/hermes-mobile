@@ -151,6 +151,15 @@ class GatewayClient:
         request=self.client.build_request('POST','/v1/runs',json=payload)
         if len(request.content)>MAX_NATIVE_RUN_REQUEST_BYTES:
             raise ValueError('Photo request exceeds the native handler limit; remove photos or shorten earlier context.')
+        if attachments:
+            try:
+                capabilities = await self.request('GET', '/v1/capabilities')
+            except IntegrationUnavailable:
+                raise NativeRunRejected('Native photo capability could not be verified; no image request was dispatched.') from None
+            photos = capabilities.get('mobile_photos') if isinstance(capabilities, dict) else None
+            if photos != {'version': 1, 'max_images': 4, 'max_image_bytes': 2 * 1024 * 1024,
+                          'max_request_bytes': MAX_NATIVE_RUN_REQUEST_BYTES, 'private_persistence': True}:
+                raise NativeRunRejected('Native photos are unavailable; activate the reviewed photo listener before resending.')
         return await self.request('POST','/v1/runs',content=request.content,
                                   headers={'Content-Type':'application/json'})
 

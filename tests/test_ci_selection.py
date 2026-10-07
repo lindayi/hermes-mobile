@@ -95,7 +95,7 @@ def test_repository_native_selection_is_exact_proven_host_subset():
         'tests/test_push_policy_rollback.py',
         'tests/test_session_release_callers.py',
     }
-    assert len(native) == 16
+    assert len(native) == 17
     assert native < host
     assert not native & private
     assert host - native == private

@@ -74,6 +74,7 @@ with tempfile.TemporaryDirectory(prefix='hermes-native-startup-') as d:
                         return {'final_response':'synthetic-no-model'}
                 adapter=holder['adapter']
                 adapter._create_agent=lambda **kwargs: CapturingAgent()
+                adapter._max_concurrent_runs=1
                 import base64
                 import io
                 import random
@@ -115,6 +116,8 @@ with tempfile.TemporaryDirectory(prefix='hermes-native-startup-') as d:
                         break
                     await asyncio.sleep(.05)
                 assert terminal['status'] == 'completed'
+                assert adapter._pending_agent_requests == 0
+                assert adapter.active_agent_work_count() == 0
                 invalid = dict(payload, mobile_attachment_ids=payload['mobile_attachment_ids'][:3])
                 captured.clear()
                 async with client.post(url+'/v1/runs',headers=headers,json=invalid) as response:
