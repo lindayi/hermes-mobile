@@ -3396,7 +3396,8 @@ _LEGACY_HYDRATION_HAZARDS = [
         for field in (
             "listed-task-state", "detail-task-state", "session-state",
             "reservation-type", "task-id", "receipt-task-id", "session-id",
-            "detail-task-id", "detail-session-id", "detail-session-task-id",
+            "receipt-session-id", "detail-task-id", "detail-session-id",
+            "detail-session-task-id",
         )
         for value in ([], {}, None, False, 7)
         for ordinals in (False, True)
@@ -3416,6 +3417,18 @@ _LEGACY_HYDRATION_HAZARDS = [
     ("task-created-type", True),
     ("task-created-invalid", False),
     ("task-created-invalid", True),
+    ("task-updated-missing", False),
+    ("task-updated-missing", True),
+    ("task-updated-type", False),
+    ("task-updated-type", True),
+    ("task-updated-invalid", False),
+    ("task-updated-invalid", True),
+    ("task-updated-before-completion", False),
+    ("task-updated-before-completion", True),
+    ("task-updated-after-now", False),
+    ("task-updated-after-now", True),
+    ("list-detail-updated-mismatch", False),
+    ("list-detail-updated-mismatch", True),
     ("task-created-after-session", False),
     ("task-created-after-session", True),
     ("session-created-missing", False),
@@ -3567,6 +3580,20 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         }
         start_head = result_head
 
+    if (isinstance(hydration_hazard, str)
+            and hydration_hazard.startswith("task-updated-")):
+        task = api.tasks["legacy-source-1"]
+        if hydration_hazard == "task-updated-missing":
+            task.pop("updated_at")
+        elif hydration_hazard == "task-updated-type":
+            task["updated_at"] = 123
+        elif hydration_hazard == "task-updated-invalid":
+            task["updated_at"] = "not-a-timestamp"
+        elif hydration_hazard == "task-updated-before-completion":
+            task["updated_at"] = "2026-09-30T10:14:59Z"
+        else:
+            task["updated_at"] = "2026-10-01T12:11:01Z"
+
     api.head_sha = legacy_head
     api.pull["head"]["sha"] = legacy_head
     api.current_main_sha = CURRENT_MAIN
@@ -3620,12 +3647,14 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     if (isinstance(hydration_hazard, tuple)
             and hydration_hazard[0] in {
                 "reservation-type", "task-id", "receipt-task-id", "session-id",
+                "receipt-session-id",
             }):
         field = {
             "reservation-type": "task_type",
             "task-id": "task_id",
             "receipt-task-id": "receipt_task_id",
             "session-id": "session_id",
+            "receipt-session-id": "receipt_session_id",
         }[hydration_hazard[0]]
         value = deepcopy(hydration_hazard[1])
         enrollment["receipt_proofs"][0][field] = value
@@ -3675,7 +3704,9 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     from deploy.cloud_coordinator import _legacy_neutral_attempt_count, _valid_receipt_proof
     if not (
             isinstance(hydration_hazard, tuple)
-            and hydration_hazard[0] in {"task-id", "receipt-task-id"}
+            and hydration_hazard[0] in {
+                "task-id", "receipt-task-id", "receipt-session-id",
+            }
     ):
         assert all(_valid_receipt_proof(proof, api.comments) for proof in proofs)
     recovered_count = _legacy_neutral_attempt_count(
@@ -3696,7 +3727,12 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         if isinstance(hydration_hazard, tuple)
         and hydration_hazard[0] in {
             "reservation-type", "task-id", "receipt-task-id", "session-id",
+            "receipt-session-id",
         }
+        or (isinstance(hydration_hazard, str) and hydration_hazard in {
+            "task-updated-missing", "task-updated-type", "task-updated-invalid",
+            "task-updated-before-completion", "task-updated-after-now",
+        })
         else 0
     )
     assert recovered_count == expected_count
@@ -3774,6 +3810,12 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                 next(task for task in values
                      if task["id"] == "legacy-source-1")["state"] = deepcopy(
                          hydration_hazard[1]
+                     )
+            if (history_visible
+                    and hydration_hazard == "list-detail-updated-mismatch"):
+                next(task for task in values
+                     if task["id"] == "legacy-source-1")["updated_at"] = (
+                         "2026-09-30T10:20:01Z"
                      )
             if (history_visible
                     and hydration_hazard == "list-detail-created-mismatch"):
@@ -3882,7 +3924,9 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
     expected_wait_reason = (
         "unauthorized-continuation"
         if isinstance(hydration_hazard, tuple)
-        and hydration_hazard[0] in {"task-id", "receipt-task-id"}
+        and hydration_hazard[0] in {
+            "task-id", "receipt-task-id", "receipt-session-id",
+        }
         else "waiting-for-verified-history"
     )
     assert expected_wait_reason in waiting["reasons"]
@@ -4009,6 +4053,7 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         elif (isinstance(hydration_hazard, tuple)
               and hydration_hazard[0] in {
                   "listed-task-state", "task-id", "receipt-task-id",
+                  "receipt-session-id",
               }):
             assert "legacy-source-1" not in task_detail_reads
         else:

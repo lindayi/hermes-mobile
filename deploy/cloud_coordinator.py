@@ -2510,6 +2510,9 @@ def _legacy_task_detail_matches_list(listed, detailed):
             or detailed.get("state") != listed.get("state")
             or detailed.get("state") not in terminal_states
             or detailed.get("created_at") != listed.get("created_at")
+            or not isinstance(listed.get("updated_at"), str)
+            or not isinstance(detailed.get("updated_at"), str)
+            or detailed.get("updated_at") != listed.get("updated_at")
             or not isinstance(detailed.get("sessions"), list)
             or len(detailed["sessions"]) != 1
             or ("session_count" in detailed
@@ -2598,6 +2601,10 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
                     ) not in session["prompt"]):
                 return None
             try:
+                task_updated = _time(task.get("updated_at"))
+                session_completed = _time(session.get("completed_at"))
+                if not session_completed <= task_updated <= now.astimezone(timezone.utc):
+                    return None
                 receipt = find_receipt(
                     comments, complete=True,
                     nonce=record["dispatch_nonce"], task_id=task_id,
