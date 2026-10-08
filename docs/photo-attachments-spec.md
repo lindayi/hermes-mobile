@@ -117,7 +117,9 @@ The dedicated owner listener loads the versioned `native_run_controls` adapter
 from the staged repository release. It admits complete photo requests up to
 20,000,000 bytes, with at most four 2 MiB inline JPEG/PNG/WebP parts and matching
 opaque IDs. The existing 10,000,000-byte text/history budget remains independent
-of the image bytes. Validation occurs before native run creation. A proven HTTP
+of the image bytes. The ingress bound measures wire bytes; text/history budgets
+measure compact UTF-8 JSON after parsing, without ASCII escaping or formatting
+whitespace. Validation occurs before native run creation. A proven HTTP
 413 is terminal rejection, not an unknown network outcome; ambiguous dispatch
 still observes the original run without replay.
 Before photo dispatch the bridge requires the exact versioned `mobile_photos`
@@ -131,16 +133,23 @@ dump, SQLite batch/`api_content`, trajectory, and API-request hook boundaries.
 SQLite compaction/archive insertion and direct message writes use the same
 sanitization, preserving native intrinsic message markers and text metadata.
 Provider-error display/status buffers and error hooks are sanitized too.
-Only transient live provider input keeps image bytes. Analyzer fallback does not
-materialize an unaccounted temporary copy; unavailable analysis or an image
-rejection produces an actionable failed photo run instead of a text-only retry.
+Failed native run results are sanitized copies before status/event persistence.
+Every photo-bearing `pre_api_request` hook argument is sanitized in a copy;
+the live provider request and message history are not mutated. Only transient
+live provider input keeps image bytes. Analyzer fallback does not materialize
+an unaccounted temporary copy for a mobile photo turn; text-only/tool-image
+fallback keeps its native behavior. Unavailable analysis or an image rejection
+produces an actionable failed photo run instead of a text-only retry.
 No new native photo files are retained, so native copies add zero bytes to the
 attachment store footprint. This does not certify historical copies or other
 listeners. Native source dependencies are fingerprinted by the existing guarded
 release; cloud and deployed listeners use the same repository adapter with the
 same installed baseline, not a cloud-only compatibility patch. Activation remains
 an independently reviewed exact-main guarded release, with the pre-photo source
-map retained for drain and rollback. No installed source is hot-edited.
+map retained for drain and rollback. Clarification capability is classified only
+from complete accepted source maps: the current and pre-photo maps support it;
+older non-clarification maps do not, and unknown or mixed maps fail closed. The
+historical and rollback maps remain unchanged. No installed source is hot-edited.
 
 ## Security and rollout
 
@@ -184,9 +193,9 @@ activation success.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `backend/native_run_controls.py` | `cf7e4c5a5b6d7663a93b4bf648033d2447c87571de4b9758ee78df9bcb1e5938` |
-| `backend/model_controls.py` | `26b8ab1203be929e6d538d25294d1399a54c4b743d6e452c419ecaa36e9eb107` |
-| `deploy/native_controls_release.py` | `50d2e4a669b55c5f43fb3cfb39cf78b74e54ca812bb62e1daf157dc0f0922ae9` |
+| `backend/native_run_controls.py` | `6b683c8347df371068bd1f4f8e709738bdef04a370ddb03fc5deb6b777b12e58` |
+| `backend/model_controls.py` | `b47c0c10360fd4ba30fa4a16da046ffbcca1ee60e251b82ad872952108e3dace` |
+| `deploy/native_controls_release.py` | `efc5a9b6573a9f739324f663f2dadbeb7ce7964d441db9be4b94d1da0d1b2786` |
 | `backend/app.py` | `693b0cc5f4dfe96441b98a74fa97d457b9d794028c0ccd2d8836d8f117aa7939` |
 | `backend/attachments.py` | `1573d0b81a02744c326f0c8a5bcfb3cf97cba88f0058ef01966f595f13a1a292` |
 | `backend/hermes_client.py` | `20e16f9028437d980df83c9ea07083b987501902375f544d6b72a1fcbca28d83` |

@@ -212,8 +212,8 @@ _PENDING_ISSUE77_CLARIFICATION_FIXTURE = {
 
 
 _ISSUE85_PHOTO_FIXTURE = {
-    'backend/model_controls.py': '26b8ab1203be929e6d538d25294d1399a54c4b743d6e452c419ecaa36e9eb107',
-    'deploy/native_controls_release.py': '50d2e4a669b55c5f43fb3cfb39cf78b74e54ca812bb62e1daf157dc0f0922ae9',
+    'backend/model_controls.py': 'b47c0c10360fd4ba30fa4a16da046ffbcca1ee60e251b82ad872952108e3dace',
+    'deploy/native_controls_release.py': 'efc5a9b6573a9f739324f663f2dadbeb7ce7964d441db9be4b94d1da0d1b2786',
     'backend/app.py': '693b0cc5f4dfe96441b98a74fa97d457b9d794028c0ccd2d8836d8f117aa7939',
     'backend/attachments.py': '1573d0b81a02744c326f0c8a5bcfb3cf97cba88f0058ef01966f595f13a1a292',
     'backend/hermes_client.py': '20e16f9028437d980df83c9ea07083b987501902375f544d6b72a1fcbca28d83',

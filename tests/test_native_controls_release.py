@@ -969,3 +969,70 @@ def test_authorized_controls_delta_allowed_but_legacy_still_protected(tmp_path, 
         + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(release.PREVIOUS_CONTROL_HASHES)
         + '\n_TIMEOUT_BASELINE_CONTROL_HASHES = ' + repr(release.TIMEOUT_BASELINE_CONTROL_HASHES))
     assert release.deploy(paths, **args)
+
+
+@pytest.mark.parametrize('family', ['pre-photo', 'current'])
+def test_native_probe_capture_and_rollback_verify_preserve_clarification_capabilities(
+        tmp_path, monkeypatch, family):
+    from types import SimpleNamespace
+    from urllib.error import HTTPError
+    from backend import model_controls
+
+    root = tmp_path / 'native'
+    root.mkdir()
+    proc = tmp_path / 'proc' / '123'
+    proc.mkdir(parents=True)
+    (proc / 'cwd').symlink_to(root)
+    (proc / 'cmdline').write_bytes(b'/usr/bin/python\x00native-listener\x00')
+    monkeypatch.setattr(release, 'PROC_ROOT', tmp_path / 'proc')
+    source_hashes = (release.PRE_PHOTO_CONTROL_HASHES if family == 'pre-photo'
+                     else release.APPROVED_CONTROL_HASHES)
+    monkeypatch.setattr(model_controls, '_control_source_hashes',
+                        lambda _root: dict(source_hashes))
+    caps = {
+        'mobile_notifications': {
+            'version': 1, 'delivery': 'durable-inbox', 'automatic_model_wake': False},
+        'mobile_run_controls': {
+            'version': 1, 'steering': True, 'live_commentary': True,
+            'clarifications': True},
+        'mobile_native_maintenance': {
+            'version': 1, 'scope': 'dedicated-listener', 'atomic_drain': False},
+        'features': {'mobile_session_delete_version': 1},
+    }
+    health_evidence = health()
+    health_evidence.update(status='ok', pid=123)
+    probe = object.__new__(release.NativeProbe)
+    probe.run = lambda *args, **kwargs: SimpleNamespace(stdout='123')
+    probe.source = root
+    probe.attest = lambda observed_root, legacy=False: 123
+    probe._start_ticks = lambda pid: 456
+    probe._bridge_pid = lambda observed_root: 789
+    probe._ready = lambda *args, **kwargs: True
+
+    def request(path, *, authenticated=True):
+        if not authenticated:
+            raise HTTPError('private', 401, 'Unauthorized', {}, None)
+        return health_evidence if path == '/health/detailed' else caps
+
+    probe.request = request
+    captured = probe.capture(root, False)
+    assert captured['source_hashes'] == source_hashes
+    probe.verify_unchanged(root, baseline=captured)
+    probe.verify(root, baseline=captured)
+
+    mismatch = dict(captured)
+    mismatch['caps'] = {
+        **caps, 'mobile_run_controls': {
+            key: value for key, value in caps['mobile_run_controls'].items()
+            if key != 'clarifications'}}
+    with pytest.raises(RuntimeError, match='capabilities'):
+        probe.verify_unchanged(root, baseline=mismatch)
+
+    old_caps = {
+        **caps, 'mobile_run_controls': {
+            key: value for key, value in caps['mobile_run_controls'].items()
+            if key != 'clarifications'}}
+    mixed = dict(captured, caps=old_caps, source_hashes={
+        **source_hashes, 'backend/native_run_controls.py': '0' * 64})
+    with pytest.raises(RuntimeError, match='source-version'):
+        probe.verify_unchanged(root, baseline=mixed)

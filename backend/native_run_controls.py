@@ -7,7 +7,8 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from functools import lru_cache
+from contextvars import ContextVar
+from functools import lru_cache, wraps
 
 from aiohttp import web
 
@@ -16,6 +17,8 @@ PHOTO_REQUEST_BYTES = 20_000_000
 TEXT_REQUEST_BYTES = 10_000_000
 PHOTO_OMITTED = '[screenshot] [photo attachment omitted after processing]'
 _INLINE_PHOTO = re.compile(r'data:image/[^;,\s"\\]+;base64,[A-Za-z0-9+/=_-]*', re.I)
+_MOBILE_PHOTO_HOOK_ACTIVE = ContextVar('mobile_photo_hook_active', default=False)
+_PHOTO_HOOK_INSTALL_LOCK = threading.Lock()
 
 
 class NativePhotoFailure(RuntimeError):
@@ -34,6 +37,14 @@ def photo_persistence_copy(value):
         return {key: (None if key == 'api_content' and _INLINE_PHOTO.search(str(item))
                       else photo_persistence_copy(item)) for key, item in value.items()}
     return value
+
+
+def _compact_utf8_size(value):
+    try:
+        return len(json.dumps(
+            value, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+    except UnicodeEncodeError:
+        raise ValueError('Native text request is not valid UTF-8') from None
 
 
 def _canonical_photo_content(content):
@@ -117,7 +128,7 @@ def validate_photo_payload(body):
     if ids is None:
         if image_parts(body):
             raise ValueError('Private photo input requires attachment binding')
-        if len(json.dumps(body).encode()) > TEXT_REQUEST_BYTES:
+        if _compact_utf8_size(body) > TEXT_REQUEST_BYTES:
             raise ValueError('Native text request exceeds the existing limit')
         return
     content = body.get('input')
@@ -148,8 +159,27 @@ def validate_photo_payload(body):
             raise ValueError('Invalid photo encoding') from None
         if not 0 < size <= 2 * 1024 * 1024:
             raise ValueError('Photo exceeds the normalized image limit')
-    if len(json.dumps(photo_persistence_copy(body)).encode()) > TEXT_REQUEST_BYTES:
+    if _compact_utf8_size(photo_persistence_copy(body)) > TEXT_REQUEST_BYTES:
         raise ValueError('Native text request exceeds the existing limit')
+
+
+def _install_photo_hook_privacy():
+    import hermes_cli.lifecycle as lifecycle
+
+    with _PHOTO_HOOK_INSTALL_LOCK:
+        original = lifecycle.invoke_hook
+        if getattr(original, '_mobile_photo_hook_privacy', False):
+            return
+
+        @wraps(original)
+        def invoke_hook(name, *args, **kwargs):
+            if name == 'pre_api_request' and _MOBILE_PHOTO_HOOK_ACTIVE.get():
+                args = tuple(photo_persistence_copy(item) for item in args)
+                kwargs = photo_persistence_copy(kwargs)
+            return original(name, *args, **kwargs)
+
+        invoke_hook._mobile_photo_hook_privacy = True
+        lifecycle.invoke_hook = invoke_hook
 
 
 @lru_cache(maxsize=16)
@@ -164,22 +194,35 @@ def _private_photo_class(base):
         def run_conversation(self, user_message, *args, **kwargs):
             self._mobile_photo_turn = isinstance(user_message, list) and any(
                 isinstance(part, dict) and part.get('type') == 'image_url' for part in user_message)
+            self._mobile_photo_failed = False
             if self._mobile_photo_turn and not getattr(self, '_vision_supported', True):
+                self._mobile_photo_turn = False
                 raise NativePhotoFailure('The configured model does not support photos; select a vision-capable model and resend.')
+            _install_photo_hook_privacy()
+            hook_token = _MOBILE_PHOTO_HOOK_ACTIVE.set(self._mobile_photo_turn)
             try:
-                result = super().run_conversation(user_message, *args, **kwargs)
-            except Exception:
-                if self._mobile_photo_turn:
-                    raise NativePhotoFailure('The photo run failed; check the configured model and retry.') from None
-                raise
-            if self._mobile_photo_turn and getattr(self, '_mobile_photo_failed', False):
-                raise NativePhotoFailure('The configured vision analyzer could not process the attached image.')
-            return result
+                try:
+                    result = super().run_conversation(user_message, *args, **kwargs)
+                except Exception:
+                    if self._mobile_photo_turn:
+                        raise NativePhotoFailure('The photo run failed; check the configured model and retry.') from None
+                    raise
+                if self._mobile_photo_turn and getattr(self, '_mobile_photo_failed', False):
+                    raise NativePhotoFailure('The configured vision analyzer could not process the attached image.')
+                if (self._mobile_photo_turn and isinstance(result, dict)
+                        and result.get('failed') is True):
+                    return photo_persistence_copy(result)
+                return result
+            finally:
+                _MOBILE_PHOTO_HOOK_ACTIVE.reset(hook_token)
+                self._mobile_photo_turn = False
+                self._mobile_photo_failed = False
 
         def _describe_image_for_anthropic_fallback(self, image_url, role):
-            # Do not materialize a second, unaccounted native temporary image.
-            self._mobile_photo_failed = True
-            raise NativePhotoFailure('The configured vision analyzer could not process the attached image.')
+            if getattr(self, '_mobile_photo_turn', False):
+                self._mobile_photo_failed = True
+                raise NativePhotoFailure('The configured vision analyzer could not process the attached image.')
+            return super()._describe_image_for_anthropic_fallback(image_url, role)
 
         def _save_session_log(self, messages=None):
             return super()._save_session_log(photo_persistence_copy(

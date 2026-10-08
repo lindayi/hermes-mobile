@@ -106,6 +106,19 @@ PREVIOUS_CONTROL_HASHES = {
 }
 
 
+def _clarification_version(source_hashes):
+    for family, version in (
+            (APPROVED_CONTROL_HASHES, 1),
+            (PRE_PHOTO_CONTROL_HASHES, 1),
+            (PRE_CLARIFICATION_CONTROL_HASHES, 0),
+            (PRE_ROUTING_CONTROL_HASHES, 0),
+            (TIMEOUT_BASELINE_CONTROL_HASHES, 0),
+            (PREVIOUS_CONTROL_HASHES, 0)):
+        if source_hashes == family:
+            return version
+    raise RuntimeError('Unknown native control source-version baseline')
+
+
 def attested_controls(root):
     """Runtime/rollback approval accepts only one complete known source set."""
     from backend.model_controls import (
@@ -612,7 +625,7 @@ class NativeProbe:
             require_controls_capabilities(caps,
                 session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
                 notification_version=int('backend/native_notifications.py' in source_hashes),
-                clarification_version=int(source_hashes == APPROVED_CONTROL_HASHES))
+                clarification_version=_clarification_version(source_hashes))
         captured = dict(root=str(root), pid=pid, legacy=legacy, caps=caps, source_hashes=source_hashes,
                         start_ticks=started, bootstrap=bootstrap,
                         bridge_root=str(baseline), bridge_pid=self._bridge_pid(baseline))
@@ -665,7 +678,7 @@ class NativeProbe:
         require_controls_capabilities(
             caps, session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
             notification_version=int('backend/native_notifications.py' in source_hashes),
-            clarification_version=int(source_hashes == APPROVED_CONTROL_HASHES))
+            clarification_version=_clarification_version(source_hashes))
         self.verify_unchanged(root, baseline=dict(
             root=str(root), legacy=False, caps=caps, source_hashes=source_hashes,
             pid=pid, start_ticks=started), operational=True)
@@ -707,7 +720,7 @@ class NativeProbe:
                 caps,
                 session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
                 notification_version=int('backend/native_notifications.py' in source_hashes),
-                clarification_version=int(source_hashes == APPROVED_CONTROL_HASHES))
+                clarification_version=_clarification_version(source_hashes))
             if operational:
                 self._require_operational_activity(health)
         if json.dumps(caps, sort_keys=True, allow_nan=False) != json.dumps(
@@ -763,8 +776,7 @@ class NativeProbe:
                                 'backend/native_session_deletion.py' in source_hashes),
                             notification_version=int(
                                 'backend/native_notifications.py' in source_hashes),
-                            clarification_version=int(
-                                source_hashes == APPROVED_CONTROL_HASHES))
+                            clarification_version=_clarification_version(source_hashes))
                     if json.dumps(caps, sort_keys=True, allow_nan=False) != json.dumps(
                             baseline['caps'], sort_keys=True, allow_nan=False):
                         raise RuntimeError('Restored native capabilities differ')
@@ -772,7 +784,7 @@ class NativeProbe:
                     require_controls_capabilities(caps,
                         session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
                         notification_version=int('backend/native_notifications.py' in source_hashes),
-                        clarification_version=int(source_hashes == APPROVED_CONTROL_HASHES))
+                        clarification_version=_clarification_version(source_hashes))
                 if not legacy:
                     expected = baseline if baseline is not None else dict(
                         root=str(root), legacy=False, caps=caps, source_hashes=APPROVED_CONTROL_HASHES)

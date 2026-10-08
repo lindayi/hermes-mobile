@@ -171,7 +171,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/frontend_release.py': '7749afb862a515fc673712b11278145adfb3d39ba2d012a34ecea257399eade3',
     'deploy/git_source.py': 'c69c7c5a45bc3a16ab26996872c258cc352cf2ec56c19d6256595e18ac713d63',
     'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
-    'deploy/native_controls_release.py': '50d2e4a669b55c5f43fb3cfb39cf78b74e54ca812bb62e1daf157dc0f0922ae9',
+    'deploy/native_controls_release.py': 'efc5a9b6573a9f739324f663f2dadbeb7ce7964d441db9be4b94d1da0d1b2786',
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': 'bf01500fb253f7d41ce49d375bba63a9e4d80569eb376a6aeae50f56cf71923f',
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
@@ -216,7 +216,7 @@ SOURCE_FINGERPRINTS = {
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
     'backend/attachments.py': '1573d0b81a02744c326f0c8a5bcfb3cf97cba88f0058ef01966f595f13a1a292',
     'backend/clarifications.py': '6a6f042beb98881a482efdd85c20555d88a375156a024481ab18a0d5c80e94fd',
-    'backend/model_controls.py': '26b8ab1203be929e6d538d25294d1399a54c4b743d6e452c419ecaa36e9eb107',
+    'backend/model_controls.py': 'b47c0c10360fd4ba30fa4a16da046ffbcca1ee60e251b82ad872952108e3dace',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',  # gitleaks:allow
     'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
     'backend/runs.py': 'a3392c2205369c2cad9b477913f9b4d0b0276b41825e225a77c79d7d99e2b0a3',

@@ -48,7 +48,7 @@ def run_native_probe(tmp_path, code):
 
 
 @contextmanager
-def native_photo_api(tmp_path):
+def native_photo_api(tmp_path, *, provider_failure=False):
     home = tmp_path / 'native-api-home'
     home.mkdir()
     ready = tmp_path / 'native-api-ready.json'
@@ -83,7 +83,7 @@ def native_photo_api(tmp_path):
         class ProviderHandler(BaseHTTPRequestHandler):
             def do_POST(self):
                 payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                images, texts = [], []
+                images, image_urls, texts = [], [], []
                 for message in payload.get('messages', []):
                     content = message.get('content')
                     if message.get('role') == 'user' and isinstance(content, str):
@@ -98,17 +98,25 @@ def native_photo_api(tmp_path):
                                 url = part.get('image_url', {}).get('url', '')
                                 raw = base64.b64decode(url.split(',', 1)[1], validate=True)
                                 images.append(hashlib.sha256(raw).hexdigest())
+                                image_urls.append(url)
                 captures.append({'images': images, 'texts': texts})
                 capture_path.write_text(json.dumps({'captures': captures, 'compactions': compactions}))
-                response = json.dumps({
-                    'id': 'synthetic-completion', 'object': 'chat.completion', 'created': 1,
-                    'model': 'synthetic-photo-model',
-                    'choices': [{'index': 0, 'finish_reason': 'stop',
-                                 'message': {'role': 'assistant',
-                                             'content': 'Synthetic photo description'}}],
-                    'usage': {'prompt_tokens': 20, 'completion_tokens': 5, 'total_tokens': 25},
-                }).encode()
-                self.send_response(200)
+                if os.environ.get('NATIVE_PROVIDER_FAILURE') == '1':
+                    response = json.dumps({
+                        'error': {'message': 'Synthetic provider echoed ' + image_urls[0]},
+                    }).encode()
+                    status = 400
+                else:
+                    response = json.dumps({
+                        'id': 'synthetic-completion', 'object': 'chat.completion', 'created': 1,
+                        'model': 'synthetic-photo-model',
+                        'choices': [{'index': 0, 'finish_reason': 'stop',
+                                     'message': {'role': 'assistant',
+                                                 'content': 'Synthetic photo description'}}],
+                        'usage': {'prompt_tokens': 20, 'completion_tokens': 5, 'total_tokens': 25},
+                    }).encode()
+                    status = 200
+                self.send_response(status)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Length', str(len(response)))
                 self.end_headers()
@@ -182,6 +190,7 @@ def native_photo_api(tmp_path):
         'NATIVE_CAPTURE': str(captured),
         'NATIVE_API_KEY': key,
         'NATIVE_API_PORT': str(port),
+        'NATIVE_PROVIDER_FAILURE': '1' if provider_failure else '0',
     }
     process = subprocess.Popen(
         [NATIVE_PYTHON, '-c', textwrap.dedent(code)],
@@ -426,6 +435,7 @@ def test_native_vision_failure_is_reported_without_synthetic_description(tmp_pat
         )
         agent = AIAgent.__new__(AIAgent)
         agent = private_photo_agent(agent)
+        agent._mobile_photo_turn = True
         agent._anthropic_image_fallback_cache = {}
         agent._materialize_data_url_for_vision = lambda source: (source, None)
         try:
@@ -437,6 +447,131 @@ def test_native_vision_failure_is_reported_without_synthetic_description(tmp_pat
             assert str(error) == 'The configured vision analyzer could not process the attached image.'
         else:
             raise AssertionError('Vision failure was converted into a text-only result')
+    ''')
+
+
+def test_native_tool_image_fallback_is_preserved_outside_mobile_photo_turn(tmp_path):
+    run_native_probe(tmp_path, '''
+        import run_agent
+        from backend.native_run_controls import NativePhotoFailure, private_photo_agent
+
+        calls = []
+        original = run_agent.AIAgent._describe_image_for_anthropic_fallback
+        run_agent.AIAgent._describe_image_for_anthropic_fallback = (
+            lambda self, image_url, role: calls.append((image_url, role)) or 'native result')
+        try:
+            agent = private_photo_agent(run_agent.AIAgent.__new__(run_agent.AIAgent))
+            assert agent._describe_image_for_anthropic_fallback('tool-image', 'tool') == 'native result'
+            assert calls == [('tool-image', 'tool')]
+            agent._mobile_photo_turn = True
+            try:
+                agent._describe_image_for_anthropic_fallback('mobile-photo', 'user')
+            except NativePhotoFailure as error:
+                assert 'vision analyzer' in str(error)
+            else:
+                raise AssertionError('Mobile photo fallback did not fail explicitly')
+            assert calls == [('tool-image', 'tool')]
+        finally:
+            run_agent.AIAgent._describe_image_for_anthropic_fallback = original
+    ''')
+
+
+def test_native_photo_pre_api_hooks_get_sanitized_copies_and_text_hooks_stay_unchanged(tmp_path):
+    run_native_probe(tmp_path, '''
+        import base64
+        import json
+        import socket
+        import struct
+        import zlib
+        from unittest.mock import Mock, patch
+        import httpx
+        from openai import BadRequestError
+        import hermes_cli.lifecycle as lifecycle
+        import run_agent
+        from backend.native_run_controls import private_photo_agent
+
+        def chunk(kind, data):
+            return (struct.pack('!I', len(data)) + kind + data
+                    + struct.pack('!I', zlib.crc32(kind + data) & 0xffffffff))
+        png = (b'\\x89PNG\\r\\n\\x1a\\n'
+               + chunk(b'IHDR', struct.pack('!IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+               + chunk(b'IDAT', zlib.compress(bytes([0, 200, 30, 10])))
+               + chunk(b'IEND', b''))
+        marker = base64.b64encode(png).decode()
+        url = 'data:image/png;base64,' + marker
+        observed = []
+        lifecycle.has_hook = lambda name: name == 'pre_api_request'
+        lifecycle.invoke_hook = lambda name, *args, **kwargs: observed.append((name, kwargs))
+        client = Mock()
+        client.chat.completions.create.side_effect = [
+            BadRequestError(
+                'Provider echoed ' + url,
+                response=httpx.Response(400, request=httpx.Request('POST', 'http://127.0.0.1/synthetic')),
+                body={'error': 'Provider echoed ' + url}),
+            BadRequestError(
+                'Text-only provider failure',
+                response=httpx.Response(400, request=httpx.Request('POST', 'http://127.0.0.1/synthetic')),
+                body={'error': 'Text-only provider failure'}),
+        ]
+        def no_network(*args, **kwargs):
+            raise AssertionError('Synthetic native test attempted a network connection')
+        with patch.object(socket.socket, 'connect', no_network), \
+             patch.object(run_agent, 'OpenAI', return_value=client):
+            agent = run_agent.AIAgent(
+                model='synthetic-photo-model', provider='custom',
+                base_url='http://127.0.0.1:1/v1', api_key='synthetic-not-a-provider-key',
+                enabled_toolsets=[], skip_memory=True, skip_background_review=True,
+                skip_context_files=True, max_iterations=1, quiet_mode=True,
+                session_id='photo-hook-fixture', platform='api_server')
+            agent = private_photo_agent(agent)
+            agent.client = client
+            agent._model_supports_vision = lambda: True
+            message = [
+                {'type': 'text', 'text': 'Inspect four synthetic photos'},
+                *[{'type': 'image_url', 'image_url': {'url': url}} for _ in range(4)],
+            ]
+            original_message = json.dumps(message)
+            try:
+                result = agent.run_conversation(
+                    message, conversation_history=[{'role': 'user', 'content': [
+                        {'type': 'image_url', 'image_url': {'url': url}}]}],
+                    task_id='photo-hook-fixture')
+                assert result.get('failed') is True
+                encoded_result = json.dumps(result)
+                assert marker not in encoded_result
+                assert 'data:image/' not in encoded_result
+                assert 'Provider echoed' in encoded_result
+            except RuntimeError as error:
+                assert 'photo' in str(error).lower() or 'vision' in str(error).lower()
+            assert json.dumps(message) == original_message
+            photo_provider_messages = client.chat.completions.create.call_args.kwargs['messages']
+            assert marker in json.dumps(photo_provider_messages)
+            assert not agent._mobile_photo_turn
+            assert not agent._mobile_photo_failed
+
+            try:
+                agent.run_conversation('Ordinary text request', conversation_history=[],
+                                       task_id='photo-hook-text-fixture')
+            except RuntimeError as error:
+                assert 'provider' in str(error).lower()
+
+        hooks = [kwargs for name, kwargs in observed if name == 'pre_api_request']
+        assert len(hooks) >= 2
+        assert all(marker not in json.dumps(hook) for hook in hooks)
+        assert all('data:image/' not in json.dumps(hook) for hook in hooks)
+        photo_hook = next(hook for hook in hooks
+                          if isinstance(hook.get('user_message'), list))
+        text_hook = next(hook for hook in hooks
+                         if hook.get('user_message') == 'Ordinary text request')
+        assert photo_hook['user_message'][0]['text'] == 'Inspect four synthetic photos'
+        assert sum('photo attachment omitted' in item.get('text', '')
+                   for item in photo_hook['user_message']) == 4
+        assert text_hook['user_message'] == 'Ordinary text request'
+        assert text_hook['request']['body']['messages'][-1]['content'] == 'Ordinary text request'
+        assert len(client.chat.completions.create.call_args_list) == 2
+        other_agent = private_photo_agent(run_agent.AIAgent.__new__(run_agent.AIAgent))
+        assert not getattr(other_agent, '_mobile_photo_turn', False)
+        assert not getattr(other_agent, '_mobile_photo_failed', False)
     ''')
 
 
@@ -492,6 +627,11 @@ def test_native_conversation_loop_rejects_image_4xx_without_text_retry(tmp_path,
                     assert 'vision' in str(error).lower() or 'photo' in str(error).lower()
                 else:
                     assert result.get('failed') is True, result
+                    if SUPPORTS_NATIVE_VISION:
+                        encoded_result = json.dumps(result)
+                        assert marker not in encoded_result
+                        assert 'data:image/' not in encoded_result
+                        assert 'Provider echoed' in encoded_result
                 assert client.chat.completions.create.call_count == int(SUPPORTS_NATIVE_VISION)
                 assert message[1]['type'] == 'image_url'
                 assert marker in json.dumps(message)
@@ -677,3 +817,65 @@ def test_authenticated_runs_reach_native_agent_and_compact_live_photos_without_c
             for path in native_home.rglob('*'):
                 if path.is_file():
                     assert b'data:image/' not in path.read_bytes(), path
+
+
+def test_failed_photo_result_stays_private_in_status_events_sse_and_history(tmp_path):
+    session_id = 'photo-assembled-session'
+    with native_photo_api(tmp_path, provider_failure=True) as (
+            native_home, upstream_url, upstream_key, capture_path):
+        gateway = GatewayClient(
+            upstream_url, upstream_key, execution_ready=True,
+            transport=httpx.AsyncHTTPTransport(retries=0))
+        app = create_app(Settings(
+            state_dir=tmp_path / 'mobile-state', profiles={'default': native_home},
+            bootstrap_secret=BOOTSTRAP, upstream_url=upstream_url,
+            upstream_token=upstream_key, execution_ready=True,
+            attachment_min_free_bytes=0), gateway_client=gateway)
+        with TestClient(app, base_url=ORIGIN) as client:
+            client.headers['Origin'] = ORIGIN
+            enroll(client)
+            image = io.BytesIO()
+            Image.new('RGB', (16, 16), 'red').save(image, format='PNG')
+            upload = client.post(
+                BASE + f'/sessions/{session_id}/attachments', content=image.getvalue(),
+                headers={'Idempotency-Key': 'failed-result-photo'})
+            assert upload.status_code == 201, upload.text
+            attachment_id = upload.json()['id']
+            path = app.state.attachments.objects / (attachment_id + '.png')
+            marker = base64.b64encode(path.read_bytes()).decode()
+
+            submitted = client.post(BASE + '/runs', json={
+                'session_id': session_id,
+                'input': 'Inspect this synthetic failed-result photo.',
+                'idempotency_key': 'failed-result-photo-run',
+                'attachments': [attachment_id],
+            })
+            assert submitted.status_code == 200, submitted.text
+            run_id = submitted.json()['id']
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                status = client.get(BASE + '/runs/' + run_id).json()
+                if status['status'] in {'completed', 'failed', 'cancelled'}:
+                    break
+                time.sleep(.05)
+            assert status['status'] == 'failed', status
+
+            events = client.get(BASE + f'/runs/{run_id}/events?after=0')
+            snapshot = client.get(
+                BASE + f'/sessions/{session_id}/messages?limit=500').json()
+            surfaces = json.dumps([status, events.text, snapshot])
+            assert 'failed' in surfaces
+            assert marker not in surfaces
+            assert 'data:image/' not in surfaces
+            assert events.headers['content-type'].startswith('text/event-stream')
+
+            captured = json.loads(capture_path.read_text())
+            assert captured['compactions'][0]['result_failed'] is True
+            assert marker not in json.dumps(captured['compactions'])
+            assert 'failed' in json.dumps(captured['compactions'])
+            assert marker not in app.state.journal.path.read_bytes().decode(errors='ignore')
+            for path in native_home.rglob('*'):
+                if path.is_file():
+                    data = path.read_bytes()
+                    assert marker.encode() not in data, path
+                    assert b'data:image/' not in data, path

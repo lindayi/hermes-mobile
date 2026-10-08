@@ -28,6 +28,72 @@ def test_four_photos_fit_complete_native_payload_without_expanding_text_limit():
         controls.validate_photo_payload(payload)
 
 
+@pytest.mark.parametrize('with_photos', [False, True])
+def test_actual_native_run_handler_measures_compact_utf8_text_budget(with_photos):
+    text = '汉' * 1_700_000
+    if with_photos:
+        payload = photo_payload()
+        payload['input'][0]['content'][0]['text'] = text
+        wire_size = len(json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode())
+        assert 10_000_000 < wire_size < controls.PHOTO_REQUEST_BYTES
+    else:
+        payload = {'input': [{'role': 'user', 'content': text}]}
+        compact_size = len(json.dumps(
+            payload, ensure_ascii=False, separators=(',', ':')).encode())
+        assert compact_size < controls.TEXT_REQUEST_BYTES
+        assert len(json.dumps(payload).encode()) > controls.TEXT_REQUEST_BYTES
+
+    class Native:
+        admitted = 0
+
+        def _check_auth(self, request):
+            return None
+
+        async def _handle_runs(self, request):
+            self.admitted += 1
+            return web.Response(status=200)
+
+    class Request:
+        headers = {}
+        match_info = {}
+
+        async def json(self):
+            return payload
+
+    handler = controls.run_controls_adapter(Native)()
+    response = __import__('asyncio').run(handler._handle_runs(Request()))
+    assert response.status == 200
+    assert handler.admitted == 1
+
+
+def test_actual_native_run_handler_rejects_compact_utf8_over_text_budget():
+    payload = {'input': [{'role': 'user', 'content': '汉' * 3_333_334}]}
+    assert len(json.dumps(
+        payload, ensure_ascii=False, separators=(',', ':')).encode()) > controls.TEXT_REQUEST_BYTES
+
+    class Native:
+        admitted = 0
+
+        def _check_auth(self, request):
+            return None
+
+        async def _handle_runs(self, request):
+            self.admitted += 1
+            return web.Response(status=200)
+
+    class Request:
+        headers = {}
+        match_info = {}
+
+        async def json(self):
+            return payload
+
+    handler = controls.run_controls_adapter(Native)()
+    response = __import__('asyncio').run(handler._handle_runs(Request()))
+    assert response.status == 413
+    assert handler.admitted == 0
+
+
 @pytest.mark.parametrize('location', ['history', 'body'])
 def test_photo_payload_rejects_image_parts_outside_the_bound_current_turn(location):
     payload = photo_payload()
@@ -182,8 +248,12 @@ def test_native_photo_database_copy_uses_flush_text_and_preserves_message_metada
 def test_photo_agent_refuses_strip_retry_and_analyzer_fallback():
     class Agent:
         _vision_supported = True
+        def _describe_image_for_anthropic_fallback(self, image_url, role):
+            return image_url, role
 
     agent = controls.private_photo_agent(Agent())
+    assert agent._describe_image_for_anthropic_fallback('tool-image', 'tool') == (
+        'tool-image', 'tool')
     agent._mobile_photo_turn = True
     with pytest.raises(RuntimeError, match='vision'):
         agent._vision_supported = False
