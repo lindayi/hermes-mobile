@@ -53,7 +53,7 @@ def test_retained_metadata_admission_is_atomic_and_survives_restart(tmp_path):
             async def chunks():
                 yield png_fixture(index % 8)
             try:
-                row = asyncio.run(store.upload(user, 'wa-1', f'metadata-{index}', chunks()))
+                row = client.portal.call(store.upload, user, 'wa-1', f'metadata-{index}', chunks())
             except attachments_module.AttachmentError as exc:
                 assert exc.status == 413
                 return None

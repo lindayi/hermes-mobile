@@ -157,6 +157,8 @@ test('real file input removal aborts an undispatched photo batch and retries rem
    test(`composer recovers only a proven pre-admission photo attempt: ${scenario}`,async t=>{
     const runs=[],uploads=[],deletes=[];
     let finishUpload,lostResponse=scenario==='legacy lost response';
+    const legacy={input:'Original text',idempotency_key:'legacy-original',selection:{model:'vision',provider:'synthetic'}};
+    const admittedKeys=new Set(scenario.startsWith('legacy')?[legacy.idempotency_key]:[]);
     const route=scenario==='disabled'?await rollbackRoute():null;
     const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAE0lEQVR4nGNQSFgARAwLEhSACAAfjgSBXOAMLAAAAABJRU5ErkJggg==','base64');
     const json=(res,value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};
@@ -190,6 +192,11 @@ test('real file input removal aborts an undispatched photo batch and retries rem
       if(req.method==='DELETE'){deletes.push(path);return json(res,{released:true});}
       if(path==='/runs' && req.method==='POST'){
        let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);runs.push(body);
+       if(body.idempotency_key===legacy.idempotency_key &&
+        (body.input!==legacy.input || body.attachments?.length || JSON.stringify(body.selection)!==JSON.stringify(legacy.selection))){
+        return json(res,{detail:'The original request was already admitted'},409);
+       }
+       admittedKeys.add(body.idempotency_key);
        if(scenario==='disabled' && runs.length===1)return json(res,{detail:'Photos disabled',code:'photos_disabled_before_admission'},503);
        if(lostResponse)return res.destroy();
        return json(res,{id:'repair-run',session_id:'photo-session',status:'completed'});
@@ -206,7 +213,6 @@ test('real file input removal aborts an undispatched photo batch and retries rem
     t.after(async()=>{await browser.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await route?.close();});
     const page=await browser.newPage();page.setDefaultTimeout(5000);
     await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);
-    const legacy={input:'Original text',idempotency_key:'legacy-original',selection:{model:'vision',provider:'synthetic'}};
     if(scenario.startsWith('legacy')){
      await page.evaluate(attempt=>sessionStorage.setItem('hermes:photo-owner:attempt:photo-session',JSON.stringify(attempt)),legacy);
      await page.reload();
@@ -236,6 +242,7 @@ test('real file input removal aborts an undispatched photo batch and retries rem
      await page.waitForFunction(()=>document.querySelector('.photo-status')?.hidden===true);
      assert.notEqual(runs.at(-1).idempotency_key,legacy.idempotency_key);
      assert.deepEqual(runs.at(-1).attachments,['1'.repeat(32)]);
+     assert.equal(admittedKeys.size,2,'retry returns the original admitted run; only the later photo request is new');
     }else{
      if(scenario==='cancel'){
       while(!finishUpload)await new Promise(resolve=>setTimeout(resolve,10));
