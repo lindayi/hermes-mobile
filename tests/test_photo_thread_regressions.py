@@ -123,6 +123,30 @@ def test_background_review_receives_private_copy_not_live_photo_messages():
     assert captured[-1][1:3] == (False, True)
 
 
+def test_successful_photo_result_is_private_without_mutating_live_result(monkeypatch):
+    image = 'data:image/png;base64,c3ludGhldGljLXBob3Rv'
+    raw_result = {'failed': False, 'final_response': 'Useful answer ' + image,
+                  'messages': [{'role': 'assistant', 'content': image}]}
+
+    class Base:
+        def run_conversation(self, user_message, *args, **kwargs):
+            return raw_result
+
+    # Hook installation is exercised in the pinned-native suite; this test
+    # isolates the return-value boundary and requires no native imports.
+    monkeypatch.setattr(controls, '_install_photo_hook_privacy', lambda: None)
+    agent = controls._private_photo_class(Base)()
+    message = [{'type': 'text', 'text': 'Inspect'},
+               {'type': 'image_url', 'image_url': {'url': image}}]
+    result = agent.run_conversation(message)
+    assert image not in json.dumps(result)
+    assert 'c3ludGhldGljLXBob3Rv' not in json.dumps(result)
+    assert 'Useful answer' in result['final_response']
+    assert result['failed'] is False
+    assert raw_result['messages'][0]['content'] == image
+    assert agent.run_conversation('ordinary text') is raw_result
+
+
 def test_failed_capability_probe_returns_concurrently_admitted_same_key(tmp_path):
     entered, release = threading.Event(), threading.Event()
     capability_calls = 0
