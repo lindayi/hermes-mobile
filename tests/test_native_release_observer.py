@@ -40,7 +40,7 @@ def operational_probe(tmp_path,monkeypatch,health_change=None):
 
     root=tmp_path/'release'
     root.mkdir()
-    hashes={name:'0'*64 for name in native.APPROVED_CONTROL_HASHES}
+    hashes=dict(native.APPROVED_CONTROL_HASHES)
     monkeypatch.setattr(native,'approved_controls',lambda stage:hashes)
     monkeypatch.setattr(native,'attested_controls',lambda stage:hashes)
     probe=object.__new__(native.NativeProbe)
@@ -72,7 +72,7 @@ def operational_probe(tmp_path,monkeypatch,health_change=None):
         health['status']='degraded'
     if health_change == 'unpreserved':
         notices.update(durable_retained=77,unpreserved=1)
-    caps={'mobile_run_controls':dict(version=1,steering=True,live_commentary=True),
+    caps={'mobile_run_controls':dict(version=1,steering=True,live_commentary=True,clarifications=True),
           'mobile_native_maintenance':dict(version=1,scope='dedicated-listener',atomic_drain=False),
           'features':{'mobile_session_delete_version':1},
           'mobile_notifications':dict(version=1,delivery='durable-inbox',automatic_model_wake=False)}
@@ -98,6 +98,15 @@ def test_post_release_native_observation_accepts_attested_busy_work(tmp_path,mon
     probe.verify_operational(root)
     with pytest.raises(RuntimeError,match='Native verification failed'):
         probe.verify(root)
+
+
+def test_native_observation_rejects_unknown_source_family(tmp_path,monkeypatch):
+    native,probe,root,_=operational_probe(tmp_path,monkeypatch)
+    hashes=dict(native.APPROVED_CONTROL_HASHES)
+    hashes['backend/native_run_controls.py']='0'*64
+    monkeypatch.setattr(native,'approved_controls',lambda stage:hashes)
+    with pytest.raises(RuntimeError,match='Unknown native control source-version baseline'):
+        probe.verify_operational(root)
 
 
 @pytest.mark.parametrize('change',[

@@ -150,6 +150,7 @@ class AttachmentStore:
             raise ValueError('Photo metadata row limits must be positive integers')
         self._upload_leases = {}
         self._upload_io_slots = asyncio.Semaphore(UPLOAD_IO_WORKERS)
+        self._decode_slots = asyncio.Semaphore(1)
         self._orphan_iterators = [None, None]
         self._orphan_directory = 0
         self._orphan_reconciled = False
@@ -188,11 +189,16 @@ class AttachmentStore:
                 CREATE INDEX IF NOT EXISTS attachments_cleanup_order ON attachments(created_at,id);
                 CREATE TABLE IF NOT EXISTS attachment_cleanup_cursor(
                     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                    created_at REAL NOT NULL, attachment_id TEXT NOT NULL);
-                INSERT OR IGNORE INTO attachment_cleanup_cursor VALUES(1,-1,'');''')
+                    created_at REAL NOT NULL, attachment_id TEXT NOT NULL,
+                    remaining INTEGER NOT NULL DEFAULT 0);
+                INSERT OR IGNORE INTO attachment_cleanup_cursor(singleton,created_at,attachment_id)
+                    VALUES(1,-1,'');''')
             columns = {row[1] for row in db.execute('PRAGMA table_info(attachments)')}
             if 'position' not in columns:
                 db.execute('ALTER TABLE attachments ADD COLUMN position INTEGER')
+            cursor_columns = {row[1] for row in db.execute('PRAGMA table_info(attachment_cleanup_cursor)')}
+            if 'remaining' not in cursor_columns:
+                db.execute('ALTER TABLE attachment_cleanup_cursor ADD COLUMN remaining INTEGER NOT NULL DEFAULT 0')
             db.commit()
 
     def connect(self):
@@ -364,7 +370,8 @@ class AttachmentStore:
 
     async def _upload_io(self, operation, *args, cancel_result=None, on_submit=None,
                          executor=None):
-        async with self._upload_io_slots:
+        slots = self._decode_slots if executor is _IMAGE_DECODE_EXECUTOR else self._upload_io_slots
+        async with slots:
             future = asyncio.get_running_loop().run_in_executor(
                 executor or _UPLOAD_IO_EXECUTOR, operation, *args)
             if on_submit is not None:
@@ -435,8 +442,11 @@ class AttachmentStore:
             result = reservation.get('result')
             if result and result[1]:
                 attachment_id = result[0]['id']
-                await self._upload_io(self.abort, attachment_id)
-                await self._upload_io(self._release_upload_lease, attachment_id)
+                with anyio.CancelScope(shield=True):
+                    try:
+                        await self._upload_io(self.abort, attachment_id)
+                    finally:
+                        await self._upload_io(self._release_upload_lease, attachment_id)
             raise
         attachment_id = row['id']
         digest = hashlib.sha256()
@@ -478,22 +488,25 @@ class AttachmentStore:
                 self._publish_upload, attachment_id, user['id'], stage, digest.hexdigest(),
                 normalized, content_type, width, height, suffix)
         except OSError as exc:
-            if descriptor is not None:
-                await self._upload_io(os.close, descriptor)
-            if fresh:
-                await self._upload_io(self.abort, attachment_id)
+            with anyio.CancelScope(shield=True):
+                if descriptor is not None:
+                    await self._upload_io(os.close, descriptor)
+                if fresh:
+                    await self._upload_io(self.abort, attachment_id)
             if exc.errno in (errno.ENOSPC, errno.EDQUOT):
                 raise AttachmentError(507, 'Photo storage is full; free space or try again later.') from exc
             raise AttachmentError(503, 'Photo storage is unavailable; try again later.') from exc
         except BaseException:
-            if descriptor is not None:
-                await self._upload_io(os.close, descriptor)
-            if fresh:
-                await self._upload_io(self.abort, attachment_id)
+            with anyio.CancelScope(shield=True):
+                if descriptor is not None:
+                    await self._upload_io(os.close, descriptor)
+                if fresh:
+                    await self._upload_io(self.abort, attachment_id)
             raise
         finally:
             if fresh:
-                await self._upload_io(self._release_upload_lease, attachment_id)
+                with anyio.CancelScope(shield=True):
+                    await self._upload_io(self._release_upload_lease, attachment_id)
 
     def abort(self, attachment_id):
         with self.connection() as db:
@@ -703,8 +716,12 @@ class AttachmentStore:
         removed = 0
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            cursor = db.execute('SELECT created_at,attachment_id FROM attachment_cleanup_cursor '
-                               'WHERE singleton=1').fetchone()
+            saved_cursor = db.execute('SELECT created_at,attachment_id,remaining '
+                                     'FROM attachment_cleanup_cursor WHERE singleton=1').fetchone()
+            cursor, remaining = tuple(saved_cursor[:2]), saved_cursor['remaining']
+            if remaining <= 0:
+                cursor = (-1, '')
+                remaining = max(1, db.execute('SELECT COUNT(*) FROM attachments').fetchone()[0])
             query = '''SELECT a.* FROM attachments a LEFT JOIN runs r ON r.id=a.run_id
                 WHERE ((a.state='receiving' AND a.created_at<=?)
                    OR (a.state='pending' AND a.expires_at<=?)
@@ -716,12 +733,14 @@ class AttachmentStore:
                 ORDER BY a.created_at,a.id LIMIT ?'''
             params = (now - ABANDONED_TTL, now, now, now)
             batch_size = max(1, min(int(limit), 256))
-            rows = db.execute(query, (*params, *cursor, batch_size)).fetchall()
+            rows = db.execute(query, (*params, *cursor, min(batch_size, remaining))).fetchall()
             if not rows:
-                rows = db.execute(query, (*params, -1, '', batch_size)).fetchall()
+                remaining = max(1, db.execute('SELECT COUNT(*) FROM attachments').fetchone()[0])
+                rows = db.execute(query, (*params, -1, '', min(batch_size, remaining))).fetchall()
             if rows:
-                db.execute('UPDATE attachment_cleanup_cursor SET created_at=?,attachment_id=? '
-                          'WHERE singleton=1', (rows[-1]['created_at'], rows[-1]['id']))
+                db.execute('UPDATE attachment_cleanup_cursor SET created_at=?,attachment_id=?,remaining=? '
+                          'WHERE singleton=1',
+                          (rows[-1]['created_at'], rows[-1]['id'], remaining - len(rows)))
             for row in rows:
                 if row['state'] == 'receiving' and self._upload_is_live(row['id']):
                     continue

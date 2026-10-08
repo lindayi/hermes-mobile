@@ -215,7 +215,7 @@ _ISSUE85_PHOTO_FIXTURE = {
     'backend/model_controls.py': 'b47c0c10360fd4ba30fa4a16da046ffbcca1ee60e251b82ad872952108e3dace',
     'deploy/native_controls_release.py': '394238547ed61ebd82c592966f8d62400d98fd1f592793f1ddb6b5a6972a634e',
     'backend/app.py': '1243aa117230d3b55e13351b351bf4e7035e7c6fc8d63467f13cb8b5adb53716',
-    'backend/attachments.py': 'f72ea45fd7b668075cff69647c24f72b8d31484cfb8a9179ee741ac3900b852c',
+    'backend/attachments.py': 'f4f93228463fa0cc36e2e92062f45639070dfa3a280b8d4499a911a579f1e559',
     'backend/hermes_client.py': '20e16f9028437d980df83c9ea07083b987501902375f544d6b72a1fcbca28d83',
     'backend/native_catalog.py': 'd6a758a7007dd23f8921bacccdf69adf81ee7b6fa212f9766493eeba43769653',
     'backend/orchestration.py': 'dc1019740112874ef5acbfe9cae0b2d92231a0a99d44752f734f26a0c043fc14',

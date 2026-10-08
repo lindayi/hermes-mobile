@@ -14,6 +14,7 @@ import threading
 import time
 import zlib
 
+import anyio
 import httpx
 import pytest
 from PIL import Image
@@ -236,6 +237,116 @@ def test_cancelled_decoder_keeps_staging_reservation_and_lease_until_exit(
             assert store._usage(db) == 0
         monkeypatch.setattr(attachments_module, '_normalize_image', normalize)
         assert asyncio.run(store.upload(user, 'wa-1', 'decoder-cancel', chunks()))['size'] > 0
+
+
+def test_decoder_does_not_consume_photo_read_worker_slots(tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        started, finish = threading.Event(), threading.Event()
+        normalize = attachments_module._normalize_image
+        def blocked_decode(path):
+            started.set()
+            assert finish.wait(5)
+            return normalize(path)
+        monkeypatch.setattr(attachments_module, '_normalize_image', blocked_decode)
+        async def chunks():
+            yield png_fixture()
+        async def exercise():
+            task = asyncio.create_task(store.upload(user, 'wa-1', 'isolated-decoder', chunks()))
+            assert await asyncio.to_thread(started.wait, 2)
+            try:
+                assert store._upload_io_slots._value == attachments_module.UPLOAD_IO_WORKERS
+            finally:
+                finish.set()
+                await task
+        asyncio.run(exercise())
+
+
+def test_anyio_cancelled_decoder_shields_followup_cleanup_under_io_contention(tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        started, finish = threading.Event(), threading.Event()
+        normalize = attachments_module._normalize_image
+        def blocked_decode(path):
+            started.set()
+            assert finish.wait(5)
+            return normalize(path)
+        monkeypatch.setattr(attachments_module, '_normalize_image', blocked_decode)
+        async def chunks():
+            yield png_fixture()
+        async def exercise():
+            scopes = []
+            async def upload():
+                with anyio.CancelScope() as scope:
+                    scopes.append(scope)
+                    await store.upload(user, 'wa-1', 'anyio-decoder', chunks())
+            task = asyncio.create_task(upload())
+            assert await asyncio.to_thread(started.wait, 2)
+            held = 0
+            while not store._upload_io_slots.locked():
+                await store._upload_io_slots.acquire()
+                held += 1
+            release = asyncio.Event()
+            async def occupy():
+                async with store._upload_io_slots:
+                    await release.wait()
+            occupier = asyncio.create_task(occupy())
+            await asyncio.sleep(0)
+            scopes[0].cancel()
+            await asyncio.sleep(.02)
+            finish.set()
+            await asyncio.sleep(.05)
+            try:
+                assert not task.done()
+            finally:
+                release.set()
+                for _ in range(held):
+                    store._upload_io_slots.release()
+                await occupier
+                await task
+            assert not store._upload_leases
+            with store.connection() as db:
+                assert db.execute('SELECT COUNT(*) FROM attachments').fetchone()[0] == 0
+            assert not list(store.staging.iterdir())
+            assert (await store.upload(user, 'wa-1', 'anyio-decoder', chunks()))['size'] > 0
+        asyncio.run(exercise())
+
+
+def test_cleanup_wraps_with_new_eligible_rows_ahead_of_late_expiry(tmp_path):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        now = time.time()
+        with store.connection() as db:
+            for index in range(3):
+                db.execute('''INSERT INTO attachments(id,user_id,profile,session_id,upload_key,
+                    state,created_at,expires_at,metadata_expires_at)
+                    VALUES(?,?,?,?,?,'pending',?,?,?)''',
+                    (f'{index + 1:032x}', user['id'], user['profile'], 'wa-1', f'cycle-{index}',
+                     now - 100 + index, now + 100 if index == 0 else now - 1, now + 86400))
+            db.commit()
+        store.cleanup(limit=1)
+        with store.connection() as db:
+            db.execute('UPDATE attachments SET expires_at=0 WHERE id=?', (f'{1:032x}',))
+            db.commit()
+        for index in range(10):
+            with store.connection() as db:
+                db.execute('''INSERT INTO attachments(id,user_id,profile,session_id,upload_key,
+                    state,created_at,expires_at,metadata_expires_at)
+                    VALUES(?,?,?,?,?,'pending',?,?,?)''',
+                    (f'{index + 10:032x}', user['id'], user['profile'], 'wa-1', f'new-{index}',
+                     now + index, now - 1, now + 86400))
+                db.commit()
+            restarted = attachments_module.AttachmentStore(store.database, store.root)
+            restarted.cleanup(limit=1)
+            with store.connection() as db:
+                if db.execute('SELECT state FROM attachments WHERE id=?',
+                              (f'{1:032x}',)).fetchone()[0] == 'expired':
+                    break
+        else:
+            pytest.fail('Newer eligible rows starved a late-expiring row across restart')
 
 
 def _photo_scope(client, attachment_id):

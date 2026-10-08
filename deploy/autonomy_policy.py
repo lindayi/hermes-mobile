@@ -214,7 +214,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/hermes-mobile-issue-starter.service': '1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69',
     'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
-    'backend/attachments.py': 'f72ea45fd7b668075cff69647c24f72b8d31484cfb8a9179ee741ac3900b852c',
+    'backend/attachments.py': 'f4f93228463fa0cc36e2e92062f45639070dfa3a280b8d4499a911a579f1e559',
     'backend/clarifications.py': '6a6f042beb98881a482efdd85c20555d88a375156a024481ab18a0d5c80e94fd',
     'backend/model_controls.py': 'b47c0c10360fd4ba30fa4a16da046ffbcca1ee60e251b82ad872952108e3dace',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',  # gitleaks:allow

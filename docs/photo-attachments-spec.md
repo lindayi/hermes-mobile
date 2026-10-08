@@ -81,7 +81,10 @@ closes it exactly once, including failure or cancellation while sending response
 headers before body iteration, body failure, client disconnect, and completion.
 Decoder cancellation likewise drains the actual decoder before removing staging,
 releasing its reservation or lease, or returning its worker slot. The event loop
-remains responsive while worker ownership is retained.
+remains responsive while worker ownership is retained. The single decoder permit
+is separate from the four storage/read permits, so decoding cannot exhaust read
+workers. Follow-up abort and lease cleanup are shielded from persistent ASGI
+cancellation while waiting for a storage permit.
 
 Unlinked uploads expire after 24 hours. Linked photos expire 30 days after
 upload, independently of the abandoned-upload TTL. Runs in queued, active, or
@@ -100,6 +103,10 @@ the cursor survives restart and wraps after reaching the end. Skipped files and
 reservations remain intact and charged. A full blocked batch therefore cannot
 starve later eligible rows. Run pins, reader locks, and retention authorization
 remain required on every visit.
+Each traversal also freezes a visit budget equal to the current metadata row
+count. It wraps when that budget is consumed even if newer eligible rows keep
+arriving. Thus older rows that become eligible after the cursor passed them
+cannot be starved by continuous admission; the remaining visit budget is durable.
 
 ## Run, history, and recovery
 
