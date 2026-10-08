@@ -10,10 +10,15 @@ from contextlib import closing
 from .runs import NATIVE_RUN_LOST_ERROR, RunConflict
 
 from .hermes_client import IntegrationUnavailable, NativeRunNotFound, NativeClarificationRejected
+from .attachments import AttachmentError
 
 
 class ClarificationNotSent(IntegrationUnavailable):
     """Clarification capability was unavailable before claiming or sending an answer."""
+
+
+class PhotosDisabledBeforeAdmission(IntegrationUnavailable):
+    """New photo submission was rejected without admitting a run."""
 
 
 class Orchestrator:
@@ -55,6 +60,9 @@ class Orchestrator:
             # BEGIN IMMEDIATE admission now enforces capacity/canonical identity.
             c.execute('BEGIN IMMEDIATE')
             c.execute('DROP INDEX IF EXISTS orchestration_one_active')
+            c.execute('CREATE INDEX IF NOT EXISTS runs_session_identity ON runs(profile,session_id,user_id)')
+            c.execute('CREATE INDEX IF NOT EXISTS anchors_requested_identity ON run_history_anchors(session_id,run_id)')
+            c.execute('CREATE INDEX IF NOT EXISTS anchors_canonical_identity ON run_history_anchors(canonical_session_id,run_id)')
 
     def claim_deletion(self, user, session_id):
         # No await between inspecting local workers and the durable writer claim.
@@ -89,19 +97,11 @@ class Orchestrator:
             raise IntegrationUnavailable('No gateway is bound to this profile')
         self.journal.require_session(user['id'], user['profile'], body['session_id'])
         self.gateway.require_execution()
-        with closing(self.journal.connect()) as c:
-            existing = c.execute('SELECT * FROM runs WHERE user_id=? AND idempotency_key=?', (user['id'], body['idempotency_key'])).fetchone()
+        existing = self._existing_submission(user, body, selection, attachment_ids)
         if existing:
-            if (existing['profile'], existing['session_id'], existing['input']) != (user['profile'], body['session_id'], body['input']):
-                raise RunConflict('Idempotency key already used for another request')
-            stored=self.journal.get(user['id'],existing['id'])
-            if stored.get('selection')!=selection:
-                raise RunConflict('Idempotency key already used for another selection')
-            if stored.get('attachment_ids', []) != attachment_ids:
-                raise RunConflict('Idempotency key already used for other photo attachments')
-            return stored
+            return existing
         if attachment_ids and not self.photos_enabled:
-            raise IntegrationUnavailable('New photo-bearing runs are disabled; retry existing runs or send text only.')
+            raise PhotosDisabledBeforeAdmission('New photo-bearing runs are disabled; retry existing runs or send text only.')
         if selection is not None:
             if not hasattr(self,'model_options'):
                 raise IntegrationUnavailable('Model controls are unavailable')
@@ -131,12 +131,23 @@ class Orchestrator:
         if attachment_ids:
             if self.attachments is None or not hasattr(self.gateway, 'validate_run_size'):
                 raise IntegrationUnavailable('Native photo request budgeting is unavailable.')
-            image_sizes = await asyncio.to_thread(
-                self.attachments.run_image_sizes, user['id'], user['profile'],
-                body['session_id'], attachment_ids)
+            try:
+                image_sizes = await asyncio.to_thread(
+                    self.attachments.run_image_sizes, user['id'], user['profile'],
+                    body['session_id'], attachment_ids)
+            except AttachmentError:
+                existing = self._existing_submission(user, body, selection, attachment_ids)
+                if existing:
+                    return existing
+                raise
             self.gateway.validate_run_size(
                 body['session_id'], body['input'], context['history'], attachment_ids,
                 image_sizes, **(selection or {}))
+        existing = self._existing_submission(user, body, selection, attachment_ids)
+        if existing:
+            return existing
+        if attachment_ids and not self.photos_enabled:
+            raise PhotosDisabledBeforeAdmission('New photo-bearing runs are disabled; retry existing runs or send text only.')
         try:
             run, created = self.journal.submit(user['id'], user['profile'], body['session_id'], body['input'], body['idempotency_key'],
                 history_anchor=lambda: self.catalog.history_anchor(user['profile'], body['session_id'], canonical_id), selection=selection,
@@ -152,6 +163,22 @@ class Orchestrator:
             self._tasks[task] = (dict(user), run)
             task.add_done_callback(lambda done: self._tasks.pop(done, None))
         return run
+
+    def _existing_submission(self, user, body, selection, attachment_ids):
+        with closing(self.journal.connect()) as c:
+            existing = c.execute('SELECT id FROM runs WHERE user_id=? AND idempotency_key=?',
+                                 (user['id'], body['idempotency_key'])).fetchone()
+        if existing is None:
+            return None
+        stored = self.journal.get(user['id'], existing['id'])
+        if (stored['profile'], stored['session_id'], stored['input']) != (
+                user['profile'], body['session_id'], body['input']):
+            raise RunConflict('Idempotency key already used for another request')
+        if stored.get('selection') != selection:
+            raise RunConflict('Idempotency key already used for another selection')
+        if stored.get('attachment_ids', []) != attachment_ids:
+            raise RunConflict('Idempotency key already used for other photo attachments')
+        return stored
 
     def get(self, user, rid):
         run = self.journal.get(user['id'], rid)

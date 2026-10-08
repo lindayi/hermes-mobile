@@ -473,9 +473,10 @@ class NativeCatalog:
         """Capture an ID boundary, including hidden rows; never a text heuristic."""
         from contextlib import closing
         with closing(self._connect(profile)) as c:
+            canonical_session_id = canonical_session_id or session_id
             if not c.execute('SELECT 1 FROM sessions WHERE id=?', (session_id,)).fetchone():
                 raise KeyError(session_id)
-            message_id = c.execute('SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?', (session_id,)).fetchone()[0]
+            message_id = c.execute('SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?', (canonical_session_id,)).fetchone()[0]
         return {'session_id': session_id, 'canonical_session_id': canonical_session_id or session_id,
                 'message_id': message_id}
 
@@ -525,7 +526,7 @@ class NativeCatalog:
                 boundary = start['message_id'] if start else 0
                 matched = complete = False
                 if (start and end and start['canonical_session_id'] == session_id
-                        and start['session_id'] == session_id and end['session_id'] == session_id):
+                        and end['canonical_session_id'] == session_id):
                     query = ('SELECT id,role,content,tool_calls FROM messages WHERE session_id=? AND id>? AND id<=?'
                              + visibility + ' ORDER BY id')
                     args = (session_id, boundary, end['message_id'])

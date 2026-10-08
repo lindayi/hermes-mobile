@@ -988,6 +988,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     void reconcileApprovals();
     let pending=attempts.get(session.id);
     try {pending ||= JSON.parse(storage.get(key(`attempt:${session.id}`)));}catch{}
+    if(pending && !Array.isArray(pending.attachment_ids) && pending.upload_pending!==true){
+      pending={...pending,attachment_ids:[],legacy_text:true};
+      attempts.set(session.id,pending);storage.set(key(`attempt:${session.id}`),JSON.stringify(pending));
+    }
     if(accepted?.idempotency_key && accepted.idempotency_key===pending?.idempotency_key){
       attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);
       if(textarea.value.trim()===pending.input){textarea.value='';drafts.delete(session.id);storage.set(draftKey,null);}
@@ -1094,7 +1098,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         const submittedPhotos=selectedPhotos.filter(photo=>previous.attachment_ids.includes(photo.metadata?.id));
         const changedPhotoSelection=submittedPhotos.length!==selectedPhotos.length
           || submittedPhotos.length!==previous.attachment_ids.length;
-        if(changedPhotoSelection || (previous.attachment_ids.length && previous.input!==input)){
+        if(changedPhotoSelection || ((previous.attachment_ids.length || previous.legacy_text) && previous.input!==input)){
           photoStatus.hidden=false;
           photoStatus.textContent='This send has an uncertain outcome. Retry the original text and photo selection unchanged; remove any newly selected photos before retrying.';
           throw new Error('The original text and photo selection must be retried unchanged while the send outcome is uncertain.');
@@ -1102,7 +1106,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }
       if(previous?.input!==input && !modelControls.canSubmit())throw new Error('Saved model choice could not be checked. Reload before sending.');
       const selection=modelControls.selection();
-      const attempt=previous?.input===input ? previous : {input,idempotency_key:win.crypto.randomUUID(),...(selection?{selection}:{} )};
+      const attempt=previous?.input===input ? previous : {input,idempotency_key:win.crypto.randomUUID(),upload_pending:true,...(selection?{selection}:{} )};
       const submittedPhotos=Array.isArray(attempt.attachment_ids)
         ? selectedPhotos.filter(photo=>attempt.attachment_ids.includes(photo.metadata?.id))
         : [...selectedPhotos];
@@ -1118,11 +1122,18 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             method:'POST',rawBody:photo.file,headers:{'Idempotency-Key':photo.uploadKey}});
           if(!/^[a-f0-9]{32}$/.test(metadata?.id || '') || metadata.status!=='pending')throw new Error('Photo upload response was invalid.');
           photo.metadata=metadata;
-          if(!current() || !selectedPhotos.includes(photo) || photo.removing){void releasePhoto(photo);if(current()){connection.failure(token);composerAction.set('idle');syncModelLock();}return;}
+          if(!current() || !selectedPhotos.includes(photo) || photo.removing){
+            void releasePhoto(photo);
+            if(!Array.isArray(attempt.attachment_ids) && owner===state.user?.id && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){
+              attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);currentModelSync?.(owner,session.id);
+            }
+            if(current()){connection.failure(token);composerAction.set('idle');syncModelLock();}
+            return;
+          }
         }
         if(submittedPhotos.some(photo=>!selectedPhotos.includes(photo) || photo.removing)){
           pendingPhotoSubmission=null;
-          if(owner===state.user?.id && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){
+          if(!Array.isArray(attempt.attachment_ids) && owner===state.user?.id && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){
             attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);currentModelSync?.(owner,session.id);
           }
           connection.failure(token);composerAction.set('idle');syncModelLock();
@@ -1136,15 +1147,17 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         const attachments=Array.isArray(attempt.attachment_ids)
           ? attempt.attachment_ids : submittedPhotos.map(photo=>photo.metadata.id);
         attempt.attachment_ids=attachments;
+        delete attempt.upload_pending;
         attempts.set(session.id,attempt);storage.set(key(`attempt:${session.id}`),JSON.stringify(attempt));
         pendingPhotoSubmission={attachmentIds:attachments,photos:submittedPhotos};
         renderPhotoSelection();
-        const {attachment_ids: savedAttachmentIds,...requestAttempt}=attempt;
+        const {attachment_ids: savedAttachmentIds,legacy_text: savedLegacyText,...requestAttempt}=attempt;
         run=await api.request('/runs',{method:'POST',body:{session_id:session.id,...requestAttempt,...(attachments.length?{attachments}:{})}});
         connection.success(token);
       }catch(error){
         connection.failure(token);
         const rejectedBeforeAdmission=[400,413,422,507].includes(error.status)
+          || error.status===503 && error.code==='photos_disabled_before_admission'
           || error.status===409 && error.code==='attachment_error';
         if(rejectedBeforeAdmission){
           pendingPhotoSubmission=null;

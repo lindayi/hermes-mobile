@@ -122,6 +122,13 @@ and unresolved submitted IDs remain locked against removal until a definite
 pre-admission rejection. Cancelled file selection does not alter the draft. A
 retry reuses upload and run idempotency keys.
 
+Disabling photos after upload rejects a new photo run with HTTP 503 and code
+`photos_disabled_before_admission`. Only this typed 503 proves no admission;
+ordinary 503, network errors, and run conflicts keep the attempt frozen.
+A proven cancellation before dispatch clears only the captured current attempt.
+Legacy unresolved text attempts are frozen with explicit empty attachment IDs;
+finish or reconcile that original input, model, and key before sending new photos.
+
 The Photos control shares the existing composer control row so text-only chats
 retain their short-viewport geometry. Navigation and teardown make best-effort
 authenticated DELETE requests for unbound uploads, including uploads that finish
@@ -137,8 +144,11 @@ error if the configured native vision capability is unavailable, rather than
 pretending an image was analyzed.
 
 Image database/file reads and base64 encoding run off the orchestration event
-loop. Snapshot attachment IDs are fetched in one owned-session query, retaining
+loop. Snapshot aliases use indexed connected-identity queries scoped to the
+authenticated owner/profile, not account-wide history scans. Attachment IDs retain
 their per-run position order and the snapshot's existing read transaction.
+Admission anchors capture the positively verified canonical Session boundary;
+prior turns match that same canonical identity after alias sends and compaction.
 
 Reopened history uses native message metadata to bind opaque attachment IDs to
 the exact user turn. Authenticated thumbnail/full-image reads are subject to
@@ -229,14 +239,14 @@ activation success.
 | --- | --- |
 | `backend/native_run_controls.py` | `6b683c8347df371068bd1f4f8e709738bdef04a370ddb03fc5deb6b777b12e58` |
 | `backend/model_controls.py` | `b47c0c10360fd4ba30fa4a16da046ffbcca1ee60e251b82ad872952108e3dace` |
-| `deploy/native_controls_release.py` | `efc5a9b6573a9f739324f663f2dadbeb7ce7964d441db9be4b94d1da0d1b2786` |
-| `backend/app.py` | `693b0cc5f4dfe96441b98a74fa97d457b9d794028c0ccd2d8836d8f117aa7939` |
-| `backend/attachments.py` | `1573d0b81a02744c326f0c8a5bcfb3cf97cba88f0058ef01966f595f13a1a292` |
+| `deploy/native_controls_release.py` | `394238547ed61ebd82c592966f8d62400d98fd1f592793f1ddb6b5a6972a634e` |
+| `backend/app.py` | `8747492a8561e9f11edffd022348ccc45950c06be39aad49964993d0096036f2` |
+| `backend/attachments.py` | `f4f93228463fa0cc36e2e92062f45639070dfa3a280b8d4499a911a579f1e559` |
 | `backend/hermes_client.py` | `20e16f9028437d980df83c9ea07083b987501902375f544d6b72a1fcbca28d83` |
 | `backend/task_reminder_presentation.py` | `fa68480f43a29d1543e55b1e514263d8fdc7f25593264ca5a61ac021b021e1c6` |
-| `backend/native_catalog.py` | `d6a758a7007dd23f8921bacccdf69adf81ee7b6fa212f9766493eeba43769653` |
-| `backend/orchestration.py` | `dc1019740112874ef5acbfe9cae0b2d92231a0a99d44752f734f26a0c043fc14` |
-| `backend/runs.py` | `a3392c2205369c2cad9b477913f9b4d0b0276b41825e225a77c79d7d99e2b0a3` |
+| `backend/native_catalog.py` | `986c43c3b13885605053330adc52a7f7b25ac9608e81bd1e67839fd3f3cb9e49` |
+| `backend/orchestration.py` | `37dec53d8ccb3cdbda61b9458395e775f3fa6c4f439303b95d4527abc0848eb5` |
+| `backend/runs.py` | `3f4ae4fa3ec533f358b8c0c9de012dbf369c1899f69cee9a28045fe1eadb7113` |
 | `requirements.lock` | `ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04` |
 
 Focused regressions must demonstrate RED before implementation and GREEN after

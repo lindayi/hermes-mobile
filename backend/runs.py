@@ -133,20 +133,27 @@ class RunJournal:
             self._require_session(c, user_id, profile, session_id)
 
     @staticmethod
-    def _related_runs(c, profile, session_id):
-        rows = c.execute('''SELECT r.*, a.session_id AS anchor_session_id,
-            a.canonical_session_id FROM runs r LEFT JOIN run_history_anchors a ON a.run_id=r.id
-            WHERE r.profile=?''', (profile,)).fetchall()
+    def _related_runs(c, profile, session_id, user_id=None):
         aliases, related = {session_id}, {}
-        while True:
-            before = len(aliases)
+        frontier = [session_id]
+        while frontier:
+            sid = frontier.pop()
+            rows = c.execute('''SELECT r.*, r.rowid AS admission_order,
+                a.message_id AS anchor_message_id, a.session_id AS anchor_session_id,
+                a.canonical_session_id FROM (
+                    SELECT id AS run_id FROM runs WHERE profile=? AND session_id=?
+                    UNION SELECT run_id FROM run_history_anchors WHERE session_id=?
+                    UNION SELECT run_id FROM run_history_anchors WHERE canonical_session_id=?
+                ) identities CROSS JOIN runs r ON r.id=identities.run_id
+                LEFT JOIN run_history_anchors a ON a.run_id=r.id
+                WHERE r.profile=? AND (? IS NULL OR r.user_id=?)''',
+                (profile, sid, sid, sid, profile, user_id, user_id)).fetchall()
             for row in rows:
                 ids = {row['session_id'], row['anchor_session_id'], row['canonical_session_id']} - {None}
-                if aliases & ids:
-                    aliases.update(ids)
-                    related[row['id']] = row
-            if len(aliases) == before:
-                return aliases, list(related.values())
+                frontier.extend(ids - aliases)
+                aliases.update(ids)
+                related[row['id']] = row
+        return aliases, sorted(related.values(), key=lambda row: row['admission_order'])
 
     @staticmethod
     def _expire_pending_approvals(c, user_id, profile, *, run_id=None, approval_id=None, request_id=None):
@@ -399,23 +406,7 @@ class RunJournal:
         with closing(self.connect()) as c:
             c.execute('BEGIN')
             self._require_session(c, user_id, profile, session_id)
-            candidates = c.execute('''SELECT r.*, a.message_id AS anchor_message_id,
-                a.session_id AS anchor_session_id, a.canonical_session_id AS anchor_canonical_session_id
-                FROM runs r LEFT JOIN run_history_anchors a ON a.run_id=r.id
-                WHERE r.user_id=? AND r.profile=? ORDER BY r.rowid''',
-                (user_id, profile)).fetchall()
-            aliases, selected = {session_id}, {}
-            while True:
-                before = len(aliases)
-                for row in candidates:
-                    identities = {row['session_id'], row['anchor_session_id'],
-                                  row['anchor_canonical_session_id']} - {None}
-                    if aliases & identities:
-                        aliases.update(identities)
-                        selected[row['id']] = row
-                if before == len(aliases):
-                    break
-            rows = [row for row in candidates if row['id'] in selected]
+            _, rows = self._related_runs(c, profile, session_id, user_id)
             replay_events, event_cursor = [], 0
             if rows:
                 event_cursor = c.execute('SELECT COALESCE(MAX(id),0) FROM events WHERE run_id=?',
@@ -442,6 +433,8 @@ class RunJournal:
         entries = []
         for row in rows:
             run = dict(row)
+            run.pop('admission_order')
+            run['anchor_canonical_session_id'] = run.pop('canonical_session_id')
             attachments = attachments_by_run.get(run['id'], [])
             if attachments:
                 run['attachment_ids'] = attachments

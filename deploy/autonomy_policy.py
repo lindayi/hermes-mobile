@@ -219,9 +219,9 @@ SOURCE_FINGERPRINTS = {
     'backend/model_controls.py': 'b47c0c10360fd4ba30fa4a16da046ffbcca1ee60e251b82ad872952108e3dace',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',  # gitleaks:allow
     'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
-    'backend/runs.py': 'a3392c2205369c2cad9b477913f9b4d0b0276b41825e225a77c79d7d99e2b0a3',
+    'backend/runs.py': '3f4ae4fa3ec533f358b8c0c9de012dbf369c1899f69cee9a28045fe1eadb7113',
     # Accepted PR45 naming bytes in this assembly; no naming-source rewrite.
-    'backend/app.py': '1243aa117230d3b55e13351b351bf4e7035e7c6fc8d63467f13cb8b5adb53716',
+    'backend/app.py': '8747492a8561e9f11edffd022348ccc45950c06be39aad49964993d0096036f2',
     'backend/auth.py': '411529a1d53bdcd01eae4bf5e35c44d3d5099e4dc9e77eb9dbbe67df6433f335',  # gitleaks:allow
     'backend/auth_store.py': '8827856de744de03648924b0ff83011bdb70417781620724acd84078181c193e',  # gitleaks:allow
     'backend/background_delivery.py': '2da2bdd89d27f18beee0e0099d1bb39b325a9f70dcba099d55ceb3dea2e88629',
@@ -231,10 +231,10 @@ SOURCE_FINGERPRINTS = {
     'backend/delivery.py': 'c241a5bf745011a7a7820313da6db688a5446703ae42c8a97c77f96ce05ff18f',
     'backend/hermes_client.py': '20e16f9028437d980df83c9ea07083b987501902375f544d6b72a1fcbca28d83',
     'backend/jobs.py': 'fd9c4a2ac2c2f292c4616fd7dd04281b4c6a5753e9c432756345d85d175eee5e',
-    'backend/native_catalog.py': 'd6a758a7007dd23f8921bacccdf69adf81ee7b6fa212f9766493eeba43769653',
+    'backend/native_catalog.py': '986c43c3b13885605053330adc52a7f7b25ac9608e81bd1e67839fd3f3cb9e49',
     'backend/notification_policy.py': '69c7c6807210dbf9300cd25c5ba14604be75730d06f41879074208d62655684d',
     'backend/operational_notifications.py': '9edbc496bb931a02096bf820d984a4032107e003924492e1120684a0f5cdad31',
-    'backend/orchestration.py': 'dc1019740112874ef5acbfe9cae0b2d92231a0a99d44752f734f26a0c043fc14',
+    'backend/orchestration.py': '37dec53d8ccb3cdbda61b9458395e775f3fa6c4f439303b95d4527abc0848eb5',
     'backend/profiles.py': '8bf7681b69f6273d6a6f86a9835cc7e2fc0bd6f31fdb59e7934bd8dbb7515f40',
     'backend/public_commentary.py': 'a52a81b0852fdcff13057bcd25ee39836abdc2d8ab658b90a9db7197ca0cf57a',
     'backend/request_notifications.py': '1136806183f7b3cbb51b65691fc5c26b41f22c2d06098d1440bb3c42a869ede8',

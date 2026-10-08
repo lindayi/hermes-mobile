@@ -48,7 +48,7 @@ def run_native_probe(tmp_path, code):
 
 
 @contextmanager
-def native_photo_api(tmp_path, *, provider_failure=False):
+def native_photo_api(tmp_path, *, provider_failure=False, aliases=False):
     home = tmp_path / 'native-api-home'
     home.mkdir()
     ready = tmp_path / 'native-api-ready.json'
@@ -77,7 +77,14 @@ def native_photo_api(tmp_path, *, provider_failure=False):
             Path(os.environ['NATIVE_CAPTURE']), os.environ['NATIVE_API_KEY'],
             int(os.environ['NATIVE_API_PORT']))
         db = SessionDB(db_path=home / 'state.db')
-        db.create_session('photo-assembled-session', 'api_server')
+        if os.environ.get('NATIVE_ALIASES') == '1':
+            db.create_session('photo-alias-one', 'api_server')
+            db.end_session('photo-alias-one', 'compression')
+            db.create_session('photo-alias-two', 'api_server', parent_session_id='photo-alias-one')
+            db.end_session('photo-alias-two', 'compression')
+            db.create_session('photo-assembled-session', 'api_server', parent_session_id='photo-alias-two')
+        else:
+            db.create_session('photo-assembled-session', 'api_server')
         captures, compactions = [], []
 
         class ProviderHandler(BaseHTTPRequestHandler):
@@ -191,6 +198,7 @@ def native_photo_api(tmp_path, *, provider_failure=False):
         'NATIVE_API_KEY': key,
         'NATIVE_API_PORT': str(port),
         'NATIVE_PROVIDER_FAILURE': '1' if provider_failure else '0',
+        'NATIVE_ALIASES': '1' if aliases else '0',
     }
     process = subprocess.Popen(
         [NATIVE_PYTHON, '-c', textwrap.dedent(code)],
@@ -720,9 +728,10 @@ def test_native_model_boundary_receives_four_distinct_near_limit_photos_in_order
     ''')
 
 
-def test_authenticated_runs_reach_native_agent_and_compact_live_photos_without_copies(tmp_path):
+@pytest.mark.parametrize('aliases', [False, True])
+def test_authenticated_runs_reach_native_agent_and_compact_live_photos_without_copies(tmp_path, aliases):
     session_id = 'photo-assembled-session'
-    with native_photo_api(tmp_path) as (native_home, upstream_url, upstream_key, capture_path):
+    with native_photo_api(tmp_path, aliases=aliases) as (native_home, upstream_url, upstream_key, capture_path):
         gateway = GatewayClient(
             upstream_url, upstream_key, execution_ready=True,
             transport=httpx.AsyncHTTPTransport(retries=0))
@@ -737,7 +746,7 @@ def test_authenticated_runs_reach_native_agent_and_compact_live_photos_without_c
             originals = [near_limit_png(index) for index in range(4)]
             uploads = [
                 client.post(
-                    BASE + f'/sessions/{session_id}/attachments', content=png,
+                    BASE + f'/sessions/{("photo-alias-one" if index < 2 else "photo-alias-two") if aliases else session_id}/attachments', content=png,
                     headers={'Idempotency-Key': f'assembled-photo-{index}'})
                 for index, png in enumerate(originals)
             ]
@@ -747,11 +756,11 @@ def test_authenticated_runs_reach_native_agent_and_compact_live_photos_without_c
                        for response in uploads)
 
             requests = [
-                {'session_id': session_id,
+                {'session_id': 'photo-alias-one' if aliases else session_id,
                  'input': 'Please describe the attached image(s), including any visible text.',
                  'idempotency_key': 'assembled-image-only',
                  'attachments': attachment_ids[:2]},
-                {'session_id': session_id, 'input': 'Compare these two synthetic images.',
+                {'session_id': 'photo-alias-two' if aliases else session_id, 'input': 'Compare these two synthetic images.',
                  'idempotency_key': 'assembled-text-and-photos',
                  'attachments': attachment_ids[2:]},
             ]
@@ -781,14 +790,10 @@ def test_authenticated_runs_reach_native_agent_and_compact_live_photos_without_c
                        for item in capture['compactions'])
             assert not any(item['result_failed'] for item in capture['compactions']), capture
 
-            latest = client.get(
-                BASE + f'/sessions/{session_id}/messages?limit=2&latest=true')
-            assert latest.status_code == 200, latest.text
-            assert any(item.get('attachment_ids') == attachment_ids[2:]
-                       for item in latest.json()['items']), json.dumps(latest.json())
             full = client.get(BASE + f'/sessions/{session_id}/messages?limit=500')
             assert full.status_code == 200, full.text
             all_users = [item for item in full.json()['items'] if item['role'] == 'user']
+            assert len(all_users) == 2, full.text
             normalized_inputs = [
                 request['input'] + '\n[screenshot]\n[screenshot]' for request in requests]
             assert sum(item['content'] == normalized_inputs[0] for item in all_users) == 1
@@ -796,6 +801,26 @@ def test_authenticated_runs_reach_native_agent_and_compact_live_photos_without_c
             bound = {item['content']: item for item in all_users}
             assert bound[normalized_inputs[0]]['attachment_ids'] == attachment_ids[:2]
             assert bound[normalized_inputs[1]]['attachment_ids'] == attachment_ids[2:]
+            latest = client.get(
+                BASE + f'/sessions/{session_id}/messages?limit=2&latest=true')
+            assert latest.status_code == 200, latest.text
+            assert any(item.get('attachment_ids') == attachment_ids[2:]
+                       for item in latest.json()['items']), json.dumps(latest.json())
+            for request in requests:
+                reopened = client.get(BASE + f"/sessions/{request['session_id']}/messages?limit=500")
+                assert reopened.status_code == 200, reopened.text
+                page = reopened.json()
+                visible_ids = [item['attachment_ids'] for item in page['items']
+                               if item['role'] == 'user' and item.get('attachment_ids')]
+                if page.get('run') and page['run'].get('attachment_ids') not in visible_ids:
+                    visible_ids.append(page['run']['attachment_ids'])
+                assert visible_ids == [attachment_ids[:2], attachment_ids[2:]]
+                assert client.get(BASE + f'/sessions/{session_id}/messages?limit=500').json() == full.json()
+            for request, ids in zip(requests, (attachment_ids[:2], attachment_ids[2:])):
+                for attachment_id in ids:
+                    for identity in (request['session_id'], session_id):
+                        assert client.get(BASE + f'/sessions/{identity}/attachments/{attachment_id}').status_code == 200
+                    assert client.get(BASE + f'/sessions/unproven-alias/attachments/{attachment_id}').status_code == 404
             for request, expected_ids in zip(requests, (attachment_ids[:2], attachment_ids[2:])):
                 metadata = bound[request['input'] + '\n[screenshot]\n[screenshot]']['attachments']
                 assert [item['id'] for item in metadata] == expected_ids

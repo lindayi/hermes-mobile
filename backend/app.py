@@ -20,7 +20,7 @@ from .hermes_client import GatewayClient, IntegrationUnavailable
 from .native_catalog import NativeCatalog
 from .runs import RunJournal, RunConflict
 from .notifications import NotificationService, build_notifications_router
-from .orchestration import ClarificationNotSent, Orchestrator
+from .orchestration import ClarificationNotSent, Orchestrator, PhotosDisabledBeforeAdmission
 from .jobs import JobService, build_jobs_router
 from .profiles import ProfileProvisioner, build_profiles_router
 from .delivery import build_delivery_router
@@ -506,6 +506,10 @@ def create_app(settings=None, *, gateway_client=None):
     @app.exception_handler(IntegrationUnavailable)
     async def integration_error(request,exc):
         return JSONResponse({'detail':str(exc)},503)
+
+    @app.exception_handler(PhotosDisabledBeforeAdmission)
+    async def photos_disabled_error(request,exc):
+        return JSONResponse({'detail':str(exc),'code':'photos_disabled_before_admission'},503)
 
     @app.exception_handler(AttachmentError)
     async def attachment_error(request,exc):

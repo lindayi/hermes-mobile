@@ -2,7 +2,7 @@
 import binascii
 import base64
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import closing, contextmanager
 import errno
 import io
@@ -1537,10 +1537,6 @@ def test_photo_alias_history_reads_and_delayed_expiry_keep_owned_ids(tmp_path):
         with sqlite3.connect(app.state.catalog.profiles['default'] / 'state.db') as db:
             db.execute('INSERT INTO sessions VALUES(?,?,?,?,?,?)',
                        (canonical, 'Canonical photo session', 'api_server', 7, 8, None))
-            db.executemany(
-                'INSERT INTO messages(id,session_id,role,content,tool_calls,timestamp) VALUES(?,?,?,?,?,?)',
-                [(2, canonical, 'user', 'Alias photo turn\n[screenshot]', None, 9),
-                 (3, canonical, 'assistant', 'Alias answer', None, 10)])
 
         upload = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
                              headers={'Idempotency-Key': 'alias-photo-upload'})
@@ -1550,6 +1546,11 @@ def test_photo_alias_history_reads_and_delayed_expiry_keep_owned_ids(tmp_path):
             history_anchor=lambda: app.state.catalog.history_anchor(
                 'default', 'wa-1', canonical),
             attachment_ids=[attachment_id], attachment_store=app.state.attachments)
+        with sqlite3.connect(app.state.catalog.profiles['default'] / 'state.db') as db:
+            db.executemany(
+                'INSERT INTO messages(id,session_id,role,content,tool_calls,timestamp) VALUES(?,?,?,?,?,?)',
+                [(2, canonical, 'user', 'Alias photo turn\n[screenshot]', None, 9),
+                 (3, canonical, 'assistant', 'Alias answer', None, 10)])
         app.state.journal.finish(user['id'], run['id'], 'completed', 'Alias answer')
 
         reopened = client.get(BASE + f'/sessions/{canonical}/messages?latest=true')
@@ -1625,6 +1626,60 @@ def test_photo_alias_history_reads_and_delayed_expiry_keep_owned_ids(tmp_path):
         assert prior['run']['attachment_ids'] == [attachment_id]
 
 
+def test_snapshot_alias_queries_are_scoped_to_owned_connected_component(tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        user = client.get(BASE + '/auth/me').json()['user']
+        journal = app.state.journal
+        with closing(journal.connect()) as db, db:
+            for index, (requested, canonical) in enumerate(
+                    [('wa-1', 'middle'), ('tip', 'middle'), ('tip', 'last')]):
+                rid = f'connected-{index}'
+                db.execute('INSERT INTO runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                           (rid, user['id'], 'default', requested, 'Synthetic turn', rid,
+                            'completed', 'Synthetic answer', None, None, index, index))
+                db.execute('INSERT INTO run_history_anchors VALUES(?,?,?,?)',
+                           (rid, requested, canonical, index))
+            # Legacy admissions without an anchor remain eligible only in their own Session.
+            db.execute('INSERT INTO runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                       ('legacy', user['id'], 'default', 'last', 'Legacy', 'legacy',
+                        'completed', None, None, None, 4, 4))
+        work = []
+        connect = journal.connect
+
+        def measured_connect():
+            db = connect()
+            db.set_progress_handler(lambda: work.append(1) or 0, 100)
+            return db
+
+        monkeypatch.setattr(journal, 'connect', measured_connect)
+        baseline = journal.snapshot_state(user['id'], 'default', 'wa-1')
+        baseline_work = len(work)
+        with closing(connect()) as db, db:
+            db.executemany('INSERT INTO runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', [
+                (f'unrelated-{index}', user['id'], 'default', f'unrelated-{index}',
+                 'Unrelated', f'unrelated-{index}', 'completed', None, None, None, 5, 5)
+                for index in range(2000)])
+            for rid, owner, profile in [('foreign-owner', 'other', 'default'),
+                                        ('foreign-profile', user['id'], 'other')]:
+                db.execute('INSERT INTO runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                           (rid, owner, profile, 'wa-1', 'Foreign', rid,
+                            'completed', None, None, None, 6, 6))
+                db.execute('INSERT INTO run_history_anchors VALUES(?,?,?,?)',
+                           (rid, 'wa-1', 'unrelated-0', 6))
+        work.clear()
+        reopened = journal.snapshot_state(user['id'], 'default', 'wa-1')
+        assert reopened == baseline
+        assert len(work) <= baseline_work + 10
+        entries = [*reopened['prior'], reopened]
+        assert [entry['run']['id'] for entry in entries] == [
+            'connected-0', 'connected-1', 'connected-2', 'legacy']
+        reverse = journal.snapshot_state(user['id'], 'default', 'last')
+        assert [entry['run']['id'] for entry in [*reverse['prior'], reverse]] == [
+            'connected-0', 'connected-1', 'connected-2', 'legacy']
+        denied = journal.snapshot_state('other', 'default', 'last')
+        assert denied['run'] is None and denied['prior'] == []
+
+
 def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
     native_requests = []
 
@@ -1656,7 +1711,34 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
             headers={'Idempotency-Key': 'rollback-existing-photo'}).json()['id']
         original = {'session_id': 'wa-1', 'input': 'Analyze retained photo',
                     'idempotency_key': 'rollback-original', 'attachments': [first_id]}
-        accepted = client.post(BASE + '/runs', json=original)
+        history_loader = app.state.orchestrator.history_loader
+        second_waiting, release_second = threading.Event(), threading.Event()
+        loads = 0
+
+        async def barrier_history(profile, session):
+            nonlocal loads
+            loads += 1
+            if loads == 1:
+                await anyio.to_thread.run_sync(second_waiting.wait, 5)
+                assert second_waiting.is_set()
+            else:
+                second_waiting.set()
+                await anyio.to_thread.run_sync(release_second.wait, 5)
+                assert release_second.is_set()
+            return await history_loader(profile, session)
+
+        app.state.orchestrator.history_loader = barrier_history
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(client.post, BASE + '/runs', json=original)
+            second = pool.submit(client.post, BASE + '/runs', json=original)
+            done, pending = wait((first, second), timeout=10, return_when=FIRST_COMPLETED)
+            assert len(done) == 1
+            accepted = next(iter(done)).result()
+            release_second.set()
+            concurrent = next(iter(pending)).result(timeout=10)
+        app.state.orchestrator.history_loader = history_loader
+        assert concurrent.status_code == 200, concurrent.text
+        assert concurrent.json()['id'] == accepted.json()['id']
         assert accepted.status_code == 200, accepted.text
         for _ in range(100):
             completed = client.get(BASE + '/runs/' + accepted.json()['id']).json()
@@ -1679,6 +1761,7 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
             'session_id': 'wa-1', 'input': 'New photo run',
             'idempotency_key': 'rollback-new-photo-run', 'attachments': [pending_id]})
         assert blocked_run.status_code == 503
+        assert blocked_run.json()['code'] == 'photos_disabled_before_admission'
         assert 'disabled' in blocked_run.json()['detail']
         text_run = client.post(BASE + '/runs', json={
             'session_id': 'wa-1', 'input': 'Text still works',
@@ -1687,6 +1770,10 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
         retried = client.post(BASE + '/runs', json=original)
         assert retried.status_code == 200
         assert retried.json()['id'] == accepted.json()['id']
+        for changed in ({'input': 'Different text'}, {'attachments': []},
+                        {'session_id': 'other'}, {'selection': {'model': 'other', 'provider': 'other'}}):
+            mismatch = client.post(BASE + '/runs', json={**original, **changed})
+            assert mismatch.status_code == 409, mismatch.text
         assert len(native_requests) == 2
         assert 'mobile_attachment_ids' not in native_requests[-1]
         assert client.get(BASE + f'/sessions/wa-1/attachments/{first_id}').status_code == 200
