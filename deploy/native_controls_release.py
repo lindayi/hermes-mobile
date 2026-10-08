@@ -26,6 +26,9 @@ INSTALLED_API = '187c92509b3769c04756f0dc800d3597ea891ea21262e8a32ceaf3972ac9530
 NATIVE_DEPENDENCIES = {
     Path('/usr/local/lib/hermes-agent/run_agent.py'): 'fb58e81ac57c0f49370d72146d21250d1cfeaa0b964c9996e972954bbc343609',
     Path('/usr/local/lib/hermes-agent/agent/conversation_loop.py'): '9904134bef009978bf95477a7ba8663421448e3e7735e0ba041ca672dfd33b45',
+    Path('/usr/local/lib/hermes-agent/agent/turn_context.py'): '4a65e543a0795c341fd7598ac42a40eb2d87da6637a3521ecc3a00096eb56896',
+    Path('/usr/local/lib/hermes-agent/agent/turn_finalizer.py'): '8c6157b55abf936d6f413c3722c919e2a8a0f02439b3c99ba13f6b22063cab7f',
+    Path('/usr/local/lib/hermes-agent/hermes_cli/lifecycle.py'): 'e820ed8114d7062d53223113cc053c737d4ced6b624ce1fbe88f79ad8b2a26bd',
     Path('/usr/local/lib/hermes-agent/agent/agent_runtime_helpers.py'): '6634b15aa5ab3d73a0f17e1d77adccbd605e3a3944b0c60adb6d84dedca9ea05',
     Path('/usr/local/lib/hermes-agent/hermes_state.py'): '70c69963f39902bad1b3ed1b943aaa1dc195b986ebd267fe1b0ce49a0c6d6723',
     Path('/usr/local/lib/hermes-agent/tools/process_registry.py'): '5eace294ba298a08ff2a5e0503a75720f5eb2bf9c3117e2588746f207ab915a9',
@@ -45,7 +48,7 @@ def _full_sha(value):
 
 APPROVED_CONTROL_HASHES = {
     'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
-    'backend/native_run_controls.py': '6b683c8347df371068bd1f4f8e709738bdef04a370ddb03fc5deb6b777b12e58',
+    'backend/native_run_controls.py': 'c904731785c54f79eb9cb2490df96b8aa4dc33704858c50a9c6d16b2b8928456',
     'backend/native_api_service.py':
         'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': 'e79cfee2bf8d32c3f51dd3ee9247e23029376e10c5e55ea21aa373d6d72535c5',

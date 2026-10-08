@@ -103,6 +103,10 @@ the cursor survives restart and wraps after reaching the end. Skipped files and
 reservations remain intact and charged. A full blocked batch therefore cannot
 starve later eligible rows. Run pins, reader locks, and retention authorization
 remain required on every visit.
+Dead receiving rows remain charged until their deterministic staging, temporary,
+and possible JPEG/PNG/WebP publication files are removed under an exclusive upload
+lease and database writer lock. Unlink failure keeps the reservation. This covers
+publication before the database commit, including across worker processes.
 Each traversal also freezes a visit budget equal to the current metadata row
 count. It wraps when that budget is consumed even if newer eligible rows keep
 arriving. Thus older rows that become eligible after the cursor passed them
@@ -123,8 +127,12 @@ pre-admission rejection. Cancelled file selection does not alter the draft. A
 retry reuses upload and run idempotency keys.
 
 Disabling photos after upload rejects a new photo run with HTTP 503 and code
-`photos_disabled_before_admission`. Only this typed 503 proves no admission;
+`photos_disabled_before_admission`. This typed 503 proves no admission;
 ordinary 503, network errors, and run conflicts keep the attempt frozen.
+An unavailable or timed-out photo capability probe rejects before local run
+creation and photo binding with HTTP 503 and code
+`photos_unavailable_before_admission`. This typed rejection also unlocks the
+original draft and photos. Generic 503 responses remain uncertain.
 A proven cancellation before dispatch clears only the captured current attempt.
 Legacy unresolved text attempts are frozen with explicit empty attachment IDs;
 finish or reconcile that original input, model, and key before sending new photos.
@@ -166,11 +174,17 @@ measure compact UTF-8 JSON after parsing, without ASCII escaping or formatting
 whitespace. Validation occurs before native run creation. A proven HTTP
 413 is terminal rejection, not an unknown network outcome; ambiguous dispatch
 still observes the original run without replay.
-Before photo dispatch the bridge requires the exact versioned `mobile_photos`
+Before local admission the bridge enforces both byte budgets with the native
+compact UTF-8 sanitized-text calculation. A budget rejection returns HTTP 413,
+leaves uploaded photos pending, and creates neither a local run nor a native POST.
+Before local admission the bridge requires the exact versioned `mobile_photos`
 capability, including private persistence and size bounds. An old listener or an
 unverifiable capability response is a known pre-dispatch failure: no photo POST
 has occurred. This handshake prevents bridge-only deployment from using the
-unadapted installed listener.
+unadapted installed listener. The proof is request-local and binds the owner,
+profile, client, endpoint, authorization, input/history, selected model, attachment
+IDs, and image sizes. Dispatch verifies that binding without a second handshake.
+Already admitted retries do not repeat the preflight; text-only runs add no probe.
 
 The adapter copies and sanitizes data at the actual enabled snapshot, request
 dump, SQLite batch/`api_content`, trajectory, and API-request hook boundaries.
@@ -178,7 +192,8 @@ SQLite compaction/archive insertion and direct message writes use the same
 sanitization, preserving native intrinsic message markers and text metadata.
 Provider-error display/status buffers and error hooks are sanitized too.
 Failed native run results are sanitized copies before status/event persistence.
-Every photo-bearing `pre_api_request` hook argument is sanitized in a copy;
+During a mobile photo turn every lifecycle-hook argument is sanitized in a copy,
+including `pre_api_request`, `pre_llm_call`, and `post_llm_call`;
 the live provider request and message history are not mutated. Only transient
 live provider input keeps image bytes. Analyzer fallback does not materialize
 an unaccounted temporary copy for a mobile photo turn; text-only/tool-image
@@ -196,6 +211,12 @@ older non-clarification maps do not, and unknown or mixed maps fail closed. The
 historical and rollback maps remain unchanged. No installed source is hot-edited.
 
 ## Security and rollout
+
+Both photo routes offload native catalog lookups and recheck Session ownership
+after the await. Catalog contention must not block active orchestration. Malformed
+PNG decoder `SyntaxError` is an actionable HTTP 415, with upload cleanup and
+same-key retry. Disk-full remains HTTP 507; cancellation and memory errors are
+not converted to unsupported-image errors.
 
 Writes retain same-origin and CSRF enforcement. The streaming body limit applies
 before framework parsing; authenticated retrieval never accepts a host path or
@@ -229,23 +250,24 @@ boundary so duplicate findings do not create duplicate fixes.
 | Capacity, expiry, and I/O | Queued, active, and unknown runs pin images consistently through run-time reads; active download bytes remain charged until the reader closes, including across workers and restart; terminal expiry preserves text and bounded tombstones; ENOSPC/EDQUOT produce actionable responses and release reservations; history metadata queries are batched off the event loop. | Synthetic run-state expiry cases, delayed-open cancellation, locked-reader release/cleanup, injected filesystem failures, query-count assertions, and event-loop heartbeat under writer contention. |
 | Composer lifecycle and preview | Retry uses the original submitted IDs, input, and model; navigation and reload cannot delete an uncertain submission; added photos remain selectable without changing the frozen retry; definite rejection unlocks photos; steering cannot silently discard photos; selected and restored previews use authenticated URLs and decode under deployed CSP. | Real browser file-input flows for retry, pending selection/removal/navigation/reload, unsupported mixed batches, steering, and both ASGI and Apache CSP. |
 
-Issue #85 adds `backend/attachments.py` to the fixed execution-source inventory
-and Python closure. Only the following current candidate bindings supersede
+Issue #85 adds `backend/attachments.py` and the shared-budget
+`backend/native_run_controls.py` dependency to the fixed execution-source
+inventory and Python closure. Only the following current candidate bindings supersede
 earlier pins; historical fixtures and all review/authorization gates remain
 unchanged. These digests establish source consistency, not review, CI, or
 activation success.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `backend/native_run_controls.py` | `6b683c8347df371068bd1f4f8e709738bdef04a370ddb03fc5deb6b777b12e58` |
-| `backend/model_controls.py` | `b47c0c10360fd4ba30fa4a16da046ffbcca1ee60e251b82ad872952108e3dace` |
-| `deploy/native_controls_release.py` | `394238547ed61ebd82c592966f8d62400d98fd1f592793f1ddb6b5a6972a634e` |
-| `backend/app.py` | `8747492a8561e9f11edffd022348ccc45950c06be39aad49964993d0096036f2` |
-| `backend/attachments.py` | `f4f93228463fa0cc36e2e92062f45639070dfa3a280b8d4499a911a579f1e559` |
-| `backend/hermes_client.py` | `20e16f9028437d980df83c9ea07083b987501902375f544d6b72a1fcbca28d83` |
+| `backend/native_run_controls.py` | `c904731785c54f79eb9cb2490df96b8aa4dc33704858c50a9c6d16b2b8928456` |
+| `backend/model_controls.py` | `1719c246cdf1eee80e45ec9a84e7cf912c043241b7dcb2a1f893c14fee2fbed7` |
+| `deploy/native_controls_release.py` | `f9397ef02138be4e685f6c80cde7edde6caa2249b61b588b1c74b664fe327b02` |
+| `backend/app.py` | `61ece82105971fad63e971ceb56a836f67637707182c5b2f1e8c1c996de2847d` |
+| `backend/attachments.py` | `461b4ad7c4271fe92b84f6f0655288aad3303dc38e1b7bce76eae69e929ffce0` |
+| `backend/hermes_client.py` | `c2a5af845399ce55829bbc8cc7e42ccb44b6c0fc9390932efcb77a748da43e14` |
 | `backend/task_reminder_presentation.py` | `fa68480f43a29d1543e55b1e514263d8fdc7f25593264ca5a61ac021b021e1c6` |
 | `backend/native_catalog.py` | `986c43c3b13885605053330adc52a7f7b25ac9608e81bd1e67839fd3f3cb9e49` |
-| `backend/orchestration.py` | `37dec53d8ccb3cdbda61b9458395e775f3fa6c4f439303b95d4527abc0848eb5` |
+| `backend/orchestration.py` | `a49df079c0a5ca223e5fce41a914bcb07397fb8182d238320df5a02a931bcc17` |
 | `backend/runs.py` | `3f4ae4fa3ec533f358b8c0c9de012dbf369c1899f69cee9a28045fe1eadb7113` |
 | `requirements.lock` | `ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04` |
 

@@ -19,6 +19,47 @@ def photo_payload():
     }
 
 
+@pytest.mark.parametrize('character', ['x', '汉'])
+def test_gateway_photo_budget_matches_native_compact_utf8_boundaries(character):
+    import asyncio
+    from backend.hermes_client import GatewayClient
+    gateway = GatewayClient('http://127.0.0.1:8642', 'synthetic-token', execution_ready=True)
+    ids = ['1' * 32]
+    sizes = [('image/png', 3)]
+    history = [{'role': 'user', 'content': ''}]
+    payload = gateway._run_payload('s', 'inspect', history, attachment_ids=ids,
+        attachments=[{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,eHl6'}}])
+    overhead = controls._compact_utf8_size(controls.photo_persistence_copy(payload))
+    length = (controls.TEXT_REQUEST_BYTES - overhead) // len(character.encode())
+    for extra in (0, 1):
+        history[0]['content'] = character * (length + extra)
+        if extra:
+            with pytest.raises(ValueError, match='text'):
+                controls.validate_photo_payload(payload)
+            with pytest.raises(ValueError, match='text'):
+                gateway.validate_run_size('s', 'inspect', history, ids, sizes)
+        else:
+            controls.validate_photo_payload(payload)
+            assert gateway.validate_run_size('s', 'inspect', history, ids, sizes) < 20_000_000
+    asyncio.run(gateway.close())
+
+
+def test_gateway_complete_photo_budget_exact_boundary():
+    import asyncio
+    from backend.hermes_client import GatewayClient
+    gateway = GatewayClient('http://127.0.0.1:8642', 'synthetic-token', execution_ready=True)
+    ids = [f'{index:032x}' for index in range(4)]
+    sizes = [('image/png', 2 * 1024 * 1024)] * 4
+    history = [{'role': 'user', 'content': ''}]
+    overhead = gateway.validate_run_size('s', 'inspect', history, ids, sizes)
+    history[0]['content'] = 'x' * (controls.PHOTO_REQUEST_BYTES - overhead)
+    assert gateway.validate_run_size('s', 'inspect', history, ids, sizes) == controls.PHOTO_REQUEST_BYTES
+    history[0]['content'] += 'x'
+    with pytest.raises(ValueError, match='native handler limit'):
+        gateway.validate_run_size('s', 'inspect', history, ids, sizes)
+    asyncio.run(gateway.close())
+
+
 def test_four_photos_fit_complete_native_payload_without_expanding_text_limit():
     payload = photo_payload()
     assert 10_000_000 < len(json.dumps(payload).encode()) < 20_000_000

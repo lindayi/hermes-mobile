@@ -1157,7 +1157,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }catch(error){
         connection.failure(token);
         const rejectedBeforeAdmission=[400,413,422,507].includes(error.status)
-          || error.status===503 && error.code==='photos_disabled_before_admission'
+          || error.status===503 && ['photos_disabled_before_admission','photos_unavailable_before_admission'].includes(error.code)
           || error.status===409 && error.code==='attachment_error';
         if(rejectedBeforeAdmission){
           pendingPhotoSubmission=null;

@@ -212,13 +212,14 @@ _PENDING_ISSUE77_CLARIFICATION_FIXTURE = {
 
 
 _ISSUE85_PHOTO_FIXTURE = {
-    'backend/model_controls.py': 'b47c0c10360fd4ba30fa4a16da046ffbcca1ee60e251b82ad872952108e3dace',
-    'deploy/native_controls_release.py': '394238547ed61ebd82c592966f8d62400d98fd1f592793f1ddb6b5a6972a634e',
-    'backend/app.py': '8747492a8561e9f11edffd022348ccc45950c06be39aad49964993d0096036f2',
-    'backend/attachments.py': 'f4f93228463fa0cc36e2e92062f45639070dfa3a280b8d4499a911a579f1e559',
-    'backend/hermes_client.py': '20e16f9028437d980df83c9ea07083b987501902375f544d6b72a1fcbca28d83',
+    'backend/native_run_controls.py': 'c904731785c54f79eb9cb2490df96b8aa4dc33704858c50a9c6d16b2b8928456',
+    'backend/model_controls.py': '1719c246cdf1eee80e45ec9a84e7cf912c043241b7dcb2a1f893c14fee2fbed7',
+    'deploy/native_controls_release.py': 'f9397ef02138be4e685f6c80cde7edde6caa2249b61b588b1c74b664fe327b02',
+    'backend/app.py': '61ece82105971fad63e971ceb56a836f67637707182c5b2f1e8c1c996de2847d',
+    'backend/attachments.py': '461b4ad7c4271fe92b84f6f0655288aad3303dc38e1b7bce76eae69e929ffce0',
+    'backend/hermes_client.py': 'c2a5af845399ce55829bbc8cc7e42ccb44b6c0fc9390932efcb77a748da43e14',
     'backend/native_catalog.py': '986c43c3b13885605053330adc52a7f7b25ac9608e81bd1e67839fd3f3cb9e49',
-    'backend/orchestration.py': '37dec53d8ccb3cdbda61b9458395e775f3fa6c4f439303b95d4527abc0848eb5',
+    'backend/orchestration.py': 'a49df079c0a5ca223e5fce41a914bcb07397fb8182d238320df5a02a931bcc17',
     'backend/runs.py': '3f4ae4fa3ec533f358b8c0c9de012dbf369c1899f69cee9a28045fe1eadb7113',
     'backend/task_reminder_presentation.py': 'fa68480f43a29d1543e55b1e514263d8fdc7f25593264ca5a61ac021b021e1c6',
     '.github/host-tests.json': 'fc1cf7b7acccae5a948d8cfbd67f3fc82c7d1fd645328b92e357f81b3827a9f9',
@@ -896,7 +897,7 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
         'backend/chat_snapshot.py', 'backend/clarifications.py', 'backend/configuration.py',
         'backend/context_compression_presentation.py', 'backend/delivery.py',
         'backend/hermes_client.py', 'backend/jobs.py', 'backend/model_controls.py',
-        'backend/native_catalog.py', 'backend/notification_policy.py',
+        'backend/native_catalog.py', 'backend/native_run_controls.py', 'backend/notification_policy.py',
         'backend/notifications.py', 'backend/operational_notifications.py',
         'backend/orchestration.py', 'backend/profiles.py', 'backend/public_commentary.py',
         'backend/request_notifications.py', 'backend/runs.py', 'backend/runtime_binding.py',
@@ -914,7 +915,7 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
     }
     starter_bridge = {'deploy/issue_starter.py'}
     assert closure == shared | coordinator | starter_bridge
-    assert len(closure) == 40
+    assert len(closure) == 41
     assert closure <= set(REQUIRED_FILES)
     assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in coordinator)
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract' for path in shared)

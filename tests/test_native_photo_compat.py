@@ -70,6 +70,7 @@ def native_photo_api(tmp_path, *, provider_failure=False, aliases=False):
         from gateway.platforms.api_server import APIServerAdapter
         from hermes_state import SessionDB
         from run_agent import AIAgent
+        import hermes_cli.lifecycle as lifecycle
         from backend.native_run_controls import private_photo_agent, run_controls_adapter
 
         home, ready, capture_path, key, port = (
@@ -85,7 +86,12 @@ def native_photo_api(tmp_path, *, provider_failure=False, aliases=False):
             db.create_session('photo-assembled-session', 'api_server', parent_session_id='photo-alias-two')
         else:
             db.create_session('photo-assembled-session', 'api_server')
-        captures, compactions = [], []
+        captures, compactions, hooks = [], [], []
+        lifecycle.has_hook = lambda name: name in {'pre_api_request', 'pre_llm_call', 'post_llm_call'}
+        def capture_hook(name, *args, **kwargs):
+            hooks.append({'name': name, 'arguments': json.loads(json.dumps(kwargs, default=str))})
+            return []
+        lifecycle.invoke_hook = capture_hook
 
         class ProviderHandler(BaseHTTPRequestHandler):
             def do_POST(self):
@@ -107,7 +113,7 @@ def native_photo_api(tmp_path, *, provider_failure=False, aliases=False):
                                 images.append(hashlib.sha256(raw).hexdigest())
                                 image_urls.append(url)
                 captures.append({'images': images, 'texts': texts})
-                capture_path.write_text(json.dumps({'captures': captures, 'compactions': compactions}))
+                capture_path.write_text(json.dumps({'captures': captures, 'compactions': compactions, 'hooks': hooks}))
                 if os.environ.get('NATIVE_PROVIDER_FAILURE') == '1':
                     response = json.dumps({
                         'error': {'message': 'Synthetic provider echoed ' + image_urls[0]},
@@ -168,7 +174,7 @@ def native_photo_api(tmp_path, *, provider_failure=False, aliases=False):
                                  if key not in ('content', 'api_content')},
                 })
                 db.archive_and_compact(agent.session_id, agent._session_messages)
-                capture_path.write_text(json.dumps({'captures': captures, 'compactions': compactions}))
+                capture_path.write_text(json.dumps({'captures': captures, 'compactions': compactions, 'hooks': hooks}))
                 return result
 
             agent.run_conversation = run_and_archive
@@ -226,6 +232,41 @@ def near_limit_png(seed):
     output = io.BytesIO()
     Image.frombytes('RGB', (1150, 1150), pixels).save(output, format='PNG', optimize=True)
     return output.getvalue()
+
+
+def test_successful_native_four_photo_turn_keeps_all_hook_copies_private(tmp_path):
+    session = 'photo-assembled-session'
+    with native_photo_api(tmp_path) as (home, url, key, capture_path):
+        gateway = GatewayClient(url, key, execution_ready=True)
+        app = create_app(Settings(
+            state_dir=tmp_path / 'mobile', profiles={'default': home},
+            bootstrap_secret=BOOTSTRAP, attachment_min_free_bytes=0), gateway_client=gateway)
+        with TestClient(app, base_url=ORIGIN) as client:
+            client.headers['Origin'] = ORIGIN
+            enroll(client)
+            uploads = [client.post(BASE + f'/sessions/{session}/attachments',
+                content=near_limit_png(index), headers={'Idempotency-Key': f'hook-photo-{index}'})
+                for index in range(4)]
+            assert [item.status_code for item in uploads] == [201] * 4
+            ids = [item.json()['id'] for item in uploads]
+            assert all(1_800_000 <= item.json()['size'] <= 2 * 1024 * 1024 for item in uploads)
+            sent = client.post(BASE + '/runs', json={'session_id': session,
+                'input': 'Inspect four synthetic photos', 'idempotency_key': 'hook-success',
+                'attachments': ids})
+            assert sent.status_code == 200, sent.text
+            for _ in range(400):
+                result = client.get(BASE + '/runs/' + sent.json()['id']).json()
+                if result['status'] in ('completed', 'failed'):
+                    break
+                time.sleep(.05)
+            assert result['status'] == 'completed', result
+            capture = json.loads(capture_path.read_text())
+            expected = [hashlib.sha256((app.state.attachments.objects / (item + '.png')).read_bytes()).hexdigest()
+                        for item in ids]
+            assert [digest for call in capture['captures'] for digest in call['images']] == expected
+            assert {'pre_api_request', 'pre_llm_call', 'post_llm_call'} <= {
+                hook['name'] for hook in capture['hooks']}
+            assert all('data:image/' not in json.dumps(hook) for hook in capture['hooks'])
 
 
 def test_native_transcript_and_json_snapshot_omit_image_bytes(tmp_path):

@@ -10,6 +10,8 @@ import json
 import os
 import sqlite3
 import struct
+import subprocess
+import sys
 import threading
 import time
 import zlib
@@ -40,6 +42,208 @@ def png_fixture(seed=0):
             + chunk(b'IHDR', struct.pack('>2I5B', 2, 2, 8, 2, 0, 0, 0))
             + chunk(b'IDAT', zlib.compress(pixels))
             + chunk(b'IEND', b''))
+
+
+def test_malformed_png_decode_is_typed_and_same_key_recovers(tmp_path):
+    malformed = bytearray(png_fixture())
+    malformed[-13] ^= 1  # Public synthetic IDAT CRC corruption.
+    with photo_client(tmp_path, raise_server_exceptions=False) as (app, client):
+        store = app.state.attachments
+        descriptors = len(os.listdir('/proc/self/fd'))
+        response = client.post(BASE + '/sessions/wa-1/attachments', content=bytes(malformed),
+                               headers={'Idempotency-Key': 'malformed-png'})
+        assert response.status_code == 415
+        with store.connection() as db:
+            assert db.execute('SELECT count(*) FROM attachments').fetchone()[0] == 0
+            assert store._usage(db) == 0
+        assert list(store.objects.iterdir()) == []
+        assert list(store.staging.iterdir()) == []
+        assert len(os.listdir('/proc/self/fd')) == descriptors
+        retry = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+                            headers={'Idempotency-Key': 'malformed-png'})
+        assert retry.status_code == 201
+
+
+@pytest.mark.parametrize('failed_unlink', [False, True])
+def test_dead_published_receiving_file_stays_charged_until_removed(tmp_path, monkeypatch, failed_unlink):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        second = attachments_module.AttachmentStore(
+            store.database, store.root, min_free_bytes=0,
+            user_quota_bytes=attachments_module.RESERVATION_BYTES,
+            global_quota_bytes=attachments_module.RESERVATION_BYTES)
+        second.cleanup(limit=256)
+        assert second._orphan_reconciled
+        crashed = subprocess.run([sys.executable, '-c', '''
+import json, os, sys
+from pathlib import Path
+from backend.attachments import AttachmentStore
+store = AttachmentStore(Path(sys.argv[1]), Path(sys.argv[2]), min_free_bytes=0)
+store.cleanup(limit=256)
+row, _ = store.begin(json.loads(sys.argv[3]), 'wa-1', 'dead-published', worker=True)
+print(row['id'], flush=True)
+data = bytes.fromhex(sys.argv[4])
+stage = store.staging / (row['id'] + '.part')
+stage.write_bytes(data)
+replace = os.replace
+def crash_after_replace(*args):
+    replace(*args)
+    os._exit(91)
+os.replace = crash_after_replace
+store._publish_upload(row['id'], json.loads(sys.argv[3])['id'], stage,
+                      'synthetic-digest', data, 'image/png', 2, 2, 'png')
+''', str(store.database), str(store.root), json.dumps(user), png_fixture().hex()],
+            capture_output=True, text=True, timeout=10)
+        assert crashed.returncode == 91, crashed.stderr
+        row = {'id': crashed.stdout.strip()}
+        final = store.objects / (row['id'] + '.png')
+        assert final.read_bytes() == png_fixture()
+        with store.connection() as db:
+            db.execute('UPDATE attachments SET created_at=? WHERE id=?',
+                       (time.time() - attachments_module.ABANDONED_TTL - 1, row['id']))
+            db.commit()
+        unlink = second._unlink
+        def guarded_unlink(path):
+            if failed_unlink and path == final:
+                raise OSError(errno.EACCES, 'synthetic locked publication')
+            return unlink(path)
+        monkeypatch.setattr(second, '_unlink', guarded_unlink)
+        second.cleanup(limit=16)
+        with second.connection() as db:
+            charged = second._usage(db)
+            if failed_unlink:
+                assert charged == attachments_module.RESERVATION_BYTES
+                assert final.exists()
+            else:
+                assert charged == 0
+                assert not final.exists()
+        if failed_unlink:
+            with pytest.raises(attachments_module.AttachmentError) as rejected:
+                second.begin(user, 'wa-1', 'new-key')
+            assert rejected.value.status == 413
+            monkeypatch.setattr(second, '_unlink', unlink)
+        recovered = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+                                headers={'Idempotency-Key': 'dead-published'})
+        assert recovered.status_code == 201
+
+
+@pytest.mark.parametrize('route', ['upload', 'read'])
+def test_photo_catalog_lookup_does_not_block_other_requests(tmp_path, monkeypatch, route):
+    with photo_client(tmp_path) as (app, client):
+        upload = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+                             headers={'Idempotency-Key': 'catalog-heartbeat'})
+        catalog = app.state.catalog
+        messages = catalog.messages
+        loop_checks = []
+        def delayed_messages(*args, **kwargs):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                loop_checks.append(False)
+            else:
+                loop_checks.append(True)
+            time.sleep(.2)
+            return messages(*args, **kwargs)
+        monkeypatch.setattr(catalog, 'messages', delayed_messages)
+        async def probe():
+            ticks = 0
+            async def heartbeat():
+                nonlocal ticks
+                for _ in range(12):
+                    await asyncio.sleep(.01)
+                    ticks += 1
+            task = asyncio.create_task(heartbeat())
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url=ORIGIN,
+                    cookies=dict(client.cookies), headers=dict(client.headers)) as other:
+                if route == 'upload':
+                    response = await other.post(BASE + '/sessions/wa-1/attachments',
+                        content=png_fixture(), headers={'Idempotency-Key': 'catalog-delayed'})
+                else:
+                    response = await other.get(BASE + '/sessions/wa-1/attachments/' + upload.json()['id'])
+                observed = ticks
+                assert (await other.get(BASE + '/auth/me')).status_code == 200
+            await task
+            return response, observed
+        response, ticks = client.portal.call(probe)
+        assert response.status_code == (201 if route == 'upload' else 200)
+        assert loop_checks == [False]
+        assert ticks >= 10
+
+
+def test_photo_capability_timeout_rejects_before_binding_and_recovers(tmp_path):
+    requests, corrected = [], False
+    async def upstream(request):
+        requests.append((request.method, request.url.path))
+        if request.url.path.endswith('/messages'):
+            return httpx.Response(200, json={'session_id': 'wa-1', 'data': []})
+        if request.url.path == '/v1/capabilities':
+            if not corrected:
+                raise httpx.ReadTimeout('synthetic capability timeout', request=request)
+            return httpx.Response(200, json={'mobile_photos': {
+                'version': 1, 'max_images': 4, 'max_image_bytes': 2 * 1024 * 1024,
+                'max_request_bytes': 20_000_000, 'private_persistence': True}})
+        if request.url.path == '/v1/runs':
+            return httpx.Response(202, json={'run_id': 'native-recovered'})
+        if request.url.path.endswith('/events'):
+            return httpx.Response(200, text='event: run.completed\n'
+                'data: {"run_id":"native-recovered","output":"Synthetic description"}\n\n')
+        return httpx.Response(404)
+    gateway = GatewayClient('http://127.0.0.1:8642', 'synthetic-test-token',
+                            execution_ready=True, transport=httpx.MockTransport(upstream))
+    with photo_client(tmp_path, gateway_client=gateway) as (app, client):
+        photo = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+                            headers={'Idempotency-Key': 'capability-recovery'}).json()
+        body = {'session_id': 'wa-1', 'input': 'Keep original draft',
+                'idempotency_key': 'capability-run', 'attachments': [photo['id']]}
+        response = client.post(BASE + '/runs', json=body)
+        assert response.status_code == 503
+        assert response.json()['code'] == 'photos_unavailable_before_admission'
+        with app.state.attachments.connection() as db:
+            assert db.execute('SELECT count(*) FROM runs').fetchone()[0] == 0
+            row = db.execute('SELECT state,run_id FROM attachments WHERE id=?', (photo['id'],)).fetchone()
+            assert tuple(row) == ('pending', None)
+        assert ('POST', '/v1/runs') not in requests
+        corrected = True
+        response = client.post(BASE + '/runs', json=body)
+        assert response.status_code == 200
+        for _ in range(100):
+            if client.get(BASE + '/runs/' + response.json()['id']).json()['status'] == 'completed':
+                break
+            time.sleep(.01)
+        assert requests.count(('GET', '/v1/capabilities')) == 2
+        assert requests.count(('POST', '/v1/runs')) == 1
+        assert client.post(BASE + '/runs', json=body).json()['id'] == response.json()['id']
+        assert client.post(BASE + '/runs', json=dict(body, idempotency_key='new-key')).status_code == 409
+
+
+@pytest.mark.parametrize('character', ['x', '汉'])
+def test_over_text_budget_is_413_before_local_run_or_native_post(tmp_path, character):
+    posts = []
+    history = [{'role': 'user', 'content': character * (10_000_001 // len(character.encode()) + 1)}]
+    async def upstream(request):
+        if request.method == 'POST':
+            posts.append(request.url.path)
+        return httpx.Response(404)
+    gateway = GatewayClient('http://127.0.0.1:8642', 'synthetic-token',
+        execution_ready=True, transport=httpx.MockTransport(upstream))
+    with photo_client(tmp_path, gateway_client=gateway) as (app, client):
+        async def context(profile, session_id):
+            return {'profile': profile, 'session_id': session_id, 'complete': True, 'history': history}
+        app.state.orchestrator.history_loader = context
+        photo = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+                            headers={'Idempotency-Key': 'budget-photo'}).json()
+        response = client.post(BASE + '/runs', json={'session_id': 'wa-1', 'input': 'Inspect',
+            'idempotency_key': 'budget-run', 'attachments': [photo['id']]})
+        assert response.status_code == 413
+        assert posts == []
+        with app.state.attachments.connection() as db:
+            assert db.execute('SELECT count(*) FROM runs').fetchone()[0] == 0
+            assert db.execute('SELECT state FROM attachments WHERE id=?', (photo['id'],)).fetchone()[0] == 'pending'
+        history.clear()
+        assert app.state.attachments.run_image_sizes(
+            client.get(BASE + '/auth/me').json()['user']['id'], 'default', 'wa-1', [photo['id']])
 
 
 def test_retained_metadata_admission_is_atomic_and_survives_restart(tmp_path):
@@ -1337,7 +1541,7 @@ def test_owned_photo_reaches_the_same_native_run_as_text_without_journal_bytes(t
 
 
 @pytest.mark.parametrize('rejection', ['capacity', 'capability'])
-def test_native_predispatch_photo_rejection_is_failed_not_unknown(tmp_path, rejection):
+def test_native_predispatch_photo_rejection_is_failed_not_unknown(tmp_path, monkeypatch, rejection):
     native_posts = []
 
     async def upstream(request):
@@ -1346,8 +1550,7 @@ def test_native_predispatch_photo_rejection_is_failed_not_unknown(tmp_path, reje
         if request.url.path == '/v1/capabilities':
             return httpx.Response(200, json={'mobile_photos': {
                 'version': 1, 'max_images': 4, 'max_image_bytes': 2 * 1024 * 1024,
-                'max_request_bytes': 20_000_000, 'private_persistence': True}}
-                if rejection == 'capacity' else {})
+                'max_request_bytes': 20_000_000, 'private_persistence': True}})
         if request.method == 'POST':
             native_posts.append(request.url.path)
             return httpx.Response(413, json={'error': {'code': 'body_too_large'}})
@@ -1355,6 +1558,15 @@ def test_native_predispatch_photo_rejection_is_failed_not_unknown(tmp_path, reje
 
     gateway = GatewayClient('http://127.0.0.1:8642', 'synthetic-test-token',
                             execution_ready=True, transport=httpx.MockTransport(upstream))
+    if rejection == 'capability':
+        # Sabotage the request-bound proof after local admission to retain the
+        # existing no-POST terminal-rejection defense, not a second handshake.
+        images = attachments_module.AttachmentStore.run_images
+        def changed_endpoint(store, *args):
+            result = images(store, *args)
+            gateway.token = 'synthetic-changed-listener'
+            return result
+        monkeypatch.setattr(attachments_module.AttachmentStore, 'run_images', changed_endpoint)
     with photo_client(tmp_path, gateway_client=gateway) as (app, client):
         upload = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
                              headers={'Idempotency-Key': 'rejected-photo-upload'})

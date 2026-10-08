@@ -47,6 +47,11 @@ def _compact_utf8_size(value):
         raise ValueError('Native text request is not valid UTF-8') from None
 
 
+def validate_photo_text_budget(body):
+    if _compact_utf8_size(photo_persistence_copy(body)) > TEXT_REQUEST_BYTES:
+        raise ValueError('Native text request exceeds the existing limit')
+
+
 def _canonical_photo_content(content):
     if not isinstance(content, list):
         return photo_persistence_copy(content)
@@ -159,8 +164,7 @@ def validate_photo_payload(body):
             raise ValueError('Invalid photo encoding') from None
         if not 0 < size <= 2 * 1024 * 1024:
             raise ValueError('Photo exceeds the normalized image limit')
-    if _compact_utf8_size(photo_persistence_copy(body)) > TEXT_REQUEST_BYTES:
-        raise ValueError('Native text request exceeds the existing limit')
+    validate_photo_text_budget(body)
 
 
 def _install_photo_hook_privacy():
@@ -173,7 +177,7 @@ def _install_photo_hook_privacy():
 
         @wraps(original)
         def invoke_hook(name, *args, **kwargs):
-            if name == 'pre_api_request' and _MOBILE_PHOTO_HOOK_ACTIVE.get():
+            if _MOBILE_PHOTO_HOOK_ACTIVE.get():
                 args = tuple(photo_persistence_copy(item) for item in args)
                 kwargs = photo_persistence_copy(kwargs)
             return original(name, *args, **kwargs)

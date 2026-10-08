@@ -128,6 +128,7 @@ class Orchestrator:
             if (not isinstance(message, dict) or 'role' not in message or 'content' not in message
                     or (message['role'] == 'tool' and not message.get('tool_call_id'))):
                 raise IntegrationUnavailable('Native tool context is incomplete')
+        photo_preflight = None
         if attachment_ids:
             if self.attachments is None or not hasattr(self.gateway, 'validate_run_size'):
                 raise IntegrationUnavailable('Native photo request budgeting is unavailable.')
@@ -141,8 +142,11 @@ class Orchestrator:
                     return existing
                 raise
             self.gateway.validate_run_size(
-                body['session_id'], body['input'], context['history'], attachment_ids,
+                canonical_id, body['input'], context['history'], attachment_ids,
                 image_sizes, **(selection or {}))
+            photo_preflight = await self.gateway.require_photo_capability(
+                canonical_id, body['input'], context['history'], attachment_ids,
+                image_sizes, (user['id'], user['profile']), **(selection or {}))
         existing = self._existing_submission(user, body, selection, attachment_ids)
         if existing:
             return existing
@@ -158,7 +162,7 @@ class Orchestrator:
         if created:
             self.journal.event(user['id'], run['id'], 'status', {'status': 'queued'})
             native_run = dict(run, session_id=context.get('canonical_session_id', run['session_id']),
-                              attachment_session_id=run['session_id'])
+                              attachment_session_id=run['session_id'], photo_preflight=photo_preflight)
             task = asyncio.create_task(self._execute(user, native_run, context['history']))
             self._tasks[task] = (dict(user), run)
             task.add_done_callback(lambda done: self._tasks.pop(done, None))
@@ -479,6 +483,8 @@ class Orchestrator:
                     user['id'], user['profile'], run.get('attachment_session_id', run['session_id']),
                     run['id'], attachment_ids)
                 kwargs['attachment_ids'] = attachment_ids
+                kwargs['photo_preflight'] = run.get('photo_preflight')
+                kwargs['photo_owner'] = (user['id'], user['profile'])
             async with asyncio.timeout(self.run_timeout):
                 upstream = await self.gateway.start(run['session_id'], run['input'], **kwargs)
         finally:

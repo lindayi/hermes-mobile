@@ -122,7 +122,11 @@ def _normalize_image(path):
         raise AttachmentError(413, 'This image cannot be compressed below 2 MiB; resize it and try again.')
     except AttachmentError:
         raise
-    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError,
+    except OSError as exc:
+        if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+            raise AttachmentError(507, 'Photo storage is full; free space or try again later.') from exc
+        raise AttachmentError(415, 'This is not a supported, complete JPEG, PNG, or WebP image.') from exc
+    except (UnidentifiedImageError, ValueError, SyntaxError, Image.DecompressionBombError,
             Image.DecompressionBombWarning) as exc:
         raise AttachmentError(415, 'This is not a supported, complete JPEG, PNG, or WebP image.') from exc
 
@@ -309,10 +313,9 @@ class AttachmentStore:
                     descriptor = self._acquire_upload_lease(existing['id'])
                     if descriptor is None:
                         raise AttachmentError(409, 'This photo upload is still being processed; try again shortly.')
-                    self._unlink(self.staging / (existing['id'] + '.part'))
-                    self._unlink(self.objects / (existing['id'] + '.tmp'))
-                    for suffix in ('jpg', 'png', 'webp'):
-                        self._unlink(self.objects / (existing['id'] + '.' + suffix))
+                    if not self._remove_receiving_files(existing['id']):
+                        os.close(descriptor)
+                        raise AttachmentError(503, 'Photo upload recovery is unavailable; try again later.')
                     db.execute('''UPDATE attachments SET sha256=NULL,content_type=NULL,width=NULL,height=NULL,
                         size=0,stored_name=NULL,created_at=?,expires_at=?,metadata_expires_at=?
                         WHERE id=? AND state='receiving' ''',
@@ -514,12 +517,23 @@ class AttachmentStore:
             row = db.execute("SELECT stored_name FROM attachments WHERE id=? AND state='receiving'",
                              (attachment_id,)).fetchone()
             if row is not None:
-                self._unlink(self.staging / (attachment_id + '.part'))
-                self._unlink(self.objects / (attachment_id + '.tmp'))
-                for suffix in ('jpg', 'png', 'webp'):
-                    self._unlink(self.objects / (attachment_id + '.' + suffix))
-                db.execute("DELETE FROM attachments WHERE id=? AND state='receiving'", (attachment_id,))
+                if self._remove_receiving_files(attachment_id):
+                    db.execute("DELETE FROM attachments WHERE id=? AND state='receiving'", (attachment_id,))
             db.commit()
+
+    def _remove_receiving_files(self, attachment_id):
+        if not ATTACHMENT_ID.fullmatch(attachment_id):
+            return False
+        paths = [self.staging / (attachment_id + '.part'),
+                 self.objects / (attachment_id + '.tmp'),
+                 *(self.objects / (attachment_id + '.' + suffix) for suffix in ('jpg', 'png', 'webp'))]
+        try:
+            for path in paths:
+                if not self._unlink(path):
+                    return False
+        except OSError:
+            return False
+        return True
 
     @staticmethod
     def _unlink(path):
@@ -742,7 +756,20 @@ class AttachmentStore:
                           'WHERE singleton=1',
                           (rows[-1]['created_at'], rows[-1]['id'], remaining - len(rows)))
             for row in rows:
-                if row['state'] == 'receiving' and self._upload_is_live(row['id']):
+                if row['state'] == 'receiving':
+                    try:
+                        lease = self._acquire_upload_lease(row['id'])
+                    except AttachmentError:
+                        continue
+                    if lease is None:
+                        continue
+                    try:
+                        if not self._remove_receiving_files(row['id']):
+                            continue
+                        db.execute('DELETE FROM attachments WHERE id=?', (row['id'],))
+                        removed += 1
+                    finally:
+                        os.close(lease)
                     continue
                 if row['stored_name']:
                     if row['stored_name'] not in (

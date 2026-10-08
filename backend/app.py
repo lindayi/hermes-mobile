@@ -16,7 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers, MutableHeaders
 
 from .auth import AuthService, build_auth_router
-from .hermes_client import GatewayClient, IntegrationUnavailable
+from .hermes_client import (GatewayClient, IntegrationUnavailable, PhotoRequestTooLarge,
+                           PhotoUnavailableBeforeAdmission)
 from .native_catalog import NativeCatalog
 from .runs import RunJournal, RunConflict
 from .notifications import NotificationService, build_notifications_router
@@ -511,6 +512,10 @@ def create_app(settings=None, *, gateway_client=None):
     async def photos_disabled_error(request,exc):
         return JSONResponse({'detail':str(exc),'code':'photos_disabled_before_admission'},503)
 
+    @app.exception_handler(PhotoUnavailableBeforeAdmission)
+    async def photos_unavailable_error(request,exc):
+        return JSONResponse({'detail':str(exc),'code':'photos_unavailable_before_admission'},503)
+
     @app.exception_handler(AttachmentError)
     async def attachment_error(request,exc):
         return JSONResponse({'detail':str(exc),'code':'attachment_error'},exc.status)
@@ -664,9 +669,10 @@ def create_app(settings=None, *, gateway_client=None):
         if not settings.photos_enabled:
             raise HTTPException(503,'New photo uploads are disabled; existing photos and text runs remain available.')
         try:
-            catalog.messages(user['profile'],sid,limit=1)
+            await asyncio.to_thread(catalog.messages,user['profile'],sid,limit=1)
         except KeyError:
             raise HTTPException(404,'Session not found') from None
+        journal.require_session(user['id'],user['profile'],sid)
         metadata=await attachments.upload(
             user,sid,request.headers.get('idempotency-key',''),request.stream())
         metadata['url']=BASE+'/sessions/'+quote(sid,safe='')+'/attachments/'+metadata['id']
@@ -676,9 +682,10 @@ def create_app(settings=None, *, gateway_client=None):
     async def read_photo(sid:str,attachment_id:str,user=Depends(ready_user)):
         journal.require_session(user['id'],user['profile'],sid)
         try:
-            catalog.messages(user['profile'],sid,limit=1)
+            await asyncio.to_thread(catalog.messages,user['profile'],sid,limit=1)
         except KeyError:
             raise HTTPException(404,'Session not found') from None
+        journal.require_session(user['id'],user['profile'],sid)
         descriptor,content_type,size=await attachments._upload_io(
             attachments.open_image,user,sid,attachment_id,
             cancel_result=lambda result: os.close(result[0]))
@@ -764,6 +771,8 @@ def create_app(settings=None, *, gateway_client=None):
             raise
         except RunConflict:
             raise
+        except PhotoRequestTooLarge as exc:
+            raise HTTPException(413,str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422,str(exc)) from exc
 

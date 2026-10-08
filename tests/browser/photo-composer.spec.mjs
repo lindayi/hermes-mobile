@@ -12,7 +12,7 @@ const frontend=process.env.HERMES_FRONTEND_DIR
   ? process.env.HERMES_FRONTEND_DIR.replace(/\/$/,'')+'/'
   : fileURLToPath(new URL('../../frontend/',import.meta.url));
 
-async function rollbackRoute(){
+async function rollbackRoute(scenario='disabled'){
  const root=fileURLToPath(new URL('../../',import.meta.url));
  const child=spawn(process.env.HERMES_TEST_PYTHON||root+'.venv/bin/python',['-B','-c',String.raw`
 import base64, json, sqlite3, sys, tempfile, time
@@ -23,10 +23,13 @@ from backend.hermes_client import GatewayClient
 from test_photo_attachments import photo_client, png_fixture
 from test_auth import BASE
 native_posts=[]
+capability_timeout=False
 async def upstream(request):
     if request.url.path.endswith('/messages'):
         return httpx.Response(200,json={'session_id':'photo-session','requested_session_id':'photo-session','data':[]})
     if request.url.path=='/v1/capabilities':
+        if capability_timeout:
+            raise httpx.ReadTimeout('synthetic capability timeout',request=request)
         return httpx.Response(200,json={'mobile_photos':{'version':1,'max_images':4,'max_image_bytes':2097152,'max_request_bytes':20000000,'private_persistence':True}})
     if request.url.path=='/v1/runs':
         native_posts.append(json.loads(request.content))
@@ -58,8 +61,17 @@ with tempfile.TemporaryDirectory(prefix='photo-browser-route-') as temporary:
             response=client.request(request['method'],BASE+request['path'],headers=request.get('headers',{}),**kwargs)
             if request['method']=='POST' and request['path'].endswith('/attachments'):
                 assert response.status_code==201,response.text
-                app.state.settings.photos_enabled=False
-                app.state.orchestrator.photos_enabled=False
+                if sys.argv[1]=='capability':
+                    capability_timeout=True
+                else:
+                    app.state.settings.photos_enabled=False
+                    app.state.orchestrator.photos_enabled=False
+            if sys.argv[1]=='capability' and request['path']=='/runs' and response.status_code==503:
+                with app.state.attachments.connection() as db:
+                    assert db.execute('SELECT count(*) FROM runs').fetchone()[0]==1
+                    assert db.execute("SELECT count(*) FROM attachments WHERE state='pending'").fetchone()[0]==1
+                assert len(native_posts)==1
+                capability_timeout=False
             result={'status':response.status_code}
             if 'application/json' in response.headers.get('content-type',''):
                 result['body']=response.json()
@@ -70,7 +82,7 @@ with tempfile.TemporaryDirectory(prefix='photo-browser-route-') as temporary:
         assert retry.status_code==200 and retry.json()['id']==accepted.json()['id']
         assert len(native_posts)==2,native_posts
         assert client.get(BASE+'/sessions/photo-session/attachments/'+old).status_code==200
-`],{cwd:root,stdio:['pipe','pipe','pipe']});
+`,scenario],{cwd:root,stdio:['pipe','pipe','pipe']});
  const reader=createInterface({input:child.stdout}),lines=reader[Symbol.asyncIterator]();
  let diagnostic='';child.stderr.on('data',chunk=>{diagnostic+=chunk;});
  const closed=new Promise(resolve=>child.once('close',code=>resolve(code)));
@@ -153,13 +165,13 @@ test('real file input removal aborts an undispatched photo batch and retries rem
   assert.deepEqual(calls.filter(call=>call==='POST /runs').length,1);
 });
 
-  for(const scenario of ['disabled','cancel','legacy admitted','legacy lost response']){
+  for(const scenario of ['disabled','capability','cancel','legacy admitted','legacy lost response']){
    test(`composer recovers only a proven pre-admission photo attempt: ${scenario}`,async t=>{
     const runs=[],uploads=[],deletes=[];
     let finishUpload,lostResponse=scenario==='legacy lost response';
     const legacy={input:'Original text',idempotency_key:'legacy-original',selection:{model:'vision',provider:'synthetic'}};
     const admittedKeys=new Set(scenario.startsWith('legacy')?[legacy.idempotency_key]:[]);
-    const route=scenario==='disabled'?await rollbackRoute():null;
+    const route=['disabled','capability'].includes(scenario)?await rollbackRoute(scenario):null;
     const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAE0lEQVR4nGNQSFgARAwLEhSACAAfjgSBXOAMLAAAAABJRU5ErkJggg==','base64');
     const json=(res,value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};
     const server=createServer(async(req,res)=>{
@@ -244,6 +256,21 @@ test('real file input removal aborts an undispatched photo batch and retries rem
      assert.deepEqual(runs.at(-1).attachments,['1'.repeat(32)]);
      assert.equal(admittedKeys.size,2,'retry returns the original admitted run; only the later photo request is new');
     }else{
+     if(scenario==='capability'){
+      await page.getByText(/Photo or message was not sent/).waitFor();
+      assert.equal(await text.inputValue(),'New text');
+      assert.equal(await page.getByRole('button',{name:'Remove photo 1'}).isEnabled(),true);
+      assert.equal(await page.getByRole('combobox',{name:'Model'}).isDisabled(),false);
+      assert.equal(await page.evaluate(owner=>sessionStorage.getItem(`hermes:${owner}:attempt:photo-session`),route.owner),null);
+      await page.getByRole('button',{name:'Send message'}).click();
+      await page.waitForFunction(()=>document.querySelector('.photo-status')?.hidden===true);
+      assert.equal(uploads.length,1);
+      assert.equal(runs.length,2);
+      assert.equal(runs[1].input,runs[0].input);
+      assert.deepEqual(runs[1].attachments,runs[0].attachments);
+      assert.equal(deletes.length,0);
+      return;
+     }
      if(scenario==='cancel'){
       while(!finishUpload)await new Promise(resolve=>setTimeout(resolve,10));
       await page.getByRole('button',{name:'Remove photo 1'}).click();finishUpload();
