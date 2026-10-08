@@ -911,7 +911,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     textarea.value=drafts.get(session.id) ?? storage.get(draftKey) ?? '';
     const selectedPhotos=[];
     let pendingPhotoSubmission=null;
-    const photoInput=h('input',{class:'photo-input',type:'file',hidden:true,multiple:true,accept:'image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif','aria-label':'Add photos'});
+    const photoInput=h('input',{class:'photo-input',type:'file',hidden:true,multiple:true,accept:'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp','aria-label':'Add photos'});
     const addPhotos=button('Photos',()=>photoInput.click(),'quiet',{'aria-label':'Add photos',title:'Add up to four JPEG, PNG, or WebP photos'});
     const photoTray=h('div',{class:'photo-tray',hidden:true,'aria-label':'Selected photos'});
     const photoStatus=h('p',{class:'photo-status caption',role:'status','aria-live':'polite',hidden:true});

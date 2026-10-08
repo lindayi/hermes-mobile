@@ -236,6 +236,29 @@ cleanup and is not a retention-safe rollback. Neither path deletes production
 data or activates production as part of development. Production, real accounts,
 private photos, and real model calls are never test fixtures.
 
+## Review-thread recovery boundaries
+
+The photo picker advertises only JPEG, PNG, and WebP; unsupported HEIC/HEIF
+still receives explicit guidance if supplied outside the picker filter. A native
+HTTP 413 is described as a run-request rejection, not as evidence that a
+text-only request contained photos.
+
+Upload lease teardown holds the same SQLite writer transaction used by lease
+acquisition and same-key recovery across both descriptor close and pathname
+removal. A failed abort may retain a receiving row, but cannot expose a second
+lease inode to a concurrent retry during teardown.
+
+Before the native memory/skill background-review fork is spawned, the private
+photo agent passes a sanitized copy of the message snapshot. The foreground
+vision input is unchanged; the plain background agent never receives inline
+photo bytes that could enter its own error dump.
+
+A failed capability probe rechecks the exact owned idempotent submission before
+returning a definitive pre-admission rejection. If another matching submission
+has already admitted the run, its existing result is returned instead. Mismatched
+submissions retain the ordinary conflict checks, and an actual pre-admission
+failure without a matching run remains a typed rejection.
+
 ## Acceptance evidence
 
 The feature is accepted only when these assembled boundaries pass; helper-only
@@ -259,15 +282,15 @@ activation success.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `backend/native_run_controls.py` | `c904731785c54f79eb9cb2490df96b8aa4dc33704858c50a9c6d16b2b8928456` |
-| `backend/model_controls.py` | `1719c246cdf1eee80e45ec9a84e7cf912c043241b7dcb2a1f893c14fee2fbed7` |
-| `deploy/native_controls_release.py` | `f9397ef02138be4e685f6c80cde7edde6caa2249b61b588b1c74b664fe327b02` |
+| `backend/native_run_controls.py` | `b4249e3954ab554b0e6efa88f2d52776e6d6d0b94dff0c2fb984a93e71cdd35d` |
+| `backend/model_controls.py` | `db2523949957c0d220cc210cbc0187f5542978e67afeb42d88efd663b90fa6e4` |
+| `deploy/native_controls_release.py` | `a19fe6cbd6c2704613eaf6607a4acad4f503666587367d5667f11418de3fd894` |
 | `backend/app.py` | `61ece82105971fad63e971ceb56a836f67637707182c5b2f1e8c1c996de2847d` |
-| `backend/attachments.py` | `461b4ad7c4271fe92b84f6f0655288aad3303dc38e1b7bce76eae69e929ffce0` |
-| `backend/hermes_client.py` | `c2a5af845399ce55829bbc8cc7e42ccb44b6c0fc9390932efcb77a748da43e14` |
+| `backend/attachments.py` | `ed8db6bfb377f310969a101ba3be3b5cad03f23c15590680cc6af1af4701f1b4` |
+| `backend/hermes_client.py` | `d669f59f7bf3fb2cc5cc671081937fb7328f9b53d50995f966333ae413823116` |
 | `backend/task_reminder_presentation.py` | `fa68480f43a29d1543e55b1e514263d8fdc7f25593264ca5a61ac021b021e1c6` |
 | `backend/native_catalog.py` | `986c43c3b13885605053330adc52a7f7b25ac9608e81bd1e67839fd3f3cb9e49` |
-| `backend/orchestration.py` | `a49df079c0a5ca223e5fce41a914bcb07397fb8182d238320df5a02a931bcc17` |
+| `backend/orchestration.py` | `f0bb271c685c6ef7070e3079cbf25a62e3e38c9d3f3512fb04cb8e56fa898598` |
 | `backend/runs.py` | `3f4ae4fa3ec533f358b8c0c9de012dbf369c1899f69cee9a28045fe1eadb7113` |
 | `requirements.lock` | `ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04` |
 

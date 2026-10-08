@@ -47,6 +47,43 @@ def run_native_probe(tmp_path, code):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_enabled_native_background_review_gets_only_sanitized_snapshot(tmp_path):
+    run_native_probe(tmp_path, r'''
+        import json
+        from unittest.mock import patch
+        from run_agent import AIAgent
+        from backend.native_run_controls import private_photo_agent
+
+        image = 'data:image/png;base64,c3ludGhldGljLXBob3Rv'
+        messages = [{'role': 'user', 'content': [
+            {'type': 'text', 'text': 'Keep this text'},
+            {'type': 'image_url', 'image_url': {'url': image}},
+        ]}]
+        original = json.dumps(messages)
+        captured = []
+        def spawn(agent, snapshot, **kwargs):
+            captured.append((snapshot, kwargs))
+            return (lambda: None), 'synthetic review prompt'
+
+        agent = private_photo_agent(AIAgent.__new__(AIAgent))
+        with patch('agent.background_review.load_background_review_settings',
+                   return_value=(True, {})) as enabled, \
+             patch('agent.background_review.spawn_background_review_thread',
+                   side_effect=spawn), \
+             patch('run_agent.threading.Thread') as thread:
+            agent._spawn_background_review(messages, review_memory=True, review_skills=True)
+        enabled.assert_called_once()
+        thread.return_value.start.assert_called_once()
+        assert len(captured) == 1
+        snapshot, options = captured[0]
+        assert image not in json.dumps(snapshot)
+        assert 'c3ludGhldGljLXBob3Rv' not in json.dumps(snapshot)
+        assert 'Keep this text' in json.dumps(snapshot)
+        assert options['review_memory'] and options['review_skills']
+        assert json.dumps(messages) == original
+    ''')
+
+
 @contextmanager
 def native_photo_api(tmp_path, *, provider_failure=False, aliases=False):
     home = tmp_path / 'native-api-home'

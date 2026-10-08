@@ -9,7 +9,7 @@ _OWNER_SOURCE = Path('/home/lindayi/projects/hermes-mobile')
 _OWNER_RELEASES = Path('/home/lindayi/.local/share/hermes-mobile-deploy/releases')
 _CONTROL_HASHES = {
     'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
-    'backend/native_run_controls.py': 'c904731785c54f79eb9cb2490df96b8aa4dc33704858c50a9c6d16b2b8928456',
+    'backend/native_run_controls.py': 'b4249e3954ab554b0e6efa88f2d52776e6d6d0b94dff0c2fb984a93e71cdd35d',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': 'e79cfee2bf8d32c3f51dd3ee9247e23029376e10c5e55ea21aa373d6d72535c5',
     'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',

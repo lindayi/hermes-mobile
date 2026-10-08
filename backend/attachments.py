@@ -273,14 +273,20 @@ class AttachmentStore:
             os.close(descriptor)
 
     def _release_upload_lease(self, attachment_id):
-        descriptor = self._upload_leases.pop(attachment_id, None)
-        if descriptor is None:
-            return
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-        self._unlink(self.staging / (attachment_id + '.lease'))
+        # Acquisition and same-key recovery use this writer lock. Keep closing
+        # the old inode and removing its pathname in the same critical section,
+        # so a retry cannot acquire an inode that we subsequently unlink.
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            descriptor = self._upload_leases.pop(attachment_id, None)
+            if descriptor is None:
+                return
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            self._unlink(self.staging / (attachment_id + '.lease'))
+            db.commit()
 
     def begin(self, user, session_id, upload_key, *, worker=False):
         if not isinstance(upload_key, str) or not UPLOAD_KEY.fullmatch(upload_key):

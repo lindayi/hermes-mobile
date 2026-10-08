@@ -237,6 +237,13 @@ def _private_photo_class(base):
             return super()._dump_api_request_debug(photo_persistence_copy(api_kwargs),
                                                   reason=reason, error=safe_error)
 
+        def _spawn_background_review(self, messages_snapshot, *args, **kwargs):
+            # The fork uses a plain native agent, not this persistence wrapper.
+            # Sanitize its input before the asynchronous handoff without
+            # mutating the foreground messages needed by the vision model.
+            return super()._spawn_background_review(
+                photo_persistence_copy(messages_snapshot), *args, **kwargs)
+
         def _convert_to_trajectory_format(self, messages, user_query, completed):
             return super()._convert_to_trajectory_format(
                 photo_persistence_copy(messages), photo_persistence_copy(user_query), completed)

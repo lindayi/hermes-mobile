@@ -9,7 +9,8 @@ from contextlib import closing
 
 from .runs import NATIVE_RUN_LOST_ERROR, RunConflict
 
-from .hermes_client import IntegrationUnavailable, NativeRunNotFound, NativeClarificationRejected
+from .hermes_client import (IntegrationUnavailable, NativeRunNotFound,
+                            NativeClarificationRejected, PhotoUnavailableBeforeAdmission)
 from .attachments import AttachmentError
 
 
@@ -144,9 +145,17 @@ class Orchestrator:
             self.gateway.validate_run_size(
                 canonical_id, body['input'], context['history'], attachment_ids,
                 image_sizes, **(selection or {}))
-            photo_preflight = await self.gateway.require_photo_capability(
-                canonical_id, body['input'], context['history'], attachment_ids,
-                image_sizes, (user['id'], user['profile']), **(selection or {}))
+            try:
+                photo_preflight = await self.gateway.require_photo_capability(
+                    canonical_id, body['input'], context['history'], attachment_ids,
+                    image_sizes, (user['id'], user['profile']), **(selection or {}))
+            except PhotoUnavailableBeforeAdmission:
+                # Another same-key submit may have admitted this request while
+                # the probe was waiting. Its result wins over a late rejection.
+                existing = self._existing_submission(user, body, selection, attachment_ids)
+                if existing:
+                    return existing
+                raise
         existing = self._existing_submission(user, body, selection, attachment_ids)
         if existing:
             return existing
