@@ -85,7 +85,7 @@ def test_enabled_native_background_review_gets_only_sanitized_snapshot(tmp_path)
 
 
 @contextmanager
-def native_photo_api(tmp_path, *, provider_failure=False, aliases=False):
+def native_photo_api(tmp_path, *, provider_failure=False, provider_echo=False, aliases=False):
     home = tmp_path / 'native-api-home'
     home.mkdir()
     ready = tmp_path / 'native-api-ready.json'
@@ -162,7 +162,9 @@ def native_photo_api(tmp_path, *, provider_failure=False, aliases=False):
                         'model': 'synthetic-photo-model',
                         'choices': [{'index': 0, 'finish_reason': 'stop',
                                      'message': {'role': 'assistant',
-                                                 'content': 'Synthetic photo description'}}],
+                                                 'content': ('Synthetic photo description ' + image_urls[0]
+                                                     if os.environ.get('NATIVE_PROVIDER_ECHO') == '1'
+                                                     else 'Synthetic photo description')}}],
                         'usage': {'prompt_tokens': 20, 'completion_tokens': 5, 'total_tokens': 25},
                     }).encode()
                     status = 200
@@ -241,6 +243,7 @@ def native_photo_api(tmp_path, *, provider_failure=False, aliases=False):
         'NATIVE_API_KEY': key,
         'NATIVE_API_PORT': str(port),
         'NATIVE_PROVIDER_FAILURE': '1' if provider_failure else '0',
+        'NATIVE_PROVIDER_ECHO': '1' if provider_echo else '0',
         'NATIVE_ALIASES': '1' if aliases else '0',
     }
     process = subprocess.Popen(
@@ -922,9 +925,11 @@ def test_authenticated_runs_reach_native_agent_and_compact_live_photos_without_c
                     assert b'data:image/' not in path.read_bytes(), path
 
 
-def test_failed_photo_result_stays_private_in_status_events_sse_and_history(tmp_path):
+@pytest.mark.parametrize('provider_failure', [True, False])
+def test_photo_result_stays_private_in_status_events_sse_and_history(tmp_path, provider_failure):
     session_id = 'photo-assembled-session'
-    with native_photo_api(tmp_path, provider_failure=True) as (
+    with native_photo_api(tmp_path, provider_failure=provider_failure,
+                          provider_echo=not provider_failure) as (
             native_home, upstream_url, upstream_key, capture_path):
         gateway = GatewayClient(
             upstream_url, upstream_key, execution_ready=True,
@@ -961,19 +966,20 @@ def test_failed_photo_result_stays_private_in_status_events_sse_and_history(tmp_
                 if status['status'] in {'completed', 'failed', 'cancelled'}:
                     break
                 time.sleep(.05)
-            assert status['status'] == 'failed', status
+            expected_status = 'failed' if provider_failure else 'completed'
+            assert status['status'] == expected_status, status
 
             events = client.get(BASE + f'/runs/{run_id}/events?after=0')
             snapshot = client.get(
                 BASE + f'/sessions/{session_id}/messages?limit=500').json()
             surfaces = json.dumps([status, events.text, snapshot])
-            assert 'failed' in surfaces
+            assert expected_status in surfaces
             assert marker not in surfaces
             assert 'data:image/' not in surfaces
             assert events.headers['content-type'].startswith('text/event-stream')
 
             captured = json.loads(capture_path.read_text())
-            assert captured['compactions'][0]['result_failed'] is True
+            assert captured['compactions'][0]['result_failed'] is provider_failure
             assert marker not in json.dumps(captured['compactions'])
             assert 'failed' in json.dumps(captured['compactions'])
             assert marker not in app.state.journal.path.read_bytes().decode(errors='ignore')

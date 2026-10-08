@@ -213,8 +213,7 @@ def _private_photo_class(base):
                     raise
                 if self._mobile_photo_turn and getattr(self, '_mobile_photo_failed', False):
                     raise NativePhotoFailure('The configured vision analyzer could not process the attached image.')
-                if (self._mobile_photo_turn and isinstance(result, dict)
-                        and result.get('failed') is True):
+                if self._mobile_photo_turn:
                     return photo_persistence_copy(result)
                 return result
             finally:
