@@ -45,6 +45,20 @@ def private_path(path):
 CSP="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 
 
+class PhotoResponse(StreamingResponse):
+    def __init__(self, descriptor, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.descriptor = descriptor
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            descriptor, self.descriptor = self.descriptor, None
+            if descriptor is not None:
+                os.close(descriptor)
+
+
 class SecurityMiddleware:
     """Bound ingress before routing/parsing; never drain an oversized upload."""
     def __init__(self, app, origin):
@@ -146,6 +160,8 @@ class Settings:
     attachment_user_quota_bytes: int = 128 * 1024 * 1024
     attachment_global_quota_bytes: int = 512 * 1024 * 1024
     attachment_min_free_bytes: int = 1024 * 1024 * 1024
+    attachment_user_metadata_rows: int | None = None
+    attachment_global_metadata_rows: int | None = None
     photos_enabled: bool = True
 
 
@@ -181,7 +197,9 @@ def create_app(settings=None, *, gateway_client=None):
         journal.path, settings.state_dir/'attachments',
         user_quota_bytes=settings.attachment_user_quota_bytes,
         global_quota_bytes=settings.attachment_global_quota_bytes,
-        min_free_bytes=settings.attachment_min_free_bytes)
+        min_free_bytes=settings.attachment_min_free_bytes,
+        user_metadata_rows=settings.attachment_user_metadata_rows,
+        global_metadata_rows=settings.attachment_global_metadata_rows)
     gateway=gateway_client or GatewayClient(settings.upstream_url,settings.upstream_token,settings.execution_ready)
     notifications=NotificationService(settings.state_dir/'notifications.sqlite',vapid_private_key=settings.vapid_private_key,vapid_public_key=settings.vapid_public_key,session_validator=auth.is_session_active)
     orchestrator=Orchestrator(journal,gateway,catalog,history_loader=gateway.history,
@@ -657,24 +675,26 @@ def create_app(settings=None, *, gateway_client=None):
             catalog.messages(user['profile'],sid,limit=1)
         except KeyError:
             raise HTTPException(404,'Session not found') from None
-        descriptor,content_type,size=await asyncio.to_thread(
-            attachments.open_image,user,sid,attachment_id)
+        descriptor,content_type,size=await attachments._upload_io(
+            attachments.open_image,user,sid,attachment_id,
+            cancel_result=lambda result: os.close(result[0]))
 
         async def image_body():
-            try:
-                remaining=size
-                while remaining:
-                    chunk=await asyncio.to_thread(os.read,descriptor,min(65536,remaining))
-                    if not chunk:
-                        break
-                    remaining-=len(chunk)
-                    yield chunk
-            finally:
-                await asyncio.to_thread(os.close,descriptor)
+            remaining=size
+            while remaining:
+                chunk=await attachments._upload_io(os.read,descriptor,min(65536,remaining))
+                if not chunk:
+                    break
+                remaining-=len(chunk)
+                yield chunk
 
-        return StreamingResponse(image_body(),media_type=content_type,
-            headers={'Content-Length':str(size),'X-Content-Type-Options':'nosniff',
-                     'Cache-Control':'no-store'})
+        try:
+            return PhotoResponse(descriptor,image_body(),media_type=content_type,
+                headers={'Content-Length':str(size),'X-Content-Type-Options':'nosniff',
+                         'Cache-Control':'no-store'})
+        except BaseException:
+            os.close(descriptor)
+            raise
 
     @app.delete(BASE+'/sessions/{sid}/attachments/{attachment_id}')
     async def release_photo(sid:str,attachment_id:str,request:Request,user=Depends(ready_user)):

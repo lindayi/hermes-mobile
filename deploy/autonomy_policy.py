@@ -171,7 +171,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/frontend_release.py': '7749afb862a515fc673712b11278145adfb3d39ba2d012a34ecea257399eade3',
     'deploy/git_source.py': 'c69c7c5a45bc3a16ab26996872c258cc352cf2ec56c19d6256595e18ac713d63',
     'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
-    'deploy/native_controls_release.py': 'efc5a9b6573a9f739324f663f2dadbeb7ce7964d441db9be4b94d1da0d1b2786',
+    'deploy/native_controls_release.py': '394238547ed61ebd82c592966f8d62400d98fd1f592793f1ddb6b5a6972a634e',
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': 'bf01500fb253f7d41ce49d375bba63a9e4d80569eb376a6aeae50f56cf71923f',
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
@@ -214,14 +214,14 @@ SOURCE_FINGERPRINTS = {
     'deploy/hermes-mobile-issue-starter.service': '1711c53ee7b7e4f86b435d3e19ade679b20af960176c53125f14eee3a0dcdb69',
     'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
-    'backend/attachments.py': '1573d0b81a02744c326f0c8a5bcfb3cf97cba88f0058ef01966f595f13a1a292',
+    'backend/attachments.py': 'f72ea45fd7b668075cff69647c24f72b8d31484cfb8a9179ee741ac3900b852c',
     'backend/clarifications.py': '6a6f042beb98881a482efdd85c20555d88a375156a024481ab18a0d5c80e94fd',
     'backend/model_controls.py': 'b47c0c10360fd4ba30fa4a16da046ffbcca1ee60e251b82ad872952108e3dace',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',  # gitleaks:allow
     'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
     'backend/runs.py': 'a3392c2205369c2cad9b477913f9b4d0b0276b41825e225a77c79d7d99e2b0a3',
     # Accepted PR45 naming bytes in this assembly; no naming-source rewrite.
-    'backend/app.py': '693b0cc5f4dfe96441b98a74fa97d457b9d794028c0ccd2d8836d8f117aa7939',
+    'backend/app.py': '1243aa117230d3b55e13351b351bf4e7035e7c6fc8d63467f13cb8b5adb53716',
     'backend/auth.py': '411529a1d53bdcd01eae4bf5e35c44d3d5099e4dc9e77eb9dbbe67df6433f335',  # gitleaks:allow
     'backend/auth_store.py': '8827856de744de03648924b0ff83011bdb70417781620724acd84078181c193e',  # gitleaks:allow
     'backend/background_delivery.py': '2da2bdd89d27f18beee0e0099d1bb39b325a9f70dcba099d55ceb3dea2e88629',

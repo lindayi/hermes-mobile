@@ -56,11 +56,32 @@ also requires at least 1 GiB of free space. Concurrent uploads and cleanup use
 the same serialized accounting; no non-expired linked image is evicted to make
 space. Disk-full, low-space, quota, decode, and interrupted-body failures return
 bounded actionable errors and release or expire their reservation safely.
+Metadata has a separate atomic per-user and global row admission limit. Every
+row counts, including receiving rows, expired tombstones, and linked history.
+The defaults derive from the byte quotas at one row per 4 KiB: 32,768 per user
+and 131,072 globally. Configure `attachment_user_metadata_rows` and
+`attachment_global_metadata_rows` to positive integer limits; omission derives
+them from the configured quotas. Owner, profile, and Session identifiers are
+limited to 512 UTF-8 bytes each; upload keys are limited to 128 ASCII characters.
+The fixed schema, bounded identifiers, opaque IDs, and fixed-size image metadata
+bound each admitted row and its indexes. Admission reserves another 4 KiB of
+free-space headroom for metadata. These limits are capacity controls, not an
+attachment-count limit per Session. Existing over-limit stores reject new keys
+but still allow reads, existing-key recovery, release, and authorized cleanup.
+Admission never erases linked history or shortens tombstone retention to make room.
+
 An image reader holds a shared lock on its open file descriptor. Release and
 expiry remove the image and clear its charged size only after they acquire the
 exclusive lock; otherwise they retain the charge and retry cleanup later. Kernel
 locks end when a reader process exits, so the same rule works across workers and
 after a crash or restart.
+Opening and reading use bounded workers. Cancellation drains the actual worker
+before closing its returned descriptor. The response owns that descriptor and
+closes it exactly once, including failure or cancellation while sending response
+headers before body iteration, body failure, client disconnect, and completion.
+Decoder cancellation likewise drains the actual decoder before removing staging,
+releasing its reservation or lease, or returning its worker slot. The event loop
+remains responsive while worker ownership is retained.
 
 Unlinked uploads expire after 24 hours. Linked photos expire 30 days after
 upload, independently of the abandoned-upload TTL. Runs in queued, active, or
@@ -73,6 +94,12 @@ durable orphans without traversing unrelated state. The first inventory must
 finish before admission. Routine scans resume across known files without
 re-closing admission; discovering an unaccounted orphan fails admission closed
 until the bounded reconciliation pass completes.
+Eligible-row cleanup keeps a transactional cursor ordered by creation time and
+opaque ID. Each bounded batch advances past locked readers and live upload leases;
+the cursor survives restart and wraps after reaching the end. Skipped files and
+reservations remain intact and charged. A full blocked batch therefore cannot
+starve later eligible rows. Run pins, reader locks, and retention authorization
+remain required on every visit.
 
 ## Run, history, and recovery
 

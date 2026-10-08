@@ -41,6 +41,370 @@ def png_fixture(seed=0):
             + chunk(b'IEND', b''))
 
 
+def test_retained_metadata_admission_is_atomic_and_survives_restart(tmp_path):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        store.user_metadata_rows = 96
+        store.global_metadata_rows = 128
+        user = client.get(BASE + '/auth/me').json()['user']
+
+        def cycle(index):
+            async def chunks():
+                yield png_fixture(index % 8)
+            try:
+                row = asyncio.run(store.upload(user, 'wa-1', f'metadata-{index}', chunks()))
+            except attachments_module.AttachmentError as exc:
+                assert exc.status == 413
+                return None
+            store.release(user, 'wa-1', row['id'])
+            return row['id']
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            ids = [value for value in pool.map(cycle, range(160)) if value]
+        assert len(ids) == 96
+        with store.connection() as db:
+            assert db.execute('SELECT count(*) FROM attachments').fetchone()[0] == 96
+            assert store._usage(db) == 0
+        restarted = attachments_module.AttachmentStore(
+            store.database, store.root, user_metadata_rows=96, global_metadata_rows=128,
+            min_free_bytes=0)
+        with pytest.raises(attachments_module.AttachmentError, match='metadata'):
+            restarted.begin(user, 'wa-1', 'over-limit')
+        # Existing tombstones and immutable bindings are not admission eviction targets.
+        with pytest.raises(attachments_module.AttachmentError) as expired:
+            restarted.metadata(user, 'wa-1', ids[0])
+        assert expired.value.status == 410
+        restarted.cleanup(limit=256, now=time.time() + 32 * 86400)
+        assert restarted.begin(user, 'wa-1', 'after-retention')[1]
+
+
+def test_metadata_global_limit_counts_receiving_and_linked_tombstones(tmp_path):
+    with photo_client(tmp_path, attachment_user_metadata_rows=8,
+                      attachment_global_metadata_rows=12) as (app, client):
+        store = app.state.attachments
+        owner = client.get(BASE + '/auth/me').json()['user']
+        users = [owner, {'id': 'synthetic-second-owner', 'profile': 'default'}]
+        rows = [store.begin(users[index % 2], 'wa-1', f'global-{index}')[0]
+                for index in range(12)]
+        with store.connection() as db:
+            db.execute("UPDATE attachments SET state='expired',reserved_bytes=0,run_id='immutable-run' "
+                       "WHERE id=?", (rows[0]['id'],))
+            db.commit()
+        with pytest.raises(attachments_module.AttachmentError, match='metadata'):
+            store.begin(owner, 'wa-1', 'over-global')
+        # Even below today's footprint limit, legacy over-limit stores allow recovery.
+        store.user_metadata_rows = store.global_metadata_rows = 1
+        assert store.begin(users[1], 'wa-1', 'global-1', worker=True)[0]['id'] == rows[1]['id']
+        store._release_upload_lease(rows[1]['id'])
+        store.abort(rows[1]['id'])
+        with store.connection() as db:
+            assert db.execute("SELECT run_id FROM attachments WHERE id=?",
+                              (rows[0]['id'],)).fetchone()[0] == 'immutable-run'
+
+
+@pytest.mark.parametrize('field', ['id', 'profile', 'session'])
+def test_metadata_admission_bounds_persisted_identifier_bytes(tmp_path, field):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        session = 'wa-1'
+        if field == 'session':
+            session = '\u00e9' * 257
+        else:
+            user[field] = '\u00e9' * 257
+        with pytest.raises(attachments_module.AttachmentError) as rejected:
+            store.begin(user, session, 'bounded-input')
+        assert rejected.value.status == 422
+        with store.connection() as db:
+            assert db.execute('SELECT count(*) FROM attachments').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('blocked_state', ['receiving', 'releasing', 'bound', 'pending'])
+@pytest.mark.parametrize('target_state', ['receiving', 'releasing', 'bound', 'pending', 'expired'])
+def test_cleanup_cursor_passes_a_full_blocked_batch_across_restart(
+        tmp_path, blocked_state, target_state):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        now = time.time()
+        locks = []
+        try:
+            with store.connection() as db:
+                run, _ = app.state.journal.submit(user['id'], user['profile'], 'wa-1',
+                                                 'synthetic', 'cleanup-cursor-run')
+                db.execute("UPDATE runs SET status='completed' WHERE id=?", (run['id'],))
+                for index in range(66):
+                    attachment_id = f'{index + 1:032x}'
+                    name = attachment_id + '.png' if blocked_state != 'receiving' else None
+                    if name:
+                        (store.objects / name).write_bytes(b'charged')
+                        descriptor = os.open(store.objects / name, os.O_RDONLY)
+                        attachments_module.fcntl.flock(descriptor, attachments_module.fcntl.LOCK_SH)
+                        locks.append(descriptor)
+                    else:
+                        (store.staging / (attachment_id + '.part')).write_bytes(b'charged')
+                        locks.append(store._acquire_upload_lease(attachment_id))
+                    db.execute('''INSERT INTO attachments(id,user_id,profile,session_id,upload_key,
+                        size,reserved_bytes,stored_name,state,run_id,created_at,expires_at,metadata_expires_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                        (attachment_id, user['id'], user['profile'], 'wa-1', f'blocked-{index}',
+                         7 if name else 0, 0 if name else attachments_module.RESERVATION_BYTES,
+                         name, blocked_state, run['id'] if blocked_state == 'bound' else None,
+                         now - 2 * 86400 + index, now - 86400, now + 86400))
+                target = 'f' * 32
+                name = target + '.png' if target_state not in ('receiving', 'expired') else None
+                if name:
+                    (store.objects / name).write_bytes(b'reclaim')
+                elif target_state == 'receiving':
+                    (store.staging / (target + '.part')).write_bytes(b'reclaim')
+                db.execute('''INSERT INTO attachments(id,user_id,profile,session_id,upload_key,
+                    size,reserved_bytes,stored_name,state,run_id,created_at,expires_at,metadata_expires_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                    (target, user['id'], user['profile'], 'wa-1', 'unblocked',
+                     7 if name else 0,
+                     attachments_module.RESERVATION_BYTES if target_state == 'receiving' else 0,
+                     name, target_state, run['id'] if target_state == 'bound' else None,
+                     now - 86400, now - 1, now - 1))
+                db.commit()
+            store.cleanup(limit=64)
+            restarted = attachments_module.AttachmentStore(store.database, store.root)
+            restarted.cleanup(limit=64)
+            assert not (store.objects / (target + '.png')).exists()
+            assert not (store.staging / (target + '.part')).exists()
+            with store.connection() as db:
+                rows = db.execute("SELECT * FROM attachments WHERE id!=?", (target,)).fetchall()
+                assert len(rows) == 66
+                assert all(row['size'] + row['reserved_bytes'] > 0 for row in rows)
+                target_row = db.execute('SELECT * FROM attachments WHERE id=?', (target,)).fetchone()
+                assert target_row is None or target_row['state'] == 'expired'
+            for index in range(66):
+                attachment_id = f'{index + 1:032x}'
+                path = (store.staging / (attachment_id + '.part') if blocked_state == 'receiving'
+                        else store.objects / (attachment_id + '.png'))
+                assert path.read_bytes() == b'charged'
+            assert all(os.fstat(descriptor) for descriptor in locks)
+        finally:
+            for descriptor in locks:
+                os.close(descriptor)
+
+
+@pytest.mark.parametrize('failure', [False, True])
+def test_cancelled_decoder_keeps_staging_reservation_and_lease_until_exit(
+        tmp_path, monkeypatch, failure):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        started, finish = threading.Event(), threading.Event()
+        normalize = attachments_module._normalize_image
+
+        def blocked_decode(path):
+            with open(path, 'rb') as source:
+                started.set()
+                assert finish.wait(5)
+                assert source.read()
+            if failure:
+                raise attachments_module.AttachmentError(422, 'synthetic decode failure')
+            return normalize(path)
+
+        monkeypatch.setattr(attachments_module, '_normalize_image', blocked_decode)
+
+        async def chunks():
+            yield png_fixture()
+
+        async def exercise():
+            task = asyncio.create_task(store.upload(user, 'wa-1', 'decoder-cancel', chunks()))
+            assert await asyncio.to_thread(started.wait, 2)
+            task.cancel()
+            await asyncio.sleep(.05)
+            try:
+                assert not task.done()
+                with store.connection() as db:
+                    row = db.execute('SELECT * FROM attachments').fetchone()
+                    assert row and row['reserved_bytes'] == attachments_module.RESERVATION_BYTES
+                assert (store.staging / (row['id'] + '.part')).exists()
+                assert store._upload_is_live(row['id'])
+                task.cancel()  # Repeated cancellation cannot relinquish worker ownership.
+                await asyncio.sleep(.01)
+                assert not task.done()
+            finally:
+                finish.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        asyncio.run(exercise())
+        assert not list(store.staging.iterdir())
+        with store.connection() as db:
+            assert store._usage(db) == 0
+        monkeypatch.setattr(attachments_module, '_normalize_image', normalize)
+        assert asyncio.run(store.upload(user, 'wa-1', 'decoder-cancel', chunks()))['size'] > 0
+
+
+def _photo_scope(client, attachment_id):
+    path = BASE + '/sessions/wa-1/attachments/' + attachment_id
+    return {'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.4'},
+            'http_version': '1.1', 'method': 'GET', 'scheme': 'http',
+            'path': path, 'raw_path': path.encode(), 'query_string': b'',
+            'root_path': '', 'server': ('testserver', 80), 'client': ('127.0.0.1', 1),
+            'headers': [(b'cookie', '; '.join(f'{k}={v}' for k, v in client.cookies.items()).encode())]}
+
+
+@pytest.mark.parametrize('after_open', [False, True])
+def test_cancelled_read_open_drains_worker_and_closes_exact_descriptor(
+        tmp_path, monkeypatch, after_open):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        row = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+                          headers={'Idempotency-Key': 'read-cancel'}).json()
+        started, finish = threading.Event(), threading.Event()
+        original = store.open_image
+        opened = []
+
+        def blocked_open(*args):
+            if after_open:
+                result = original(*args)
+                opened.append(result[0])
+            started.set()
+            assert finish.wait(5)
+            if not after_open:
+                result = original(*args)
+                opened.append(result[0])
+            return result
+
+        monkeypatch.setattr(store, 'open_image', blocked_open)
+        async def receive():
+            return {'type': 'http.request', 'body': b'', 'more_body': False}
+        async def send(message):
+            pass
+        async def exercise():
+            task = asyncio.create_task(app(_photo_scope(client, row['id']), receive, send))
+            assert await asyncio.to_thread(started.wait, 2)
+            task.cancel()
+            await asyncio.sleep(.05)
+            try:
+                assert not task.done()
+                task.cancel()
+                await asyncio.sleep(.01)
+                assert not task.done()
+            finally:
+                finish.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        asyncio.run(exercise())
+        assert len(opened) == 1
+        with pytest.raises(OSError):
+            os.fstat(opened[0])
+        unrelated = os.open(store.database, os.O_RDONLY)
+        try:
+            store.release(user, 'wa-1', row['id'])
+            store.cleanup()
+            assert os.fstat(unrelated)
+            with store.connection() as db:
+                assert store._usage(db) == 0
+        finally:
+            os.close(unrelated)
+
+
+def test_photo_disconnect_drains_read_before_descriptor_can_be_reused(tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        row = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+                          headers={'Idempotency-Key': 'disconnect-reader'}).json()
+        started, finish = threading.Event(), threading.Event()
+        original_read = os.read
+        readers = []
+        def blocked_read(descriptor, count):
+            readers.append(descriptor)
+            started.set()
+            assert finish.wait(5)
+            return original_read(descriptor, count)
+        monkeypatch.setattr(os, 'read', blocked_read)
+
+        request_sent = False
+        async def receive():
+            nonlocal request_sent
+            if not request_sent:
+                request_sent = True
+                return {'type': 'http.request', 'body': b'', 'more_body': False}
+            assert await asyncio.to_thread(started.wait, 2)
+            return {'type': 'http.disconnect'}
+        async def send(message):
+            pass
+        async def exercise():
+            scope = _photo_scope(client, row['id'])
+            scope['asgi']['spec_version'] = '2.0'
+            task = asyncio.create_task(app(scope, receive, send))
+            assert await asyncio.to_thread(started.wait, 2)
+            await asyncio.sleep(.05)
+            try:
+                assert not task.done()
+                assert os.fstat(readers[0])
+                store.release(user, 'wa-1', row['id'])
+                with store.connection() as db:
+                    assert store._usage(db) == row['size']
+            finally:
+                finish.set()
+                await asyncio.wait_for(task, 2)
+        asyncio.run(exercise())
+        assert len(readers) == 1
+        with pytest.raises(OSError):
+            os.fstat(readers[0])
+        unrelated = os.open(store.database, os.O_RDONLY)
+        try:
+            store.cleanup()
+            assert os.fstat(unrelated)
+            with store.connection() as db:
+                assert store._usage(db) == 0
+        finally:
+            os.close(unrelated)
+
+
+@pytest.mark.parametrize('failure', ['start-error', 'start-cancel', 'body-error',
+                                     'body-cancel', 'normal'])
+def test_photo_response_finalizes_reader_even_before_first_iteration(tmp_path, monkeypatch, failure):
+    with photo_client(tmp_path) as (app, client):
+        store = app.state.attachments
+        user = client.get(BASE + '/auth/me').json()['user']
+        row = client.post(BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+                          headers={'Idempotency-Key': 'response-finalize'}).json()
+        original = store.open_image
+        opened = []
+        closed = []
+        original_close = os.close
+        def record_open(*args):
+            result = original(*args)
+            opened.append(result[0])
+            return result
+        def record_close(descriptor):
+            if descriptor in opened:
+                closed.append(descriptor)
+            original_close(descriptor)
+        monkeypatch.setattr(store, 'open_image', record_open)
+        monkeypatch.setattr(os, 'close', record_close)
+        async def receive():
+            return {'type': 'http.request', 'body': b'', 'more_body': False}
+        async def send(message):
+            kind = 'start' if message['type'] == 'http.response.start' else 'body'
+            if failure == kind + '-error':
+                raise RuntimeError('synthetic send failure')
+            if failure == kind + '-cancel':
+                raise asyncio.CancelledError()
+        async def exercise():
+            if failure == 'normal':
+                await app(_photo_scope(client, row['id']), receive, send)
+            else:
+                with pytest.raises((RuntimeError, asyncio.CancelledError)):
+                    await app(_photo_scope(client, row['id']), receive, send)
+        asyncio.run(exercise())
+        assert len(opened) == 1
+        assert closed == opened
+        with pytest.raises(OSError):
+            os.fstat(opened[0])
+        store.release(user, 'wa-1', row['id'])
+        with store.connection() as db:
+            assert store._usage(db) == 0
+
+
 @contextmanager
 def photo_client(tmp_path, *, gateway_client=None, raise_server_exceptions=True, **settings_options):
     home = tmp_path / 'native'

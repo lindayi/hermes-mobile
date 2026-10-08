@@ -16,6 +16,7 @@ import stat
 import time
 import warnings
 
+import anyio
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 
@@ -24,6 +25,7 @@ MAX_IMAGE_BYTES = 2 * 1024 * 1024
 MAX_IMAGES_PER_RUN = 4
 MAX_IMAGE_PIXELS = 40_000_000
 RESERVATION_BYTES = MAX_INPUT_BYTES + MAX_IMAGE_BYTES
+METADATA_ROW_BYTES = 4096
 UPLOAD_IO_WORKERS = 4
 _IMAGE_DECODE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix='photo-decode')
 _UPLOAD_IO_EXECUTOR = ThreadPoolExecutor(max_workers=UPLOAD_IO_WORKERS, thread_name_prefix='photo-storage')
@@ -127,7 +129,8 @@ def _normalize_image(path):
 
 class AttachmentStore:
     def __init__(self, database, root, *, user_quota_bytes=128 * 1024 * 1024,
-                 global_quota_bytes=512 * 1024 * 1024, min_free_bytes=1024 * 1024 * 1024):
+                 global_quota_bytes=512 * 1024 * 1024, min_free_bytes=1024 * 1024 * 1024,
+                 user_metadata_rows=None, global_metadata_rows=None):
         self.database = Path(database).resolve()
         self.root = Path(root)
         if (self.root.is_symlink()
@@ -138,6 +141,13 @@ class AttachmentStore:
         self.user_quota_bytes = user_quota_bytes
         self.global_quota_bytes = global_quota_bytes
         self.min_free_bytes = min_free_bytes
+        self.user_metadata_rows = (max(1, user_quota_bytes // METADATA_ROW_BYTES)
+                                   if user_metadata_rows is None else user_metadata_rows)
+        self.global_metadata_rows = (max(1, global_quota_bytes // METADATA_ROW_BYTES)
+                                     if global_metadata_rows is None else global_metadata_rows)
+        if any(type(value) is not int or value < 1
+               for value in (self.user_metadata_rows, self.global_metadata_rows)):
+            raise ValueError('Photo metadata row limits must be positive integers')
         self._upload_leases = {}
         self._upload_io_slots = asyncio.Semaphore(UPLOAD_IO_WORKERS)
         self._orphan_iterators = [None, None]
@@ -174,7 +184,12 @@ class AttachmentStore:
                 UNIQUE(user_id,profile,session_id,upload_key));
                 CREATE INDEX IF NOT EXISTS attachments_owner_session
                     ON attachments(user_id,profile,session_id,state);
-                CREATE INDEX IF NOT EXISTS attachments_run ON attachments(run_id);''')
+                CREATE INDEX IF NOT EXISTS attachments_run ON attachments(run_id);
+                CREATE INDEX IF NOT EXISTS attachments_cleanup_order ON attachments(created_at,id);
+                CREATE TABLE IF NOT EXISTS attachment_cleanup_cursor(
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    created_at REAL NOT NULL, attachment_id TEXT NOT NULL);
+                INSERT OR IGNORE INTO attachment_cleanup_cursor VALUES(1,-1,'');''')
             columns = {row[1] for row in db.execute('PRAGMA table_info(attachments)')}
             if 'position' not in columns:
                 db.execute('ALTER TABLE attachments ADD COLUMN position INTEGER')
@@ -260,6 +275,9 @@ class AttachmentStore:
     def begin(self, user, session_id, upload_key, *, worker=False):
         if not isinstance(upload_key, str) or not UPLOAD_KEY.fullmatch(upload_key):
             raise AttachmentError(422, 'A valid photo upload idempotency key is required.')
+        if any(not isinstance(value, str) or not value or len(value.encode('utf-8')) > 512
+               for value in (user['id'], user['profile'], session_id)):
+            raise AttachmentError(422, 'Photo owner and session identifiers must be bounded.')
         self.cleanup(limit=16)
         if not self._orphan_reconciled:
             raise AttachmentError(503, 'Photo storage is reconciling; retry the upload shortly.')
@@ -306,6 +324,11 @@ class AttachmentStore:
                 if existing['state'] == 'expired':
                     raise AttachmentError(410, 'This photo upload expired; select the photo again.')
                 return dict(existing), False
+            counts = db.execute('''SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN user_id=? THEN 1 ELSE 0 END),0) FROM attachments''',
+                (user['id'],)).fetchone()
+            if counts[0] >= self.global_metadata_rows or counts[1] >= self.user_metadata_rows:
+                raise AttachmentError(413, 'Photo metadata storage is full; retry after retention cleanup.')
             global_used = self._usage(db)
             user_used = self._usage(db, user['id'])
             reserved_pending = db.execute(
@@ -318,7 +341,7 @@ class AttachmentStore:
             if (global_used + RESERVATION_BYTES > self.global_quota_bytes
                     or user_used + RESERVATION_BYTES > self.user_quota_bytes):
                 raise AttachmentError(413, 'Photo storage quota is full; remove unneeded photos or try later.')
-            if free - reserved_pending - RESERVATION_BYTES < self.min_free_bytes:
+            if free - reserved_pending - RESERVATION_BYTES - METADATA_ROW_BYTES < self.min_free_bytes:
                 raise AttachmentError(507, 'The server is preserving required free space; photo upload is unavailable.')
             attachment_id = secrets.token_hex(16)
             descriptor = self._acquire_upload_lease(attachment_id) if worker else None
@@ -339,25 +362,32 @@ class AttachmentStore:
                 self._upload_leases[attachment_id] = descriptor
             return dict(db.execute('SELECT * FROM attachments WHERE id=?', (attachment_id,)).fetchone()), True
 
-    async def _upload_io(self, operation, *args, cancel_result=None, on_submit=None):
+    async def _upload_io(self, operation, *args, cancel_result=None, on_submit=None,
+                         executor=None):
         async with self._upload_io_slots:
             future = asyncio.get_running_loop().run_in_executor(
-                _UPLOAD_IO_EXECUTOR, operation, *args)
+                executor or _UPLOAD_IO_EXECUTOR, operation, *args)
             if on_submit is not None:
                 on_submit()
             try:
                 return await asyncio.shield(future)
             except asyncio.CancelledError:
+                # A cancelled waiter still owns the actual worker and its result.
+                with anyio.CancelScope(shield=True):
+                    while not future.done():
+                        try:
+                            await asyncio.shield(future)
+                        except asyncio.CancelledError:
+                            continue
+                        except BaseException:
+                            break
                 try:
-                    result = await asyncio.shield(future)
+                    result = future.result()
                 except BaseException:
                     pass
                 else:
                     if cancel_result is not None:
-                        try:
-                            cancel_result(result)
-                        except OSError:
-                            pass
+                        cancel_result(result)
                 raise
 
     def _publish_upload(self, attachment_id, user_id, stage, digest, normalized,
@@ -442,8 +472,8 @@ class AttachmentStore:
 
             await self._upload_io(
                 _sync_and_close, descriptor, on_submit=transfer_descriptor)
-            normalized, content_type, width, height, suffix = await asyncio.get_running_loop().run_in_executor(
-                _IMAGE_DECODE_EXECUTOR, _normalize_image, stage)
+            normalized, content_type, width, height, suffix = await self._upload_io(
+                _normalize_image, stage, executor=_IMAGE_DECODE_EXECUTOR)
             return await self._upload_io(
                 self._publish_upload, attachment_id, user['id'], stage, digest.hexdigest(),
                 normalized, content_type, width, height, suffix)
@@ -673,15 +703,25 @@ class AttachmentStore:
         removed = 0
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            rows = db.execute('''SELECT a.* FROM attachments a LEFT JOIN runs r ON r.id=a.run_id
-                WHERE (a.state='receiving' AND a.created_at<=?)
+            cursor = db.execute('SELECT created_at,attachment_id FROM attachment_cleanup_cursor '
+                               'WHERE singleton=1').fetchone()
+            query = '''SELECT a.* FROM attachments a LEFT JOIN runs r ON r.id=a.run_id
+                WHERE ((a.state='receiving' AND a.created_at<=?)
                    OR (a.state='pending' AND a.expires_at<=?)
                    OR (a.state='releasing')
                    OR (a.state='bound' AND a.expires_at<=?
                        AND r.status IN ('completed','failed','cancelled'))
-                   OR (a.state='expired' AND a.run_id IS NULL AND a.metadata_expires_at<=?)
-                ORDER BY a.created_at LIMIT ?''',
-                (now - ABANDONED_TTL, now, now, now, max(1, min(int(limit), 256)))).fetchall()
+                   OR (a.state='expired' AND a.run_id IS NULL AND a.metadata_expires_at<=?))
+                   AND (a.created_at,a.id) > (?,?)
+                ORDER BY a.created_at,a.id LIMIT ?'''
+            params = (now - ABANDONED_TTL, now, now, now)
+            batch_size = max(1, min(int(limit), 256))
+            rows = db.execute(query, (*params, *cursor, batch_size)).fetchall()
+            if not rows:
+                rows = db.execute(query, (*params, -1, '', batch_size)).fetchall()
+            if rows:
+                db.execute('UPDATE attachment_cleanup_cursor SET created_at=?,attachment_id=? '
+                          'WHERE singleton=1', (rows[-1]['created_at'], rows[-1]['id']))
             for row in rows:
                 if row['state'] == 'receiving' and self._upload_is_live(row['id']):
                     continue
