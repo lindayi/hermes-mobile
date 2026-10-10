@@ -2277,6 +2277,108 @@ def test_neutral_new_head_keeps_unscored_source_unknown_without_deadlock(tmp_pat
     assert not result["review_valid"]
 
 
+@pytest.mark.parametrize("failure", ["source", "check"])
+@pytest.mark.parametrize("review_state", [
+    None, "PENDING", "DISMISSED", "stale", "wrong_author",
+    "COMMENTED", "APPROVED", "CHANGES_REQUESTED",
+])
+def test_neutral_waiting_review_serializes_source_failure(
+        tmp_path, monkeypatch, failure, review_state):
+    api, store, coordinator, _ = _ready_sha_bound_handoff(tmp_path)
+    coordinator.run(apply=True)
+    neutral = next(a for a in store.actions().values() if a.get("task_type") == "neutral")
+    api.head_sha = api.pull["head"]["sha"] = NEXT_RESULT_HEAD
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.complete_task(
+        neutral["task_id"], neutral, head_sha=NEXT_RESULT_HEAD, base_sha=CURRENT_MAIN,
+    )
+    api.unresolved = False
+    coordinator.run(apply=True)
+    assert store.action(neutral["key"])["handoff_state"] == "waiting_review"
+    assert api.fix_attempts == 2
+
+    api.review_state = (
+        "CHANGES_REQUESTED" if review_state in {"stale", "wrong_author"} else review_state
+    )
+    if review_state == "stale":
+        api.review_sha = RESULT_HEAD
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.source_failure = True
+    api.source_failure_sha = NEXT_RESULT_HEAD
+    if failure == "check" or review_state == "wrong_author":
+        original_get_all = api.get_all
+
+        def get_all(route, *, collection=None):
+            values = original_get_all(route, collection=collection)
+            if failure == "check" and "/check-runs?" in route:
+                for check in values:
+                    if check["name"] == "source-ci":
+                        check["conclusion"] = "failure"
+            if review_state == "wrong_author" and "/reviews?" in route:
+                for review in values:
+                    if review["user"]["id"] == COPILOT_REVIEWER:
+                        review["user"]["id"] = COPILOT_AGENT
+            return values
+
+        monkeypatch.setattr(api, "get_all", get_all)
+    if review_state in {"CHANGES_REQUESTED", "stale", "wrong_author"}:
+        api.unresolved = True
+    for _ in range(3):
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+    reviewed = review_state in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+    assert api.fix_attempts == (3 if reviewed else 2)
+    assert api.review_attempts == 0
+    assert not result["auto_merge_eligible"]
+    action = StateStore(store.path).action(neutral["key"])
+    if review_state in {"COMMENTED", "APPROVED"}:
+        assert action is None or action["handoff_state"] == "done"
+    else:
+        assert action["handoff_state"] == "waiting_review"
+
+
+def test_missing_copilot_lost_post_reservation_survives_restart(tmp_path, monkeypatch):
+    api = FakeApi(source_failure=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(a for a in store.actions().values() if a["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    api.source_failure = False
+    api.review_state = None
+    original_write = api.write
+    posts = []
+
+    def write(route, body):
+        if route.endswith("/requested_reviewers"):
+            posts.append((route, body))
+            reservation = StateStore(path).action(f"copilot-review-request:16:{HEAD}")
+            assert reservation["status"] == "sending"
+            raise ApiError("POST response lost", status=503)
+        return original_write(route, body)
+
+    monkeypatch.setattr(api, "write", write)
+    coordinator.run(apply=True)
+    key = f"copilot-review-request:16:{HEAD}"
+    uncertain = StateStore(path).action(key)
+    assert uncertain["status"] == "uncertain"
+    assert uncertain["head"] == HEAD
+    assert len(posts) == 1
+    for _ in range(3):
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    assert StateStore(path).action(key) == uncertain
+    assert len(posts) == 1
+    assert api.get("repos/lindayi/hermes-mobile/pulls/16/requested_reviewers") == {
+        "users": [], "teams": [],
+    }
+    assert api.fix_attempts == 1
+    assert api.review_attempts == 0
+
+
 def test_stale_base_neutral_reconciliation_has_a_separate_budget(tmp_path):
     api, store, coordinator, _ = _ready_sha_bound_handoff(tmp_path)
     store._mutate(lambda state: state["enrollments"]["16"].update(
@@ -4792,6 +4894,10 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
                    for action in StateStore(path).actions().values())
     api.unresolved = True
     api.review_state = "CHANGES_REQUESTED"
+    api.progress_review = {
+        **api.progress_review, "commit_id": api.head_sha,
+        "state": "CHANGES_REQUESTED", "submitted_at": "2026-10-01T12:10:30Z",
+    }
     for _ in range(3):
         resumed = Coordinator(
             api, StateStore(path), clock=lambda: 1790856660,

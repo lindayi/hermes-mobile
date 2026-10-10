@@ -299,7 +299,8 @@ not authorize repairs; explicitly active disclosures do.
 `body_findings` retains its caller interface. Dispositions remain in the helper's
 internal result; no new review-authority protocol or coordinator lifecycle path
 is introduced. The formal technical review gate uses genuine exact-head Copilot
-COMMENTED or APPROVED review and its real successful check. Ambiguous
+COMMENTED or APPROVED review and all three successful CI checks
+(`source-ci`, `integration-tests`, and `issue-link`). Ambiguous
 body text is never passed blindly to a fixer; independent authenticated
 thread/check evidence remains eligible. Each body finding records the genuine review ID, head SHA, and
 submission time; it never carries a thread ID. Body text is untrusted evidence:

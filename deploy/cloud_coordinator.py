@@ -3749,18 +3749,6 @@ class Coordinator:
             busy = True
             busy_action_keys.add(key)
 
-        def completed_neutral_handoff(action):
-            return (
-                isinstance(action, dict)
-                and action.get("kind") == "fix"
-                and action.get("task_type") == "neutral"
-                and action.get("status") == "completed"
-                and action.get("handoff_state") == "waiting_review"
-                and action.get("ready_state") == "done"
-                and action.get("receipt_result") == "ready"
-                and _valid_receipt_proof(action, snapshot["comments"])
-            )
-
         historical_dirty = (
             snapshot.get("historical_base") is True
             and snapshot["pull"].get("mergeable") is False
@@ -4060,10 +4048,7 @@ class Coordinator:
                     handoff_waiting = self._advance_task_handoff(
                         key, action, snapshot, deferred=handoffs,
                     )
-                    if (handoff_waiting
-                            and not completed_neutral_handoff(
-                                self.store.action(key),
-                            )):
+                    if handoff_waiting:
                         mark_busy()
                 elif (action.get("handoff_state") == "waiting_review"
                       and action.get("review_requirement") == "missing_independent_review"
@@ -4234,10 +4219,7 @@ class Coordinator:
                                         key, self.store.action(key), snapshot,
                                         deferred=handoffs,
                                     )
-                                    if (handoff_waiting
-                                            and not completed_neutral_handoff(
-                                                self.store.action(key),
-                                            )):
+                                    if handoff_waiting:
                                         mark_busy()
                                 else:
                                     event = _lifecycle_event(
@@ -4921,7 +4903,6 @@ class Coordinator:
                 isinstance(action, dict)
                 and action.get("issue") == number
                 and action.get("kind") == "fix"
-                and action.get("task_type") != "neutral"
                 and action.get("status") == "completed"
                 and action.get("handoff_state") == "waiting_review"
                 and action.get("review_requirement") == "missing_copilot_review"
@@ -4986,7 +4967,6 @@ class Coordinator:
                 isinstance(action, dict)
                 and action.get("issue") == number
                 and action.get("kind") == "fix"
-                and action.get("task_type") != "neutral"
                 and action.get("status") == "completed"
                 and action.get("handoff_state") == "waiting_review"
                 and action.get("review_requirement") == "missing_copilot_review"
@@ -5219,11 +5199,32 @@ class Coordinator:
                     pull_number=number, source_failure=snapshot["source_failure"],
                     reviews=snapshot["reviews"],
                 )
+        latest_copilot = latest_reviews(snapshot["reviews"], COPILOT_REVIEWER_ID)
+        neutral_rejection_ready = (
+            snapshot["reviews_complete"] is True
+            and positive_id(pull_user.get("id") if isinstance(pull_user, dict) else None)
+            and pull_user["id"] != COPILOT_REVIEWER_ID
+            and latest_copilot and len(latest_copilot) == 1
+            and latest_copilot[0].get("state") == "CHANGES_REQUESTED"
+            and latest_copilot[0].get("commit_id") == head
+            and latest_copilot[0].get("dismissed") is not True
+            and latest_copilot[0].get("dismissed_at") in (None, "")
+            and snapshot["threads_complete"] is True
+            and any(
+                finding.get("thread") for finding in current_evidence["findings"]
+            )
+            and any(
+                actions[key].get("task_type") == "neutral"
+                for key in copilot_review_handoff_keys
+            )
+        )
         rejection_progress_ready = (
-            waiting_handoff_is_only_busy and negative_review_complete
+            waiting_handoff_is_only_busy
+            and (negative_review_complete or neutral_rejection_ready)
             and checks_terminal and progress is not None
             and any(
-                actions[key].get("task_id") in progress["evaluated_task_ids"]
+                actions[key].get("task_type") == "neutral"
+                or actions[key].get("task_id") in progress["evaluated_task_ids"]
                 for key in copilot_review_handoff_keys
             )
         )
