@@ -7355,7 +7355,7 @@ def test_completed_task_handoff_waits_for_copilot_without_independent_dispatch(
 
 
 @pytest.mark.parametrize("correction_status", [None, "sent", "uncertain"])
-def test_waiting_source_handoff_serializes_repairs_but_allows_its_review_request(
+def test_later_review_does_not_release_active_or_uncertain_correction(
         tmp_path, correction_status):
     class MissingCopilotReviewApi(FakeApi):
         def get_all(self, route, *, collection=None):
@@ -7410,13 +7410,46 @@ def test_waiting_source_handoff_serializes_repairs_but_allows_its_review_request
         ]) == 1
     else:
         assert review_requests == []
-        assert store.action(correction_key)["status"] == correction_status
+        recovered = StateStore(tmp_path / "state.json").action(correction_key)
+        assert recovered["status"] == correction_status
         if correction_status == "uncertain":
-            assert store.action(correction_key)["task_id"] == ["malformed-task-id"]
+            assert recovered["task_id"] == ["malformed-task-id"]
         assert not any(
             route.endswith("/agents/repos/lindayi/hermes-mobile/tasks")
             for route, _ in api.writes[writes_before:]
         )
+        assert not any(
+            route.endswith(f"/statuses/{HEAD}")
+            for route, _ in api.writes[writes_before:]
+        )
+
+
+def test_retired_review_tests_are_mapped_to_collected_regressions():
+    retired = sorted(
+        name[len("_legacy_"):]
+        for name, value in globals().items()
+        if name.startswith("_legacy_")
+        and name != "_legacy_neutral_decision_comment" and callable(value)
+    )
+    migration = (
+        Path(__file__).resolve().parents[1] / "docs" / "cloud-coordinator-spec.md"
+    ).read_text()
+    replacements = (
+        "test_later_review_does_not_release_active_or_uncertain_correction",
+        "test_waiting_copilot_review_handoff_survives_restart_without_budget",
+        "test_completed_task_handoff_waits_for_copilot_without_independent_dispatch",
+        "test_current_copilot_rejection_advances_progress_but_cannot_merge",
+        "test_rejecting_review_progress_uses_non_review_checks_in_the_planner",
+        "test_foreign_retired_review_status_is_not_merge_authority",
+        "test_auto_merge_uses_current_three_checks_without_cloud_review",
+        "test_required_policy_accepts_only_current_three_contexts_and_apps",
+        "test_completed_copilot_review_completes_handoff_without_independent_report",
+        "test_completed_copilot_comment_accepts_review_without_independent_report",
+    )
+
+    assert len(retired) == 60
+    assert all(f"`{name}`" in migration for name in retired)
+    assert all(name in migration and callable(globals().get(name)) for name in replacements)
 
 
 def _legacy_current_independent_review_completes_handoff_without_copilot(tmp_path):
