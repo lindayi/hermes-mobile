@@ -8,13 +8,60 @@ import pytest
 
 from deploy.cloud_coordinator import _authorized_result_heads
 from test_cloud_coordinator import (
-    BASE, HEAD, OWNER, COPILOT_AGENT, Coordinator, FakeApi, StateStore,
+    BASE, HEAD, OWNER, COPILOT_AGENT, COPILOT_REVIEWER, Coordinator, FakeApi, StateStore,
     _compare_result,
+    _progress_review,
     refresh_owner_review,
 )
 
 NOW = 1790856660
 RESULT_HEAD = "c" * 40
+
+
+def genuine_review(api, head, *, state="COMMENTED"):
+    api.review_sha = head
+    api.review_state = state
+    api.review_submitted_at = "2026-10-02T11:00:00Z"
+    api.missing_review = False
+
+
+def genuine_findings(api, head, text, *, review_id=63002):
+    previous = getattr(api, "_genuine_get_all", api.get_all)
+    api._genuine_get_all = previous
+    feedback = _progress_review(head, review_id, text, "2026-10-02T11:00:00Z")
+
+    def get_all(route, *, collection=None):
+        values = previous(route, collection=collection)
+        if route.endswith("/pulls/16/reviews?per_page=100"):
+            return [feedback, *[r for r in values if r["user"]["id"] != COPILOT_REVIEWER]]
+        return values
+
+    api.get_all = get_all
+    api.missing_review = False
+
+
+def saved_legacy_review(api, store, coordinator, source_action=None, *, status="sent"):
+    """Restore pre-policy reviewer occupancy without dispatching new review work."""
+    from deploy.cloud_coordinator import review_task_request
+
+    enrollment = store.snapshot()["enrollments"]["16"]
+    snapshot = coordinator._snapshot_pull(16, enrollment, BASE)
+    if source_action is None:
+        source = enrollment["initial_source"]
+        source_action = {
+            "source_type": "starter", "initial_source": source,
+            "issue": 16, "head": source["head_sha"],
+        }
+    request = review_task_request(snapshot, source_action, 11001, "Historical anchor")
+    assert request is not None
+    task = api.write("agents/repos/lindayi/hermes-mobile/tasks", {
+        "prompt": request["body"], "head_ref": "topic", "base_ref": "main",
+    })
+    key = f"historical-review:{request['head']}:{task['id']}"
+    request["key"] = key
+    assert store.claim_action(key, request)
+    store.update_action(key, status, task_id=task["id"], task_created_at=task["created_at"])
+    return store.action(key)
 
 
 def bound_worker(tmp_path, *, sensitive=False, authorize=False):
@@ -262,7 +309,7 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     waiting = run()
     assert not waiting["auto_merge_requested"] and api.fix_attempts == 1
     assert store.action(first["key"])["handoff_state"] == "waiting_review"
-    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
     saved = store.action(first["key"])
     assert saved["receipt_session_completed_at"] == "2026-10-01T12:05:30Z"
     assert saved["receipt_completed_at"] == saved["receipt_session_completed_at"]
@@ -274,25 +321,23 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     assert store.action(first["key"])["handoff_state"] == "waiting_review"
     assert not waiting["repair_requested"] and not waiting["auto_merge_requested"]
     assert api.fix_attempts == 1
-    assert api.review_attempts == 1
-    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert api.review_attempts == 0
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
     api.unresolved = False
     api.review_state = "PENDING"
-    review = next(
-        action for action in StateStore(store.path).actions().values()
-        if action.get("kind") == "review"
+    original_get_all = api.get_all
+    feedback = _progress_review(
+        RESULT_HEAD, 63002, "Publish a bounded follow-up fixer request before approval.",
+        "2026-10-01T12:06:00Z",
     )
-    api.complete_review_task(
-        review["task_id"],
-        review,
-        source_action=StateStore(store.path).action(first["key"]),
-        verdict="changes_requested",
-        findings=[{
-            "path": "frontend/styles.css",
-            "comment": "Publish a bounded follow-up fixer request before approval.",
-        }],
-        report="One bounded follow-up is required before approval.",
-    )
+
+    def feedback_reviews(route, *, collection=None):
+        values = original_get_all(route, collection=collection)
+        if route.endswith("/pulls/16/reviews?per_page=100"):
+            return [feedback, *[r for r in values if r["user"]["id"] != COPILOT_REVIEWER]]
+        return values
+
+    api.get_all = feedback_reviews
     first_review = run()
     second_review = run()
     third_review = run()
@@ -332,18 +377,8 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     assert not waiting["auto_merge_requested"] and api.fix_attempts == 2
     api.tasks.clear()
     assert not run()["auto_merge_requested"]
-    final_review = next(
-        action for action in StateStore(store.path).actions().values()
-        if action.get("kind") == "review" and action.get("source_task_id") == second["task_id"]
-    )
-    api.complete_review_task(
-        final_review["task_id"],
-        final_review,
-        source_action=StateStore(store.path).action(second["key"]),
-        verdict="pass",
-        findings=[],
-        report="No further bounded follow-up required.",
-    )
+    api.get_all = original_get_all
+    genuine_review(api, final_head)
     assert not run()["auto_merge_requested"]
     assert not run()["auto_merge_requested"]  # Required checks remain pending.
     api.pending_required = False
@@ -421,8 +456,8 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
         if route.startswith("repos/lindayi/hermes-mobile/issues/28/timeline?"):
             return api.source_timeline
         values = original_get_all(route, collection=collection)
-        if missing_review and "/check-runs?" in route:
-            return [item for item in values if item.get("name") != "agent-review"]
+        if api.missing_review and "/check-runs?" in route:
+            return [item for item in values if item.get("name") != "copilot-pull-request-reviewer"]
         return values
 
     def graphql(query, variables):
@@ -439,6 +474,7 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
         return original_graphql(query, variables)
 
     api.get, api.get_all = get, get_all
+    api.missing_review = missing_review
     api.graphql = graphql
     api.pull.update(pull)
     api.pull["draft"] = False
@@ -450,6 +486,7 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
     api.blob_contents["f" * 40] = b"Synthetic coordinator test contents\n"
     if missing_review:
         api.owner_review_body = "no independent review has been published"
+        api.review_state = "PENDING"
     attach_closing_issue_api(api)
     store = StateStore(tmp_path / "paired-main" / "state.json")
     if not admit:
@@ -579,6 +616,7 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(
         }, separators=(",", ":")),
         submitted_at="2026-10-01T12:10:00Z",
     )
+    genuine_findings(api, current_head, "First new finding. Second new finding.")
 
     if corruption is not None:
         original_tasks = deepcopy(api.tasks)
@@ -642,24 +680,7 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(
     reopened = StateStore(store.path)
     enrollment = reopened.snapshot()["enrollments"]["16"]
     assert reopened.action(neutral["key"])["status"] == "completed"
-    reviewer = next((
-        action for action in reopened.actions().values()
-        if action.get("kind") == "review"
-    ), None)
-    assert reviewer is not None, (
-        after_neutral["reasons"], enrollment, api.fix_attempts,
-    )
-    assert reviewer["status"] == "sent"
-    api.complete_review_task(
-        reviewer["task_id"], reviewer,
-        source_action=reopened.action(neutral["key"]),
-        verdict="changes_requested",
-        findings=[
-            {"path": "tests/test_cloud_coordinator.py", "comment": "First new finding."},
-            {"path": "tests/test_cloud_coordinator.py", "comment": "Second new finding."},
-        ],
-        files=api.review_file_digests(),
-    )
+    genuine_findings(api, current_head, "First new finding. Second new finding.", review_id=63003)
     Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)
     reviewed = Coordinator(
         api, StateStore(store.path), clock=lambda: NOW,
@@ -667,12 +688,11 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(
 
     reopened = StateStore(store.path)
     enrollment = reopened.snapshot()["enrollments"]["16"]
-    assert not reopened.action(reviewer["key"]).get("report_error"), (
-        reopened.action(reviewer["key"]).get("report_error"), reviewed["reasons"],
-    )
+    assert api.review_attempts == 0
     source = next((
         action for action in reopened.actions().values()
-        if action.get("kind") == "fix" and action.get("task_type") == "review-followup"
+        if (action.get("kind") == "fix" and action.get("attempt") == 4
+            and action.get("task_type") != "neutral")
     ), None)
     assert source is not None, (reviewed["reasons"], enrollment, api.fix_attempts)
     assert source["attempt"] == 4 and source["status"] == "sent"
@@ -695,19 +715,8 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(
         Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=True)
     reopened = StateStore(store.path)
     completed_source = reopened.action(source["key"])
-    reviewer = next(
-        action for action in reopened.actions().values()
-        if action.get("kind") == "review" and action.get("head") == result_head
-    )
-    api.complete_review_task(
-        reviewer["task_id"], reviewer, source_action=completed_source,
-        verdict="changes_requested",
-        findings=[
-            {"path": "tests/test_cloud_coordinator.py", "comment": "First new finding."},
-            {"path": "tests/test_cloud_coordinator.py", "comment": "Second new finding."},
-        ],
-        files=api.review_file_digests(),
-    )
+    assert completed_source["receipt_result"] == "ready"
+    genuine_findings(api, result_head, "First new finding. Second new finding.", review_id=63004)
     # Publish a real bound negative report while verification remains pending.
     original_get_all = api.get_all
 
@@ -726,7 +735,7 @@ def test_cold_legacy_pr86_receipts_resume_neutral_after_main_advances(
     persisted = StateStore(store.path).snapshot()["enrollments"]["16"]
     assert source["task_id"] not in persisted["repair_progress"]["evaluated_task_ids"]
     assert persisted["attempts"] == 4
-    assert StateStore(store.path).action(reviewer["key"])["publication_state"] == "done"
+    assert api.review_attempts == 0
 
     # A new main does not revoke the source receipt or its completed review.
     api.current_main_sha = "e" * 40
@@ -793,7 +802,7 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
                 return list(producer.timeline)
             values = super().get_all(route, collection=collection)
             if "/check-runs?" in route:
-                return [item for item in values if item.get("name") != "agent-review"]
+                return [item for item in values if item.get("name") != "copilot-pull-request-reviewer"]
             return values
 
         def graphql(self, query, variables):
@@ -822,6 +831,7 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
     ]
     api.blob_contents["f" * 40] = b"Synthetic starter PR contents\n"
     api.owner_review_body = "no independent review has been published"
+    api.review_state = "PENDING"
     api.tasks[producer.task_detail["id"]] = producer.task_detail
     api.task_posts = 1
     attach_closing_issue_api(api)
@@ -837,31 +847,29 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
     assert first["pull_requests"][0]["required_checks_green"] is False
     assert second["pull_requests"][0]["required_checks_green"] is False
     actions = StateStore(path).actions()
-    reviews = [item for item in actions.values() if item.get("kind") == "review"]
-    assert len(reviews) == 1, (
-        first["pull_requests"][0]["reasons"], second["pull_requests"][0]["reasons"],
-        third["pull_requests"][0]["reasons"], api.review_attempts,
-        StateStore(path).snapshot()["enrollments"]["16"],
-    )
-    assert reviews[0]["status"] == "sent"
-    assert reviews[0]["source_task_id"] == producer.task_detail["id"]
-    assert reviews[0]["task_id"] != reviews[0]["source_task_id"]
+    assert not any(item.get("kind") == "review" for item in actions.values())
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
     assert not any(item.get("kind") == "fix" for item in actions.values())
-    assert api.fix_attempts == 0 and api.review_attempts == 1
+    assert api.fix_attempts == 0 and api.review_attempts == 0
     assert first["pull_requests"][0]["auto_merge_eligible"] is False
     assert second["pull_requests"][0]["auto_merge_eligible"] is False
     assert third["pull_requests"][0]["auto_merge_eligible"] is False
 
     source = StateStore(path).snapshot()["enrollments"]["16"]["initial_source"]
-    api.complete_review_task(
-        reviews[0]["task_id"], reviews[0],
-        source_action={
-            "source_start_head": source["head_sha"],
-            "source_session_id": source["session_id"],
-            "source_comment_id": source["admission_comment_id"],
-        },
-        verdict="pass", findings=[], report="No findings in the complete source inventory.",
-    )
+    genuine_review(api, HEAD)
+    original_get_all = api.get_all
+
+    def completed_checks(route, *, collection=None):
+        values = original_get_all(route, collection=collection)
+        if "/check-runs?" in route:
+            values.append({
+                "id": 9991, "name": "copilot-pull-request-reviewer",
+                "head_sha": HEAD, "app": {"id": 15368},
+                "status": "completed", "conclusion": "success",
+            })
+        return values
+
+    api.get_all = completed_checks
     for _ in range(3):
         result = run()
     assert result["pull_requests"][0]["review_valid"] is True
@@ -874,17 +882,18 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
                 '{"schema":"hermes-independent-agent-review-v1",',
             ))
     ]
-    assert len(published) == 1
+    assert len(published) == 0
     agent_statuses = [
         item for item in api.status_log.get(HEAD, [])
         if item.get("context") == "agent-review" and item.get("state") == "success"
     ]
-    assert len(agent_statuses) == 1
+    assert len(agent_statuses) == 0
     assert not any(
         item.get("kind") == "fix" for item in StateStore(path).actions().values()
     )
-    assert api.review_attempts == 1 and api.fix_attempts == 0
+    assert api.review_attempts == 0 and api.fix_attempts == 0
 
+    refresh_owner_review(api, HEAD, submitted_at="2026-10-02T12:00:00Z")
     review_id = api.owner_review_id
     review_digest = hashlib.sha256(api.owner_review_body.encode("utf-8")).hexdigest()
     api.comments.append({
@@ -897,7 +906,7 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
     authorized = run()["pull_requests"][0]
     assert authorized["auto_merge_eligible"] is True
     assert authorized["auto_merge_requested"] is True
-    assert api.review_attempts == 1 and api.fix_attempts == 0
+    assert api.review_attempts == 0 and api.fix_attempts == 0
 
 
 def test_persisted_v1_source_replays_with_multiple_start_commands_without_ledger(tmp_path):
@@ -953,12 +962,10 @@ def test_persisted_v1_source_replays_with_multiple_start_commands_without_ledger
         ).run(apply=True)["pull_requests"][0]
 
     actions = StateStore(path).actions()
-    reviews = [action for action in actions.values() if action["kind"] == "review"]
-    assert len(reviews) == 1, (
-        result["reasons"], StateStore(path).snapshot()["enrollments"]["16"],
-    )
-    assert reviews[0]["source_comment_id"] == source["admission_comment_id"]
-    assert api.review_attempts == 1 and api.fix_attempts == 0
+    assert not any(action["kind"] == "review" for action in actions.values())
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+    assert api.review_attempts == 0 and api.fix_attempts == 0
+    assert StateStore(path).snapshot()["enrollments"]["16"]["initial_source"] == source
     assert "starter-source-provenance" not in result["reasons"]
 
     legacy_admission["initial_source"] = {
@@ -1060,11 +1067,13 @@ def test_actual_paired_v2_main_advance_keeps_authority_but_requires_neutral_repa
     assert not run()["auto_merge_requested"] and api.fix_attempts == 2
     # Neutral repair produces C against M1; only fresh review/checks permit merge.
     repaired_head = "e" * 40
+    api.review_sha = RESULT_HEAD
     finish_v2(api, second, head=repaired_head)
     api.tasks[second["task_id"]]["sessions"][0]["completed_at"] = "2026-10-01T12:07:00Z"
     api.tasks[second["task_id"]]["updated_at"] = "2026-10-01T12:07:00Z"
     api.pull["mergeable_state"] = "clean"
-    assert not run()["auto_merge_requested"]  # Previous review predates second task.
+    assert not run()["auto_merge_requested"]  # Previous review names the old head.
+    api.review_sha = repaired_head
     api.review_submitted_at = "2026-10-01T12:07:01Z"
     api.pending_required = True
     assert not run()["auto_merge_requested"]
@@ -1072,15 +1081,6 @@ def test_actual_paired_v2_main_advance_keeps_authority_but_requires_neutral_repa
     api.strict_protection = False
     assert not run()["auto_merge_requested"]  # Never bypass strict current-main policy.
     api.strict_protection = True
-    review = next(
-        action for action in StateStore(store.path).actions().values()
-        if action.get("kind") == "review"
-    )
-    api.complete_review_task(
-        review["task_id"], review, source_action=StateStore(store.path).action(second["key"]),
-    )
-    published = run()
-    assert not published["review_valid"]
     merged = run()
     assert merged["auto_merge_requested"], merged["reasons"]
     assert api.graphql_writes[-1][1]["expectedHeadOid"] == repaired_head
@@ -1448,7 +1448,8 @@ def test_initial_starter_source_rejects_unbound_or_changed_evidence(tmp_path, ch
     for _ in range(3):
         Coordinator(positive, StateStore(positive_store.path),
                     clock=lambda: 1790942400).run(apply=True)
-    assert positive.review_attempts == 1 and positive.fix_attempts == 0
+    assert positive.review_attempts == 0 and positive.fix_attempts == 0
+    assert positive.requested_reviewers == [{"id": COPILOT_REVIEWER}]
     api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
     api.unresolved = False
     task = next(iter(api.tasks.values()))
@@ -1639,8 +1640,9 @@ def test_initial_starter_source_requires_consistent_complete_edit_history(tmp_pa
     assert edit_reads
     if change is None:
         assert "starter-source-provenance" not in first["reasons"]
-        assert api.review_attempts == 1 and api.fix_attempts == 0
-        assert sum(action.get("kind") == "review" for action in actions) == 1
+        assert api.review_attempts == 0 and api.fix_attempts == 0
+        assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+        assert not any(action.get("kind") == "review" for action in actions)
         assert not any(key.endswith(":starter-source-provenance") for key in outbox)
         return
     assert "starter-source-provenance" in first["reasons"]
@@ -1718,7 +1720,7 @@ def test_initial_source_supported_handoffs_and_exact_head_review(tmp_path, mode)
         assert "initial_source" not in legacy_enrollment
         assert api.review_attempts == 0 and api.fix_attempts == 0
     elif mode == "already_reviewed":
-        refresh_owner_review(api, HEAD)
+        genuine_review(api, HEAD)
     before = api.starter_state_path.read_bytes()
     for _ in range(4):
         result = Coordinator(
@@ -1727,7 +1729,8 @@ def test_initial_source_supported_handoffs_and_exact_head_review(tmp_path, mode)
         ).run(apply=True)["pull_requests"][0]
     assert api.starter_state_path.read_bytes() == before
     assert api.fix_attempts == 0
-    assert api.review_attempts == (0 if mode == "already_reviewed" else 1)
+    assert api.review_attempts == 0
+    assert bool(api.requested_reviewers) is (mode != "already_reviewed")
     assert "starter-source-provenance" not in result["reasons"]
     enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
     assert enrollment["attempts"] == 0 and not enrollment.get("receipt_proofs")
@@ -1737,27 +1740,17 @@ def test_initial_source_supported_handoffs_and_exact_head_review(tmp_path, mode)
         assert enrollment["comment"] == legacy_enrollment["comment"]
         assert enrollment["authorized_head"] == legacy_enrollment["authorized_head"]
     if mode != "already_reviewed":
-        review = next(a for a in store.actions().values() if a["kind"] == "review")
-        source = enrollment["initial_source"]
-        api.complete_review_task(
-            review["task_id"], review,
-            source_action={
-                "source_start_head": source["head_sha"],
-                "source_session_id": source["session_id"],
-                "source_comment_id": source["admission_comment_id"],
-            },
-            verdict="pass", findings=[], report="Verified initial source accepted.",
-        )
+        genuine_review(api, HEAD)
         for _ in range(4):
             result = Coordinator(
                 api, StateStore(store.path), clock=lambda: 1790942400,
                 starter_state_path=api.starter_state_path,
             ).run(apply=True)["pull_requests"][0]
         assert result["review_valid"] and result["required_checks_green"]
-        assert result["auto_merge_eligible"] and api.review_attempts == 1
+        assert result["auto_merge_eligible"] and api.review_attempts == 0
         assert sum(item.get("state") == "success"
                    for item in api.status_log.get(HEAD, [])
-                   if item.get("context") == "agent-review") == 1
+                   if item.get("context") == "agent-review") == 0
         assert api.starter_state_path.read_bytes() == before
 
 
@@ -1808,11 +1801,26 @@ def test_first_review_anchor_survives_main_advance_before_dispatch(
         monkeypatch.setattr(cloud_coordinator, "review_anchor_request", legacy_anchor)
     baseline = run()
     monkeypatch.setattr(cloud_coordinator, "review_anchor_request", anchor_request)
-    old_key, old_anchor = next(
-        (key, entry) for key, entry in StateStore(store.path).snapshot()["outbox"].items()
-        if entry.get("kind") == "review-anchor"
-    )
     source = StateStore(store.path).snapshot()["enrollments"]["16"]["initial_source"]
+    snapshot = Coordinator(api, store)._snapshot_pull(
+        16, store.snapshot()["enrollments"]["16"], BASE,
+    )
+    source_action = {
+        "source_type": "starter", "initial_source": source,
+        "issue": 16, "head": HEAD, "source_task_id": source["task_id"],
+        "source_comment_id": source["admission_comment_id"],
+    }
+    old_anchor = (legacy_anchor if legacy_identity else anchor_request)(snapshot, source_action)
+    old_key = old_anchor["key"]
+    old_anchor.update(status="sent" if publication == "sent" else "uncertain")
+    if publication in {"sent", "lost_response"}:
+        api.comments.append({
+            "id": 11001, "body": old_anchor["body"], "user": {"id": OWNER},
+            "created_at": "2026-10-02T11:00:00Z",
+            "updated_at": "2026-10-02T11:00:00Z",
+        })
+        old_anchor["comment_id"] = 11001
+    store._mutate(lambda state: state["outbox"].update({old_key: old_anchor}))
     assert old_anchor["status"] == ("sent" if publication == "sent" else "uncertain")
     assert old_anchor["main_sha"] == BASE
     assert not baseline["review_valid"] and not baseline["auto_merge_eligible"]
@@ -1825,12 +1833,7 @@ def test_first_review_anchor_survives_main_advance_before_dispatch(
         (key, entry) for key, entry in StateStore(store.path).snapshot()["outbox"].items()
         if entry.get("kind") == "review-anchor"
     ]
-    assert len(anchors) == 2
-    new_key, new_anchor = next(item for item in anchors if item[0] != old_key)
-    assert new_anchor["main_sha"] == new_main
-    assert new_anchor["marker"] != old_anchor["marker"]
-    assert new_anchor["status"] == "sent"
-    assert f"against base `{new_main}`" in new_anchor["body"]
+    assert len(anchors) == 1
     retained_anchor = StateStore(store.path).snapshot()["outbox"][old_key]
     if publication == "lost_response":
         assert retained_anchor["status"] == "sent" and retained_anchor["comment_id"] > 0
@@ -1844,38 +1847,24 @@ def test_first_review_anchor_survives_main_advance_before_dispatch(
     api.pull["base"]["sha"] = new_main
     for _ in range(3):
         result = run()
-    review = next(
-        item for item in StateStore(store.path).actions().values()
-        if item.get("kind") == "review"
-    )
-    assert review["status"] == "sent" and review["main_sha"] == new_main
-    assert review["anchor_comment_id"] == new_anchor["comment_id"]
-    assert review["source_task_id"] == source["task_id"]
-    assert review["task_id"] != source["task_id"]
-    assert api.review_attempts == 1 and api.fix_attempts == 0
-    assert len(attempts) == 2
+    assert not any(item.get("kind") == "review" for item in store.actions().values())
+    assert api.review_attempts == 0 and api.fix_attempts == 0
+    assert len(attempts) == 0
     assert not result["review_valid"] and not result["auto_merge_eligible"]
 
-    api.complete_review_task(
-        review["task_id"], review,
-        source_action={
-            "source_start_head": source["head_sha"],
-            "source_session_id": source["session_id"],
-            "source_comment_id": source["admission_comment_id"],
-        },
-    )
+    genuine_review(api, HEAD)
     for _ in range(3):
         result = run()
     assert result["review_valid"] and result["required_checks_green"]
     assert result["auto_merge_eligible"]
-    assert api.review_attempts == 1 and api.fix_attempts == 0
+    assert api.review_attempts == 0 and api.fix_attempts == 0
     assert sum(
         route.endswith("/pulls/16/reviews") for route, _ in api.writes
-    ) == 1
+    ) == 0
     assert sum(
         item.get("context") == "agent-review" and item.get("state") == "success"
         for item in api.status_log.get(HEAD, [])
-    ) == 1
+    ) == 0
     enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
     assert enrollment["initial_source"] == source
     assert enrollment["attempts"] == 0 and not enrollment.get("receipt_proofs")
@@ -1906,9 +1895,10 @@ def test_first_review_main_advance_after_dispatch_never_replays_creation(
     monkeypatch.setattr(api, "write", create)
     for _ in range(3):
         run()
-    old_review = next(
-        item for item in StateStore(store.path).actions().values()
-        if item.get("kind") == "review"
+    monkeypatch.setattr(api, "write", write)
+    old_review = saved_legacy_review(
+        api, store, Coordinator(api, store, clock=lambda: 1790942400),
+        status="sent" if response == "queued" else "uncertain",
     )
     assert old_review["status"] == ("sent" if response == "queued" else "uncertain")
     assert api.review_attempts == 1
@@ -1941,6 +1931,9 @@ def test_first_review_main_advance_after_dispatch_never_replays_creation(
         )
         for _ in range(3):
             result = run()
+        assert not result["review_valid"] and not result["auto_merge_eligible"]
+        genuine_review(api, HEAD)
+        result = run()
         assert result["review_valid"] is (not head_change)
         assert result["auto_merge_eligible"] is (not head_change)
         assert api.review_attempts == 1 and api.fix_attempts == 0
@@ -1952,13 +1945,14 @@ def test_first_review_main_advance_after_dispatch_never_replays_creation(
         assert sum(
             item.get("context") == "agent-review" and item.get("state") == "success"
             for item in api.status_log.get(HEAD, [])
-        ) == (0 if head_change else 1)
+        ) == 0
 
 
 @pytest.mark.parametrize("command", ["/hermes enroll", f"/hermes enroll {HEAD}"])
 def test_manual_enrollment_without_source_has_one_explicit_blocker(tmp_path, command):
     api = FakeApi()
     api.owner_review_body = "no independent review"
+    api.review_state = "PENDING"
     api.comments[0]["body"] = command
     path = tmp_path / "manual-no-source" / "state.json"
     for _ in range(3):
@@ -1979,6 +1973,7 @@ def test_manual_missing_source_skips_only_authenticated_active_cloud_workflow(tm
 
     api = FakeApi()
     api.owner_review_body = "no independent review"
+    api.review_state = "PENDING"
     api.workflow_runs = [{
         "id": 789, "name": "Running cloud work", "workflow_id": COPILOT_WORKFLOW_ID,
         "path": COPILOT_WORKFLOW_PATH, "head_sha": "c" * 40,
@@ -2057,6 +2052,7 @@ def test_legacy_starter_bridge_is_supported_by_read_only_cli(tmp_path, capsys, m
 def test_source_less_enrollment_history_blocks_only_active_work(tmp_path, kind, status):
     api = FakeApi()
     api.owner_review_body = "no independent review"
+    api.review_state = "PENDING"
     store = StateStore(tmp_path / "history" / "state.json")
     Coordinator(api, store, clock=lambda: NOW).run(apply=True)
     assert store.claim_action("history", {
@@ -2119,7 +2115,8 @@ def test_legacy_saved_starter_bridge_rejects_single_binding_mutations(tmp_path, 
     for _ in range(3):
         Coordinator(api, StateStore(positive_path), clock=lambda: 1790942400,
                     starter_state_path=api.starter_state_path).run(apply=True)
-    assert api.review_attempts == 1 and api.fix_attempts == 0
+    assert api.review_attempts == 0 and api.fix_attempts == 0
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
     api.comments = [api.comments[0]]
     api.tasks = {"task-1": next(t for t in api.tasks.values() if t["id"] == "task-1")}
     api.review_attempts = 0
@@ -2163,6 +2160,7 @@ def test_initial_starter_changes_requested_runs_real_fixer_receipt_and_delta_rev
     api, store = actual_starter_consumer(tmp_path, admit=False, missing_review=True)
     api.unresolved = False
     api.task_posts = 1
+    genuine_findings(api, HEAD, "Preserve exact source identity in the bounded follow-up.")
     clock = [1790942400]
 
     def run():
@@ -2171,25 +2169,12 @@ def test_initial_starter_changes_requested_runs_real_fixer_receipt_and_delta_rev
 
     for _ in range(3):
         run()
-    initial_review = next(a for a in store.actions().values() if a["kind"] == "review")
     source = store.snapshot()["enrollments"]["16"]["initial_source"]
-    api.complete_review_task(
-        initial_review["task_id"], initial_review,
-        source_action={
-            "source_start_head": source["head_sha"],
-            "source_session_id": source["session_id"],
-            "source_comment_id": source["admission_comment_id"],
-        },
-        verdict="changes_requested",
-        findings=[{"path": "tests/test_cloud_coordinator.py",
-                   "comment": "Preserve exact source identity in the bounded follow-up."}],
-        report="One bounded follow-up is required.",
-    )
     for _ in range(3):
         result = run()
         assert not result["review_valid"] and not result["auto_merge_eligible"]
     fixer = next(a for a in store.actions().values() if a["kind"] == "fix")
-    assert api.fix_attempts == 1 and api.review_attempts == 1
+    assert api.fix_attempts == 1 and api.review_attempts == 0
     api.complete_task(fixer["task_id"], fixer, head_sha=RESULT_HEAD)
     api.head_sha = RESULT_HEAD
     api.pull["head"]["sha"] = RESULT_HEAD
@@ -2198,20 +2183,17 @@ def test_initial_starter_changes_requested_runs_real_fixer_receipt_and_delta_rev
     validated_fixer = store.action(fixer["key"])
     assert validated_fixer["receipt_result"] == "ready"
     assert validated_fixer["receipt_session_id"]
-    delta = next(a for a in store.actions().values()
-                 if a["kind"] == "review" and a["source_task_id"] == fixer["task_id"])
-    assert delta["task_id"] != fixer["task_id"] != initial_review["task_id"]
-    api.complete_review_task(delta["task_id"], delta, source_action=validated_fixer,
-                             verdict="pass", findings=[], report="Delta accepted.")
+    api.get_all = api._genuine_get_all
+    genuine_review(api, RESULT_HEAD)
     for _ in range(4):
         result = run()
     assert result["review_valid"] and result["auto_merge_eligible"]
-    assert api.fix_attempts == 1 and api.review_attempts == 2
+    assert api.fix_attempts == 1 and api.review_attempts == 0
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 1
     assert len(api.graphql_writes) == 1
     assert sum(item.get("state") == "success"
                for item in api.status_log.get(RESULT_HEAD, [])
-               if item.get("context") == "agent-review") == 1
+               if item.get("context") == "agent-review") == 0
 
 
 @pytest.mark.parametrize("change", ["body", "closing_edge", "body_and_closing_edge"])
@@ -2226,7 +2208,9 @@ def test_dispatched_initial_review_accepts_report_after_admission_only_binding_c
 
     for _ in range(3):
         run()
-    review = next(a for a in store.actions().values() if a["kind"] == "review")
+    review = saved_legacy_review(
+        api, store, Coordinator(api, store, clock=lambda: 1790942400),
+    )
     source = deepcopy(store.snapshot()["enrollments"]["16"]["initial_source"])
     admission = deepcopy(store.snapshot()["enrollments"]["16"]["starter_admission"])
     assert review["status"] == "sent"
@@ -2246,17 +2230,17 @@ def test_dispatched_initial_review_accepts_report_after_admission_only_binding_c
     )
     for _ in range(5):
         result = run()
-    assert result["review_valid"] and result["required_checks_green"]
-    assert result["auto_merge_eligible"] and result["auto_merge_requested"]
+    assert not result["review_valid"] and not result["required_checks_green"]
+    assert not result["auto_merge_eligible"] and not result["auto_merge_requested"]
     assert api.review_attempts == 1 and api.fix_attempts == 0
     enrollment = store.snapshot()["enrollments"]["16"]
     assert enrollment["initial_source"] == source
     assert enrollment["starter_admission"] == admission
     assert enrollment["attempts"] == 0 and not enrollment.get("receipt_proofs")
-    assert len(api.graphql_writes) == 1
+    assert len(api.graphql_writes) == 0
     assert sum(item.get("state") == "success"
                for item in api.status_log.get(HEAD, [])
-               if item.get("context") == "agent-review") == 1
+               if item.get("context") == "agent-review") == 0
     published = [
         item for item in api.owner_reviews + [api._current_owner_review_record()]
         if item.get("commit_id") == HEAD and item.get("state") == "COMMENTED"
@@ -2264,7 +2248,12 @@ def test_dispatched_initial_review_accepts_report_after_admission_only_binding_c
             '{"schema":"hermes-independent-agent-review-v1",',
         )
     ]
-    assert len(published) == 1
+    assert len(published) == 0
+    genuine_review(api, HEAD)
+    result = run()
+    assert result["review_valid"] and result["required_checks_green"]
+    assert result["auto_merge_eligible"] and result["auto_merge_requested"]
+    assert len(api.graphql_writes) == 1
 
 
 def test_admitted_starter_body_report_and_v2_receipt_survive_restart_and_manual_renewal(tmp_path):
@@ -2317,25 +2306,14 @@ def test_starter_source_session_boundary_survives_paired_admission(tmp_path, len
         Coordinator(api, StateStore(store.path), clock=lambda: 1791210000).run(apply=True)
     source = StateStore(store.path).snapshot()["enrollments"]["16"]["initial_source"]
     assert source["session_id"] == session_id
-    review = next(
-        action for action in StateStore(store.path).actions().values()
-        if action["kind"] == "review"
-    )
-    api.complete_review_task(
-        review["task_id"], review,
-        source_action={
-            "source_start_head": source["head_sha"],
-            "source_session_id": source["session_id"],
-            "source_comment_id": source["admission_comment_id"],
-        },
-        verdict="pass", findings=[], report="The complete source head is accepted.",
-    )
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+    genuine_review(api, HEAD)
     for _ in range(3):
         result = Coordinator(
             api, StateStore(store.path), clock=lambda: 1791210000,
         ).run(apply=True)["pull_requests"][0]
     assert result["review_valid"] and result["auto_merge_eligible"]
-    assert api.review_attempts == 1 and api.fix_attempts == 0
+    assert api.review_attempts == 0 and api.fix_attempts == 0
     if length == 256:
         from deploy.cloud_coordinator import (
             _valid_initial_source, _valid_starter_admission, enrollment_from_comment,
@@ -2446,6 +2424,7 @@ def test_upgraded_starter_reconciles_old_format_lost_response_and_consumer_repla
 
     api.get, api.get_all = get, get_all
     api.owner_review_body = "No independent review has been published."
+    api.review_state = "PENDING"
     api.pull_files = [
         {"filename": "README.md", "status": "modified", "sha": "f" * 40},
     ]
@@ -2470,6 +2449,7 @@ def test_upgraded_starter_reconciles_old_format_lost_response_and_consumer_repla
     assert source_error is None and source == enrollment["initial_source"]
     source = enrollment["initial_source"]
     assert source["session_id"] == pending["link_intent"]["session_id"]
-    assert api.review_attempts == 1 and api.fix_attempts == 0
+    assert api.review_attempts == 0 and api.fix_attempts == 0
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
     assert len([action for action in StateStore(store.path).actions().values()
-                if action["kind"] == "review"]) == 1
+                if action["kind"] == "review"]) == 0

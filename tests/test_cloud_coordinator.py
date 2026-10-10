@@ -976,7 +976,7 @@ def test_auto_merge_uses_current_four_checks_without_cloud_review():
     )
 
 
-def test_structured_owner_comment_accepts_review_without_copilot_approval():
+def test_completed_copilot_comment_accepts_review_without_independent_report():
     from deploy.cloud_coordinator import independent_review_valid
 
     owner_body = json.dumps({
@@ -997,11 +997,20 @@ def test_structured_owner_comment_accepts_review_without_copilot_approval():
     copilot_comment = {
         "id": 64002, "state": "COMMENTED", "commit_id": HEAD,
         "submitted_at": "2026-10-01T12:11:00Z",
+        "body": "",
         "user": {"id": COPILOT_REVIEWER},
     }
     assert independent_review_valid(
         HEAD, [owner_review, copilot_comment], [],
         pull_author_id=198982749, reviews_complete=True, threads_complete=True,
+    )
+    assert independent_review_valid(
+        HEAD, [copilot_comment], [],
+        pull_author_id=COPILOT_AGENT, reviews_complete=True, threads_complete=True,
+    )
+    assert not independent_review_valid(
+        HEAD, [owner_review], [],
+        pull_author_id=COPILOT_AGENT, reviews_complete=True, threads_complete=True,
     )
     assert not independent_review_valid(
         HEAD, [owner_review, copilot_comment], [{"isResolved": False}],
@@ -1021,7 +1030,7 @@ def test_structured_owner_comment_accepts_review_without_copilot_approval():
     )
 
 
-def test_owner_comment_only_four_check_gate_replays_without_duplicate_dispatch(tmp_path):
+def test_copilot_comment_four_check_gate_replays_without_duplicate_dispatch(tmp_path):
     api = FakeApi()
     api.review_state = "COMMENTED"
     path = tmp_path / "state.json"
@@ -1743,6 +1752,7 @@ class FakeApi:
                 "id": 63001, "state": self.review_state,
                 "commit_id": self.review_sha or self.head_sha,
                 "submitted_at": self.review_submitted_at,
+                "body": "",
                 "user": {"id": COPILOT_REVIEWER},
             }]
             reviews.extend(self.owner_reviews)
@@ -2336,6 +2346,11 @@ def test_stale_base_reconciliation_accepts_a_validated_new_head_handoff(tmp_path
     api.pull["mergeable_state"] = "clean"
     api.unresolved = False
     refresh_owner_review(api, NEXT_RESULT_HEAD)
+    api.review_state = "COMMENTED"
+    api.review_sha = NEXT_RESULT_HEAD
+    api.review_submitted_at = "2026-10-01T12:06:00Z"
+    requests_before = [write for write in api.writes
+                       if write[0].endswith("/requested_reviewers")]
 
     coordinator.run(apply=True)
     updated = next(
@@ -2348,7 +2363,8 @@ def test_stale_base_reconciliation_accepts_a_validated_new_head_handoff(tmp_path
     assert updated["receipt_body"] == api.comments[-1]["body"]
     assert api.fix_attempts == 2
     assert api.review_attempts == 0
-    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert [write for write in api.writes
+            if write[0].endswith("/requested_reviewers")] == requests_before
 
 
 def test_neutral_acceptance_and_predecessor_supersession_are_atomic(tmp_path):
@@ -5093,8 +5109,8 @@ def test_capped_reordered_inventory_waits_through_real_coordinator(tmp_path, sta
                 api, StateStore(path), clock=lambda: 1790856660,
             ).run(apply=True)["pull_requests"][0]
             assert summary["required_checks_green"] is True
-            if state == "COMMENTED":
-                assert summary["review_valid"] is True
+            assert summary["review_valid"] is False
+            assert summary["auto_merge_eligible"] is False
             enrollment = StateStore(path).snapshot()["enrollments"]["16"]
             assert enrollment["attempts"] == 3
             assert enrollment["repair_progress"]["consecutive_no_progress"] == 2
@@ -6875,8 +6891,10 @@ def test_task_api_identity_reconciles_across_head_changes(tmp_path):
     assert second["head"] == api.head_sha
 
 
-@pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
-def test_same_head_handoff_uses_independent_review_not_copilot(tmp_path, review_state):
+@pytest.mark.parametrize("review_state", [
+    "APPROVED", "COMMENTED", "CHANGES_REQUESTED", "PENDING", "DISMISSED",
+])
+def test_same_head_handoff_requires_completed_copilot_review(tmp_path, review_state):
     api = FakeApi(source_failure=True)
     api.pending_required = True
     store = StateStore(tmp_path / "state.json")
@@ -6889,11 +6907,13 @@ def test_same_head_handoff_uses_independent_review_not_copilot(tmp_path, review_
 
     summary = coordinator.run(apply=True)["pull_requests"][0]
 
-    expected = review_state != "CHANGES_REQUESTED"
+    expected = review_state in {"APPROVED", "COMMENTED"}
     assert store.action(fix["key"])["handoff_state"] == (
         "done" if expected else "waiting_review"
     )
-    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    requests = [route for route, _ in api.writes if route.endswith("/requested_reviewers")]
+    assert len(requests) == (0 if expected else 1)
+    assert api.review_attempts == 0
     assert summary["review_valid"] is expected
     assert summary["auto_merge_eligible"] is False
     assert api.fix_attempts == 1
@@ -6902,9 +6922,10 @@ def test_same_head_handoff_uses_independent_review_not_copilot(tmp_path, review_
 
 @pytest.mark.parametrize("review_state", ["APPROVED", "COMMENTED", "CHANGES_REQUESTED"])
 @pytest.mark.parametrize("restart", [False, True])
-def test_independent_review_completes_handoff_without_copilot(
+def test_completed_copilot_review_completes_handoff_without_independent_report(
         tmp_path, review_state, restart):
     api = FakeApi(source_failure=True)
+    api.owner_review_body = "Historical owner feedback is not an independent report."
     path = tmp_path / "state.json"
     store = StateStore(path)
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
@@ -6933,7 +6954,9 @@ def test_independent_review_completes_handoff_without_copilot(
         "waiting_review" if review_state == "CHANGES_REQUESTED" else "done"
     )
     assert summary["review_valid"] is (review_state != "CHANGES_REQUESTED")
-    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    requests = [route for route, _ in api.writes if route.endswith("/requested_reviewers")]
+    assert len(requests) == (1 if review_state == "CHANGES_REQUESTED" else 0)
+    assert api.review_attempts == 0
     assert api.fix_attempts == 1
 
 
@@ -6943,7 +6966,7 @@ def test_independent_review_completes_handoff_without_copilot(
     "2026-10-01T12:05:15Z", "2026-10-01T12:05:30Z",
     "2026-10-01T13:05:29+01:00", "2026-10-01T12:11:01Z",
 ])
-def test_copilot_review_timing_does_not_control_handoff(
+def test_copilot_review_timing_must_be_valid_for_handoff(
         tmp_path, review_state, submitted_at):
     api = FakeApi(source_failure=True)
     api.pending_required = True
@@ -6967,13 +6990,16 @@ def test_copilot_review_timing_does_not_control_handoff(
     )
     assert summary["review_valid"] is expected
     assert summary["auto_merge_eligible"] is False
-    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    requests = [route for route, _ in api.writes if route.endswith("/requested_reviewers")]
+    assert len(requests) == (0 if expected else 1)
+    assert api.review_attempts == 0
     assert api.fix_attempts == 1
 
 
 @pytest.mark.parametrize("review_patch", [
     {"commit_id": "c" * 40},
     {"user": {"id": OWNER}},
+    {"user": {"id": COPILOT_AGENT}},
     {"user": {"id": str(COPILOT_REVIEWER)}},
     {"user": {"id": float(COPILOT_REVIEWER)}},
 ])
@@ -6998,9 +7024,11 @@ def test_post_task_review_still_requires_exact_head_and_authenticated_identity(
     summary = coordinator.run(apply=True)["pull_requests"][0]
 
     assert store.action(fix["key"])["handoff_state"] == "waiting_review"
-    assert "agent" in summary["reasons"]
+    assert "review" in summary["reasons"]
     assert summary["auto_merge_eligible"] is False
-    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+    assert api.review_attempts == 0
 
 
 @pytest.mark.parametrize("completed_at", [
@@ -7022,6 +7050,7 @@ def test_post_task_review_cannot_replace_invalid_persisted_completion_proof(
     assert store.action(fix["key"])["handoff_state"] == "waiting_review"
     store.update_action(fix["key"], "completed", receipt_completed_at=completed_at)
     api.tasks.clear()
+    api.review_state = "COMMENTED"
     api.review_submitted_at = "2026-10-01T12:06:00Z"
     writes, graphql_writes = list(api.writes), list(api.graphql_writes)
 
@@ -7033,11 +7062,13 @@ def test_post_task_review_cannot_replace_invalid_persisted_completion_proof(
     assert all("/statuses/" in route and body.get("context") == "cloud-review"
                for route, body in new_writes)
     assert api.graphql_writes == graphql_writes
-    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+    assert api.review_attempts == 0
 
 
 @pytest.mark.parametrize("result_head", [HEAD, "c" * 40], ids=["same-head", "new-head"])
-def test_waiting_independent_review_handoff_survives_restart_without_budget(
+def test_waiting_copilot_review_handoff_survives_restart_without_budget(
         tmp_path, result_head):
     api = RecordingApi(unresolved=True)
     path = tmp_path / "state.json"
@@ -7066,9 +7097,8 @@ def test_waiting_independent_review_handoff_survives_restart_without_budget(
     events = store.snapshot()["lifecycle_events"]
     assert not any(event["reason"] == "execution_exhausted" for event in events)
 
-    # Neither live task inventory nor advisory Copilot feedback releases the lock.
+    # Absent task inventory does not release the lock without a completed review.
     api.tasks.clear()
-    api.review_state = "APPROVED"
     api.review_submitted_at = "2026-10-01T12:06:00Z"
     writes, graphql_writes = list(api.writes), list(api.graphql_writes)
     restarted = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
@@ -7077,7 +7107,7 @@ def test_waiting_independent_review_handoff_survives_restart_without_budget(
     assert path.read_bytes() == before
     summary = restarted.run(apply=True)["pull_requests"][0]
     for item in (plan, summary):
-        assert "agent" in item["reasons"]
+        assert "review" in item["reasons"]
         assert not item["repair_requested"] and not item["auto_merge_eligible"]
     StateStore(path).retire(16, result_head)
     persisted = StateStore(path).snapshot()
@@ -7088,6 +7118,7 @@ def test_waiting_independent_review_handoff_survives_restart_without_budget(
     assert api.writes == writes and api.graphql_writes == graphql_writes
 
     api.unresolved = False
+    api.review_state = "APPROVED"
     refresh_owner_review(api, result_head)
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     if result_head == HEAD:
@@ -7181,7 +7212,7 @@ def test_task_handoff_marks_draft_ready_without_waiting_for_copilot(tmp_path):
     assert api.fix_attempts == 1
 
 
-def test_completed_task_handoff_does_not_wait_for_copilot_or_bypass_independent_review(
+def test_completed_task_handoff_waits_for_copilot_without_independent_dispatch(
         tmp_path):
     api = FakeApi(source_failure=True)
     api.owner_review_body = "not a structured independent review"
@@ -7198,7 +7229,9 @@ def test_completed_task_handoff_does_not_wait_for_copilot_or_bypass_independent_
     action = store.action(fix["key"])
     assert action["handoff_state"] == "waiting_review"
     assert action.get("handoff_waits", 0) == 0
-    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+    assert api.review_attempts == 0
     assert api.fix_attempts == 1
     assert result["pull_requests"][0]["review_valid"] is False
     assert result["pull_requests"][0]["auto_merge_eligible"] is False
@@ -7209,7 +7242,9 @@ def test_completed_task_handoff_does_not_wait_for_copilot_or_bypass_independent_
     assert store.action(fix["key"])["handoff_state"] == "waiting_review"
     assert store.action(fix["key"]).get("handoff_waits", 0) == 0
     assert api.fix_attempts == 1
-    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
+    assert len([route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]) == 1
+    assert api.review_attempts == 0
     assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
 
@@ -10556,10 +10591,10 @@ def test_scan_commit_failure_precedes_every_handoff_mutation(tmp_path, monkeypat
     if path_kind == "draft_ready":
         assert len(ready) == 1 and requests == []
     else:
-        assert ready == [] and requests == []
+        assert ready == [] and len(requests) == 1
     assert api.fix_attempts == 1
     assert result["pull_requests"][0]["repair_requested"] is False
-    assert "agent" in result["pull_requests"][0]["reasons"]
+    assert "review" in result["pull_requests"][0]["reasons"]
 
 
 def test_draft_race_at_dispatch_is_reported_as_suppressed_repair(tmp_path):

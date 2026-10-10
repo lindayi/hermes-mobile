@@ -450,7 +450,7 @@ def _complete_resolved_threads(threads, *, complete=True):
 
 def copilot_review_valid(head_sha, reviews, threads, *, threads_complete=True,
                          reviews_complete=True):
-    """Require the latest authenticated Copilot review on this exact head."""
+    """Require the latest authenticated Copilot review to approve this exact head."""
     if (not _is_sha(head_sha) or reviews_complete is not True or not isinstance(reviews, list)
             or not _complete_resolved_threads(threads, complete=threads_complete)):
         return False
@@ -458,7 +458,11 @@ def copilot_review_valid(head_sha, reviews, threads, *, threads_complete=True,
     # malformed later record cannot be skipped to reuse an earlier approval.
     # PENDING reviews have no submitted_at in GitHub's API. They cannot be
     # ordered against an approval; do not invent a time or ignore that evidence.
-    return current_copilot_review_valid(reviews, head_sha, complete=reviews_complete)
+    latest = latest_reviews(reviews, COPILOT_REVIEWER_ID)
+    return bool(latest) and all(
+        review.get("state") == "APPROVED" and review.get("commit_id") == head_sha
+        for review in latest
+    )
 
 
 def independent_review_valid(head_sha, reviews, threads, *, pull_author_id,
@@ -470,9 +474,13 @@ def independent_review_valid(head_sha, reviews, threads, *, pull_author_id,
             or reviews_complete is not True
             or not _complete_resolved_threads(threads, complete=threads_complete)):
         return False
-    return copilot_review_valid(
-        head_sha, reviews, threads, reviews_complete=reviews_complete,
-        threads_complete=threads_complete,
+    disposition = review_body_disposition(
+        reviews, head_sha, reviewer_id=COPILOT_REVIEWER_ID,
+    )
+    return (
+        current_copilot_review_valid(reviews, head_sha, complete=reviews_complete)
+        and not disposition["findings"] and not disposition["ambiguous"]
+        and disposition["inventory_complete"] is True
     )
 
 
@@ -4540,10 +4548,9 @@ class Coordinator:
         else:
             return self._handoff_wait(key, action, snapshot)
 
-        if not copilot_review_valid(
-                head, snapshot.get("reviews"), snapshot.get("threads"),
-                threads_complete=snapshot.get("threads_complete") is True,
-                reviews_complete=snapshot.get("reviews_complete") is True):
+        if not current_copilot_review_valid(
+                snapshot.get("reviews"), head,
+                complete=snapshot.get("reviews_complete") is True):
             self.store.update_action(
                 key, "completed", handoff_state="waiting_review",
                 review_requirement="missing_copilot_review",
@@ -4813,6 +4820,9 @@ class Coordinator:
             reviews_complete=snapshot["reviews_complete"],
             issue=number, review_actions=actions,
         )
+        progress_review_ok = current_copilot_review_valid(
+            snapshot["reviews"], head, complete=snapshot["reviews_complete"],
+        )
         sensitive = classify_sensitive_paths(
             snapshot["files"], complete=snapshot["files_complete"],
         )
@@ -4966,7 +4976,7 @@ class Coordinator:
         )
         progress = _completed_repair_progress(
             snapshot, progress_actions, current_fingerprints, authorized_heads,
-            review_ok=review_ok, checks_ok=progress_checks_ok,
+            review_ok=progress_review_ok, checks_ok=progress_checks_ok,
             current_fingerprints_complete=current_fingerprints_complete,
             negative_review_complete=negative_review_complete,
             checks_terminal=checks_terminal,

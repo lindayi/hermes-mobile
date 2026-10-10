@@ -118,6 +118,7 @@ def test_fresh_pull_fences_reject_weak_numeric_identity(tmp_path, monkeypatch, s
         coordinator.run(apply=True)
         fix = next(a for a in store.actions().values() if a["kind"] == "fix")
         api.complete_task(fix["task_id"], fix)
+        api.review_state = "PENDING"
         plan = coordinator._build_plan(apply=True)  # Verify receipt; defer remote handoff.
         action = store.action(fix["key"])
         assert action["handoff_state"] == "waiting_review"
@@ -180,7 +181,7 @@ def test_task_handoff_never_requests_or_waits_for_copilot(tmp_path, monkeypatch)
     monkeypatch.setattr(api, "get", get)
     monkeypatch.setattr(api, "write", write)
     coordinator.run(apply=True)
-    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert store.action(fix["key"])["handoff_state"] == "done"
     assert api.fix_attempts == 1
     assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
 
@@ -192,7 +193,10 @@ def test_task_handoff_never_requests_or_waits_for_copilot(tmp_path, monkeypatch)
 ])
 def test_review_report_requires_expected_reviewer_session_principal_ids(
         tmp_path, field, invalid):
+    from test_issue_starter_paired_lifecycle import saved_legacy_review
+
     api = FakeApi(source_failure=True)
+    api.review_state = "PENDING"
     api.owner_reviews = []
     api.owner_review_body = "not a structured independent review"
     store = StateStore(tmp_path / "state.json")
@@ -203,7 +207,7 @@ def test_review_report_requires_expected_reviewer_session_principal_ids(
     api.source_failure = False
     coordinator.run(apply=True)
     Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
-    review = next(a for a in store.actions().values() if a["kind"] == "review")
+    review = saved_legacy_review(api, store, coordinator, store.action(fix["key"]))
     api.complete_review_task(review["task_id"], review, source_action=store.action(fix["key"]))
     api.tasks[review["task_id"]]["sessions"][0][field]["id"] = invalid
 
@@ -213,10 +217,16 @@ def test_review_report_requires_expected_reviewer_session_principal_ids(
 
     assert summary["review_valid"] is False
     assert StateStore(store.path).action(fix["key"])["handoff_state"] == "waiting_review"
+    from deploy.cloud_coordinator import ReceiptError
+
+    snapshot = coordinator._snapshot_pull(16, store.snapshot()["enrollments"]["16"], BASE)
+    with pytest.raises(ReceiptError):
+        coordinator._validate_review_report(review, snapshot, api.tasks[review["task_id"]])
     rejected = StateStore(store.path).action(review["key"])
     assert rejected["status"] == "completed"
-    assert rejected["report_retry_allowed"] is False
-    assert rejected["report_error"]
+    assert rejected.get("report_retry_allowed", False) is False
+    assert rejected["task_id"] == review["task_id"]
+    assert api.review_attempts == 1
 
 
 @pytest.mark.parametrize("stage", ["enrollment", "snapshot", "authorization"])

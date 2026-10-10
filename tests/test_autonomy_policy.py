@@ -959,6 +959,8 @@ def test_caller_flags_cannot_override_failed_components(phase, sensitive, claime
     expected = {blocker}
     if path == ('main', 'current'):
         expected.add('main-source-missing')
+    if sensitive and path == ('copilot_review', 'reviews', 0, 'id'):
+        expected.add('sensitive-review-authorization')
     assert validate_transition(evidence, phase=phase) == {
         'ready': False, 'phase': phase, 'blockers': sorted(expected),
     }
@@ -986,6 +988,37 @@ def test_all_phases_preserve_the_exact_four_checks():
         assert validate_transition(evidence, phase=phase) == {
             'ready': True, 'phase': phase, 'blockers': [],
         }
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('mutate', [
+    lambda review: review.update(checks_complete=False),
+    lambda review: review.update(check_runs=[]),
+    lambda review: review['check_runs'][-1].update(status='in_progress'),
+    lambda review: review['check_runs'][-1].update(conclusion='failure'),
+    lambda review: review['check_runs'][-1].update(head_sha=SHA),
+    lambda review: review['check_runs'][-1].update(app={'id': COPILOT_REVIEWER_ID}),
+    lambda review: review.update(
+        check_runs=review['check_runs'][:-1],
+        statuses=[{'context': 'copilot-pull-request-reviewer', 'state': 'success'}],
+    ),
+])
+def test_copilot_required_check_cannot_be_missing_stale_pending_or_synthesized(phase, mutate):
+    evidence = _phase_evidence(phase)
+    mutate(evidence['copilot_review'])
+    before = copy.deepcopy(evidence)
+    assert _blockers(evidence, phase) == {'copilot-review-checks'}
+    assert evidence == before
+
+
+@pytest.mark.parametrize('phase', PHASES)
+def test_protection_cannot_remove_the_real_copilot_review_check(phase):
+    evidence = _phase_evidence(phase)
+    evidence['protection']['required_checks'].pop(2)
+    evidence['copilot_review']['check_runs'].pop()
+    assert _blockers(evidence, phase) == {
+        'required-check-policy', 'copilot-review-checks',
+    }
 
 
 def test_missing_pending_pr16_source_cannot_satisfy_current_main_contract():

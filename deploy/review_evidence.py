@@ -222,7 +222,7 @@ def current_copilot_review_valid(reviews, head_sha, *, complete=True):
         return False
     selected = latest_reviews(reviews, 175728472)
     return bool(selected) and all(
-        review.get("state") in {"COMMENTED", "APPROVED"}
+        review.get("state") in ("COMMENTED", "APPROVED")
         and review.get("commit_id") == head_sha
         and review.get("dismissed") is not True
         and review.get("dismissed_at") in (None, "")

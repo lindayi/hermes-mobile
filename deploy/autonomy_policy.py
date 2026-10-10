@@ -184,13 +184,13 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    # Issue #87 bounded-repair candidate; source consistency only.
-    'deploy/cloud_coordinator.py': 'e854f07040ea38bb83dccaa5d8d1f416d2acd6cc7bcf5e09c1b7a65c23416686',
+    # Issue #92 Copilot-only candidate; historical bounded-repair pins are retained.
+    'deploy/cloud_coordinator.py': 'd9a89fad059b9647208db27fbe8b18849346af8eb8d99fe71fbd52b01809d5b0',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
-    'deploy/review_evidence.py': 'bc2bea2e4cd17ac28ed96cc5d421f62f63e7ef14ee9bdec5045cf6f26bb8f290',
+    'deploy/review_evidence.py': '60f1c98ce562900b21429aa8e93728e9260aab6b2363fb4b9b068cd2ccc532b5',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     # Issue #65 producer-only overlay; historical receipt hashes remain documented.
@@ -481,7 +481,8 @@ def _check_review(evidence, main_sha, phase, blockers):
         blockers.add('copilot-review')
     from deploy.cloud_coordinator import required_checks_pass
     if not required_checks_pass(
-            evidence['protection'].get('required_checks'),
+            [{'context': context, 'app_id': app_id}
+             for context, app_id in REQUIRED_CHECKS[phase].items()],
             review.get('check_runs'), review.get('statuses'),
             complete=review.get('checks_complete') is True, head_sha=head):
         blockers.add('copilot-review-checks')
