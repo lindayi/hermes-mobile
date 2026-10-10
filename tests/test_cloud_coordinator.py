@@ -3382,6 +3382,65 @@ def test_progressing_source_repairs_continue_to_the_twenty_attempt_ceiling(
         }
 
 
+@pytest.mark.parametrize("non_review_status", ["success", "in_progress", "failure"])
+def test_rejecting_review_progress_uses_non_review_checks_in_the_planner(
+        tmp_path, non_review_status):
+    class WaitingReviewCheckApi(ProgressApi):
+        def get_all(self, route, *, collection=None):
+            result = super().get_all(route, collection=collection)
+            if f"/commits/{self.head_sha}/check-runs?" in route:
+                adjusted = []
+                for run in result:
+                    if run.get("name") == "copilot-pull-request-reviewer":
+                        run = run | {"status": "in_progress", "conclusion": None}
+                    elif (run.get("name") == "source-ci"
+                          and non_review_status == "in_progress"):
+                        run = run | {"status": "in_progress", "conclusion": None}
+                    elif (run.get("name") == "source-ci"
+                          and non_review_status == "failure"):
+                        run = run | {"conclusion": "failure"}
+                    adjusted.append(run)
+                return adjusted
+            return result
+
+    api = WaitingReviewCheckApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.review_state = "CHANGES_REQUESTED"
+    api.review_submitted_at = "2026-10-01T12:10:00Z"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "Finding A remains.", "2026-10-01T12:10:00Z",
+    ) | {"state": "CHANGES_REQUESTED"}
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    first = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    api.complete_task(first["task_id"], first, head_sha=HEAD)
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    progress = store.snapshot()["enrollments"]["16"]["repair_progress"]
+    assert summary["review_valid"] is False
+    assert summary["required_checks_green"] is False
+    assert summary["auto_merge_eligible"] is False
+    assert store.action(first["key"])["handoff_state"] == "waiting_review"
+    assert not api.graphql_writes
+    if non_review_status == "in_progress":
+        assert progress["evaluated_task_ids"] == []
+        assert progress["consecutive_no_progress"] == 0
+        assert summary["repair_requested"] is False
+        assert api.fix_attempts == 1
+    else:
+        assert first["task_id"] in progress["evaluated_task_ids"]
+        assert progress["consecutive_no_progress"] == 1
+        assert summary["repair_requested"] is True
+        assert api.fix_attempts == 2
+        if non_review_status == "failure":
+            assert progress["resolved_fingerprints"] == []
+
+
 @pytest.mark.parametrize("producer", ["source", "review-followup", "neutral"])
 @pytest.mark.parametrize("occupancy", [None, "sending", "uncertain", "sent", "remote-active"])
 def test_cold_legacy_mixed_budget_request_identity(tmp_path, producer, occupancy):
@@ -7293,6 +7352,61 @@ def test_completed_task_handoff_waits_for_copilot_without_independent_dispatch(
     assert api.review_attempts == 0
     assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
+
+
+@pytest.mark.parametrize("correction_status", [None, "sent", "uncertain"])
+def test_waiting_source_handoff_serializes_repairs_but_allows_its_review_request(
+        tmp_path, correction_status):
+    class MissingCopilotReviewApi(FakeApi):
+        def get_all(self, route, *, collection=None):
+            result = super().get_all(route, collection=collection)
+            if route.endswith("/pulls/16/reviews?per_page=100"):
+                return [
+                    review for review in result
+                    if review.get("user", {}).get("id") != COPILOT_REVIEWER
+                ]
+            return result
+
+    api = MissingCopilotReviewApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.review_state = "PENDING"
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    coordinator.run(apply=True)
+    fix = next(action for action in store.actions().values() if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix)
+    correction_key = "historical-report-correction"
+    if correction_status is not None:
+        store._mutate(lambda state: state["actions"].__setitem__(
+            correction_key, {
+                "key": correction_key, "kind": "review",
+                "task_type": "report-correction", "issue": 16,
+                "status": correction_status, "head": HEAD, "main_sha": BASE,
+                "task_id": "historical-correction-task",
+            },
+        ))
+
+    summary = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert store.action(fix["key"])["handoff_state"] == "waiting_review"
+    assert summary["auto_merge_eligible"] is False
+    assert api.fix_attempts == 1
+    review_requests = [
+        body for route, body in api.writes
+        if route.endswith("/requested_reviewers")
+    ]
+    if correction_status is None:
+        assert review_requests == [
+            {"reviewers": ["copilot-pull-request-reviewer[bot]"]},
+        ], (summary.get("reasons"), summary.get("repair_requested"))
+        coordinator.run(apply=True)
+        assert len([
+            route for route, _ in api.writes
+            if route.endswith("/requested_reviewers")
+        ]) == 1
+    else:
+        assert review_requests == []
+        assert store.action(correction_key)["status"] == correction_status
 
 
 def _legacy_current_independent_review_completes_handoff_without_copilot(tmp_path):

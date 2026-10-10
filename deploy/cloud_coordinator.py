@@ -3735,13 +3735,20 @@ class Coordinator:
 
     def _reconcile_actions(self, snapshot, actions, *, apply, handoffs=None,
                            review_publications=None, receipt_recoveries=None,
-                           recovery_keys=None):
+                           recovery_keys=None, busy_details=None):
         # Reconciliation never performs handoff mutations; it only collects them.
         handoffs = [] if handoffs is None else handoffs
         review_publications = [] if review_publications is None else review_publications
         receipt_recoveries = [] if receipt_recoveries is None else receipt_recoveries
         number = snapshot["issue"]
         busy = False
+        busy_action_keys = set()
+
+        def mark_busy():
+            nonlocal busy
+            busy = True
+            busy_action_keys.add(key)
+
         historical_dirty = (
             snapshot.get("historical_base") is True
             and snapshot["pull"].get("mergeable") is False
@@ -3794,18 +3801,18 @@ class Coordinator:
                 # Retired review reservations remain occupied until authenticated
                 # terminal task evidence arrives; never replay or repurpose them.
                 if status in {"sending", "uncertain"}:
-                    busy = True
+                    mark_busy()
                 elif status == "sent":
                     task_id = action.get("task_id")
                     if not isinstance(task_id, str) or not task_id:
-                        busy = True
+                        mark_busy()
                         continue
                     try:
                         task = self.api.get(
                             f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}"
                         )
                     except CoordinatorError:
-                        busy = True
+                        mark_busy()
                         continue
                     if (not isinstance(task, dict) or task.get("id") != task_id
                             or task.get("created_at") != action.get("task_created_at")
@@ -3817,7 +3824,7 @@ class Coordinator:
                                        ))
                             or not _task_scoped(task, snapshot)
                             or not _task_terminal(task)):
-                        busy = True
+                        mark_busy()
                     elif apply:
                         self.store.update_action(key, "completed")
                 continue
@@ -3917,10 +3924,12 @@ class Coordinator:
                             )
                         if report_recovery_superseded:
                             snapshot["superseded_report_failure_key"] = key
-                        busy = (
+                        report_busy = (
                             retry_allowed and not report_recovery_superseded
                             and not historical_dirty
-                        ) or busy
+                        )
+                        if report_busy:
+                            mark_busy()
                         if not apply:
                             continue
                         self.store.update_action(
@@ -3981,7 +3990,7 @@ class Coordinator:
                             ),
                         )
                         review_publications.append(key)
-                    busy = True
+                    mark_busy()
                     continue
                 if (status == "completed"
                         and action.get("task_type") == "report-correction"
@@ -4002,9 +4011,9 @@ class Coordinator:
                     if action.get("task_type") != "report-correction":
                         if action.get("key") != snapshot.get(
                                 "superseded_report_failure_key"):
-                            busy = _review_report_recovery_busy(
-                                actions, action, allow_retry=not historical_dirty,
-                            ) or busy
+                            if _review_report_recovery_busy(
+                                    actions, action, allow_retry=not historical_dirty):
+                                mark_busy()
                     continue
                 if (status == "completed"
                         and _review_report_correction_parent_needs_recovery(
@@ -4012,7 +4021,7 @@ class Coordinator:
                         )):
                     if apply:
                         review_publications.append(key)
-                    busy = True
+                    mark_busy()
                     continue
                 if (status == "completed"
                         and action.get("publication_disposition") == "stale"):
@@ -4023,7 +4032,7 @@ class Coordinator:
                 )):
                     if apply:
                         review_publications.append(key)
-                    busy = True
+                    mark_busy()
                     continue
                 continue
             if action.get("kind") != "fix":
@@ -4036,18 +4045,18 @@ class Coordinator:
                     snapshot.setdefault("stale_handoff_keys", []).append(key)
                     continue
                 if action.get("handoff_state") in HANDOFF_ACTIVE_STATES and apply:
-                    busy = self._advance_task_handoff(
-                        key, action, snapshot, deferred=handoffs,
-                    ) or busy
+                    if self._advance_task_handoff(
+                            key, action, snapshot, deferred=handoffs):
+                        mark_busy()
                 elif (action.get("handoff_state") == "waiting_review"
                       and action.get("review_requirement") == "missing_independent_review"
                       and _review_prompt_inventory_error(snapshot)):
                     continue
                 else:
-                    busy = True
+                    mark_busy()
                 continue
             if status == "completed" and action.get("handoff_state") == "failed":
-                busy = True
+                mark_busy()
                 continue
             receipt_recovery_identity = (
                 status == "uncertain"
@@ -4084,18 +4093,18 @@ class Coordinator:
                 initial_receipt_recovery or codec_revision_recovery
             )
             if status in {"sending", "uncertain"} and not receipt_recovery:
-                busy = True
+                mark_busy()
                 continue
             if receipt_recovery:
                 if not apply:
-                    busy = True
+                    mark_busy()
                     continue
                 if recovery_keys is None:
                     receipt_recoveries.append(key)
-                    busy = True
+                    mark_busy()
                     continue
                 if not self.store.claim_receipt_recovery(key, action):
-                    busy = True
+                    mark_busy()
                     continue
                 action = self.store.action(key)
             if status == "sent" or receipt_recovery:
@@ -4103,7 +4112,7 @@ class Coordinator:
                 if not isinstance(task_id, str) or not task_id or len(task_id) > 128:
                     if apply and not receipt_recovery:
                         self._record_receipt_wait(key, action)
-                    busy = True
+                    mark_busy()
                     continue
                 try:
                     task = self.api.get(
@@ -4112,7 +4121,7 @@ class Coordinator:
                 except CoordinatorError:
                     if apply and not receipt_recovery:
                         self._record_receipt_wait(key, action)
-                    busy = True
+                    mark_busy()
                     continue
                 if (not isinstance(task, dict) or task.get("id") != task_id
                         or not all(_github_identity(task.get(field), expected)
@@ -4123,7 +4132,7 @@ class Coordinator:
                         or not _task_scoped(task, snapshot)):
                     if apply and not receipt_recovery:
                         self._record_receipt_wait(key, action)
-                    busy = True
+                    mark_busy()
                     continue
                 if (snapshot["enrollment"].get("authorized_head") is not None
                         and (task.get("created_at") != action.get("task_created_at")
@@ -4133,7 +4142,7 @@ class Coordinator:
                              or task["owner"].get("id") != OWNER_ID
                              or not isinstance(task.get("repository"), dict)
                              or task["repository"].get("id") != REPOSITORY_ID)):
-                    busy = True
+                    mark_busy()
                     continue
                 if receipt_recovery:
                     sessions = task.get("sessions")
@@ -4143,12 +4152,12 @@ class Coordinator:
                             or not isinstance(sessions[0], dict)
                             or sessions[0].get("prompt") != action.get("body")
                     ):
-                        busy = True
+                        mark_busy()
                         continue
                 if _task_terminal(task):
                     if task.get("state") in {"failed", "timed_out", "cancelled"}:
                         if receipt_recovery:
-                            busy = True
+                            mark_busy()
                             continue
                         if apply:
                             event = _lifecycle_event(
@@ -4171,7 +4180,7 @@ class Coordinator:
                             if action.get("head") not in authorized_heads:
                                 if apply and not receipt_recovery:
                                     self._record_receipt_wait(key, action)
-                                busy = True
+                                mark_busy()
                                 continue
                         try:
                             receipt = validate_task_receipt(
@@ -4204,10 +4213,10 @@ class Coordinator:
                                     self.store.update_action_with_lifecycle(
                                         key, "completed", None, now=self.clock(), **fields,
                                     )
-                                    busy = self._advance_task_handoff(
-                                        key, self.store.action(key), snapshot,
-                                        deferred=handoffs,
-                                    ) or busy
+                                    if self._advance_task_handoff(
+                                            key, self.store.action(key), snapshot,
+                                            deferred=handoffs):
+                                        mark_busy()
                                 else:
                                     event = _lifecycle_event(
                                         {"issue": number, "head": fields["receipt_head"],
@@ -4222,12 +4231,21 @@ class Coordinator:
                         elif apply and not receipt_recovery:
                             self._record_receipt_wait(key, action)
                         if not receipt:
-                            busy = True
+                            mark_busy()
                 else:
-                    busy = True
-        return (busy or _other_task_active(snapshot["tasks"], snapshot)
-                or _cloud_agent_active(snapshot.get("workflows", []),
-                                       snapshot["pull"]["head"]["ref"]))
+                    mark_busy()
+        external_busy = (
+            _other_task_active(snapshot["tasks"], snapshot)
+            or _cloud_agent_active(
+                snapshot.get("workflows", []), snapshot["pull"]["head"]["ref"],
+            )
+            or recovery_keys is not None
+        )
+        if busy_details is not None:
+            busy_details.update(
+                action_keys=busy_action_keys, external_busy=external_busy,
+            )
+        return busy or external_busy
 
     def _review_task_recovery_allowed(self, action, snapshot, task):
         if (not _review_task_terminal(action, task)
@@ -4582,7 +4600,7 @@ class Coordinator:
                 key, "completed", handoff_state="waiting_review",
                 review_requirement="missing_copilot_review",
             )
-            return False
+            return True
         self.store.update_action(key, "completed", handoff_state="done")
         return False
 
@@ -4808,7 +4826,8 @@ class Coordinator:
             return "observation"
         return None
 
-    def _plan_pull(self, snapshot, actions, *, apply, reconciled_busy=None):
+    def _plan_pull(self, snapshot, actions, *, apply, reconciled_busy=None,
+                   reconciled_busy_details=None):
         number, head = snapshot["issue"], snapshot["head"]
         if snapshot.get("terminal"):
             lifecycle = []
@@ -4875,11 +4894,14 @@ class Coordinator:
         review_publications = []
         receipt_recoveries = []
         agent_busy = reconciled_busy
+        busy_details = (
+            {} if reconciled_busy_details is None else reconciled_busy_details
+        )
         if agent_busy is None:
             agent_busy = self._reconcile_actions(
                 snapshot, actions, apply=apply, handoffs=handoffs,
                 review_publications=review_publications,
-                receipt_recoveries=receipt_recoveries,
+                receipt_recoveries=receipt_recoveries, busy_details=busy_details,
             )
         if apply:
             actions = self.store.actions()
@@ -4924,6 +4946,31 @@ class Coordinator:
                 "status_action": None, "merge_action": None, "outcomes": [outcome],
                 "receipt_recoveries": receipt_recoveries, "handoffs": handoffs,
             }
+        copilot_review_handoff_keys = {
+            key for key, action in actions.items()
+            if (
+                isinstance(action, dict)
+                and action.get("issue") == number
+                and action.get("kind") == "fix"
+                and action.get("task_type") != "neutral"
+                and action.get("status") == "completed"
+                and action.get("handoff_state") == "waiting_review"
+                and action.get("review_requirement") == "missing_copilot_review"
+                and action.get("receipt_result") == "ready"
+                and action.get("receipt_head") == head
+                and action.get("receipt_base") == snapshot["main_sha"]
+                and action.get("main_sha") == snapshot["main_sha"]
+                and action.get("owner_id") == OWNER_ID
+                and action.get("repository_id") == REPOSITORY_ID
+                and _pull_identity(snapshot["pull"], action)
+                and _valid_receipt_proof(action, snapshot["comments"])
+            )
+        }
+        waiting_handoff_is_only_busy = (
+            len(copilot_review_handoff_keys) == 1
+            and busy_details.get("action_keys") == copilot_review_handoff_keys
+            and busy_details.get("external_busy") is False
+        )
         if authorized_head is not None and (
                 not _is_sha(authorized_head) or head not in authorized_heads):
             return {
@@ -4999,7 +5046,9 @@ class Coordinator:
         progress_required = [
             requirement for requirement in _required_contexts(required)
             if not (negative_review_complete
-                    and requirement.get("context") == "agent-review")
+                    and requirement.get("context") in {
+                        "agent-review", "copilot-pull-request-reviewer",
+                    })
         ]
         checks_terminal = required_checks_pass(
             progress_required, snapshot["check_runs"], snapshot["statuses"],
@@ -5118,7 +5167,18 @@ class Coordinator:
                     pull_number=number, source_failure=snapshot["source_failure"],
                     reviews=snapshot["reviews"],
                 )
-        if (repair and not agent_busy and not inventory_blocked
+        rejection_progress_ready = (
+            waiting_handoff_is_only_busy and negative_review_complete
+            and checks_terminal and progress is not None
+            and any(
+                actions[key].get("task_id") in progress["evaluated_task_ids"]
+                for key in copilot_review_handoff_keys
+            )
+        )
+        if (repair and (
+                not agent_busy
+                or (repair.get("task_type") != "neutral" and rejection_progress_ready)
+        ) and not inventory_blocked
                 and (
                     (repair.get("task_type") == "neutral"
                      and neutral_attempts < NEUTRAL_LIMIT)
@@ -5193,6 +5253,7 @@ class Coordinator:
         source_provenance_verified = (
             _valid_initial_source(snapshot.get("initial_source"))
             or snapshot.get("retained_ready_handoff") is True
+            or bool(copilot_review_handoff_keys)
         )
         source_work_active = (
             _cloud_agent_active(
@@ -5214,6 +5275,14 @@ class Coordinator:
                 and action.get("status") in {"sending", "uncertain", "sent"}
                 for action in actions.values()
             )
+        )
+        has_current_copilot_review = any(
+            isinstance(review, dict)
+            and isinstance(review.get("user"), dict)
+            and type(review["user"].get("id")) is int
+            and review["user"]["id"] == COPILOT_REVIEWER_ID
+            and review.get("commit_id") == head
+            for review in snapshot["reviews"]
         )
         if source_provenance_missing:
             reasons.append((
@@ -5368,10 +5437,12 @@ class Coordinator:
                                         if isinstance(snapshot["pull"].get("user"), dict)
                                         else None),
                         complete=snapshot["reviews_complete"])
+                        and not has_current_copilot_review
                         and snapshot["reviews_complete"] is True
                        and snapshot["scoped"] and not mergeability_unknown
                        and snapshot["pull"].get("draft") is False
-                       and repair is None and not agent_busy
+                       and repair is None
+                       and (not agent_busy or waiting_handoff_is_only_busy)
                        and source_provenance_verified
                        and not source_work_active) else None
                 ),
@@ -6069,15 +6140,18 @@ class Coordinator:
                 if (not current or current.get("id") != snapshot["pull"].get("id")
                         or current.get("node_id") != snapshot["pull"].get("node_id")):
                     continue
+                busy_details = {}
                 busy = self._reconcile_actions(
                     snapshot, self.store.actions(), apply=True,
                     handoffs=pr_plan["handoffs"], recovery_keys=(key,),
+                    busy_details=busy_details,
                 )
                 recovered = self.store.action(key)
                 if recovered and recovered.get("status") == "completed":
                     refreshed = self._plan_pull(
                         snapshot, self.store.actions(), apply=True,
                         reconciled_busy=busy,
+                        reconciled_busy_details=busy_details,
                     )
                     refreshed["handoffs"].extend(pr_plan["handoffs"])
                     refreshed.setdefault("review_publications", []).extend(
