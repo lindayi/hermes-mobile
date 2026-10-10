@@ -1659,6 +1659,21 @@ def test_copilot_review_requires_real_successful_exact_head_check(mutate):
     assert _blockers(evidence) == {'copilot-review-checks'}
 
 
+def test_unbound_successful_status_cannot_replace_exact_head_check_run():
+    evidence = _evidence()
+    review = evidence['copilot_review']
+    review['check_runs'] = [
+        run for run in review['check_runs'] if run['name'] != 'integration-tests'
+    ]
+    review['statuses'] = [{
+        'context': 'integration-tests', 'state': 'success',
+        'created_at': '2026-10-01T22:00:00Z',
+        'head_sha': 'd' * 40,
+    }]
+
+    assert _blockers(evidence) == {'copilot-review-checks'}
+
+
 @pytest.mark.parametrize('phase', PHASES)
 def test_advisory_cloud_review_status_does_not_replace_review_evidence(phase):
     evidence = _phase_evidence(phase)

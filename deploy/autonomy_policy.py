@@ -490,7 +490,7 @@ def _check_review(evidence, main_sha, phase, blockers):
     if not required_checks_pass(
             [{'context': context, 'app_id': app_id}
              for context, app_id in REQUIRED_CHECKS[phase].items()],
-            review.get('check_runs'), review.get('statuses'),
+            review.get('check_runs'), [],
             complete=review.get('checks_complete') is True, head_sha=head):
         blockers.add('copilot-review-checks')
     if any(not isinstance(thread, dict) or thread.get('isResolved') is not True

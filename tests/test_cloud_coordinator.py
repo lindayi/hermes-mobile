@@ -7382,10 +7382,14 @@ def test_waiting_source_handoff_serializes_repairs_but_allows_its_review_request
                 "key": correction_key, "kind": "review",
                 "task_type": "report-correction", "issue": 16,
                 "status": correction_status, "head": HEAD, "main_sha": BASE,
-                "task_id": "historical-correction-task",
+                "task_id": (
+                    ["malformed-task-id"] if correction_status == "uncertain"
+                    else "historical-correction-task"
+                ),
             },
         ))
 
+    writes_before = len(api.writes)
     summary = coordinator.run(apply=True)["pull_requests"][0]
 
     assert store.action(fix["key"])["handoff_state"] == "waiting_review"
@@ -7407,6 +7411,12 @@ def test_waiting_source_handoff_serializes_repairs_but_allows_its_review_request
     else:
         assert review_requests == []
         assert store.action(correction_key)["status"] == correction_status
+        if correction_status == "uncertain":
+            assert store.action(correction_key)["task_id"] == ["malformed-task-id"]
+        assert not any(
+            route.endswith("/agents/repos/lindayi/hermes-mobile/tasks")
+            for route, _ in api.writes[writes_before:]
+        )
 
 
 def _legacy_current_independent_review_completes_handoff_without_copilot(tmp_path):
