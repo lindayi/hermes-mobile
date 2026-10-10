@@ -78,10 +78,10 @@ targeted independent review.
   deployment outcomes. Export is written to the configured application state
   directory and bound to its sole ready default-profile owner, not the GitHub
   account ID. Source readers never dispatch tasks or modify source state.
-- Current-head owner-published independent-agent review and resolved-thread
+- Current-head authenticated Copilot review and resolved-thread
   validation, fail-closed check collection, and protected auto-merge eligibility.
-  Copilot feedback is supplemental; the coordinator does not request Copilot review
-  or treat its owned advisory `cloud-review` status as required review evidence.
+  The coordinator requests real Copilot review through the bounded action flow;
+  its owned advisory `cloud-review` status is not required review evidence.
 - Failure to read the required-check policy or to prove complete/current evidence
   blocks auto-merge. The coordinator never reports tests as successful.
 
@@ -107,7 +107,7 @@ release was deployed. The parent continues to require fresh evidence on the
 result head.
 
 Accepted task IDs are reconciled by GET, including when the PR head advances.
-Queued, running, waiting, uncertain, and completed tasks awaiting independent
+Queued, running, waiting, uncertain, and completed tasks awaiting Copilot
 review retain the serialization lock; review waits consume neither handoff nor
 fixer budgets. An ambiguous task-creation response is never blindly resent;
 preserve the durable claim and state for verified recovery rather than resetting
@@ -116,11 +116,19 @@ comment, or completed session never triggers a second dispatch by itself.
 
 ## Review, merge, delivery, and Inbox are separate
 
-The coordinator requires the latest authenticated owner-published structured
-independent-agent formal `COMMENT` review on the exact current head and complete
-review/thread evidence with every thread resolved. Copilot feedback is
-supplemental; missing approval alone never delays task handoff or consumes a fixer
-attempt. Actual unresolved findings and definite rejection still block acceptance.
+Issue #92 requires the latest authenticated Copilot review from reviewer bot ID
+`175728472`, `COMMENTED` or `APPROVED` on the exact head, complete review/thread
+pagination, resolved threads and the real successful review check. Coding bot ID
+`198982749` does not qualify. Missing, stale, pending, dismissed or rejecting
+reviews block. Request genuine review through the bounded action flow, not a
+synthetic pass. Do not dispatch independent review/report-correction tasks or
+owner independent-review publications for new decisions. Preserve historical
+records and active task occupancy; never cancel or repurpose active tasks.
+
+### Historical independent-report transport (retired by issue #92)
+
+The following describes the former report transport for retained history only.
+It does not authorize new dispatch/publication or impose a merge requirement.
 After a source task reaches a verified `ready` receipt without current
 independent evidence, the coordinator posts one owner-authored review anchor
 comment and dispatches one reserved read-only reviewer task on that exact
@@ -186,15 +194,17 @@ generic agent lock or create a fixer task. Once positively completed, it is
 retired after its head changes or enrollment becomes inactive; current active
 records and unresolved work remain retained.
 
+### Current merge and deployment guards
+
 Sensitive changes additionally need owner authorization bound to that exact SHA
 and the documented targeted independent review; neither approval nor authorization
 carries to a later head.
 
 The active required contexts are exactly `source-ci` (Actions app 15368),
-`integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), with
+`integration-tests`, `copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368), with
 strict/up-to-date checks and resolved review conversations. The coordinator may
 publish an owned advisory `cloud-review` status, but it is not required and never
-replaces the structured independent review. No repository settings or protections
+replaces genuine Copilot review. No repository settings or protections
 are changed by this source behavior. See [`autonomy-policy.md`](autonomy-policy.md)
 for the owner-controlled deployment boundary.
 
@@ -235,8 +245,8 @@ Separate owner/policy work still required:
 - Keep the active required contexts and protections owner-controlled. The
   coordinator does not configure Copilot reviewer requirements, publish
   `cloud-review` as a required status, or change repository settings. Its owned
-  `cloud-review` status remains advisory and never substitutes for independent
-  review. Exact current required contexts and independent-review evidence are documented in
+  `cloud-review` status remains advisory and never substitutes for genuine Copilot
+  review. Exact current required contexts and review evidence are documented in
   [`AGENTS.md`](../AGENTS.md) and
   [`cloud-coordinator-spec.md`](cloud-coordinator-spec.md).
 - Install and enable the service/timer only after exact-head review and policy

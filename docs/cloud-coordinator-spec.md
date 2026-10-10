@@ -123,8 +123,8 @@ contract at enrollment, admission, source resolution and downstream review/repor
 boundaries; 257-character IDs are rejected.
 The pull artifact's optional `global_id` may be absent only because authenticated
 PR detail supplies the bound node identity; explicit null or mismatch is rejected.
-An already accepted exact-head independent review suppresses first-review
-anchors and dispatch even without a local reviewer action.
+An already accepted exact-head Copilot review suppresses duplicate review requests
+even without a local reviewer action.
 
 This fence is admission-only. Later body reports or changed canonical linkage do
 not revoke a durably admitted PR; PR45 receipt-result heads, restart/compaction,
@@ -298,8 +298,8 @@ not authorize repairs; explicitly active disclosures do.
 
 `body_findings` retains its caller interface. Dispositions remain in the helper's
 internal result; no new review-authority protocol or coordinator lifecycle path
-is introduced. The formal technical review gate uses the current exact-head owner-published
-structured independent-agent COMMENT review, not Copilot APPROVED state. Ambiguous
+is introduced. The formal technical review gate uses genuine exact-head Copilot
+COMMENTED or APPROVED review and its real successful check. Ambiguous
 body text is never passed blindly to a fixer; independent authenticated
 thread/check evidence remains eligible. Each body finding records the genuine review ID, head SHA, and
 submission time; it never carries a thread ID. Body text is untrusted evidence:
@@ -584,7 +584,7 @@ still require valid task, session, and completion chronology. Hydrated task
 `created_at` must match the authenticated task-list value exactly.
 Missing, malformed, out-of-order, or list/detail-inconsistent timestamps preserve
 unknown history and block dispatch; no timestamp or ledger value is synthesized.
-New source, neutral, and independent-review follow-up request hashes include the
+New source and neutral follow-up request hashes include the
 literal `budget-v2:` discriminator so split ordinals cannot collide with retained
 legacy completed keys. Historical keys, bodies, nonces and receipts are unchanged;
 both prompt forms remain authenticated under the same task/session bindings.
@@ -594,11 +594,11 @@ Fully observed terminal failed verification allows only a nonprogress decision.
 Completed required check runs with `failure`, `cancelled`, `timed_out`,
 `action_required`, `neutral`, `skipped`, `stale`, or `startup_failure` are terminal
 observations, not successful verification. They permit a no-progress evaluation
-when the exact-head task and independent review are complete, but never resolution
+when the exact-head task and Copilot review are complete, but never resolution
 credit or merge eligibility. Pending, null, unknown or malformed conclusions,
 wrong app/head bindings and incomplete pagination keep evaluation pending.
-A bound negative report supplies the review-stage disposition, not a successful
-`agent-review` check; all non-review checks must be observed before scoring.
+A rejecting Copilot review supplies a negative review-stage disposition, not a
+successful review check; all non-review checks must be observed before scoring.
 An incomplete or older-encoding reservation baseline receives an explicitly
 unknown decision only after fresh complete review/check evidence; it cannot clear
 targets or alter the streak. Neutral advancement can leave an older source result
@@ -676,7 +676,7 @@ zero-progress or retroactively scored. A valid retained ready-receipt chain may
 continue to provide current source provenance and prove an authenticated
 historical-base handoff after its completed action is compacted, but cannot by
 itself establish a historical no-progress streak or replace fresh checks and
-independent review. Source acceptance remains distinct from merge approval and
+Copilot review. Source acceptance remains distinct from merge approval and
 deployment.
 
 When a paginated task-list item for a saved retained receipt has `session_count: 1`
@@ -775,42 +775,40 @@ workloads.
 
 ## Review, checks, and merge
 
-Technical review acceptance requires the latest authenticated owner-published
-structured independent-agent formal COMMENT review on the exact current head.
-The existing `hermes-independent-agent-review-v1` contract requires a positive
-`pass` verdict and a bound lowercase evidence SHA-256. The selected record's ID and
-raw-body SHA-256 are checked against the current complete review collection using
-`selected_independent_agent_review`; edited, removed, stale, malformed, or
-superseded evidence cannot reuse an earlier review. Every review record must be an
-object with positive integer user and review IDs (not booleans or strings), and
-review IDs must be unique. These are validated across the complete collection
-before author filtering. All authenticated reviews must have valid timezone-aware
-submission times. Missing, malformed, or naive timestamps fail closed; this
-includes an unsubmitted `PENDING` review, for which GitHub omits `submitted_at`.
-Times are compared as instants, not strings; tied latest owner reviews fail closed.
-Because REST `application/vnd.github.full+json` review payloads do not reliably
-expose edit metadata, the authenticated transport also re-reads the exact REST
-review's GraphQL `PullRequestReview` node and binds node ID, database ID,
-repository, pull number, head commit, author login, body, submission time,
-`updatedAt`, `lastEditedAt`, and `includesCreatedEdit` before treating the review
-as an unedited positive proof. Missing GraphQL metadata, mismatches, or any edit
-signal fail closed.
-Review pagination must be complete and every thread resolved, with complete thread
-pagination. A status, Copilot review, overview, or arbitrary comment is not
-independent review. Copilot feedback is supplemental; COMMENTED or missing APPROVED
-alone does not block acceptance, trigger repeated review requests, or consume fixer
-budget. Actual open findings must still be resolved, and a definite rejection is
-not acceptance.
+Owner-authorized issue #92 replaces independent-review merge gating. Technical
+acceptance requires the latest authenticated Copilot review from reviewer bot ID
+`175728472` on the exact current head, in state `COMMENTED` or `APPROVED`. Coding
+bot ID `198982749` does not qualify. Review and thread pagination must be complete,
+every thread resolved, and the real required review check completed successfully.
+Missing, stale, pending, dismissed, rejecting, wrong-identity or malformed review
+evidence blocks. A check alone is not a review. COMMENTED is eligible; do not
+demand APPROVED-only or dispatch duplicate reviews after acceptance.
 Task receipt handoff and review acceptance are separate. After the exact result
 head, repository, base and authorization fences pass, the coordinator completes
-the source-writing task handoff only when the existing independent-review gate
-accepts a current owner-published review on that head, with complete review and
+the source-writing task handoff only when the Copilot review gate
+accepts a current authenticated review on that head, with complete review and
 thread collection and all threads resolved. Otherwise the task stays in
 `waiting_review`, retaining its lock without consuming fixer or handoff-wait
 budgets. Unresolved findings and definite rejection are not treated as acceptance.
-The coordinator never requests or waits for an advisory Copilot review. Completing
-a handoff is not merge evidence: merge still requires the valid independent-agent
-review, resolved threads, required checks and every other existing guard.
+The coordinator requests or re-requests the real Copilot review through the
+existing bounded action flow. Completing a handoff is not merge evidence: merge
+still requires the genuine Copilot review, resolved threads, required checks and
+every other existing guard. New merge decisions never dispatch independent review,
+report-correction or owner independent-review publication actions, and never
+publish `agent-review`. Historical records and active tasks remain intact; they
+are not cancelled or repurposed and still occupy their existing task slots.
+
+Review requests use one durable reservation per PR/head. Check authenticated
+review and requested-reviewer readback before requesting the genuine reviewer.
+Repeat events and cold restarts cannot duplicate that request. A lost or ambiguous
+POST response stays reserved and is never blindly replayed. A new head needs fresh
+review and a new head-bound reservation; no old success is copied.
+
+### Historical independent-report transport (retired by issue #92)
+
+The following report/publication contract records the former implementation.
+It does not authorize new reviewer dispatch or publication and is not a current
+merge requirement. Sensitive owner authorization above remains a separate guard.
 
 The existing task API exposes task identity, GitHub pull/branch artifacts and
 authenticated session metadata. After a source task reaches a verified `ready`
@@ -991,7 +989,7 @@ present; its absence does not invalidate an older genuinely validated proof.
 Observation time or mutable task update time is never substituted for authenticated
 completion. Missing, invalid or conflicting completion proof fails closed.
 Unresolved findings and threads remain eligible for the existing bounded repair
-path; no fixer attempt is consumed just for awaiting advisory Copilot feedback.
+path; no fixer attempt is consumed just for awaiting required Copilot review.
 Preparation stages verified receipt/handoff state in memory. Controller evidence
 is collected against durable lifecycle history plus all newly observed merge
 events in the complete plan. The scan commits those source events, receipt state,
@@ -1020,18 +1018,16 @@ authorization; the separate release policy still classifies the complete diff
 from the deployed base before deployment.
 
 The coordinator may publish its existing owned advisory `cloud-review` status,
-but does not require it; a status is not a substitute for reading the structured
-independent review. The current protected
+but does not require it; a status is not a substitute for reading the genuine
+Copilot review. The current protected
 policy is exactly `source-ci` (Actions app 15368), `integration-tests`,
-`agent-review`, and `issue-link` (Actions app 15368), with strict/up-to-date checks
+`copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368), with strict/up-to-date checks
 and required conversation resolution. Missing, extra, or differently app-bound
 required contexts fail closed. All four required checks must independently report
 success; skipped, cancelled, missing, pending, failed, or incomplete checks are not
 green. The coordinator never writes `integration-tests` or `source-ci` statuses.
-It may write `agent-review` success only after an independent-review report
-passes strict exact-head and authenticated-report validation plus complete,
-independently verified file-inventory checks; that status is not a substitute for
-independent review or any other required context. Branch rules are collected
+It never synthesizes the Copilot review check or writes `agent-review` for new merge
+decisions. Branch rules are collected
 with explicit `per_page=100` and `page` pagination, bounded to 100 pages; only a
 short final page proves completion. Errors (including an unavailable rules
 endpoint), malformed pages/policy fields, or exhaustion of the bound fail closed.
@@ -1051,7 +1047,7 @@ fails closed rather than weakening protection.
 
 Auto-merge is requested through GitHub's protected `enablePullRequestAutoMerge`
 operation only when the same-repository main base is current, the PR is not a
-draft or conflict, all four required checks are green, the independent review gate
+draft or conflict, all four required checks are green, the Copilot review gate
 passes, no fixer may be running, and any sensitive authorization is current. Both
 the PR head and the current `main` SHA are re-read before enabling
 auto-merge; the mutation supplies `expectedHeadOid` as the server-side head
@@ -1298,12 +1294,11 @@ activation approval.
 ## External policy boundary
 
 The current source policy requires the exact four protected contexts above and
-independent structured review evidence; advisory `cloud-review` is neither required
+genuine exact-head Copilot review evidence; advisory `cloud-review` is neither required
 nor synthesized. Any later protection change requires separate owner authorization
 and new verification. The coordinator cannot alter branch protection.
 
-Native compatibility gating and routine deployment policy remain follow-ups under
-issue #5. This slice does not change the current global `AGENTS.md` review,
-integration, merge, or deployment instructions. Any future transition should
+Issue #92 synchronizes the current contributor review contract without changing
+native compatibility, CI or deployment guards. Any future transition should
 follow verified coordinator and branch-protection rollout, preserve exact-head
 evidence and sensitive owner decisions, and keep guarded deployment separate.

@@ -33,7 +33,7 @@ execution. The full managed `all` remains an opt-in diagnostic and the conservat
 release-stage gate.
 
 The active required contexts are `source-ci` (Actions app 15368),
-`integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), with
+`integration-tests`, `copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368), with
 strict/up-to-date checks and resolved conversations. Do not require, synthesize, or
 publish `cloud-review` as a required status. Any future policy change needs a
 separate owner-authorized protection change and verified current-head evidence.
@@ -101,21 +101,20 @@ review after follow-up commits. Automatic review/re-review is controlled by GitH
 repository settings, not by these instruction files; do not claim this repository
 has that setting enabled unless verified. A Copilot suggestion is feedback, not an
 instruction: judge it against the code and tests. Authentication, deployment,
-migration, and semantic merge-conflict changes require targeted independent review.
+migration, and semantic merge-conflict changes require targeted review.
 
 Body-only review evidence uses authenticated full-media `body_html`, never a raw
 Markdown fallback. Keep rendered code/pre/blockquote inert and entity-decoded text
 literal; see [docs/cloud-coordinator-spec.md](docs/cloud-coordinator-spec.md).
 
-Every PR requires the latest authenticated, exact-head owner-published structured
-independent-agent formal COMMENT review, a valid positive verdict and evidence
-binding, complete review/thread pagination, and resolved conversations. Stale,
-edited, removed, malformed, superseded, or unbound evidence fails closed; status
-alone is not a review. Copilot feedback is supplemental: missing APPROVED or
-COMMENTED alone does not block acceptance, repeat review requests, or consume
-fixer budget. Actual open findings must be resolved, and definite rejection is
-not acceptance. Sensitive changes still require separate exact-SHA owner
-authorization and targeted independent review.
+Issue #92 supersedes the independent-review merge requirement. Every PR requires
+an authenticated, exact-head Copilot review from reviewer bot ID `175728472` in
+state `COMMENTED` or `APPROVED`, complete review/thread pagination, resolved threads,
+and the real successful required review check. Coding bot ID `198982749` does not
+qualify. Missing, stale, pending, dismissed or rejecting reviews block. Do not
+dispatch independent review/report-correction tasks or publish `agent-review` for
+new merge decisions. Preserve historical records and active task occupancy.
+Sensitive changes retain separate exact-SHA owner authorization and targeted review.
 
 Required checks and protections are authoritative. Do not fabricate reviews,
 approvals, check results, or identities. Review and test evidence applies only to
@@ -123,8 +122,9 @@ the exact head SHA; any new commit invalidates it. Address findings with follow-
 commits and reply to their actual GitHub threads. Never self-approve, bypass
 protections, or write directly to `main`.
 
-The exact four active contexts above must pass on the exact head SHA. Publish
-`agent-review` only after verifying the independent review of that head. Verify the
+The exact four active contexts above must pass on the exact head SHA. Request or
+re-request genuine Copilot review through the bounded action flow; never synthesize
+review success. Verify the
 automatically emitted `integration-tests` result is bound to that head and its
 same-run complete hosted `source-ci` aggregate succeeded. Record the workflow URL;
 the host-only compatibility suite is verified during guarded deployment, not
@@ -139,7 +139,7 @@ never rebase or force-push reviewed history. Gather both PR intents, the common 
 and both diffs for a neutral reviewer/reconciler. Preserve compatible behavior,
 regenerate derived files from their sources, and test both intended behaviors and
 their interaction; never resolve conflicts by wholesale choosing one side.
-Record resolution decisions on GitHub and obtain independent review and final
+Record resolution decisions on GitHub and obtain Copilot review and final
 integration evidence for the updated head. Escalate to the owner only for genuinely
 incompatible product requirements, not routine technical conflicts.
 

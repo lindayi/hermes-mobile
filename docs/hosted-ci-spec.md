@@ -56,7 +56,7 @@ Current staging intentionally includes `.github`, covered separately by
    reconstruction proves public-source reproducibility, not installed production
    compatibility. Local iteration uses focused regressions; guarded exact-main
    deployment runs the complete residual host partition before activation.
-8. Formal independent review, follow-up commits and exact-head gates precede
+8. Genuine Copilot review, follow-up commits and exact-head gates precede
    protected merge. Reconcile intervening main changes without dropping parallel
    work, then remove only this task's merged branch/worktree and scratch.
 

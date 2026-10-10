@@ -84,22 +84,21 @@ bypasses protection. Missing cloud entitlement/quota uses this explicit local pa
 
 ## Review
 
-Copilot code review is supplemental feedback, not an approval gate. Batch coherent
-changes rather than repeatedly requesting review for COMMENTED or missing APPROVED
-feedback. Follow-up review is appropriate after actual fixes, not solely because no
-approval was issued.
+Issue #92 requires genuine Copilot reviewer bot ID `175728472` in state `COMMENTED`
+or `APPROVED` on the exact head, complete review/thread pagination, resolved
+threads and the real successful review check. Coding bot ID `198982749` does not
+qualify. Missing, stale, pending, dismissed or rejecting reviews block. Batch
+coherent fixes and request fresh review through the bounded action flow. Do not
+repeat requests merely because a qualifying review is COMMENTED.
 
-Address actual Copilot findings with follow-up commits and evidence; explain false
-positives. Independent technical acceptance for every PR requires the latest
-authenticated owner-published structured independent-agent formal COMMENT review,
-exact-head evidence binding, complete review/thread pagination, and resolved
-conversations. A status, Copilot review, or arbitrary comment is not a substitute.
-The authoring task and authoritative independent review run in separate cloud
-contexts; never claim an author reviewed their own changes. Sensitive changes retain
-targeted independent review and exact-SHA owner authorization.
+Address actual findings with follow-up commits and evidence; explain false positives.
+No independent report or `agent-review` publication is required for ordinary merge
+decisions. Do not dispatch independent review/report-correction tasks; preserve
+history and active occupancy. Sensitive changes retain targeted review and
+exact-SHA owner authorization.
 
 Main protection requires the exact contexts `source-ci` (Actions app 15368),
-`integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), strict
+`integration-tests`, `copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368), strict
 up-to-date checks, owner enforcement, and thread resolution. The automatic
 `integration-tests` job depends on `source-ci` in the same run and succeeds only
 when that complete hosted aggregate succeeds. Host-only compatibility is a separate

@@ -12,17 +12,17 @@ source import and subsequent changes use protected pull requests.
 
 1. Repository `lindayi/hermes-mobile` exists; remote source readback matches commits.
 2. Main requires the exact contexts `source-ci` (Actions app 15368),
-   `integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), an
+   `integration-tests`, `copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368), an
    up-to-date branch and resolved review conversations; protections apply to
    administrators. `cloud-review` is advisory and is not a required context.
-3. Every PR requires the latest authenticated owner-published structured
-   independent-agent formal COMMENT review on its exact head, a positive verdict
-   with evidence binding, complete review/thread pagination, and resolved threads.
-   A status alone is not independent review. Copilot feedback is supplemental;
-   COMMENTED or missing APPROVED alone does not block or consume fixer budget when
-   there are no findings. Actual open findings and definite rejection still block.
-   Sensitive changes retain separate exact-SHA owner authorization and targeted
-   independent review.
+3. Under owner-authorized issue #92, every PR requires an authenticated exact-head
+   Copilot review from reviewer bot ID `175728472`, in state `COMMENTED` or
+   `APPROVED`, complete review/thread pagination, resolved threads, and the real
+   successful required review check. Coding bot ID `198982749` does not qualify.
+   Missing, stale, pending, dismissed or rejecting reviews block. No independent
+   report or `agent-review` publication is required. Do not generate independent
+   review/report-correction tasks; preserve historical records and active occupancy.
+   Sensitive changes retain separate exact-SHA owner authorization and targeted review.
 4. At least one real PR review is published; genuine findings receive follow-up
    commits and checked thread resolution. Do not invent findings for a demo.
 5. Task worktrees isolate edits. Conflict reconciliation preserves both compatible

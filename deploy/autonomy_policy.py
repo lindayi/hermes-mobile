@@ -2,8 +2,7 @@
 
 import re
 from deploy.review_evidence import (
-    current_independent_agent_review,
-    latest_reviews,
+    current_copilot_review_valid,
     sensitive_review_authorized,
 )
 
@@ -68,7 +67,7 @@ RUN_JOBS = frozenset({
 REQUIRED_CHECKS = {
     phase: {
         'source-ci': 15368, 'integration-tests': None,
-        'agent-review': None, 'issue-link': 15368,
+        'copilot-pull-request-reviewer': 15368, 'issue-link': 15368,
     }
     for phase in ('pre-cutover', 'staging', 'post-cutover')
 }
@@ -459,9 +458,9 @@ def _check_source_run(evidence, sha, blockers):
 
 
 def _check_review(evidence, main_sha, phase, blockers):
-    review = evidence.get('independent_review')
+    review = evidence.get('copilot_review')
     if not isinstance(review, dict):
-        blockers.add('independent-review-evidence')
+        blockers.add('copilot-review-evidence')
         return
     head = review.get('head_sha')
     if (review.get('repository_id') != REPOSITORY_ID or review.get('base_branch') != 'main'
@@ -471,25 +470,24 @@ def _check_review(evidence, main_sha, phase, blockers):
             or review['pull_author_id'] == OWNER_ID
             or review.get('reviews_complete') is not True
             or review.get('threads_complete') is not True):
-        blockers.add('independent-review-evidence')
+        blockers.add('copilot-review-evidence')
         return
     reviews, threads = review.get('reviews'), review.get('threads')
     if not isinstance(reviews, list) or not isinstance(threads, list):
-        blockers.add('independent-review-evidence')
+        blockers.add('copilot-review-evidence')
         return
-    if current_independent_agent_review(
-            reviews, head, owner_id=OWNER_ID,
-            expected=review.get('selected_review'),
-            complete=review.get('reviews_complete')) is None:
-        blockers.add('independent-review')
-    latest_copilot = latest_reviews(reviews, COPILOT_REVIEWER_ID)
-    if latest_copilot and any(
-            item.get('state') == 'CHANGES_REQUESTED' and item.get('commit_id') == head
-            for item in latest_copilot):
-        blockers.add('independent-review-rejection')
+    if not current_copilot_review_valid(
+            reviews, head, complete=review.get('reviews_complete')):
+        blockers.add('copilot-review')
+    from deploy.cloud_coordinator import required_checks_pass
+    if not required_checks_pass(
+            evidence['protection'].get('required_checks'),
+            review.get('check_runs'), review.get('statuses'),
+            complete=review.get('checks_complete') is True, head_sha=head):
+        blockers.add('copilot-review-checks')
     if any(not isinstance(thread, dict) or thread.get('isResolved') is not True
            or thread.get('comments_complete') is not True for thread in threads):
-        blockers.add('independent-review-threads')
+        blockers.add('copilot-review-threads')
 
     change = review.get('change')
     if (not isinstance(change, dict) or change.get('head_sha') != head

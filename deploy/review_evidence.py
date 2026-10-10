@@ -215,6 +215,21 @@ def latest_reviews(reviews, reviewer_id):
     return [review for review, stamp in zip(authored, stamps) if stamp == latest]
 
 
+def current_copilot_review_valid(reviews, head_sha, *, complete=True):
+    """Accept only genuine, submitted, current-head Copilot reviewer evidence."""
+    if (complete is not True or not isinstance(head_sha, str)
+            or _SHA_RE.fullmatch(head_sha) is None):
+        return False
+    selected = latest_reviews(reviews, 175728472)
+    return bool(selected) and all(
+        review.get("state") in {"COMMENTED", "APPROVED"}
+        and review.get("commit_id") == head_sha
+        and review.get("dismissed") is not True
+        and review.get("dismissed_at") in (None, "")
+        for review in selected
+    )
+
+
 @dataclass
 class _Element:
     tag: str

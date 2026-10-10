@@ -29,7 +29,7 @@ from deploy.autonomy_policy import (
     WORKFLOW_PATH,
     validate_transition,
 )
-from deploy.review_evidence import current_independent_agent_review
+from deploy.review_evidence import current_copilot_review_valid, current_independent_agent_review
 from scripts.autonomy_policy import MAX_EVIDENCE, main as cli_main
 
 SHA = 'a' * 40
@@ -179,6 +179,11 @@ _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE = {
     'deploy/workflow_notifications.py': 'c599d19bc1f1b1976429d7e5ca834eade37e35c718b4c389ceaef4ad47ecb1ad',
 }
 
+_ISSUE92_COPILOT_REVIEW_FIXTURE = {
+    'deploy/cloud_coordinator.py': 'd9a89fad059b9647208db27fbe8b18849346af8eb8d99fe71fbd52b01809d5b0',
+    'deploy/review_evidence.py': '60f1c98ce562900b21429aa8e93728e9260aab6b2363fb4b9b068cd2ccc532b5',
+}
+
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
 }
@@ -221,7 +226,7 @@ def _source_files():
             | _PENDING_PR45_NAMING_FIXTURE
             | _ISSUE65_RECEIPT_PRODUCER_FIXTURE | _PENDING_ISSUE77_CLARIFICATION_FIXTURE
             | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
-            | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)
+            | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE)
 
 
 def _source_ci():
@@ -268,7 +273,7 @@ def _evidence():
         'state': 'COMMENTED', 'body_sha256': review_body_sha256,
         'evidence_sha256': 'c' * 64,
     }
-    return {
+    evidence = {
         'repository': {'id': REPOSITORY_ID, 'full_name': REPOSITORY},
         'main': {
             'repository_id': REPOSITORY_ID, 'ref': REF, 'current': True, 'sha': SHA,
@@ -281,16 +286,25 @@ def _evidence():
             'required_checks': [
                 {'context': 'source-ci', 'app_id': 15368},
                 {'context': 'integration-tests', 'app_id': None},
-                {'context': 'agent-review', 'app_id': None},
+                {'context': 'copilot-pull-request-reviewer', 'app_id': 15368},
                 {'context': 'issue-link', 'app_id': 15368},
             ],
         },
         'source_ci': _source_ci(),
-        'independent_review': {
+        'copilot_review': {
             'repository_id': REPOSITORY_ID, 'base_branch': 'main', 'base_sha': SHA,
             'state': 'open', 'draft': False,
             'pull_author_id': COPILOT_AGENT_ID,
             'head_sha': review_head, 'reviews_complete': True, 'threads_complete': True,
+            'checks_complete': True,
+            'statuses': [],
+            'check_runs': [{
+                'name': name, 'app': {'id': app_id}, 'head_sha': review_head,
+                'status': 'completed', 'conclusion': 'success',
+            } for name, app_id in (
+                ('source-ci', 15368), ('integration-tests', None),
+                ('issue-link', 15368), ('copilot-pull-request-reviewer', 15368),
+            )],
             'reviews': [{
                 'id': 2, 'user': {'id': COPILOT_REVIEWER_ID}, 'state': 'COMMENTED',
                 'commit_id': review_head, 'submitted_at': '2026-10-01T21:00:00Z',
@@ -307,6 +321,7 @@ def _evidence():
             'change': {'head_sha': review_head, 'files_complete': True, 'sensitive': False},
         },
     }
+    return evidence
 
 
 PHASES = ('pre-cutover', 'staging', 'post-cutover')
@@ -318,7 +333,7 @@ def _phase_evidence(phase):
 
 def _sensitive_evidence(phase, state='COMMENTED'):
     evidence = _phase_evidence(phase)
-    review = evidence['independent_review']
+    review = evidence['copilot_review']
     head = review['head_sha']
     body = json.dumps({
         'schema': 'hermes-independent-agent-review-v1',
@@ -623,13 +638,13 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         if path in {'deploy/cloud_coordinator.py', 'deploy/issue_starter.py',
                     'deploy/review_evidence.py'}
     } == {
-        'deploy/cloud_coordinator.py': _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE[
+        'deploy/cloud_coordinator.py': _ISSUE92_COPILOT_REVIEW_FIXTURE[
             'deploy/cloud_coordinator.py'
         ],
         'deploy/issue_starter.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
             'deploy/issue_starter.py'
         ],
-        'deploy/review_evidence.py': _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE[
+        'deploy/review_evidence.py': _ISSUE92_COPILOT_REVIEW_FIXTURE[
             'deploy/review_evidence.py'
         ],
     }
@@ -655,7 +670,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         for path, digest in (
             _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
             | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
-            | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
+            | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
         ).items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
     }
@@ -692,8 +707,9 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: SOURCE_FINGERPRINTS[path]
         for path in _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
-    } == _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
-    for path, digest in _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE.items():
+    } == (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE)
+    for path, digest in (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
+                         | _ISSUE92_COPILOT_REVIEW_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
@@ -748,7 +764,7 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
     | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
-    | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE,
+    | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
 def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
@@ -769,7 +785,7 @@ def test_issue83_initial_review_pin_matches_actual_candidate_bytes(path, pins):
 
 
 @pytest.mark.parametrize('pins', [
-    SOURCE_FINGERPRINTS, _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE,
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE))
 def test_issue87_bounded_repair_pin_matches_actual_candidate_bytes(path, pins):
@@ -921,19 +937,14 @@ def test_launch_roots_have_complete_fixed_closure_and_independent_unit_pins():
     (('source_ci', 'jobs_complete'), False, 'source-ci-jobs'),
     (('source_ci', 'artifact', 'expired'), True, 'release-artifact-evidence'),
     (('source_ci', 'artifact', 'attestation', 'verified'), False, 'release-attestation'),
-    (('independent_review', 'reviews', 1, 'id'), True, 'independent-review'),
-    (('independent_review', 'reviews', 1, 'body'), 'malformed report', 'independent-review'),
-    (('independent_review', 'reviews_complete'), False, 'independent-review-evidence'),
-    (('independent_review', 'threads', 0, 'isResolved'), False, 'independent-review-threads'),
+    (('copilot_review', 'reviews', 0, 'id'), True, 'copilot-review'),
+    (('copilot_review', 'reviews', 0, 'commit_id'), 'd' * 40, 'copilot-review'),
+    (('copilot_review', 'reviews_complete'), False, 'copilot-review-evidence'),
+    (('copilot_review', 'threads', 0, 'isResolved'), False, 'copilot-review-threads'),
     (('protection', 'strict'), False, 'branch-protection'),
 ])
 def test_caller_flags_cannot_override_failed_components(phase, sensitive, claimed_ready, path, value, blocker):
     evidence = _sensitive_evidence(phase) if sensitive else _phase_evidence(phase)
-    sensitive_review_mutation = (
-        sensitive and path[:3] == ('independent_review', 'reviews', 1)
-    )
-    if sensitive_review_mutation:
-        path = path[:2] + (-1,) + path[3:]
     node = evidence
     for key in path[:-1]:
         node = node[key]
@@ -948,8 +959,6 @@ def test_caller_flags_cannot_override_failed_components(phase, sensitive, claime
     expected = {blocker}
     if path == ('main', 'current'):
         expected.add('main-source-missing')
-    if sensitive and sensitive_review_mutation and path[-1] in {'id', 'body'}:
-        expected.add('sensitive-review-authorization')
     assert validate_transition(evidence, phase=phase) == {
         'ready': False, 'phase': phase, 'blockers': sorted(expected),
     }
@@ -970,6 +979,8 @@ def test_complete_synthetic_components_report_source_policy_ready(phase, sensiti
 
 
 def test_all_phases_preserve_the_exact_four_checks():
+    assert COPILOT_REVIEWER_ID == 175728472
+    assert COPILOT_AGENT_ID == 198982749
     evidence = _evidence()
     for phase in PHASES:
         assert validate_transition(evidence, phase=phase) == {
@@ -1053,8 +1064,8 @@ def test_missing_native_job_record_and_truncated_review_block():
     assert 'source-ci-jobs' in _blockers(evidence)
 
     evidence = _evidence()
-    evidence['independent_review']['threads'][0]['comments_complete'] = False
-    assert 'independent-review-threads' in _blockers(evidence)
+    evidence['copilot_review']['threads'][0]['comments_complete'] = False
+    assert 'copilot-review-threads' in _blockers(evidence)
 
 
 def test_missing_installed_host_gate_blocks():
@@ -1163,18 +1174,20 @@ def test_wrong_required_check_app_identity_or_partial_cutover_blocks():
 
 
 @pytest.mark.parametrize('mutate', [
-    lambda review: review['reviews'][1].update(body='edited review'),
-    lambda review: review['reviews'][1].update(commit_id='d' * 40),
+    lambda review: review['reviews'][0].update(user={'id': COPILOT_AGENT_ID}),
+    lambda review: review['reviews'][0].update(commit_id='d' * 40),
+    lambda review: review['reviews'][0].update(dismissed=True),
+    lambda review: review['reviews'][0].update(dismissed_at='2026-10-01T22:00:00Z'),
     lambda review: review.update(reviews_complete=False),
     lambda review: review.update(threads_complete=False),
     lambda review: review['threads'][0].update(isResolved=False),
 ])
-def test_review_requires_authenticated_exact_head_independent_evidence_and_complete_threads(mutate):
+def test_review_requires_authenticated_exact_head_copilot_evidence_and_complete_threads(mutate):
     evidence = _evidence()
-    mutate(evidence['independent_review'])
+    mutate(evidence['copilot_review'])
     assert _blockers(evidence) & {
-        'independent-review', 'independent-review-evidence',
-        'independent-review-threads',
+        'copilot-review', 'copilot-review-evidence',
+        'copilot-review-threads',
     }
 
 
@@ -1242,8 +1255,8 @@ def test_mismatched_current_head_and_sensitive_approval_block():
     assert 'source-ci-evidence' in _blockers(evidence)
 
     evidence = _evidence()
-    evidence['independent_review']['change'] = {
-        'head_sha': evidence['independent_review']['head_sha'],
+    evidence['copilot_review']['change'] = {
+        'head_sha': evidence['copilot_review']['head_sha'],
         'files_complete': True,
         'sensitive': True,
         'owner_authorization': {'actor_id': OWNER_ID, 'head_sha': SHA, 'state': 'approved'},
@@ -1252,7 +1265,7 @@ def test_mismatched_current_head_and_sensitive_approval_block():
     assert 'sensitive-review-authorization' in _blockers(evidence)
 
     evidence = _evidence()
-    evidence['independent_review'].pop('change')
+    evidence['copilot_review'].pop('change')
     assert 'change-scope-evidence' in _blockers(evidence)
 
 
@@ -1303,20 +1316,20 @@ def test_additive_staging_requires_exact_app_bindings(phase):
     (('protection', 'enforce_admins'), False, 'branch-protection'),
     (('protection', 'required_conversation_resolution'), False, 'branch-protection'),
     (('protection', 'complete'), False, 'branch-protection'),
-    (('independent_review', 'reviews'), [], 'independent-review'),
-    (('independent_review', 'reviews', 1, 'state'), 'APPROVED', 'independent-review'),
-    (('independent_review', 'reviews', 1, 'state'), 'CHANGES_REQUESTED', 'independent-review'),
-    (('independent_review', 'reviews', 1, 'state'), 'DISMISSED', 'independent-review'),
-    (('independent_review', 'reviews', 1, 'user', 'id'), COPILOT_REVIEWER_ID, 'independent-review'),
-    (('independent_review', 'reviews', 1, 'commit_id'), 'd' * 40, 'independent-review'),
-    (('independent_review', 'reviews_complete'), False, 'independent-review-evidence'),
-    (('independent_review', 'threads_complete'), False, 'independent-review-evidence'),
-    (('independent_review', 'threads', 0, 'isResolved'), False, 'independent-review-threads'),
-    (('independent_review', 'threads', 0, 'comments_complete'), False, 'independent-review-threads'),
-    (('independent_review', 'base_sha'), 'd' * 40, 'independent-review-evidence'),
-    (('independent_review', 'change', 'head_sha'), 'd' * 40, 'change-scope-evidence'),
-    (('independent_review', 'change', 'files_complete'), False, 'change-scope-evidence'),
-    (('independent_review', 'change', 'sensitive'), True, 'sensitive-review-authorization'),
+    (('copilot_review', 'reviews'), [], 'copilot-review'),
+    (('copilot_review', 'reviews', 0, 'state'), 'PENDING', 'copilot-review'),
+    (('copilot_review', 'reviews', 0, 'state'), 'CHANGES_REQUESTED', 'copilot-review'),
+    (('copilot_review', 'reviews', 0, 'state'), 'DISMISSED', 'copilot-review'),
+    (('copilot_review', 'reviews', 0, 'user', 'id'), COPILOT_AGENT_ID, 'copilot-review'),
+    (('copilot_review', 'reviews', 0, 'commit_id'), 'd' * 40, 'copilot-review'),
+    (('copilot_review', 'reviews_complete'), False, 'copilot-review-evidence'),
+    (('copilot_review', 'threads_complete'), False, 'copilot-review-evidence'),
+    (('copilot_review', 'threads', 0, 'isResolved'), False, 'copilot-review-threads'),
+    (('copilot_review', 'threads', 0, 'comments_complete'), False, 'copilot-review-threads'),
+    (('copilot_review', 'base_sha'), 'd' * 40, 'copilot-review-evidence'),
+    (('copilot_review', 'change', 'head_sha'), 'd' * 40, 'change-scope-evidence'),
+    (('copilot_review', 'change', 'files_complete'), False, 'change-scope-evidence'),
+    (('copilot_review', 'change', 'sensitive'), True, 'sensitive-review-authorization'),
     (('source_ci', 'head_sha'), 'd' * 40, 'source-ci-evidence'),
     (('source_ci', 'workflow_id'), 1, 'source-ci-evidence'),
     (('source_ci', 'jobs_complete'), False, 'source-ci-jobs'),
@@ -1345,12 +1358,13 @@ def test_additive_staging_missing_merged_coordinator_blocks(phase):
 
 
 @pytest.mark.parametrize('phase', PHASES)
-def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(phase):
+@pytest.mark.parametrize('state', ['PENDING', 'DISMISSED', 'CHANGES_REQUESTED'])
+def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(phase, state):
     evidence = _phase_evidence(phase)
-    review = evidence['independent_review']
-    review['reviews'].append(dict(review['reviews'][1], id=3,
+    review = evidence['copilot_review']
+    review['reviews'].append(dict(review['reviews'][0], id=3, state=state,
                                   submitted_at='2026-10-01T23:00:00Z'))
-    assert _blockers(evidence, phase) == {'independent-review'}
+    assert _blockers(evidence, phase) == {'copilot-review'}
     review['reviews'].pop()
     evidence = _sensitive_evidence(phase)
     assert _blockers(evidence, phase) == set()
@@ -1363,10 +1377,8 @@ def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(p
         ('targeted_review', 'state', 'DISMISSED'),
     ):
         changed = copy.deepcopy(evidence)
-        changed['independent_review']['change'][record][field] = value
+        changed['copilot_review']['change'][record][field] = value
         expected = {'sensitive-review-authorization'}
-        if record == 'targeted_review':
-            expected.add('independent-review')
         assert _blockers(changed, phase) == expected
 
 
@@ -1374,6 +1386,10 @@ def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(p
 def test_sensitive_owner_published_independent_review_matches_authenticated_record(phase):
     evidence = _sensitive_evidence(phase)
     before = copy.deepcopy(evidence)
+    review = evidence['copilot_review']
+    assert current_independent_agent_review(
+        review['reviews'], review['head_sha'], owner_id=OWNER_ID,
+        expected=review['selected_review']) == review['change']['targeted_review']
     assert validate_transition(evidence, phase=phase) == {
         'ready': True, 'phase': phase, 'blockers': [],
     }
@@ -1401,6 +1417,14 @@ def test_sensitive_owner_review_must_be_a_formal_comment_not_approval(phase):
     pytest.param(lambda review: review['reviews'][-1].update(state='APPROVED'), id='state-mismatch'),
     pytest.param(lambda review: review['reviews'][-1].update(state='DISMISSED'), id='dismissed-record'),
     pytest.param(lambda review: review['reviews'][-1].update(state='CHANGES_REQUESTED'), id='changes-requested'),
+    pytest.param(lambda review: review['reviews'][-1].update(body='malformed report'), id='malformed-report'),
+    pytest.param(lambda review: review['reviews'][-1].update(body='edited review'), id='edited-body'),
+    pytest.param(lambda review: review['change']['targeted_review'].update(
+        body_sha256='d' * 64), id='wrong-body-digest'),
+    pytest.param(lambda review: review['change']['targeted_review'].update(
+        evidence_sha256='d' * 64), id='wrong-evidence-digest'),
+    pytest.param(lambda review: review['reviews'][-1].update(
+        lastEditedAt='2026-10-01T23:01:00Z'), id='edited-record'),
     pytest.param(lambda review: review['reviews'].append(copy.deepcopy(review['reviews'][-1])), id='duplicate-id'),
     pytest.param(lambda review: review['reviews'].append(dict(review['reviews'][-1], user={'id': 77})), id='conflicting-reviewer'),
     pytest.param(lambda review: review['reviews'].append(dict(review['reviews'][-1], state='DISMISSED')), id='conflicting-state'),
@@ -1408,15 +1432,21 @@ def test_sensitive_owner_review_must_be_a_formal_comment_not_approval(phase):
 ])
 def test_sensitive_targeted_review_rejects_unbound_claim(phase, mutate):
     evidence = _sensitive_evidence(phase)
-    mutate(evidence['independent_review'])
+    mutate(evidence['copilot_review'])
     expected = {'sensitive-review-authorization'}
-    if ('targeted_review' in evidence['independent_review']['change']
-            and current_independent_agent_review(
-                evidence['independent_review']['reviews'],
-                evidence['independent_review']['head_sha'], owner_id=OWNER_ID,
-                expected=evidence['independent_review'].get('selected_review')) is None):
-        expected.add('independent-review')
+    if not current_copilot_review_valid(
+            evidence['copilot_review']['reviews'], evidence['copilot_review']['head_sha']):
+        expected.add('copilot-review')
     assert _blockers(evidence, phase) == expected
+
+
+@pytest.mark.parametrize('phase', PHASES)
+def test_sensitive_review_cannot_be_replaced_by_copilot_or_status(phase):
+    evidence = _sensitive_evidence(phase)
+    review = evidence['copilot_review']
+    review['reviews'] = [review['reviews'][0]]
+    review['selected_review'] = {'verdict': 'pass', 'head_sha': review['head_sha']}
+    assert _blockers(evidence, phase) == {'sensitive-review-authorization'}
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -1427,17 +1457,17 @@ def test_sensitive_targeted_review_rejects_unbound_claim(phase, mutate):
 ])
 def test_targeted_review_timestamp_must_be_valid_and_timezone_aware(phase, state, timestamp):
     evidence = _sensitive_evidence(phase, state)
-    record = evidence['independent_review']['reviews'][-1]
+    record = evidence['copilot_review']['reviews'][-1]
     if timestamp is None:
         record.pop('submitted_at')
     else:
         record['submitted_at'] = timestamp
     # A valid timestamp on the claim cannot replace the matched record's timestamp.
-    evidence['independent_review']['change']['targeted_review']['submitted_at'] = '2026-10-01T22:00:00Z'
+    evidence['copilot_review']['change']['targeted_review']['submitted_at'] = '2026-10-01T22:00:00Z'
     before = copy.deepcopy(evidence)
 
     assert _blockers(evidence, phase) == {
-        'sensitive-review-authorization', 'independent-review',
+        'sensitive-review-authorization',
     }
     assert evidence == before
 
@@ -1446,7 +1476,7 @@ def test_targeted_review_timestamp_must_be_valid_and_timezone_aware(phase, state
 @pytest.mark.parametrize('timestamp', ['2026-10-01T22:00:00Z', '2026-10-01T18:00:00-04:00'])
 def test_targeted_review_timestamp_accepts_valid_aware_record(phase, timestamp):
     evidence = _sensitive_evidence(phase)
-    record = evidence['independent_review']['reviews'][-1]
+    record = evidence['copilot_review']['reviews'][-1]
     record['submitted_at'] = timestamp
     record['updatedAt'] = timestamp
     assert _blockers(evidence, phase) == set()
@@ -1455,7 +1485,7 @@ def test_targeted_review_timestamp_accepts_valid_aware_record(phase, timestamp):
 @pytest.mark.parametrize('review_id', [None, 0, -1, True, 2.0, '2'])
 def test_sensitive_targeted_review_requires_positive_integer_id(review_id):
     evidence = _sensitive_evidence('pre-cutover')
-    review = evidence['independent_review']
+    review = evidence['copilot_review']
     review['change']['targeted_review']['review_id'] = review_id
     review['reviews'][-1]['id'] = review_id
     assert 'sensitive-review-authorization' in _blockers(evidence)
@@ -1464,8 +1494,8 @@ def test_sensitive_targeted_review_requires_positive_integer_id(review_id):
 @pytest.mark.parametrize('phase', PHASES)
 def test_sensitive_targeted_review_requires_complete_collection(phase):
     evidence = _sensitive_evidence(phase)
-    evidence['independent_review']['reviews_complete'] = False
-    assert _blockers(evidence, phase) == {'independent-review-evidence'}
+    evidence['copilot_review']['reviews_complete'] = False
+    assert _blockers(evidence, phase) == {'copilot-review-evidence'}
 
 
 @pytest.mark.parametrize('reviewer_id', [
@@ -1473,20 +1503,21 @@ def test_sensitive_targeted_review_requires_complete_collection(phase):
 ])
 def test_sensitive_targeted_reviewer_must_be_positive_and_independent(reviewer_id):
     evidence = _sensitive_evidence('pre-cutover', 'APPROVED')
-    review = evidence['independent_review']
+    review = evidence['copilot_review']
     review['pull_author_id'] = 77
     review['change']['targeted_review']['reviewer_id'] = reviewer_id
     review['reviews'][-1]['user']['id'] = reviewer_id
-    assert _blockers(evidence) == {
-        'sensitive-review-authorization', 'independent-review',
-    }
+    expected = {'sensitive-review-authorization'}
+    if not current_copilot_review_valid(review['reviews'], review['head_sha']):
+        expected.add('copilot-review')
+    assert _blockers(evidence) == expected
 
 
 @pytest.mark.parametrize('author_id', [None, 0, -1, '198982749', 1.5])
 def test_pr_author_identity_is_required_and_well_formed(author_id):
     evidence = _evidence()
-    evidence['independent_review']['pull_author_id'] = author_id
-    assert 'independent-review-evidence' in _blockers(evidence)
+    evidence['copilot_review']['pull_author_id'] = author_id
+    assert 'copilot-review-evidence' in _blockers(evidence)
 
 
 @pytest.mark.parametrize('field,value', [
@@ -1501,8 +1532,8 @@ def test_pr_author_identity_is_required_and_well_formed(author_id):
 ])
 def test_malformed_authenticated_review_ordering_fails_closed(field, value):
     evidence = _evidence()
-    evidence['independent_review']['reviews'][1][field] = value
-    assert 'independent-review' in _blockers(evidence)
+    evidence['copilot_review']['reviews'][0][field] = value
+    assert 'copilot-review' in _blockers(evidence)
 
 
 @pytest.mark.parametrize('malformed', [
@@ -1520,39 +1551,86 @@ def test_malformed_authenticated_review_ordering_fails_closed(field, value):
 ])
 def test_every_review_author_is_validated_before_copilot_filtering(malformed):
     evidence = _evidence()
-    evidence['independent_review']['reviews'].append(malformed)
+    evidence['copilot_review']['reviews'].append(malformed)
 
-    assert _blockers(evidence) == {'independent-review'}
+    assert _blockers(evidence) == {'copilot-review'}
 
 
 def test_definite_review_rejection_blocks_acceptance():
     evidence = _evidence()
-    evidence['independent_review']['reviews'].append({
+    evidence['copilot_review']['reviews'].append({
         'id': 3, 'user': {'id': COPILOT_REVIEWER_ID}, 'state': 'CHANGES_REQUESTED',
-        'commit_id': evidence['independent_review']['head_sha'],
+        'commit_id': evidence['copilot_review']['head_sha'],
         'submitted_at': '2026-10-01T23:00:00Z',
     })
 
-    assert _blockers(evidence) == {'independent-review-rejection'}
+    assert _blockers(evidence) == {'copilot-review'}
 
 
-def test_copilot_comment_or_missing_approval_is_advisory():
+@pytest.mark.parametrize('state', ['COMMENTED', 'APPROVED'])
+def test_copilot_comment_or_approval_is_required(state):
     evidence = _evidence()
-    review = evidence['independent_review']
+    review = evidence['copilot_review']
+    review['reviews'][0]['state'] = state
     assert _blockers(evidence) == set()
     review['reviews'] = [item for item in review['reviews']
                          if item['user']['id'] != COPILOT_REVIEWER_ID]
+    assert _blockers(evidence) == {'copilot-review'}
+
+
+def test_ordinary_review_needs_no_independent_report_or_selected_review():
+    evidence = _evidence()
+    review = evidence['copilot_review']
+    review['reviews'] = [review['reviews'][0]]
+    review.pop('selected_review')
     assert _blockers(evidence) == set()
+    review['reviews'].append({
+        'id': 4, 'user': {'id': OWNER_ID}, 'state': 'COMMENTED',
+        'commit_id': review['head_sha'], 'submitted_at': '2026-10-01T23:00:00Z',
+        'body': 'not a structured independent report',
+    })
+    assert _blockers(evidence) == set()
+    evidence['independent_review'] = {
+        'ready': True, 'reviews_complete': True, 'selected_review': {'verdict': 'pass'},
+    }
+    review['reviews'] = []
+    assert _blockers(evidence) == {'copilot-review'}
+
+
+def test_retired_independent_evidence_root_cannot_replace_copilot_review():
+    evidence = _evidence()
+    evidence['independent_review'] = evidence.pop('copilot_review')
+    assert _blockers(evidence) == {'copilot-review-evidence'}
+
+
+@pytest.mark.parametrize('mutate', [
+    pytest.param(lambda review: review.update(checks_complete=False), id='incomplete-checks'),
+    pytest.param(lambda review: review.update(check_runs=[]), id='missing-checks'),
+    pytest.param(lambda review: review['check_runs'][-1].update(conclusion='failure'), id='failed-check'),
+    pytest.param(lambda review: review['check_runs'][-1].update(conclusion='skipped'), id='skipped-check'),
+    pytest.param(lambda review: review['check_runs'][-1].update(status='in_progress'), id='pending-check'),
+    pytest.param(lambda review: review['check_runs'][-1].update(head_sha='d' * 40), id='stale-check'),
+    pytest.param(lambda review: review['check_runs'][-1].update(app={'id': COPILOT_REVIEWER_ID}), id='wrong-app'),
+    pytest.param(lambda review: review['check_runs'][-1].update(name='agent-review'), id='retired-context'),
+    pytest.param(lambda review: review.update(
+        check_runs=review['check_runs'][:-1],
+        statuses=[{'context': 'copilot-pull-request-reviewer', 'state': 'success',
+                   'head_sha': review['head_sha']}]), id='status-not-bound-check'),
+])
+def test_copilot_review_requires_real_successful_exact_head_check(mutate):
+    evidence = _evidence()
+    mutate(evidence['copilot_review'])
+    assert _blockers(evidence) == {'copilot-review-checks'}
 
 
 @pytest.mark.parametrize('phase', PHASES)
 def test_advisory_cloud_review_status_does_not_replace_review_evidence(phase):
     evidence = _phase_evidence(phase)
-    evidence['independent_review']['reviews'] = []
-    evidence['independent_review']['advisory_cloud_review_status'] = {
-        'state': 'success', 'head_sha': evidence['independent_review']['head_sha'],
+    evidence['copilot_review']['reviews'] = []
+    evidence['copilot_review']['advisory_cloud_review_status'] = {
+        'state': 'success', 'head_sha': evidence['copilot_review']['head_sha'],
     }
-    assert _blockers(evidence, phase) == {'independent-review'}
+    assert _blockers(evidence, phase) == {'copilot-review'}
 
 
 def test_all_phases_use_the_same_four_check_map():
