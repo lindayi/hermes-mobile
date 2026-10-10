@@ -2,8 +2,8 @@
 
 import re
 from deploy.review_evidence import (
-    current_independent_agent_review,
-    latest_reviews,
+    current_copilot_review_valid,
+    review_body_disposition,
     sensitive_review_authorized,
 )
 
@@ -68,7 +68,7 @@ RUN_JOBS = frozenset({
 REQUIRED_CHECKS = {
     phase: {
         'source-ci': 15368, 'integration-tests': None,
-        'agent-review': None, 'issue-link': 15368,
+        'issue-link': 15368,
     }
     for phase in ('pre-cutover', 'staging', 'post-cutover')
 }
@@ -185,13 +185,13 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    # Issue #87 bounded-repair candidate; source consistency only.
-    'deploy/cloud_coordinator.py': 'e854f07040ea38bb83dccaa5d8d1f416d2acd6cc7bcf5e09c1b7a65c23416686',
+    # Issue #92 Copilot-only candidate; historical bounded-repair pins are retained.
+    'deploy/cloud_coordinator.py': '3c2dd4527a1108cce142c6e9e8f70429c4c66153d8cc0193b3d4f041571f1ff1',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
-    'deploy/review_evidence.py': 'bc2bea2e4cd17ac28ed96cc5d421f62f63e7ef14ee9bdec5045cf6f26bb8f290',
+    'deploy/review_evidence.py': 'ca76b89cd3d6b9b01a42d8edc4594574d369bd681316f56cfca2279fe441a124',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     # Issue #65 producer-only overlay; historical receipt hashes remain documented.
@@ -459,37 +459,43 @@ def _check_source_run(evidence, sha, blockers):
 
 
 def _check_review(evidence, main_sha, phase, blockers):
-    review = evidence.get('independent_review')
+    review = evidence.get('copilot_review')
     if not isinstance(review, dict):
-        blockers.add('independent-review-evidence')
+        blockers.add('copilot-review-evidence')
         return
     head = review.get('head_sha')
     if (review.get('repository_id') != REPOSITORY_ID or review.get('base_branch') != 'main'
             or review.get('base_sha') != main_sha or not _valid_sha(head)
             or review.get('state') != 'open' or review.get('draft') is not False
             or type(review.get('pull_author_id')) is not int or review['pull_author_id'] < 1
-            or review['pull_author_id'] == OWNER_ID
             or review.get('reviews_complete') is not True
             or review.get('threads_complete') is not True):
-        blockers.add('independent-review-evidence')
+        blockers.add('copilot-review-evidence')
         return
     reviews, threads = review.get('reviews'), review.get('threads')
     if not isinstance(reviews, list) or not isinstance(threads, list):
-        blockers.add('independent-review-evidence')
+        blockers.add('copilot-review-evidence')
         return
-    if current_independent_agent_review(
-            reviews, head, owner_id=OWNER_ID,
-            expected=review.get('selected_review'),
-            complete=review.get('reviews_complete')) is None:
-        blockers.add('independent-review')
-    latest_copilot = latest_reviews(reviews, COPILOT_REVIEWER_ID)
-    if latest_copilot and any(
-            item.get('state') == 'CHANGES_REQUESTED' and item.get('commit_id') == head
-            for item in latest_copilot):
-        blockers.add('independent-review-rejection')
+    if not current_copilot_review_valid(
+            reviews, head, pull_author_id=review.get('pull_author_id'),
+            complete=review.get('reviews_complete')):
+        blockers.add('copilot-review')
+    disposition = review_body_disposition(
+        reviews, head, reviewer_id=COPILOT_REVIEWER_ID,
+    )
+    if (disposition['findings'] or disposition['ambiguous']
+            or disposition['inventory_complete'] is not True):
+        blockers.add('copilot-review')
+    from deploy.cloud_coordinator import required_checks_pass
+    if not required_checks_pass(
+            [{'context': context, 'app_id': app_id}
+             for context, app_id in REQUIRED_CHECKS[phase].items()],
+            review.get('check_runs'), [],
+            complete=review.get('checks_complete') is True, head_sha=head):
+        blockers.add('copilot-review-checks')
     if any(not isinstance(thread, dict) or thread.get('isResolved') is not True
            or thread.get('comments_complete') is not True for thread in threads):
-        blockers.add('independent-review-threads')
+        blockers.add('copilot-review-threads')
 
     change = review.get('change')
     if (not isinstance(change, dict) or change.get('head_sha') != head

@@ -194,12 +194,13 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         for clause in (
             'docs/git-development-spec.md',
             'source-ci` (Actions app 15368)',
-            'integration-tests`, `agent-review`, and `issue-link` (Actions app 15368)',
-            'owner-published structured independent-agent formal COMMENT review',
-            'Copilot feedback is supplemental',
-            'missing APPROVED or COMMENTED alone',
-            'Publish `agent-review` only after verifying the independent review',
-            'Verify the automatically emitted `integration-tests` result is bound to that',
+            'integration-tests`, and `issue-link` (Actions app 15368)',
+            '175728472',
+            'COMMENTED',
+            'APPROVED',
+            '198982749',
+            'Never fabricate',
+            'automatically emitted `integration-tests` result is bound to that',
             'exact head SHA',
             'resolved review threads',
             'current with freshly fetched `origin/main`',
@@ -218,8 +219,8 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         'inside guarded deployment before activation',
         'same exact head SHA',
         'Final integration is a merge gate, not a full local suite per edit',
-        'changed scope needs one independent delta review',
-        'final authority/status is freshly bound to the current head',
+        'obtain Copilot review plus final integration evidence',
+        'Review and test evidence is valid only for its exact head SHA',
         'fresh Linux',
         'Playwright OS dependencies',
         'playwright install-deps chromium',
@@ -232,9 +233,10 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
     assert 'Full managed integration result, if required' not in template
     for clause in (
         'Mandatory final integration evidence',
-        'The latest authenticated owner-published structured independent-agent formal COMMENT review',
-        'Copilot is advisory',
-        'source-ci (Actions app 15368), integration-tests, agent-review, and issue-link (Actions app 15368)',
+        'The authenticated exact-head Copilot review, three successful CI checks',
+        'COMMENTED or APPROVED',
+        'No independent report or agent-review publication is required',
+        'source-ci (Actions app 15368), integration-tests, and issue-link (Actions app 15368)',
         'cloud-review is advisory, not required or synthesized',
         'resolved review threads',
         'current with freshly fetched origin/main',
@@ -258,12 +260,12 @@ def test_all_active_context_lists_include_issue_link():
     ):
         text = ' '.join((ROOT / path).read_text().split())
         assert all(context in text for context in (
-            'source-ci', 'integration-tests', 'agent-review', 'issue-link',
+            'source-ci', 'integration-tests', 'issue-link',
         )), path
 
     policy = ' '.join((ROOT / 'docs/autonomy-policy.md').read_text().split())
     assert (
-        '| `staging` | `source-ci`, `integration-tests`, `agent-review`, '
+        '| `staging` | `source-ci`, `integration-tests`, '
         '`issue-link` |'
     ) in policy
 
@@ -309,27 +311,44 @@ def test_active_gate_contract_preserves_exact_head_review():
         text = ' '.join((ROOT / path).read_text().split())
         assert 'source-ci' in text and 'issue-link' in text and 'cloud-review' in text
         assert 'exact' in text and ('head' in text or 'SHA' in text)
-        assert 'independent-agent' in text
+        assert '175728472' in text
+        assert '198982749' in text
+        assert 'Copilot' in text
         assert 'COMMENT' in text
+        assert 'APPROVED' in text
 
     policy = ' '.join((ROOT / 'docs/autonomy-policy.md').read_text().split())
     for clause in (
         'The CLI performs no network calls, writes, status publication, settings changes',
         'does not authenticate the JSON file',
-        'A status or Copilot review alone is not independent review',
+        'Ordinary merge evidence has no structured independent report',
         'Installed-runtime compatibility remains an exact-main guarded deployment gate',
         'pre-cutover',
         'post-cutover',
     ):
         assert clause in policy, clause
 
+    for clause in (
+        'Sensitive',
+        'owner authorization',
+        'targeted review',
+    ):
+        assert clause in ' '.join((ROOT / 'AGENTS.md').read_text().split()), clause
+    for clause in (
+        '`copilot_review.reviews`',
+        '`hermes-independent-agent-review-v1`',
+        '`sensitive-review-authorization`',
+        'owner-published',
+    ):
+        assert clause in policy, clause
 
-def test_policy_documents_bounded_four_check_maps_and_independent_review():
+
+def test_policy_documents_bounded_three_check_maps_and_copilot_review():
     policy = (ROOT / 'docs/autonomy-policy.md').read_text()
     expected = {
-        'pre-cutover': ('source-ci', 'integration-tests', 'agent-review', 'issue-link'),
-        'staging': ('source-ci', 'integration-tests', 'agent-review', 'issue-link'),
-        'post-cutover': ('source-ci', 'integration-tests', 'agent-review', 'issue-link'),
+        'pre-cutover': ('source-ci', 'integration-tests', 'issue-link'),
+        'staging': ('source-ci', 'integration-tests', 'issue-link'),
+        'post-cutover': ('source-ci', 'integration-tests', 'issue-link'),
     }
     for phase, contexts in expected.items():
         assert f'--phase {phase} /private/path/evidence.json' in policy
@@ -340,11 +359,15 @@ def test_policy_documents_bounded_four_check_maps_and_independent_review():
         'No arbitrary supersets or unknown contexts',
         'app_id must be explicitly present as a JSON integer or null',
         '`source-ci` and `issue-link` are bound to Actions app 15368',
-        '`integration-tests` and `agent-review` remain unbound',
+        'Actions app 15368; `integration-tests` remains unbound',
         'Phase names remain for compatibility',
         'advisory `cloud-review`',
     ):
         assert clause in text, clause
+    assert '`statusCheckRollup` omits it' in policy
+    assert 'cannot be a required branch context' in policy
+    assert 'An absent review still blocks merge' in policy
+    assert "GitHub's automatic Copilot review ruleset requests reviews" in policy
 
 
 def test_parallel_integration_preserves_reviewed_history_and_both_intents():

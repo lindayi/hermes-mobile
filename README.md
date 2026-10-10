@@ -15,15 +15,15 @@ Canonical source: https://github.com/lindayi/hermes-mobile
 
 Read [AGENTS.md](AGENTS.md) before editing. Every task uses a branch/worktree and a
 GitHub pull request. GitHub reviews carry findings; fixes are separate follow-up
-commits. Before an authorized gate transition, main requires `source-ci`,
-`integration-tests`, `agent-review`, and `issue-link`, plus resolved review threads
+commits. Under owner-authorized issue #92, main requires `source-ci`,
+`integration-tests`, and `issue-link`, plus resolved review threads
 and an up-to-date branch, including for the repository owner.
 
-The author can merge their own PR after these gates pass. GitHub does not allow
-self-approval, so independent reviewer agents post formal COMMENT reviews and the
-verified result is recorded as the exact-head `agent-review` status. This is not a
-human approval or a claim of a separate GitHub identity. No routine owner action is
-required. Do not manufacture passing review/test statuses.
+The author can merge their own PR after these gates pass. Genuine Copilot reviewer
+bot ID `175728472` must submit a `COMMENTED` or `APPROVED` review on the exact head,
+with complete pagination, resolved threads and all three successful CI checks.
+Coding bot ID `198982749` does not qualify. No independent report or `agent-review`
+publication is required. Do not manufacture passing review/test statuses.
 
 Example task setup, from the canonical checkout:
 
@@ -59,7 +59,7 @@ remain distinct from emulated browser verification.
 Hosted `source-ci` requires the public build, syntax/secret checks, complete
 JavaScript suite, portable-Python shards, generated-assets browser shards and native
 suite. The `integration-tests` check succeeds only when `source-ci` succeeds in the
-same workflow run. These hosted results, together with `agent-review` and
+same workflow run. These hosted results, together with genuine exact-head Copilot review and
 `issue-link` above, are required merge evidence on the exact PR head. The complete
 installed/private compatibility partition in `.github/host-tests.json` is not run
 on PR heads; it must pass against verified exact-main staged source and artifact

@@ -366,9 +366,10 @@ def test_quoted_provenance_container_code_is_inert(tmp_path, container):
     result = parse(body, "COMMENTED")
     assert result["findings"] == []
     api = ReviewApi([copilot_review(body)])
+    api.pending_required = True
     path = tmp_path / "state.json"
     plan = _managed_cycle(api, path)["pull_requests"][0]
-    assert not plan["repair_requested"] and not plan["review_valid"]
+    assert not plan["repair_requested"] and plan["review_valid"]
     assert api.fix_attempts == 0 and not api.graphql_writes
     assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
 

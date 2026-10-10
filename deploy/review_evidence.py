@@ -215,6 +215,22 @@ def latest_reviews(reviews, reviewer_id):
     return [review for review, stamp in zip(authored, stamps) if stamp == latest]
 
 
+def current_copilot_review_valid(reviews, head_sha, *, pull_author_id, complete=True):
+    """Accept only genuine, submitted, current-head Copilot reviewer evidence."""
+    if (complete is not True or not positive_id(pull_author_id)
+            or pull_author_id == 175728472 or not isinstance(head_sha, str)
+            or _SHA_RE.fullmatch(head_sha) is None):
+        return False
+    selected = latest_reviews(reviews, 175728472)
+    return bool(selected) and all(
+        review.get("state") in ("COMMENTED", "APPROVED")
+        and review.get("commit_id") == head_sha
+        and review.get("dismissed") is not True
+        and review.get("dismissed_at") in (None, "")
+        for review in selected
+    )
+
+
 @dataclass
 class _Element:
     tag: str
@@ -628,10 +644,10 @@ def review_body_disposition(reviews, head_sha, *, reviewer_id):
     if not isinstance(head_sha, str) or review.get("commit_id") != head_sha:
         return empty
     if (type(state) is str and (
-            state in {"APPROVED", "DISMISSED", "PENDING"}
-            or state == "COMMENTED" and body == "")):
+            state in {"DISMISSED", "PENDING"}
+            or state in {"COMMENTED", "APPROVED"} and body == "")):
         return empty
-    if (type(state) is not str or state not in {"COMMENTED", "CHANGES_REQUESTED"}
+    if (type(state) is not str or state not in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
             or not isinstance(body, str) or not body.strip()):
         return dict(empty, inventory_complete=False)
     result = parse_body(body, state, body_html=review.get("body_html"))

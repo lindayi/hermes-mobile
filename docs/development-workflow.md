@@ -79,7 +79,7 @@ The authoritative [Git development contract](git-development-spec.md)
 runner capabilities on the revision being integrated, not a pending PR's promises.
 
 The active required contexts are `source-ci` (Actions app 15368),
-`integration-tests`, `agent-review`, and `issue-link` (Actions app 15368), with
+`integration-tests`, and `issue-link` (Actions app 15368), with
 strict/up-to-date checks and required conversation resolution. `cloud-review` is
 advisory and is not a substitute for any required context. The automatic
 `integration-tests` job succeeds only when the same-run `source-ci` aggregate
@@ -91,13 +91,12 @@ run on PR heads. The complete `.github/host-tests.json` partition must run throu
 inside guarded deployment before activation; failure blocks activation. Never
 execute PR code on a production or self-hosted runner.
 
-The four active contexts above govern protected auto-merge and source consistency.
-Independent technical acceptance additionally requires the latest authenticated,
-exact-head owner-published structured independent-agent formal COMMENT review, a
-valid positive verdict and evidence binding, complete review/thread pagination, and
-resolved conversations. Copilot feedback is supplemental: missing APPROVED or
-COMMENTED alone does not block acceptance, repeat review requests, or consume
-fixer budget; actionable findings and definite rejection still block. See
+The three active contexts above govern protected auto-merge and source consistency.
+Issue #92 requires an authenticated exact-head Copilot review from reviewer bot ID
+`175728472` in state `COMMENTED` or `APPROVED`, complete review/thread pagination,
+resolved threads and all three successful CI checks. Coding bot ID `198982749`
+does not qualify. Missing, stale, pending, dismissed or rejecting reviews block.
+No independent report or `agent-review` status is required. See
 [`autonomy-policy.md`](autonomy-policy.md) for the read-only evidence contract.
 Installed/private compatibility remains required at
 guarded exact-main deployment; do not execute public PR code on a production-host
@@ -122,36 +121,30 @@ See [GitHub's setup workflow documentation](https://docs.github.com/en/copilot/h
 For behavior changes, record a real focused RED followed by GREEN and preserve
 existing assertions. Describe the baseline, linked issue, acceptance cases,
 scope, risks, exact commands/results, and any unrun checks in the pull request.
-All four active contexts must pass on the exact head SHA before GitHub merge.
-Independent review must be the latest authenticated owner-published structured
-independent-agent formal COMMENT on that SHA, with a positive verdict and bound
-evidence digest, complete review/thread pagination, and resolved conversations.
-Malformed, edited, removed, stale, superseded, or unbound evidence fails closed.
-`agent-review` remains evidence-backed and is not a substitute for reading the
-review. Copilot is supplemental: missing APPROVED or COMMENTED alone is not a
-blocker and does not justify repeat requests or fixer attempts without findings.
-Resolve actual findings; do not treat a definite rejection as acceptance. New
-commits invalidate final head-bound authority and status evidence; unchanged reviewed
-blobs/configuration/dependencies may retain verifiable review acceptance, while
-changed scope needs one independent delta review and final authority/status is freshly
-bound to the current head. Sensitive changes still require separate exact-SHA owner
-authorization.
+All three active contexts must pass on the exact head SHA before GitHub merge.
+Copilot review must be authenticated and bound to that SHA, with complete
+review/thread pagination and resolved conversations. Resolve actual findings; do
+not treat a definite rejection as acceptance. New commits invalidate head-bound
+review and status evidence. Sensitive changes still require separate exact-SHA
+owner authorization and targeted review.
 
 Use follow-up fix commits, reply in actual GitHub threads with the fix SHA and test
-evidence, and check findings before resolving them. Publish `agent-review` only
-after verifying the independent review of that head. Verify the automatically
-emitted `integration-tests` result is bound to that exact head and its same-run
+evidence, and check findings before resolving them. Never fabricate the required
+Copilot internal check or publish `agent-review` for a new merge decision. Verify
+the automatically emitted `integration-tests` result is bound to that exact head and its same-run
 `source-ci` aggregate succeeded. Require resolved review threads
 and a branch current with freshly fetched `origin/main` before merging through
 GitHub. No owner/admin bypass; never self-approve, fabricate approvals, review/test
 statuses or identities, bypass protections, or write directly to `main`. Report
 unrun or blocked checks honestly. Merging is not deployment.
 
-Copilot code review is optional supplemental feedback. Do not repeat requests merely
-because a review is COMMENTED or lacks APPROVED; batch any real fixes before a
+Request or re-request genuine Copilot review through the existing bounded action
+flow when current-head review is missing. Do not repeat requests merely because a
+qualifying review is COMMENTED rather than APPROVED. Batch real fixes before a
 follow-up review. Automatic review is a GitHub repository setting, not something
-these files can enable. Verify configuration before describing review as automatic.
-Independent technical review runs separately from the authoring task. Keep targeted
+these files can enable. Do not dispatch independent review/report-correction tasks
+or owner independent-review publications for new merge decisions. Preserve task
+history and active occupancy; never cancel or repurpose active tasks. Keep targeted
 review for authentication, deployment, migration, and semantic conflict changes.
 Review and test evidence is valid only for its exact head SHA.
 
@@ -164,7 +157,7 @@ the common base, and both diffs for a neutral reviewer/reconciler. Combine compa
 behavior, regenerate derived files from their source inputs, and test both intended
 behaviors and their interaction. Never resolve by wholesale choosing ours/theirs.
 Record resolution decisions on GitHub, preserving discussion and relevant dissent;
-rerun affected tests and obtain independent review plus final integration evidence
+rerun affected tests and obtain Copilot review plus final integration evidence
 on the resulting exact head. Escalate to the owner only for genuinely incompatible
 product requirements; agents resolve technical conflicts rather than offloading
 them to the owner.

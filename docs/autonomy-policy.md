@@ -2,17 +2,27 @@
 
 This policy defines the evidence required by its read-only gate validator. It does
 not change or activate repository settings. The active protected checks are exactly
-`source-ci` (Actions app 15368), `integration-tests`, `agent-review`, and `issue-link`
+`source-ci` (Actions app 15368), `integration-tests`, and `issue-link`
 (Actions app 15368), with strict/up-to-date checks and conversation resolution.
 Advisory `cloud-review` is not required or synthesized.
 
-Every PR also requires the latest authenticated owner-published structured
-independent-agent formal COMMENT review on its exact head, a positive verdict and
-bound evidence digest, complete review/thread pagination, and resolved threads.
-Copilot feedback is supplemental; actual findings and definite rejection remain
-blockers. Unchanged reviewed blobs, configuration, and dependencies may retain
-verifiable acceptance; changed scope needs one independent delta review, while final
-current-head authority and statuses are freshly bound and never copied blindly.
+Owner-authorized issue #92 supersedes independent-review merge gating. Every PR
+requires an authenticated exact-head Copilot review from reviewer bot ID `175728472`
+in state `COMMENTED` or `APPROVED`, complete review/thread pagination, resolved
+threads, and all three successful required CI checks. Coding bot ID `198982749`
+does not qualify. Missing, stale, pending, dismissed or rejecting reviews block.
+No independent report or `agent-review` publication is required for ordinary merge
+decisions. Historical pin/evidence notes below do not reinstate that requirement.
+Sensitive authorization and guarded exact-main deployment remain separate.
+
+GitHub's automatic Copilot review ruleset requests reviews. The coordinator,
+read-only validator, and manual operator require genuine current-head Copilot
+review evidence separately from GitHub's three hard branch CI checks. Issue #92's
+owner correction records that REST exposes the internal successful Copilot check,
+but GraphQL `statusCheckRollup` omits it and protected merge still reports it as
+expected. Thus `copilot-pull-request-reviewer` cannot be a required branch context.
+An absent review still blocks merge. Do not publish a replacement status or add
+a workflow wrapper, review service, independent reviewer, or human-review gate.
 
 ## Read-only validator
 
@@ -46,7 +56,7 @@ non-coordinator inventory started at `b85c098857e7fb8229f47bd688d703bb677aeb34`,
 and the old PR16 coordinator checkpoint was
 `403ac3d87988b9d3c7dc45aaecb44f11f3ef4a83`. Neither identifier describes all
 current candidate bytes. The explicit refreshes below supersede the corresponding
-historical fingerprints, not the requirement for final independent source acceptance.
+historical fingerprints, not the requirement for final exact-head Copilot review.
 The inventory includes `issue-link.yml` and the statically traversed local Python
 dependencies of the listed roots, including `deploy.observe_release`. Traversal
 resolves relative package imports and initializers and rejects unresolved local or
@@ -483,7 +493,7 @@ below. Neither a pin refresh alone nor a caller assertion is sufficient; pins ne
 auto-refresh. Merging this read-only validator is separate from activation and does
 not change the coordinator, repository protection, services, or existing merge gates.
 
-Any fingerprint-set or dependency-inventory update must be independently reviewed
+Any fingerprint-set or dependency-inventory update must be reviewed
 against the complete source, its local control dependencies, and intended control
 flow; additions are never accepted automatically. The digest comparison is only a
 consistency check: it does not authenticate the evidence file, prove how hashes
@@ -518,17 +528,14 @@ current-main readback. Readiness requires:
   changed-file classification must be complete for that exact head. Evidence binds
   the positive numeric PR-author ID. Every review record must have a positive unique
   ID, valid authenticated author identity, and valid timezone-aware timestamp;
-  malformed review records block. The latest owner review is selected by chronological
-  timestamp, and its current COMMENT body must exactly match the selected review ID
-  and body digest, contain a valid positive structured independent-agent verdict on
-  the current PR head, and bind the reviewed evidence digest. Offsets compare as
-  instants, not strings or review-ID order. Every review and thread page must be
-  complete and every thread resolved. A status or Copilot review alone is not
-  independent review.
+  malformed review records block. The latest genuine Copilot review must be on
+  the exact head in state `COMMENTED` or `APPROVED`. Offsets compare as instants,
+  not strings or review-ID order. Every review and thread page must be complete
+  and every thread resolved. All three required CI checks must also succeed.
 
 If the PR under review changes sensitive files, readiness additionally requires
 owner ID `5164171` authorization for that exact head, bound to one owner-published
-independent-agent review in the complete authenticated `independent_review.reviews`
+independent-agent review in the complete authenticated `copilot_review.reviews`
 collection. The existing command is extended to
 `/hermes authorize-sensitive <head-sha> review <positive-review-id> <body-sha256>`;
 the former head-only command cannot authorize sensitive work. The review must be a
@@ -554,14 +561,14 @@ consent for future commits.
 
 | Phase | Required main protection checks | Meaning |
 | --- | --- | --- |
-| `pre-cutover` | `source-ci`, `integration-tests`, `agent-review`, `issue-link` | Current four-check policy; independent exact-head structured COMMENT review is separately required. |
-| `staging` | `source-ci`, `integration-tests`, `agent-review`, `issue-link` | Same four-check policy; no advisory `cloud-review` status is required. |
-| `post-cutover` | `source-ci`, `integration-tests`, `agent-review`, `issue-link` | Same four-check policy; installed/private host compatibility remains a guarded exact-main deployment gate. |
+| `pre-cutover` | `source-ci`, `integration-tests`, `issue-link` | Current three-check CI policy with separate mandatory Copilot review evidence. |
+| `staging` | `source-ci`, `integration-tests`, `issue-link` | Same three-check policy; no advisory `cloud-review` status is required. |
+| `post-cutover` | `source-ci`, `integration-tests`, `issue-link` | Same three-check policy; installed/private host compatibility remains a guarded exact-main deployment gate. |
 
 These are exact context maps, not minimum subsets. No arbitrary supersets or unknown
 contexts are accepted, and duplicate contexts block. Each check's app_id must be
 explicitly present as a JSON integer or null. `source-ci` and `issue-link` are bound
-to Actions app 15368; `integration-tests` and `agent-review` remain unbound. No other
+to Actions app 15368; `integration-tests` remains unbound. No other
 app-binding variants are accepted.
 
 All three phases require strict main protection, administrator enforcement and
@@ -569,9 +576,9 @@ conversation resolution. In every phase, complete `source-ci` includes the publi
 native suite. Installed-runtime compatibility remains an exact-main guarded
 deployment gate, not a premerge host task. The validator never publishes statuses
 or performs a settings transition. It requires complete source/run/artifact
-provenance, changed-file classification, current structured independent review, and
+provenance, changed-file classification, current genuine Copilot review, and
 sensitive owner authorization where applicable. Phase names remain for compatibility;
-they do not authorize changing the active four-check map.
+they do not authorize changing the active three-check map.
 
 No coding task or validator performs settings changes or service activation. Do not
 equate synthetic unit-test success with live readiness, a merge, or a deployment.
@@ -579,7 +586,7 @@ equate synthetic unit-test success with live readiness, a merge, or a deployment
 ## Evidence fields
 
 The JSON root contains `repository`, `main`, `protection`, `source_ci`, and
-`independent_review` records. `main.files` maps the exact required source paths to their
+`copilot_review` records. `main.files` maps the exact required source paths to their
 SHA-256 digests and is bound to `main.sha`, `main.ref` and the fixed repository ID.
 `source_ci.jobs` carries every unique GitHub job ID, name, run ID, attempt, head
 SHA, completion status and conclusion. The artifact record carries its run/attempt,
@@ -587,11 +594,11 @@ repository IDs, expiration state, size and SHA-256. Its attestation record carri
 the verified certificate identity, issuer, repository ID, ref, source/signer SHA,
 run invocation URI, trigger and runner environment.
 
-`independent_review` identifies the current PR repository, base ref/SHA and head SHA,
+`copilot_review` identifies the current PR repository, base ref/SHA and head SHA,
 positive `pull_author_id`, open/draft state, complete changed-file classification
 for its exact head, complete review/thread pagination, review IDs, authors, valid
-timestamps, states and commit SHAs, resolved thread state, and the selected review
-ID, current raw-body digest, and evidence digest.
+timestamps, states and commit SHAs, resolved thread state, and real required
+check-run evidence. Ordinary merge evidence has no structured independent report.
 For a sensitive change it also carries the exact-head owner authorization and
 targeted-review identities. Consult `deploy/autonomy_policy.py` for the executable
 field contract; missing fields block rather than defaulting to success.
