@@ -132,6 +132,12 @@ attempt, leaves files, draft text, upload keys, and completed upload references
 available for retry in the mounted composer, and unlocks model selection. It must
 not leave a frozen run key that could later submit text without the selected
 photos. Browser File objects are not persisted across navigation or reload.
+Restoring the composer clears a saved `upload_pending` attempt only when it has
+no dispatch attachment-ID array; that marker proves the run was never sent.
+The draft remains, model selection unlocks, and the UI explains that photos must
+be selected again. A new send uses a fresh run key. Attempts with dispatch IDs,
+including empty arrays and legacy unresolved text attempts, remain frozen for
+exact retry; a reload is not permission to forget a possibly admitted run.
 
 Disabling photos after upload rejects a new photo run with HTTP 503 and code
 `photos_disabled_before_admission`. This typed 503 proves no admission;

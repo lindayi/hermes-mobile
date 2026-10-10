@@ -997,6 +997,13 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(textarea.value.trim()===pending.input){textarea.value='';drafts.delete(session.id);storage.set(draftKey,null);}
       pending=null;
     }
+    if(pending?.upload_pending===true && !Array.isArray(pending.attachment_ids)){
+      // Files do not survive composer teardown; only this marker proves no run dispatch.
+      attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);
+      pending=null;
+      photoStatus.hidden=false;
+      photoStatus.textContent='Photos could not be restored. Your draft is retained; select them again before sending.';
+    }
     if(Array.isArray(pending?.attachment_ids) && pending.attachment_ids.length<=4){
       for(const id of pending.attachment_ids){
         if(typeof id!=='string' || !/^[a-f0-9]{32}$/.test(id))continue;
