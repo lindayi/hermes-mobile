@@ -309,7 +309,7 @@ def test_actual_starter_to_lifecycle_consumer_fixer_review_checks_merge_and_repl
     waiting = run()
     assert not waiting["auto_merge_requested"] and api.fix_attempts == 1
     assert store.action(first["key"])["handoff_state"] == "waiting_review"
-    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+    assert not api.requested_reviewers  # Unresolved findings take priority.
     saved = store.action(first["key"])
     assert saved["receipt_session_completed_at"] == "2026-10-01T12:05:30Z"
     assert saved["receipt_completed_at"] == saved["receipt_session_completed_at"]

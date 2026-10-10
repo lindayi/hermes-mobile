@@ -185,12 +185,12 @@ SOURCE_FINGERPRINTS = {
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     # Issue #92 Copilot-only candidate; historical bounded-repair pins are retained.
-    'deploy/cloud_coordinator.py': 'd9a89fad059b9647208db27fbe8b18849346af8eb8d99fe71fbd52b01809d5b0',
+    'deploy/cloud_coordinator.py': '568e115b0015df170ac714f32cb77408d1a170646485c6ad4a5b099e95bbee9a',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
-    'deploy/review_evidence.py': '60f1c98ce562900b21429aa8e93728e9260aab6b2363fb4b9b068cd2ccc532b5',
+    'deploy/review_evidence.py': '84ccef23bc96ca1a423d619a6694cec6ad27aa4068515a3bf398aa8b838124ba',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     # Issue #65 producer-only overlay; historical receipt hashes remain documented.

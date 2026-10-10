@@ -180,8 +180,8 @@ _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE = {
 }
 
 _ISSUE92_COPILOT_REVIEW_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'd9a89fad059b9647208db27fbe8b18849346af8eb8d99fe71fbd52b01809d5b0',
-    'deploy/review_evidence.py': '60f1c98ce562900b21429aa8e93728e9260aab6b2363fb4b9b068cd2ccc532b5',
+    'deploy/cloud_coordinator.py': '568e115b0015df170ac714f32cb77408d1a170646485c6ad4a5b099e95bbee9a',
+    'deploy/review_evidence.py': '84ccef23bc96ca1a423d619a6694cec6ad27aa4068515a3bf398aa8b838124ba',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {

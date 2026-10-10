@@ -52,6 +52,7 @@ def test_terminal_task_requires_live_numeric_ownership(tmp_path, state, field, k
         mutate_id(task[field], "id", kind)
 
     if kind == "valid":
+        api.pending_required = True
         coordinator.run(apply=True)
         assert store.action(fix["key"])["status"] == "completed"
         assert [e["reason"] for e in store.snapshot()["lifecycle_events"]] == ["task_failed"]
@@ -168,6 +169,7 @@ def test_task_handoff_never_requests_or_waits_for_copilot(tmp_path, monkeypatch)
     coordinator.run(apply=True)
     fix = next(a for a in store.actions().values() if a["kind"] == "fix")
     api.complete_task(fix["task_id"], fix)
+    api.unresolved = False
     original_get, original_write = api.get, api.write
 
     def get(route):

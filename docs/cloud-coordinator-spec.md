@@ -785,15 +785,22 @@ evidence blocks. A check alone is not a review. COMMENTED is eligible; do not
 demand APPROVED-only or dispatch duplicate reviews after acceptance.
 Task receipt handoff and review acceptance are separate. After the exact result
 head, repository, base and authorization fences pass, the coordinator completes
-the source-writing task handoff only when the Copilot review gate
-accepts a current authenticated review on that head, with complete review and
-thread collection and all threads resolved. Otherwise the task stays in
+the source-writing task handoff only when a complete review collection contains
+a current authenticated Copilot COMMENTED or APPROVED review on that head.
+Otherwise the task stays in
 `waiting_review`, retaining its lock without consuming fixer or handoff-wait
-budgets. Unresolved findings and definite rejection are not treated as acceptance.
+budgets. This receipt handoff does not accept unresolved findings for merge.
+Repair-progress evaluation uses completed review identity separately from merge
+acceptance, so actionable findings can remain repair targets without blocking
+the bounded repair budget. Unknown or incomplete finding inventories still defer
+progress evaluation. Definite rejection never qualifies as completed acceptance.
 The coordinator requests or re-requests the real Copilot review through the
 existing bounded action flow. Completing a handoff is not merge evidence: merge
 still requires the genuine Copilot review, resolved threads, required checks and
-every other existing guard. New merge decisions never dispatch independent review,
+every other existing guard. Actionable, ambiguous or incomplete rendered body
+evidence still blocks merge. Invalid starter-source provenance blocks new review
+requests and retains its explicit diagnostic; it is not independent-review
+authority. New merge decisions never dispatch independent review,
 report-correction or owner independent-review publication actions, and never
 publish `agent-review`. Historical records and active tasks remain intact; they
 are not cancelled or repurposed and still occupy their existing task slots.

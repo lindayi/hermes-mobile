@@ -5120,6 +5120,41 @@ class Coordinator:
             reasons.append(("sensitive", "Owner exact-head authorization is required for sensitive changes."))
         if not review_ok:
             reasons.append(("review", "A current genuine Copilot review and resolved conversations are required."))
+        source_provenance_missing = (
+            not progress_review_ok
+            and not _valid_initial_source(snapshot.get("initial_source"))
+            and not snapshot.get("retained_ready_handoff")
+            and repair is None
+            and not (agent_busy and any(
+                action.get("issue") == number
+                and action.get("kind") in {"fix", "review"}
+                for action in actions.values()
+            ))
+            and snapshot["pull"].get("draft") is False
+            and not _cloud_agent_active(
+                snapshot["workflows"], snapshot["pull"]["head"]["ref"],
+            )
+            and not _other_task_active([
+                task for task in snapshot["tasks"]
+                if (isinstance(task, dict)
+                    and isinstance(task.get("state"), str)
+                    and task.get("state") in {
+                        "queued", "in_progress", "waiting_for_user", "idle",
+                        "requested", "pending",
+                    })
+            ], snapshot)
+            and not any(
+                action.get("issue") == number
+                and action.get("kind") in {"fix", "review"}
+                and action.get("status") in {"sending", "uncertain", "sent"}
+                for action in actions.values()
+            )
+        )
+        if source_provenance_missing:
+            reasons.append((
+                "starter-source-provenance",
+                "No authenticated initial-source task provenance is available; review requests are blocked.",
+            ))
         if not checks_ok:
             reasons.append(("checks", "Every configured required check must complete successfully."))
         if status and not status_owned:
@@ -5247,7 +5282,7 @@ class Coordinator:
                 and any(code == "starter-source-provenance" for code, _ in reasons)):
             notification_outcomes.append(self._outcome(
                 snapshot, "starter-source-provenance",
-                "No authenticated initial-source task provenance is available; independent review dispatch is blocked. Use an authenticated issue-starter handoff or a verified coordinator repair handoff.",
+                "No authenticated initial-source task provenance is available; review requests are blocked. Use an authenticated issue-starter handoff or a verified coordinator repair handoff.",
             ))
         return {"issue": number, "head": head, "sensitive": sensitive,
                 "terminal": False,
@@ -5267,7 +5302,10 @@ class Coordinator:
                         and snapshot["reviews_complete"] is True
                         and snapshot["scoped"] and not mergeability_unknown
                         and snapshot["pull"].get("draft") is False
-                        and repair is None and not agent_busy) else None
+                        and repair is None and not agent_busy
+                        and not (source_provenance_missing
+                                 and _valid_starter_admission(
+                                     enrollment.get("starter_admission")))) else None
                 ),
                 "status_action": status_action,
                 "merge_action": merge_action, "auto_merge_requested": merge_requested,
@@ -5401,7 +5439,9 @@ class Coordinator:
         if self.store.action(key) is not None:
             return "reserved"
         pull = self._fence_pull(action["issue"], action["head"], action["main_sha"])
-        if not _pull_identity(pull, action) or pull.get("draft") is not False:
+        if (not _pull_identity(pull, action) or pull.get("draft") is not False
+                or not self._authorized_dispatch_head(
+                    action["issue"], action["head"], pull["base"]["sha"])):
             return "superseded"
         reviews = _rest_list(
             self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
@@ -5419,7 +5459,9 @@ class Coordinator:
         if any(user["id"] == COPILOT_REVIEWER_ID for user in users):
             return "requested"
         current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
-        if not _pull_identity(current, action) or current.get("draft") is not False:
+        if (not _pull_identity(current, action) or current.get("draft") is not False
+                or not self._authorized_dispatch_head(
+                    action["issue"], action["head"], current["base"]["sha"])):
             return "superseded"
         if not self.store.claim_action(key, action):
             return "reserved"
