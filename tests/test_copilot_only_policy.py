@@ -4,7 +4,7 @@ from copy import deepcopy
 import pytest
 
 from deploy import autonomy_policy
-from deploy.cloud_coordinator import copilot_review_valid
+from deploy.cloud_coordinator import _valid_initial_source, copilot_review_valid
 from test_autonomy_policy import SHA, _evidence
 from test_cloud_coordinator import (
     BASE, HEAD, COPILOT_AGENT, COPILOT_REVIEWER, Coordinator, FakeApi, StateStore,
@@ -182,7 +182,7 @@ def test_copilot_only_validator_fails_closed(hazard):
 
 @pytest.mark.parametrize("active_source_work", [False, True])
 def test_copilot_request_requires_source_provenance_and_idle_source(
-        tmp_path, active_source_work):
+        tmp_path, active_source_work, monkeypatch):
     class RequestApi(CopilotApi):
         def get_all(self, route, *, collection=None):
             if "/reviews?" in route:
@@ -203,9 +203,38 @@ def test_copilot_request_requires_source_provenance_and_idle_source(
         "pull_id": api.pull["id"], "pull_node_id": api.pull["node_id"],
         "repository_id": 1399942965,
     }
+    if active_source_work:
+        enrollment.update({
+            "authorized_head": HEAD,
+            "starter_admission": {
+                "version": 1, "issue_number": 16, "head_sha": HEAD,
+                "body_sha256": "c" * 64, "comment_id": 123,
+                "comment_created_at": "2026-10-01T11:00:00Z",
+            },
+        })
     store.enroll(enrollment)
     coordinator = Coordinator(api, store)
     if active_source_work:
+        source = {
+            "version": 1, "issue_number": 16, "start_comment_id": 100,
+            "start_comment_created_at": "2026-10-01T11:00:00Z",
+            "task_id": "starter-task", "session_id": "starter-session",
+            "task_created_at": "2026-10-01T11:01:00Z",
+            "session_created_at": "2026-10-01T11:02:00Z",
+            "session_completed_at": "2026-10-01T11:05:00Z",
+            "head_sha": HEAD, "head_ref": "topic", "pull_id": api.pull["id"],
+            "pull_node_id": api.pull["node_id"], "repository_id": 1399942965,
+            "pull_body_sha256": "c" * 64, "issue_body_sha256": "d" * 64,
+            "admission_comment_id": 123,
+            "admission_comment_created_at": "2026-10-01T11:00:00Z",
+        }
+        assert _valid_initial_source(source)
+        snapshot_pull = coordinator._snapshot_pull
+
+        def source_bound_snapshot(*args, **kwargs):
+            return snapshot_pull(*args, **kwargs) | {"initial_source": source}
+
+        monkeypatch.setattr(coordinator, "_snapshot_pull", source_bound_snapshot)
         coordinator._reconcile_actions = lambda *_args, **_kwargs: False
     coordinator.run(apply=True)
     assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
