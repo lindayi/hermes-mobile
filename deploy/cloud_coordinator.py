@@ -5004,6 +5004,24 @@ class Coordinator:
             and busy_details.get("action_keys") == copilot_review_handoff_keys
             and busy_details.get("external_busy") is False
         )
+        new_handoff_review_activity = any(
+            isinstance(review, dict)
+            and (
+                isinstance(review.get("user"), dict)
+                and type(review["user"].get("id")) is int
+                and review["user"]["id"] == COPILOT_REVIEWER_ID
+                or _valid_timestamp(review.get("submitted_at"))
+                and datetime.fromisoformat(
+                    review["submitted_at"].replace("Z", "+00:00"),
+                ) > datetime.fromisoformat(
+                    actions[key]["receipt_completed_at"].replace("Z", "+00:00"),
+                )
+            )
+            for key in copilot_review_handoff_keys
+            if key not in existing_copilot_review_handoff_keys
+            and _valid_timestamp(actions[key].get("receipt_completed_at"))
+            for review in snapshot["reviews"]
+        )
 
         if authorized_head is not None and (
                 not _is_sha(authorized_head) or head not in authorized_heads):
@@ -5483,6 +5501,7 @@ class Coordinator:
                                copilot_review_handoff_keys
                                & existing_copilot_review_handoff_keys
                            )
+                           or not new_handoff_review_activity
                        )
                        and source_provenance_verified
                        and not source_work_active) else None

@@ -2424,7 +2424,7 @@ def test_upgraded_starter_reconciles_old_format_lost_response_and_consumer_repla
 
     api.get, api.get_all = get, get_all
     api.owner_review_body = "No independent review has been published."
-    api.review_state = "PENDING"
+    api.review_state = None
     api.pull_files = [
         {"filename": "README.md", "status": "modified", "sha": "f" * 40},
     ]
