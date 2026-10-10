@@ -15,7 +15,6 @@ REQUIRED = [
     {"context": "source-ci", "app_id": 15368},
     {"context": "integration-tests", "app_id": None},
     {"context": "issue-link", "app_id": 15368},
-    {"context": "copilot-pull-request-reviewer", "app_id": 15368},
 ]
 
 
@@ -29,6 +28,9 @@ class CopilotApi(FakeApi):
         values = super().get_all(route, collection=collection)
         if "/reviews?" in route:
             return [item for item in values if item["user"]["id"] == COPILOT_REVIEWER]
+        if "/check-runs?" in route:
+            return [item for item in values
+                    if item.get("name") != "copilot-pull-request-reviewer"]
         return values
 
 
@@ -58,6 +60,49 @@ def test_copilot_only_accepts_real_review_and_checks(tmp_path, state):
     assert not any("/statuses/" in route or route.endswith("/reviews")
                    for route, body in api.writes)
     assert autonomy_policy.validate_transition(copilot_evidence(), phase="post-cutover")["ready"]
+
+
+@pytest.mark.parametrize("hazard", [
+    "absent", "stale", "wrong_author", "rejecting", "unresolved", "failed_ci",
+])
+def test_three_ci_contexts_do_not_replace_copilot_review(tmp_path, hazard):
+    class InvalidReviewApi(CopilotApi):
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if "/reviews?" in route:
+                if hazard == "absent":
+                    return []
+                for review in values:
+                    if hazard == "stale":
+                        review["commit_id"] = BASE
+                    elif hazard == "wrong_author":
+                        review["user"] = {"id": COPILOT_AGENT}
+                    elif hazard == "rejecting":
+                        review["state"] = "CHANGES_REQUESTED"
+            if "/check-runs?" in route and hazard == "failed_ci":
+                values[0]["conclusion"] = "failure"
+            return values
+
+    api = InvalidReviewApi()
+    if hazard == "unresolved":
+        api.unresolved = True
+    result = Coordinator(api, StateStore(tmp_path / "state.json")).run(apply=False)
+    assert not result["pull_requests"][0]["auto_merge_eligible"]
+    evidence = copilot_evidence()
+    review = evidence["copilot_review"]
+    if hazard == "absent":
+        review["reviews"] = []
+    elif hazard == "unresolved":
+        review["threads"][0]["isResolved"] = False
+    elif hazard == "failed_ci":
+        review["check_runs"][0]["conclusion"] = "failure"
+    else:
+        review["reviews"][0].update({
+            "stale": {"commit_id": BASE},
+            "wrong_author": {"user": {"id": COPILOT_AGENT}},
+            "rejecting": {"state": "CHANGES_REQUESTED"},
+        }[hazard])
+    assert not autonomy_policy.validate_transition(evidence, phase="post-cutover")["ready"]
 
 
 @pytest.mark.parametrize("author", [5164171, 198982749])

@@ -194,7 +194,7 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         for clause in (
             'docs/git-development-spec.md',
             'source-ci` (Actions app 15368)',
-            'integration-tests`, `copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368)',
+            'integration-tests`, and `issue-link` (Actions app 15368)',
             '175728472',
             'COMMENTED',
             'APPROVED',
@@ -233,10 +233,10 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
     assert 'Full managed integration result, if required' not in template
     for clause in (
         'Mandatory final integration evidence',
-        'The authenticated exact-head Copilot review, real successful review check',
+        'The authenticated exact-head Copilot review, three successful CI checks',
         'COMMENTED or APPROVED',
         'No independent report or agent-review publication is required',
-        'source-ci (Actions app 15368), integration-tests, copilot-pull-request-reviewer (Actions app 15368), and issue-link (Actions app 15368)',
+        'source-ci (Actions app 15368), integration-tests, and issue-link (Actions app 15368)',
         'cloud-review is advisory, not required or synthesized',
         'resolved review threads',
         'current with freshly fetched origin/main',
@@ -260,12 +260,12 @@ def test_all_active_context_lists_include_issue_link():
     ):
         text = ' '.join((ROOT / path).read_text().split())
         assert all(context in text for context in (
-            'source-ci', 'integration-tests', 'copilot-pull-request-reviewer', 'issue-link',
+            'source-ci', 'integration-tests', 'issue-link',
         )), path
 
     policy = ' '.join((ROOT / 'docs/autonomy-policy.md').read_text().split())
     assert (
-        '| `staging` | `source-ci`, `integration-tests`, `copilot-pull-request-reviewer`, '
+        '| `staging` | `source-ci`, `integration-tests`, '
         '`issue-link` |'
     ) in policy
 
@@ -313,7 +313,7 @@ def test_active_gate_contract_preserves_exact_head_review():
         assert 'exact' in text and ('head' in text or 'SHA' in text)
         assert '175728472' in text
         assert '198982749' in text
-        assert 'copilot-pull-request-reviewer' in text
+        assert 'Copilot' in text
         assert 'COMMENT' in text
         assert 'APPROVED' in text
 
@@ -343,12 +343,12 @@ def test_active_gate_contract_preserves_exact_head_review():
         assert clause in policy, clause
 
 
-def test_policy_documents_bounded_four_check_maps_and_copilot_review():
+def test_policy_documents_bounded_three_check_maps_and_copilot_review():
     policy = (ROOT / 'docs/autonomy-policy.md').read_text()
     expected = {
-        'pre-cutover': ('source-ci', 'integration-tests', 'copilot-pull-request-reviewer', 'issue-link'),
-        'staging': ('source-ci', 'integration-tests', 'copilot-pull-request-reviewer', 'issue-link'),
-        'post-cutover': ('source-ci', 'integration-tests', 'copilot-pull-request-reviewer', 'issue-link'),
+        'pre-cutover': ('source-ci', 'integration-tests', 'issue-link'),
+        'staging': ('source-ci', 'integration-tests', 'issue-link'),
+        'post-cutover': ('source-ci', 'integration-tests', 'issue-link'),
     }
     for phase, contexts in expected.items():
         assert f'--phase {phase} /private/path/evidence.json' in policy
@@ -359,11 +359,15 @@ def test_policy_documents_bounded_four_check_maps_and_copilot_review():
         'No arbitrary supersets or unknown contexts',
         'app_id must be explicitly present as a JSON integer or null',
         '`source-ci` and `issue-link` are bound to Actions app 15368',
-        'as is `copilot-pull-request-reviewer`; `integration-tests` remains unbound',
+        'Actions app 15368; `integration-tests` remains unbound',
         'Phase names remain for compatibility',
         'advisory `cloud-review`',
     ):
         assert clause in text, clause
+    assert '`statusCheckRollup` omits it' in policy
+    assert 'cannot be a required branch context' in policy
+    assert 'An absent review still blocks merge' in policy
+    assert "GitHub's automatic Copilot review ruleset requests reviews" in policy
 
 
 def test_parallel_integration_preserves_reviewed_history_and_both_intents():

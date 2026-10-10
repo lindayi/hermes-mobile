@@ -33,7 +33,7 @@ execution. The full managed `all` remains an opt-in diagnostic and the conservat
 release-stage gate.
 
 The active required contexts are `source-ci` (Actions app 15368),
-`integration-tests`, `copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368), with
+`integration-tests`, and `issue-link` (Actions app 15368), with
 strict/up-to-date checks and resolved conversations. Do not require, synthesize, or
 publish `cloud-review` as a required status. Any future policy change needs a
 separate owner-authorized protection change and verified current-head evidence.
@@ -110,11 +110,17 @@ literal; see [docs/cloud-coordinator-spec.md](docs/cloud-coordinator-spec.md).
 Issue #92 supersedes the independent-review merge requirement. Every PR requires
 an authenticated, exact-head Copilot review from reviewer bot ID `175728472` in
 state `COMMENTED` or `APPROVED`, complete review/thread pagination, resolved threads,
-and the real successful required review check. Coding bot ID `198982749` does not
+and all three successful required CI checks. Coding bot ID `198982749` does not
 qualify. Missing, stale, pending, dismissed or rejecting reviews block. Do not
 dispatch independent review/report-correction tasks or publish `agent-review` for
 new merge decisions. Preserve historical records and active task occupancy.
 Sensitive changes retain separate exact-SHA owner authorization and targeted review.
+
+GitHub's automatic Copilot review ruleset requests reviews. Coordinator and manual
+operators validate the separate mandatory review evidence before merge. The
+internal `copilot-pull-request-reviewer` check is absent from GraphQL
+`statusCheckRollup` and cannot serve as a required branch context. Do not replace
+it with a synthetic status, workflow wrapper, review service, or human-review gate.
 
 Required checks and protections are authoritative. Do not fabricate reviews,
 approvals, check results, or identities. Review and test evidence applies only to
@@ -122,7 +128,7 @@ the exact head SHA; any new commit invalidates it. Address findings with follow-
 commits and reply to their actual GitHub threads. Never self-approve, bypass
 protections, or write directly to `main`.
 
-The exact four active contexts above must pass on the exact head SHA. Request or
+The exact three active contexts above must pass on the exact head SHA. Request or
 re-request genuine Copilot review through the bounded action flow; never synthesize
 review success. Verify the
 automatically emitted `integration-tests` result is bound to that head and its
@@ -130,7 +136,7 @@ same-run complete hosted `source-ci` aggregate succeeded. Record the workflow UR
 the host-only compatibility suite is verified during guarded deployment, not
 claimed as PR-head evidence. Focused checks or dependency setup alone are not final
 integration.
-Require all four active contexts, resolved review threads, and a branch current with
+Require all three active contexts, resolved review threads, and a branch current with
 freshly fetched `origin/main` before GitHub merge. Never fabricate advisory status
 success, retire a required context, or use No owner/admin bypass shortcuts.
 

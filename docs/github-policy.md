@@ -86,10 +86,16 @@ bypasses protection. Missing cloud entitlement/quota uses this explicit local pa
 
 Issue #92 requires genuine Copilot reviewer bot ID `175728472` in state `COMMENTED`
 or `APPROVED` on the exact head, complete review/thread pagination, resolved
-threads and the real successful review check. Coding bot ID `198982749` does not
+threads and all three successful CI checks. Coding bot ID `198982749` does not
 qualify. Missing, stale, pending, dismissed or rejecting reviews block. Batch
 coherent fixes and request fresh review through the bounded action flow. Do not
 repeat requests merely because a qualifying review is COMMENTED.
+
+The automatic Copilot review ruleset requests reviews. Coordinator and manual
+operators validate review evidence separately from GitHub's three hard branch CI
+checks. The internal Copilot check is absent from GraphQL statusCheckRollup and
+cannot be a required context. Missing review evidence still blocks merge. Do not
+add a replacement status, workflow wrapper, review service, or human-review gate.
 
 Address actual findings with follow-up commits and evidence; explain false positives.
 No independent report or `agent-review` publication is required for ordinary merge
@@ -98,7 +104,7 @@ history and active occupancy. Sensitive changes retain targeted review and
 exact-SHA owner authorization.
 
 Main protection requires the exact contexts `source-ci` (Actions app 15368),
-`integration-tests`, `copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368), strict
+`integration-tests`, and `issue-link` (Actions app 15368), strict
 up-to-date checks, owner enforcement, and thread resolution. The automatic
 `integration-tests` job depends on `source-ci` in the same run and succeeds only
 when that complete hosted aggregate succeeds. Host-only compatibility is a separate

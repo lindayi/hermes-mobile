@@ -2,18 +2,27 @@
 
 This policy defines the evidence required by its read-only gate validator. It does
 not change or activate repository settings. The active protected checks are exactly
-`source-ci` (Actions app 15368), `integration-tests`, `copilot-pull-request-reviewer` (Actions app 15368), and `issue-link`
+`source-ci` (Actions app 15368), `integration-tests`, and `issue-link`
 (Actions app 15368), with strict/up-to-date checks and conversation resolution.
 Advisory `cloud-review` is not required or synthesized.
 
 Owner-authorized issue #92 supersedes independent-review merge gating. Every PR
 requires an authenticated exact-head Copilot review from reviewer bot ID `175728472`
 in state `COMMENTED` or `APPROVED`, complete review/thread pagination, resolved
-threads, and the real successful required review check. Coding bot ID `198982749`
+threads, and all three successful required CI checks. Coding bot ID `198982749`
 does not qualify. Missing, stale, pending, dismissed or rejecting reviews block.
 No independent report or `agent-review` publication is required for ordinary merge
 decisions. Historical pin/evidence notes below do not reinstate that requirement.
 Sensitive authorization and guarded exact-main deployment remain separate.
+
+GitHub's automatic Copilot review ruleset requests reviews. The coordinator,
+read-only validator, and manual operator require genuine current-head Copilot
+review evidence separately from GitHub's three hard branch CI checks. Issue #92's
+owner correction records that REST exposes the internal successful Copilot check,
+but GraphQL `statusCheckRollup` omits it and protected merge still reports it as
+expected. Thus `copilot-pull-request-reviewer` cannot be a required branch context.
+An absent review still blocks merge. Do not publish a replacement status or add
+a workflow wrapper, review service, independent reviewer, or human-review gate.
 
 ## Read-only validator
 
@@ -522,7 +531,7 @@ current-main readback. Readiness requires:
   malformed review records block. The latest genuine Copilot review must be on
   the exact head in state `COMMENTED` or `APPROVED`. Offsets compare as instants,
   not strings or review-ID order. Every review and thread page must be complete
-  and every thread resolved. The real required review check must also succeed.
+  and every thread resolved. All three required CI checks must also succeed.
 
 If the PR under review changes sensitive files, readiness additionally requires
 owner ID `5164171` authorization for that exact head, bound to one owner-published
@@ -552,14 +561,14 @@ consent for future commits.
 
 | Phase | Required main protection checks | Meaning |
 | --- | --- | --- |
-| `pre-cutover` | `source-ci`, `integration-tests`, `copilot-pull-request-reviewer`, `issue-link` | Current four-check Copilot-only merge policy. |
-| `staging` | `source-ci`, `integration-tests`, `copilot-pull-request-reviewer`, `issue-link` | Same four-check policy; no advisory `cloud-review` status is required. |
-| `post-cutover` | `source-ci`, `integration-tests`, `copilot-pull-request-reviewer`, `issue-link` | Same four-check policy; installed/private host compatibility remains a guarded exact-main deployment gate. |
+| `pre-cutover` | `source-ci`, `integration-tests`, `issue-link` | Current three-check CI policy with separate mandatory Copilot review evidence. |
+| `staging` | `source-ci`, `integration-tests`, `issue-link` | Same three-check policy; no advisory `cloud-review` status is required. |
+| `post-cutover` | `source-ci`, `integration-tests`, `issue-link` | Same three-check policy; installed/private host compatibility remains a guarded exact-main deployment gate. |
 
 These are exact context maps, not minimum subsets. No arbitrary supersets or unknown
 contexts are accepted, and duplicate contexts block. Each check's app_id must be
 explicitly present as a JSON integer or null. `source-ci` and `issue-link` are bound
-to Actions app 15368, as is `copilot-pull-request-reviewer`; `integration-tests` remains unbound. No other
+to Actions app 15368; `integration-tests` remains unbound. No other
 app-binding variants are accepted.
 
 All three phases require strict main protection, administrator enforcement and
@@ -569,7 +578,7 @@ deployment gate, not a premerge host task. The validator never publishes statuse
 or performs a settings transition. It requires complete source/run/artifact
 provenance, changed-file classification, current genuine Copilot review, and
 sensitive owner authorization where applicable. Phase names remain for compatibility;
-they do not authorize changing the active four-check map.
+they do not authorize changing the active three-check map.
 
 No coding task or validator performs settings changes or service activation. Do not
 equate synthetic unit-test success with live readiness, a merge, or a deployment.

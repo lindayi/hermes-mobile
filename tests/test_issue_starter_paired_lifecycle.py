@@ -844,8 +844,10 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
     first = run()
     second = run()
     third = run()
-    assert first["pull_requests"][0]["required_checks_green"] is False
-    assert second["pull_requests"][0]["required_checks_green"] is False
+    assert first["pull_requests"][0]["required_checks_green"] is True
+    assert second["pull_requests"][0]["required_checks_green"] is True
+    assert first["pull_requests"][0]["review_valid"] is False
+    assert second["pull_requests"][0]["review_valid"] is False
     actions = StateStore(path).actions()
     assert not any(item.get("kind") == "review" for item in actions.values())
     assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
@@ -2230,7 +2232,8 @@ def test_dispatched_initial_review_accepts_report_after_admission_only_binding_c
     )
     for _ in range(5):
         result = run()
-    assert not result["review_valid"] and not result["required_checks_green"]
+    assert not result["review_valid"] and result["required_checks_green"]
+    assert not result["auto_merge_eligible"]
     assert not result["auto_merge_eligible"] and not result["auto_merge_requested"]
     assert api.review_attempts == 1 and api.fix_attempts == 0
     enrollment = store.snapshot()["enrollments"]["16"]

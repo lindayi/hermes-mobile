@@ -769,13 +769,12 @@ def test_required_checks_need_complete_green_evidence_for_every_context():
 
 @pytest.mark.parametrize("drift", [
     None, "missing-context", "extra-context", "wrong-source-app",
-    "wrong-issue-app", "wrong-agent-app",
+    "wrong-issue-app", "internal-review-context",
 ])
-def test_required_policy_accepts_only_current_four_contexts_and_apps(drift):
+def test_required_policy_accepts_only_current_three_contexts_and_apps(drift):
     checks = [
         {"context": "source-ci", "app_id": 15368},
         {"context": "integration-tests", "app_id": None},
-        {"context": "copilot-pull-request-reviewer", "app_id": 15368},
         {"context": "issue-link", "app_id": 15368},
     ]
     if drift == "missing-context":
@@ -786,8 +785,8 @@ def test_required_policy_accepts_only_current_four_contexts_and_apps(drift):
         checks[0]["app_id"] = 15369
     elif drift == "wrong-issue-app":
         checks[-1]["app_id"] = None
-    elif drift == "wrong-agent-app":
-        checks[2]["app_id"] = None
+    elif drift == "internal-review-context":
+        checks.append({"context": "copilot-pull-request-reviewer", "app_id": 15368})
 
     class PolicyApi:
         def get(self, route):
@@ -805,7 +804,7 @@ def test_required_policy_accepts_only_current_four_contexts_and_apps(drift):
     if drift is None:
         assert {(check["context"], check["app_id"]) for check in required} == {
             ("source-ci", 15368), ("integration-tests", None),
-            ("copilot-pull-request-reviewer", 15368), ("issue-link", 15368),
+            ("issue-link", 15368),
         }
 
 
@@ -813,7 +812,6 @@ def test_required_policy_normalizes_only_redundant_legacy_context_projection():
     checks = [
         {"context": "source-ci", "app_id": 15368},
         {"context": "integration-tests", "app_id": None},
-        {"context": "copilot-pull-request-reviewer", "app_id": 15368},
         {"context": "issue-link", "app_id": 15368},
     ]
     contexts = [check["context"] for check in checks]
@@ -832,7 +830,7 @@ def test_required_policy_normalizes_only_redundant_legacy_context_projection():
     assert complete and strict and conversations
     assert {(item["context"], item["app_id"]) for item in required} == {
         ("source-ci", 15368), ("integration-tests", None),
-        ("copilot-pull-request-reviewer", 15368), ("issue-link", 15368),
+        ("issue-link", 15368),
     }
 
 
@@ -844,7 +842,6 @@ def test_required_policy_does_not_hide_nonredundant_legacy_rules(change):
     checks = [
         {"context": "source-ci", "app_id": 15368},
         {"context": "integration-tests", "app_id": None},
-        {"context": "copilot-pull-request-reviewer", "app_id": 15368},
         {"context": "issue-link", "app_id": 15368},
     ]
     contexts = [check["context"] for check in checks]
@@ -877,14 +874,13 @@ def test_required_policy_does_not_hide_nonredundant_legacy_rules(change):
 
     required, complete, _, _ = _required_checks(PolicyApi())
     assert not complete
-    assert len(required) >= 4
+    assert len(required) >= 3
 
 
 def test_required_policy_allows_consistently_empty_classic_rules_with_ruleset():
     checks = [
         {"context": "source-ci", "integration_id": 15368},
         {"context": "integration-tests"},
-        {"context": "copilot-pull-request-reviewer", "integration_id": 15368},
         {"context": "issue-link", "integration_id": 15368},
     ]
 
@@ -906,7 +902,7 @@ def test_required_policy_allows_consistently_empty_classic_rules_with_ruleset():
 
     required, complete, strict, conversations = _required_checks(PolicyApi())
     assert complete and strict and conversations
-    assert len(required) == 4
+    assert len(required) == 3
 
 
 def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
@@ -916,7 +912,6 @@ def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
         required_checks=[
             {"context": "source-ci", "app_id": 15368},
             {"context": "integration-tests", "app_id": None},
-            {"context": "copilot-pull-request-reviewer", "app_id": 15368},
             {"context": "issue-link", "app_id": 15368},
         ],
         check_runs=[{
@@ -924,7 +919,7 @@ def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
             "status": "completed", "conclusion": "success",
         } for name, app_id in (
             ("source-ci", 15368), ("integration-tests", None),
-            ("copilot-pull-request-reviewer", 15368), ("issue-link", 15368),
+            ("issue-link", 15368),
         )],
         statuses=[],
         checks_complete=True,
@@ -952,12 +947,11 @@ def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
     )
 
 
-def test_auto_merge_uses_current_four_checks_without_cloud_review():
+def test_auto_merge_uses_current_three_checks_without_cloud_review():
     pr = valid_pr()
     required = [
         {"context": "source-ci", "app_id": 15368},
         {"context": "integration-tests", "app_id": None},
-        {"context": "copilot-pull-request-reviewer", "app_id": 15368},
         {"context": "issue-link", "app_id": 15368},
     ]
     runs = [
@@ -965,7 +959,7 @@ def test_auto_merge_uses_current_four_checks_without_cloud_review():
          "status": "completed", "conclusion": "success"}
         for name, app_id in (
             ("source-ci", 15368), ("integration-tests", None),
-            ("copilot-pull-request-reviewer", 15368), ("issue-link", 15368),
+            ("issue-link", 15368),
         )
     ]
     assert eligible_for_auto_merge(
@@ -1752,7 +1746,6 @@ class FakeApi:
                 "checks": [
                     {"context": "source-ci", "app_id": 15368},
                     {"context": "integration-tests", "app_id": None},
-                    {"context": "copilot-pull-request-reviewer", "app_id": 15368},
                     {"context": "issue-link", "app_id": 15368},
                 ],
                 "strict": self.strict_protection,
@@ -1819,7 +1812,7 @@ class FakeApi:
                 }
                 for name, app_id in (
                     ("source-ci", 15368), ("integration-tests", None),
-                    ("copilot-pull-request-reviewer", 15368), ("issue-link", 15368),
+                    ("issue-link", 15368),
                 )
             ]
         if "/statuses?per_page=100" in route:
@@ -3391,6 +3384,11 @@ def test_rejecting_review_progress_uses_non_review_checks_in_the_planner(
         def get_all(self, route, *, collection=None):
             result = super().get_all(route, collection=collection)
             if f"/commits/{self.head_sha}/check-runs?" in route:
+                result.append({
+                    "name": "copilot-pull-request-reviewer",
+                    "head_sha": self.head_sha, "app": {"id": 15368},
+                    "status": "in_progress", "conclusion": None,
+                })
                 adjusted = []
                 for run in result:
                     if run.get("name") == "copilot-pull-request-reviewer":
@@ -3425,7 +3423,7 @@ def test_rejecting_review_progress_uses_non_review_checks_in_the_planner(
 
     progress = store.snapshot()["enrollments"]["16"]["repair_progress"]
     assert summary["review_valid"] is False
-    assert summary["required_checks_green"] is False
+    assert summary["required_checks_green"] is (non_review_status == "success")
     assert summary["auto_merge_eligible"] is False
     assert store.action(first["key"])["handoff_state"] == "waiting_review"
     assert not api.graphql_writes

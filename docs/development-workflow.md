@@ -79,7 +79,7 @@ The authoritative [Git development contract](git-development-spec.md)
 runner capabilities on the revision being integrated, not a pending PR's promises.
 
 The active required contexts are `source-ci` (Actions app 15368),
-`integration-tests`, `copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368), with
+`integration-tests`, and `issue-link` (Actions app 15368), with
 strict/up-to-date checks and required conversation resolution. `cloud-review` is
 advisory and is not a substitute for any required context. The automatic
 `integration-tests` job succeeds only when the same-run `source-ci` aggregate
@@ -91,10 +91,10 @@ run on PR heads. The complete `.github/host-tests.json` partition must run throu
 inside guarded deployment before activation; failure blocks activation. Never
 execute PR code on a production or self-hosted runner.
 
-The four active contexts above govern protected auto-merge and source consistency.
+The three active contexts above govern protected auto-merge and source consistency.
 Issue #92 requires an authenticated exact-head Copilot review from reviewer bot ID
 `175728472` in state `COMMENTED` or `APPROVED`, complete review/thread pagination,
-resolved threads and the real successful review check. Coding bot ID `198982749`
+resolved threads and all three successful CI checks. Coding bot ID `198982749`
 does not qualify. Missing, stale, pending, dismissed or rejecting reviews block.
 No independent report or `agent-review` status is required. See
 [`autonomy-policy.md`](autonomy-policy.md) for the read-only evidence contract.
@@ -121,7 +121,7 @@ See [GitHub's setup workflow documentation](https://docs.github.com/en/copilot/h
 For behavior changes, record a real focused RED followed by GREEN and preserve
 existing assertions. Describe the baseline, linked issue, acceptance cases,
 scope, risks, exact commands/results, and any unrun checks in the pull request.
-All four active contexts must pass on the exact head SHA before GitHub merge.
+All three active contexts must pass on the exact head SHA before GitHub merge.
 Copilot review must be authenticated and bound to that SHA, with complete
 review/thread pagination and resolved conversations. Resolve actual findings; do
 not treat a definite rejection as acceptance. New commits invalidate head-bound
@@ -130,7 +130,7 @@ owner authorization and targeted review.
 
 Use follow-up fix commits, reply in actual GitHub threads with the fix SHA and test
 evidence, and check findings before resolving them. Never fabricate the required
-Copilot review check or publish `agent-review` for a new merge decision. Verify
+Copilot internal check or publish `agent-review` for a new merge decision. Verify
 the automatically emitted `integration-tests` result is bound to that exact head and its same-run
 `source-ci` aggregate succeeded. Require resolved review threads
 and a branch current with freshly fetched `origin/main` before merging through

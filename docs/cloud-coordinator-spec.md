@@ -598,7 +598,7 @@ when the exact-head task and Copilot review are complete, but never resolution
 credit or merge eligibility. Pending, null, unknown or malformed conclusions,
 wrong app/head bindings and incomplete pagination keep evaluation pending.
 A rejecting Copilot review supplies a negative review-stage disposition, not a
-successful review check; all non-review checks must be observed before scoring.
+successful CI result; all three CI checks must be observed before scoring.
 An incomplete or older-encoding reservation baseline receives an explicitly
 unknown decision only after fresh complete review/check evidence; it cannot clear
 targets or alter the streak. Neutral advancement can leave an older source result
@@ -779,10 +779,16 @@ Owner-authorized issue #92 replaces independent-review merge gating. Technical
 acceptance requires the latest authenticated Copilot review from reviewer bot ID
 `175728472` on the exact current head, in state `COMMENTED` or `APPROVED`. Coding
 bot ID `198982749` does not qualify. Review and thread pagination must be complete,
-every thread resolved, and the real required review check completed successfully.
+every thread resolved, and all three required CI checks completed successfully.
 Missing, stale, pending, dismissed, rejecting, wrong-identity or malformed review
 evidence blocks. A check alone is not a review. COMMENTED is eligible; do not
 demand APPROVED-only or dispatch duplicate reviews after acceptance.
+The automatic Copilot review ruleset requests reviews. The coordinator and manual
+operator validate review evidence separately from GitHub's three hard branch CI
+contexts. The internal `copilot-pull-request-reviewer` check is absent from GraphQL
+`statusCheckRollup` and cannot serve as a required branch context. A missing review
+still blocks merge; no replacement status, workflow wrapper, review service, or
+extra human-review gate is required.
 Task receipt handoff and review acceptance are separate. After the exact result
 head, repository, base and authorization fences pass, the coordinator completes
 the source-writing task handoff only when a complete review collection contains
@@ -1028,9 +1034,9 @@ The coordinator may publish its existing owned advisory `cloud-review` status,
 but does not require it; a status is not a substitute for reading the genuine
 Copilot review. The current protected
 policy is exactly `source-ci` (Actions app 15368), `integration-tests`,
-`copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368), with strict/up-to-date checks
+and `issue-link` (Actions app 15368), with strict/up-to-date checks
 and required conversation resolution. Missing, extra, or differently app-bound
-required contexts fail closed. All four required checks must independently report
+required contexts fail closed. All three required checks must independently report
 success; skipped, cancelled, missing, pending, failed, or incomplete checks are not
 green. The coordinator never writes `integration-tests` or `source-ci` statuses.
 It never synthesizes the Copilot review check or writes `agent-review` for new merge
@@ -1040,7 +1046,7 @@ short final page proves completion. Errors (including an unavailable rules
 endpoint), malformed pages/policy fields, or exhaustion of the bound fail closed.
 The policy retains the union of classic and all ruleset requirements, including
 separate app bindings for the same check context, and validates that union against
-the four active required contexts. GitHub's classic-protection response may include
+the three active required contexts. GitHub's classic-protection response may include
 both app-bound `checks` and a legacy `contexts` array that is only their name
 projection. Its entries must be strictly strings, not context objects whose app
 bindings could be discarded. When both arrays contain the same distinct context names, the
@@ -1054,7 +1060,7 @@ fails closed rather than weakening protection.
 
 Auto-merge is requested through GitHub's protected `enablePullRequestAutoMerge`
 operation only when the same-repository main base is current, the PR is not a
-draft or conflict, all four required checks are green, the Copilot review gate
+draft or conflict, all three required checks are green, the Copilot review gate
 passes, no fixer may be running, and any sensitive authorization is current. Both
 the PR head and the current `main` SHA are re-read before enabling
 auto-merge; the mutation supplies `expectedHeadOid` as the server-side head
@@ -1300,7 +1306,7 @@ activation approval.
 
 ## External policy boundary
 
-The current source policy requires the exact four protected contexts above and
+The current source policy requires the exact three protected contexts above and
 genuine exact-head Copilot review evidence; advisory `cloud-review` is neither required
 nor synthesized. Any later protection change requires separate owner authorization
 and new verification. The coordinator cannot alter branch protection.

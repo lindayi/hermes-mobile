@@ -94,7 +94,7 @@ COMPUTED_MERGEABLE_STATES = frozenset({
 })
 CURRENT_REQUIRED_CHECKS = frozenset({
     ("source-ci", 15368), ("integration-tests", None),
-    ("copilot-pull-request-reviewer", 15368), ("issue-link", 15368),
+    ("issue-link", 15368),
 })
 MAX_PAGES = 100
 MAX_FINDINGS = 8

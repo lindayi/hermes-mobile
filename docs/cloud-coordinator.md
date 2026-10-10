@@ -118,7 +118,7 @@ comment, or completed session never triggers a second dispatch by itself.
 
 Issue #92 requires the latest authenticated Copilot review from reviewer bot ID
 `175728472`, `COMMENTED` or `APPROVED` on the exact head, complete review/thread
-pagination, resolved threads and the real successful review check. Coding bot ID
+pagination, resolved threads and all three successful CI checks. Coding bot ID
 `198982749` does not qualify. Missing, stale, pending, dismissed or rejecting
 reviews block. Request genuine review through the bounded action flow, not a
 synthetic pass. Do not dispatch independent review/report-correction tasks or
@@ -201,7 +201,7 @@ and the documented targeted independent review; neither approval nor authorizati
 carries to a later head.
 
 The active required contexts are exactly `source-ci` (Actions app 15368),
-`integration-tests`, `copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368), with
+`integration-tests`, and `issue-link` (Actions app 15368), with
 strict/up-to-date checks and resolved review conversations. The coordinator may
 publish an owned advisory `cloud-review` status, but it is not required and never
 replaces genuine Copilot review. No repository settings or protections

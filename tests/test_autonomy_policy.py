@@ -180,7 +180,7 @@ _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE = {
 }
 
 _ISSUE92_COPILOT_REVIEW_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'b6c2e35821e813a55a905761dc797859b4f0f06bd2d68dbdedb23609007fbd03',
+    'deploy/cloud_coordinator.py': 'db2ce26072a98f0c01ec4a0cc212a21b7ee706bc8efe2e0ea75ce967b074d2b4',
     'deploy/review_evidence.py': '8b55ea466b715058b7cd0a4ce5c013d690c9846c4af0e81fea266e95d84f1a86',
 }
 
@@ -286,7 +286,6 @@ def _evidence():
             'required_checks': [
                 {'context': 'source-ci', 'app_id': 15368},
                 {'context': 'integration-tests', 'app_id': None},
-                {'context': 'copilot-pull-request-reviewer', 'app_id': 15368},
                 {'context': 'issue-link', 'app_id': 15368},
             ],
         },
@@ -303,7 +302,7 @@ def _evidence():
                 'status': 'completed', 'conclusion': 'success',
             } for name, app_id in (
                 ('source-ci', 15368), ('integration-tests', None),
-                ('issue-link', 15368), ('copilot-pull-request-reviewer', 15368),
+                ('issue-link', 15368),
             )],
             'reviews': [{
                 'id': 2, 'user': {'id': COPILOT_REVIEWER_ID}, 'state': 'COMMENTED',
@@ -1001,7 +1000,7 @@ def test_all_phases_preserve_the_exact_four_checks():
     lambda review: review['check_runs'][-1].update(app={'id': COPILOT_REVIEWER_ID}),
     lambda review: review.update(
         check_runs=review['check_runs'][:-1],
-        statuses=[{'context': 'copilot-pull-request-reviewer', 'state': 'success'}],
+        statuses=[{'context': 'issue-link', 'state': 'success'}],
     ),
 ])
 def test_copilot_required_check_cannot_be_missing_stale_pending_or_synthesized(phase, mutate):
@@ -1651,7 +1650,7 @@ def test_retired_independent_evidence_root_cannot_replace_copilot_review():
     pytest.param(lambda review: review['check_runs'][-1].update(name='agent-review'), id='retired-context'),
     pytest.param(lambda review: review.update(
         check_runs=review['check_runs'][:-1],
-        statuses=[{'context': 'copilot-pull-request-reviewer', 'state': 'success',
+        statuses=[{'context': 'issue-link', 'state': 'success',
                    'head_sha': review['head_sha']}]), id='status-not-bound-check'),
 ])
 def test_copilot_review_requires_real_successful_exact_head_check(mutate):

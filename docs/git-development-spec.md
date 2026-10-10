@@ -12,13 +12,13 @@ source import and subsequent changes use protected pull requests.
 
 1. Repository `lindayi/hermes-mobile` exists; remote source readback matches commits.
 2. Main requires the exact contexts `source-ci` (Actions app 15368),
-   `integration-tests`, `copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368), an
+   `integration-tests`, and `issue-link` (Actions app 15368), an
    up-to-date branch and resolved review conversations; protections apply to
    administrators. `cloud-review` is advisory and is not a required context.
 3. Under owner-authorized issue #92, every PR requires an authenticated exact-head
    Copilot review from reviewer bot ID `175728472`, in state `COMMENTED` or
-   `APPROVED`, complete review/thread pagination, resolved threads, and the real
-   successful required review check. Coding bot ID `198982749` does not qualify.
+   `APPROVED`, complete review/thread pagination, resolved threads, and all three
+   successful required CI checks. Coding bot ID `198982749` does not qualify.
    Missing, stale, pending, dismissed or rejecting reviews block. No independent
    report or `agent-review` publication is required. Do not generate independent
    review/report-correction tasks; preserve historical records and active occupancy.
@@ -33,6 +33,13 @@ source import and subsequent changes use protected pull requests.
    If active work prevents safe rollout, report that boundary instead of disrupting it.
 8. After merge remove task workspace/branch and disposable artifacts, not active
    sessions, required dependencies, runtime databases or still-referenced releases.
+
+GitHub's automatic Copilot review ruleset requests reviews. Coordinator and manual
+operators validate mandatory review evidence before merge; GitHub hard branch
+checks enforce only the three CI contexts above. The internal
+`copilot-pull-request-reviewer` check is absent from GraphQL `statusCheckRollup`
+and cannot be a required branch context. An absent review still blocks merge.
+Do not add replacement statuses, wrappers, review services, or human-review gates.
 
 ## Migration baseline
 

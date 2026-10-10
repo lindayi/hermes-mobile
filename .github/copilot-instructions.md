@@ -24,17 +24,23 @@ Write PR descriptions as plain paragraphs using the repository template; include
 For task handoff, a literal Closes #N is a readability convention; verify linkage from authenticated GitHub closing-issue references, never PR body text.
 
 The active required contexts are `source-ci` (Actions app 15368),
-`integration-tests`, `copilot-pull-request-reviewer` (Actions app 15368), and `issue-link` (Actions app 15368), with
+`integration-tests`, and `issue-link` (Actions app 15368), with
 strict/up-to-date checks and resolved conversations. Do not require, synthesize, or
 publish `cloud-review` as a required status. Independent technical acceptance
 requires an authenticated, exact-head Copilot review from reviewer bot ID
 `175728472` in state `COMMENTED` or `APPROVED`, complete review/thread pagination,
-resolved threads, and the real successful required review check. Coding bot ID
+resolved threads, and all three successful required CI checks. Coding bot ID
 `198982749` does not qualify. Missing, stale, pending, dismissed or rejecting reviews
 block. Issue #92 removes independent-review merge gating: do not dispatch new
 independent review/report-correction tasks or publish `agent-review`. Preserve
 historical records and active task occupancy. Sensitive changes retain separate
 exact-SHA owner authorization and targeted review.
+
+The automatic Copilot review ruleset requests reviews. Coordinator and manual
+operators validate mandatory exact-head review evidence separately from GitHub's
+three hard CI contexts. The internal `copilot-pull-request-reviewer` check is not
+a supported required branch context; never replace it with synthetic statuses,
+workflow wrappers, a new review service, or an extra human-review gate.
 The automatic `integration-tests` job succeeds only when the same-run complete
 hosted `source-ci` aggregate succeeds. Installed/private host compatibility is not
 PR-head evidence; the complete host partition remains a guarded exact-main
