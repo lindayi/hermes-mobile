@@ -48,7 +48,15 @@ def _compact_utf8_size(value):
 
 
 def validate_photo_text_budget(body):
-    if _compact_utf8_size(photo_persistence_copy(body)) > TEXT_REQUEST_BYTES:
+    # Called after native binding validation, or with the bridge's generated
+    # current-turn placeholders. Only these URL values get the image budget;
+    # persistence redaction must never hide ordinary text or extra metadata.
+    content = body['input'][0]['content']
+    counted = dict(body, input=[dict(body['input'][0], content=[
+        dict(part, image_url=dict(part['image_url'], url=PHOTO_OMITTED))
+        if isinstance(part, dict) and part.get('type') == 'image_url' else part
+        for part in content])])
+    if _compact_utf8_size(counted) > TEXT_REQUEST_BYTES:
         raise ValueError('Native text request exceeds the existing limit')
 
 

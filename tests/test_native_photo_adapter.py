@@ -29,7 +29,9 @@ def test_gateway_photo_budget_matches_native_compact_utf8_boundaries(character):
     history = [{'role': 'user', 'content': ''}]
     payload = gateway._run_payload('s', 'inspect', history, attachment_ids=ids,
         attachments=[{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,eHl6'}}])
-    overhead = controls._compact_utf8_size(controls.photo_persistence_copy(payload))
+    counted = json.loads(json.dumps(payload))
+    counted['input'][0]['content'][1]['image_url']['url'] = controls.PHOTO_OMITTED
+    overhead = len(json.dumps(counted, ensure_ascii=False, separators=(',', ':')).encode())
     length = (controls.TEXT_REQUEST_BYTES - overhead) // len(character.encode())
     for extra in (0, 1):
         history[0]['content'] = character * (length + extra)
@@ -58,6 +60,54 @@ def test_gateway_complete_photo_budget_exact_boundary():
     with pytest.raises(ValueError, match='native handler limit'):
         gateway.validate_run_size('s', 'inspect', history, ids, sizes)
     asyncio.run(gateway.close())
+
+
+@pytest.mark.parametrize('location', ['history', 'input_text', 'metadata'])
+def test_photo_text_budget_counts_unbound_inline_data_before_native_admission(location):
+    import asyncio
+    from backend.hermes_client import GatewayClient
+    payload = {
+        'input': [{'role': 'user', 'content': [
+            {'type': 'text', 'text': 'Inspect'},
+            {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,YQ=='}},
+        ]}],
+        'mobile_attachment_ids': ['a' * 32],
+    }
+    unbound = 'data:image/png;base64,' + 'A' * 10_000_000
+    if location == 'history':
+        payload['conversation_history'] = [{'role': 'user', 'content': unbound}]
+    elif location == 'input_text':
+        payload['input'][0]['content'][0]['text'] = unbound
+    else:
+        payload['input'][0]['content'][1]['image_url']['detail'] = unbound
+    assert controls._compact_utf8_size(payload) < controls.PHOTO_REQUEST_BYTES
+
+    class Native:
+        admitted = 0
+
+        def _check_auth(self, request):
+            return None
+
+        async def _handle_runs(self, request):
+            self.admitted += 1
+            return web.Response(status=200)
+
+    class Request:
+        async def json(self):
+            return payload
+
+    handler = controls.run_controls_adapter(Native)()
+    response = asyncio.run(handler._handle_runs(Request()))
+    assert response.status == 413
+    assert handler.admitted == 0
+    if location != 'metadata':
+        gateway = GatewayClient('http://127.0.0.1:8642', 'synthetic-token', execution_ready=True)
+        try:
+            with pytest.raises(ValueError, match='text'):
+                gateway.validate_run_size('s', unbound if location == 'input_text' else 'Inspect',
+                    payload.get('conversation_history', []), ['a' * 32], [('image/png', 1)])
+        finally:
+            asyncio.run(gateway.close())
 
 
 def test_four_photos_fit_complete_native_payload_without_expanding_text_limit():

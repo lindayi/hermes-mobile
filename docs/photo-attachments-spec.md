@@ -126,9 +126,17 @@ and unresolved submitted IDs remain locked against removal until a definite
 pre-admission rejection. Cancelled file selection does not alter the draft. A
 retry reuses upload and run idempotency keys.
 
+An upload failure, including a generic 503 or lost upload response, is always
+pre-admission: `/runs` has not been called. It clears only the captured run
+attempt, leaves files, draft text, upload keys, and completed upload references
+available for retry in the mounted composer, and unlocks model selection. It must
+not leave a frozen run key that could later submit text without the selected
+photos. Browser File objects are not persisted across navigation or reload.
+
 Disabling photos after upload rejects a new photo run with HTTP 503 and code
 `photos_disabled_before_admission`. This typed 503 proves no admission;
-ordinary 503, network errors, and run conflicts keep the attempt frozen.
+ordinary run-response 503, network errors after run dispatch, and run conflicts
+keep the attempt frozen.
 An unavailable or timed-out photo capability probe rejects before local run
 creation and photo binding with HTTP 503 and code
 `photos_unavailable_before_admission`. This typed rejection also unlocks the
@@ -158,12 +166,27 @@ their per-run position order and the snapshot's existing read transaction.
 Admission anchors capture the positively verified canonical Session boundary;
 prior turns match that same canonical identity after alias sends and compaction.
 
-Reopened history uses native message metadata to bind opaque attachment IDs to
-the exact user turn. Authenticated thumbnail/full-image reads are subject to
-the same ownership and expiry checks. After expiry, the UI shows an explicit
-placeholder and keeps the associated text. No filename, image bytes, local
-path, or user-controlled URL is placed in logs, events, notifications, or
-native history.
+Reopened mobile history obtains ordered opaque attachment IDs from the durable
+owned run journal, not from native message metadata. Native persistence retains
+text and generic `[screenshot]` markers. The catalog projects journal IDs onto
+the first matching user turn within the recorded canonical admission boundary;
+marker count and exact text are checked within that boundary, not searched across
+unrelated turns. Compaction uses the existing proved rewrite mapping. When native
+persistence cannot be proved, retained journal turns or the run overlay carry
+attachment metadata rather than claiming a native message binding.
+
+This implementation does not provide self-contained native-message attachment
+metadata. Native-only history without the mobile journal cannot reconstruct photo
+IDs, and that acceptance boundary remains incomplete. Backup/recovery must retain
+the mobile journal and attachment metadata together with native history. The
+assembled native compatibility tests cover mobile reopening, canonical aliases,
+compaction, ordered IDs, and no duplicate user turn with those stores present;
+they do not prove recovery from native history alone.
+
+Authenticated thumbnail/full-image reads remain subject to ownership and expiry
+checks. After expiry, the UI shows an explicit placeholder and keeps associated
+text. No filename, image bytes, local path, or user-controlled URL is placed in
+logs, events, notifications, or native history.
 
 The dedicated owner listener loads the versioned `native_run_controls` adapter
 from the staged repository release. It admits complete photo requests up to
@@ -174,8 +197,12 @@ measure compact UTF-8 JSON after parsing, without ASCII escaping or formatting
 whitespace. Validation occurs before native run creation. A proven HTTP
 413 is terminal rejection, not an unknown network outcome; ambiguous dispatch
 still observes the original run without replay.
-Before local admission the bridge enforces both byte budgets with the native
-compact UTF-8 sanitized-text calculation. A budget rejection returns HTTP 413,
+Before local admission the bridge enforces both byte budgets with the same
+compact UTF-8 text calculation as the native adapter. Only current-turn bound
+image URL values are replaced with a fixed omission marker for text accounting;
+all other text, history, keys, and image-part metadata count in full, including
+inline data URL strings outside those bound URL values. The persistence sanitizer
+is not a size validator. A budget rejection returns HTTP 413,
 leaves uploaded photos pending, and creates neither a local run nor a native POST.
 Before local admission the bridge requires the exact versioned `mobile_photos`
 capability, including private persistence and size bounds. An old listener or an
@@ -283,9 +310,9 @@ activation success.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `backend/native_run_controls.py` | `5383f0cb8be70a795bb2690bc5968c373d6c3f6f0faf4458539983c30476b787` |
-| `backend/model_controls.py` | `8e73ee01d61b44786cdaf5798edadfd97eefd12175e942be45e4bb21473849ad` |
-| `deploy/native_controls_release.py` | `41b620ce44325feff43339fd05a1fbb2a0036e06467f196948b9a317b876d5dc` |
+| `backend/native_run_controls.py` | `d8af6f7687c7d75b0c148b0572f7f4c13c1ac9bedc295e59719a7a3ee43f5058` |
+| `backend/model_controls.py` | `fee5b5b6130e73d5fdce0a79362c09f5ace7621e8b426b5fb1b574cd3cd2bbef` |
+| `deploy/native_controls_release.py` | `0b3bbb3e1484eaa4f046cb90e19270d8ee43b7bcb2a30b08252c85748e4e50e9` |
 | `backend/app.py` | `61ece82105971fad63e971ceb56a836f67637707182c5b2f1e8c1c996de2847d` |
 | `backend/attachments.py` | `ed8db6bfb377f310969a101ba3be3b5cad03f23c15590680cc6af1af4701f1b4` |
 | `backend/hermes_client.py` | `d669f59f7bf3fb2cc5cc671081937fb7328f9b53d50995f966333ae413823116` |

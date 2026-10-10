@@ -1113,7 +1113,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       attempts.set(session.id,attempt);storage.set(key(`attempt:${session.id}`),JSON.stringify(attempt));syncModelLock();
       const owner=state.user?.id;
       composerAction.set('sending');connection.run('sending');const token=connection.token();
-      let run;try{
+      let run,runDispatched=false;try{
         for(let index=0;index<submittedPhotos.length;index++){
           const photo=submittedPhotos[index];
           if(photo.metadata)continue;
@@ -1152,11 +1152,13 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         pendingPhotoSubmission={attachmentIds:attachments,photos:submittedPhotos};
         renderPhotoSelection();
         const {attachment_ids: savedAttachmentIds,legacy_text: savedLegacyText,...requestAttempt}=attempt;
+        runDispatched=true;
         run=await api.request('/runs',{method:'POST',body:{session_id:session.id,...requestAttempt,...(attachments.length?{attachments}:{})}});
         connection.success(token);
       }catch(error){
         connection.failure(token);
-        const rejectedBeforeAdmission=[400,413,422,507].includes(error.status)
+        // Upload errors cannot admit a run, even if the upload response was lost.
+        const rejectedBeforeAdmission=!runDispatched || [400,413,422,507].includes(error.status)
           || error.status===503 && ['photos_disabled_before_admission','photos_unavailable_before_admission'].includes(error.code)
           || error.status===409 && error.code==='attachment_error';
         if(rejectedBeforeAdmission){

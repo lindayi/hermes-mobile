@@ -165,10 +165,11 @@ test('real file input removal aborts an undispatched photo batch and retries rem
   assert.deepEqual(calls.filter(call=>call==='POST /runs').length,1);
 });
 
-  for(const scenario of ['disabled','capability','cancel','legacy admitted','legacy lost response']){
+  for(const scenario of ['disabled','capability','cancel','legacy admitted','legacy lost response','upload 503','upload lost response']){
    test(`composer recovers only a proven pre-admission photo attempt: ${scenario}`,async t=>{
-    const runs=[],uploads=[],deletes=[];
-    let finishUpload,lostResponse=scenario==='legacy lost response';
+    const runs=[],uploads=[],deletes=[],uploadKeys=[];
+    const uploadFailure=scenario.startsWith('upload'),uploadIds=new Map();
+    let finishUpload,finishFailedUpload,rejectUpload=true,lostResponse=scenario==='legacy lost response';
     const legacy={input:'Original text',idempotency_key:'legacy-original',selection:{model:'vision',provider:'synthetic'}};
     const admittedKeys=new Set(scenario.startsWith('legacy')?[legacy.idempotency_key]:[]);
     const route=['disabled','capability'].includes(scenario)?await rollbackRoute(scenario):null;
@@ -194,10 +195,22 @@ test('real file input removal aborts an undispatched photo batch and retries rem
       if(path==='/auth/me')return json(res,{user:{id:'photo-owner',status:'ready'},csrf_token:'fixture'});
       if(path==='/sessions')return json(res,{items:[{id:'photo-session',title:'Photo repair'}],total:1});
       if(path.endsWith('/messages'))return json(res,{items:[]});
-      if(path.endsWith('/model-options'))return json(res,{available:true,default:{model:'vision',provider:'synthetic'},models:[{id:'vision',provider:'synthetic',label:'Synthetic',reasoning_efforts:[]}]});
+      if(path.endsWith('/model-options'))return json(res,{available:true,default:{model:'vision',provider:'synthetic'},models:[
+       {id:'vision',provider:'synthetic',label:'Synthetic',reasoning_efforts:[]},
+       {id:'other-vision',provider:'synthetic',label:'Other synthetic',reasoning_efforts:[]},
+      ]});
       if(path.endsWith('/attachments') && req.method==='POST'){
        const data=[];for await(const chunk of req)data.push(chunk);uploads.push(Buffer.concat(data));
-       finishUpload=()=>json(res,{id:'1'.repeat(32),status:'pending'},201);
+       const uploadKey=req.headers['idempotency-key'];uploadKeys.push(uploadKey);
+       if(!uploadIds.has(uploadKey))uploadIds.set(uploadKey,String(uploadIds.size+1).repeat(32));
+       finishUpload=()=>json(res,{id:uploadIds.get(uploadKey),status:'pending'},201);
+       if(uploadFailure && uploads.length>=2 && rejectUpload){
+        // Chromium may retry a disconnected socket before surfacing fetch failure.
+        if(finishFailedUpload)return res.destroy();
+        finishFailedUpload=()=>scenario==='upload 503'
+         ? json(res,{detail:'Synthetic upload unavailable'},503) : res.destroy();
+        return;
+       }
        if(scenario==='cancel')return;
        return finishUpload();
       }
@@ -234,7 +247,45 @@ test('real file input removal aborts an undispatched photo batch and retries rem
     await text.fill(scenario.startsWith('legacy')?'Original text':'New text');
     await page.getByRole('combobox',{name:'Model'}).waitFor();
     await page.locator('input[type=file]').setInputFiles({name:'synthetic.png',mimeType:'image/png',buffer:bytes});
+    if(uploadFailure)await page.locator('input[type=file]').setInputFiles({name:'second.png',mimeType:'image/png',buffer:bytes});
     await page.getByRole('button',{name:'Send message'}).click();
+    if(uploadFailure){
+     await page.waitForFunction(()=>document.querySelector('.photo-status')?.textContent==='Uploading photo 2 of 2…');
+     while(!finishFailedUpload)await new Promise(resolve=>setTimeout(resolve,10));
+     const originalAttempt=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('hermes:photo-owner:attempt:photo-session')));
+     const previews=await page.locator('.photo-preview img').evaluateAll(images=>images.map(image=>image.src));
+     finishFailedUpload();
+     await page.waitForFunction(()=>document.querySelector('[aria-label="Send message"]')?.dataset.state==='idle');
+     assert.equal(runs.length,0,'an upload error cannot have admitted a run');
+     assert.equal(await text.inputValue(),'New text');
+     assert.deepEqual(await page.locator('.photo-preview img').evaluateAll(images=>images.map(image=>image.src)),previews);
+     assert.equal(await page.getByRole('button',{name:'Remove photo 1'}).isEnabled(),true);
+     assert.equal(await page.getByRole('button',{name:'Remove photo 2'}).isEnabled(),true);
+     assert.equal(await page.getByRole('combobox',{name:'Model'}).isDisabled(),false,'pre-admission upload failure must unlock the model');
+     assert.equal(await page.evaluate(()=>sessionStorage.getItem('hermes:photo-owner:attempt:photo-session')),null);
+     await page.getByText(/Photo or message was not sent/).waitFor();
+     assert.equal(originalAttempt.upload_pending,true);
+     const failedUploadCount=uploads.length;
+     assert.ok(failedUploadCount>=2);
+     assert.ok(uploadKeys.every(key=>typeof key==='string' && key.length>0));
+     assert.notEqual(uploadKeys[0],uploadKeys[1]);
+     rejectUpload=false;
+     await page.getByRole('combobox',{name:'Model'}).selectOption('1');
+     await page.getByRole('button',{name:'Send message'}).click();
+     await page.waitForFunction(()=>document.querySelector('.photo-status')?.hidden===true);
+     assert.deepEqual(uploads,Array(failedUploadCount+1).fill(bytes),'retry retains files and skips the already uploaded photo');
+     assert.deepEqual(uploadKeys,[uploadKeys[0],...Array(failedUploadCount).fill(uploadKeys[1])],'lost upload response retries the original upload key');
+     assert.equal(uploadIds.size,2,'retry must not create a replacement reservation');
+     assert.equal(runs.length,1);
+     assert.equal(runs[0].input,'New text');
+     assert.deepEqual(runs[0].attachments,['1'.repeat(32),'2'.repeat(32)]);
+     assert.deepEqual(runs[0].selection,{model:'other-vision',provider:'synthetic'});
+     assert.notEqual(runs[0].idempotency_key,originalAttempt.idempotency_key,'the undispatched run attempt was cleared');
+     assert.equal(deletes.length,0);
+     assert.equal(await text.inputValue(),'');
+     assert.equal(await page.locator('.photo-preview').count(),0);
+     return;
+    }
     if(scenario.startsWith('legacy')){
      await page.getByText(/Retry the original text and photo selection unchanged/).waitFor();
      assert.equal(runs.length,0);assert.equal(uploads.length,0);
