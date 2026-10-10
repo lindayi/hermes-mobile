@@ -194,13 +194,14 @@ states and ordered authenticated creation evidence. This is owner handoff
 certification, not a provider-reported exact completion timestamp. Explicit invalid completion
 timestamps fail closed. The producer and consumer both select exactly one GitHub
 branch and pull from at most 20 artifacts; unrelated artifacts do not block an
-otherwise bound handoff. Accepted exact-head independent review suppresses
-redundant first-review dispatch.
+otherwise bound handoff. Accepted exact-head Copilot review suppresses
+redundant review requests.
 The start-comment ID in the producer command prevents substitution of another
 otherwise-valid owner command. It persists verified initial-source identity before
-dispatching one independent-review task; that dispatch does not publish a review or
-status and cannot satisfy merge gates. Invalid, missing, or changed source blocks
-review dispatch with a deduplicated outcome.
+requesting genuine Copilot review through the bounded coordinator action flow.
+Issue #92 retires independent reviewer task dispatch; no request publishes a review
+or status or satisfies merge gates. Invalid, missing, or changed source blocks
+review requests with a deduplicated outcome.
 Compact versioned `starter_admission` and `initial_source` provenance are committed
 with enrollment. Existing version-1/2 admissions are never completed by searching
 the task list for a matching artifact: a version-1 admission is recoverable only

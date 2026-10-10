@@ -349,7 +349,7 @@ independent literal fixture against actual bytes. Missing, malformed or mutated
 unit-source evidence must still block policy readiness. These tests do not prove
 kernel enforcement, application compatibility, or Inbox/ACK delivery.
 
-Source merge requires independent exact-head review and protected gates. It is
+Source merge requires genuine Copilot exact-head review and protected gates. It is
 separate from operator authorization and installed-service qualification. Only
 after approved source is merged may the operator qualify a bounded real service
 cycle, Inbox/ACK behavior, duplicate suppression and restart behavior before timer

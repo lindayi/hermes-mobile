@@ -25,6 +25,7 @@ from deploy.review_evidence import (
     FINDING_KINDS,
     body_findings,
     current_independent_agent_review,
+    current_copilot_review_valid,
     latest_reviews,
     positive_id,
     selected_independent_agent_review,
@@ -93,7 +94,7 @@ COMPUTED_MERGEABLE_STATES = frozenset({
 })
 CURRENT_REQUIRED_CHECKS = frozenset({
     ("source-ci", 15368), ("integration-tests", None),
-    ("agent-review", None), ("issue-link", 15368),
+    ("issue-link", 15368),
 })
 MAX_PAGES = 100
 MAX_FINDINGS = 8
@@ -450,7 +451,7 @@ def _complete_resolved_threads(threads, *, complete=True):
 def copilot_review_valid(head_sha, reviews, threads, *, threads_complete=True,
                          reviews_complete=True):
     """Require the latest authenticated Copilot review to approve this exact head."""
-    if (not _is_sha(head_sha) or not reviews_complete or not isinstance(reviews, list)
+    if (not _is_sha(head_sha) or reviews_complete is not True or not isinstance(reviews, list)
             or not _complete_resolved_threads(threads, complete=threads_complete)):
         return False
     # Every record and author ID is validated before author filtering, so a
@@ -458,8 +459,6 @@ def copilot_review_valid(head_sha, reviews, threads, *, threads_complete=True,
     # PENDING reviews have no submitted_at in GitHub's API. They cannot be
     # ordered against an approval; do not invent a time or ignore that evidence.
     latest = latest_reviews(reviews, COPILOT_REVIEWER_ID)
-    # GitHub timestamp precision can tie submissions. Neither list position nor
-    # review ID proves their order: every review at the latest instant must agree.
     return bool(latest) and all(
         review.get("state") == "APPROVED" and review.get("commit_id") == head_sha
         for review in latest
@@ -469,32 +468,22 @@ def copilot_review_valid(head_sha, reviews, threads, *, threads_complete=True,
 def independent_review_valid(head_sha, reviews, threads, *, pull_author_id,
                              threads_complete=True, reviews_complete=True,
                              issue=None, review_actions=None):
-    """Require current owner-published independent evidence, not Copilot approval."""
+    """Compatibility seam for retained callers; independent reports are not gates."""
     if (not _is_sha(head_sha) or type(pull_author_id) is not int
-            or pull_author_id <= 0 or pull_author_id == OWNER_ID
+            or pull_author_id <= 0
             or reviews_complete is not True
             or not _complete_resolved_threads(threads, complete=threads_complete)):
         return False
-    selected = current_independent_agent_review(
-        reviews, head_sha, owner_id=OWNER_ID, complete=reviews_complete,
+    disposition = review_body_disposition(
+        reviews, head_sha, reviewer_id=COPILOT_REVIEWER_ID,
     )
-    if selected is None:
-        return False
-    if any(
-            isinstance(action, dict)
-            and action.get("kind") == "review"
-            and action.get("task_type") == "report-correction"
-            and action.get("publication_disposition") == "stale"
-            and action.get("issue") == issue
-            and action.get("head") == head_sha
-            and _stale_report_correction_matches_review(action, selected, reviews)
-            for action in (review_actions or {}).values()):
-        return False
-    latest_copilot = latest_reviews(reviews, COPILOT_REVIEWER_ID)
-    return not latest_copilot or not any(
-        review.get("state") == "CHANGES_REQUESTED"
-        and review.get("commit_id") == head_sha
-        for review in latest_copilot
+    return (
+        current_copilot_review_valid(
+            reviews, head_sha, pull_author_id=pull_author_id,
+            complete=reviews_complete,
+        )
+        and not disposition["findings"] and not disposition["ambiguous"]
+        and disposition["inventory_complete"] is True
     )
 
 
@@ -603,6 +592,7 @@ def eligible_for_auto_merge(pull, *, current_main_sha, required_checks, check_ru
         return False
     return required_checks_pass(
         required_checks, check_runs, statuses, complete=checks_complete,
+        head_sha=pull.get("head", {}).get("sha"),
     )
 
 
@@ -2049,6 +2039,27 @@ def _negative_review_progress_fingerprints(actions, issue, head_sha, reviews, *,
             or _review_submission(published) is None):
         return [], False
     return _review_finding_fingerprints(report.get("findings"))
+
+
+def _current_copilot_rejection_progress(reviews, head_sha, *, pull_author_id,
+                                        reviews_complete):
+    if (reviews_complete is not True or not positive_id(pull_author_id)
+            or pull_author_id == COPILOT_REVIEWER_ID):
+        return False
+    latest = latest_reviews(reviews, COPILOT_REVIEWER_ID)
+    if (not latest or len(latest) != 1
+            or latest[0].get("state") != "CHANGES_REQUESTED"
+            or latest[0].get("commit_id") != head_sha
+            or latest[0].get("dismissed") is True
+            or latest[0].get("dismissed_at") not in (None, "")):
+        return False
+    disposition = review_body_disposition(
+        reviews, head_sha, reviewer_id=COPILOT_REVIEWER_ID,
+    )
+    return (
+        disposition["inventory_complete"] is True
+        and disposition["ambiguous"] is False
+    )
 
 
 def _current_review_report_failure(actions, issue, head_sha):
@@ -3724,13 +3735,20 @@ class Coordinator:
 
     def _reconcile_actions(self, snapshot, actions, *, apply, handoffs=None,
                            review_publications=None, receipt_recoveries=None,
-                           recovery_keys=None):
+                           recovery_keys=None, busy_details=None):
         # Reconciliation never performs handoff mutations; it only collects them.
         handoffs = [] if handoffs is None else handoffs
         review_publications = [] if review_publications is None else review_publications
         receipt_recoveries = [] if receipt_recoveries is None else receipt_recoveries
         number = snapshot["issue"]
         busy = False
+        busy_action_keys = set()
+
+        def mark_busy():
+            nonlocal busy
+            busy = True
+            busy_action_keys.add(key)
+
         historical_dirty = (
             snapshot.get("historical_base") is True
             and snapshot["pull"].get("mergeable") is False
@@ -3780,6 +3798,36 @@ class Coordinator:
                     self.store.mark_uncertain(key)
                 continue
             if action.get("kind") == "review":
+                # Retired review reservations remain occupied until authenticated
+                # terminal task evidence arrives; never replay or repurpose them.
+                if status in {"sending", "uncertain"}:
+                    mark_busy()
+                elif status == "sent":
+                    task_id = action.get("task_id")
+                    if not isinstance(task_id, str) or not task_id:
+                        mark_busy()
+                        continue
+                    try:
+                        task = self.api.get(
+                            f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}"
+                        )
+                    except CoordinatorError:
+                        mark_busy()
+                        continue
+                    if (not isinstance(task, dict) or task.get("id") != task_id
+                            or task.get("created_at") != action.get("task_created_at")
+                            or not _valid_timestamp(task.get("updated_at"))
+                            or not all(_github_identity(task.get(field), expected)
+                                       for field, expected in (
+                                           ("creator", OWNER_ID), ("owner", OWNER_ID),
+                                           ("repository", REPOSITORY_ID),
+                                       ))
+                            or not _task_scoped(task, snapshot)
+                            or not _task_terminal(task)):
+                        mark_busy()
+                    elif apply:
+                        self.store.update_action(key, "completed")
+                continue
                 if status in {"sending", "uncertain"}:
                     busy = True
                     continue
@@ -3876,10 +3924,12 @@ class Coordinator:
                             )
                         if report_recovery_superseded:
                             snapshot["superseded_report_failure_key"] = key
-                        busy = (
+                        report_busy = (
                             retry_allowed and not report_recovery_superseded
                             and not historical_dirty
-                        ) or busy
+                        )
+                        if report_busy:
+                            mark_busy()
                         if not apply:
                             continue
                         self.store.update_action(
@@ -3940,7 +3990,7 @@ class Coordinator:
                             ),
                         )
                         review_publications.append(key)
-                    busy = True
+                    mark_busy()
                     continue
                 if (status == "completed"
                         and action.get("task_type") == "report-correction"
@@ -3961,9 +4011,9 @@ class Coordinator:
                     if action.get("task_type") != "report-correction":
                         if action.get("key") != snapshot.get(
                                 "superseded_report_failure_key"):
-                            busy = _review_report_recovery_busy(
-                                actions, action, allow_retry=not historical_dirty,
-                            ) or busy
+                            if _review_report_recovery_busy(
+                                    actions, action, allow_retry=not historical_dirty):
+                                mark_busy()
                     continue
                 if (status == "completed"
                         and _review_report_correction_parent_needs_recovery(
@@ -3971,7 +4021,7 @@ class Coordinator:
                         )):
                     if apply:
                         review_publications.append(key)
-                    busy = True
+                    mark_busy()
                     continue
                 if (status == "completed"
                         and action.get("publication_disposition") == "stale"):
@@ -3982,7 +4032,7 @@ class Coordinator:
                 )):
                     if apply:
                         review_publications.append(key)
-                    busy = True
+                    mark_busy()
                     continue
                 continue
             if action.get("kind") != "fix":
@@ -3995,18 +4045,20 @@ class Coordinator:
                     snapshot.setdefault("stale_handoff_keys", []).append(key)
                     continue
                 if action.get("handoff_state") in HANDOFF_ACTIVE_STATES and apply:
-                    busy = self._advance_task_handoff(
+                    handoff_waiting = self._advance_task_handoff(
                         key, action, snapshot, deferred=handoffs,
-                    ) or busy
+                    )
+                    if handoff_waiting:
+                        mark_busy()
                 elif (action.get("handoff_state") == "waiting_review"
                       and action.get("review_requirement") == "missing_independent_review"
                       and _review_prompt_inventory_error(snapshot)):
                     continue
                 else:
-                    busy = True
+                    mark_busy()
                 continue
             if status == "completed" and action.get("handoff_state") == "failed":
-                busy = True
+                mark_busy()
                 continue
             receipt_recovery_identity = (
                 status == "uncertain"
@@ -4043,18 +4095,18 @@ class Coordinator:
                 initial_receipt_recovery or codec_revision_recovery
             )
             if status in {"sending", "uncertain"} and not receipt_recovery:
-                busy = True
+                mark_busy()
                 continue
             if receipt_recovery:
                 if not apply:
-                    busy = True
+                    mark_busy()
                     continue
                 if recovery_keys is None:
                     receipt_recoveries.append(key)
-                    busy = True
+                    mark_busy()
                     continue
                 if not self.store.claim_receipt_recovery(key, action):
-                    busy = True
+                    mark_busy()
                     continue
                 action = self.store.action(key)
             if status == "sent" or receipt_recovery:
@@ -4062,7 +4114,7 @@ class Coordinator:
                 if not isinstance(task_id, str) or not task_id or len(task_id) > 128:
                     if apply and not receipt_recovery:
                         self._record_receipt_wait(key, action)
-                    busy = True
+                    mark_busy()
                     continue
                 try:
                     task = self.api.get(
@@ -4071,7 +4123,7 @@ class Coordinator:
                 except CoordinatorError:
                     if apply and not receipt_recovery:
                         self._record_receipt_wait(key, action)
-                    busy = True
+                    mark_busy()
                     continue
                 if (not isinstance(task, dict) or task.get("id") != task_id
                         or not all(_github_identity(task.get(field), expected)
@@ -4082,7 +4134,7 @@ class Coordinator:
                         or not _task_scoped(task, snapshot)):
                     if apply and not receipt_recovery:
                         self._record_receipt_wait(key, action)
-                    busy = True
+                    mark_busy()
                     continue
                 if (snapshot["enrollment"].get("authorized_head") is not None
                         and (task.get("created_at") != action.get("task_created_at")
@@ -4092,7 +4144,7 @@ class Coordinator:
                              or task["owner"].get("id") != OWNER_ID
                              or not isinstance(task.get("repository"), dict)
                              or task["repository"].get("id") != REPOSITORY_ID)):
-                    busy = True
+                    mark_busy()
                     continue
                 if receipt_recovery:
                     sessions = task.get("sessions")
@@ -4102,12 +4154,12 @@ class Coordinator:
                             or not isinstance(sessions[0], dict)
                             or sessions[0].get("prompt") != action.get("body")
                     ):
-                        busy = True
+                        mark_busy()
                         continue
                 if _task_terminal(task):
                     if task.get("state") in {"failed", "timed_out", "cancelled"}:
                         if receipt_recovery:
-                            busy = True
+                            mark_busy()
                             continue
                         if apply:
                             event = _lifecycle_event(
@@ -4130,7 +4182,7 @@ class Coordinator:
                             if action.get("head") not in authorized_heads:
                                 if apply and not receipt_recovery:
                                     self._record_receipt_wait(key, action)
-                                busy = True
+                                mark_busy()
                                 continue
                         try:
                             receipt = validate_task_receipt(
@@ -4163,10 +4215,12 @@ class Coordinator:
                                     self.store.update_action_with_lifecycle(
                                         key, "completed", None, now=self.clock(), **fields,
                                     )
-                                    busy = self._advance_task_handoff(
+                                    handoff_waiting = self._advance_task_handoff(
                                         key, self.store.action(key), snapshot,
                                         deferred=handoffs,
-                                    ) or busy
+                                    )
+                                    if handoff_waiting:
+                                        mark_busy()
                                 else:
                                     event = _lifecycle_event(
                                         {"issue": number, "head": fields["receipt_head"],
@@ -4181,12 +4235,21 @@ class Coordinator:
                         elif apply and not receipt_recovery:
                             self._record_receipt_wait(key, action)
                         if not receipt:
-                            busy = True
+                            mark_busy()
                 else:
-                    busy = True
-        return (busy or _other_task_active(snapshot["tasks"], snapshot)
-                or _cloud_agent_active(snapshot.get("workflows", []),
-                                       snapshot["pull"]["head"]["ref"]))
+                    mark_busy()
+        external_busy = (
+            _other_task_active(snapshot["tasks"], snapshot)
+            or _cloud_agent_active(
+                snapshot.get("workflows", []), snapshot["pull"]["head"]["ref"],
+            )
+            or recovery_keys is not None
+        )
+        if busy_details is not None:
+            busy_details.update(
+                action_keys=busy_action_keys, external_busy=external_busy,
+            )
+        return busy or external_busy
 
     def _review_task_recovery_allowed(self, action, snapshot, task):
         if (not _review_task_terminal(action, task)
@@ -4531,52 +4594,15 @@ class Coordinator:
         else:
             return self._handoff_wait(key, action, snapshot)
 
-        author = current.get("user")
-        author_id = author.get("id") if isinstance(author, dict) else None
-        current_owner_review = current_independent_agent_review(
-            snapshot.get("reviews"), head, owner_id=OWNER_ID,
-            complete=snapshot.get("reviews_complete") is True,
-        )
-        if not independent_review_valid(
-                head, snapshot.get("reviews"), snapshot.get("threads"),
-                pull_author_id=author_id,
-                threads_complete=snapshot.get("threads_complete") is True,
-                reviews_complete=snapshot.get("reviews_complete") is True,
-                issue=action["issue"], review_actions=self.store.actions()):
-            review_action = _current_review_followup(
-                self.store.actions(), action["issue"], head,
-            )
-            if (not isinstance(review_action, dict)
-                    or review_action.get("status") != "completed"
-                    or review_action.get("publication_state") != "done"
-                    or review_action.get("report_verdict") != "changes_requested"):
-                inventory_error = _review_prompt_inventory_error(snapshot)
-                if inventory_error:
-                    self.store.update_action(
-                        key, "completed", handoff_state="inventory_blocked",
-                        review_requirement="unrepresentable_inventory",
-                        review_inventory_error=inventory_error,
-                    )
-                    return False
-                review_requirement = (
-                    "missing_independent_review"
-                    if current_owner_review is None else "existing_review_blocked"
-                )
-                self.store.update_action(
-                    key, "completed", handoff_state="waiting_review",
-                    review_requirement=review_requirement,
-                )
-                return True
-            self.store.update_action(key, "completed", handoff_state="done")
-            return False
-        review_action = _current_review_followup(self.store.actions(), action["issue"], head)
-        if (isinstance(review_action, dict)
-                and review_action.get("report_verdict") == "pass"
-                and review_action.get("publication_state") == "done"
-                and review_action.get("agent_review_state") != "done"):
+        if not current_copilot_review_valid(
+                snapshot.get("reviews"), head,
+                pull_author_id=(snapshot.get("pull", {}).get("user", {}).get("id")
+                                if isinstance(snapshot.get("pull", {}).get("user"), dict)
+                                else None),
+                complete=snapshot.get("reviews_complete") is True):
             self.store.update_action(
                 key, "completed", handoff_state="waiting_review",
-                review_requirement="missing_agent_review",
+                review_requirement="missing_copilot_review",
             )
             return True
         self.store.update_action(key, "completed", handoff_state="done")
@@ -4716,130 +4742,10 @@ class Coordinator:
         return report, session
 
     def _advance_agent_review_publication(self, key, action):
-        statuses = _rest_list(
-            self.api, f"repos/{REPOSITORY}/commits/{action['head']}/statuses?per_page=100",
-        )
-        existing, owned = _status_owned(statuses, "agent-review", OWNER_ID)
-        if owned and existing and existing.get("state") == "success":
-            self.store.update_action(
-                key, "completed", agent_review_state="done",
-                agent_review_status_id=existing.get("id"),
-            )
-            return "done"
-        if (action.get("task_type") == "report-correction"
-                and not self._report_correction_publication_current(action)):
-            return self._stale_report_correction_publication(key, action)
-        if action.get("agent_review_state") == "uncertain":
-            return "uncertain"
-        try:
-            response = self.api.write(
-                f"repos/{REPOSITORY}/statuses/{action['head']}",
-                {
-                    "state": "success",
-                    "context": "agent-review",
-                    "description": "Verified exact-head independent-agent review evidence",
-                },
-            )
-        except CoordinatorError:
-            self.store.update_action(key, "completed", agent_review_state="uncertain")
-            return "uncertain"
-        creator = response.get("creator") if isinstance(response, dict) else None
-        if (not isinstance(response, dict)
-                or response.get("context") != "agent-review"
-                or response.get("state") != "success"
-                or not isinstance(creator, dict)
-                or creator.get("id") != OWNER_ID):
-            self.store.update_action(key, "completed", agent_review_state="uncertain")
-            return "uncertain"
-        self.store.update_action(
-            key, "completed", agent_review_state="done",
-            agent_review_status_id=response.get("id"),
-        )
-        return "done"
+        return "retired"
 
     def _advance_review_publication(self, key, action, snapshot):
-        if action.get("publication_disposition") == "stale":
-            return "stale"
-        publications_were_durable = (
-            action.get("report_verdict") in {"pass", "changes_requested"}
-            and action.get("publication_state") == "done"
-            and action.get("agent_review_state") == "done"
-            and _review_report_correction_parent_needs_recovery(
-                self.store.actions(), action,
-            )
-        )
-        body = _published_review_body(action["review_report"], action["head"])
-        if action.get("publication_state") != "done":
-            reviews = _rest_list(
-                self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
-            )
-            existing = _matching_owner_review(reviews, head_sha=action["head"], body=body)
-            if existing is not None:
-                self.store.update_action(
-                    key, "completed", publication_state="done",
-                    published_review_id=existing.get("id"),
-                    published_review_body=body,
-                )
-            else:
-                state = action.get("publication_state")
-                if state in {"sending", "uncertain"}:
-                    if (action.get("task_type") == "report-correction"
-                            and not self._report_correction_publication_current(action)):
-                        return self._stale_report_correction_publication(key, action)
-                    if (state == "sending"
-                            and action.get("task_type") == "report-correction"):
-                        self.store.update_action(
-                            key, "completed", publication_state="uncertain",
-                        )
-                    return "uncertain"
-                self.store.update_action(key, "completed", publication_state="sending")
-                action = self.store.action(key) or action
-                if (action.get("task_type") == "report-correction"
-                        and not self._report_correction_publication_current(action)):
-                    return self._stale_report_correction_publication(key, action)
-                if action.get("task_type") == "report-correction":
-                    self.store.update_action(
-                        key, "completed", publication_intent_body=body,
-                    )
-                    action = self.store.action(key) or action
-                try:
-                    response = self.api.write(
-                        f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews",
-                        {"event": "COMMENT", "commit_id": action["head"], "body": body},
-                    )
-                except CoordinatorError:
-                    self.store.update_action(key, "completed", publication_state="uncertain")
-                    return "uncertain"
-                if (not isinstance(response, dict)
-                        or type(response.get("id")) is not int or response["id"] <= 0
-                        or response.get("body") != body
-                        or response.get("commit_id") != action["head"]
-                        or response.get("state") != "COMMENTED"
-                        or not isinstance(response.get("user"), dict)
-                        or response["user"].get("id") != OWNER_ID):
-                    self.store.update_action(key, "completed", publication_state="uncertain")
-                    return "uncertain"
-                self.store.update_action(
-                    key, "completed", publication_state="done",
-                    published_review_id=response.get("id"), published_review_body=body,
-                )
-            action = self.store.action(key) or action
-        if action.get("report_verdict") == "pass" and action.get("agent_review_state") != "done":
-            status = self._advance_agent_review_publication(key, action)
-            if status != "done":
-                return status
-        if action.get("task_type") == "report-correction":
-            action = self.store.action(key) or action
-            if (not publications_were_durable
-                    and not self._report_correction_publication_current(action)):
-                return self._stale_report_correction_publication(key, action)
-            if not _review_publication_proven(action):
-                return "uncertain"
-            self.store.update_action(
-                action.get("correction_of"), "completed",
-                report_retry_state="recovered",
-            )
-        return "done"
+        return "retired"
 
     def _notification_outcomes(self, snapshot, reasons):
         outcomes = []
@@ -4924,7 +4830,8 @@ class Coordinator:
             return "observation"
         return None
 
-    def _plan_pull(self, snapshot, actions, *, apply, reconciled_busy=None):
+    def _plan_pull(self, snapshot, actions, *, apply, reconciled_busy=None,
+                   reconciled_busy_details=None):
         number, head = snapshot["issue"], snapshot["head"]
         if snapshot.get("terminal"):
             lifecycle = []
@@ -4963,19 +4870,11 @@ class Coordinator:
             reviews_complete=snapshot["reviews_complete"],
             issue=number, review_actions=actions,
         )
-        report_failure_before_reconcile = _current_review_report_failure(
-            actions, number, head,
+        progress_review_ok = current_copilot_review_valid(
+            snapshot["reviews"], head,
+            pull_author_id=pull_user.get("id") if isinstance(pull_user, dict) else None,
+            complete=snapshot["reviews_complete"],
         )
-        report_recovery_superseded = (
-            review_ok
-            and _later_owner_review_supersedes_report_failure(
-                report_failure_before_reconcile, snapshot["reviews"], head,
-            )
-        )
-        if report_recovery_superseded:
-            snapshot["superseded_report_failure_key"] = (
-                report_failure_before_reconcile["key"]
-            )
         sensitive = classify_sensitive_paths(
             snapshot["files"], complete=snapshot["files_complete"],
         )
@@ -4991,37 +4890,36 @@ class Coordinator:
         required = snapshot["required"]
         checks_ok = required_checks_pass(
             required, snapshot["check_runs"], snapshot["statuses"],
-            complete=snapshot["policy_complete"],
+            complete=snapshot["policy_complete"], head_sha=head,
         )
-        status_state = "success" if review_ok and authorized else "pending"
-        status, status_owned = _status_owned(snapshot["statuses"], "cloud-review", OWNER_ID)
+        status, status_owned = None, True
         status_action = None
         handoffs = []
         review_publications = []
         receipt_recoveries = []
+        existing_copilot_review_handoff_keys = {
+            key for key, action in actions.items()
+            if (
+                isinstance(action, dict)
+                and action.get("issue") == number
+                and action.get("kind") == "fix"
+                and action.get("status") == "completed"
+                and action.get("handoff_state") == "waiting_review"
+                and action.get("review_requirement") == "missing_copilot_review"
+            )
+        }
         agent_busy = reconciled_busy
+        busy_details = (
+            {} if reconciled_busy_details is None else reconciled_busy_details
+        )
         if agent_busy is None:
             agent_busy = self._reconcile_actions(
                 snapshot, actions, apply=apply, handoffs=handoffs,
                 review_publications=review_publications,
-                receipt_recoveries=receipt_recoveries,
+                receipt_recoveries=receipt_recoveries, busy_details=busy_details,
             )
         if apply:
             actions = self.store.actions()
-        if not report_recovery_superseded:
-            report_failure_after_reconcile = _current_review_report_failure(
-                actions, number, head,
-            )
-            report_recovery_superseded = (
-                review_ok
-                and _later_owner_review_supersedes_report_failure(
-                    report_failure_after_reconcile, snapshot["reviews"], head,
-                )
-            )
-            if report_recovery_superseded:
-                snapshot["superseded_report_failure_key"] = (
-                    report_failure_after_reconcile["key"]
-                )
         enrollment = dict(snapshot["enrollment"])
         enrollment["receipt_proofs"] = self.store.snapshot()["enrollments"].get(
             str(number), {},
@@ -5063,6 +4961,48 @@ class Coordinator:
                 "status_action": None, "merge_action": None, "outcomes": [outcome],
                 "receipt_recoveries": receipt_recoveries, "handoffs": handoffs,
             }
+        copilot_review_handoff_keys = {
+            key for key, action in actions.items()
+            if (
+                isinstance(action, dict)
+                and action.get("issue") == number
+                and action.get("kind") == "fix"
+                and action.get("status") == "completed"
+                and action.get("handoff_state") == "waiting_review"
+                and action.get("review_requirement") == "missing_copilot_review"
+                and action.get("receipt_result") == "ready"
+                and action.get("receipt_head") == head
+                and action.get("receipt_base") == action.get("main_sha")
+                and action.get("owner_id") == OWNER_ID
+                and action.get("repository_id") == REPOSITORY_ID
+                and _pull_identity(snapshot["pull"], action)
+                and _valid_receipt_proof(action, snapshot["comments"])
+            )
+        }
+        waiting_handoff_is_only_busy = (
+            len(copilot_review_handoff_keys) == 1
+            and busy_details.get("action_keys") == copilot_review_handoff_keys
+            and busy_details.get("external_busy") is False
+        )
+        new_handoff_review_activity = any(
+            isinstance(review, dict)
+            and (
+                isinstance(review.get("user"), dict)
+                and type(review["user"].get("id")) is int
+                and review["user"]["id"] == COPILOT_REVIEWER_ID
+                or _valid_timestamp(review.get("submitted_at"))
+                and datetime.fromisoformat(
+                    review["submitted_at"].replace("Z", "+00:00"),
+                ) > datetime.fromisoformat(
+                    actions[key]["receipt_completed_at"].replace("Z", "+00:00"),
+                )
+            )
+            for key in copilot_review_handoff_keys
+            if key not in existing_copilot_review_handoff_keys
+            and _valid_timestamp(actions[key].get("receipt_completed_at"))
+            for review in snapshot["reviews"]
+        )
+
         if authorized_head is not None and (
                 not _is_sha(authorized_head) or head not in authorized_heads):
             return {
@@ -5091,6 +5031,12 @@ class Coordinator:
                 reviews_complete=snapshot["reviews_complete"],
             ) if not review_ok else ([], False)
         )
+        if not negative_review_complete and not review_ok:
+            negative_review_complete = _current_copilot_rejection_progress(
+                snapshot["reviews"], head,
+                pull_author_id=pull_user.get("id") if isinstance(pull_user, dict) else None,
+                reviews_complete=snapshot["reviews_complete"],
+            )
         if negative_review_complete:
             current_fingerprints = sorted(
                 set(current_fingerprints) | set(negative_review_fingerprints),
@@ -5132,7 +5078,9 @@ class Coordinator:
         progress_required = [
             requirement for requirement in _required_contexts(required)
             if not (negative_review_complete
-                    and requirement.get("context") == "agent-review")
+                    and requirement.get("context") in {
+                        "agent-review", "copilot-pull-request-reviewer",
+                    })
         ]
         checks_terminal = required_checks_pass(
             progress_required, snapshot["check_runs"], snapshot["statuses"],
@@ -5142,16 +5090,21 @@ class Coordinator:
             progress_required, snapshot["check_runs"], snapshot["statuses"],
             complete=snapshot["policy_complete"], head_sha=head,
         )
+        completed_review_followup = _current_review_followup(actions, number, head)
+        followup_disposition = (
+            completed_review_followup.get("review_report", {}).get(
+                "progress_disposition", {},
+            ) if isinstance(completed_review_followup, dict) else {}
+        )
         progress = _completed_repair_progress(
             snapshot, progress_actions, current_fingerprints, authorized_heads,
-            review_ok=review_ok, checks_ok=progress_checks_ok,
+            review_ok=progress_review_ok, checks_ok=progress_checks_ok,
             current_fingerprints_complete=current_fingerprints_complete,
             negative_review_complete=negative_review_complete,
             checks_terminal=checks_terminal,
             independently_resolved=(
-                _current_review_followup(actions, number, head)
-                .get("review_report", {}).get("progress_disposition", {}).get("resolved", [])
-                if negative_review_complete else []
+                followup_disposition.get("resolved", [])
+                if negative_review_complete and isinstance(followup_disposition, dict) else []
             ),
         )
         if progress is None:
@@ -5193,127 +5146,14 @@ class Coordinator:
                          or snapshot.get("retained_ready_handoff")))
         )
         mergeability_unknown = _mergeability_unknown(snapshot["pull"])
-        source_handoff = _current_source_handoff(actions, number, head)
-        initial_source = snapshot.get("initial_source")
-        if not review_ok and source_handoff is None and _valid_initial_source(initial_source):
-            source_handoff = {
-                "kind": "starter-source", "issue": number, "head": head,
-                "status": "completed", "handoff_state": "waiting_review",
-                "review_requirement": "missing_independent_review",
-                "source_type": "starter", "source_task_id": initial_source["task_id"],
-                "source_session_id": initial_source["session_id"],
-                "source_comment_id": initial_source["admission_comment_id"],
-                "source_start_head": initial_source["head_sha"],
-                "source_session_completed_at": initial_source["session_completed_at"],
-                "initial_source": initial_source,
-            }
-        if (not review_ok and source_handoff is None and head in authorized_heads
-                and snapshot.get("scoped") is True):
-            retained_proof = next((
-                proof for proof in reversed(enrollment.get("receipt_proofs", []))
-                if isinstance(proof, dict)
-                and proof.get("issue") == number
-                and proof.get("receipt_result") == "ready"
-                and proof.get("receipt_head") == head
-                and proof.get("receipt_base") == snapshot["main_sha"]
-                and _valid_receipt_proof(proof, snapshot["comments"])
-            ), None)
-            if retained_proof is not None:
-                source_handoff = {
-                    "kind": "fix", "issue": number, "head": head,
-                    "status": "completed", "handoff_state": "waiting_review",
-                    "review_requirement": "missing_independent_review",
-                    "source_type": "fix",
-                    "source_task_id": retained_proof["receipt_task_id"],
-                    "source_session_id": retained_proof["receipt_session_id"],
-                    "source_comment_id": retained_proof["receipt_comment_id"],
-                    "source_start_head": retained_proof["receipt_start_head"],
-                    "receipt_completed_at": retained_proof["receipt_completed_at"],
-                }
-        review_followup = _current_review_followup(actions, number, head)
-        review_inventory_error = (
-            source_handoff.get("review_inventory_error")
-            if isinstance(source_handoff, dict) else None
-        )
-        if (not review_inventory_error and source_handoff
-                and source_handoff.get("handoff_state") == "waiting_review"
-                and source_handoff.get("review_requirement") == "missing_independent_review"):
-            review_inventory_error = _review_prompt_inventory_error(snapshot)
-        inventory_blocked = bool(review_inventory_error)
+        review_followup = None
+        review_inventory_error = None
+        inventory_blocked = False
         review_anchor = None
         review_correction_anchor = None
         review_action = None
-        source_handoff_ready = False
-        source_completed_at = (
-            source_handoff.get("receipt_completed_at")
-            or source_handoff.get("source_session_completed_at")
-            if source_handoff else None
-        )
-        if source_handoff and _valid_timestamp(source_completed_at):
-            completed = datetime.fromisoformat(
-                source_completed_at.replace("Z", "+00:00")
-            )
-            source_handoff_ready = completed <= datetime.fromtimestamp(
-                self.clock(), timezone.utc
-            )
-        if (source_handoff and source_handoff.get("handoff_state") == "waiting_review"
-                and source_handoff.get("review_requirement") == "missing_independent_review"
-                and source_handoff_ready
-                and not inventory_blocked
-                and review_followup is None and not mergeability_unknown
-                ):
-            review_anchor = review_anchor_request(snapshot, source_handoff)
-            anchor_comment = _matching_owner_comment(
-                snapshot["comments"], review_anchor["marker"],
-                expected_body=review_anchor["body"],
-            )
-            if anchor_comment is not None:
-                review_action = review_task_request(
-                    snapshot, source_handoff, anchor_comment["id"], review_anchor["prefix"],
-                )
-        report_failure = _current_review_report_failure(actions, number, head)
-        report_correction = _review_report_correction(actions, report_failure)
-        report_observation_error = next((
-            action for action in actions.values()
-            if action.get("kind") == "review"
-            and action.get("issue") == number
-            and action.get("head") == head
-            and action.get("status") == "sent"
-            and isinstance(action.get("report_observation_error"), str)
-            and action["report_observation_error"]
-        ), None)
-        report_source = (
-            _review_source_action(
-                actions, number, report_failure, snapshot["comments"],
-                snapshot["enrollment"].get("initial_source"),
-            )
-            if report_failure else None
-        )
-        report_recovery_proven = (
-            self._historical_report_recovery_proven(
-                report_failure, report_source, snapshot,
-            )
-            if report_source is not None else False
-        )
-        if (not report_recovery_superseded
-                and report_failure and report_failure.get("report_retry_allowed") is True
-                and report_correction is None
-                and report_recovery_proven
-                and not inventory_blocked
-                and not mergeability_unknown):
-            if report_source is not None:
-                review_correction_anchor = review_anchor_request(
-                    snapshot, report_source, retry_of=report_failure,
-                )
-                correction_anchor_comment = _matching_owner_comment(
-                    snapshot["comments"], review_correction_anchor["marker"],
-                    expected_body=review_correction_anchor["body"],
-                )
-                if correction_anchor_comment is not None:
-                    review_action = review_task_request(
-                        snapshot, report_source, correction_anchor_comment["id"],
-                        review_correction_anchor["prefix"], retry_of=report_failure,
-                    )
+        report_failure = None
+        report_observation_error = None
         repair = None
         attempts = snapshot["enrollment"].get("attempts", 0)
         neutral_attempts = snapshot["enrollment"].get(
@@ -5359,7 +5199,39 @@ class Coordinator:
                     pull_number=number, source_failure=snapshot["source_failure"],
                     reviews=snapshot["reviews"],
                 )
-        if (repair and not agent_busy and not inventory_blocked
+        latest_copilot = latest_reviews(snapshot["reviews"], COPILOT_REVIEWER_ID)
+        neutral_rejection_ready = (
+            snapshot["reviews_complete"] is True
+            and positive_id(pull_user.get("id") if isinstance(pull_user, dict) else None)
+            and pull_user["id"] != COPILOT_REVIEWER_ID
+            and latest_copilot and len(latest_copilot) == 1
+            and latest_copilot[0].get("state") == "CHANGES_REQUESTED"
+            and latest_copilot[0].get("commit_id") == head
+            and latest_copilot[0].get("dismissed") is not True
+            and latest_copilot[0].get("dismissed_at") in (None, "")
+            and snapshot["threads_complete"] is True
+            and any(
+                finding.get("thread") for finding in current_evidence["findings"]
+            )
+            and any(
+                actions[key].get("task_type") == "neutral"
+                for key in copilot_review_handoff_keys
+            )
+        )
+        rejection_progress_ready = (
+            waiting_handoff_is_only_busy
+            and (negative_review_complete or neutral_rejection_ready)
+            and checks_terminal and progress is not None
+            and any(
+                actions[key].get("task_type") == "neutral"
+                or actions[key].get("task_id") in progress["evaluated_task_ids"]
+                for key in copilot_review_handoff_keys
+            )
+        )
+        if (repair and (
+                not agent_busy
+                or (repair.get("task_type") != "neutral" and rejection_progress_ready)
+        ) and not inventory_blocked
                 and (
                     (repair.get("task_type") == "neutral"
                      and neutral_attempts < NEUTRAL_LIMIT)
@@ -5400,99 +5272,76 @@ class Coordinator:
         if sensitive and not authorized:
             reasons.append(("sensitive", "Owner exact-head authorization is required for sensitive changes."))
         if not review_ok:
-            reasons.append(("review", "A current structured independent-agent review and resolved conversations are required."))
-        if (not review_ok and source_handoff is None and repair is None
-                and not (agent_busy and any(
-                    action.get("issue") == number
-                    and action.get("kind") in {"fix", "review"}
-                    for action in actions.values()
-                ))
-                and snapshot["pull"].get("draft") is False
-                and not _cloud_agent_active(
-                    snapshot["workflows"], snapshot["pull"]["head"]["ref"],
-                )
-                and not _other_task_active([
-                    task for task in snapshot["tasks"]
-                    if (isinstance(task, dict)
-                        and isinstance(task.get("state"), str)
-                        and task.get("state") in {
+            reasons.append(("review", "A current genuine Copilot review and resolved conversations are required."))
+        source_provenance_missing = (
+            not progress_review_ok
+            and not _valid_initial_source(snapshot.get("initial_source"))
+            and not snapshot.get("retained_ready_handoff")
+            and repair is None
+            and not (agent_busy and any(
+                action.get("issue") == number
+                and action.get("kind") in {"fix", "review"}
+                for action in actions.values()
+            ))
+            and snapshot["pull"].get("draft") is False
+            and not _cloud_agent_active(
+                snapshot["workflows"], snapshot["pull"]["head"]["ref"],
+            )
+            and not _other_task_active([
+                task for task in snapshot["tasks"]
+                if (isinstance(task, dict)
+                    and isinstance(task.get("state"), str)
+                    and task.get("state") in {
                         "queued", "in_progress", "waiting_for_user", "idle",
                         "requested", "pending",
-                        })
-                ], snapshot)
-                and not any(
-                    action.get("issue") == number
-                    and action.get("kind") in {"fix", "review"}
-                    and action.get("status") in {"sending", "uncertain", "sent"}
-                    for action in actions.values()
-                )):
+                    })
+            ], snapshot)
+            and not any(
+                action.get("issue") == number
+                and action.get("kind") in {"fix", "review"}
+                and action.get("status") in {"sending", "uncertain", "sent"}
+                for action in actions.values()
+            )
+        )
+        source_provenance_verified = (
+            _valid_initial_source(snapshot.get("initial_source"))
+            or snapshot.get("retained_ready_handoff") is True
+            or bool(copilot_review_handoff_keys)
+        )
+        source_work_active = (
+            _cloud_agent_active(
+                snapshot["workflows"], snapshot["pull"]["head"]["ref"],
+            )
+            or _other_task_active([
+                task for task in snapshot["tasks"]
+                if (isinstance(task, dict)
+                    and isinstance(task.get("state"), str)
+                    and task.get("state") in {
+                        "queued", "in_progress", "waiting_for_user", "idle",
+                        "requested", "pending",
+                    })
+            ], snapshot)
+            or any(
+                isinstance(action, dict)
+                and action.get("issue") == number
+                and action.get("kind") == "fix"
+                and action.get("status") in {"sending", "uncertain", "sent"}
+                for action in actions.values()
+            )
+        )
+        has_current_copilot_review = any(
+            isinstance(review, dict)
+            and isinstance(review.get("user"), dict)
+            and type(review["user"].get("id")) is int
+            and review["user"]["id"] == COPILOT_REVIEWER_ID
+            and review.get("commit_id") == head
+            for review in snapshot["reviews"]
+        )
+        if source_provenance_missing:
             reasons.append((
                 "starter-source-provenance",
-                "No authenticated initial-source task provenance is available; independent review dispatch is blocked.",
+                "No authenticated initial-source task provenance is available; review requests are blocked.",
             ))
-        if review_inventory_error:
-            reasons.append((
-                "review-inventory",
-                f"Independent review was not dispatched because {review_inventory_error}; "
-                "the complete changed-file inventory must fit the supported bounded review contract.",
-            ))
-        if report_failure and not report_recovery_superseded:
-            correction_publication_pending = (
-                report_correction is not None
-                and report_correction.get("status") == "completed"
-                and not report_correction.get("report_error")
-                and report_correction.get("publication_disposition") != "stale"
-                and isinstance(report_correction.get("review_report"), dict)
-                and (
-                    report_correction.get("publication_state") != "done"
-                    or (report_correction.get("report_verdict") == "pass"
-                        and report_correction.get("agent_review_state") != "done")
-                )
-            )
-            correction_complete = (
-                report_correction is not None
-                and report_correction.get("status") == "completed"
-                and not report_correction.get("report_error")
-                and report_correction.get("publication_disposition") != "stale"
-                and isinstance(report_correction.get("review_report"), dict)
-                and report_correction.get("publication_state") == "done"
-                and report_correction.get("agent_review_state") in {None, "done"}
-            )
-            if not correction_complete:
-                correction_exhausted = (
-                    report_failure.get("report_retry_allowed") is not True
-                    or not report_recovery_proven
-                    or (report_correction is not None
-                        and report_correction.get("status") not in {
-                            "sending", "uncertain", "sent",
-                        }
-                        and not correction_publication_pending)
-                )
-                if not correction_publication_pending:
-                    if correction_exhausted:
-                        reasons.append((
-                            "review-report-exhausted",
-                            "The terminal independent-review task did not produce a usable bound report, and its single safe correction is unavailable or exhausted. This head remains blocked; no review status is inferred.",
-                        ))
-                    else:
-                        reasons.append((
-                            "review-report-terminal",
-                            "The terminal independent-review task did not produce a usable bound report. At most one separately authenticated corrective review may be reserved; ambiguous task creation is never replayed.",
-                        ))
-        elif report_observation_error:
-            if report_observation_error.get("report_observation_error") == (
-                    "Independent review task scope/session containers were malformed"):
-                message = (
-                    "The independent-review task's scope/session containers were malformed; "
-                    "its saved task remains occupied and recovery is paused until authentic "
-                    "container metadata is restored."
-                )
-            else:
-                message = (
-                    "The independent-review task response was malformed; its identity and "
-                    "terminality remain unverified, so recovery is paused."
-                )
-            reasons.append(("review-report-observation", message))
         if not checks_ok:
             reasons.append(("checks", "Every configured required check must complete successfully."))
         if status and not status_owned:
@@ -5601,25 +5450,6 @@ class Coordinator:
         )
         if status and not status_owned:
             merge = False
-        if (snapshot["scoped"] and not (status and not status_owned)
-                and ((status is not None and status.get("state") != status_state)
-                     or (status is None and not merge))):
-            prior = [item for item in actions.values()
-                     if item.get("kind") == "status" and item.get("issue") == number
-                     and item.get("head") == head]
-            ambiguous = any(item.get("status") in {"sending", "uncertain"}
-                            for item in prior)
-            generation = max(
-                [item.get("generation", 0) for item in actions.values()
-                 if item.get("kind") == "status" and item.get("issue") == number]
-                + [self.store.status_generation_floor(number)]
-            ) + 1
-            if not ambiguous:
-                status_action = {
-                    "kind": "status", "issue": number, "head": head,
-                    "state": status_state, "generation": generation,
-                    "key": f"status:{number}:{head}:{generation}",
-                }
         merge_key = f"auto-merge:{number}:{head}:{snapshot['main_sha']}"
         merge_requested = bool(snapshot["pull"].get("auto_merge")) or (
             actions.get(merge_key, {}).get("status") == "sent"
@@ -5639,7 +5469,7 @@ class Coordinator:
                 and any(code == "starter-source-provenance" for code, _ in reasons)):
             notification_outcomes.append(self._outcome(
                 snapshot, "starter-source-provenance",
-                "No authenticated initial-source task provenance is available; independent review dispatch is blocked. Use an authenticated issue-starter handoff or a verified coordinator repair handoff.",
+                "No authenticated initial-source task provenance is available; review requests are blocked. Use an authenticated issue-starter handoff or a verified coordinator repair handoff.",
             ))
         return {"issue": number, "head": head, "sensitive": sensitive,
                 "terminal": False,
@@ -5648,6 +5478,35 @@ class Coordinator:
                 "repair": repair, "review_anchor": review_anchor,
                 "review_correction_anchor": review_correction_anchor,
                 "review_action": review_action, "review_publications": review_publications,
+                "copilot_review_request": (
+                    {"kind": "copilot-review-request", "issue": number, "head": head,
+                     "main_sha": snapshot["main_sha"],
+                     "key": f"copilot-review-request:{number}:{head}",
+                     "pull_id": snapshot["pull"].get("id"),
+                     "pull_node_id": snapshot["pull"].get("node_id")}
+                    if (not current_copilot_review_valid(
+                        snapshot["reviews"], head,
+                        pull_author_id=(snapshot["pull"].get("user", {}).get("id")
+                                        if isinstance(snapshot["pull"].get("user"), dict)
+                                        else None),
+                        complete=snapshot["reviews_complete"])
+                        and not has_current_copilot_review
+                        and snapshot["reviews_complete"] is True
+                       and snapshot["scoped"] and not mergeability_unknown
+                       and snapshot["pull"].get("draft") is False
+                       and repair is None
+                       and (not agent_busy or waiting_handoff_is_only_busy)
+                       and (
+                           not copilot_review_handoff_keys
+                           or bool(
+                               copilot_review_handoff_keys
+                               & existing_copilot_review_handoff_keys
+                           )
+                           or not new_handoff_review_activity
+                       )
+                       and source_provenance_verified
+                       and not source_work_active) else None
+                ),
                 "status_action": status_action,
                 "merge_action": merge_action, "auto_merge_requested": merge_requested,
                 "outcomes": notification_outcomes,
@@ -5773,7 +5632,63 @@ class Coordinator:
         )
         return head in authorized and head not in blocked
 
+    def _request_copilot_review(self, action):
+        """Reserve one genuine request per head; uncertain writes are never replayed."""
+        self._identity()
+        key = action["key"]
+        if self.store.action(key) is not None:
+            return "reserved"
+        pull = self._fence_pull(action["issue"], action["head"], action["main_sha"])
+        if (not _pull_identity(pull, action) or pull.get("draft") is not False
+                or not self._authorized_dispatch_head(
+                    action["issue"], action["head"], pull["base"]["sha"])):
+            return "superseded"
+        reviews = _rest_list(
+            self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
+        )
+        pull_user = pull.get("user")
+        pull_author_id = pull_user.get("id") if isinstance(pull_user, dict) else None
+        if current_copilot_review_valid(
+                reviews, action["head"], pull_author_id=pull_author_id):
+            return "reviewed"
+        requested = self.api.get(
+            f"repos/{REPOSITORY}/pulls/{action['issue']}/requested_reviewers"
+        )
+        users = requested.get("users") if isinstance(requested, dict) else None
+        if (not isinstance(users, list) or not isinstance(requested.get("teams"), list)
+                or any(not isinstance(user, dict) or type(user.get("id")) is not int
+                       or user["id"] <= 0 for user in users)):
+            return "incomplete"
+        if any(user["id"] == COPILOT_REVIEWER_ID for user in users):
+            return "requested"
+        current = self._fence_pull(action["issue"], action["head"], action["main_sha"])
+        if (not _pull_identity(current, action) or current.get("draft") is not False
+                or not self._authorized_dispatch_head(
+                    action["issue"], action["head"], current["base"]["sha"])):
+            return "superseded"
+        if not self.store.claim_action(key, action):
+            return "reserved"
+        try:
+            response = self.api.write(
+                f"repos/{REPOSITORY}/pulls/{action['issue']}/requested_reviewers",
+                {"reviewers": ["copilot-pull-request-reviewer[bot]"]},
+            )
+        except CoordinatorError:
+            self.store.mark_uncertain(key)
+            return "uncertain"
+        reviewers = response.get("requested_reviewers") if isinstance(response, dict) else None
+        if (not _pull_identity(response, action)
+                or response.get("head", {}).get("sha") != action["head"]
+                or not isinstance(reviewers, list)
+                or not any(_github_identity(user, COPILOT_REVIEWER_ID) for user in reviewers)):
+            self.store.mark_uncertain(key)
+            return "uncertain"
+        self.store.update_action(key, "sent")
+        return "sent"
+
     def _dispatch_task(self, action):
+        if action.get("kind") == "review":
+            return "retired"
         key = action["key"]
         neutral = action.get("task_type") == "neutral"
         review_followup = action.get("task_type") == "review-followup"
@@ -5976,6 +5891,7 @@ class Coordinator:
         return "sent"
 
     def _publish_status(self, action, snapshot, actor_id):
+        return "retired"
         key = action["key"]
         existing = self.store.action(key)
         if existing and existing.get("status") != "blocked":
@@ -6285,15 +6201,18 @@ class Coordinator:
                 if (not current or current.get("id") != snapshot["pull"].get("id")
                         or current.get("node_id") != snapshot["pull"].get("node_id")):
                     continue
+                busy_details = {}
                 busy = self._reconcile_actions(
                     snapshot, self.store.actions(), apply=True,
                     handoffs=pr_plan["handoffs"], recovery_keys=(key,),
+                    busy_details=busy_details,
                 )
                 recovered = self.store.action(key)
                 if recovered and recovered.get("status") == "completed":
                     refreshed = self._plan_pull(
                         snapshot, self.store.actions(), apply=True,
                         reconciled_busy=busy,
+                        reconciled_busy_details=busy_details,
                     )
                     refreshed["handoffs"].extend(pr_plan["handoffs"])
                     refreshed.setdefault("review_publications", []).extend(
@@ -6361,6 +6280,9 @@ class Coordinator:
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") != "pending"):
                     continue
+                if (key.startswith(("review-anchor:", "review-correction-anchor:"))
+                        or str(entry.get("marker", "")).startswith(REVIEW_ANCHOR_MARKER_PREFIX)):
+                    continue
                 current = self._fence_pull(entry["issue"], entry["head"])
                 if not current:
                     self.store.update_outbox(key, "superseded")
@@ -6421,6 +6343,9 @@ class Coordinator:
             review_action = pr_plan.get("review_action")
             if review_action:
                 self._dispatch_task(review_action)
+            copilot_request = pr_plan.get("copilot_review_request")
+            if copilot_request:
+                self._request_copilot_review(copilot_request)
             action = pr_plan["repair"]
             if action:
                 result = self._dispatch_task(action)

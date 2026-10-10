@@ -54,17 +54,17 @@ Deployment and operator gates not exercised:
 
 Review and integration
 
-Copilot review was supplemental feedback only; no approval was inferred from a comment or status:
+Genuine Copilot reviewer bot175728472 has a COMMENTED or APPROVED review on the exact head; coding bot198982749 does not qualify:
 
 Copilot suggestions were judged against the code and tests. Comments are not approvals or passing review status:
 
-The latest authenticated owner-published structured independent-agent formal COMMENT review is verified on the exact head, with positive verdict and evidence binding, complete pagination, and resolved threads. Copilot is advisory; actual findings and definite rejection remain blockers:
+The authenticated exact-head Copilot review, three successful CI checks, complete review/thread pagination and resolved threads are verified. Missing, stale, pending, dismissed or rejecting reviews block. No independent report or agent-review publication is required:
 
 Findings have follow-up fix commits and test evidence, and resolved review threads were checked before resolution:
 
 The branch is current with freshly fetched origin/main. Any conflicts preserve both PRs' intents and are retested and reviewed on the resulting head:
 
-The exact required contexts source-ci (Actions app 15368), integration-tests, agent-review, and issue-link (Actions app 15368) are verified on the exact head. cloud-review is advisory, not required or synthesized. New commits invalidate old-head authority and status evidence:
+The exact required contexts source-ci (Actions app 15368), integration-tests, and issue-link (Actions app 15368) are verified on the exact head. Genuine exact-head Copilot review is a separate mandatory evidence gate, not a required branch status. cloud-review is advisory, not required or synthesized. New commits invalidate old-head authority and status evidence:
 
 The exact-head integration-tests job and its same-run complete hosted source-ci aggregate pass. Host-only compatibility is not PR-head evidence; the complete installed/private host suite remains a guarded exact-main deployment gate before activation:
 

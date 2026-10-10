@@ -338,9 +338,11 @@ def test_empty_active_fallback_never_dispatches_or_hides_real_finding(tmp_path, 
     assert repair_request(HEAD, 0, [], [], reviews=[review]) is None
     assert not copilot_review_valid(HEAD, [review], [])
     api = ReviewApi([review])
+    api.pending_required = True
     path = tmp_path / "state.json"
     plan = _managed_cycle(api, path)["pull_requests"][0]
-    assert not plan["repair_requested"] and not plan["review_valid"]
+    assert not plan["repair_requested"]
+    assert plan["review_valid"] is (count == "0" and shape in {"empty", "intro-only"})
     assert api.fix_attempts == 0 and not api.graphql_writes
     state = StateStore(path).snapshot()
     assert state["enrollments"]["16"]["attempts"] == 0
@@ -425,9 +427,11 @@ def test_review5392848133_wrapped_intro_never_dispatches(tmp_path, count, separa
     review = review_pair(OVERVIEW_MARKER + "\n" + section, section, state="COMMENTED")
     assert repair_request(HEAD, 0, [], [], reviews=[review]) is None
     api = ReviewApi([review])
+    api.pending_required = True
     path = tmp_path / "state.json"
     plan = _managed_cycle(api, path)["pull_requests"][0]
-    assert not plan["repair_requested"] and not plan["review_valid"]
+    assert not plan["repair_requested"]
+    assert plan["review_valid"] is (count == "0")
     assert api.fix_attempts == 0 and not api.graphql_writes
     saved = StateStore(path).snapshot()
     assert saved["enrollments"]["16"]["attempts"] == 0
