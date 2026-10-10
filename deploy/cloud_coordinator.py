@@ -478,7 +478,10 @@ def independent_review_valid(head_sha, reviews, threads, *, pull_author_id,
         reviews, head_sha, reviewer_id=COPILOT_REVIEWER_ID,
     )
     return (
-        current_copilot_review_valid(reviews, head_sha, complete=reviews_complete)
+        current_copilot_review_valid(
+            reviews, head_sha, pull_author_id=pull_author_id,
+            complete=reviews_complete,
+        )
         and not disposition["findings"] and not disposition["ambiguous"]
         and disposition["inventory_complete"] is True
     )
@@ -2036,6 +2039,27 @@ def _negative_review_progress_fingerprints(actions, issue, head_sha, reviews, *,
             or _review_submission(published) is None):
         return [], False
     return _review_finding_fingerprints(report.get("findings"))
+
+
+def _current_copilot_rejection_progress(reviews, head_sha, *, pull_author_id,
+                                        reviews_complete):
+    if (reviews_complete is not True or not positive_id(pull_author_id)
+            or pull_author_id == COPILOT_REVIEWER_ID):
+        return False
+    latest = latest_reviews(reviews, COPILOT_REVIEWER_ID)
+    if (not latest or len(latest) != 1
+            or latest[0].get("state") != "CHANGES_REQUESTED"
+            or latest[0].get("commit_id") != head_sha
+            or latest[0].get("dismissed") is True
+            or latest[0].get("dismissed_at") not in (None, "")):
+        return False
+    disposition = review_body_disposition(
+        reviews, head_sha, reviewer_id=COPILOT_REVIEWER_ID,
+    )
+    return (
+        disposition["inventory_complete"] is True
+        and disposition["ambiguous"] is False
+    )
 
 
 def _current_review_report_failure(actions, issue, head_sha):
@@ -4550,6 +4574,9 @@ class Coordinator:
 
         if not current_copilot_review_valid(
                 snapshot.get("reviews"), head,
+                pull_author_id=(snapshot.get("pull", {}).get("user", {}).get("id")
+                                if isinstance(snapshot.get("pull", {}).get("user"), dict)
+                                else None),
                 complete=snapshot.get("reviews_complete") is True):
             self.store.update_action(
                 key, "completed", handoff_state="waiting_review",
@@ -4821,7 +4848,9 @@ class Coordinator:
             issue=number, review_actions=actions,
         )
         progress_review_ok = current_copilot_review_valid(
-            snapshot["reviews"], head, complete=snapshot["reviews_complete"],
+            snapshot["reviews"], head,
+            pull_author_id=pull_user.get("id") if isinstance(pull_user, dict) else None,
+            complete=snapshot["reviews_complete"],
         )
         sensitive = classify_sensitive_paths(
             snapshot["files"], complete=snapshot["files_complete"],
@@ -4923,6 +4952,12 @@ class Coordinator:
                 reviews_complete=snapshot["reviews_complete"],
             ) if not review_ok else ([], False)
         )
+        if not negative_review_complete and not review_ok:
+            negative_review_complete = _current_copilot_rejection_progress(
+                snapshot["reviews"], head,
+                pull_author_id=pull_user.get("id") if isinstance(pull_user, dict) else None,
+                reviews_complete=snapshot["reviews_complete"],
+            )
         if negative_review_complete:
             current_fingerprints = sorted(
                 set(current_fingerprints) | set(negative_review_fingerprints),
@@ -4974,6 +5009,12 @@ class Coordinator:
             progress_required, snapshot["check_runs"], snapshot["statuses"],
             complete=snapshot["policy_complete"], head_sha=head,
         )
+        completed_review_followup = _current_review_followup(actions, number, head)
+        followup_disposition = (
+            completed_review_followup.get("review_report", {}).get(
+                "progress_disposition", {},
+            ) if isinstance(completed_review_followup, dict) else {}
+        )
         progress = _completed_repair_progress(
             snapshot, progress_actions, current_fingerprints, authorized_heads,
             review_ok=progress_review_ok, checks_ok=progress_checks_ok,
@@ -4981,9 +5022,8 @@ class Coordinator:
             negative_review_complete=negative_review_complete,
             checks_terminal=checks_terminal,
             independently_resolved=(
-                _current_review_followup(actions, number, head)
-                .get("review_report", {}).get("progress_disposition", {}).get("resolved", [])
-                if negative_review_complete else []
+                followup_disposition.get("resolved", [])
+                if negative_review_complete and isinstance(followup_disposition, dict) else []
             ),
         )
         if progress is None:
@@ -5150,6 +5190,31 @@ class Coordinator:
                 for action in actions.values()
             )
         )
+        source_provenance_verified = (
+            _valid_initial_source(snapshot.get("initial_source"))
+            or snapshot.get("retained_ready_handoff") is True
+        )
+        source_work_active = (
+            _cloud_agent_active(
+                snapshot["workflows"], snapshot["pull"]["head"]["ref"],
+            )
+            or _other_task_active([
+                task for task in snapshot["tasks"]
+                if (isinstance(task, dict)
+                    and isinstance(task.get("state"), str)
+                    and task.get("state") in {
+                        "queued", "in_progress", "waiting_for_user", "idle",
+                        "requested", "pending",
+                    })
+            ], snapshot)
+            or any(
+                isinstance(action, dict)
+                and action.get("issue") == number
+                and action.get("kind") == "fix"
+                and action.get("status") in {"sending", "uncertain", "sent"}
+                for action in actions.values()
+            )
+        )
         if source_provenance_missing:
             reasons.append((
                 "starter-source-provenance",
@@ -5298,14 +5363,17 @@ class Coordinator:
                      "pull_id": snapshot["pull"].get("id"),
                      "pull_node_id": snapshot["pull"].get("node_id")}
                     if (not current_copilot_review_valid(
-                        snapshot["reviews"], head, complete=snapshot["reviews_complete"])
+                        snapshot["reviews"], head,
+                        pull_author_id=(snapshot["pull"].get("user", {}).get("id")
+                                        if isinstance(snapshot["pull"].get("user"), dict)
+                                        else None),
+                        complete=snapshot["reviews_complete"])
                         and snapshot["reviews_complete"] is True
-                        and snapshot["scoped"] and not mergeability_unknown
-                        and snapshot["pull"].get("draft") is False
-                        and repair is None and not agent_busy
-                        and not (source_provenance_missing
-                                 and _valid_starter_admission(
-                                     enrollment.get("starter_admission")))) else None
+                       and snapshot["scoped"] and not mergeability_unknown
+                       and snapshot["pull"].get("draft") is False
+                       and repair is None and not agent_busy
+                       and source_provenance_verified
+                       and not source_work_active) else None
                 ),
                 "status_action": status_action,
                 "merge_action": merge_action, "auto_merge_requested": merge_requested,
@@ -5446,7 +5514,10 @@ class Coordinator:
         reviews = _rest_list(
             self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
         )
-        if current_copilot_review_valid(reviews, action["head"]):
+        pull_user = pull.get("user")
+        pull_author_id = pull_user.get("id") if isinstance(pull_user, dict) else None
+        if current_copilot_review_valid(
+                reviews, action["head"], pull_author_id=pull_author_id):
             return "reviewed"
         requested = self.api.get(
             f"repos/{REPOSITORY}/pulls/{action['issue']}/requested_reviewers"

@@ -81,6 +81,64 @@ def test_owner_and_bot_authors_share_copilot_review_gate(author, state):
     assert not blockers
 
 
+@pytest.mark.parametrize("state", ["COMMENTED", "APPROVED"])
+def test_copilot_reviewer_cannot_author_the_pull_request(state):
+    from deploy.cloud_coordinator import independent_review_valid
+
+    evidence = copilot_evidence()
+    review = evidence["copilot_review"]
+    review["pull_author_id"] = COPILOT_REVIEWER
+    review["reviews"][0].update({"state": state, "body": "", "body_html": ""})
+
+    assert not independent_review_valid(
+        review["head_sha"], review["reviews"], review["threads"],
+        pull_author_id=COPILOT_REVIEWER,
+    )
+    blockers = set()
+    autonomy_policy._check_review(
+        evidence, evidence["main"]["sha"], "post-cutover", blockers,
+    )
+    assert "copilot-review" in blockers
+
+
+@pytest.mark.parametrize("body,body_html", [
+    (
+        "<!-- ccr-overview-v2 -->\n\n## Copilot review overview\n\n"
+        "### 🔵 Needs a closer look\n\nNo bugs found.\n\n**Findings:** None\n\n"
+        "<details><summary><strong>Previously missed (1)</strong></summary>\n\n"
+        "<details><summary>Finding</summary>\n\n"
+        "Required correction: reject stale evidence.\n</details></details>",
+        "<h2>Copilot review overview</h2><h3>🔵 Needs a closer look</h3>"
+        "<p>No bugs found.</p><p><strong>Findings:</strong> None</p>"
+        "<details><summary><strong>Previously missed (1)</strong></summary>"
+        "<details><summary>Finding</summary><p>"
+        "Required correction: reject stale evidence.</p></details></details>",
+    ),
+    (
+        "<!-- ccr-overview-v2 -->\n\nIncomplete rendered inventory",
+        "<details",
+    ),
+])
+def test_read_only_validator_rejects_actionable_or_ambiguous_comment(
+        body, body_html):
+    from deploy.cloud_coordinator import independent_review_valid
+
+    evidence = copilot_evidence()
+    review = evidence["copilot_review"]
+    review["reviews"][0].update({
+        "state": "COMMENTED", "body": body, "body_html": body_html,
+    })
+
+    result = autonomy_policy.validate_transition(evidence, phase="post-cutover")
+
+    assert not result["ready"]
+    assert "copilot-review" in result["blockers"]
+    assert not independent_review_valid(
+        review["head_sha"], review["reviews"], review["threads"],
+        pull_author_id=review["pull_author_id"],
+    )
+
+
 @pytest.mark.parametrize("change", [
     {"state": "PENDING"}, {"state": "DISMISSED"}, {"state": "CHANGES_REQUESTED"},
     {"commit_id": BASE}, {"dismissed": True}, {"dismissed_at": "2026-10-01T22:00:00Z"},
@@ -122,32 +180,36 @@ def test_copilot_only_validator_fails_closed(hazard):
     assert not autonomy_policy.validate_transition(evidence, phase="post-cutover")["ready"]
 
 
-@pytest.mark.parametrize("lost_response", [False, True])
-def test_copilot_request_is_real_and_never_duplicated(tmp_path, lost_response):
+@pytest.mark.parametrize("active_source_work", [False, True])
+def test_copilot_request_requires_source_provenance_and_idle_source(
+        tmp_path, active_source_work):
     class RequestApi(CopilotApi):
         def get_all(self, route, *, collection=None):
             if "/reviews?" in route:
                 return []
             return super().get_all(route, collection=collection)
 
-        def write(self, route, body, **kwargs):
-            if route.endswith("/requested_reviewers"):
-                self.writes.append((route, body))
-                assert body == {"reviewers": ["copilot-pull-request-reviewer[bot]"]}
-                if lost_response:
-                    from deploy.cloud_coordinator import ApiError
-                    raise ApiError("Synthetic lost response")
-                return self.pull | {"requested_reviewers": [{"id": COPILOT_REVIEWER}]}
-            return super().write(route, body, **kwargs)
-
     api = RequestApi()
     store = StateStore(tmp_path / "state.json")
-    for _ in range(3):
-        result = Coordinator(api, store).run(apply=True)
-        assert not result["pull_requests"][0]["auto_merge_eligible"]
-    assert len([route for route, _ in api.writes if route.endswith("/requested_reviewers")]) == 1
+    if active_source_work:
+        api.workflow_runs = [{
+            "id": 781, "head_branch": "topic", "workflow_id": 372426410,
+            "path": "dynamic/copilot-swe-agent/copilot", "event": "dynamic",
+            "actor": {"id": COPILOT_AGENT}, "repository": {"id": 1399942965},
+            "head_repository": {"id": 1399942965}, "status": "in_progress",
+        }]
+    enrollment = {
+        "issue": 16, "comment": 123, "head": HEAD, "base": BASE,
+        "pull_id": api.pull["id"], "pull_node_id": api.pull["node_id"],
+        "repository_id": 1399942965,
+    }
+    store.enroll(enrollment)
+    coordinator = Coordinator(api, store)
+    if active_source_work:
+        coordinator._reconcile_actions = lambda *_args, **_kwargs: False
+    coordinator.run(apply=True)
+    assert not any(route.endswith("/requested_reviewers") for route, _ in api.writes)
     assert api.review_attempts == api.fix_attempts == 0
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
     assert not any("/statuses/" in route or route.endswith("/reviews") for route, _ in api.writes)
 
 

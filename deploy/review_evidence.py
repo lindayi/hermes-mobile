@@ -215,9 +215,10 @@ def latest_reviews(reviews, reviewer_id):
     return [review for review, stamp in zip(authored, stamps) if stamp == latest]
 
 
-def current_copilot_review_valid(reviews, head_sha, *, complete=True):
+def current_copilot_review_valid(reviews, head_sha, *, pull_author_id, complete=True):
     """Accept only genuine, submitted, current-head Copilot reviewer evidence."""
-    if (complete is not True or not isinstance(head_sha, str)
+    if (complete is not True or not positive_id(pull_author_id)
+            or pull_author_id == 175728472 or not isinstance(head_sha, str)
             or _SHA_RE.fullmatch(head_sha) is None):
         return False
     selected = latest_reviews(reviews, 175728472)

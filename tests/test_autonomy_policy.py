@@ -180,8 +180,8 @@ _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE = {
 }
 
 _ISSUE92_COPILOT_REVIEW_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'c8cc3f72bad05a024e4f0c5623d49d7cd64b91805b17858feea7d895eee1c9a6',
-    'deploy/review_evidence.py': '84ccef23bc96ca1a423d619a6694cec6ad27aa4068515a3bf398aa8b838124ba',
+    'deploy/cloud_coordinator.py': '97f3e437321790a56fbe333ad8819f67c07c320cafee427e227d159aeef8b00e',
+    'deploy/review_evidence.py': '8b55ea466b715058b7cd0a4ce5c013d690c9846c4af0e81fea266e95d84f1a86',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
@@ -308,6 +308,7 @@ def _evidence():
             'reviews': [{
                 'id': 2, 'user': {'id': COPILOT_REVIEWER_ID}, 'state': 'COMMENTED',
                 'commit_id': review_head, 'submitted_at': '2026-10-01T21:00:00Z',
+                'body': '', 'body_html': '',
             }, {
                 'id': 1, 'node_id': 'PRR_kwDOU3FvNc8AAAABQehXFA',
                 'user': {'id': OWNER_ID, 'login': 'lindayi'}, 'state': 'COMMENTED',
@@ -1468,7 +1469,8 @@ def test_sensitive_targeted_review_rejects_unbound_claim(phase, mutate):
     mutate(evidence['copilot_review'])
     expected = {'sensitive-review-authorization'}
     if not current_copilot_review_valid(
-            evidence['copilot_review']['reviews'], evidence['copilot_review']['head_sha']):
+            evidence['copilot_review']['reviews'], evidence['copilot_review']['head_sha'],
+            pull_author_id=evidence['copilot_review']['pull_author_id']):
         expected.add('copilot-review')
     assert _blockers(evidence, phase) == expected
 
@@ -1541,7 +1543,9 @@ def test_sensitive_targeted_reviewer_must_be_positive_and_independent(reviewer_i
     review['change']['targeted_review']['reviewer_id'] = reviewer_id
     review['reviews'][-1]['user']['id'] = reviewer_id
     expected = {'sensitive-review-authorization'}
-    if not current_copilot_review_valid(review['reviews'], review['head_sha']):
+    if not current_copilot_review_valid(
+            review['reviews'], review['head_sha'],
+            pull_author_id=review['pull_author_id']):
         expected.add('copilot-review')
     assert _blockers(evidence) == expected
 

@@ -1209,6 +1209,52 @@ def test_completed_source_progress_survives_main_advance_with_negative_review(
     assert ignored["consecutive_no_progress"] == 0
 
 
+def test_current_copilot_rejection_advances_progress_but_cannot_merge(monkeypatch):
+    from deploy import cloud_coordinator
+
+    finding = "The finding remains."
+    fingerprint = cloud_coordinator._repair_fingerprint("finding", finding)
+    review = _progress_review(
+        HEAD, 64002, finding, "2026-10-01T12:10:00Z",
+    ) | {"state": "CHANGES_REQUESTED"}
+    action = {
+        "kind": "fix", "issue": 16, "status": "completed", "attempt": 1,
+        "task_id": "source-task", "head": HEAD, "main_sha": BASE,
+        "receipt_result": "ready", "receipt_head": HEAD, "receipt_base": BASE,
+        "receipt_start_head": BASE, "pull_id": 160000016,
+        "pull_node_id": "PR_node_16", "repository_id": 1399942965,
+        "owner_id": OWNER, "repair_policy_version": 1,
+        "repair_fingerprints": [fingerprint],
+        "repair_fingerprint_version": 2, "repair_fingerprints_complete": True,
+    }
+    snapshot = {
+        "issue": 16, "head": HEAD, "comments": [], "scoped": True,
+        "reviews_complete": True, "threads_complete": True,
+        "pull": {"id": 160000016, "node_id": "PR_node_16"},
+        "enrollment": {"repair_progress": cloud_coordinator._new_repair_progress()},
+    }
+    monkeypatch.setattr(
+        cloud_coordinator, "_valid_receipt_proof", lambda *_args, **_kwargs: True,
+    )
+    negative_review_complete = cloud_coordinator._current_copilot_rejection_progress(
+        [review], HEAD, pull_author_id=OWNER, reviews_complete=True,
+    )
+
+    progress = cloud_coordinator._completed_repair_progress(
+        snapshot, {"source-task": action}, [fingerprint], {HEAD},
+        review_ok=False, checks_ok=True, current_fingerprints_complete=True,
+        negative_review_complete=negative_review_complete,
+    )
+
+    assert negative_review_complete
+    assert progress["evaluated_task_ids"] == ["source-task"]
+    assert progress["consecutive_no_progress"] == 1
+    assert not cloud_coordinator.independent_review_valid(
+        HEAD, [review], [], pull_author_id=OWNER,
+        threads_complete=True, reviews_complete=True,
+    )
+
+
 def test_legacy_neutral_recovery_splits_shared_counter_atomically(tmp_path):
     store = StateStore(tmp_path / "state.json")
     store.enroll(enrolled_record())
@@ -6912,7 +6958,7 @@ def test_same_head_handoff_requires_completed_copilot_review(tmp_path, review_st
         "done" if expected else "waiting_review"
     )
     requests = [route for route, _ in api.writes if route.endswith("/requested_reviewers")]
-    assert len(requests) == (0 if expected else 1)
+    assert requests == []
     assert api.review_attempts == 0
     assert summary["review_valid"] is expected
     assert summary["auto_merge_eligible"] is False
@@ -6955,7 +7001,7 @@ def test_completed_copilot_review_completes_handoff_without_independent_report(
     )
     assert summary["review_valid"] is (review_state != "CHANGES_REQUESTED")
     requests = [route for route, _ in api.writes if route.endswith("/requested_reviewers")]
-    assert len(requests) == (1 if review_state == "CHANGES_REQUESTED" else 0)
+    assert requests == []
     assert api.review_attempts == 0
     assert api.fix_attempts == 1
 
@@ -6991,7 +7037,7 @@ def test_copilot_review_timing_must_be_valid_for_handoff(
     assert summary["review_valid"] is expected
     assert summary["auto_merge_eligible"] is False
     requests = [route for route, _ in api.writes if route.endswith("/requested_reviewers")]
-    assert len(requests) == (0 if expected else 1)
+    assert requests == []
     assert api.review_attempts == 0
     assert api.fix_attempts == 1
 
@@ -7026,8 +7072,8 @@ def test_post_task_review_still_requires_exact_head_and_authenticated_identity(
     assert store.action(fix["key"])["handoff_state"] == "waiting_review"
     assert "review" in summary["reasons"]
     assert summary["auto_merge_eligible"] is False
-    assert len([route for route, _ in api.writes
-                if route.endswith("/requested_reviewers")]) == 1
+    assert not [route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]
     assert api.review_attempts == 0
 
 
@@ -7062,8 +7108,8 @@ def test_post_task_review_cannot_replace_invalid_persisted_completion_proof(
     assert all("/statuses/" in route and body.get("context") == "cloud-review"
                for route, body in new_writes)
     assert api.graphql_writes == graphql_writes
-    assert len([route for route, _ in api.writes
-                if route.endswith("/requested_reviewers")]) == 1
+    assert not [route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]
     assert api.review_attempts == 0
 
 
@@ -7229,8 +7275,8 @@ def test_completed_task_handoff_waits_for_copilot_without_independent_dispatch(
     action = store.action(fix["key"])
     assert action["handoff_state"] == "waiting_review"
     assert action.get("handoff_waits", 0) == 0
-    assert len([route for route, _ in api.writes
-                if route.endswith("/requested_reviewers")]) == 1
+    assert not [route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]
     assert api.review_attempts == 0
     assert api.fix_attempts == 1
     assert result["pull_requests"][0]["review_valid"] is False
@@ -7242,8 +7288,8 @@ def test_completed_task_handoff_waits_for_copilot_without_independent_dispatch(
     assert store.action(fix["key"])["handoff_state"] == "waiting_review"
     assert store.action(fix["key"]).get("handoff_waits", 0) == 0
     assert api.fix_attempts == 1
-    assert len([route for route, _ in api.writes
-                if route.endswith("/requested_reviewers")]) == 1
+    assert not [route for route, _ in api.writes
+                if route.endswith("/requested_reviewers")]
     assert api.review_attempts == 0
     assert not any(event["reason"] == "execution_exhausted"
                    for event in store.snapshot()["lifecycle_events"])
@@ -10591,7 +10637,7 @@ def test_scan_commit_failure_precedes_every_handoff_mutation(tmp_path, monkeypat
     if path_kind == "draft_ready":
         assert len(ready) == 1 and requests == []
     else:
-        assert ready == [] and len(requests) == 1
+        assert ready == [] and requests == []
     assert api.fix_attempts == 1
     assert result["pull_requests"][0]["repair_requested"] is False
     assert "review" in result["pull_requests"][0]["reasons"]

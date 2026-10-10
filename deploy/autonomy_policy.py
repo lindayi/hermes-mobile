@@ -3,6 +3,7 @@
 import re
 from deploy.review_evidence import (
     current_copilot_review_valid,
+    review_body_disposition,
     sensitive_review_authorized,
 )
 
@@ -185,12 +186,12 @@ SOURCE_FINGERPRINTS = {
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     # Issue #92 Copilot-only candidate; historical bounded-repair pins are retained.
-    'deploy/cloud_coordinator.py': 'c8cc3f72bad05a024e4f0c5623d49d7cd64b91805b17858feea7d895eee1c9a6',
+    'deploy/cloud_coordinator.py': '97f3e437321790a56fbe333ad8819f67c07c320cafee427e227d159aeef8b00e',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
-    'deploy/review_evidence.py': '84ccef23bc96ca1a423d619a6694cec6ad27aa4068515a3bf398aa8b838124ba',
+    'deploy/review_evidence.py': '8b55ea466b715058b7cd0a4ce5c013d690c9846c4af0e81fea266e95d84f1a86',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     # Issue #65 producer-only overlay; historical receipt hashes remain documented.
@@ -476,7 +477,14 @@ def _check_review(evidence, main_sha, phase, blockers):
         blockers.add('copilot-review-evidence')
         return
     if not current_copilot_review_valid(
-            reviews, head, complete=review.get('reviews_complete')):
+            reviews, head, pull_author_id=review.get('pull_author_id'),
+            complete=review.get('reviews_complete')):
+        blockers.add('copilot-review')
+    disposition = review_body_disposition(
+        reviews, head, reviewer_id=COPILOT_REVIEWER_ID,
+    )
+    if (disposition['findings'] or disposition['ambiguous']
+            or disposition['inventory_complete'] is not True):
         blockers.add('copilot-review')
     from deploy.cloud_coordinator import required_checks_pass
     if not required_checks_pass(
