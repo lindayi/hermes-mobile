@@ -3749,6 +3749,18 @@ class Coordinator:
             busy = True
             busy_action_keys.add(key)
 
+        def completed_neutral_handoff(action):
+            return (
+                isinstance(action, dict)
+                and action.get("kind") == "fix"
+                and action.get("task_type") == "neutral"
+                and action.get("status") == "completed"
+                and action.get("handoff_state") == "waiting_review"
+                and action.get("ready_state") == "done"
+                and action.get("receipt_result") == "ready"
+                and _valid_receipt_proof(action, snapshot["comments"])
+            )
+
         historical_dirty = (
             snapshot.get("historical_base") is True
             and snapshot["pull"].get("mergeable") is False
@@ -4045,8 +4057,13 @@ class Coordinator:
                     snapshot.setdefault("stale_handoff_keys", []).append(key)
                     continue
                 if action.get("handoff_state") in HANDOFF_ACTIVE_STATES and apply:
-                    if self._advance_task_handoff(
-                            key, action, snapshot, deferred=handoffs):
+                    handoff_waiting = self._advance_task_handoff(
+                        key, action, snapshot, deferred=handoffs,
+                    )
+                    if (handoff_waiting
+                            and not completed_neutral_handoff(
+                                self.store.action(key),
+                            )):
                         mark_busy()
                 elif (action.get("handoff_state") == "waiting_review"
                       and action.get("review_requirement") == "missing_independent_review"
@@ -4213,9 +4230,14 @@ class Coordinator:
                                     self.store.update_action_with_lifecycle(
                                         key, "completed", None, now=self.clock(), **fields,
                                     )
-                                    if self._advance_task_handoff(
-                                            key, self.store.action(key), snapshot,
-                                            deferred=handoffs):
+                                    handoff_waiting = self._advance_task_handoff(
+                                        key, self.store.action(key), snapshot,
+                                        deferred=handoffs,
+                                    )
+                                    if (handoff_waiting
+                                            and not completed_neutral_handoff(
+                                                self.store.action(key),
+                                            )):
                                         mark_busy()
                                 else:
                                     event = _lifecycle_event(
@@ -4893,6 +4915,18 @@ class Coordinator:
         handoffs = []
         review_publications = []
         receipt_recoveries = []
+        existing_copilot_review_handoff_keys = {
+            key for key, action in actions.items()
+            if (
+                isinstance(action, dict)
+                and action.get("issue") == number
+                and action.get("kind") == "fix"
+                and action.get("task_type") != "neutral"
+                and action.get("status") == "completed"
+                and action.get("handoff_state") == "waiting_review"
+                and action.get("review_requirement") == "missing_copilot_review"
+            )
+        }
         agent_busy = reconciled_busy
         busy_details = (
             {} if reconciled_busy_details is None else reconciled_busy_details
@@ -4958,8 +4992,7 @@ class Coordinator:
                 and action.get("review_requirement") == "missing_copilot_review"
                 and action.get("receipt_result") == "ready"
                 and action.get("receipt_head") == head
-                and action.get("receipt_base") == snapshot["main_sha"]
-                and action.get("main_sha") == snapshot["main_sha"]
+                and action.get("receipt_base") == action.get("main_sha")
                 and action.get("owner_id") == OWNER_ID
                 and action.get("repository_id") == REPOSITORY_ID
                 and _pull_identity(snapshot["pull"], action)
@@ -4971,6 +5004,7 @@ class Coordinator:
             and busy_details.get("action_keys") == copilot_review_handoff_keys
             and busy_details.get("external_busy") is False
         )
+
         if authorized_head is not None and (
                 not _is_sha(authorized_head) or head not in authorized_heads):
             return {
@@ -5443,6 +5477,13 @@ class Coordinator:
                        and snapshot["pull"].get("draft") is False
                        and repair is None
                        and (not agent_busy or waiting_handoff_is_only_busy)
+                       and (
+                           not copilot_review_handoff_keys
+                           or bool(
+                               copilot_review_handoff_keys
+                               & existing_copilot_review_handoff_keys
+                           )
+                       )
                        and source_provenance_verified
                        and not source_work_active) else None
                 ),

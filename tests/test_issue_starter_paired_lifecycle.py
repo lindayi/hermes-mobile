@@ -486,7 +486,7 @@ def actual_starter_consumer(tmp_path, *, admit=True, missing_review=False,
     api.blob_contents["f" * 40] = b"Synthetic coordinator test contents\n"
     if missing_review:
         api.owner_review_body = "no independent review has been published"
-        api.review_state = "PENDING"
+        api.review_state = None
     attach_closing_issue_api(api)
     store = StateStore(tmp_path / "paired-main" / "state.json")
     if not admit:
@@ -831,7 +831,7 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
     ]
     api.blob_contents["f" * 40] = b"Synthetic starter PR contents\n"
     api.owner_review_body = "no independent review has been published"
-    api.review_state = "PENDING"
+    api.review_state = None
     api.tasks[producer.task_detail["id"]] = producer.task_detail
     api.task_posts = 1
     attach_closing_issue_api(api)

@@ -1794,13 +1794,15 @@ class FakeApi:
         if route.endswith("/pulls/16/files?per_page=100"):
             return list(self.review_pull_files())
         if route.endswith("/pulls/16/reviews?per_page=100"):
-            reviews = [{
-                "id": 63001, "state": self.review_state,
-                "commit_id": self.review_sha or self.head_sha,
-                "submitted_at": self.review_submitted_at,
-                "body": "",
-                "user": {"id": COPILOT_REVIEWER},
-            }]
+            reviews = []
+            if self.review_state is not None:
+                reviews.append({
+                    "id": 63001, "state": self.review_state,
+                    "commit_id": self.review_sha or self.head_sha,
+                    "submitted_at": self.review_submitted_at,
+                    "body": "",
+                    "user": {"id": COPILOT_REVIEWER},
+                })
             reviews.extend(self.owner_reviews)
             reviews.append(self._current_owner_review_record())
             return reviews
