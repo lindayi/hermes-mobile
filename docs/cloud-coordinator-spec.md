@@ -1339,7 +1339,7 @@ The remaining retired-path cases are `test_auto_merge_uses_current_four_checks_w
 `test_required_policy_accepts_only_current_four_contexts_and_apps`, and
 `test_waiting_independent_review_handoff_survives_restart_without_budget`; their
 collected replacements are the corresponding current three-check and Copilot-only
-tests in the preceding rows. The coordinator module currently collects 1,354
+tests in the preceding rows. The coordinator module currently collects 1,355
 pytest cases. The source-level inventory compares 275 baseline coordinator test
 functions with 219 current test functions; name changes and the explicit
 retirement map above account for the difference, rather than an assertion that

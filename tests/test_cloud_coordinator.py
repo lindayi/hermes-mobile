@@ -7354,7 +7354,7 @@ def test_completed_task_handoff_waits_for_copilot_without_independent_dispatch(
                    for event in store.snapshot()["lifecycle_events"])
 
 
-@pytest.mark.parametrize("correction_status", [None, "sent", "uncertain"])
+@pytest.mark.parametrize("correction_status", [None, "sent", "uncertain", "malformed"])
 def test_later_review_does_not_release_active_or_uncertain_correction(
         tmp_path, correction_status):
     class MissingCopilotReviewApi(FakeApi):
@@ -7377,13 +7377,15 @@ def test_later_review_does_not_release_active_or_uncertain_correction(
     api.complete_task(fix["task_id"], fix)
     correction_key = "historical-report-correction"
     if correction_status is not None:
+        stored_status = "uncertain" if correction_status == "malformed" else correction_status
         store._mutate(lambda state: state["actions"].__setitem__(
             correction_key, {
                 "key": correction_key, "kind": "review",
                 "task_type": "report-correction", "issue": 16,
-                "status": correction_status, "head": HEAD, "main_sha": BASE,
+                "status": stored_status, "head": HEAD, "main_sha": BASE,
                 "task_id": (
-                    ["malformed-task-id"] if correction_status == "uncertain"
+                    {"malformed": "task-id"} if correction_status == "malformed"
+                    else ["malformed-task-id"] if correction_status == "uncertain"
                     else "historical-correction-task"
                 ),
             },
@@ -7411,9 +7413,11 @@ def test_later_review_does_not_release_active_or_uncertain_correction(
     else:
         assert review_requests == []
         recovered = StateStore(tmp_path / "state.json").action(correction_key)
-        assert recovered["status"] == correction_status
+        assert recovered["status"] == stored_status
         if correction_status == "uncertain":
             assert recovered["task_id"] == ["malformed-task-id"]
+        if correction_status == "malformed":
+            assert recovered["task_id"] == {"malformed": "task-id"}
         assert not any(
             route.endswith("/agents/repos/lindayi/hermes-mobile/tasks")
             for route, _ in api.writes[writes_before:]
