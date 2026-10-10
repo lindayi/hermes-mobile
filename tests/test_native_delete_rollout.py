@@ -216,6 +216,8 @@ def activate_candidate(bound_native):
     caps['features'] = {'mobile_session_delete_version': 1}
     caps['mobile_notifications'] = dict(version=1, delivery='durable-inbox', automatic_model_wake=False)
     caps['mobile_run_controls']['clarifications'] = True
+    caps['mobile_photos'] = dict(version=1, max_images=4, max_image_bytes=2097152,
+                                max_request_bytes=20000000, private_persistence=True)
     return probe, candidate_root, health, caps
 
 

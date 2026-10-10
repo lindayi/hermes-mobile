@@ -122,6 +122,12 @@ def _clarification_version(source_hashes):
     raise RuntimeError('Unknown native control source-version baseline')
 
 
+def _photo_version(source_hashes):
+    # Reuse the complete-family allowlist; partial/mixed maps are never old versions.
+    _clarification_version(source_hashes)
+    return int(source_hashes == APPROVED_CONTROL_HASHES)
+
+
 def attested_controls(root):
     """Runtime/rollback approval accepts only one complete known source set."""
     from backend.model_controls import (
@@ -175,11 +181,19 @@ def approved_controls(root):
 
 
 def require_controls_capabilities(caps, *, session_delete_version, notification_version=0,
-                                  clarification_version=0):
+                                  clarification_version=0, photo_version=0):
     """Capabilities must agree with the independently attested source version."""
     try:
         if (type(notification_version) is not int or notification_version not in (0, 1)
-                or type(clarification_version) is not int or clarification_version not in (0, 1)):
+                or type(clarification_version) is not int or clarification_version not in (0, 1)
+                or type(photo_version) is not int or photo_version not in (0, 1)):
+            raise ValueError()
+        if photo_version == 0:
+            if 'mobile_photos' in caps:
+                raise ValueError()
+        elif json.dumps(caps['mobile_photos'], sort_keys=True, allow_nan=False) != json.dumps(
+                dict(version=1, max_images=4, max_image_bytes=2097152,
+                     max_request_bytes=20000000, private_persistence=True), sort_keys=True):
             raise ValueError()
         if notification_version == 0:
             if 'mobile_notifications' in caps:
@@ -622,13 +636,15 @@ class NativeProbe:
         if health.get('pid') != pid:
             raise RuntimeError('Native health PID mismatch')
         caps = self.request('/v1/capabilities')
-        if not isinstance(caps, dict) or (legacy and 'mobile_run_controls' in caps):
+        if not isinstance(caps, dict) or (legacy and any(
+                name in caps for name in ('mobile_run_controls', 'mobile_photos'))):
             raise RuntimeError('Unknown legacy capabilities')
         if not legacy:
             require_controls_capabilities(caps,
                 session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
                 notification_version=int('backend/native_notifications.py' in source_hashes),
-                clarification_version=_clarification_version(source_hashes))
+                clarification_version=_clarification_version(source_hashes),
+                photo_version=_photo_version(source_hashes))
         captured = dict(root=str(root), pid=pid, legacy=legacy, caps=caps, source_hashes=source_hashes,
                         start_ticks=started, bootstrap=bootstrap,
                         bridge_root=str(baseline), bridge_pid=self._bridge_pid(baseline))
@@ -681,7 +697,8 @@ class NativeProbe:
         require_controls_capabilities(
             caps, session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
             notification_version=int('backend/native_notifications.py' in source_hashes),
-            clarification_version=_clarification_version(source_hashes))
+            clarification_version=_clarification_version(source_hashes),
+            photo_version=_photo_version(source_hashes))
         self.verify_unchanged(root, baseline=dict(
             root=str(root), legacy=False, caps=caps, source_hashes=source_hashes,
             pid=pid, start_ticks=started), operational=True)
@@ -714,6 +731,8 @@ class NativeProbe:
             raise RuntimeError('Unchanged native health is not healthy')
         require_native_quiescence(health)  # Validate typed known evidence, permit busy.
         caps = self.request('/v1/capabilities')
+        if baseline['legacy'] and (not isinstance(caps, dict) or 'mobile_photos' in caps):
+            raise RuntimeError('Unknown legacy capabilities')
         if not baseline['legacy']:
             self._ready(health, baseline=baseline)  # Validate schema/source, permit busy.
             source_hashes = baseline.get('source_hashes')
@@ -723,7 +742,8 @@ class NativeProbe:
                 caps,
                 session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
                 notification_version=int('backend/native_notifications.py' in source_hashes),
-                clarification_version=_clarification_version(source_hashes))
+                clarification_version=_clarification_version(source_hashes),
+                photo_version=_photo_version(source_hashes))
             if operational:
                 self._require_operational_activity(health)
         if json.dumps(caps, sort_keys=True, allow_nan=False) != json.dumps(
@@ -779,7 +799,8 @@ class NativeProbe:
                                 'backend/native_session_deletion.py' in source_hashes),
                             notification_version=int(
                                 'backend/native_notifications.py' in source_hashes),
-                            clarification_version=_clarification_version(source_hashes))
+                            clarification_version=_clarification_version(source_hashes),
+                            photo_version=_photo_version(source_hashes))
                     if json.dumps(caps, sort_keys=True, allow_nan=False) != json.dumps(
                             baseline['caps'], sort_keys=True, allow_nan=False):
                         raise RuntimeError('Restored native capabilities differ')
@@ -787,7 +808,8 @@ class NativeProbe:
                     require_controls_capabilities(caps,
                         session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
                         notification_version=int('backend/native_notifications.py' in source_hashes),
-                        clarification_version=_clarification_version(source_hashes))
+                        clarification_version=_clarification_version(source_hashes),
+                        photo_version=_photo_version(source_hashes))
                 if not legacy:
                     expected = baseline if baseline is not None else dict(
                         root=str(root), legacy=False, caps=caps, source_hashes=APPROVED_CONTROL_HASHES)

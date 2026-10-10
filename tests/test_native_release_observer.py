@@ -76,6 +76,8 @@ def operational_probe(tmp_path,monkeypatch,health_change=None):
           'mobile_native_maintenance':dict(version=1,scope='dedicated-listener',atomic_drain=False),
           'features':{'mobile_session_delete_version':1},
           'mobile_notifications':dict(version=1,delivery='durable-inbox',automatic_model_wake=False)}
+    caps['mobile_photos']=dict(version=1,max_images=4,max_image_bytes=2097152,
+                               max_request_bytes=20000000,private_persistence=True)
     if health_change == 'bad_caps':
         caps['mobile_run_controls']['steering']=False
     def request(path,*,authenticated=True):

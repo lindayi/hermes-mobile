@@ -238,11 +238,18 @@ attachment store footprint. This does not certify historical copies or other
 listeners. Native source dependencies are fingerprinted by the existing guarded
 release; cloud and deployed listeners use the same repository adapter with the
 same installed baseline, not a cloud-only compatibility patch. Activation remains
-an independently reviewed exact-main guarded release, with the pre-photo source
+a separately verified exact-main guarded release, with the pre-photo source
 map retained for drain and rollback. Clarification capability is classified only
 from complete accepted source maps: the current and pre-photo maps support it;
 older non-clarification maps do not, and unknown or mixed maps fail closed. The
 historical and rollback maps remain unchanged. No installed source is hot-edited.
+Capture, unchanged-listener verification, operational verification, and rollback
+also bind `mobile_photos` to the complete attested source family: the current
+photo-enabled family requires version 1, four images, 2 MiB per image,
+20,000,000 request bytes, and `private_persistence: true`. Pre-photo source
+families must not advertise this capability. Missing/malformed fields or limits
+and unexpected legacy advertisement fail verification; clarification support
+alone cannot prove photo readiness.
 
 ## Security and rollout
 
@@ -318,7 +325,7 @@ activation success.
 | --- | --- |
 | `backend/native_run_controls.py` | `d8af6f7687c7d75b0c148b0572f7f4c13c1ac9bedc295e59719a7a3ee43f5058` |
 | `backend/model_controls.py` | `fee5b5b6130e73d5fdce0a79362c09f5ace7621e8b426b5fb1b574cd3cd2bbef` |
-| `deploy/native_controls_release.py` | `0b3bbb3e1484eaa4f046cb90e19270d8ee43b7bcb2a30b08252c85748e4e50e9` |
+| `deploy/native_controls_release.py` | `8a7d0f8f37b520cf8105734e60972b01211ba831600966105031b40d165d1f1f` |
 | `backend/app.py` | `61ece82105971fad63e971ceb56a836f67637707182c5b2f1e8c1c996de2847d` |
 | `backend/attachments.py` | `ed8db6bfb377f310969a101ba3be3b5cad03f23c15590680cc6af1af4701f1b4` |
 | `backend/hermes_client.py` | `d669f59f7bf3fb2cc5cc671081937fb7328f9b53d50995f966333ae413823116` |
