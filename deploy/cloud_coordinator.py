@@ -470,7 +470,7 @@ def independent_review_valid(head_sha, reviews, threads, *, pull_author_id,
                              issue=None, review_actions=None):
     """Compatibility seam for retained callers; independent reports are not gates."""
     if (not _is_sha(head_sha) or type(pull_author_id) is not int
-            or pull_author_id <= 0 or pull_author_id == OWNER_ID
+            or pull_author_id <= 0
             or reviews_complete is not True
             or not _complete_resolved_threads(threads, complete=threads_complete)):
         return False

@@ -185,7 +185,7 @@ SOURCE_FINGERPRINTS = {
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     # Issue #92 Copilot-only candidate; historical bounded-repair pins are retained.
-    'deploy/cloud_coordinator.py': '568e115b0015df170ac714f32cb77408d1a170646485c6ad4a5b099e95bbee9a',
+    'deploy/cloud_coordinator.py': 'c8cc3f72bad05a024e4f0c5623d49d7cd64b91805b17858feea7d895eee1c9a6',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
@@ -467,7 +467,6 @@ def _check_review(evidence, main_sha, phase, blockers):
             or review.get('base_sha') != main_sha or not _valid_sha(head)
             or review.get('state') != 'open' or review.get('draft') is not False
             or type(review.get('pull_author_id')) is not int or review['pull_author_id'] < 1
-            or review['pull_author_id'] == OWNER_ID
             or review.get('reviews_complete') is not True
             or review.get('threads_complete') is not True):
         blockers.add('copilot-review-evidence')

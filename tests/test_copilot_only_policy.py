@@ -60,6 +60,27 @@ def test_copilot_only_accepts_real_review_and_checks(tmp_path, state):
     assert autonomy_policy.validate_transition(copilot_evidence(), phase="post-cutover")["ready"]
 
 
+@pytest.mark.parametrize("author", [5164171, 198982749])
+@pytest.mark.parametrize("state", ["COMMENTED", "APPROVED"])
+def test_owner_and_bot_authors_share_copilot_review_gate(author, state):
+    from deploy.cloud_coordinator import independent_review_valid
+    evidence = copilot_evidence()
+    review = evidence["copilot_review"]
+    review["pull_author_id"] = author
+    review["reviews"][0].update({
+        "state": state,
+        "body": "",
+        "body_html": "",
+    })
+    assert independent_review_valid(
+        review["head_sha"], review["reviews"], review["threads"],
+        pull_author_id=author,
+    )
+    blockers = set()
+    autonomy_policy._check_review(evidence, evidence["main"]["sha"], "post-cutover", blockers)
+    assert not blockers
+
+
 @pytest.mark.parametrize("change", [
     {"state": "PENDING"}, {"state": "DISMISSED"}, {"state": "CHANGES_REQUESTED"},
     {"commit_id": BASE}, {"dismissed": True}, {"dismissed_at": "2026-10-01T22:00:00Z"},
