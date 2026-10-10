@@ -644,10 +644,10 @@ def review_body_disposition(reviews, head_sha, *, reviewer_id):
     if not isinstance(head_sha, str) or review.get("commit_id") != head_sha:
         return empty
     if (type(state) is str and (
-            state in {"APPROVED", "DISMISSED", "PENDING"}
-            or state == "COMMENTED" and body == "")):
+            state in {"DISMISSED", "PENDING"}
+            or state in {"COMMENTED", "APPROVED"} and body == "")):
         return empty
-    if (type(state) is not str or state not in {"COMMENTED", "CHANGES_REQUESTED"}
+    if (type(state) is not str or state not in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
             or not isinstance(body, str) or not body.strip()):
         return dict(empty, inventory_complete=False)
     result = parse_body(body, state, body_html=review.get("body_html"))

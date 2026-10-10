@@ -181,7 +181,7 @@ _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE = {
 
 _ISSUE92_COPILOT_REVIEW_FIXTURE = {
     'deploy/cloud_coordinator.py': 'db2ce26072a98f0c01ec4a0cc212a21b7ee706bc8efe2e0ea75ce967b074d2b4',
-    'deploy/review_evidence.py': '8b55ea466b715058b7cd0a4ce5c013d690c9846c4af0e81fea266e95d84f1a86',
+    'deploy/review_evidence.py': 'ca76b89cd3d6b9b01a42d8edc4594574d369bd681316f56cfca2279fe441a124',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
@@ -1542,7 +1542,9 @@ def test_sensitive_targeted_reviewer_must_be_positive_and_independent(reviewer_i
     review['change']['targeted_review']['reviewer_id'] = reviewer_id
     review['reviews'][-1]['user']['id'] = reviewer_id
     expected = {'sensitive-review-authorization'}
-    if not current_copilot_review_valid(
+    # Assigning the retained independent-report JSON to Copilot is also
+    # invalid body evidence, even if its APPROVED state is well formed.
+    if reviewer_id == COPILOT_REVIEWER_ID or not current_copilot_review_valid(
             review['reviews'], review['head_sha'],
             pull_author_id=review['pull_author_id']):
         expected.add('copilot-review')

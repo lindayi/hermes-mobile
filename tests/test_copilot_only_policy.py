@@ -164,14 +164,15 @@ def test_copilot_reviewer_cannot_author_the_pull_request(state):
         "<details",
     ),
 ])
+@pytest.mark.parametrize("state", ["COMMENTED", "APPROVED"])
 def test_read_only_validator_rejects_actionable_or_ambiguous_comment(
-        body, body_html):
+        body, body_html, state):
     from deploy.cloud_coordinator import independent_review_valid
 
     evidence = copilot_evidence()
     review = evidence["copilot_review"]
     review["reviews"][0].update({
-        "state": "COMMENTED", "body": body, "body_html": body_html,
+        "state": state, "body": body, "body_html": body_html,
     })
 
     result = autonomy_policy.validate_transition(evidence, phase="post-cutover")

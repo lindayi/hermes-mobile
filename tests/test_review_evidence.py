@@ -495,6 +495,15 @@ def test_open_zero_nonactionable_overview_is_not_repair_evidence(tmp_path, body)
     assert not any(action["kind"] == "fix" for action in state["actions"].values())
 
 
+def test_approved_actionable_body_blocks_merge_and_requests_repair(tmp_path):
+    api = ReviewApi([copilot_review(BODY_ONLY, state="APPROVED")])
+    result = _managed_cycle(api, tmp_path / "state.json")
+    assert result["pull_requests"][0]["repair_requested"]
+    assert not result["pull_requests"][0]["review_valid"]
+    assert not result["pull_requests"][0]["auto_merge_eligible"]
+    assert api.fix_attempts == 1
+
+
 @pytest.mark.parametrize("review", [
     copilot_review(NO_FINDINGS),
     copilot_review(PENDING_VALIDATION),
@@ -504,7 +513,7 @@ def test_open_zero_nonactionable_overview_is_not_repair_evidence(tmp_path, body)
     copilot_review(BODY_ONLY, commit_id=BASE),  # Stale head.
     copilot_review(BODY_ONLY, user_id=OWNER),  # Foreign author.
     copilot_review(BODY_ONLY, user_id=198982749),  # Coding agent, not reviewer.
-    copilot_review(BODY_ONLY, state="APPROVED"),
+    copilot_review(NO_FINDINGS, state="APPROVED"),
     copilot_review(BODY_ONLY, state="PENDING", submitted_at=None),
     copilot_review(BODY_ONLY, state="DISMISSED"),
     copilot_review(BODY_ONLY, state=[]),
