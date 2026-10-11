@@ -24,6 +24,12 @@ PROC_ROOT = Path('/proc')
 LEGACY_LAUNCHER = 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22'
 INSTALLED_API = '187c92509b3769c04756f0dc800d3597ea891ea21262e8a32ceaf3972ac95300'
 NATIVE_DEPENDENCIES = {
+    Path('/usr/local/lib/hermes-agent/run_agent.py'): 'fb58e81ac57c0f49370d72146d21250d1cfeaa0b964c9996e972954bbc343609',
+    Path('/usr/local/lib/hermes-agent/agent/conversation_loop.py'): '9904134bef009978bf95477a7ba8663421448e3e7735e0ba041ca672dfd33b45',
+    Path('/usr/local/lib/hermes-agent/agent/turn_context.py'): '4a65e543a0795c341fd7598ac42a40eb2d87da6637a3521ecc3a00096eb56896',
+    Path('/usr/local/lib/hermes-agent/agent/turn_finalizer.py'): '8c6157b55abf936d6f413c3722c919e2a8a0f02439b3c99ba13f6b22063cab7f',
+    Path('/usr/local/lib/hermes-agent/hermes_cli/lifecycle.py'): 'e820ed8114d7062d53223113cc053c737d4ced6b624ce1fbe88f79ad8b2a26bd',
+    Path('/usr/local/lib/hermes-agent/agent/agent_runtime_helpers.py'): '6634b15aa5ab3d73a0f17e1d77adccbd605e3a3944b0c60adb6d84dedca9ea05',
     Path('/usr/local/lib/hermes-agent/hermes_state.py'): '70c69963f39902bad1b3ed1b943aaa1dc195b986ebd267fe1b0ce49a0c6d6723',
     Path('/usr/local/lib/hermes-agent/tools/process_registry.py'): '5eace294ba298a08ff2a5e0503a75720f5eb2bf9c3117e2588746f207ab915a9',
     Path('/usr/local/lib/hermes-agent/tools/async_delegation.py'): 'eadedad768e3b327bfa9755daf8b0ee00f330ce3f787336986d8b50dad5f9391',
@@ -41,6 +47,17 @@ def _full_sha(value):
 
 
 APPROVED_CONTROL_HASHES = {
+    'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
+    'backend/native_run_controls.py': 'd8af6f7687c7d75b0c148b0572f7f4c13c1ac9bedc295e59719a7a3ee43f5058',
+    'backend/native_api_service.py':
+        'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+    'backend/native_maintenance.py': 'e79cfee2bf8d32c3f51dd3ee9247e23029376e10c5e55ea21aa373d6d72535c5',
+    'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
+    'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
+}
+
+# Exact pre-photo source set, retained for drain/rollback.
+PRE_PHOTO_CONTROL_HASHES = {
     'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
     'backend/native_run_controls.py': '564f0ab912a1d138f2ac5b1271935ef5aa2c99cdd2ab48d0527363f1a031e65c',
     'backend/native_api_service.py':
@@ -92,10 +109,29 @@ PREVIOUS_CONTROL_HASHES = {
 }
 
 
+def _clarification_version(source_hashes):
+    for family, version in (
+            (APPROVED_CONTROL_HASHES, 1),
+            (PRE_PHOTO_CONTROL_HASHES, 1),
+            (PRE_CLARIFICATION_CONTROL_HASHES, 0),
+            (PRE_ROUTING_CONTROL_HASHES, 0),
+            (TIMEOUT_BASELINE_CONTROL_HASHES, 0),
+            (PREVIOUS_CONTROL_HASHES, 0)):
+        if source_hashes == family:
+            return version
+    raise RuntimeError('Unknown native control source-version baseline')
+
+
+def _photo_version(source_hashes):
+    # Reuse the complete-family allowlist; partial/mixed maps are never old versions.
+    _clarification_version(source_hashes)
+    return int(source_hashes == APPROVED_CONTROL_HASHES)
+
+
 def attested_controls(root):
     """Runtime/rollback approval accepts only one complete known source set."""
     from backend.model_controls import (
-        _CONTROL_HASHES, _PRE_CLARIFICATION_CONTROL_HASHES, _PRE_ROUTING_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES,
+        _CONTROL_HASHES, _PRE_PHOTO_CONTROL_HASHES, _PRE_CLARIFICATION_CONTROL_HASHES, _PRE_ROUTING_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES,
         _TIMEOUT_BASELINE_CONTROL_HASHES, _control_source_hashes)
     actual = _control_source_hashes(root)
     if (set(APPROVED_CONTROL_HASHES) != {
@@ -108,12 +144,14 @@ def attested_controls(root):
                 'backend/native_controls_service.py', 'backend/native_run_controls.py',
                 'backend/native_api_service.py', 'backend/native_maintenance.py'}
             or _CONTROL_HASHES != APPROVED_CONTROL_HASHES
+            or _PRE_PHOTO_CONTROL_HASHES != PRE_PHOTO_CONTROL_HASHES
+            or set(PRE_PHOTO_CONTROL_HASHES) != set(APPROVED_CONTROL_HASHES)
             or _PRE_ROUTING_CONTROL_HASHES != PRE_ROUTING_CONTROL_HASHES
             or _PRE_CLARIFICATION_CONTROL_HASHES != PRE_CLARIFICATION_CONTROL_HASHES
             or _PREVIOUS_CONTROL_HASHES != PREVIOUS_CONTROL_HASHES
             or set(TIMEOUT_BASELINE_CONTROL_HASHES) != set(APPROVED_CONTROL_HASHES)
             or _TIMEOUT_BASELINE_CONTROL_HASHES != TIMEOUT_BASELINE_CONTROL_HASHES
-            or actual not in (APPROVED_CONTROL_HASHES, PRE_CLARIFICATION_CONTROL_HASHES,
+            or actual not in (APPROVED_CONTROL_HASHES, PRE_PHOTO_CONTROL_HASHES, PRE_CLARIFICATION_CONTROL_HASHES,
                               PRE_ROUTING_CONTROL_HASHES,
                               TIMEOUT_BASELINE_CONTROL_HASHES, PREVIOUS_CONTROL_HASHES)):
         raise RuntimeError('Native controls do not match approved source version')
@@ -124,6 +162,7 @@ def approved_controls(root):
     try:
         tree = ast.parse((root / 'backend/model_controls.py').read_bytes())
         for name, expected in (('_CONTROL_HASHES', APPROVED_CONTROL_HASHES),
+                               ('_PRE_PHOTO_CONTROL_HASHES', PRE_PHOTO_CONTROL_HASHES),
                                ('_PRE_CLARIFICATION_CONTROL_HASHES', PRE_CLARIFICATION_CONTROL_HASHES),
                                ('_PRE_ROUTING_CONTROL_HASHES', PRE_ROUTING_CONTROL_HASHES),
                                ('_PREVIOUS_CONTROL_HASHES', PREVIOUS_CONTROL_HASHES),
@@ -142,11 +181,19 @@ def approved_controls(root):
 
 
 def require_controls_capabilities(caps, *, session_delete_version, notification_version=0,
-                                  clarification_version=0):
+                                  clarification_version=0, photo_version=0):
     """Capabilities must agree with the independently attested source version."""
     try:
         if (type(notification_version) is not int or notification_version not in (0, 1)
-                or type(clarification_version) is not int or clarification_version not in (0, 1)):
+                or type(clarification_version) is not int or clarification_version not in (0, 1)
+                or type(photo_version) is not int or photo_version not in (0, 1)):
+            raise ValueError()
+        if photo_version == 0:
+            if 'mobile_photos' in caps:
+                raise ValueError()
+        elif json.dumps(caps['mobile_photos'], sort_keys=True, allow_nan=False) != json.dumps(
+                dict(version=1, max_images=4, max_image_bytes=2097152,
+                     max_request_bytes=20000000, private_persistence=True), sort_keys=True):
             raise ValueError()
         if notification_version == 0:
             if 'mobile_notifications' in caps:
@@ -589,13 +636,15 @@ class NativeProbe:
         if health.get('pid') != pid:
             raise RuntimeError('Native health PID mismatch')
         caps = self.request('/v1/capabilities')
-        if not isinstance(caps, dict) or (legacy and 'mobile_run_controls' in caps):
+        if not isinstance(caps, dict) or (legacy and any(
+                name in caps for name in ('mobile_run_controls', 'mobile_photos'))):
             raise RuntimeError('Unknown legacy capabilities')
         if not legacy:
             require_controls_capabilities(caps,
                 session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
                 notification_version=int('backend/native_notifications.py' in source_hashes),
-                clarification_version=int(source_hashes == APPROVED_CONTROL_HASHES))
+                clarification_version=_clarification_version(source_hashes),
+                photo_version=_photo_version(source_hashes))
         captured = dict(root=str(root), pid=pid, legacy=legacy, caps=caps, source_hashes=source_hashes,
                         start_ticks=started, bootstrap=bootstrap,
                         bridge_root=str(baseline), bridge_pid=self._bridge_pid(baseline))
@@ -648,7 +697,8 @@ class NativeProbe:
         require_controls_capabilities(
             caps, session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
             notification_version=int('backend/native_notifications.py' in source_hashes),
-            clarification_version=int(source_hashes == APPROVED_CONTROL_HASHES))
+            clarification_version=_clarification_version(source_hashes),
+            photo_version=_photo_version(source_hashes))
         self.verify_unchanged(root, baseline=dict(
             root=str(root), legacy=False, caps=caps, source_hashes=source_hashes,
             pid=pid, start_ticks=started), operational=True)
@@ -681,6 +731,8 @@ class NativeProbe:
             raise RuntimeError('Unchanged native health is not healthy')
         require_native_quiescence(health)  # Validate typed known evidence, permit busy.
         caps = self.request('/v1/capabilities')
+        if baseline['legacy'] and (not isinstance(caps, dict) or 'mobile_photos' in caps):
+            raise RuntimeError('Unknown legacy capabilities')
         if not baseline['legacy']:
             self._ready(health, baseline=baseline)  # Validate schema/source, permit busy.
             source_hashes = baseline.get('source_hashes')
@@ -690,7 +742,8 @@ class NativeProbe:
                 caps,
                 session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
                 notification_version=int('backend/native_notifications.py' in source_hashes),
-                clarification_version=int(source_hashes == APPROVED_CONTROL_HASHES))
+                clarification_version=_clarification_version(source_hashes),
+                photo_version=_photo_version(source_hashes))
             if operational:
                 self._require_operational_activity(health)
         if json.dumps(caps, sort_keys=True, allow_nan=False) != json.dumps(
@@ -746,8 +799,8 @@ class NativeProbe:
                                 'backend/native_session_deletion.py' in source_hashes),
                             notification_version=int(
                                 'backend/native_notifications.py' in source_hashes),
-                            clarification_version=int(
-                                source_hashes == APPROVED_CONTROL_HASHES))
+                            clarification_version=_clarification_version(source_hashes),
+                            photo_version=_photo_version(source_hashes))
                     if json.dumps(caps, sort_keys=True, allow_nan=False) != json.dumps(
                             baseline['caps'], sort_keys=True, allow_nan=False):
                         raise RuntimeError('Restored native capabilities differ')
@@ -755,7 +808,8 @@ class NativeProbe:
                     require_controls_capabilities(caps,
                         session_delete_version=int('backend/native_session_deletion.py' in source_hashes),
                         notification_version=int('backend/native_notifications.py' in source_hashes),
-                        clarification_version=int(source_hashes == APPROVED_CONTROL_HASHES))
+                        clarification_version=_clarification_version(source_hashes),
+                        photo_version=_photo_version(source_hashes))
                 if not legacy:
                     expected = baseline if baseline is not None else dict(
                         root=str(root), legacy=False, caps=caps, source_hashes=APPROVED_CONTROL_HASHES)

@@ -1,5 +1,6 @@
 import importlib.util
 import httpx
+import json
 import pytest
 
 
@@ -106,6 +107,146 @@ async def test_gateway_timeout_is_not_classified_as_native_run_not_found():
         with pytest.raises(IntegrationUnavailable) as error:
             await client.request('GET', '/v1/runs/native-run')
         assert error.value.__class__ is IntegrationUnavailable
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize('outcome', ['413', 'timeout', '503'])
+@pytest.mark.asyncio
+async def test_native_photo_rejection_is_distinct_from_ambiguous_dispatch(outcome):
+    from backend.hermes_client import GatewayClient, IntegrationUnavailable, NativeRunRejected
+    requests = []
+
+    async def handle(request):
+        requests.append((request.method, request.url.path, request.content))
+        if request.url.path == '/v1/capabilities':
+            return httpx.Response(200, json={'mobile_photos': {
+                'version': 1, 'max_images': 4, 'max_image_bytes': 2 * 1024 * 1024,
+                'max_request_bytes': 20_000_000, 'private_persistence': True}})
+        if outcome == 'timeout':
+            raise httpx.ReadTimeout('synthetic timeout')
+        return httpx.Response(int(outcome), json={'error': {'code': 'body_too_large'}})
+
+    client = GatewayClient('http://127.0.0.1:8642', 'synthetic-token', execution_ready=True,
+                           transport=httpx.MockTransport(handle))
+    try:
+        with pytest.raises(IntegrationUnavailable) as error:
+            await client.start(
+                'synthetic-session', 'Inspect a photo',
+                attachments=[{'type': 'image_url', 'image_url': {
+                    'url': 'data:image/png;base64,c3ludGhldGlj'}}],
+                attachment_ids=['a' * 32])
+        assert type(error.value) is (NativeRunRejected if outcome == '413' else IntegrationUnavailable)
+        assert [request[:2] for request in requests] == [
+            ('GET', '/v1/capabilities'), ('POST', '/v1/runs')]
+        sent = json.loads(requests[1][2])
+        assert sent['mobile_attachment_ids'] == ['a' * 32]
+        assert sent['input'][0]['content'][1]['image_url']['url'] == (
+            'data:image/png;base64,c3ludGhldGlj')
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize('changed', ['none', 'owner', 'profile', 'text', 'history', 'model', 'ids', 'endpoint', 'authorization', 'client'])
+@pytest.mark.asyncio
+async def test_photo_capability_proof_is_request_local_without_second_probe(changed):
+    from backend.hermes_client import GatewayClient, NativeRunRejected
+    calls = []
+    async def handle(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path == '/v1/capabilities':
+            return httpx.Response(200, json={'mobile_photos': {
+                'version': 1, 'max_images': 4, 'max_image_bytes': 2 * 1024 * 1024,
+                'max_request_bytes': 20_000_000, 'private_persistence': True}})
+        return httpx.Response(202, json={'run_id': 'synthetic-run'})
+    client = GatewayClient('http://127.0.0.1:8642', 'synthetic-token', execution_ready=True,
+                           transport=httpx.MockTransport(handle))
+    replacement = None
+    owner = ('synthetic-owner', 'default')
+    history = []
+    ids = ['a' * 32]
+    try:
+        proof = await client.require_photo_capability('s', 'Inspect', history, ids, [('image/png', 3)], owner)
+        options = {'history': history, 'attachments': [
+            {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,eHl6'}}],
+            'attachment_ids': ids, 'photo_owner': owner, 'photo_preflight': proof}
+        text = 'Inspect'
+        if changed == 'owner':
+            options['photo_owner'] = ('other-owner', 'default')
+        elif changed == 'profile':
+            options['photo_owner'] = ('synthetic-owner', 'other-profile')
+        elif changed == 'text':
+            text = 'Changed'
+        elif changed == 'history':
+            options['history'] = [{'role': 'user', 'content': 'Changed'}]
+        elif changed == 'model':
+            options.update(model='changed', provider='custom')
+        elif changed == 'ids':
+            options['attachment_ids'] = ['b' * 32]
+        elif changed == 'endpoint':
+            client.client.base_url = 'http://127.0.0.1:8643'
+        elif changed == 'authorization':
+            client.client.headers['Authorization'] = '******'
+        elif changed == 'client':
+            replacement = GatewayClient('http://127.0.0.1:8642', 'synthetic-token',
+                execution_ready=True, transport=httpx.MockTransport(handle))
+        target = replacement or client
+        if changed == 'none':
+            assert (await target.start('s', text, **options))['run_id'] == 'synthetic-run'
+            assert calls == [('GET', '/v1/capabilities'), ('POST', '/v1/runs')]
+        else:
+            with pytest.raises(NativeRunRejected, match='preflight'):
+                await target.start('s', text, **options)
+            assert calls == [('GET', '/v1/capabilities')]
+    finally:
+        await client.close()
+        if replacement is not None:
+            await replacement.close()
+
+
+@pytest.mark.asyncio
+async def test_locally_oversized_photo_request_is_proven_rejected_before_dispatch():
+    from backend.hermes_client import GatewayClient, NativeRunRejected
+    requests = []
+    client = GatewayClient(
+        'http://127.0.0.1:8642', 'synthetic-token', execution_ready=True,
+        transport=httpx.MockTransport(lambda request: requests.append(request)))
+    images = [{'type': 'image_url', 'image_url': {
+        'url': 'data:image/png;base64,' + 'A' * 2_796_200}} for _ in range(4)]
+    try:
+        with pytest.raises(NativeRunRejected, match='native handler limit'):
+            await client.start(
+                'synthetic-session', 'Inspect these photos',
+                history=[{'role': 'user', 'content': 'x' * 9_000_000}],
+                attachments=images, attachment_ids=['a' * 32, 'b' * 32, 'c' * 32, 'd' * 32])
+        assert requests == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize('capability', ['missing', 'unverified', 'private'])
+@pytest.mark.asyncio
+async def test_photo_dispatch_requires_versioned_private_native_listener(capability):
+    from backend.hermes_client import GatewayClient, NativeRunRejected
+    calls = []
+
+    async def handle(request):
+        calls.append(request.method)
+        if capability == 'unverified':
+            raise httpx.ReadTimeout('synthetic capability timeout')
+        return httpx.Response(200, json={'mobile_photos': {
+            'version': 1, 'max_images': 4, 'max_image_bytes': 2 * 1024 * 1024,
+            'max_request_bytes': 20_000_000, 'private_persistence': False}}
+            if capability == 'private' else {})
+
+    client = GatewayClient('http://127.0.0.1:8642', 'synthetic-token', execution_ready=True,
+                           transport=httpx.MockTransport(handle))
+    try:
+        with pytest.raises(NativeRunRejected):
+            await client.start('synthetic-session', 'Inspect photo',
+                attachments=[{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,YQ=='}}],
+                attachment_ids=['0' * 32])
+        assert calls == ['GET']
     finally:
         await client.close()
 

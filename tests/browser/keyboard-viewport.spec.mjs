@@ -8,7 +8,10 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
 const dir=process.env.HERMES_FRONTEND_DIR || fileURLToPath(new URL('../../frontend/',import.meta.url));
-async function browserFixture(t,{visual=false,live=false,startupFailure=false,fallback=false}={}) {
+async function browserFixture(t,{visual=false,live=false,startupFailure=false,fallback=false,csp=false}={}) {
+ const policy=csp==='apache'
+  ? (await readFile(new URL('../../deploy/apache-hermes-mobile.conf',import.meta.url),'utf8')).match(/Content-Security-Policy "([^"]+)"/)[1]
+  : csp?(await readFile(new URL('../../backend/app.py',import.meta.url),'utf8')).match(/^CSP="([^"]+)"$/m)[1]:null;
  const server=createServer(async(req,res)=>{
   const url=new URL(req.url,'http://fixture'),p=url.pathname.replace('/hermes/app-api','');
   const json=o=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(o));};
@@ -25,7 +28,7 @@ async function browserFixture(t,{visual=false,live=false,startupFailure=false,fa
   const name=url.pathname.replace(/^\/hermes\//,'')||'index.html';
   // Match the builder's 24-hex release suffix without intercepting other paths/modules.
   if(startupFailure && /^\/hermes\/ui(?:\.[a-f0-9]{24})?\.mjs$/.test(url.pathname)){res.writeHead(200,{'Content-Type':'text/javascript'});res.end('export async function mountApp(){throw Error("synthetic startup failure")}');return;}
-  try {const data=await readFile(join(dir,name));res.writeHead(200,{'Content-Type':({html:'text/html',css:'text/css',js:'text/javascript',mjs:'text/javascript'})[name.split('.').pop()]||'application/octet-stream'});res.end(data);}catch{res.writeHead(404).end();}
+  try {const data=await readFile(join(dir,name));res.writeHead(200,{'Content-Type':({html:'text/html',css:'text/css',js:'text/javascript',mjs:'text/javascript'})[name.split('.').pop()]||'application/octet-stream',...(policy?{'Content-Security-Policy':policy}:{})});res.end(data);}catch{res.writeHead(404).end();}
  });
  await new Promise(r=>server.listen(0,'127.0.0.1',r));
  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
@@ -52,6 +55,91 @@ async function inside(page,selector,top,height) {
  assert.ok(box.width>=40 && box.x>=0 && box.x+box.width<=await page.evaluate(()=>innerWidth)+1,`${selector} horizontal bounds`);
  return box;
 }
+test('compact photo picker uses the real file input and releases failed-send uploads on navigation',{timeout:20000},async t=>{
+ const page=await browserFixture(t,{csp:true}),deleted=[],uploaded=[];
+ const id='00000000000000000000000000000001';
+ await page.route('**/hermes/app-api/sessions/s/attachments**',async route=>{
+ if(route.request().method()==='DELETE'){deleted.push(route.request().url());return route.fulfill({status:204});}
+ uploaded.push(route.request().postDataBuffer());
+ return route.fulfill({status:201,json:{id,status:'pending'}});
+ });
+ await page.route('**/hermes/app-api/runs',route=>route.fulfill({status:413,json:{detail:'Synthetic definite rejection'}}));
+ const picker=page.getByRole('button',{name:'Add photos',exact:true});
+ await inside(page,'[aria-label="Add photos"]:not(input)',0,844);
+ const chooser=page.waitForEvent('filechooser');await picker.click();
+ const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=','base64');
+ await (await chooser).setFiles({name:'synthetic.png',mimeType:'image/png',buffer:bytes});
+ await page.getByRole('button',{name:'Remove photo 1'}).waitFor();
+ assert.equal(await page.locator('.photo-preview img').evaluate(async image=>{
+  try{await image.decode();return image.naturalWidth>0;}catch{return false;}
+ }),true,'selected photo decodes under the app CSP');
+ const cancel=page.waitForEvent('filechooser');await picker.click();await (await cancel).setFiles([]);
+ assert.equal(await page.locator('.photo-preview').count(),1,'cancel does not clear selection');
+ await page.getByRole('button',{name:'Send message',exact:true}).click();
+ await page.getByText(/Photo or message was not sent\. Your text and selected photos are retained/).waitFor();
+ assert.deepEqual(uploaded,[bytes]);
+ assert.equal(await page.locator('.photo-preview').count(),1);
+ await mkdir(artifactURL(),{recursive:true});
+ await page.screenshot({path:fileURLToPath(artifactURL('compact-photo-picker.png'))});
+ const release=page.waitForResponse(response=>response.request().method()==='DELETE');
+ await page.getByRole('button',{name:'Back to chats',exact:true}).click();await release;
+ await page.waitForFunction(()=>!document.querySelector('.photo-preview'));
+ assert.equal(deleted.length,1);
+ assert.ok(deleted[0].endsWith('/sessions/s/attachments/'+id));
+});
+test('ambiguous photo-send failure preserves the original request and selected IDs',{timeout:20000},async t=>{
+ const page=await browserFixture(t,{csp:true}),uploads=[],runs=[],deletes=[];
+ const id='00000000000000000000000000000001';
+ await page.route('**/hermes/app-api/sessions/s/attachments**',async route=>{
+  if(route.request().method()==='DELETE'){deletes.push(route.request().url());return route.fulfill({status:204});}
+  uploads.push(route.request().postDataBuffer());
+  return route.fulfill({status:201,json:{id,status:'pending'}});
+ });
+ await page.route('**/hermes/app-api/runs',async route=>{
+  runs.push(route.request().postDataJSON());
+  return route.fulfill({status:503,json:{detail:'Synthetic ambiguous outcome'}});
+ });
+ const picker=page.getByRole('button',{name:'Add photos',exact:true});
+ const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jXioAAAAASUVORK5CYII=','base64');
+ const text=page.getByRole('textbox',{name:'Message Hermes',exact:true});
+ await text.fill('Keep this exact request');
+ const firstChooser=page.waitForEvent('filechooser');await picker.click();
+ await (await firstChooser).setFiles({name:'original.png',mimeType:'image/png',buffer:bytes});
+ await page.getByRole('button',{name:'Send message',exact:true}).click();
+ await page.getByText(/The send outcome is uncertain/).waitFor();
+ assert.match(await page.locator('.photo-status').textContent(),/submitted photos are retained/);
+ const firstPayload=runs[0];
+ assert.equal(firstPayload.input,'Keep this exact request');
+ assert.deepEqual(firstPayload.attachments,[id]);
+ assert.equal(await page.getByRole('button',{name:'Remove photo 1'}).isDisabled(),true);
+
+ const secondChooser=page.waitForEvent('filechooser');await picker.click();
+ await (await secondChooser).setFiles({name:'new.png',mimeType:'image/png',buffer:bytes});
+ await page.getByRole('button',{name:'Send message',exact:true}).click();
+ await page.getByText(/Retry the original text and photo selection unchanged/).waitFor();
+ assert.equal(runs.length,1,'a changed selection cannot replay an uncertain attempt');
+ await page.getByRole('button',{name:'Remove photo 2'}).click();
+ await page.getByRole('button',{name:'Send message',exact:true}).click();
+ await page.getByText(/The send outcome is uncertain/).waitFor();
+ assert.equal(runs.length,2);
+ assert.deepEqual(runs[1],firstPayload);
+ assert.deepEqual(uploads,[bytes]);
+ assert.deepEqual(deletes,[]);
+ const saved=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('hermes:keyboard-fixture:attempt:s')));
+ assert.equal(saved.idempotency_key,firstPayload.idempotency_key);
+ assert.deepEqual(saved.attachment_ids,[id]);
+});
+test('selected photo previews decode under the deployed Apache content security policy',{timeout:20000},async t=>{
+ const page=await browserFixture(t,{csp:'apache'});
+ const picker=page.getByRole('button',{name:'Add photos',exact:true});
+ const chooser=page.waitForEvent('filechooser');await picker.click();
+ const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=','base64');
+ await (await chooser).setFiles({name:'apache-policy.png',mimeType:'image/png',buffer:bytes});
+ await page.getByRole('button',{name:'Remove photo 1'}).waitFor();
+ assert.equal(await page.locator('.photo-preview img').evaluate(async image=>{
+  try{await image.decode();return image.naturalWidth>0;}catch{return false;}
+ }),true);
+});
 test('browser fallback fits actual short and landscape viewports with native zoom still permitted',{timeout:20000},async t=>{
  const page=await browserFixture(t,{fallback:true});await page.getByRole('textbox',{name:'Message Hermes',exact:true}).fill('Fallback draft');
  for(const size of [{width:390,height:380},{width:844,height:390},{width:390,height:844}]){

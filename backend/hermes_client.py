@@ -1,6 +1,11 @@
 """Private, fail-closed adapter for installed Hermes's authenticated Runs API."""
 from urllib.parse import urlparse
+import asyncio
+import hashlib
 import httpx
+
+
+MAX_NATIVE_RUN_REQUEST_BYTES = 20_000_000
 
 
 class IntegrationUnavailable(RuntimeError):
@@ -9,6 +14,18 @@ class IntegrationUnavailable(RuntimeError):
 
 class NativeRunNotFound(IntegrationUnavailable):
     """An authenticated lookup proved that this process no longer owns the run."""
+
+
+class NativeRunRejected(IntegrationUnavailable):
+    """The native handler positively rejected a request before run admission."""
+
+
+class PhotoUnavailableBeforeAdmission(IntegrationUnavailable):
+    """A photo capability failure proved that no local admission occurred."""
+
+
+class PhotoRequestTooLarge(ValueError):
+    """Both native request budgets are checked before local admission."""
 
 
 class NativeClarificationRejected(IntegrationUnavailable):
@@ -33,6 +50,9 @@ class GatewayClient:
             raise IntegrationUnavailable('Private Hermes API is not configured')
         try:
             response=await self.client.request(method,path,**kwargs)
+            if (method.upper() == 'POST' and urlparse(path).path == '/v1/runs'
+                    and response.status_code == 413):
+                raise NativeRunRejected('Run request was rejected before admission; reduce its size and resend.')
             segments = urlparse(path).path.split('/')
             if (method.upper() == 'GET' and len(segments) == 4
                     and segments[:3] == ['', 'v1', 'runs'] and segments[3]
@@ -133,14 +153,106 @@ class GatewayClient:
             raise IntegrationUnavailable('Steering acknowledgement is unresolved')
         return reply
 
-    async def start(self,session_id,text,history=None,*,model=None,provider=None):
+    async def start(self,session_id,text,history=None,*,model=None,provider=None,
+                    attachments=None,attachment_ids=None,photo_preflight=None,photo_owner=None):
         self.require_execution()
+        payload=self._run_payload(session_id,text,history,model=model,provider=provider,
+                                  attachments=attachments,attachment_ids=attachment_ids)
+        request=self.client.build_request('POST','/v1/runs',json=payload)
+        if len(request.content)>MAX_NATIVE_RUN_REQUEST_BYTES:
+            raise NativeRunRejected('Photo request exceeds the native handler limit; remove photos or shorten earlier context.')
+        if attachments:
+            sizes = []
+            for part in attachments:
+                header, encoded = part['image_url']['url'].split(',', 1)
+                sizes.append((header[5:].split(';', 1)[0],
+                              len(encoded) // 4 * 3 - len(encoded) + len(encoded.rstrip('='))))
+            binding = self._photo_capability_binding(
+                session_id,text,history,attachment_ids,sizes,photo_owner,model=model,provider=provider)
+            if photo_preflight is None:
+                try:
+                    await self.require_photo_capability(
+                        session_id,text,history,attachment_ids,sizes,photo_owner,model=model,provider=provider)
+                except PhotoUnavailableBeforeAdmission as exc:
+                    raise NativeRunRejected(str(exc)) from None
+            elif photo_preflight != binding:
+                raise NativeRunRejected('Native photo preflight no longer matches this request; no image was dispatched.')
+        return await self.request('POST','/v1/runs',content=request.content,
+                                  headers={'Content-Type':'application/json'})
+
+    @staticmethod
+    def _run_payload(session_id,text,history=None,*,model=None,provider=None,
+                     attachments=None,attachment_ids=None):
         payload={'session_id':session_id,'input':text,'conversation_history':history or []}
+        if attachments is not None or attachment_ids is not None:
+            if (not isinstance(attachments,list) or not 1 <= len(attachments) <= 4
+                    or not isinstance(attachment_ids,list) or len(attachment_ids)!=len(attachments)
+                    or any(not isinstance(value,dict) or value.get('type')!='image_url'
+                           or not isinstance(value.get('image_url'),dict)
+                           or not isinstance(value['image_url'].get('url'),str)
+                           or not value['image_url']['url'].startswith('data:image/')
+                           for value in attachments)
+                    or any(not isinstance(value,str) or len(value)!=32
+                           or any(char not in '0123456789abcdef' for char in value)
+                           for value in attachment_ids)):
+                raise ValueError('Invalid private photo run binding')
+            payload['input']=[{'role':'user','content':[
+                {'type':'text','text':text}, *attachments]}]
+            payload['mobile_attachment_ids']=attachment_ids
         if model is not None or provider is not None:
             if not model or not provider:
                 raise ValueError('Both model and provider are required')
             payload.update(model=model,provider=provider)
-        return await self.request('POST','/v1/runs',json=payload)
+        return payload
+
+    def validate_run_size(self,session_id,text,history,attachment_ids,image_sizes,*,model=None,provider=None):
+        from .native_run_controls import validate_photo_text_budget
+        attachments=[{'type':'image_url','image_url':{
+            'url':f'data:{content_type};base64,'}} for content_type,_ in image_sizes]
+        payload=self._run_payload(session_id,text,history,model=model,provider=provider,
+                                  attachments=attachments,attachment_ids=attachment_ids)
+        try:
+            validate_photo_text_budget(payload)
+        except ValueError as exc:
+            raise PhotoRequestTooLarge(str(exc)) from None
+        body=self.client.build_request('POST','/v1/runs',json=payload).content
+        size=len(body)+sum(((image_size+2)//3)*4 for _,image_size in image_sizes)
+        if size>MAX_NATIVE_RUN_REQUEST_BYTES:
+            raise PhotoRequestTooLarge('Photo request exceeds the native handler limit; remove photos or shorten earlier context.')
+        return size
+
+    def _photo_capability_binding(self,session_id,text,history,attachment_ids,image_sizes,owner,*,model=None,provider=None):
+        attachments=[{'type':'image_url','image_url':{'url':f'data:{mime};base64,'}}
+                     for mime,_ in image_sizes]
+        payload=self._run_payload(session_id,text,history,model=model,provider=provider,
+                                  attachments=attachments,attachment_ids=attachment_ids)
+        request=self.client.build_request('POST','/v1/runs',json=payload)
+        digest=hashlib.sha256(request.content).digest()
+        authority=hashlib.sha256(
+            (self.token + '\0' + request.headers.get('Authorization','')).encode()).digest()
+        return (self, self.client, str(request.url), authority,
+                tuple(owner or ()), digest, tuple(image_sizes))
+
+    async def require_photo_capability(self,session_id,text,history,attachment_ids,image_sizes,owner,*,model=None,provider=None):
+        self.require_execution()
+        binding=self._photo_capability_binding(
+            session_id,text,history,attachment_ids,image_sizes,owner,model=model,provider=provider)
+        try:
+            async with asyncio.timeout(30):
+                capabilities=await self.request('GET','/v1/capabilities')
+        except (IntegrationUnavailable, TimeoutError):
+            raise PhotoUnavailableBeforeAdmission(
+                'Native photo capability could not be verified; no photo run was admitted. Retry after correcting the listener.') from None
+        photos=capabilities.get('mobile_photos') if isinstance(capabilities,dict) else None
+        if photos != {'version':1,'max_images':4,'max_image_bytes':2*1024*1024,
+                      'max_request_bytes':MAX_NATIVE_RUN_REQUEST_BYTES,'private_persistence':True}:
+            raise PhotoUnavailableBeforeAdmission(
+                'Native photos are unavailable; activate the reviewed photo listener before resending.')
+        if binding != self._photo_capability_binding(
+                session_id,text,history,attachment_ids,image_sizes,owner,model=model,provider=provider):
+            raise PhotoUnavailableBeforeAdmission(
+                'Native photo listener changed during verification; no photo run was admitted.')
+        return binding
 
     async def stop(self,run_id):
         from urllib.parse import quote

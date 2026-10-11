@@ -205,7 +205,10 @@ def _journal_turn(run, events):
     common = {'tool_calls': None, 'timestamp': run['created_at'], 'run_id': run['id'],
               'run_status': run['status'], 'source': 'journal', 'run_error': run['error']}
     prefix = 'journal:' + run['id'] + ':'
-    items = [dict(common, id=prefix + 'user', role='user', content=run['input'])]
+    user_item = dict(common, id=prefix + 'user', role='user', content=run['input'])
+    if run.get('attachment_ids'):
+        user_item['attachment_ids'] = list(run['attachment_ids'])
+    items = [user_item]
     pending, text_parts = [], []
 
     def public_text(text, event_id, observed_at, timed_chunks=None):
@@ -470,9 +473,10 @@ class NativeCatalog:
         """Capture an ID boundary, including hidden rows; never a text heuristic."""
         from contextlib import closing
         with closing(self._connect(profile)) as c:
+            canonical_session_id = canonical_session_id or session_id
             if not c.execute('SELECT 1 FROM sessions WHERE id=?', (session_id,)).fetchone():
                 raise KeyError(session_id)
-            message_id = c.execute('SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?', (session_id,)).fetchone()[0]
+            message_id = c.execute('SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?', (canonical_session_id,)).fetchone()[0]
         return {'session_id': session_id, 'canonical_session_id': canonical_session_id or session_id,
                 'message_id': message_id}
 
@@ -486,6 +490,7 @@ class NativeCatalog:
         has_public_text = bool(snapshot and any(event['name'] in ('delta', 'commentary')
                                                for event in snapshot.get('replay_events', ())))
         synthetic = []
+        native_attachments = {}
         conservative = False
         with closing(self._connect(profile)) as c:
             # Count, turn-completion proof, and page must share one native view.
@@ -521,13 +526,15 @@ class NativeCatalog:
                 boundary = start['message_id'] if start else 0
                 matched = complete = False
                 if (start and end and start['canonical_session_id'] == session_id
-                        and start['session_id'] == session_id and end['session_id'] == session_id):
+                        and end['canonical_session_id'] == session_id):
                     query = ('SELECT id,role,content,tool_calls FROM messages WHERE session_id=? AND id>? AND id<=?'
                              + visibility + ' ORDER BY id')
                     args = (session_id, boundary, end['message_id'])
                     first = _first_turn_row(iter(c.execute(query, args)), processes)
                     matched = matches_user(first, old, reminders)
                     complete = matched and isinstance(old['output'], str) and _completed_turn(iter(c.execute(query, args)), old, processes=processes, reminders=reminders)
+                if matched and old.get('attachment_ids'):
+                    native_attachments[first['id']] = (old['id'], list(old['attachment_ids']))
                 if entry.get('replay_events'):
                     # Prove ownership in the original/archived generation before
                     # following copies. A relocated interval can cross an external
@@ -554,15 +561,26 @@ class NativeCatalog:
                             'timestamp': old['created_at'] if role == 'user' else old.get('updated_at'),
                             'run_id': old['id'], 'run_status': old['status'], 'source': 'journal',
                             'reconciliation': 'unverified', 'run_error': old['error']}
+                    if role == 'user' and old.get('attachment_ids'):
+                        item['attachment_ids'] = list(old['attachment_ids'])
                     synthetic.append((position, index, item))
             if anchor:
                 history_position = None
                 if (run['status'] == 'completed' and isinstance(run['output'], str)
                         and anchor['canonical_session_id'] == session_id):
                     call_field = ',tool_call_id' if 'tool_call_id' in columns else ''
-                    tail = c.execute('SELECT id,role,content,tool_calls' + call_field + ' FROM messages WHERE session_id=? AND id>?'
-                                     + visibility + ' ORDER BY id', (session_id, anchor['message_id']))
-                    if not has_guidance and not has_public_text and _completed_turn(iter(tail), run, snapshot.get('tool_events', ()), processes, reminders):
+                    query = ('SELECT id,role,content,tool_calls' + call_field
+                             + ' FROM messages WHERE session_id=? AND id>?'
+                             + visibility + ' ORDER BY id')
+                    args = (session_id, anchor['message_id'])
+                    first = _first_turn_row(iter(c.execute(query, args)), processes)
+                    complete = (not has_guidance and not has_public_text
+                                and matches_user(first, run, reminders)
+                                and _completed_turn(iter(c.execute(query, args)), run,
+                                                    snapshot.get('tool_events', ()), processes, reminders))
+                    if complete:
+                        if run.get('attachment_ids'):
+                            native_attachments[first['id']] = (run['id'], list(run['attachment_ids']))
                         overlay = None
                 if overlay and rewritten_turn is not None:
                     owned, conservative = rewritten_turn
@@ -580,6 +598,8 @@ class NativeCatalog:
                     matched = (matches_user(first, run, reminders)
                                and anchor['canonical_session_id'] == session_id)
                     if matched:
+                        if run.get('attachment_ids'):
+                            native_attachments[first['id']] = (run['id'], list(run['attachment_ids']))
                         next_user = next((row['id'] for row in tail if _ordinary_user(row, processes)), None)
                         visibility += ' AND (id<' + str(int(first['id']))
                         visibility += (' OR id>=' + str(int(next_user))) if next_user is not None else ''
@@ -636,6 +656,10 @@ class NativeCatalog:
             items = []
             for row in rows:
                 item = dict(row)
+                if item['id'] in native_attachments:
+                    run_id, attachment_ids = native_attachments[item['id']]
+                    item['run_id'] = run_id
+                    item['attachment_ids'] = attachment_ids
                 if item['id'] in reminders:
                     item.update({key: value for key, value in reminders[item['id']].items() if key != 'run_id'})
                 compression = item['id'] in compressions

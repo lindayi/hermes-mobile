@@ -67,6 +67,65 @@ with tempfile.TemporaryDirectory(prefix='hermes-native-startup-') as d:
                     assert (await response.json())['pending_approvals']==[]
                 async with client.post(url+'/v1/runs/missing/steer',headers=headers,json={'input':'fixture','idempotency_key':'fixture-key'}) as response:
                     assert response.status==404
+                captured={}
+                class CapturingAgent:
+                    def run_conversation(self, user_message, conversation_history, task_id):
+                        captured.update(user_message=user_message,history=conversation_history)
+                        return {'final_response':'synthetic-no-model'}
+                adapter=holder['adapter']
+                adapter._create_agent=lambda **kwargs: CapturingAgent()
+                adapter._max_concurrent_runs=1
+                import base64
+                import io
+                import random
+                from PIL import Image
+                image_bytes = io.BytesIO()
+                pixels = random.Random(85).randbytes(800 * 800 * 3)
+                Image.frombytes('RGB', (800, 800), pixels).save(image_bytes, format='PNG')
+                normalized_bytes = image_bytes.getvalue()
+                assert len(normalized_bytes) <= 2 * 1024 * 1024
+                encoded_image=base64.b64encode(normalized_bytes).decode()
+                image_part={'type':'image_url','image_url':{
+                    'url':'data:image/png;base64,'+encoded_image}}
+                payload={
+                    'session_id':'photo-native-synthetic',
+                    'input':[{'role':'user','content':[
+                        {'type':'text','text':'Inspect four synthetic photos.'},
+                        image_part,image_part,image_part,image_part,
+                    ]}],
+                    'conversation_history':[],
+                    'mobile_attachment_ids':[f'{index:032x}' for index in range(4)],
+                }
+                assert base64.b64decode(encoded_image)==normalized_bytes
+                request_size=len(json.dumps(payload).encode())
+                from backend.native_run_controls import PHOTO_REQUEST_BYTES
+                assert 10_000_000<request_size<PHOTO_REQUEST_BYTES
+                async with client.post(url+'/v1/runs',headers=headers,json=payload) as response:
+                    assert response.status==202
+                    run_id=(await response.json())['run_id']
+                for _ in range(100):
+                    if captured:
+                        break
+                    await asyncio.sleep(.05)
+                assert captured['user_message'][1]['image_url']['url']==image_part['image_url']['url']
+                assert len(captured['user_message'])==5
+                for _ in range(100):
+                    async with client.get(url+'/v1/runs/'+run_id,headers=headers) as response:
+                        terminal = await response.json()
+                    if terminal.get('status') == 'completed':
+                        break
+                    await asyncio.sleep(.05)
+                assert terminal['status'] == 'completed'
+                assert adapter._pending_agent_requests == 0
+                assert adapter.active_agent_work_count() == 0
+                invalid = dict(payload, mobile_attachment_ids=payload['mobile_attachment_ids'][:3])
+                captured.clear()
+                async with client.post(url+'/v1/runs',headers=headers,json=invalid) as response:
+                    assert response.status==413
+                assert not captured
+                async with client.post(url+'/v1/runs',json={'input': 'Synthetic anonymous request'}) as response:
+                    assert response.status==401
+                assert not captured
             os.kill(os.getpid(),signal.SIGTERM)
             await asyncio.wait_for(task,10)
             print(json.dumps({'native_http_startup':True,'anonymous_denied':True,'versioned_controls':True,'missing_run_rejected':True,'models_invoked':0}))

@@ -12,6 +12,7 @@
   "tests/test_native_maintenance.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
   "tests/test_native_notifications.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
   "tests/test_native_parallel_lease_contract.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
+  "tests/test_native_photo_compat.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
   "tests/test_native_run_controls.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
   "tests/test_native_session_deletion.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",
   "tests/test_native_session_deletion_review.py": "Requires the installed, patched Hermes runtime; synthetic isolated fixtures only.",

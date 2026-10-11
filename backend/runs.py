@@ -133,20 +133,27 @@ class RunJournal:
             self._require_session(c, user_id, profile, session_id)
 
     @staticmethod
-    def _related_runs(c, profile, session_id):
-        rows = c.execute('''SELECT r.*, a.session_id AS anchor_session_id,
-            a.canonical_session_id FROM runs r LEFT JOIN run_history_anchors a ON a.run_id=r.id
-            WHERE r.profile=?''', (profile,)).fetchall()
+    def _related_runs(c, profile, session_id, user_id=None):
         aliases, related = {session_id}, {}
-        while True:
-            before = len(aliases)
+        frontier = [session_id]
+        while frontier:
+            sid = frontier.pop()
+            rows = c.execute('''SELECT r.*, r.rowid AS admission_order,
+                a.message_id AS anchor_message_id, a.session_id AS anchor_session_id,
+                a.canonical_session_id FROM (
+                    SELECT id AS run_id FROM runs WHERE profile=? AND session_id=?
+                    UNION SELECT run_id FROM run_history_anchors WHERE session_id=?
+                    UNION SELECT run_id FROM run_history_anchors WHERE canonical_session_id=?
+                ) identities CROSS JOIN runs r ON r.id=identities.run_id
+                LEFT JOIN run_history_anchors a ON a.run_id=r.id
+                WHERE r.profile=? AND (? IS NULL OR r.user_id=?)''',
+                (profile, sid, sid, sid, profile, user_id, user_id)).fetchall()
             for row in rows:
                 ids = {row['session_id'], row['anchor_session_id'], row['canonical_session_id']} - {None}
-                if aliases & ids:
-                    aliases.update(ids)
-                    related[row['id']] = row
-            if len(aliases) == before:
-                return aliases, list(related.values())
+                frontier.extend(ids - aliases)
+                aliases.update(ids)
+                related[row['id']] = row
+        return aliases, sorted(related.values(), key=lambda row: row['admission_order'])
 
     @staticmethod
     def _expire_pending_approvals(c, user_id, profile, *, run_id=None, approval_id=None, request_id=None):
@@ -222,8 +229,16 @@ class RunJournal:
                           [(user_id, profile, alias, operation_id, 'prepared', time.time()) for alias in aliases])
             return dict(operation_id=operation_id, state='prepared')
 
+    @staticmethod
+    def _attachment_ids(c, run_id):
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='attachments'").fetchone():
+            return []
+        return [row[0] for row in c.execute(
+            "SELECT id FROM attachments WHERE run_id=? AND state IN ('bound','expired','releasing') ORDER BY position,id",
+            (run_id,))]
+
     def submit(self, user_id, profile, session_id, text, key, *, history_anchor=None, selection=None,
-               conversation_roots=None):
+               conversation_roots=None, attachment_ids=(), attachment_store=None):
         with closing(self.connect()) as c, c:
             c.execute('BEGIN IMMEDIATE')
             if c.execute('SELECT 1 FROM deployment_gate').fetchone():
@@ -238,7 +253,13 @@ class RunJournal:
                 saved=c.execute('SELECT selection FROM run_selections WHERE run_id=?',(row['id'],)).fetchone()
                 if (json.loads(saved[0]) if saved else None)!=selection:
                     raise RunConflict('Idempotency key already used for another selection')
-                return dict(row,**({'selection':selection} if selection is not None else {})), False
+                saved_attachments = self._attachment_ids(c, row['id'])
+                if saved_attachments != list(attachment_ids):
+                    raise RunConflict('Idempotency key already used for other photo attachments')
+                extra = {'selection':selection} if selection is not None else {}
+                if saved_attachments:
+                    extra['attachment_ids'] = saved_attachments
+                return dict(row, **extra), False
             if c.execute("SELECT 1 FROM runs WHERE profile=? AND session_id=? AND status IN ('queued','running','stopping','waiting_for_approval','waiting_for_clarification','unknown')", (profile,session_id)).fetchone():
                 raise RunConflict('Session has an active or unresolved run')
             # Match the dedicated native listener's bounded capacity. Unknown
@@ -277,12 +298,19 @@ class RunJournal:
             c.execute('INSERT INTO runs(id,user_id,profile,session_id,input,idempotency_key,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)', (rid,user_id,profile,session_id,text,key,'queued',now,now))
             if selection is not None:
                 c.execute('INSERT INTO run_selections VALUES(?,?)',(rid,json.dumps(selection,sort_keys=True)))
+            if attachment_ids:
+                if attachment_store is None:
+                    raise ValueError('Photo storage is unavailable')
+                attachment_store.bind(c, user_id, profile, session_id, list(attachment_ids), rid)
             # Persist exactly the identity checked above, never reload it after
             # admission. Anchor failure leaves no run or selection behind.
             if anchor is not None:
                 c.execute('INSERT INTO run_history_anchors VALUES(?,?,?,?)',
                           (rid, anchor['session_id'], anchor['canonical_session_id'], anchor['message_id']))
-            return dict(c.execute('SELECT * FROM runs WHERE id=?',(rid,)).fetchone(),**({'selection':selection} if selection is not None else {})), True
+            extra = {'selection':selection} if selection is not None else {}
+            if attachment_ids:
+                extra['attachment_ids'] = list(attachment_ids)
+            return dict(c.execute('SELECT * FROM runs WHERE id=?',(rid,)).fetchone(), **extra), True
 
     def _require_run(self, c, user_id, run_id):
         row = c.execute('SELECT * FROM runs WHERE id=? AND user_id=?', (run_id, user_id)).fetchone()
@@ -296,7 +324,11 @@ class RunJournal:
             c.execute('BEGIN')
             row = self._require_run(c, user_id, run_id)
             saved=c.execute('SELECT selection FROM run_selections WHERE run_id=?',(run_id,)).fetchone()
-            return dict(row,**({'selection':json.loads(saved[0])} if saved else {}))
+            extra = {'selection':json.loads(saved[0])} if saved else {}
+            attachments = self._attachment_ids(c, run_id)
+            if attachments:
+                extra['attachment_ids'] = attachments
+            return dict(row, **extra)
 
     def session_statuses(self, user_id, profile, session_ids):
         """One allowlisted read for a page, scoped before newest-run selection."""
@@ -332,6 +364,9 @@ class RunJournal:
             if row is None:
                 return {'run': None, 'anchor': None}
             run = dict(row)
+            attachments = self._attachment_ids(c, run['id'])
+            if attachments:
+                run['attachment_ids'] = attachments
             anchor = {key: run.pop('anchor_' + key) for key in ('message_id', 'session_id', 'canonical_session_id')}
             return {'run': run, 'anchor': anchor if anchor['message_id'] is not None else None}
 
@@ -371,17 +406,24 @@ class RunJournal:
         with closing(self.connect()) as c:
             c.execute('BEGIN')
             self._require_session(c, user_id, profile, session_id)
-            rows = c.execute('''SELECT r.*, a.message_id AS anchor_message_id,
-                a.session_id AS anchor_session_id, a.canonical_session_id AS anchor_canonical_session_id
-                FROM runs r LEFT JOIN run_history_anchors a ON a.run_id=r.id
-                WHERE r.user_id=? AND r.profile=? AND r.session_id=?
-                ORDER BY r.rowid''', (user_id, profile, session_id)).fetchall()
+            _, rows = self._related_runs(c, profile, session_id, user_id)
             replay_events, event_cursor = [], 0
             if rows:
                 event_cursor = c.execute('SELECT COALESCE(MAX(id),0) FROM events WHERE run_id=?',
                                          (rows[-1]['id'],)).fetchone()[0]
                 replay_events = self._replay_events(c, rows[-1]['id'])
             prior_replays = {}
+            attachments_by_run = {}
+            if rows and c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='attachments'").fetchone():
+                run_ids = [row['id'] for row in rows]
+                for offset in range(0, len(run_ids), 250):
+                    batch = run_ids[offset:offset + 250]
+                    for attachment in c.execute('''SELECT a.run_id,a.id FROM attachments a
+                        WHERE a.user_id=? AND a.profile=? AND a.run_id IN ('''
+                        + ','.join('?' for _ in batch) + ''')
+                        AND a.state IN ('bound','expired','releasing')
+                        ORDER BY a.run_id,a.position,a.id''', (user_id, profile, *batch)):
+                        attachments_by_run.setdefault(attachment['run_id'], []).append(attachment['id'])
             for row in rows[:-1]:
                 if c.execute("SELECT 1 FROM events WHERE run_id=? AND name IN ('steering','clarification') LIMIT 1",
                              (row['id'],)).fetchone():
@@ -391,6 +433,11 @@ class RunJournal:
         entries = []
         for row in rows:
             run = dict(row)
+            run.pop('admission_order')
+            run['anchor_canonical_session_id'] = run.pop('canonical_session_id')
+            attachments = attachments_by_run.get(run['id'], [])
+            if attachments:
+                run['attachment_ids'] = attachments
             anchor = {key: run.pop('anchor_' + key) for key in ('message_id', 'session_id', 'canonical_session_id')}
             entries.append({'run': run, 'anchor': anchor if anchor['message_id'] is not None else None})
             if run['id'] in prior_replays:

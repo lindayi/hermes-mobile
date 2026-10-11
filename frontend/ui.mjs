@@ -5,6 +5,7 @@ import {createModelControls} from './model-controls.mjs';
 import {createSessionSwipe} from './session-swipe.mjs';
 import {observeDisclosureReachability} from './disclosure-reachability.mjs';
 import {markHistoryNode,backgroundPlacement} from './background-placement.mjs';
+import {BASE} from './api.mjs';
 
 // Presentation only: these dates never participate in transcript ordering.
 export function formatMessageTime(value, {locale, timeZone} = {}) {
@@ -52,6 +53,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   const deletionKey=(owner,id)=>JSON.stringify([owner,id]);
   const storage = {get(key,persistent=false) { try { return (persistent ? win.localStorage : win.sessionStorage).getItem(key); } catch { return null; } }, set(key,value,persistent=false) {try { const store=persistent ? win.localStorage : win.sessionStorage;value == null ? store.removeItem(key) : store.setItem(key,value); } catch { /* private browsing may disable storage */ }}};
   const key = name => `hermes:${state.user?.id}:${name}`;
+  const photoURL=(sessionId,id)=>`${BASE}app-api/sessions/${encodeURIComponent(sessionId)}/attachments/${id}`;
   const h = (tag, attrs = {}, ...children) => {
     const el = doc.createElement(tag);
     for (const [key,value] of Object.entries(attrs)) {
@@ -907,6 +909,75 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const draftKey=key(`draft:${session.id}`);
     const textarea = h('textarea',{name:'message',rows:2,placeholder:'Message Hermes…','aria-label':'Message Hermes',maxlength:32000});
     textarea.value=drafts.get(session.id) ?? storage.get(draftKey) ?? '';
+    const selectedPhotos=[];
+    let pendingPhotoSubmission=null;
+    const photoInput=h('input',{class:'photo-input',type:'file',hidden:true,multiple:true,accept:'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp','aria-label':'Add photos'});
+    const addPhotos=button('Photos',()=>photoInput.click(),'quiet',{'aria-label':'Add photos',title:'Add up to four JPEG, PNG, or WebP photos'});
+    const photoTray=h('div',{class:'photo-tray',hidden:true,'aria-label':'Selected photos'});
+    const photoStatus=h('p',{class:'photo-status caption',role:'status','aria-live':'polite',hidden:true});
+    const releasePreview=photo=>{if(photo.previewUrl)win.URL?.revokeObjectURL?.(photo.previewUrl);};
+    const releasePhoto=async photo=>{if(photo.metadata)try{await api.request(`/sessions/${encodeURIComponent(session.id)}/attachments/${photo.metadata.id}`,{method:'DELETE'});}catch{}};
+    const clearPhotos=(release=true)=>{const retained=new Set(pendingPhotoSubmission?.attachmentIds || []);for(const photo of selectedPhotos){if(release && !retained.has(photo.metadata?.id))void releasePhoto(photo);releasePreview(photo);}selectedPhotos.length=0;photoTray.replaceChildren();photoTray.hidden=true;photoInput.value='';};
+    const renderPhotoSelection=()=>{
+      photoTray.replaceChildren();
+      selectedPhotos.forEach((photo,index)=>{
+        const remove=button('Remove',event=>{
+          if(photo.removing)return;
+          photo.removing=true;
+          event.currentTarget.dataset.locked='true';
+          void action(event.currentTarget,async()=>{
+            try{
+              if(photo.metadata)await api.request(`/sessions/${encodeURIComponent(session.id)}/attachments/${photo.metadata.id}`,{method:'DELETE'});
+            }catch(error){
+              photo.removing=false;
+              photoStatus.hidden=false;
+              photoStatus.textContent='Could not remove photo. Your text and selected photos are retained; try again.';
+              renderPhotoSelection();
+              throw error;
+            }
+            if(!current())return;
+            const position=selectedPhotos.indexOf(photo);
+            if(position<0)return;
+            releasePreview(photo);selectedPhotos.splice(position,1);photoStatus.hidden=true;renderPhotoSelection();
+          });
+        },'quiet photo-remove',{'aria-label':`Remove photo ${index+1}`});
+        const inFlight=pendingPhotoSubmission?.attachmentIds.includes(photo.metadata?.id);
+        remove.disabled=!!inFlight || !!photo.removing;remove.dataset.locked=String(!!inFlight || !!photo.removing);
+        const preview=photo.previewUrl || photo.metadata?.url;
+        photoTray.append(h('div',{class:'photo-preview'},preview?h('img',{src:preview,alt:`Selected photo ${index+1}`}):h('span',{class:'caption'},'Photo selected'),remove));
+      });
+      photoTray.hidden=!selectedPhotos.length;
+    };
+    photoInput.addEventListener('change',()=>{
+      const files=[...(photoInput.files || [])];
+      photoInput.value='';
+      if(!files.length)return;
+      if(selectedPhotos.length+files.length>4){
+        photoStatus.hidden=false;photoStatus.textContent='Choose no more than four photos per message.';
+        return;
+      }
+      const supported=files.map(file=>{
+        const extension=/\.([^.]+)$/.exec(file.name || '')?.[1]?.toLowerCase();
+        const type=(file.type || '').toLowerCase();
+        if(['image/heic','image/heif','image/heic-sequence','image/heif-sequence'].includes(type)
+            || ['heic','heif'].includes(extension)){
+          photoStatus.hidden=false;photoStatus.textContent='HEIC/HEIF photos are not supported yet. Choose JPEG, PNG, or WebP.';
+          return null;
+        }
+        if(!['image/jpeg','image/png','image/webp'].includes(type)
+            && !['jpg','jpeg','png','webp'].includes(extension)){
+          photoStatus.hidden=false;photoStatus.textContent='Choose a JPEG, PNG, or WebP photo.';
+          return null;
+        }
+        let previewUrl='';
+        try{previewUrl=win.URL?.createObjectURL?.(file) || '';}catch{}
+        return {file,previewUrl,uploadKey:win.crypto.randomUUID(),metadata:null};
+      });
+      if(supported.some(photo=>!photo)){for(const photo of supported)if(photo)releasePreview(photo);return;}
+      selectedPhotos.push(...supported);
+      photoStatus.hidden=true;photoStatus.textContent='';
+      renderPhotoSelection();
+    });
     const accepted=result.run || result.last_run;
     const approvalNotice=h('div',{class:'approval-notice',role:'status','aria-live':'polite',hidden:true});
     let approvalRevision=0, approvalPending=new Map(), genericApproval=false, currentApprovalRun=accepted?.id;
@@ -917,9 +988,30 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     void reconcileApprovals();
     let pending=attempts.get(session.id);
     try {pending ||= JSON.parse(storage.get(key(`attempt:${session.id}`)));}catch{}
+    if(pending && !Array.isArray(pending.attachment_ids) && pending.upload_pending!==true){
+      pending={...pending,attachment_ids:[],legacy_text:true};
+      attempts.set(session.id,pending);storage.set(key(`attempt:${session.id}`),JSON.stringify(pending));
+    }
     if(accepted?.idempotency_key && accepted.idempotency_key===pending?.idempotency_key){
       attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);
       if(textarea.value.trim()===pending.input){textarea.value='';drafts.delete(session.id);storage.set(draftKey,null);}
+      pending=null;
+    }
+    if(pending?.upload_pending===true && !Array.isArray(pending.attachment_ids)){
+      // Files do not survive composer teardown; only this marker proves no run dispatch.
+      attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);
+      pending=null;
+      photoStatus.hidden=false;
+      photoStatus.textContent='Photos could not be restored. Your draft is retained; select them again before sending.';
+    }
+    if(Array.isArray(pending?.attachment_ids) && pending.attachment_ids.length<=4){
+      for(const id of pending.attachment_ids){
+        if(typeof id!=='string' || !/^[a-f0-9]{32}$/.test(id))continue;
+        selectedPhotos.push({file:null,previewUrl:'',uploadKey:'',metadata:{
+          id,status:'pending',url:photoURL(session.id,id)}});
+      }
+      pendingPhotoSubmission={attachmentIds:[...pending.attachment_ids],photos:[...selectedPhotos]};
+      renderPhotoSelection();
     }
     let draftRevision=0;
     textarea.addEventListener('input',()=>{if(version!==routeVersion)return;draftRevision++;drafts.set(session.id,textarea.value);storage.set(draftKey,textarea.value);});
@@ -953,6 +1045,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     async function steer(retryAttempt){
       if(version!==routeVersion || state.user?.id!==steeringOwner || !steeringEnabled || steeringStatus!=='running' || steeringBusy || !steeringRun)return;
+      if(selectedPhotos.length){steerStatus.hidden=false;steerStatus.textContent='Photos cannot be sent as guidance to an active run. Keep them selected and send them in a new message after this run finishes.';return;}
       const input=retryAttempt?.input || textarea.value.trim();if(!input)return;
       const runId=steeringRun,submittedRevision=draftRevision,attemptKey=key(`steer:${session.id}:${runId}`);
       controlsRevision++;
@@ -985,6 +1078,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       dispatch=supported?steer:idle?submit:null;
       send.disabled=supported?status!=='running' || steeringBusy:!idle;
       send.dataset.locked=String(send.disabled);send.dataset.state=status;
+      addPhotos.disabled=supported;photoInput.disabled=supported;
       send.setAttribute('aria-label',label);send.title=status==='stopping'?'Stop requested':label;
       send.replaceChildren(icon('send'));
       if(supported)send.setAttribute('aria-describedby','steering-help');else send.removeAttribute('aria-describedby');
@@ -1001,24 +1095,96 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     currentModelSync=(owner,sessionId)=>{if(owner===modelOwner && sessionId===session.id)syncModelLock();};
     const modelObserver=new win.MutationObserver(syncModelLock);modelObserver.observe(send,{attributes:true,attributeFilter:['disabled','data-state']});syncModelLock();
     win.addEventListener('focus',refreshSteering);
-    const previousExtras=stopExtras;stopExtras=()=>{steeringRun=null;win.removeEventListener('focus',refreshSteering);modelObserver.disconnect();modelControls.destroy();previousExtras?.();};
+    const previousExtras=stopExtras;stopExtras=()=>{steeringRun=null;clearPhotos();win.removeEventListener('focus',refreshSteering);modelObserver.disconnect();modelControls.destroy();previousExtras?.();};
     async function submit() {
-      const input=textarea.value.trim(); if(!input) return;
+      if(!textarea.value.trim() && !selectedPhotos.length)return;
+      const input=textarea.value.trim() || 'Please describe the attached image(s), including any visible text.';
       let previous=attempts.get(session.id);
       try { previous ||= JSON.parse(storage.get(key(`attempt:${session.id}`))); } catch {}
+      if(Array.isArray(previous?.attachment_ids)){
+        const submittedPhotos=selectedPhotos.filter(photo=>previous.attachment_ids.includes(photo.metadata?.id));
+        const changedPhotoSelection=submittedPhotos.length!==selectedPhotos.length
+          || submittedPhotos.length!==previous.attachment_ids.length;
+        if(changedPhotoSelection || ((previous.attachment_ids.length || previous.legacy_text) && previous.input!==input)){
+          photoStatus.hidden=false;
+          photoStatus.textContent='This send has an uncertain outcome. Retry the original text and photo selection unchanged; remove any newly selected photos before retrying.';
+          throw new Error('The original text and photo selection must be retried unchanged while the send outcome is uncertain.');
+        }
+      }
       if(previous?.input!==input && !modelControls.canSubmit())throw new Error('Saved model choice could not be checked. Reload before sending.');
       const selection=modelControls.selection();
-      const attempt=previous?.input===input ? previous : {input,idempotency_key:win.crypto.randomUUID(),...(selection?{selection}:{} )};
+      const attempt=previous?.input===input ? previous : {input,idempotency_key:win.crypto.randomUUID(),upload_pending:true,...(selection?{selection}:{} )};
+      const submittedPhotos=Array.isArray(attempt.attachment_ids)
+        ? selectedPhotos.filter(photo=>attempt.attachment_ids.includes(photo.metadata?.id))
+        : [...selectedPhotos];
       attempts.set(session.id,attempt);storage.set(key(`attempt:${session.id}`),JSON.stringify(attempt));syncModelLock();
       const owner=state.user?.id;
       composerAction.set('sending');connection.run('sending');const token=connection.token();
-      let run;try{run=await api.request('/runs',{method:'POST',body:{session_id:session.id,...attempt}});connection.success(token);}catch(error){
+      let run,runDispatched=false;try{
+        for(let index=0;index<submittedPhotos.length;index++){
+          const photo=submittedPhotos[index];
+          if(photo.metadata)continue;
+          photoStatus.hidden=false;photoStatus.textContent=`Uploading photo ${index+1} of ${submittedPhotos.length}…`;
+          const metadata=await api.request(`/sessions/${encodeURIComponent(session.id)}/attachments`,{
+            method:'POST',rawBody:photo.file,headers:{'Idempotency-Key':photo.uploadKey}});
+          if(!/^[a-f0-9]{32}$/.test(metadata?.id || '') || metadata.status!=='pending')throw new Error('Photo upload response was invalid.');
+          photo.metadata=metadata;
+          if(!current() || !selectedPhotos.includes(photo) || photo.removing){
+            void releasePhoto(photo);
+            if(!Array.isArray(attempt.attachment_ids) && owner===state.user?.id && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){
+              attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);currentModelSync?.(owner,session.id);
+            }
+            if(current()){connection.failure(token);composerAction.set('idle');syncModelLock();}
+            return;
+          }
+        }
+        if(submittedPhotos.some(photo=>!selectedPhotos.includes(photo) || photo.removing)){
+          pendingPhotoSubmission=null;
+          if(!Array.isArray(attempt.attachment_ids) && owner===state.user?.id && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){
+            attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);currentModelSync?.(owner,session.id);
+          }
+          connection.failure(token);composerAction.set('idle');syncModelLock();
+          photoStatus.hidden=false;
+          photoStatus.textContent='Photo selection changed before sending. The remaining selected photos are ready to send.';
+          renderPhotoSelection();
+          return;
+        }
+        photoStatus.hidden=false;
+        photoStatus.textContent=submittedPhotos.length?'Sending message with photos…':'Sending message…';
+        const attachments=Array.isArray(attempt.attachment_ids)
+          ? attempt.attachment_ids : submittedPhotos.map(photo=>photo.metadata.id);
+        attempt.attachment_ids=attachments;
+        delete attempt.upload_pending;
+        attempts.set(session.id,attempt);storage.set(key(`attempt:${session.id}`),JSON.stringify(attempt));
+        pendingPhotoSubmission={attachmentIds:attachments,photos:submittedPhotos};
+        renderPhotoSelection();
+        const {attachment_ids: savedAttachmentIds,legacy_text: savedLegacyText,...requestAttempt}=attempt;
+        runDispatched=true;
+        run=await api.request('/runs',{method:'POST',body:{session_id:session.id,...requestAttempt,...(attachments.length?{attachments}:{})}});
+        connection.success(token);
+      }catch(error){
         connection.failure(token);
-        if(owner===state.user?.id && [400,422].includes(error.status) && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);currentModelSync?.(owner,session.id);}
-        if(version===routeVersion){composerAction.set('idle');syncModelLock();}
+        // Upload errors cannot admit a run, even if the upload response was lost.
+        const rejectedBeforeAdmission=!runDispatched || [400,413,422,507].includes(error.status)
+          || error.status===503 && ['photos_disabled_before_admission','photos_unavailable_before_admission'].includes(error.code)
+          || error.status===409 && error.code==='attachment_error';
+        if(rejectedBeforeAdmission){
+          pendingPhotoSubmission=null;
+          if(owner===state.user?.id && attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){
+            attempts.delete(session.id);storage.set(key(`attempt:${session.id}`),null);currentModelSync?.(owner,session.id);
+          }
+        }
+        if(version===routeVersion){
+          photoStatus.hidden=false;
+          photoStatus.textContent=rejectedBeforeAdmission
+            ? `${submittedPhotos.length?'Photo or message was not sent. Your text and selected photos are retained.':'Message was not sent. Your text is retained.'} ${error.message || 'Correct the issue and try again.'}`
+            : `The send outcome is uncertain. ${submittedPhotos.length?'Your text and submitted photos are retained':'Your text is retained'}; retry the original request unchanged. ${error.message || ''}`;
+          renderPhotoSelection();composerAction.set('idle');syncModelLock();
+        }
         throw error;
       }
       if(owner!==state.user?.id)return;
+      photoStatus.hidden=true;photoStatus.textContent='';
       storage.set(key(`run:${session.id}`),run.id,true);
       if(attempts.get(session.id)?.idempotency_key===attempt.idempotency_key){
         if((drafts.get(session.id) ?? textarea.value).trim()===input){drafts.delete(session.id);storage.set(draftKey,null);}
@@ -1028,7 +1194,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         syncModelLock();
       }
       if(version!==routeVersion)return;
-      messages.querySelector('.empty')?.remove();messages.append(renderMessage({role:'user',content:input,timestamp:run.created_at,run_id:run.id,session_id:session.id}),...renderReminders(run));
+      messages.querySelector('.empty')?.remove();messages.append(renderMessage({role:'user',content:input,timestamp:run.created_at,run_id:run.id,session_id:session.id,attachments:run.attachments}),...renderReminders(run));
+      for(const photo of submittedPhotos){const position=selectedPhotos.indexOf(photo);if(position>=0){releasePreview(photo);selectedPhotos.splice(position,1);}}
+      pendingPhotoSubmission=null;renderPhotoSelection();
       messages.scrollTop=messages.scrollHeight;
       await trackRun({...run,session_id:session.id},messages,composerAction);
     }
@@ -1044,7 +1212,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       root.append(overlay);textarea.focus();textarea.setSelectionRange(start,end);
     },'quiet icon-button',{'aria-label':'Expand editor',title:'Expand editor'});
     const editorSlot=h('div',{class:'composer-editor'},textarea,expand);
-    const composer=h('form',{class:'composer',onsubmit:e=>{e.preventDefault();if(dispatch===submit || dispatch===steer)activate();}},editorSlot,steerHelp,steerStatus,steerRetries,h('div',{class:'composer-bottom'},modelControls.element,send));
+    const composer=h('form',{class:'composer',onsubmit:e=>{e.preventDefault();if(dispatch===submit || dispatch===steer)activate();}},editorSlot,photoTray,photoStatus,photoInput,steerHelp,steerStatus,steerRetries,h('div',{class:'composer-bottom'},modelControls.element,addPhotos,send));
     const technical=h('details',{class:'technical-strip',hidden:true});
     const renderTelemetry=data=>{
       if(version!==routeVersion || !data)return;
@@ -1217,7 +1385,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     if(Object.hasOwn(result,'run')) {
       if(result.run) {
         messages.querySelector('.empty')?.remove();
-        messages.append(renderMessage({role:'user',content:result.run.input,timestamp:result.run.created_at,run_id:result.run.id,session_id:session.id}),...renderReminders(result.run));
+        messages.append(renderMessage({role:'user',content:result.run.input,timestamp:result.run.created_at,run_id:result.run.id,session_id:session.id,attachments:result.run.attachments}),...renderReminders(result.run));
         messages.scrollTop=messages.scrollHeight;
         await trackRun(result.run,messages,composerAction,result.tool_replay,{follow:shouldFollowInitialRestore,finish:finishInitialRestore});
       } else if(result.last_run?.status==='unknown') {
@@ -1936,11 +2104,25 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     }
     const text=typeof message.content==='string' ? message.content : message.content == null ? '' : JSON.stringify(message.content);
     const tools=(message.tool_calls || []).map(tool=>({...tool,name:tool.function?.name || tool.name}));
-    if(!text.trim())return tools.length ? toolActivity(tools) : doc.createDocumentFragment();
+    const attachments=Array.isArray(message.attachments) ? message.attachments.slice(0,4) : [];
+    const photos=h('div',{class:'message-photos','aria-label':'Attached photos'});
+    for(const item of attachments){
+      if(!item || typeof item.id!=='string' || !/^[a-f0-9]{32}$/.test(item.id) || item.status==='expired'){
+        photos.append(h('p',{class:'expired-photo caption',role:'status'},'Photo expired; message text is still available.'));
+        continue;
+      }
+      const source=photoURL(message.session_id || state.session?.id || '',item.id);
+      const image=h('img',{src:source,alt:'Attached photo',loading:'lazy'});
+      image.addEventListener('error',()=>image.replaceWith(h('p',{class:'expired-photo caption',role:'status'},'Photo expired or unavailable; message text is still available.')),{once:true});
+      photos.append(image);
+    }
+    const gallery=attachments.length?photos:null;
+    if(!text.trim() && message.role==='assistant' && tools.length)return toolActivity(tools);
+    if(!text.trim() && !tools.length && !gallery)return doc.createDocumentFragment();
     if(message.role==='assistant' && message.channel==='commentary'){const progress=publicActivity(text,message.timed_chunks,Object.hasOwn(message,'timestamp')?message.timestamp:message.observed_at);if(tools.length)progress.append(toolActivity(tools));return progress;}
     const copy=message.role==='assistant' ? button(icon('copy'),e=>action(e.currentTarget,async()=>{if(!win.navigator.clipboard)throw new Error('Copy is unavailable in this browser. Select the text to copy it.');await win.navigator.clipboard.writeText(text);inform('Copied to clipboard.');}),'quiet message-copy',{'aria-label':'Copy message',title:'Copy message'}) : null;
     const node=h('article',{class:`message ${message.role === 'user' ? 'user-message' : 'assistant-message'}`},h('div',{class:'message-author'},message.role === 'user' ? 'You' : 'Hermes',messageTime(message.timestamp),copy),
-      renderMarkdown(doc,text),tools.length ? toolActivity(tools) : null);
+      text.trim()?renderMarkdown(doc,text):null,gallery,tools.length ? toolActivity(tools) : null);
     if(message.role==='user' && message.kind==='guidance' && message.run_id && message.idempotency_key){
       node.dataset.guidanceRun=message.run_id;node.dataset.guidanceKey=message.idempotency_key;
       if(message.steering_id){node.dataset.guidanceId=message.steering_id;node.id=`journal:${message.run_id}:steering:${message.steering_id}`;}

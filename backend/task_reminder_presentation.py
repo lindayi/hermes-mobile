@@ -4,6 +4,7 @@ No native SDK imports or model-history mutation. Literal grammar mirrors
 agent/conversation_compression.py and tools/todo_tool.py. Unknown/multiline
 variants deliberately remain human text. Marker presence alone proves nothing.
 """
+import json
 import re
 from bisect import bisect_right
 from collections import Counter
@@ -199,7 +200,41 @@ def reminder_projections(connection, session_id, columns, snapshot, compressions
 
 
 def matches_user(row, run, reminders=()):
-    return (row is not None and row['role'] == 'user' and
-            (row['content'] == run['input'] or
-             (row['id'] in reminders and reminders[row['id']]['run_id'] == run['id']
-              and reminders[row['id']]['content'] == run['input'])))
+    if row is None or row['role'] != 'user':
+        return False
+    attachment_ids = (run['attachment_ids']
+                      if 'attachment_ids' in run.keys() else [])
+    if isinstance(attachment_ids, list) and attachment_ids:
+        content = row['content']
+        if isinstance(content, str) and content.startswith('\x00json:'):
+            try:
+                parts = json.loads(content[len('\x00json:'):])
+            except (ValueError, TypeError):
+                return False
+            if not isinstance(parts, list):
+                return False
+            text, images = [], 0
+            for part in parts:
+                if not isinstance(part, dict):
+                    return False
+                if part.get('type') == 'text' and isinstance(part.get('text'), str):
+                    if part['text'] == '[screenshot] [photo attachment omitted after processing]':
+                        images += 1
+                    else:
+                        text.append(part['text'])
+                elif part.get('type') in {'image_url', 'input_image', 'image'}:
+                    images += 1
+                else:
+                    return False
+            return text == [run['input']] and images == len(attachment_ids)
+        if not isinstance(content, str):
+            return False
+        markers = '\n[screenshot]' * len(attachment_ids)
+        omitted = '\n[screenshot] [photo attachment omitted after processing]' * len(attachment_ids)
+        return content in (run['input'] + markers, run['input'] + omitted)
+    if row['content'] == run['input']:
+        return True
+    if (row['id'] in reminders and reminders[row['id']]['run_id'] == run['id']
+            and reminders[row['id']]['content'] == run['input']):
+        return True
+    return False

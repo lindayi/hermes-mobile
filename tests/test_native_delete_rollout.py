@@ -39,6 +39,7 @@ def versions(tmp_path, monkeypatch):
     for root in roots:
         (root / 'backend/model_controls.py').write_text(
             '_CONTROL_HASHES = ' + repr(maps[1])
+            + '\n_PRE_PHOTO_CONTROL_HASHES = ' + repr(release.PRE_PHOTO_CONTROL_HASHES)
             + '\n_PRE_CLARIFICATION_CONTROL_HASHES = ' + repr(release.PRE_CLARIFICATION_CONTROL_HASHES)
             + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(release.PRE_ROUTING_CONTROL_HASHES)
             + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(maps[0])
@@ -215,6 +216,8 @@ def activate_candidate(bound_native):
     caps['features'] = {'mobile_session_delete_version': 1}
     caps['mobile_notifications'] = dict(version=1, delivery='durable-inbox', automatic_model_wake=False)
     caps['mobile_run_controls']['clarifications'] = True
+    caps['mobile_photos'] = dict(version=1, max_images=4, max_image_bytes=2097152,
+                                max_request_bytes=20000000, private_persistence=True)
     return probe, candidate_root, health, caps
 
 

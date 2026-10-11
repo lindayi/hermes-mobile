@@ -216,6 +216,23 @@ _PENDING_ISSUE77_CLARIFICATION_FIXTURE = {
 }
 
 
+_ISSUE85_PHOTO_FIXTURE = {
+    'backend/native_run_controls.py': 'd8af6f7687c7d75b0c148b0572f7f4c13c1ac9bedc295e59719a7a3ee43f5058',
+    'backend/model_controls.py': 'fee5b5b6130e73d5fdce0a79362c09f5ace7621e8b426b5fb1b574cd3cd2bbef',
+    'deploy/native_controls_release.py': '8a7d0f8f37b520cf8105734e60972b01211ba831600966105031b40d165d1f1f',
+    'backend/app.py': '61ece82105971fad63e971ceb56a836f67637707182c5b2f1e8c1c996de2847d',
+    'backend/attachments.py': '56ccacea9b5f6365b58306f5287f6b2ecc522f3db2f033c6ede4d23693a644e0',
+    'backend/hermes_client.py': 'd669f59f7bf3fb2cc5cc671081937fb7328f9b53d50995f966333ae413823116',
+    'backend/native_catalog.py': '986c43c3b13885605053330adc52a7f7b25ac9608e81bd1e67839fd3f3cb9e49',
+    'backend/orchestration.py': 'f0bb271c685c6ef7070e3079cbf25a62e3e38c9d3f3512fb04cb8e56fa898598',
+    'backend/runs.py': '3f4ae4fa3ec533f358b8c0c9de012dbf369c1899f69cee9a28045fe1eadb7113',
+    'backend/task_reminder_presentation.py': 'fa68480f43a29d1543e55b1e514263d8fdc7f25593264ca5a61ac021b021e1c6',
+    '.github/host-tests.json': 'fc1cf7b7acccae5a948d8cfbd67f3fc82c7d1fd645328b92e357f81b3827a9f9',
+    '.github/native-tests.json': '2da051240c05c0c53192439a9dbc4e7cc80939d2f3089e502f34906bf658e5df',
+    'requirements.lock': 'ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04',
+}
+
+
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _ISSUE52_MERGED_MAIN_BASE_FIXTURE
             | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
@@ -226,7 +243,8 @@ def _source_files():
             | _PENDING_PR45_NAMING_FIXTURE
             | _ISSUE65_RECEIPT_PRODUCER_FIXTURE | _PENDING_ISSUE77_CLARIFICATION_FIXTURE
             | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
-            | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE)
+            | _ISSUE85_PHOTO_FIXTURE | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
+            | _ISSUE92_COPILOT_REVIEW_FIXTURE)
 
 
 def _source_ci():
@@ -618,6 +636,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_PENDING_PR45_NAMING_FIXTURE)
     pending |= set(_PENDING_ISSUE77_CLARIFICATION_FIXTURE)
     pending |= set(_ISSUE83_INITIAL_REVIEW_FIXTURE)
+    pending |= set(_ISSUE85_PHOTO_FIXTURE)
     pending |= set(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
@@ -700,8 +719,12 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
         path: SOURCE_FINGERPRINTS[path] for path in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
-    } == _PENDING_ISSUE77_CLARIFICATION_FIXTURE
-    for path, digest in _PENDING_ISSUE77_CLARIFICATION_FIXTURE.items():
+    } == {
+        path: digest for path, digest in (
+            _PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
+        ).items() if path in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
+    }
+    for path, digest in (_PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
@@ -886,12 +909,12 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
     # Exact assembled static closure, not a live-derived whitelist. Existing
     # shared imports keep their original execution-source-contract labels.
     shared = {
-        'backend/app.py', 'backend/auth.py', 'backend/auth_store.py',
+        'backend/app.py', 'backend/attachments.py', 'backend/auth.py', 'backend/auth_store.py',
         'backend/background_delivery.py', 'backend/catalog_search.py',
         'backend/chat_snapshot.py', 'backend/clarifications.py', 'backend/configuration.py',
         'backend/context_compression_presentation.py', 'backend/delivery.py',
         'backend/hermes_client.py', 'backend/jobs.py', 'backend/model_controls.py',
-        'backend/native_catalog.py', 'backend/notification_policy.py',
+        'backend/native_catalog.py', 'backend/native_run_controls.py', 'backend/notification_policy.py',
         'backend/notifications.py', 'backend/operational_notifications.py',
         'backend/orchestration.py', 'backend/profiles.py', 'backend/public_commentary.py',
         'backend/request_notifications.py', 'backend/runs.py', 'backend/runtime_binding.py',
@@ -909,7 +932,7 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
     }
     starter_bridge = {'deploy/issue_starter.py'}
     assert closure == shared | coordinator | starter_bridge
-    assert len(closure) == 39
+    assert len(closure) == 41
     assert closure <= set(REQUIRED_FILES)
     assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in coordinator)
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract' for path in shared)
@@ -1257,7 +1280,7 @@ def test_mutating_each_executable_dependency_blocks(path):
 
 @pytest.mark.parametrize('path', [
     '.github/workflows/issue-link.yml',
-    'backend/app.py', 'backend/auth.py', 'backend/auth_store.py',
+    'backend/app.py', 'backend/attachments.py', 'backend/auth.py', 'backend/auth_store.py',
     'backend/background_delivery.py', 'backend/catalog_search.py', 'backend/chat_snapshot.py',
     'backend/configuration.py', 'backend/context_compression_presentation.py',
     'backend/delivery.py', 'backend/hermes_client.py', 'backend/jobs.py',

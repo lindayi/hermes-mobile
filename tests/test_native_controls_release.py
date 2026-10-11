@@ -192,6 +192,7 @@ def fixture(tmp_path):
                                         _PRE_ROUTING_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES)
     (paths.source / 'backend/model_controls.py').write_text(
         '_CONTROL_HASHES = ' + repr(_CONTROL_HASHES)
+        + '\n_PRE_PHOTO_CONTROL_HASHES = ' + repr(release.PRE_PHOTO_CONTROL_HASHES)
         + '\n_PRE_CLARIFICATION_CONTROL_HASHES = ' + repr(_PRE_CLARIFICATION_CONTROL_HASHES)
         + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(_PRE_ROUTING_CONTROL_HASHES)
         + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(_PREVIOUS_CONTROL_HASHES)
@@ -962,8 +963,256 @@ def test_authorized_controls_delta_allowed_but_legacy_still_protected(tmp_path, 
     monkeypatch.setattr(release, 'APPROVED_CONTROL_HASHES', approved)
     (paths.source / 'backend/model_controls.py').write_text(
         '_CONTROL_HASHES = ' + repr(approved)
+        + '\n_PRE_PHOTO_CONTROL_HASHES = ' + repr(release.PRE_PHOTO_CONTROL_HASHES)
         + '\n_PRE_CLARIFICATION_CONTROL_HASHES = ' + repr(release.PRE_CLARIFICATION_CONTROL_HASHES)
         + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(release.PRE_ROUTING_CONTROL_HASHES)
         + '\n_PREVIOUS_CONTROL_HASHES = ' + repr(release.PREVIOUS_CONTROL_HASHES)
         + '\n_TIMEOUT_BASELINE_CONTROL_HASHES = ' + repr(release.TIMEOUT_BASELINE_CONTROL_HASHES))
     assert release.deploy(paths, **args)
+
+
+def photo_capabilities():
+    return dict(version=1, max_images=4, max_image_bytes=2097152,
+                max_request_bytes=20000000, private_persistence=True)
+
+
+@pytest.fixture
+def photo_probe(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from urllib.error import HTTPError
+    from backend import model_controls
+
+    root = tmp_path / 'native'
+    root.mkdir()
+    proc = tmp_path / 'proc' / '123'
+    proc.mkdir(parents=True)
+    (proc / 'cwd').symlink_to(root)
+    (proc / 'cmdline').write_bytes(b'/usr/bin/python\x00native-listener\x00')
+    monkeypatch.setattr(release, 'PROC_ROOT', tmp_path / 'proc')
+    caps = {
+        'mobile_notifications': dict(version=1, delivery='durable-inbox', automatic_model_wake=False),
+        'mobile_run_controls': dict(version=1, steering=True, live_commentary=True, clarifications=True),
+        'mobile_native_maintenance': dict(version=1, scope='dedicated-listener', atomic_drain=False),
+        'features': {'mobile_session_delete_version': 1},
+        'mobile_photos': photo_capabilities(),
+    }
+    baseline = dict(root=str(root), legacy=False, pid=123, start_ticks=456,
+                    caps=caps, source_hashes=dict(release.APPROVED_CONTROL_HASHES))
+    monkeypatch.setattr(model_controls, '_control_source_hashes', lambda _: baseline['source_hashes'])
+    monkeypatch.setattr(release, 'approved_controls', lambda _: baseline['source_hashes'])
+    monkeypatch.setattr(release.time, 'sleep', lambda _: None)
+    evidence = dict(health(), status='ok', native_maintenance=dict(
+        work={name: 0 for name in release.OPERATIONAL_UNSAFE_WORK},
+        notifications={'unpreserved': 0}))
+    probe = object.__new__(release.NativeProbe)
+    probe.source = root
+    probe.run = lambda *args, **kwargs: SimpleNamespace(stdout='123')
+    probe.attest = lambda *args, **kwargs: 123
+    probe._start_ticks = lambda _: 456
+    probe._bridge_pid = lambda _: 789
+    probe._ready = lambda *args, **kwargs: True
+
+    def request(path, *, authenticated=True):
+        if not authenticated:
+            raise HTTPError('private', 401, 'Unauthorized', {}, None)
+        return evidence if path == '/health/detailed' else caps
+
+    probe.request = request
+    return probe, root, baseline
+
+
+def check_photo_probe(probe, root, baseline, path):
+    if path == 'capture':
+        return probe.capture(root, False)
+    if path == 'unchanged':
+        return probe.verify_unchanged(root, baseline=baseline)
+    if path == 'operational':
+        return probe.verify_operational(root)
+    return probe.verify(root, **({'baseline': baseline} if path == 'rollback' else {}))
+
+
+@pytest.mark.parametrize('path', ['capture', 'unchanged', 'operational', 'activate', 'rollback'])
+def test_photo_source_requires_photo_capability_at_each_probe_boundary(photo_probe, monkeypatch, path):
+    probe, root, baseline = photo_probe
+    del baseline['caps']['mobile_photos']
+    # Exercise each direct gate, not a later nested unchanged check.
+    if path != 'unchanged':
+        monkeypatch.setattr(probe, 'verify_unchanged', lambda *args, **kwargs: None)
+    with pytest.raises(RuntimeError, match='capabilities|Native verification failed') as error:
+        check_photo_probe(probe, root, baseline, path)
+    if path in ('activate', 'rollback'):
+        assert 'capabilities' in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize('path', ['capture', 'unchanged', 'operational', 'activate', 'rollback'])
+def test_photo_source_accepts_exact_photo_capability(photo_probe, path):
+    check_photo_probe(*photo_probe, path)
+
+
+@pytest.mark.parametrize('field', tuple(photo_capabilities()))
+@pytest.mark.parametrize('bad', ['missing', 'wrong', 'type', 'null', 'nan'])
+def test_photo_capability_rejects_inexact_fields(photo_probe, field, bad):
+    probe, root, baseline = photo_probe
+    photos = baseline['caps']['mobile_photos']
+    expected = photos[field]
+    if bad == 'missing':
+        del photos[field]
+    else:
+        photos[field] = {
+            'wrong': False if field == 'private_persistence' else expected + 1,
+            'type': 1 if field == 'private_persistence' else float(expected),
+            'null': None, 'nan': float('nan'),
+        }[bad]
+    with pytest.raises(RuntimeError, match='capabilities'):
+        probe.verify_unchanged(root, baseline=baseline)
+
+
+@pytest.mark.parametrize('photos', [None, {}, [], True, '1', {**photo_capabilities(), 'extra': True},
+                                   {**photo_capabilities(), 'version': True}])
+def test_photo_capability_rejects_malformed_or_extended_contract(photo_probe, photos):
+    probe, root, baseline = photo_probe
+    baseline['caps']['mobile_photos'] = photos
+    with pytest.raises(RuntimeError, match='capabilities'):
+        probe.verify_unchanged(root, baseline=baseline)
+
+
+@pytest.mark.parametrize('version', [None, True, 1.0, '1', 2, -1])
+def test_photo_version_cannot_be_coerced(photo_probe, version):
+    with pytest.raises(RuntimeError, match='capabilities'):
+        release.require_controls_capabilities(photo_probe[2]['caps'], session_delete_version=1,
+                                             notification_version=1, clarification_version=1,
+                                             photo_version=version)
+
+
+@pytest.mark.parametrize('family', [
+    'PRE_PHOTO_CONTROL_HASHES', 'PRE_CLARIFICATION_CONTROL_HASHES', 'PRE_ROUTING_CONTROL_HASHES',
+    'TIMEOUT_BASELINE_CONTROL_HASHES', 'PREVIOUS_CONTROL_HASHES'])
+@pytest.mark.parametrize('path', ['capture', 'unchanged', 'rollback'])
+def test_historical_source_families_accept_only_absent_photos(photo_probe, family, path):
+    probe, root, baseline = photo_probe
+    baseline['source_hashes'] = dict(getattr(release, family))
+    caps = baseline['caps']
+    del caps['mobile_photos']
+    if family != 'PRE_PHOTO_CONTROL_HASHES':
+        del caps['mobile_run_controls']['clarifications']
+    if family == 'PREVIOUS_CONTROL_HASHES':
+        del caps['mobile_notifications']
+        caps['features'].clear()
+    check_photo_probe(probe, root, baseline, path)
+    caps['mobile_photos'] = photo_capabilities()
+    with pytest.raises(RuntimeError, match='capabilities|Native verification failed'):
+        check_photo_probe(probe, root, baseline, path)
+
+
+@pytest.mark.parametrize('change', ['missing', 'extra', 'mixed'])
+def test_photo_version_requires_complete_known_source_map(change):
+    hashes = dict(release.APPROVED_CONTROL_HASHES)
+    if change == 'missing':
+        del hashes['backend/native_notifications.py']
+    elif change == 'extra':
+        hashes['backend/unknown.py'] = '0' * 64
+    else:
+        hashes['backend/native_notifications.py'] = release.PRE_ROUTING_CONTROL_HASHES[
+            'backend/native_notifications.py']
+    with pytest.raises(RuntimeError, match='source-version'):
+        release._photo_version(hashes)
+
+
+@pytest.mark.parametrize('path', ['capture', 'unchanged', 'rollback'])
+@pytest.mark.parametrize('advertisement', [None, {}, photo_capabilities()])
+def test_legacy_probe_rejects_photo_advertisement(photo_probe, monkeypatch, path, advertisement):
+    import hashlib
+
+    probe, root, baseline = photo_probe
+    launcher = root / 'backend/native_api_service.py'
+    launcher.parent.mkdir()
+    launcher.write_bytes(b'legacy')
+    monkeypatch.setattr(release, 'LEGACY_LAUNCHER', hashlib.sha256(b'legacy').hexdigest())
+    (release.PROC_ROOT / '123/cmdline').write_bytes(
+        (release.NATIVE_PYTHON + '\x00' + str(launcher) + '\x00').encode())
+    baseline.update(legacy=True, source_hashes={'backend/native_api_service.py': release.LEGACY_LAUNCHER})
+    baseline['caps'].clear()
+    baseline['caps']['legacy'] = True
+    # A genuine old listener still passes every legacy path.
+    if path == 'capture':
+        assert probe.capture(root, True)['legacy'] is True
+        monkeypatch.setattr(probe, 'verify_unchanged', lambda *args, **kwargs: None)
+    else:
+        check_photo_probe(probe, root, baseline, path)
+    baseline['caps']['mobile_photos'] = advertisement
+    with pytest.raises(RuntimeError, match='capabilities|Native verification failed') as error:
+        if path == 'capture':
+            probe.capture(root, True)
+        else:
+            check_photo_probe(probe, root, baseline, path)
+    if path == 'rollback':
+        assert 'capabilities' in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize('family', ['pre-photo', 'current'])
+def test_native_probe_capture_and_rollback_verify_preserve_clarification_capabilities(
+        tmp_path, monkeypatch, family):
+    from types import SimpleNamespace
+    from urllib.error import HTTPError
+    from backend import model_controls
+
+    root = tmp_path / 'native'
+    root.mkdir()
+    proc = tmp_path / 'proc' / '123'
+    proc.mkdir(parents=True)
+    (proc / 'cwd').symlink_to(root)
+    (proc / 'cmdline').write_bytes(b'/usr/bin/python\x00native-listener\x00')
+    monkeypatch.setattr(release, 'PROC_ROOT', tmp_path / 'proc')
+    source_hashes = (release.PRE_PHOTO_CONTROL_HASHES if family == 'pre-photo'
+                     else release.APPROVED_CONTROL_HASHES)
+    monkeypatch.setattr(model_controls, '_control_source_hashes',
+                        lambda _root: dict(source_hashes))
+    caps = {
+        'mobile_notifications': {
+            'version': 1, 'delivery': 'durable-inbox', 'automatic_model_wake': False},
+        'mobile_run_controls': {
+            'version': 1, 'steering': True, 'live_commentary': True,
+            'clarifications': True},
+        'mobile_native_maintenance': {
+            'version': 1, 'scope': 'dedicated-listener', 'atomic_drain': False},
+        'features': {'mobile_session_delete_version': 1},
+    }
+    if family == 'current':
+        caps['mobile_photos'] = photo_capabilities()
+    health_evidence = health()
+    health_evidence.update(status='ok', pid=123)
+    probe = object.__new__(release.NativeProbe)
+    probe.run = lambda *args, **kwargs: SimpleNamespace(stdout='123')
+    probe.source = root
+    probe.attest = lambda observed_root, legacy=False: 123
+    probe._start_ticks = lambda pid: 456
+    probe._bridge_pid = lambda observed_root: 789
+    probe._ready = lambda *args, **kwargs: True
+
+    def request(path, *, authenticated=True):
+        if not authenticated:
+            raise HTTPError('private', 401, 'Unauthorized', {}, None)
+        return health_evidence if path == '/health/detailed' else caps
+
+    probe.request = request
+    captured = probe.capture(root, False)
+    assert captured['source_hashes'] == source_hashes
+    probe.verify_unchanged(root, baseline=captured)
+    probe.verify(root, baseline=captured)
+
+    mismatch = dict(captured)
+    mismatch['caps'] = {
+        **caps, 'mobile_run_controls': {
+            key: value for key, value in caps['mobile_run_controls'].items()
+            if key != 'clarifications'}}
+    with pytest.raises(RuntimeError, match='capabilities'):
+        probe.verify_unchanged(root, baseline=mismatch)
+
+    old_caps = {
+        **caps, 'mobile_run_controls': {
+            key: value for key, value in caps['mobile_run_controls'].items()
+            if key != 'clarifications'}}
+    mixed = dict(captured, caps=old_caps, source_hashes={
+        **source_hashes, 'backend/native_run_controls.py': '0' * 64})
+    with pytest.raises(RuntimeError, match='source-version'):
+        probe.verify_unchanged(root, baseline=mixed)

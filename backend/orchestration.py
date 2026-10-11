@@ -9,16 +9,25 @@ from contextlib import closing
 
 from .runs import NATIVE_RUN_LOST_ERROR, RunConflict
 
-from .hermes_client import IntegrationUnavailable, NativeRunNotFound, NativeClarificationRejected
+from .hermes_client import (IntegrationUnavailable, NativeRunNotFound,
+                            NativeClarificationRejected, PhotoUnavailableBeforeAdmission)
+from .attachments import AttachmentError
 
 
 class ClarificationNotSent(IntegrationUnavailable):
     """Clarification capability was unavailable before claiming or sending an answer."""
 
 
+class PhotosDisabledBeforeAdmission(IntegrationUnavailable):
+    """New photo submission was rejected without admitting a run."""
+
+
 class Orchestrator:
-    def __init__(self, journal, gateway, catalog, *, history_loader=None, profile="default", run_timeout=3600):
+    def __init__(self, journal, gateway, catalog, *, history_loader=None, attachments=None,
+                 profile="default", run_timeout=3600, photos_enabled=True):
         self.journal, self.gateway, self.catalog = journal, gateway, catalog
+        self.attachments = attachments
+        self.photos_enabled = photos_enabled
         self.profile = profile
         self.history_loader = history_loader
         self.approval_notifier = None
@@ -52,6 +61,9 @@ class Orchestrator:
             # BEGIN IMMEDIATE admission now enforces capacity/canonical identity.
             c.execute('BEGIN IMMEDIATE')
             c.execute('DROP INDEX IF EXISTS orchestration_one_active')
+            c.execute('CREATE INDEX IF NOT EXISTS runs_session_identity ON runs(profile,session_id,user_id)')
+            c.execute('CREATE INDEX IF NOT EXISTS anchors_requested_identity ON run_history_anchors(session_id,run_id)')
+            c.execute('CREATE INDEX IF NOT EXISTS anchors_canonical_identity ON run_history_anchors(canonical_session_id,run_id)')
 
     def claim_deletion(self, user, session_id):
         # No await between inspecting local workers and the durable writer claim.
@@ -64,9 +76,16 @@ class Orchestrator:
 
     async def submit(self, user, body):
         limits = {'session_id': 200, 'input': 100000, 'idempotency_key': 128}
-        if (not isinstance(body, dict) or set(body) - {'selection'} != set(limits)
+        if (not isinstance(body, dict) or set(body) - {'selection', 'attachments'} != set(limits)
                 or any(not isinstance(body[k], str) or not body[k].strip() or len(body[k]) > limit for k, limit in limits.items())):
             raise ValueError('Invalid run request')
+        attachment_ids = body.get('attachments', [])
+        if (not isinstance(attachment_ids, list) or len(attachment_ids) > 4
+                or any(not isinstance(value, str) or len(value) != 32
+                       or any(char not in '0123456789abcdef' for char in value)
+                       for value in attachment_ids)
+                or len(set(attachment_ids)) != len(attachment_ids)):
+            raise ValueError('Invalid photo attachment references')
         selection=body.get('selection')
         if selection is not None:
             if (not isinstance(selection,dict) or set(selection) != {'model','provider'}
@@ -79,15 +98,11 @@ class Orchestrator:
             raise IntegrationUnavailable('No gateway is bound to this profile')
         self.journal.require_session(user['id'], user['profile'], body['session_id'])
         self.gateway.require_execution()
-        with closing(self.journal.connect()) as c:
-            existing = c.execute('SELECT * FROM runs WHERE user_id=? AND idempotency_key=?', (user['id'], body['idempotency_key'])).fetchone()
+        existing = self._existing_submission(user, body, selection, attachment_ids)
         if existing:
-            if (existing['profile'], existing['session_id'], existing['input']) != (user['profile'], body['session_id'], body['input']):
-                raise RunConflict('Idempotency key already used for another request')
-            stored=self.journal.get(user['id'],existing['id'])
-            if stored.get('selection')!=selection:
-                raise RunConflict('Idempotency key already used for another selection')
-            return stored
+            return existing
+        if attachment_ids and not self.photos_enabled:
+            raise PhotosDisabledBeforeAdmission('New photo-bearing runs are disabled; retry existing runs or send text only.')
         if selection is not None:
             if not hasattr(self,'model_options'):
                 raise IntegrationUnavailable('Model controls are unavailable')
@@ -114,19 +129,69 @@ class Orchestrator:
             if (not isinstance(message, dict) or 'role' not in message or 'content' not in message
                     or (message['role'] == 'tool' and not message.get('tool_call_id'))):
                 raise IntegrationUnavailable('Native tool context is incomplete')
+        photo_preflight = None
+        if attachment_ids:
+            if self.attachments is None or not hasattr(self.gateway, 'validate_run_size'):
+                raise IntegrationUnavailable('Native photo request budgeting is unavailable.')
+            try:
+                image_sizes = await asyncio.to_thread(
+                    self.attachments.run_image_sizes, user['id'], user['profile'],
+                    body['session_id'], attachment_ids)
+            except AttachmentError:
+                existing = self._existing_submission(user, body, selection, attachment_ids)
+                if existing:
+                    return existing
+                raise
+            self.gateway.validate_run_size(
+                canonical_id, body['input'], context['history'], attachment_ids,
+                image_sizes, **(selection or {}))
+            try:
+                photo_preflight = await self.gateway.require_photo_capability(
+                    canonical_id, body['input'], context['history'], attachment_ids,
+                    image_sizes, (user['id'], user['profile']), **(selection or {}))
+            except PhotoUnavailableBeforeAdmission:
+                # Another same-key submit may have admitted this request while
+                # the probe was waiting. Its result wins over a late rejection.
+                existing = self._existing_submission(user, body, selection, attachment_ids)
+                if existing:
+                    return existing
+                raise
+        existing = self._existing_submission(user, body, selection, attachment_ids)
+        if existing:
+            return existing
+        if attachment_ids and not self.photos_enabled:
+            raise PhotosDisabledBeforeAdmission('New photo-bearing runs are disabled; retry existing runs or send text only.')
         try:
             run, created = self.journal.submit(user['id'], user['profile'], body['session_id'], body['input'], body['idempotency_key'],
                 history_anchor=lambda: self.catalog.history_anchor(user['profile'], body['session_id'], canonical_id), selection=selection,
-                conversation_roots=lambda ids: self.catalog.conversation_roots(user['profile'], ids))
+                conversation_roots=lambda ids: self.catalog.conversation_roots(user['profile'], ids),
+                attachment_ids=attachment_ids, attachment_store=self.attachments)
         except sqlite3.IntegrityError as exc:
             raise RunConflict('A local run is active or unresolved') from exc
         if created:
             self.journal.event(user['id'], run['id'], 'status', {'status': 'queued'})
-            native_run = dict(run, session_id=context.get('canonical_session_id', run['session_id']))
+            native_run = dict(run, session_id=context.get('canonical_session_id', run['session_id']),
+                              attachment_session_id=run['session_id'], photo_preflight=photo_preflight)
             task = asyncio.create_task(self._execute(user, native_run, context['history']))
             self._tasks[task] = (dict(user), run)
             task.add_done_callback(lambda done: self._tasks.pop(done, None))
         return run
+
+    def _existing_submission(self, user, body, selection, attachment_ids):
+        with closing(self.journal.connect()) as c:
+            existing = c.execute('SELECT id FROM runs WHERE user_id=? AND idempotency_key=?',
+                                 (user['id'], body['idempotency_key'])).fetchone()
+        if existing is None:
+            return None
+        stored = self.journal.get(user['id'], existing['id'])
+        if (stored['profile'], stored['session_id'], stored['input']) != (
+                user['profile'], body['session_id'], body['input']):
+            raise RunConflict('Idempotency key already used for another request')
+        if stored.get('selection') != selection:
+            raise RunConflict('Idempotency key already used for another selection')
+        if stored.get('attachment_ids', []) != attachment_ids:
+            raise RunConflict('Idempotency key already used for other photo attachments')
+        return stored
 
     def get(self, user, rid):
         run = self.journal.get(user['id'], rid)
@@ -384,7 +449,12 @@ class Orchestrator:
         try:
             await self._stream(user, run, history)
             return
-        except Exception:
+        except Exception as exc:
+            from .attachments import AttachmentError
+            from .hermes_client import NativeRunRejected
+            if isinstance(exc, (AttachmentError, NativeRunRejected)) and not self.get(user, run['id']).get('upstream_id'):
+                self.journal.finish(user['id'], run['id'], 'failed', error=str(exc))
+                return
             self.journal.finish(user['id'], run['id'], 'unknown',
                                 error='Stream interrupted; observing original native run without replay')
         if not self.get(user, run['id'])['upstream_id']:
@@ -414,6 +484,16 @@ class Orchestrator:
             kwargs={'history':history}
             if run.get('selection') is not None:
                 kwargs.update(run['selection'])
+            attachment_ids = run.get('attachment_ids', [])
+            if attachment_ids:
+                if self.attachments is None:
+                    raise IntegrationUnavailable('Private photo storage is unavailable; no image was sent.')
+                kwargs['attachments'] = await asyncio.to_thread(self.attachments.run_images,
+                    user['id'], user['profile'], run.get('attachment_session_id', run['session_id']),
+                    run['id'], attachment_ids)
+                kwargs['attachment_ids'] = attachment_ids
+                kwargs['photo_preflight'] = run.get('photo_preflight')
+                kwargs['photo_owner'] = (user['id'], user['profile'])
             async with asyncio.timeout(self.run_timeout):
                 upstream = await self.gateway.start(run['session_id'], run['input'], **kwargs)
         finally:
@@ -485,6 +565,8 @@ class Orchestrator:
             self.steering.observe(user, current, event)
             self.clarifications.observe(user, current, event)
             self.journal.finish(user['id'], rid, event['event'].split('.')[1], output=event.get('output'),
+                                error=('The photo could not be analyzed; choose a vision-capable model or resend.'
+                                       if event['event'] == 'run.failed' and current.get('attachment_ids') else None),
                                 expected={k: current[k] for k in ('profile', 'upstream_id')})
 
     def _matches(self, run, result):
@@ -530,6 +612,8 @@ class Orchestrator:
                     self.clarifications.observe(user, run, result)
                 if result.get('run_id') == run['upstream_id'] and result.get('status') in ('completed', 'failed', 'cancelled'):
                     self.journal.finish(user['id'], rid, result['status'], output=result.get('output'),
+                                        error=('The photo could not be analyzed; choose a vision-capable model or resend.'
+                                               if result['status'] == 'failed' and run.get('attachment_ids') else None),
                                         expected={k: run[k] for k in ('profile', 'upstream_id')})
                     return
                 if result.get('status') == 'stopping':
