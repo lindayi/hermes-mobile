@@ -124,6 +124,8 @@ selection on desktop, individual preview/removal, optional text, and images-only
 sends. Images-only sends use the explicit default request “Please describe the
 attached image(s), including any visible text.” Upload status is announced to
 assistive technology; unsupported formats and retryable failures are explicit.
+Recovery notices mention retained photos only for photo-bearing submissions;
+text-only failures preserve the text draft without inventing photo instructions.
 The draft and all selected attachment references remain available after a
 recoverable upload or run error, including after navigation and reload when the
 run outcome is uncertain. Restored photo previews use authenticated API paths,

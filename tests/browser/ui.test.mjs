@@ -155,6 +155,31 @@ test('ambiguous photo retry blocks a changed photo selection',async t=>{
   assert.equal(doc.querySelectorAll('.photo-preview').length,2,'neither the original photo nor new selection is discarded');
 });
 
+for(const status of [413,undefined]){
+  test(`text-only send failure has no photo recovery instructions: ${status || 'network'}`,async t=>{
+    const requests=[];
+    const {doc,app}=await setup(async(path,options={})=>{
+      if(path==='/auth/me')return {user:{id:'u',status:'ready'}};
+      if(path.startsWith('/sessions?'))return {items:[{id:'s1',title:'Text fixture'}],total:1};
+      if(path.includes('/messages'))return {items:[]};
+      if(path==='/runs'){requests.push(options.body);throw Object.assign(new Error('Synthetic send failure'),{status});}
+      return {items:[]};
+    });
+    t.after(()=>{app.destroy();doc.defaultView.close();});
+    click(doc,'Text fixture');await tick();
+    const textarea=doc.querySelector('textarea');
+    textarea.value='Text only';textarea.dispatchEvent(new doc.defaultView.Event('input'));
+    click(doc,'Send message');await tick();await tick();
+    assert.equal(requests.length,1);
+    assert.equal(requests[0].attachments,undefined);
+    const notice=doc.querySelector('.photo-status').textContent;
+    assert.doesNotMatch(notice,/photo/i);
+    assert.match(notice,/Your text is retained/);
+    assert.match(notice,status===413?/Message was not sent/:/outcome is uncertain/);
+    assert.equal(textarea.value,'Text only');
+  });
+}
+
 test('ambiguous text-only retry blocks newly selected photos with recovery guidance',async t=>{
   const requests=[];
   const {doc,app}=await setup(async(path,options={})=>{

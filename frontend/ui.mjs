@@ -1177,8 +1177,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(version===routeVersion){
           photoStatus.hidden=false;
           photoStatus.textContent=rejectedBeforeAdmission
-            ? `Photo or message was not sent. Your text and selected photos are retained. ${error.message || 'Correct the issue and try again.'}`
-            : `The send outcome is uncertain. Your text and submitted photos are retained; retry the original request unchanged. ${error.message || ''}`;
+            ? `${submittedPhotos.length?'Photo or message was not sent. Your text and selected photos are retained.':'Message was not sent. Your text is retained.'} ${error.message || 'Correct the issue and try again.'}`
+            : `The send outcome is uncertain. ${submittedPhotos.length?'Your text and submitted photos are retained':'Your text is retained'}; retry the original request unchanged. ${error.message || ''}`;
           renderPhotoSelection();composerAction.set('idle');syncModelLock();
         }
         throw error;
