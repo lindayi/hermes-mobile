@@ -401,9 +401,13 @@ def test_rollback_retries_transient_status_without_replacing_original_proofs(tmp
 
 def test_controller_retries_status_churn_after_original_posthandoff_idle_stop(
         tmp_path, monkeypatch):
+    from deploy.assets import _assets
+
     _, outbox, native, paths, callbacks, args, old, event = setup_controller_release(
         tmp_path, monkeypatch, distinct_native_root=True)
     native_root = native.active_root
+    assets = _assets(paths.webroot)
+    dropin = paths.dropin.read_bytes() if paths.dropin.exists() else None
     idle_reads = []
     status_reads = []
     run = args['run']
@@ -436,6 +440,8 @@ def test_controller_retries_status_churn_after_original_posthandoff_idle_stop(
     assert (paths.state / 'current').resolve() == old
     assert native.active_root == native_root
     assert (native.pid, native.started) == (123, 456)
+    assert _assets(paths.webroot) == assets
+    assert (paths.dropin.read_bytes() if paths.dropin.exists() else None) == dropin
     assert outbox.record('async:' + event['delegation_id'])['state'] == 'delivered'
     with sqlite3.connect(paths.database) as db:
         assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
@@ -489,7 +495,7 @@ def test_rollback_retry_rechecks_original_bindings_and_preservation(
                            (change, change, 'uncertain'))
 
     callbacks.sleep = mutate
-    with pytest.raises((RuntimeError, AssertionError)):
+    with pytest.raises(RuntimeError):
         under_owned_lock(paths, lambda: callbacks.verify_rollback(old, baseline))
     assert len(sleeps) == 1
     assert len(reads) <= 3
@@ -556,6 +562,68 @@ def test_rollback_retries_only_fully_bound_pending_ack(tmp_path, monkeypatch):
     assert results == [True]
     assert sleeps == [True]
     assert callbacks.initial_records['async:deleg_1']['payload_sha256'] == item['payload_sha256']
+
+
+@pytest.mark.parametrize('problem', ['missing', 'token', 'session', 'pending', 'exception'])
+def test_rollback_receipt_failures_remain_closed_without_generic_retry(
+        tmp_path, monkeypatch, problem):
+    from deploy.native_notification_release import ROLLBACK_ATTEMPTS
+
+    app, outbox, native, paths, callbacks, baseline, old, candidate, event = setup_release(tmp_path)
+    capture_and_handoff(paths, callbacks, baseline, candidate)
+    item = deliver_before_bridge_ack(app, outbox, event, callbacks.scope)
+    if problem != 'pending':
+        with app.notifications._db() as db:
+            if problem == 'missing':
+                db.execute('DELETE FROM background_receipts')
+            elif problem == 'token':
+                db.execute("UPDATE background_receipts SET lease_token='wrong-token'")
+            elif problem == 'session':
+                db.execute("UPDATE inbox SET session_id='wrong-session'")
+    if problem == 'exception':
+        request = native.request
+
+        def fail_health(path):
+            if path == '/health/detailed':
+                raise RuntimeError('synthetic transport error')
+            return request(path)
+
+        monkeypatch.setattr(native, 'request', fail_health)
+    sleeps = []
+    callbacks.sleep = sleeps.append
+    with pytest.raises(RuntimeError, match='receipt|readiness|acknowledgement'):
+        under_owned_lock(paths, lambda: callbacks.verify_rollback(old, baseline))
+    assert len(sleeps) == (ROLLBACK_ATTEMPTS - 1 if problem == 'pending' else 0)
+    assert callbacks.initial_records[item['event_id']]['payload_sha256'] == item['payload_sha256']
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT owner FROM deployment_gate').fetchone() == (baseline['gate_owner'],)
+    assert callbacks._proof.execute(
+        'SELECT COUNT(*) FROM records WHERE snap>?', (callbacks.handoff_records.snap,)
+    ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('key', ['quarantined', 'conflicts', 'active_workers'])
+@pytest.mark.parametrize('window', ['snapshot', 'health'])
+def test_rollback_never_classifies_unsafe_or_malformed_status_as_churn(
+        tmp_path, monkeypatch, key, window):
+    _, _, native, paths, callbacks, baseline, old, candidate, _ = setup_release(tmp_path)
+    capture_and_handoff(paths, callbacks, baseline, candidate)
+    request = native.request
+    reads, sleeps = [], []
+
+    def unsafe_status(path):
+        value = request(path)
+        if path == '/v1/mobile/notifications/status':
+            reads.append(True)
+            if len(reads) == (1 if window == 'snapshot' else 2):
+                return {**value, key: 'unknown' if key == 'active_workers' else 1}
+        return value
+
+    monkeypatch.setattr(native, 'request', unsafe_status)
+    callbacks.sleep = sleeps.append
+    with pytest.raises(RuntimeError, match='evidence unavailable'):
+        under_owned_lock(paths, lambda: callbacks.verify_rollback(old, baseline))
+    assert sleeps == []
 
 
 def test_controller_reopens_after_receipt_delay_with_preserved_pending_record(

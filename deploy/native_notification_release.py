@@ -734,11 +734,11 @@ class NativeNotificationCallbacks:
             raise ValueError()
         if any(type(status[key]) is not int or status[key] < 0 for key in STATUS_KEYS):
             raise ValueError()
-        if any(status[key] != counts[key] for key in counts):
-            raise _EvidenceChanged()
         if (status['conflicts'] != conflicts or status['conflicts'] != 0
                 or status['quarantined'] != 0):
             raise ValueError()
+        if any(status[key] != counts[key] for key in counts):
+            raise _EvidenceChanged()
         if status['foreign_retained'] != foreign_retained:
             raise _EvidenceChanged()
 
@@ -755,8 +755,6 @@ class NativeNotificationCallbacks:
             evidence = health['native_maintenance']
             notices = evidence['notifications']
             status = self.native.request('/v1/mobile/notifications/status')
-            if snapshot is not None and status != snapshot['status']:
-                raise _EvidenceChanged()
             if health['pid'] != evidence['pid'] or notices['unpreserved'] != 0:
                 raise ValueError()
             if any(type(notices[key]) is not int or notices[key] < 0 for key in
@@ -767,6 +765,10 @@ class NativeNotificationCallbacks:
             if (not isinstance(status, dict) or set(status) != set(STATUS_KEYS)
                      or any(type(status[key]) is not int or status[key] < 0 for key in STATUS_KEYS)):
                 raise ValueError()
+            if status['conflicts'] != 0 or status['quarantined'] != 0:
+                raise ValueError()
+            if snapshot is not None and status != snapshot['status']:
+                raise _EvidenceChanged()
             if (status['pending'] != notices['web_pending']
                     or status['quarantined'] != notices['quarantined']
                     or status['foreign_retained'] != notices['foreign_retained']

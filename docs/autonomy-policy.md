@@ -102,7 +102,7 @@ accepted source evidence, not a still-unreviewed PR25 candidate or activation ap
 It was absent only from the historical b85c098 baseline.
 
 Issue #96 updates only the current rollback-observation source pin to
-`2964ec6f87394c89244d2be323151db797fe1dabc45fcf01c0b77a17e134b551`.
+`9844177bc34bd774e81542182d3556c4f40d9e88907d7ad56e8f6020b2b4f983`.
 The historical PR25 literal remains retained. This bounded retry candidate needs
 exact-head Copilot review and complete hosted CI; its inventory pin is not review,
 incident recovery, or activation authorization. See

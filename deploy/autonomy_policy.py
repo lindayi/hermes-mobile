@@ -251,7 +251,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
     'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
     # Issue #96 bounded rollback observation; historical PR25 pins remain retained.
-    'deploy/native_notification_release.py': '2964ec6f87394c89244d2be323151db797fe1dabc45fcf01c0b77a17e134b551',
+    'deploy/native_notification_release.py': '9844177bc34bd774e81542182d3556c4f40d9e88907d7ad56e8f6020b2b4f983',
 }
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',
