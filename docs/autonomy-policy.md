@@ -95,11 +95,18 @@ which records these exact hashes and accepts the controller flow, together with
 `c7a8a2d8491f46e374493c948e66e9a05a93060e518fb3847af2935fc46ec082`),
 which preserves those incoming merged PR25 bytes. These reports are parent-retained
 source-review lineage, not runtime evidence or portable test inputs.
-`deploy/native_notification_release.py` already matches its retained
+The historical PR25 `deploy/native_notification_release.py` matched its retained
 `364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582` pin;
 its `native25-route-bound-review.json` and PR33 merged-preservation lineage is
 accepted source evidence, not a still-unreviewed PR25 candidate or activation approval.
 It was absent only from the historical b85c098 baseline.
+
+Issue #96 updates only the current rollback-observation source pin to
+`2964ec6f87394c89244d2be323151db797fe1dabc45fcf01c0b77a17e134b551`.
+The historical PR25 literal remains retained. This bounded retry candidate needs
+exact-head Copilot review and complete hosted CI; its inventory pin is not review,
+incident recovery, or activation authorization. See
+[the rollback proof contract](native-notification-release.md).
 
 ### Issue #52 native hosted-artifact candidate
 

@@ -365,6 +365,199 @@ def test_controller_reopens_prepublication_after_positive_rollback_proof(
         assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
 
 
+def churn_rollback_status(native, monkeypatch, *, persistent=False):
+    request = native.request
+    reads = []
+
+    def changing_status(path):
+        value = request(path)
+        if path == '/v1/mobile/notifications/status':
+            reads.append(value)
+            if len(reads) % 2 == 0 and (persistent or len(reads) == 2):
+                return {**value, 'active_workers': value['active_workers'] + 1}
+        return value
+
+    monkeypatch.setattr(native, 'request', changing_status)
+    return reads
+
+
+def test_rollback_retries_transient_status_without_replacing_original_proofs(tmp_path, monkeypatch):
+    _, _, native, paths, callbacks, baseline, old, candidate, _ = setup_release(tmp_path)
+    capture_and_handoff(paths, callbacks, baseline, candidate)
+    original = (callbacks.initial_records, callbacks.handoff_records, callbacks.initial_receipts)
+    reads = churn_rollback_status(native, monkeypatch)
+    callbacks.sleep = lambda _: None
+    results = []
+
+    under_owned_lock(paths, lambda: results.append(callbacks.verify_rollback(old, baseline)))
+
+    assert results == [True]
+    assert len(reads) == 4
+    assert original == (callbacks.initial_records, callbacks.handoff_records, callbacks.initial_receipts)
+    assert [tuple(row) for row in callbacks._proof.execute(
+        'SELECT DISTINCT snap FROM records ORDER BY snap')] == [
+        (callbacks.initial_records.snap,), (callbacks.handoff_records.snap,)]
+
+
+def test_controller_retries_status_churn_after_original_posthandoff_idle_stop(
+        tmp_path, monkeypatch):
+    _, outbox, native, paths, callbacks, args, old, event = setup_controller_release(
+        tmp_path, monkeypatch, distinct_native_root=True)
+    native_root = native.active_root
+    idle_reads = []
+    status_reads = []
+    run = args['run']
+
+    def no_restart(command, **kwargs):
+        assert 'restart' not in command
+        return run(command, **kwargs)
+
+    args['run'] = no_restart
+
+    def idle(*_args, **_kwargs):
+        nonlocal status_reads
+        idle_reads.append(True)
+        if len(idle_reads) == 2:
+            status_reads = churn_rollback_status(native, monkeypatch)
+            return False
+        return True
+
+    native.idle = idle
+    callbacks.sleep = lambda _: None
+    with pytest.raises(RuntimeError, match='Native activity changed after handoff'):
+        release.deploy(paths, idle_timeout=0, **args)
+
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status['status'] == 'rolled_back'
+    assert status['error'] == 'Native activity changed after handoff'
+    assert len(idle_reads) == 2
+    assert len(status_reads) == 4
+    assert callbacks.baseline['gate_owner'] == status['release']
+    assert (paths.state / 'current').resolve() == old
+    assert native.active_root == native_root
+    assert (native.pid, native.started) == (123, 456)
+    assert outbox.record('async:' + event['delegation_id'])['state'] == 'delivered'
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (0,)
+
+
+@pytest.mark.parametrize('change', [
+    'pid', 'start', 'gate', 'pointer', 'source', 'config', 'database', 'owner',
+    'record', 'receipt', 'payload', 'quarantined', 'foreign',
+])
+def test_rollback_retry_rechecks_original_bindings_and_preservation(
+        tmp_path, monkeypatch, change):
+    app, outbox, native, paths, callbacks, baseline, old, candidate, event = setup_release(tmp_path)
+    scope = json.dumps(['default', str(callbacks.home)], separators=(',', ':'))
+    create_owned_ack(app, outbox, event, scope)
+    capture_and_handoff(paths, callbacks, baseline, candidate)
+    reads = churn_rollback_status(native, monkeypatch)
+    sleeps = []
+
+    def mutate(_):
+        sleeps.append(True)
+        if change == 'pid':
+            native.pid += 1
+        elif change == 'start':
+            native.started += 1
+        elif change == 'gate':
+            with sqlite3.connect(paths.database) as db:
+                db.execute("UPDATE deployment_gate SET owner='foreign-owner'")
+        elif change == 'pointer':
+            (paths.state / 'current').unlink()
+            (paths.state / 'current').symlink_to(candidate)
+        elif change == 'source':
+            (old / 'backend/native_notifications.py').write_text('changed')
+        elif change == 'config':
+            native.config_bytes = b'{}'
+        elif change == 'database':
+            replacement = callbacks.inbox.with_suffix('.replacement')
+            shutil.copyfile(callbacks.inbox, replacement)
+            replacement.chmod(0o600)
+            replacement.replace(callbacks.inbox)
+        elif change == 'owner':
+            with sqlite3.connect(callbacks.auth) as db:
+                db.execute("UPDATE users SET id='replacement-owner'")
+        elif change in ('record', 'receipt'):
+            delete_captured_evidence(app, outbox, event, change)
+        elif change == 'payload':
+            with outbox.transaction() as db:
+                db.execute("UPDATE notification_outbox SET result_json='{}'")
+        else:
+            with outbox.transaction() as db:
+                db.execute('UPDATE notification_outbox SET state=?,route=?,source_state=?',
+                           (change, change, 'uncertain'))
+
+    callbacks.sleep = mutate
+    with pytest.raises((RuntimeError, AssertionError)):
+        under_owned_lock(paths, lambda: callbacks.verify_rollback(old, baseline))
+    assert len(sleeps) == 1
+    assert len(reads) <= 3
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT COUNT(*) FROM deployment_gate').fetchone() == (1,)
+    assert callbacks._proof.execute(
+        'SELECT COUNT(*) FROM records WHERE snap>?', (callbacks.handoff_records.snap,)
+    ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('elapsed_bound', [False, True])
+def test_controller_rollback_churn_exhaustion_keeps_owned_gate_closed(
+        tmp_path, monkeypatch, elapsed_bound):
+    from deploy.native_notification_release import ROLLBACK_ATTEMPTS, ROLLBACK_TIMEOUT
+
+    _, _, native, paths, callbacks, args, old, _ = setup_controller_release(tmp_path, monkeypatch)
+    reads, sleeps = [], []
+    now = [0]
+    callbacks.clock = lambda: now[0]
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += ROLLBACK_TIMEOUT if elapsed_bound else seconds
+
+    callbacks.sleep = sleep
+
+    def idle(*_args, **_kwargs):
+        nonlocal reads
+        reads = churn_rollback_status(native, monkeypatch, persistent=True)
+        return False
+
+    native.idle = idle
+    with pytest.raises(RuntimeError, match='admission gate remains closed'):
+        release.deploy(paths, idle_timeout=0, **args)
+    status = json.loads((paths.state / 'status.json').read_text())
+    assert status['status'] == 'rollback_failed'
+    assert status['error'] == 'Native idle wait timed out'
+    assert status['rollback_error'] == 'Native notification evidence changed during observation'
+    assert len(reads) == (2 if elapsed_bound else 2 * ROLLBACK_ATTEMPTS)
+    assert len(sleeps) == (1 if elapsed_bound else ROLLBACK_ATTEMPTS - 1)
+    assert all(0 < seconds <= 1 for seconds in sleeps)
+    assert (paths.state / 'current').resolve() == old
+    assert (native.pid, native.started) == (123, 456)
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT owner FROM deployment_gate').fetchone() == (status['release'],)
+
+
+def test_rollback_retries_only_fully_bound_pending_ack(tmp_path, monkeypatch):
+    app, outbox, native, paths, callbacks, baseline, old, candidate, event = setup_release(tmp_path)
+    capture_and_handoff(paths, callbacks, baseline, candidate)
+    item, receipt_id = create_unacked_owned_receipt(app, outbox, event, callbacks.scope)
+    outbox.ack(event_id=item['event_id'], payload_sha256=item['payload_sha256'],
+               lease_token=item['lease_token'], receipt_id=receipt_id)
+    sleeps = []
+
+    def acknowledge(_):
+        sleeps.append(True)
+        app.notifications.background_acknowledged(
+            callbacks.scope, item['event_id'], item['lease_token'])
+
+    callbacks.sleep = acknowledge
+    results = []
+    under_owned_lock(paths, lambda: results.append(callbacks.verify_rollback(old, baseline)))
+    assert results == [True]
+    assert sleeps == [True]
+    assert callbacks.initial_records['async:deleg_1']['payload_sha256'] == item['payload_sha256']
+
+
 def test_controller_reopens_after_receipt_delay_with_preserved_pending_record(
         tmp_path, monkeypatch):
     _, _, _, paths, callbacks, args, _, _ = setup_controller_release(
