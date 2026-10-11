@@ -971,6 +971,332 @@ def test_authorized_controls_delta_allowed_but_legacy_still_protected(tmp_path, 
     assert release.deploy(paths, **args)
 
 
+@pytest.fixture
+def photo_transition(tmp_path, monkeypatch):
+    """Real transaction and lock bytes; synthetic process/artifact boundaries only."""
+    import hashlib
+    import subprocess
+    import sys
+    from deploy import frontend_release, git_source, release_artifact
+
+    paths, old, journal, dropin, events, args = fixture(tmp_path)
+    lock = (Path(__file__).resolve().parents[1] / 'requirements.lock').read_bytes()
+    previous_lock = lock.replace(b'Pillow==12.3.0\n', b'')
+    assert hashlib.sha256(previous_lock).hexdigest() == (
+        '1e912f6160c68f3ebb56a51da95af013875d0b4690434fe52fcd3f6b115de095')
+    assert hashlib.sha256(lock).hexdigest() == (
+        'ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04')
+    (old / 'requirements.lock').write_bytes(previous_lock)
+    (paths.source / 'requirements.lock').write_bytes(lock)
+
+    # Never consult the real systemd, /proc, installed bridge, or native Python.
+    runtime = tmp_path / 'bridge-venv/bin'
+    runtime.mkdir(parents=True)
+    python = runtime / 'python'
+    python.symlink_to(sys.executable)
+    uvicorn = runtime / 'uvicorn'
+    uvicorn.write_text('#!' + str(python) + '\n')
+    proc = tmp_path / 'proc/123'
+    proc.mkdir(parents=True)
+    (proc / 'cwd').symlink_to(old)
+    (proc / 'exe').symlink_to(python.resolve())
+    command = [str(python), str(uvicorn), 'backend.serve:create_app', '--factory',
+               '--host', '127.0.0.1', '--port', '9120', '--proxy-headers',
+               '--forwarded-allow-ips=127.0.0.1', '--no-access-log']
+    (proc / 'cmdline').write_bytes(('\0'.join(command) + '\0').encode())
+    (proc / 'stat').write_text('123 (fixture bridge) S ' + '0 ' * 18 + '456 0\n')
+    monkeypatch.setattr(release, 'PROC_ROOT', proc.parent)
+    monkeypatch.setattr(release, 'BRIDGE_UVICORN', uvicorn, raising=False)
+    original_run = args['run']
+
+    def run(cmd, **kw):
+        if cmd[:4] == ['systemctl', '--user', 'show', 'hermes-mobile.service']:
+            events.append(('bridge-pid',))
+            return subprocess.CompletedProcess(cmd, 0, stdout='123\n')
+        if cmd[0] == str(python):
+            assert cmd[1:4] == ['-I', '-B', '-c']
+            assert kw == dict(check=True, capture_output=True, text=True, timeout=15,
+                              cwd=old)
+            with journal.connect() as db:
+                assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
+            assert (paths.state / 'current').resolve() == old
+            assert not any(e[0] in ('capture', 'command') for e in events)
+            events.append(('photo-dependency', cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout='Pillow 12.3.0 JPEG PNG WEBP OK\n')
+        return original_run(cmd, **kw)
+
+    args.update(run=run, local_full_checks=False, hosted_run_id=765,
+                expected_source_sha='a' * 40)
+    monkeypatch.setattr(git_source, 'preflight', lambda *a, **kw: 'a' * 40)
+    monkeypatch.setattr(git_source, 'verify_stage', lambda *a, **kw: None)
+
+    def acquire(source, run_id, destination, *, run):
+        events.append(('verified-bundle',))
+        public = destination / 'public'
+        public.mkdir(parents=True)
+        (public / 'index.html').write_bytes(b'<h1>photo release</h1>')
+        return release_artifact.VerifiedBundle(
+            'a' * 40, run_id, 1, 81, 'b' * 64, release_artifact.source_mapping(source),
+            {'index.html': hashlib.sha256(b'<h1>photo release</h1>').hexdigest()}, public)
+
+    monkeypatch.setattr(release_artifact, 'acquire_verified_bundle', acquire)
+    monkeypatch.setattr(bridge, 'run_host_checks',
+                        lambda *a, **kw: events.append(('host-checks',)))
+    monkeypatch.setattr(frontend_release, 'build_frontend',
+                        lambda *a: pytest.fail('No local build in hosted mode'))
+    args['checks'] = lambda *a: pytest.fail('No local full suite in hosted mode')
+    return paths, old, journal, dropin, events, args
+
+
+def test_photo_lock_transition_uses_bridge_interpreter_before_admission(photo_transition):
+    paths, old, journal, dropin, events, args = photo_transition
+    stage = release.deploy(paths, **args)
+    labels = [e[0] for e in events]
+    assert labels.count('photo-dependency') == 1
+    assert labels.index('photo-dependency') < labels.index('capture')
+    assert labels.count('verified-bundle') == labels.count('host-checks') == 1
+    assert labels.count('command') == 3
+    assert (paths.state / 'current').resolve() == stage
+    assert (paths.webroot / 'index.html').read_bytes() == b'<h1>photo release</h1>'
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'succeeded'
+    with journal.connect() as db:
+        assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
+
+
+def assert_photo_preflight_unchanged(photo_transition):
+    paths, old, journal, dropin, events, args = photo_transition
+    assert (paths.state / 'current').resolve() == old
+    assert paths.dropin.read_text() == 'old bridge dropin\n'
+    assert not dropin.exists()
+    assert (paths.webroot / 'index.html').read_text() == '<h1>old</h1>'
+    assert not any(e[0] in ('capture', 'command', 'idle') for e in events)
+    assert json.loads((paths.state / 'status.json').read_text())['status'] == 'failed'
+    with journal.connect() as db:
+        assert not db.execute('SELECT 1 FROM deployment_gate').fetchall()
+
+
+@pytest.mark.parametrize('fault', [None, 'missing-PIL', 'PIL-version', 'metadata-version',
+                                   'missing-metadata', 'JPEG', 'PNG', 'WEBP',
+                                   'missing-JPEG', 'missing-PNG', 'missing-WEBP'])
+def test_photo_dependency_script_proves_versions_and_decoders(photo_transition, monkeypatch, fault):
+    """Execute the actual probe text inside a fully synthetic PIL runtime."""
+    import builtins
+    import contextlib
+    import importlib.metadata
+    import io
+    import subprocess
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    paths, old, journal, dropin, events, args = photo_transition
+    decoded, verified = [], []
+
+    class Image:
+        size = (2, 2)
+        def __init__(self, fmt=None):
+            self.format = fmt
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def save(self, data, *, format):
+            data.write(format.encode())
+        def verify(self):
+            verified.append(self.format)
+        def load(self):
+            if self.format == fault:
+                raise OSError('synthetic broken decoder: ' + fault)
+            decoded.append(self.format)
+        def convert(self, mode):
+            assert mode == 'RGB'
+            return self
+
+    pil = ModuleType('PIL')
+    pil.__version__ = '12.2.0' if fault == 'PIL-version' else '12.3.0'
+    def open_image(data):
+        fmt = data.getvalue().decode()
+        if fault == 'missing-' + fmt:
+            raise KeyError('synthetic missing decoder: ' + fmt)
+        return Image(fmt)
+    pil.Image = SimpleNamespace(new=lambda *a: Image(), open=open_image)
+    pil.ImageOps = SimpleNamespace(exif_transpose=lambda image: image)
+    monkeypatch.setitem(sys.modules, 'PIL', pil)
+    def version(name):
+        assert name == 'Pillow'
+        if fault == 'missing-metadata':
+            raise importlib.metadata.PackageNotFoundError(name)
+        return '12.2.0' if fault == 'metadata-version' else '12.3.0'
+    monkeypatch.setattr(importlib.metadata, 'version', version)
+    original_import = builtins.__import__
+    def importing(name, *a, **kw):
+        if name == 'PIL' and fault == 'missing-PIL':
+            raise ModuleNotFoundError('synthetic missing PIL')
+        return original_import(name, *a, **kw)
+    original_run = args['run']
+    output = io.StringIO()
+    def run(cmd, **kw):
+        result = original_run(cmd, **kw)
+        if cmd[1:4] == ['-I', '-B', '-c']:
+            # Fake only the external process boundary. Do not execute or import
+            # installed native/bridge source; run the real probe with fake PIL.
+            with monkeypatch.context() as local:
+                local.setattr(builtins, '__import__', importing)
+                try:
+                    with contextlib.redirect_stdout(output):
+                        exec(compile(cmd[-1], '<photo-dependency-probe>', 'exec'), {})
+                except Exception as error:
+                    raise subprocess.CalledProcessError(1, cmd, stderr=str(error)) from error
+            result.stdout = output.getvalue()
+        return result
+    args['run'] = run
+    if fault is None:
+        release.deploy(paths, **args)
+        assert verified == ['JPEG', 'PNG', 'WEBP']
+        assert set(decoded) == {'JPEG', 'PNG', 'WEBP'}
+        assert output.getvalue() == 'Pillow 12.3.0 JPEG PNG WEBP OK\n'
+    else:
+        with pytest.raises(RuntimeError, match='Bridge Pillow 12.3.0 dependency verification failed'):
+            release.deploy(paths, **args)
+        assert output.getvalue() == ''
+        assert_photo_preflight_unchanged(photo_transition)
+
+
+@pytest.mark.parametrize('fault', ['empty', 'wrong', 'nonzero', 'timeout', 'missing-executable'])
+def test_photo_dependency_requires_positive_subprocess_proof(photo_transition, fault):
+    import subprocess
+    paths, old, journal, dropin, events, args = photo_transition
+    original_run = args['run']
+    def run(cmd, **kw):
+        result = original_run(cmd, **kw)
+        if cmd[1:4] == ['-I', '-B', '-c']:
+            if fault == 'timeout':
+                raise subprocess.TimeoutExpired(cmd, kw['timeout'])
+            if fault == 'missing-executable':
+                raise FileNotFoundError('synthetic missing interpreter')
+            if fault == 'nonzero':
+                result.returncode = 1
+            else:
+                result.stdout = '' if fault == 'empty' else 'Pillow installed\n'
+        return result
+    args['run'] = run
+    with pytest.raises(RuntimeError, match='Bridge Pillow 12.3.0 dependency verification failed'):
+        release.deploy(paths, **args)
+    assert_photo_preflight_unchanged(photo_transition)
+
+
+@pytest.mark.parametrize('fault', ['pid', 'cwd', 'interpreter', 'launcher', 'shebang', 'exe',
+                                   'owner', 'start-changed', 'pid-changed', 'command-changed',
+                                   'cwd-changed'])
+def test_photo_dependency_requires_bound_unchanged_bridge_process(photo_transition, monkeypatch, fault):
+    import sys
+    paths, old, journal, dropin, events, args = photo_transition
+    proc = release.PROC_ROOT / '123'
+    command = (proc / 'cmdline').read_bytes()
+    if fault == 'cwd':
+        (proc / 'cwd').unlink()
+        (proc / 'cwd').symlink_to(paths.source)
+    elif fault == 'interpreter':
+        # Same underlying executable does not authorize a different virtualenv.
+        (proc / 'cmdline').write_bytes(
+            str(Path(sys.executable).resolve()).encode() + b'\0' + command.split(b'\0', 1)[1])
+    elif fault == 'launcher':
+        (proc / 'cmdline').write_bytes(command.replace(bytes(release.BRIDGE_UVICORN), b'/other/uvicorn'))
+    elif fault == 'shebang':
+        release.BRIDGE_UVICORN.write_text('#!/other/python\n')
+    elif fault == 'exe':
+        (proc / 'exe').unlink()
+        (proc / 'exe').symlink_to(release.BRIDGE_UVICORN)
+    elif fault == 'owner':
+        uid = release.os.getuid()
+        monkeypatch.setattr(release.os, 'getuid', lambda: uid + 1)
+    original_run = args['run']
+    probed = False
+    def run(cmd, **kw):
+        nonlocal probed
+        result = original_run(cmd, **kw)
+        if cmd[:4] == ['systemctl', '--user', 'show', 'hermes-mobile.service']:
+            if fault == 'pid':
+                result.stdout = '0\n'
+            elif fault == 'pid-changed' and probed:
+                result.stdout = '124\n'
+        if cmd[1:4] == ['-I', '-B', '-c']:
+            probed = True
+            if fault == 'start-changed':
+                (proc / 'stat').write_text((proc / 'stat').read_text().replace('456', '789'))
+            elif fault == 'command-changed':
+                (proc / 'cmdline').write_bytes(command.replace(b'9120', b'9999'))
+            elif fault == 'cwd-changed':
+                (proc / 'cwd').unlink()
+                (proc / 'cwd').symlink_to(paths.source)
+        return result
+    args['run'] = run
+    with pytest.raises(RuntimeError, match='Bridge Pillow 12.3.0 dependency verification failed'):
+        release.deploy(paths, **args)
+    assert_photo_preflight_unchanged(photo_transition)
+
+
+@pytest.mark.parametrize('fault', ['old-missing', 'new-missing', 'unknown-old', 'unknown-new',
+                                   'reverse', 'extra-package', 'wrong-pillow'])
+def test_photo_lock_transition_rejects_any_other_lock_pair(photo_transition, fault):
+    paths, old, journal, dropin, events, args = photo_transition
+    previous, candidate = old / 'requirements.lock', paths.source / 'requirements.lock'
+    if fault.endswith('missing'):
+        (previous if fault == 'old-missing' else candidate).unlink()
+    elif fault.startswith('unknown'):
+        (previous if fault == 'unknown-old' else candidate).write_bytes(b'other==1\n')
+    elif fault == 'reverse':
+        before, after = previous.read_bytes(), candidate.read_bytes()
+        previous.write_bytes(after)
+        candidate.write_bytes(before)
+    elif fault == 'extra-package':
+        candidate.write_bytes(candidate.read_bytes() + b'other==1\n')
+    else:
+        candidate.write_bytes(candidate.read_bytes().replace(b'Pillow==12.3.0', b'Pillow==12.2.0'))
+    with pytest.raises(RuntimeError, match='Unsupported protected dependency/native change'):
+        release.deploy(paths, **args)
+    assert not any(e[0] == 'photo-dependency' for e in events)
+    assert_photo_preflight_unchanged(photo_transition)
+
+
+@pytest.mark.parametrize('name', [
+    'patches/native.patch', 'hermes-plugin/unrelated.py', 'backend/native_api_service.py',
+    'backend/member_runtime.py', 'backend/member_scheduler.py', 'backend/member_jobs.py',
+    'deploy/hermes-mobile-api.service', 'deploy/hermes-family-scheduler@.service'])
+def test_photo_lock_transition_preserves_other_protected_files(photo_transition, name):
+    paths, old, journal, dropin, events, args = photo_transition
+    target = paths.source / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('unapproved protected change')
+    with pytest.raises(RuntimeError, match='Unsupported protected|approved'):
+        release.deploy(paths, **args)
+    assert not any(e[0] == 'photo-dependency' for e in events)
+    assert_photo_preflight_unchanged(photo_transition)
+
+
+def test_photo_lock_transition_still_rejected_by_ordinary_bridge(photo_transition):
+    paths, old, journal, dropin, events, args = photo_transition
+    # Remove the separate native-controls delta so lock-only refusal is proven.
+    for name in ('backend/native_controls_service.py', 'backend/native_run_controls.py',
+                 'backend/native_maintenance.py', 'backend/native_session_deletion.py',
+                 'backend/native_notifications.py'):
+        (old / name).write_bytes((paths.source / name).read_bytes())
+    with pytest.raises(RuntimeError, match='Unsupported dependency/native changes require operator maintenance'):
+        bridge.deploy(paths, checks=args['checks'], verify=args['verify'], run=args['run'])
+    assert not any(e[0] == 'photo-dependency' for e in events)
+    assert_photo_preflight_unchanged(photo_transition)
+
+
+@pytest.mark.parametrize('photo_lock', [False, True])
+def test_unchanged_lock_does_not_add_runtime_dependency_probe(photo_transition, photo_lock):
+    paths, old, journal, dropin, events, args = photo_transition
+    if photo_lock:
+        (old / 'requirements.lock').write_bytes((paths.source / 'requirements.lock').read_bytes())
+    else:
+        (paths.source / 'requirements.lock').write_bytes((old / 'requirements.lock').read_bytes())
+    release.deploy(paths, **args)
+    assert not any(e[0] in ('bridge-pid', 'photo-dependency') for e in events)
+
+
 def photo_capabilities():
     return dict(version=1, max_images=4, max_image_bytes=2097152,
                 max_request_bytes=20000000, private_persistence=True)

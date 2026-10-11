@@ -109,6 +109,40 @@ migration-only operator and its positive-count manifest are not substitutes for
 ordinary release evidence or for an empty-backlog proof. Such upgrades require a
 separately approved maintenance/migration path; this worker does not bypass it.
 
+## Photo dependency transition (issue #94)
+
+Baseline `ff6f8fa5afa65cd933e427f096cc82a3c37822f8` adds photo controls and
+only `Pillow==12.3.0` to `requirements.lock`. Native maintenance may recognize
+exactly this forward lock transition (SHA-256 of the complete file):
+
+- Old: `1e912f6160c68f3ebb56a51da95af013875d0b4690434fe52fcd3f6b115de095`
+- New: `ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04`
+
+The complete remaining protected fingerprint map must still be equal. Missing,
+reversed, unrelated or additionally changed lockfiles are not authorized; this is
+not a generic dependency override. Ordinary bridge delivery must still refuse the
+transition. Native source approval and every existing provenance, hosted artifact,
+host-partition, drain, notification, readiness and rollback gate remain mandatory.
+
+Before admission closes or any service/assets/pointer mutation, maintenance must
+positively identify the running bridge's owned PID, old-release working directory,
+uvicorn command and virtualenv interpreter. It invokes that interpreter using its
+original virtualenv path (not the resolved system Python, the maintenance worker's
+Python, the canonical checkout's test Python, or the native listener's Python).
+The read-only, bounded probe requires both installed Pillow metadata and `PIL`
+to report exactly `12.3.0`, imports the image helpers, and round-trips tiny in-memory
+JPEG, PNG and WebP images through verification and full decoding. The process
+binding must remain unchanged across the probe. Missing/wrong Pillow, failed
+imports/decoders, unknown/changing bridge identity, failed subprocesses or missing
+positive output abort before admission and leave the old pointer, assets and
+service dropins untouched. The worker never installs or upgrades packages.
+
+Synthetic managed acceptance tests exercise the real `deploy()` transaction with
+only external process/artifact boundaries faked: the recognized transition succeeds,
+all rejection cases above fail before mutation, ordinary bridge delivery still
+rejects, and unchanged locks retain their existing behavior. Normal invocation
+remains `--schedule --hosted-run-id ID`; there is no new flag or fallback.
+
 ## Native maintenance validation mode
 
 Normal native-controls maintenance uses the verified hosted release bundle:

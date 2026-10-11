@@ -223,6 +223,71 @@ def require_controls_capabilities(caps, *, session_delete_version, notification_
         raise RuntimeError('Native controls capabilities do not match source version') from None
 
 
+BRIDGE_UVICORN = Path('/home/lindayi/projects/hermes-mobile/.venv/bin/uvicorn')
+PRE_PHOTO_LOCK = '1e912f6160c68f3ebb56a51da95af013875d0b4690434fe52fcd3f6b115de095'
+PHOTO_LOCK = 'ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04'
+PHOTO_DEPENDENCY_PROBE = '''\
+from importlib.metadata import version
+from io import BytesIO
+import PIL
+from PIL import Image, ImageOps
+if PIL.__version__ != '12.3.0' or version('Pillow') != '12.3.0':
+    raise RuntimeError('Pillow 12.3.0 required')
+for fmt in ('JPEG', 'PNG', 'WEBP'):
+    data = BytesIO()
+    Image.new('RGB', (2, 2), (32, 64, 96)).save(data, format=fmt)
+    data.seek(0)
+    with Image.open(data) as image:
+        image.verify()
+    data.seek(0)
+    with Image.open(data) as image:
+        image.load()
+        if image.format != fmt or image.size != (2, 2):
+            raise RuntimeError('Pillow decoder mismatch')
+        ImageOps.exif_transpose(image).convert('RGB').load()
+print('Pillow 12.3.0 JPEG PNG WEBP OK')
+'''
+
+
+def require_bridge_photo_dependency(root, *, run):
+    """Probe the existing bridge venv, never the worker/test/native interpreter."""
+    def identity():
+        pid = run(['systemctl', '--user', 'show', 'hermes-mobile.service',
+                   '--property=MainPID', '--value'], check=True, capture_output=True,
+                  text=True, timeout=10).stdout.strip()
+        if not pid.isdigit() or int(pid) <= 0:
+            raise ValueError('Unknown bridge PID')
+        proc = PROC_ROOT / pid
+        command = (proc / 'cmdline').read_bytes().split(b'\0')
+        python = Path(os.fsdecode(command[0]))
+        expected = [str(python), str(BRIDGE_UVICORN), 'backend.serve:create_app',
+                    '--factory', '--host', '127.0.0.1', '--port', '9120',
+                    '--proxy-headers', '--forwarded-allow-ips=127.0.0.1', '--no-access-log']
+        with BRIDGE_UVICORN.open('rb') as launcher:
+            shebang = launcher.readline(4096).rstrip(b'\n')
+        if (not python.is_absolute() or python.parent != BRIDGE_UVICORN.parent
+                or python.name not in ('python', 'python3', 'python3.12')
+                or command != [os.fsencode(arg) for arg in expected] + [b'']
+                or shebang != b'#!' + os.fsencode(python)
+                or proc.stat().st_uid != os.getuid()
+                or (proc / 'cwd').resolve(strict=True) != root
+                or (proc / 'exe').resolve(strict=True) != python.resolve(strict=True)):
+            raise ValueError('Unknown bridge interpreter binding')
+        return pid, NativeProbe._start_ticks(int(pid)), str(python), command
+
+    try:
+        before = identity()
+        # Keep the venv path: resolving its symlink would invoke system Python.
+        result = run([before[2], '-I', '-B', '-c', PHOTO_DEPENDENCY_PROBE],
+                     check=True, capture_output=True, text=True, timeout=15, cwd=root)
+        if (getattr(result, 'returncode', None) != 0
+                or getattr(result, 'stdout', None) != 'Pillow 12.3.0 JPEG PNG WEBP OK\n'
+                or identity() != before):
+            raise ValueError('Missing positive Pillow/bridge identity proof')
+    except (OSError, ValueError, IndexError, RuntimeError, subprocess.SubprocessError) as error:
+        raise RuntimeError('Bridge Pillow 12.3.0 dependency verification failed') from error
+
+
 def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
            run=subprocess.run, sleep=time.sleep, idle_timeout=1800,
            bootstrap_dedicated_native=False, probe=None, handoff=None,
@@ -301,7 +366,12 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
                               ('backend/native_controls_service.py', 'backend/native_run_controls.py',
                                'backend/native_maintenance.py', 'backend/native_session_deletion.py',
                                'backend/native_notifications.py'))
-            if bridge.fingerprints(stage, protected) != bridge.fingerprints(old, protected):
+            candidate_protected = bridge.fingerprints(stage, protected)
+            baseline_protected = bridge.fingerprints(old, protected)
+            photo_transition = candidate_protected != baseline_protected
+            if photo_transition and (
+                    baseline_protected.get('requirements.lock') != PRE_PHOTO_LOCK
+                    or candidate_protected != {**baseline_protected, 'requirements.lock': PHOTO_LOCK}):
                 raise RuntimeError('Unsupported protected dependency/native change')
             for name in ('backend/native_controls_service.py', 'backend/native_run_controls.py'):
                 if not (stage / name).is_file():
@@ -329,6 +399,8 @@ def deploy(paths, *, checks, verify, native, native_dropin=NATIVE_DROPIN,
             # Strict existing public verifier BEFORE admission or service mutation.
             saved_assets = _assets(paths.webroot)
             verify(old, True)
+            if photo_transition:
+                require_bridge_photo_dependency(old, run=run)
             baseline = native.capture(old, bootstrap_dedicated_native)
             baseline['gate_owner'] = release_id
             saved = {str(p): p.read_bytes() if p.exists() else None for p in (paths.dropin, native_dropin)}
