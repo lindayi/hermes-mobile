@@ -44,6 +44,30 @@ def png_fixture(seed=0):
             + chunk(b'IEND', b''))
 
 
+@pytest.mark.parametrize('field', ['user_quota_bytes', 'global_quota_bytes', 'min_free_bytes'])
+@pytest.mark.parametrize('value', [-1, True, False, 1.5, float('nan'), float('inf'), None, '128', 2**63])
+def test_invalid_storage_byte_controls_fail_before_attachment_state(tmp_path, field, value):
+    database, root = tmp_path / 'runs.sqlite', tmp_path / 'attachments'
+    with pytest.raises(ValueError, match='byte quota|free-space reserve'):
+        attachments_module.AttachmentStore(database, root, **{field: value})
+    assert not database.exists()
+    assert not root.exists()
+
+
+@pytest.mark.parametrize('field', ['user_quota_bytes', 'global_quota_bytes'])
+def test_zero_storage_quota_is_invalid(tmp_path, field):
+    with pytest.raises(ValueError, match='byte quota'):
+        attachments_module.AttachmentStore(tmp_path / 'runs.sqlite', tmp_path / 'attachments', **{field: 0})
+
+
+@pytest.mark.parametrize('quota,reserve', [(1, 0), (2**63 - 1, 2**63 - 1)])
+def test_integer_storage_control_boundaries_are_retained(tmp_path, quota, reserve):
+    store = attachments_module.AttachmentStore(tmp_path / 'runs.sqlite', tmp_path / 'attachments',
+        user_quota_bytes=quota, global_quota_bytes=quota, min_free_bytes=reserve)
+    assert store.user_quota_bytes == store.global_quota_bytes == quota
+    assert store.min_free_bytes == reserve
+
+
 def test_malformed_png_decode_is_typed_and_same_key_recovers(tmp_path):
     malformed = bytearray(png_fixture())
     malformed[-13] ^= 1  # Public synthetic IDAT CRC corruption.
@@ -1335,7 +1359,8 @@ def test_delete_photo_release_keeps_event_loop_responsive_under_writer_lock(tmp_
         assert heartbeats >= 5
 
 
-def test_periodic_orphan_rescan_does_not_block_known_storage_admission(tmp_path):
+@pytest.mark.parametrize('orphan_first', [False, True])
+def test_periodic_orphan_rescan_does_not_block_known_storage_admission(tmp_path, monkeypatch, orphan_first):
     with photo_client(tmp_path) as (app, client):
         store = app.state.attachments
         store.cleanup(limit=256, rescan=True)
@@ -1355,18 +1380,37 @@ def test_periodic_orphan_rescan_does_not_block_known_storage_admission(tmp_path)
             db.commit()
         orphan = store.objects / 'newly-orphaned.tmp'
         orphan.write_bytes(b'unknown bytes')
+        # Directory order is filesystem-dependent, not insertion order. Exercise
+        # both discovery timings without changing the bounded production scanner.
+        original_iterdir = type(store.objects).iterdir
+        def ordered_fixture(path):
+            entries = original_iterdir(path)
+            if path == store.objects:
+                return iter(sorted(entries, key=lambda item: (
+                    (item != orphan) if orphan_first else (item == orphan), item.name)))
+            return entries
+        monkeypatch.setattr(type(store.objects), 'iterdir', ordered_fixture)
 
         store.cleanup(limit=64, rescan=True)
         user = client.get(BASE + '/auth/me').json()['user']
-        reservation, fresh = store.begin(user, 'wa-1', 'known-storage-admission')
-
-        assert fresh
-        assert reservation['state'] == 'receiving'
+        if orphan_first:
+            with pytest.raises(attachments_module.AttachmentError) as blocked:
+                store.begin(user, 'wa-1', 'known-storage-admission')
+            assert blocked.value.status == 503
+        else:
+            reservation, fresh = store.begin(user, 'wa-1', 'known-storage-admission')
+            assert fresh
+            assert reservation['state'] == 'receiving'
         for _ in range(20):
             store.cleanup(limit=64)
-            if not orphan.exists():
+            if not orphan.exists() and store._orphan_reconciled:
                 break
         assert not orphan.exists()
+        assert store._orphan_reconciled
+        if orphan_first:
+            reservation, fresh = store.begin(user, 'wa-1', 'known-storage-admission')
+            assert fresh
+            assert reservation['state'] == 'receiving'
 
 
 def test_retry_does_not_reclaim_a_live_upload_lease(tmp_path):

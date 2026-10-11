@@ -135,6 +135,11 @@ class AttachmentStore:
     def __init__(self, database, root, *, user_quota_bytes=128 * 1024 * 1024,
                  global_quota_bytes=512 * 1024 * 1024, min_free_bytes=1024 * 1024 * 1024,
                  user_metadata_rows=None, global_metadata_rows=None):
+        if any(type(value) is not int or not 1 <= value <= 2**63 - 1
+               for value in (user_quota_bytes, global_quota_bytes)):
+            raise ValueError('Photo byte quotas must be positive signed-64-bit integers')
+        if type(min_free_bytes) is not int or not 0 <= min_free_bytes <= 2**63 - 1:
+            raise ValueError('Photo free-space reserve must be a nonnegative signed-64-bit integer')
         self.database = Path(database).resolve()
         self.root = Path(root)
         if (self.root.is_symlink()

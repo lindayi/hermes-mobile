@@ -52,7 +52,12 @@ The configurable defaults are 128 MiB per user and 512 MiB globally, counting
 normalized files, staging data, and in-flight reservations. A reservation is
 made under the storage database's writer lock before accepting bytes and covers
 the maximum simultaneous staging plus normalized footprint. Upload admission
-also requires at least 1 GiB of free space. Concurrent uploads and cleanup use
+also requires at least 1 GiB of free space by default. Configured byte quotas must
+be positive integers and the free-space reserve a nonnegative integer, all within
+the signed-64-bit range; booleans, floats, strings, null and out-of-range values
+fail startup before attachment directories or tables are created. An explicit
+zero reserve is supported for isolated tests or deliberate operator policy, not
+inferred from a malformed value. Concurrent uploads and cleanup use
 the same serialized accounting; no non-expired linked image is evicted to make
 space. Disk-full, low-space, quota, decode, and interrupted-body failures return
 bounded actionable errors and release or expire their reservation safely.
@@ -266,16 +271,20 @@ owner/profile/Session binding. Staging cleanup is bounded and cannot follow
 symlinks or delete outside the attachment root.
 
 Storage and metadata changes are additive. Text-only requests and legacy
-history remain readable. The guarded photo-only rollback sets the private
-application configuration field `photos_enabled` to `false` through the normal
-reviewed release path. This rejects new uploads and new photo-bearing runs, but
-keeps text runs, retries of already admitted photo runs, authenticated reads,
-metadata, and normal cleanup available. Re-enable photos through the same
-guarded path by setting the field to `true`; do not edit a live config or
-immutable release. A rollback to pre-photo code does not preserve photo reads or
-cleanup and is not a retention-safe rollback. Neither path deletes production
-data or activates production as part of development. Production, real accounts,
-private photos, and real model calls are never test fixtures.
+history remain readable. The application configuration field `photos_enabled`
+provides a runtime photo-only disable switch: `false` rejects new uploads and new
+photo-bearing runs, while retaining text runs, retries of already admitted photo
+runs, authenticated reads, metadata, and normal cleanup. Its behavior is covered
+by synthetic route/browser tests.
+
+This PR does not implement a guarded operator command to change that field in
+production. A verified activation and disable/re-enable procedure remains an
+operational acceptance prerequisite under issue #85, not a completed rollback
+path. Do not edit live configuration or immutable releases to work around that
+missing procedure. A rollback to pre-photo code does not preserve photo reads or
+cleanup and is not retention-safe. Source merge runs CI only; it does not activate
+photos or discharge these operational gates. Production, real accounts, private
+photos, and real model calls are never test fixtures.
 
 ## Review-thread recovery boundaries
 
@@ -327,7 +336,7 @@ activation success.
 | `backend/model_controls.py` | `fee5b5b6130e73d5fdce0a79362c09f5ace7621e8b426b5fb1b574cd3cd2bbef` |
 | `deploy/native_controls_release.py` | `8a7d0f8f37b520cf8105734e60972b01211ba831600966105031b40d165d1f1f` |
 | `backend/app.py` | `61ece82105971fad63e971ceb56a836f67637707182c5b2f1e8c1c996de2847d` |
-| `backend/attachments.py` | `ed8db6bfb377f310969a101ba3be3b5cad03f23c15590680cc6af1af4701f1b4` |
+| `backend/attachments.py` | `56ccacea9b5f6365b58306f5287f6b2ecc522f3db2f033c6ede4d23693a644e0` |
 | `backend/hermes_client.py` | `d669f59f7bf3fb2cc5cc671081937fb7328f9b53d50995f966333ae413823116` |
 | `backend/task_reminder_presentation.py` | `fa68480f43a29d1543e55b1e514263d8fdc7f25593264ca5a61ac021b021e1c6` |
 | `backend/native_catalog.py` | `986c43c3b13885605053330adc52a7f7b25ac9608e81bd1e67839fd3f3cb9e49` |
