@@ -250,8 +250,8 @@ SOURCE_FINGERPRINTS = {
     'backend/tool_presentation.py': '4cfd8d468f75213d3aee3f8ab3c9f9409bb3b97e50a2aa05492181b49a1b474f',
     'deploy/backup.py': '3cbc5ace1c5110ded4eefe1298a2d6963280da9e7002d2cb092b2f66d25a6201',
     'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
-    # Accepted merged PR25 source, absent from the historical b85c098 baseline.
-    'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
+    # Issue #96 bounded rollback observation; historical PR25 pins remain retained.
+    'deploy/native_notification_release.py': '165622c962554f19263567e7c1bd60ee17cf8e73a9967cc39be995c3d8071ff1',
 }
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',

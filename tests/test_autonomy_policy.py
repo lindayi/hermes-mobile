@@ -115,6 +115,10 @@ _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
     'deploy/native_notification_release.py': '364f5856f31a07117274a6855a0af573e85d4d197770188b6e9c734df4699582',
 }
 
+_ISSUE96_ROLLBACK_OBSERVATION_FIXTURE = {
+    'deploy/native_notification_release.py': '165622c962554f19263567e7c1bd60ee17cf8e73a9967cc39be995c3d8071ff1',
+}
+
 # Accepted PR29/PR40/PR42 dependency bytes retained from main5316, independently
 # spelled out (not copied from policy constants at runtime). Issue43 source
 # acceptance does not authorize operational activation.
@@ -244,7 +248,7 @@ def _source_files():
             | _ISSUE65_RECEIPT_PRODUCER_FIXTURE | _PENDING_ISSUE77_CLARIFICATION_FIXTURE
             | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
             | _ISSUE85_PHOTO_FIXTURE | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
-            | _ISSUE92_COPILOT_REVIEW_FIXTURE)
+            | _ISSUE92_COPILOT_REVIEW_FIXTURE | _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE)
 
 
 def _source_ci():
@@ -670,7 +674,10 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path == 'deploy/native_notification_release.py'
-    } == _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
+    } == _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE
+    for path, digest in _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE.items():
+        source = Path(__file__).resolve().parents[1] / path
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_PR40_LIFECYCLE_FIXTURE

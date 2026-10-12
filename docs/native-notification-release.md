@@ -89,6 +89,17 @@ still pending`; no baseline is recorded and the gate stays closed.
 Rollback before handoff accepts positively validated records appended by the
 undrained old listener; after handoff the record set must match exactly.
 
+Rollback observation retries only classified status churn or an otherwise fully
+bound receipt awaiting its bridge ACK. It allows at most five attempts within a
+five-second retry window, with at most one second between attempts. Each attempt
+rechecks the original source, bridge pointer, owned gate, native configuration,
+database and owner bindings, and the fixed restored PID/start identity. It compares
+against the original capture and handoff record, delivery and receipt proofs;
+it never replaces them with a fresh baseline. Each attempt discards its scratch
+snapshot. Other failures and exhausted retries leave admission closed. This does
+not retry the post-handoff idle safety stop or require idle for an unchanged,
+prepublication abort; that abort never restarts working agents.
+
 Before either abort path reopens admission, the controller requires a separate
 read-only rollback proof against the captured source, database identities, durable
 records, and previously existing owner receipts. A candidate failure or receipt

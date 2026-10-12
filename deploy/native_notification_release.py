@@ -15,6 +15,8 @@ import time
 # Retained outbox history is append-only; read it in bounded pages, never truncated.
 PAGE_SIZE = 500
 CAPTURE_ATTEMPTS = 5
+ROLLBACK_ATTEMPTS = 5
+ROLLBACK_TIMEOUT = 5
 # Per-snapshot owner-route results reused across pages; evicted, never grown.
 ROUTE_CACHE_KEYS = 512
 SCRATCH_CACHE_KIB = 1024
@@ -732,11 +734,11 @@ class NativeNotificationCallbacks:
             raise ValueError()
         if any(type(status[key]) is not int or status[key] < 0 for key in STATUS_KEYS):
             raise ValueError()
-        if any(status[key] != counts[key] for key in counts):
-            raise _EvidenceChanged()
         if (status['conflicts'] != conflicts or status['conflicts'] != 0
                 or status['quarantined'] != 0):
             raise ValueError()
+        if any(status[key] != counts[key] for key in counts):
+            raise _EvidenceChanged()
         if status['foreign_retained'] != foreign_retained:
             raise _EvidenceChanged()
 
@@ -753,8 +755,6 @@ class NativeNotificationCallbacks:
             evidence = health['native_maintenance']
             notices = evidence['notifications']
             status = self.native.request('/v1/mobile/notifications/status')
-            if snapshot is not None and status != snapshot['status']:
-                raise _EvidenceChanged()
             if health['pid'] != evidence['pid'] or notices['unpreserved'] != 0:
                 raise ValueError()
             if any(type(notices[key]) is not int or notices[key] < 0 for key in
@@ -765,6 +765,10 @@ class NativeNotificationCallbacks:
             if (not isinstance(status, dict) or set(status) != set(STATUS_KEYS)
                      or any(type(status[key]) is not int or status[key] < 0 for key in STATUS_KEYS)):
                 raise ValueError()
+            if status['conflicts'] != 0 or status['quarantined'] != 0:
+                raise ValueError()
+            if snapshot is not None and status != snapshot['status']:
+                raise _EvidenceChanged()
             if (status['pending'] != notices['web_pending']
                     or status['quarantined'] != notices['quarantined']
                     or status['foreign_retained'] != notices['foreign_retained']
@@ -988,35 +992,62 @@ class NativeNotificationCallbacks:
                 or baseline != self.baseline
                 or Path(root).resolve(strict=True) != self.bridge_root):
             raise RuntimeError('Native notification rollback baseline is unavailable')
-        self._require_controller_gate(self.baseline['gate_owner'])
-        self._require_native_state_dir()
-        pointer = self.controller / 'current'
-        if not pointer.is_symlink() or pointer.resolve(strict=True) != self.bridge_root:
-            raise RuntimeError('Native notification rollback bridge binding changed')
         native_root = Path(self.baseline['root']).resolve(strict=True)
-        self._source(native_root, self.baseline['source_hashes'])
-        pid = self.native.attest(native_root)
-        started = self.native._start_ticks(pid)
-        if type(pid) is not int or pid <= 0 or type(started) is not int or started <= 0:
-            raise RuntimeError('Native notification rollback process identity is unknown')
-        snapshot = self._snapshot(expected_owner=self.owner_id, include_receipts=True)
-        try:
-            snap = snapshot['id']
-            if snapshot['identities'] != self.identities:
-                raise RuntimeError('Native notification database binding changed')
-            handed_off = self.handoff_records is not None
-            expected = self.handoff_records if handed_off else self.initial_records
-            # Before handoff the old listener was not yet drained and may append.
-            self._preserved(expected.snap, snap, exact=handed_off)
-            self._preserved_deliveries(self.initial_deliveries.snap, snap)
-            if handed_off:
-                self._preserved_deliveries(self.handoff_deliveries.snap, snap)
-            self._preserved_receipts(self.initial_receipts.snap, snap)
-            if self.handoff_receipts is not None:
-                self._preserved_receipts(self.handoff_receipts.snap, snap)
-            self._require_delivered_receipts(snapshot)
-            self._require_health(identity=(pid, started), baseline=self.baseline,
-                                 require_idle=False, snapshot=snapshot)
-        finally:
-            self._discard(snapshot)
-        return True
+        identity = None
+        deadline = self.clock() + ROLLBACK_TIMEOUT
+        for attempt in range(ROLLBACK_ATTEMPTS):
+            self._require_controller_gate(self.baseline['gate_owner'])
+            self._require_native_state_dir()
+            pointer = self.controller / 'current'
+            if not pointer.is_symlink() or pointer.resolve(strict=True) != self.bridge_root:
+                raise RuntimeError('Native notification rollback bridge binding changed')
+            self._source(native_root, self.baseline['source_hashes'])
+            pid = self.native.attest(native_root)
+            started = self.native._start_ticks(pid)
+            if type(pid) is not int or pid <= 0 or type(started) is not int or started <= 0:
+                raise RuntimeError('Native notification rollback process identity is unknown')
+            if identity is None:
+                identity = (pid, started)
+            elif (pid, started) != identity:
+                raise RuntimeError('Native notification rollback process identity changed')
+            snapshot = None
+            try:
+                snapshot = self._snapshot(expected_owner=self.owner_id, include_receipts=True)
+                snap = snapshot['id']
+                if snapshot['identities'] != self.identities:
+                    raise RuntimeError('Native notification database binding changed')
+                handed_off = self.handoff_records is not None
+                self._preserved(self.initial_records.snap, snap)
+                # Before handoff the old listener was not yet drained and may append.
+                if handed_off:
+                    self._preserved(self.handoff_records.snap, snap, exact=True)
+                self._preserved_deliveries(self.initial_deliveries.snap, snap)
+                if handed_off:
+                    self._preserved_deliveries(self.handoff_deliveries.snap, snap)
+                self._preserved_receipts(self.initial_receipts.snap, snap)
+                if self.handoff_receipts is not None:
+                    self._preserved_receipts(self.handoff_receipts.snap, snap)
+                pending_ack = None
+                try:
+                    self._require_delivered_receipts(snapshot, retry_pending=True)
+                except _EvidenceChanged as error:
+                    # Missing/inconsistent receipts fail before status churn;
+                    # a valid pending ACK may retry only after readiness checks.
+                    pending_ack = error
+                self._require_health(identity=(pid, started), baseline=self.baseline,
+                                     require_idle=False, snapshot=snapshot)
+                if pending_ack is not None:
+                    raise pending_ack
+                if attempt and self.clock() >= deadline:
+                    raise last_change
+                return True
+            except _EvidenceChanged as error:
+                last_change = error
+                remaining = deadline - self.clock()
+                if attempt + 1 == ROLLBACK_ATTEMPTS or remaining <= 0:
+                    raise
+            finally:
+                self._discard(snapshot)
+            self.sleep(min(self.poll_interval, 1, remaining))
+            if self.clock() >= deadline:
+                raise last_change
