@@ -743,6 +743,20 @@ def parse_body(body, state, *, body_html=None):
                     reason="unstructured-comment", inventory_complete=False)
 
     sections = list(_disclosures(parser.root)) if overview else []
+    if overview:
+        headings = []
+        for node in parser.root.children:
+            if not isinstance(node, _Element) or node.tag not in {'h2', 'h3'}:
+                continue
+            label = ' '.join(_text(node, quoted=False).split())
+            if (node.tag == 'h2' and label == 'Copilot review overview'
+                    or node.tag == 'h3' and re.fullmatch(
+                        r'(?:[🟢🔵🟡] )?(?:Looks good|Needs a closer look|Changes recommended)', label)):
+                headings.append(node.tag)
+        if any(headings.count(tag) > 1 for tag in ('h2', 'h3')):
+            result['classifications'].append('ambiguous')
+            result['ambiguous'] = True
+            result['inventory_complete'] = False
     positive_open = False
     counted_sections = set()
     counted_targets = set()

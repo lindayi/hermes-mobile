@@ -195,7 +195,7 @@ _ISSUE92_COPILOT_REVIEW_FIXTURE = {
 
 _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE = {
     'deploy/cloud_coordinator.py': '0e43fae886f34b897fd62dfd365869718ec40abc0c7e1e26b75adc445c158b33',
-    'deploy/review_evidence.py': 'bc5218da8a587c198e2fea2ecb7943594514f4a8fbc8d8b7cccd477f56a4ab98',
+    'deploy/review_evidence.py': '015044c1dab2ea5f1b1bab01376a11ce2966e30acd1cf96f53e1feea145699bf',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {

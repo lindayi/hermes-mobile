@@ -116,7 +116,7 @@ bytes; neither parent's separate review-source digest describes this assembly.
 | Combined candidate path | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `0e43fae886f34b897fd62dfd365869718ec40abc0c7e1e26b75adc445c158b33` |
-| `deploy/review_evidence.py` | `bc5218da8a587c198e2fea2ecb7943594514f4a8fbc8d8b7cccd477f56a4ab98` |
+| `deploy/review_evidence.py` | `015044c1dab2ea5f1b1bab01376a11ce2966e30acd1cf96f53e1feea145699bf` |
 
 Earlier fixture overlays and historical tables remain provenance only. These pins
 are not exact-head review acceptance, hosted CI evidence, merge authorization, or

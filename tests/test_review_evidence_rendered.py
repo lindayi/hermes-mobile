@@ -107,6 +107,23 @@ def test_current_copilot_overview_counts_findings_and_preserves_summary_context(
     assert "Register runtime dependency in pinned execution-source policy" not in finding["text"]
 
 
+@pytest.mark.parametrize('heading', ['<h3>Looks good</h3>', '<h3>🔵 Needs a closer look</h3>',
+                                     '<h2>Copilot review overview</h2>'])
+@pytest.mark.parametrize('location', ['before', 'middle', 'after'])
+def test_duplicate_provider_frame_headings_are_ambiguous(heading, location):
+    rendered = '<h2>Copilot review overview</h2>' + CURRENT_COPILOT_HTML
+    if location == 'before':
+        rendered = heading + rendered
+    elif location == 'middle':
+        rendered = rendered.replace('</p>', '</p>' + heading, 1)
+    else:
+        rendered += heading
+    result = parse_body(CURRENT_COPILOT_RAW, 'COMMENTED', body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings_total'] == 1
+
+
 @pytest.mark.parametrize("legacy_heading", ["", "<h2>Copilot review overview</h2>"])
 @pytest.mark.parametrize("text_position", ["before-status", "before-summary", "after-summary"])
 def test_provider_summary_root_text_is_incomplete_without_crashing(legacy_heading, text_position):
