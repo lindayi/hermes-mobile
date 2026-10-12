@@ -252,7 +252,9 @@ def test_pull_collection_requires_numeric_identity(tmp_path, stage, field, kind)
         api.authorize_sha_review = True
         api.comments = [{"id": 124, "user": {"id": OWNER_ID},
                          "body": (f"/hermes authorize-sensitive {api.head_sha} review "
-                                  f"{api.owner_review_id} {api.owner_review_digest}")}]
+                                  f"{api.copilot_review_id} {api.copilot_review_digest}"),
+                         "created_at": "2026-10-01T12:10:00Z",
+                         "updated_at": "2026-10-01T12:10:00Z"}]
         _, commands, _, candidates = coordinator._scan_enrollments(store.snapshot())
         assert bool(candidates["16"].get("sensitive_sha")) is (kind == "valid")
         assert bool(commands[0][1].get("validated")) is (kind == "valid")

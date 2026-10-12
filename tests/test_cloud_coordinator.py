@@ -1453,6 +1453,14 @@ def test_review_collection_blocks_owner_review_when_graphql_metadata_is_untruste
                 review["submittedAt"] = "2026-10-01T11:01:00Z"
             return response
 
+    if mutation == "error":
+        # Unavailable metadata is not evidence of deletion or revocation.
+        with pytest.raises(ApiError, match="GitHub GraphQL request failed"):
+            _rest_list(
+                InvalidMetadata(),
+                "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100",
+            )
+        return
     reviews = _rest_list(
         InvalidMetadata(),
         "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100",
@@ -1610,6 +1618,13 @@ class FakeApi:
         self.requested_reviewers = []
         self.review_state = "APPROVED"
         self.review_submitted_at = "2026-10-01T12:00:00Z"
+        self.copilot_review_id = 63001
+        self.copilot_review_node_id = "PRR_synthetic_copilot_63001"
+        self.copilot_review_body = ""
+        self.copilot_review_html = ""
+        self.copilot_review_updated_at = self.review_submitted_at
+        self.copilot_review_last_edited_at = None
+        self.copilot_review_includes_created_edit = False
         self.owner_review_id = 64001
         self.owner_review_node_id = "PRR_kwDOU3FvNc8AAAABQehXFA"
         self.owner_review_head_sha = authorize_sha if authorize else head_sha
@@ -1656,9 +1671,10 @@ class FakeApi:
                 "id": 124, "user": {"id": OWNER},
                 "body": (
                     f"/hermes authorize-sensitive {authorize_sha} review "
-                    f"{self.owner_review_id} {self.owner_review_digest}"
+                    f"{self.copilot_review_id} {self.copilot_review_digest}"
                 ),
-                "updated_at": "2026-10-01T11:30:00Z",
+                "created_at": "2026-10-01T12:01:00Z",
+                "updated_at": "2026-10-01T12:01:00Z",
             })
         self._sync_owner_reviews()
 
@@ -1679,6 +1695,41 @@ class FakeApi:
                 includesCreatedEdit=False,
             )
         return record
+
+    @property
+    def copilot_review_digest(self):
+        return hashlib.sha256(self.copilot_review_body.encode("utf-8")).hexdigest()
+
+    def _current_copilot_review_record(self, *, graphql=False):
+        review = {
+            "id": self.copilot_review_id,
+            "node_id": self.copilot_review_node_id,
+            "state": self.review_state,
+            "commit_id": self.review_sha or self.head_sha,
+            "submitted_at": self.review_submitted_at,
+            "body": self.copilot_review_body,
+            "user": {"id": COPILOT_REVIEWER, "login": "copilot-pull-request-reviewer"},
+        }
+        if graphql:
+            review.update(
+                updatedAt=self.copilot_review_updated_at,
+                lastEditedAt=self.copilot_review_last_edited_at,
+                includesCreatedEdit=self.copilot_review_includes_created_edit,
+            )
+        return review
+
+    def set_copilot_review(self, *, review_id, head_sha, body, submitted_at,
+                           state="COMMENTED", body_html=None):
+        self.copilot_review_id = review_id
+        self.copilot_review_node_id = f"PRR_synthetic_copilot_{review_id}"
+        self.review_state = state
+        self.review_sha = head_sha
+        self.review_submitted_at = submitted_at
+        self.copilot_review_updated_at = submitted_at
+        self.copilot_review_last_edited_at = None
+        self.copilot_review_includes_created_edit = False
+        self.copilot_review_body = body
+        self.copilot_review_html = body if body_html is None else body_html
 
     def _sync_owner_reviews(self):
         self.owner_reviews = []
@@ -1701,6 +1752,14 @@ class FakeApi:
             return {"id": 1399942965}
         if route == "user":
             return {"id": OWNER}
+        if route.startswith("repos/lindayi/hermes-mobile/issues/comments/"):
+            comment_id = int(route.rsplit("/", 1)[-1])
+            for comment in self.comments:
+                if comment.get("id") == comment_id:
+                    return dict(comment, issue_url=(
+                        "https://api.github.com/repos/lindayi/hermes-mobile/issues/16"
+                    ))
+            raise ApiError("comment not found", status=404)
         if route.startswith("agents/repos/lindayi/hermes-mobile/tasks/"):
             task_id = route.rsplit("/", 1)[-1]
             if task_id not in self.tasks:
@@ -1789,13 +1848,7 @@ class FakeApi:
         if route.endswith("/pulls/16/reviews?per_page=100"):
             reviews = []
             if self.review_state is not None:
-                reviews.append({
-                    "id": 63001, "state": self.review_state,
-                    "commit_id": self.review_sha or self.head_sha,
-                    "submitted_at": self.review_submitted_at,
-                    "body": "",
-                    "user": {"id": COPILOT_REVIEWER},
-                })
+                reviews.append(self._current_copilot_review_record())
             reviews.extend(self.owner_reviews)
             reviews.append(self._current_owner_review_record())
             return reviews
@@ -1861,6 +1914,36 @@ class FakeApi:
             }
         if "PullRequestReview" in query:
             requested = variables.get("id")
+            if self.copilot_review_node_id == requested:
+                review = self._current_copilot_review_record()
+                review = {
+                    **review,
+                    "updatedAt": self.copilot_review_updated_at,
+                    "lastEditedAt": self.copilot_review_last_edited_at,
+                    "includesCreatedEdit": self.copilot_review_includes_created_edit,
+                }
+                return {
+                    "data": {"node": {
+                        "id": review["node_id"],
+                        "databaseId": review["id"],
+                        "submittedAt": review["submitted_at"],
+                        "updatedAt": review["updatedAt"],
+                        "lastEditedAt": review["lastEditedAt"],
+                        "includesCreatedEdit": review["includesCreatedEdit"],
+                        "state": review["state"],
+                        "body": review["body"],
+                        "bodyHTML": self.copilot_review_html,
+                        "commit": {"oid": review["commit_id"]},
+                        "author": {"login": "copilot-pull-request-reviewer"},
+                        "pullRequest": {
+                            "number": 16,
+                            "repository": {
+                                "nameWithOwner": "lindayi/hermes-mobile",
+                                "databaseId": 1399942965,
+                            },
+                        },
+                    }},
+                }
             review = next((item for item in self.owner_reviews
                            if item["node_id"] == requested), None)
             if review is None and self._current_owner_review_record()["node_id"] == requested:
@@ -3033,17 +3116,26 @@ def test_sensitive_change_needs_owner_authorization_for_the_exact_current_sha(tm
 def test_sensitive_authorization_command_selects_review_and_body_digest():
     review_id, body_sha256 = 64001, "c" * 64
     comment = {
+        "id": 124,
         "user": {"id": OWNER},
         "body": f"/hermes authorize-sensitive {HEAD} review {review_id} {body_sha256}",
+        "created_at": "2026-10-01T12:10:00Z",
+        "updated_at": "2026-10-01T12:10:00Z",
     }
     assert _is_owner_sensitive_command(comment) == {
         "head": HEAD, "review_id": review_id, "body_sha256": body_sha256,
+        "command_comment_id": 124,
+        "command_body_sha256": hashlib.sha256(comment["body"].encode("utf-8")).hexdigest(),
+        "command_created_at": "2026-10-01T12:10:00Z",
     }
     assert _is_owner_sensitive_command(comment | {
         "body": f"/hermes authorize-sensitive {HEAD}",
     }) is None
     assert _is_owner_sensitive_command(comment | {
         "user": {"id": COPILOT_REVIEWER},
+    }) is None
+    assert _is_owner_sensitive_command(comment | {
+        "updated_at": "2026-10-01T12:11:00Z",
     }) is None
 
 
@@ -3108,8 +3200,9 @@ def test_sensitive_owner_review_is_revalidated_at_planning_status_and_merge_fenc
                 self.review_reads += 1
                 if self.review_reads == invalid_on_read:
                     for review in values:
-                        if review.get("id") == self.owner_review_id:
-                            review["body"] += " "
+                        if review.get("id") == self.copilot_review_id:
+                            self.copilot_review_updated_at = "2026-10-01T12:00:01Z"
+                            review["updatedAt"] = self.copilot_review_updated_at
             return values
 
     api = ChangingOwnerReview(
