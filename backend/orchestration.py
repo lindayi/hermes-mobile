@@ -12,6 +12,7 @@ from .runs import NATIVE_RUN_LOST_ERROR, RunConflict
 from .hermes_client import (IntegrationUnavailable, NativeRunNotFound,
                             NativeClarificationRejected, PhotoUnavailableBeforeAdmission)
 from .attachments import AttachmentError
+from .photo_policy import PhotoPolicyError, PhotosDisabled
 
 
 class ClarificationNotSent(IntegrationUnavailable):
@@ -24,10 +25,11 @@ class PhotosDisabledBeforeAdmission(IntegrationUnavailable):
 
 class Orchestrator:
     def __init__(self, journal, gateway, catalog, *, history_loader=None, attachments=None,
-                 profile="default", run_timeout=3600, photos_enabled=True):
+                 profile="default", run_timeout=3600, photos_enabled=True, photo_policy=None):
         self.journal, self.gateway, self.catalog = journal, gateway, catalog
         self.attachments = attachments
         self.photos_enabled = photos_enabled
+        self.photo_policy = photo_policy
         self.profile = profile
         self.history_loader = history_loader
         self.approval_notifier = None
@@ -101,7 +103,7 @@ class Orchestrator:
         existing = self._existing_submission(user, body, selection, attachment_ids)
         if existing:
             return existing
-        if attachment_ids and not self.photos_enabled:
+        if attachment_ids and not self._photos_enabled():
             raise PhotosDisabledBeforeAdmission('New photo-bearing runs are disabled; retry existing runs or send text only.')
         if selection is not None:
             if not hasattr(self,'model_options'):
@@ -159,13 +161,16 @@ class Orchestrator:
         existing = self._existing_submission(user, body, selection, attachment_ids)
         if existing:
             return existing
-        if attachment_ids and not self.photos_enabled:
+        if attachment_ids and not self._photos_enabled():
             raise PhotosDisabledBeforeAdmission('New photo-bearing runs are disabled; retry existing runs or send text only.')
         try:
             run, created = self.journal.submit(user['id'], user['profile'], body['session_id'], body['input'], body['idempotency_key'],
                 history_anchor=lambda: self.catalog.history_anchor(user['profile'], body['session_id'], canonical_id), selection=selection,
                 conversation_roots=lambda ids: self.catalog.conversation_roots(user['profile'], ids),
-                attachment_ids=attachment_ids, attachment_store=self.attachments)
+                attachment_ids=attachment_ids, attachment_store=self.attachments,
+                admission_guard=(self.photo_policy.require_enabled if attachment_ids and self.photo_policy else None))
+        except PhotosDisabled as exc:
+            raise PhotosDisabledBeforeAdmission(str(exc)) from exc
         except sqlite3.IntegrityError as exc:
             raise RunConflict('A local run is active or unresolved') from exc
         if created:
@@ -176,6 +181,15 @@ class Orchestrator:
             self._tasks[task] = (dict(user), run)
             task.add_done_callback(lambda done: self._tasks.pop(done, None))
         return run
+
+    def _photos_enabled(self):
+        if self.photo_policy is None:
+            return self.photos_enabled
+        try:
+            return self.photo_policy.enabled()
+        except PhotoPolicyError as exc:
+            raise IntegrationUnavailable(
+                'Photo policy is unavailable; no new photo run was admitted.') from exc
 
     def _existing_submission(self, user, body, selection, attachment_ids):
         with closing(self.journal.connect()) as c:

@@ -2048,10 +2048,6 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
         assert blocked_run.status_code == 503
         assert blocked_run.json()['code'] == 'photos_disabled_before_admission'
         assert 'disabled' in blocked_run.json()['detail']
-        text_run = client.post(BASE + '/runs', json={
-            'session_id': 'wa-1', 'input': 'Text still works',
-            'idempotency_key': 'rollback-text-only'})
-        assert text_run.status_code == 200, text_run.text
         retried = client.post(BASE + '/runs', json=original)
         assert retried.status_code == 200
         assert retried.json()['id'] == accepted.json()['id']
@@ -2066,6 +2062,10 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
                 break
             time.sleep(.01)
         assert completed['status'] == 'completed'
+        text_run = client.post(BASE + '/runs', json={
+            'session_id': 'wa-1', 'input': 'Text still works',
+            'idempotency_key': 'rollback-text-only'})
+        assert text_run.status_code == 200, text_run.text
         assert len(native_requests) == 2
         assert 'mobile_attachment_ids' not in native_requests[-1]
         assert client.get(BASE + f'/sessions/wa-1/attachments/{first_id}').status_code == 200
