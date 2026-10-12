@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path.cwd() / 'tests'))
 import httpx
 from backend.hermes_client import GatewayClient
-from test_photo_attachments import photo_client, png_fixture
+from test_photo_attachments import photo_client, png_fixture, photo_operator, photo_operator_config
 from test_auth import BASE
 native_posts=[]
 capability_timeout=False
@@ -64,8 +64,9 @@ with tempfile.TemporaryDirectory(prefix='photo-browser-route-') as temporary:
                 if sys.argv[1]=='capability':
                     capability_timeout=True
                 else:
-                    app.state.settings.photos_enabled=False
-                    app.state.orchestrator.photos_enabled=False
+                    config=photo_operator_config(app)
+                    result=photo_operator('disable',config)
+                    assert result.returncode==0,result.stderr
             if sys.argv[1]=='capability' and request['path']=='/runs' and response.status_code==503:
                 with app.state.attachments.connection() as db:
                     assert db.execute('SELECT count(*) FROM runs').fetchone()[0]==1
