@@ -382,7 +382,8 @@ _DISCUSSION_HREF_RE = re.compile(
 )
 
 
-def _has_discussion_link(node):
+def _discussion_targets(node):
+    targets = set()
     pending = list(reversed(node.children))
     while pending:
         child = pending.pop()
@@ -392,9 +393,10 @@ def _has_discussion_link(node):
             if child.tag == "a" and isinstance(child.href, str) and (
                 _DISCUSSION_HREF_RE.fullmatch(child.href)
             ):
-                return True
+                # Fragment and absolute links identify the same review comment.
+                targets.add(child.href.rsplit("#", 1)[1].lower())
             pending.extend(reversed(child.children))
-    return False
+    return targets
 
 
 def _has_inert_disclosure(root):
@@ -426,7 +428,10 @@ def _counted_section_matches(node, expected):
         if not isinstance(child, _Element) or child.tag != "li":
             return False
         items.append(child)
-    return len(items) == expected and all(_has_discussion_link(item) for item in items)
+    targets = [_discussion_targets(item) for item in items]
+    return (len(items) == expected
+            and all(len(item_targets) == 1 for item_targets in targets)
+            and len(set().union(*targets)) == expected)
 
 
 def _text(node, *, exclude_details=False, exclude_history=False, quoted=True, render_quote=None,
@@ -530,14 +535,12 @@ def _provider_summary(root):
         child for child in root.children
         if not isinstance(child, str) or child.strip()
     ]
-    if not all(isinstance(child, _Element) for child in children[:3]):
-        if len(children) < 2 or not all(isinstance(child, _Element) for child in children[:2]):
-            return None
-    if [child.tag for child in children[:3]] == ["h2", "h3", "p"]:
+    tags = [child.tag if isinstance(child, _Element) else None for child in children[:3]]
+    if tags == ["h2", "h3", "p"]:
         if _text(children[0], quoted=False).strip() != "Copilot review overview":
             return None
         status_node, summary = children[1], children[2]
-    elif [child.tag for child in children[:2]] == ["h3", "p"]:
+    elif tags[:2] == ["h3", "p"]:
         status_node, summary = children[0], children[1]
     else:
         return None

@@ -91,8 +91,10 @@ def test_rendered_inventory_reports_total_and_cap(count):
     assert result["inventory_complete"] is (count <= 8)
 
 
-def test_current_copilot_overview_counts_findings_and_preserves_summary_context():
-    review = review_pair(CURRENT_COPILOT_RAW, CURRENT_COPILOT_HTML, state="COMMENTED")
+@pytest.mark.parametrize("legacy_heading", ["", "<h2>Copilot review overview</h2>"])
+def test_current_copilot_overview_counts_findings_and_preserves_summary_context(legacy_heading):
+    review = review_pair(CURRENT_COPILOT_RAW, legacy_heading + CURRENT_COPILOT_HTML,
+                         state="COMMENTED")
     result = review_body_disposition([review], HEAD, reviewer_id=review["user"]["id"])
 
     assert result["inventory_complete"] is True
@@ -103,6 +105,24 @@ def test_current_copilot_overview_counts_findings_and_preserves_summary_context(
     assert "The operator procedure does not bind the active release" in finding["text"]
     assert "These commands do not bind the deployed source" in finding["text"]
     assert "Register runtime dependency in pinned execution-source policy" not in finding["text"]
+
+
+@pytest.mark.parametrize("legacy_heading", ["", "<h2>Copilot review overview</h2>"])
+@pytest.mark.parametrize("text_position", ["before-status", "before-summary", "after-summary"])
+def test_provider_summary_root_text_is_incomplete_without_crashing(legacy_heading, text_position):
+    rendered = legacy_heading + CURRENT_COPILOT_HTML
+    if text_position == "before-status":
+        rendered = rendered.replace("<h3>", "Unclassified root text.<h3>", 1)
+    elif text_position == "before-summary":
+        rendered = rendered.replace("<p>", "Unclassified root text.<p>", 1)
+    else:
+        rendered = rendered.replace("</p>", "</p>Unclassified root text.", 1)
+    result = parse_body(CURRENT_COPILOT_RAW, "COMMENTED", body_html=rendered)
+
+    assert result["inventory_complete"] is False
+    assert result["ambiguous"] is True
+    assert result["findings_total"] == 1
+    assert "These commands do not bind the deployed source" in result["findings"][0][1]
 
 
 @pytest.mark.parametrize("rendered", [
@@ -167,6 +187,28 @@ def test_count_leading_sections_reject_unsupported_discussion_targets(item):
 
     assert result["inventory_complete"] is False
     assert result["ambiguous"] is True
+
+
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("targets", [
+    (("#discussion_r1",), ("#discussion_r1",)),
+    (("#discussion_r1",), ("https://github.com/lindayi/hermes-mobile/pull/103#discussion_r1",)),
+    (("#discussion_r1", "#discussion_r2"),),
+])
+def test_counted_inventory_rejects_duplicate_or_multiple_discussion_targets(category, targets):
+    count = len(targets)
+    label = f"{count} {category} finding" + ("s" if count != 1 else "")
+    items = "".join(
+        "<li>" + "".join(f'<a href="{target}">Finding</a>' for target in item) + "</li>"
+        for item in targets
+    )
+    rendered = f"<details><summary>{label}</summary><ul>{items}</ul></details>"
+    result = parse_body(OVERVIEW_MARKER + "\nCounted section", "COMMENTED",
+                        body_html=rendered)
+
+    assert result["inventory_complete"] is False
+    assert result["ambiguous"] is True
+    assert result["findings"] == []
 
 
 def test_count_leading_section_inside_quotation_is_incomplete():
