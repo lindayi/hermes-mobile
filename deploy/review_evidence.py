@@ -745,7 +745,10 @@ def parse_body(body, state, *, body_html=None):
     sections = list(_disclosures(parser.root)) if overview else []
     if overview:
         headings = []
-        for node in parser.root.children:
+        heading_positions = []
+        children = [node for node in parser.root.children
+                    if not isinstance(node, str) or node.strip()]
+        for position, node in enumerate(children):
             if not isinstance(node, _Element) or node.tag not in {'h2', 'h3'}:
                 continue
             label = ' '.join(_text(node, quoted=False).split())
@@ -753,7 +756,9 @@ def parse_body(body, state, *, body_html=None):
                     or node.tag == 'h3' and re.fullmatch(
                         r'(?:[🟢🔵🟡] )?(?:Looks good|Needs a closer look|Changes recommended)', label)):
                 headings.append(node.tag)
-        if any(headings.count(tag) > 1 for tag in ('h2', 'h3')):
+                heading_positions.append(position)
+        if (headings not in ([], ['h2'], ['h3'], ['h2', 'h3'])
+                or heading_positions != list(range(len(headings)))):
             result['classifications'].append('ambiguous')
             result['ambiguous'] = True
             result['inventory_complete'] = False

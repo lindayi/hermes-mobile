@@ -107,6 +107,20 @@ def test_current_copilot_overview_counts_findings_and_preserves_summary_context(
     assert "Register runtime dependency in pinned execution-source policy" not in finding["text"]
 
 
+@pytest.mark.parametrize('location', ['after-summary', 'after-inventory'])
+def test_misplaced_single_legacy_heading_is_ambiguous(location):
+    heading = '<h2>Copilot review overview</h2>'
+    rendered = CURRENT_COPILOT_HTML
+    if location == 'after-summary':
+        rendered = rendered.replace('</p>', '</p>' + heading, 1)
+    else:
+        rendered += heading
+    result = parse_body(CURRENT_COPILOT_RAW, 'COMMENTED', body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings_total'] == 1
+
+
 @pytest.mark.parametrize('heading', ['<h3>Looks good</h3>', '<h3>🔵 Needs a closer look</h3>',
                                      '<h2>Copilot review overview</h2>'])
 @pytest.mark.parametrize('location', ['before', 'middle', 'after'])
@@ -257,7 +271,7 @@ def test_counted_inventory_requires_disjoint_cross_section_targets(reverse, reso
     assert result["ambiguous"] is not distinct
     assert result["findings"] == []
     # Inventory uncertainty must not erase independently bounded active evidence.
-    with_active = parse_body(review["body"], "COMMENTED", body_html=rendered + HTML_ESCAPED)
+    with_active = parse_body(review["body"], "COMMENTED", body_html=HTML_ESCAPED + rendered)
     assert with_active["inventory_complete"] is distinct
     assert with_active["findings_total"] == 1
     assert "decode <details> only after validation." in with_active["findings"][0][1]
