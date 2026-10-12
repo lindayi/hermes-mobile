@@ -317,6 +317,41 @@ def test_owner_authorization_must_bind_the_selected_review_and_exact_digest():
     )
 
 
+def test_sensitive_authorization_accepts_a_bound_current_copilot_review():
+    body = "<p>Copilot review body</p>"
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    review = {
+        "id": 5300000002,
+        "node_id": "PRR_synthetic_copilot",
+        "state": "COMMENTED",
+        "commit_id": HEAD,
+        "submitted_at": SUBMITTED,
+        "updatedAt": SUBMITTED,
+        "lastEditedAt": None,
+        "includesCreatedEdit": False,
+        "body": body,
+        "body_html": "<p>Copilot review body</p>",
+        "user": {"id": COPILOT_REVIEWER, "login": "copilot-pull-request-reviewer"},
+    }
+    authorization = {
+        "actor_id": OWNER,
+        "head_sha": HEAD,
+        "state": "approved",
+        "review_id": review["id"],
+        "body_sha256": digest,
+    }
+    targeted = {
+        "review_id": review["id"],
+        "reviewer_id": COPILOT_REVIEWER,
+        "head_sha": HEAD,
+        "state": "COMMENTED",
+        "body_sha256": digest,
+    }
+    assert sensitive_review_authorized(
+        [review], HEAD, authorization, targeted, owner_id=OWNER,
+    )
+
+
 @pytest.mark.parametrize("state", ["COMMENTED", "CHANGES_REQUESTED"])
 def test_body_only_previously_missed_finding_dispatches_bounded_fixer(tmp_path, state):
     api = ReviewApi([copilot_review(BODY_ONLY, state=state)])
