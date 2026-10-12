@@ -57,6 +57,8 @@ def collect_review(evidence, number, expected_head, *, api, store):
     protection = api.get(f'{route}/branches/main/protection')
     state = store.snapshot()
     enrollment = state['enrollments'][str(number)]
+    if not isinstance(enrollment, dict) or enrollment.get('active') is not True:
+        raise ValueError('Review collection requires an active enrollment')
     snapshot = coordinator._snapshot_pull(number, enrollment, sha, actions=state['actions'])
     pull = snapshot['pull']
     if (snapshot['head'] != expected_head or snapshot['scoped'] is not True

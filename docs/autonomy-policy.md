@@ -52,6 +52,9 @@ There are no default state/evidence paths or candidate-source imports. It assemb
 reviews, authenticated edit metadata, complete check runs and thread pagination),
 classifies the changed files, and independently fetches the current owner command
 with `_current_sensitive_owner_command`. Persisted authorization alone is not proof.
+The selected enrollment must be explicitly active; disabled or malformed enrollment
+state cannot supply retained authorization. The final state fence detects revocation
+during collection.
 
 ```sh
 python3 scripts/autonomy_policy.py --phase staging --collect-review \

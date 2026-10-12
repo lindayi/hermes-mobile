@@ -47,6 +47,7 @@ def collection(tmp_path, monkeypatch):
     monkeypatch.setattr(coordinator, 'GhApi', lambda: api)
     state = coordinator.StateStore._empty()
     state['enrollments']['16'] = enrolled_record(
+        active=True,
         sensitive_authorization=review['change']['owner_authorization'],
         targeted_review=review['change']['targeted_review'],
     )
@@ -77,6 +78,21 @@ def test_cli_collects_current_owner_command_through_actual_snapshot(collection, 
     assert evidence['main'] == baseline['main']
     assert evidence['source_ci'] == baseline['source_ci']
     assert report['collection']['baseline_refreshed'] is False
+    assert before == (state_path.read_bytes(), evidence_path.read_bytes())
+    assert api.writes == api.graphql_writes == []
+
+
+@pytest.mark.parametrize('active', [False, None, 0, 1, 'true'])
+def test_cli_rejects_inactive_or_malformed_enrollment(collection, capsys, active):
+    api, _, state_path, evidence_path, args, _ = collection
+    state = json.loads(state_path.read_text())
+    state['enrollments']['16']['active'] = active
+    state_path.write_text(json.dumps(state))
+    before = (state_path.read_bytes(), evidence_path.read_bytes())
+    assert cli.main(args) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report['ready'] is False
+    assert 'evidence' not in report
     assert before == (state_path.read_bytes(), evidence_path.read_bytes())
     assert api.writes == api.graphql_writes == []
 
