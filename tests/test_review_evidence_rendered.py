@@ -127,6 +127,45 @@ def test_current_overview_count_mismatch_duplicate_or_extra_prose_is_incomplete(
     assert result["inventory_complete"] is False
 
 
+@pytest.mark.parametrize(("label", "count", "classification"), [
+    ("1 open finding", 1, "inline"),
+    ("2 open findings", 2, "inline"),
+    ("0 open findings", 0, "inline"),
+    ("1 resolved finding", 1, "resolved"),
+    ("2 resolved findings", 2, "resolved"),
+])
+def test_count_leading_sections_require_matching_linked_items(label, count, classification):
+    items = "".join(
+        f'<li><a href="#discussion_r{index + 1}">Finding {index + 1}</a></li>'
+        for index in range(count)
+    )
+    listing = f"<ul>{items}</ul>" if count else ""
+    rendered = (
+        f"<details><summary><strong>{label}</strong></summary>{listing}</details>"
+    )
+    result = parse_body(OVERVIEW_MARKER + "\nCounted section", "COMMENTED",
+                        body_html=rendered)
+
+    assert result["inventory_complete"] is True
+    assert result["ambiguous"] is False
+    assert classification in result["classifications"]
+
+
+def test_count_leading_section_inside_quotation_is_incomplete():
+    rendered = CURRENT_COPILOT_HTML.replace(
+        "<details open><summary><strong>1 open finding</strong></summary>",
+        "<blockquote><details open><summary><strong>1 open finding</strong></summary>",
+    ).replace(
+        "</ul></details><details><summary><strong>Previously missed",
+        "</ul></details></blockquote><details><summary><strong>Previously missed",
+    )
+    result = parse_body(CURRENT_COPILOT_RAW, "COMMENTED", body_html=rendered)
+
+    assert result["inventory_complete"] is False
+    assert result["ambiguous"] is True
+    assert len(result["findings"]) == 1
+
+
 def test_current_review_resumes_completed_repair_without_replaying_or_losing_thread(
         tmp_path):
     api = ProgressApi(unresolved=True)
@@ -168,8 +207,12 @@ def test_current_review_resumes_completed_repair_without_replaying_or_losing_thr
     assert progress["resolved_fingerprints"] == []
     assert progress["consecutive_no_progress"] == 0
     assert enrollment["attempts"] == 2
-    assert source_action["receipt_result"] == "ready"
-    assert StateStore(path).action(source_action["key"])["status"] == "completed"
+    proof = next(
+        item for item in enrollment["receipt_proofs"]
+        if item["task_id"] == source_action["task_id"]
+    )
+    assert proof["status"] == "completed" and proof["receipt_result"] == "ready"
+    assert proof["attempt"] == 1 and proof["repair_fingerprints_complete"] is False
     assert second["repair_requested"]
 
     fix_posts = [
@@ -184,8 +227,18 @@ def test_current_review_resumes_completed_repair_without_replaying_or_losing_thr
     _managed_cycle(api, path)
     assert api.fix_attempts == 2
     assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 2
-    assert len([item for item in StateStore(path).actions().values()
-                if item["kind"] == "fix"]) == 2
+    active_fixes = [
+        item for item in StateStore(path).actions().values()
+        if item["kind"] == "fix" and item.get("status") == "sent"
+    ]
+    assert len(active_fixes) == 1 and active_fixes[0]["attempt"] == 2
+    targets = active_fixes[0]["repair_target_map"].values()
+    assert any(target == {"kind": "thread", "target": "prrt kw1"} for target in targets)
+    assert any(
+        target["kind"] == "finding"
+        and "operator commands omit deployed source" in target["target"]
+        for target in targets
+    )
 
 
 @pytest.mark.parametrize("rendered", [

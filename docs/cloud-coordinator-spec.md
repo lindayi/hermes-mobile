@@ -296,6 +296,23 @@ explicit `Previously missed` sections still forward body-only items.
 `Open (0)` never suppresses an actionable summary. COMMENTED summaries alone do
 not authorize repairs; explicitly active disclosures do.
 
+The current `ccr-overview-v2` renderer also labels linked inventory sections
+`N open finding(s)` and `N resolved finding(s)`. The singular/plural form and
+the number of linked list items in the section's single unordered list must
+match the count. Duplicate, malformed, inert, partial, or mismatched sections
+make the inventory incomplete; a resolved section never becomes active
+evidence. Existing `Open (N)` labels remain supported.
+
+In this renderer only, one top-level paragraph immediately after the exact
+overview heading and recognized status heading is provider summary context.
+It is attached literally to the single count-matched `Previously missed (1)`
+finding only when the review also has one count-matched open inventory and no
+other ambiguous content. The summary is not discarded or treated as a separate
+approval. Extra prose, unknown framing, multiple active findings, and any
+unmatched inventory remain incomplete. Actual disclosure markup inside
+`code`, `pre`, or `blockquote` is inert and makes the inventory incomplete;
+entity-decoded text remains literal.
+
 `body_findings` retains its caller interface. Dispositions remain in the helper's
 internal result; no new review-authority protocol or coordinator lifecycle path
 is introduced. The formal technical review gate uses genuine exact-head Copilot

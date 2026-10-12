@@ -349,6 +349,16 @@ def _section_kind(node):
     label = " ".join(_text(summary).split()) if summary else ""
     if summary and _text(summary) != _text(summary, quoted=False):
         return "ambiguous", label
+    counted = re.fullmatch(
+        r"(\d{1,3}) (open|resolved) (findings?)", label, re.IGNORECASE,
+    )
+    if counted:
+        count = int(counted[1])
+        plural = counted[3].lower() == "findings"
+        if plural == (count != 1):
+            return ("counted-open" if counted[2].lower() == "open"
+                    else "counted-resolved"), label
+        return "ambiguous", label
     # Only complete section labels confer scope; a finding title containing
     # 'resolved' or 'history' must not silently become an exclusion boundary.
     for kind, pattern in (
@@ -360,6 +370,51 @@ def _section_kind(node):
         if re.fullmatch(pattern, label, re.IGNORECASE):
             return kind, label
     return "ambiguous", label
+
+
+def _has_descendant(node, tag):
+    pending = list(reversed(node.children))
+    while pending:
+        child = pending.pop()
+        if isinstance(child, _Element):
+            if child.tag in {"code", "pre", "blockquote"}:
+                continue
+            if child.tag == tag:
+                return True
+            pending.extend(reversed(child.children))
+    return False
+
+
+def _has_inert_disclosure(root):
+    pending = [(root, False)]
+    while pending:
+        node, quoted = pending.pop()
+        if not isinstance(node, _Element):
+            continue
+        quoted = quoted or node.tag in {"code", "pre", "blockquote"}
+        if quoted and node.tag == "details":
+            return True
+        pending.extend((child, quoted) for child in reversed(node.children))
+    return False
+
+
+def _counted_section_matches(node, expected):
+    body = [child for child in node.children if child is not _summary(node)]
+    elements = [child for child in body if isinstance(child, _Element)]
+    if any(isinstance(child, str) and child.strip() for child in body):
+        return False
+    if expected == 0:
+        return not elements
+    if len(elements) != 1 or elements[0].tag != "ul":
+        return False
+    items = []
+    for child in elements[0].children:
+        if isinstance(child, str) and not child.strip():
+            continue
+        if not isinstance(child, _Element) or child.tag != "li":
+            return False
+        items.append(child)
+    return len(items) == expected and all(_has_descendant(item, "a") for item in items)
 
 
 def _text(node, *, exclude_details=False, exclude_history=False, quoted=True, render_quote=None,
@@ -435,6 +490,10 @@ def _without_metadata(node):
         ):
             index += 1
             continue
+        if (index == 0 and isinstance(child, str)
+                and re.fullmatch(r"🧠\s+", child)):
+            index += 1
+            continue
         if not isinstance(child, _Element) or child.tag != "strong":
             break
         label = _text(child).strip()
@@ -453,9 +512,33 @@ def _without_metadata(node):
     return _Element(node.tag, children[index:])
 
 
-def _summary_content(root, overview):
+def _provider_summary(root):
+    """Return only the summary paragraph in the current structured overview frame."""
+    children = [
+        child for child in root.children
+        if not isinstance(child, str) or child.strip()
+    ]
+    if (len(children) < 3 or not all(isinstance(child, _Element) for child in children[:3])
+            or [child.tag for child in children[:3]] != ["h2", "h3", "p"]):
+        return None
+    if _text(children[0], quoted=False).strip() != "Copilot review overview":
+        return None
+    status = " ".join(_text(children[1], quoted=False).split())
+    if not re.fullmatch(
+            r"(?:[🟢🔵🟡] )?(?:Looks good|Needs a closer look|Changes recommended)",
+            status):
+        return None
+    summary = children[2]
+    if _text(summary, quoted=False) != _text(summary):
+        return None
+    return summary
+
+
+def _summary_content(root, overview, *, exclude=None):
     children = []
     for child in root.children:
+        if child is exclude:
+            continue
         if overview and isinstance(child, _Element):
             if child.tag == "hr":
                 break
@@ -549,12 +632,44 @@ def parse_body(body, state, *, body_html=None):
 
     sections = list(_disclosures(parser.root)) if overview else []
     positive_open = False
+    counted_sections = set()
+    open_section_count = 0
+    matched_active_sections = []
+    active_section_seen = False
+    resolved_section_seen = False
+    history_section_seen = False
     for node in sections:
         kind, label = _section_kind(node)
         result["classifications"].append(kind)
         if kind == "ambiguous":
             result["ambiguous"] = True
+        elif kind in {"counted-open", "counted-resolved"}:
+            category = "open" if kind == "counted-open" else "resolved"
+            count = int(re.match(r"\d+", label)[0])
+            duplicate = category in counted_sections or (
+                open_section_count > 0 if category == "open" else resolved_section_seen
+            )
+            if duplicate or not _counted_section_matches(node, count):
+                result["classifications"][-1] = "ambiguous"
+                result["ambiguous"] = True
+                result["inventory_complete"] = False
+            else:
+                counted_sections.add(category)
+                result["classifications"][-1] = (
+                    "inline" if category == "open" else "resolved"
+                )
+                if category == "open":
+                    open_section_count += 1
+                    if count:
+                        positive_open = True
+                else:
+                    resolved_section_seen = True
         elif kind == "inline":
+            if open_section_count:
+                result["classifications"][-1] = "ambiguous"
+                result["ambiguous"] = True
+                result["inventory_complete"] = False
+            open_section_count += 1
             count = int(re.search(r"\((\d+)\)$", label)[1])
             if count:
                 positive_open = True
@@ -576,6 +691,8 @@ def parse_body(body, state, *, body_html=None):
                          if _has_live_content(child)]
                 if len(texts) != expected:
                     result["inventory_complete"] = False
+                elif expected == 1:
+                    matched_active_sections.append((expected, texts))
             else:
                 result["inventory_complete"] = False
                 # Count/shape uncertainty may preserve a populated active section,
@@ -585,8 +702,43 @@ def parse_body(body, state, *, body_html=None):
             if not texts:
                 result["classifications"][-1] = "no-findings"
             result["findings"].extend(("previously-missed", text) for text in texts if text)
+            if active_section_seen:
+                result["classifications"][-1] = "ambiguous"
+                result["ambiguous"] = True
+                result["inventory_complete"] = False
+            active_section_seen = True
+        elif kind == "resolved":
+            if resolved_section_seen:
+                result["classifications"][-1] = "ambiguous"
+                result["ambiguous"] = True
+                result["inventory_complete"] = False
+            resolved_section_seen = True
+        elif kind == "history":
+            if history_section_seen:
+                result["classifications"][-1] = "ambiguous"
+                result["ambiguous"] = True
+                result["inventory_complete"] = False
+            history_section_seen = True
 
-    summary_root = _summary_content(parser.root, overview)
+    if overview and _has_inert_disclosure(parser.root):
+        result["classifications"].append("ambiguous")
+        result["ambiguous"] = True
+        result["inventory_complete"] = False
+
+    provider_summary = _provider_summary(parser.root) if overview else None
+    attach_provider_summary = (
+        provider_summary is not None
+        and result["inventory_complete"] is True
+        and result["ambiguous"] is False
+        and open_section_count == 1
+        and "open" in counted_sections
+        and len(matched_active_sections) == 1
+        and len(result["findings"]) == 1
+        and result["findings"][0][0] == "previously-missed"
+    )
+    summary_root = _summary_content(
+        parser.root, overview, exclude=provider_summary if attach_provider_summary else None,
+    )
     summary = _text(summary_root, exclude_details=True, quoted=False).strip()
     # Keep quoted nodes opaque through footer/framing/status removal as well as
     # classification. Fresh render tokens cannot collide with any input text;
@@ -604,6 +756,13 @@ def parse_body(body, state, *, body_html=None):
     kind, prose = _summary_disposition(summary, overview=overview, state=state, context=context)
     prose = re.sub(re.escape(prefix) + r"(\d+)" + re.escape(prefix),
                    lambda match: quotations[int(match[1])], prose)
+    if attach_provider_summary and kind in {"no-findings", "validation-only"}:
+        summary_text = _text(provider_summary).strip()
+        finding_kind, finding_text = result["findings"][0]
+        result["findings"][0] = (
+            finding_kind, summary_text + "\n\n" + finding_text,
+        )
+        kind = "no-findings"
     result["classifications"].append(kind)
     if kind == "active" and not positive_open and not result["findings"] and not result["ambiguous"]:
         result["findings"].append(("changes-requested", prose))
