@@ -505,10 +505,10 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
                     enrollment = self.snapshot()["enrollments"]["16"]
                     assert enrollment["sensitive_sha"] == HEAD
                     assert enrollment["sensitive_authorization"]["head_sha"] == HEAD
-                    assert enrollment["sensitive_authorization"]["review_id"] == api.owner_review_id
-                    assert enrollment["sensitive_authorization"]["body_sha256"] == api.owner_review_digest
+                    assert enrollment["sensitive_authorization"]["review_id"] == api.copilot_review_id
+                    assert enrollment["sensitive_authorization"]["body_sha256"] == api.copilot_review_digest
                     assert enrollment["targeted_review"]["head_sha"] == HEAD
-                    assert enrollment["targeted_review"]["review_id"] == api.owner_review_id
+                    assert enrollment["targeted_review"]["review_id"] == api.copilot_review_id
                 if failure == "race":
                     api.head_sha = "c" * 40
                     api.pull["head"]["sha"] = api.head_sha
@@ -555,12 +555,13 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
     fix = next(a for a in store.actions().values() if a["kind"] == "fix")
     api.complete_task(fix["task_id"], fix)
     api.pull["draft"] = True
-    api.review_state = "PENDING"
+    api.review_state = "COMMENTED" if change == "authorized" else "PENDING"
     if change == "authorized":
         api.authorize_sha_review = True
         api.comments.append({"id": 124, "user": {"id": GITHUB_OWNER},
                              "body": (f"/hermes authorize-sensitive {HEAD} review "
-                                      f"{api.owner_review_id} {api.owner_review_digest}"),
+                                      f"{api.copilot_review_id} {api.copilot_review_digest}"),
+                             "created_at": "2026-10-01T20:59:00Z",
                              "updated_at": "2026-10-01T20:59:00Z"})
     else:
         api.head_sha = "c" * 40

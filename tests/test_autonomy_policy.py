@@ -29,7 +29,12 @@ from deploy.autonomy_policy import (
     WORKFLOW_PATH,
     validate_transition,
 )
-from deploy.review_evidence import current_copilot_review_valid, current_independent_agent_review
+from deploy.review_evidence import (
+    current_copilot_review_valid,
+    current_independent_agent_review,
+    review_body_disposition,
+    selected_copilot_sensitive_review,
+)
 from scripts.autonomy_policy import MAX_EVIDENCE, main as cli_main
 
 SHA = 'a' * 40
@@ -188,6 +193,11 @@ _ISSUE92_COPILOT_REVIEW_FIXTURE = {
     'deploy/review_evidence.py': '6cad7d062531c829731eba30ccac3dd73b28a748e8d5c0e40cbb8d2995b303c6',
 }
 
+_ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE = {
+    'deploy/cloud_coordinator.py': '0e43fae886f34b897fd62dfd365869718ec40abc0c7e1e26b75adc445c158b33',
+    'deploy/review_evidence.py': 'bc5218da8a587c198e2fea2ecb7943594514f4a8fbc8d8b7cccd477f56a4ab98',
+}
+
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
 }
@@ -248,7 +258,8 @@ def _source_files():
             | _ISSUE65_RECEIPT_PRODUCER_FIXTURE | _PENDING_ISSUE77_CLARIFICATION_FIXTURE
             | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
             | _ISSUE85_PHOTO_FIXTURE | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
-            | _ISSUE92_COPILOT_REVIEW_FIXTURE | _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE)
+            | _ISSUE92_COPILOT_REVIEW_FIXTURE | _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE
+            | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE)
 
 
 def _source_ci():
@@ -357,31 +368,35 @@ def _sensitive_evidence(phase, state='COMMENTED'):
     evidence = _phase_evidence(phase)
     review = evidence['copilot_review']
     head = review['head_sha']
-    body = json.dumps({
-        'schema': 'hermes-independent-agent-review-v1',
-        'reviewed_head_sha': head,
-        'review_method': 'independent-agent',
-        'verdict': 'pass',
-        'evidence_sha256': 'c' * 64,
-    }, separators=(',', ':'))
+    body = ''
     body_sha256 = hashlib.sha256(body.encode('utf-8')).hexdigest()
+    command = f'/hermes authorize-sensitive {head} review 3 {body_sha256}'
     review['change'].update(
         sensitive=True,
         owner_authorization={
             'actor_id': OWNER_ID, 'head_sha': head, 'state': 'approved',
             'review_id': 3, 'body_sha256': body_sha256,
+            'command_comment_id': 4,
+            'command_body_sha256': hashlib.sha256(command.encode('utf-8')).hexdigest(),
+            'command_created_at': '2026-10-01T23:01:00Z',
+        },
+        owner_command={
+            'comment_id': 4, 'actor_id': OWNER_ID, 'body': command,
+            'created_at': '2026-10-01T23:01:00Z',
+            'updated_at': '2026-10-01T23:01:00Z',
         },
         targeted_review={
-            'review_id': 3, 'reviewer_id': OWNER_ID, 'head_sha': head,
-            'state': state, 'body_sha256': body_sha256, 'evidence_sha256': 'c' * 64,
+            'review_id': 3, 'reviewer_id': COPILOT_REVIEWER_ID, 'head_sha': head,
+            'state': state, 'body_sha256': body_sha256,
         },
     )
     review['reviews'].append({
-        'id': 3, 'node_id': 'PRR_kwDOU3FvNc8AAAABQehXFB',
-        'user': {'id': OWNER_ID, 'login': 'lindayi'}, 'commit_id': head, 'state': state,
+        'id': 3, 'node_id': 'PRR_synthetic_copilot_sensitive',
+        'user': {'id': COPILOT_REVIEWER_ID, 'login': 'copilot-pull-request-reviewer'},
+        'commit_id': head, 'state': state,
         'submitted_at': '2026-10-01T23:00:00Z',
         'updatedAt': '2026-10-01T23:00:00Z',
-        'lastEditedAt': None, 'includesCreatedEdit': False, 'body': body,
+        'lastEditedAt': None, 'includesCreatedEdit': False, 'body': body, 'body_html': body,
     })
     review['selected_review'] = review['change']['targeted_review']
     return evidence
@@ -661,13 +676,13 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         if path in {'deploy/cloud_coordinator.py', 'deploy/issue_starter.py',
                     'deploy/review_evidence.py'}
     } == {
-        'deploy/cloud_coordinator.py': _ISSUE92_COPILOT_REVIEW_FIXTURE[
+        'deploy/cloud_coordinator.py': _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE[
             'deploy/cloud_coordinator.py'
         ],
         'deploy/issue_starter.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
             'deploy/issue_starter.py'
         ],
-        'deploy/review_evidence.py': _ISSUE92_COPILOT_REVIEW_FIXTURE[
+        'deploy/review_evidence.py': _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE[
             'deploy/review_evidence.py'
         ],
     }
@@ -697,6 +712,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
             _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
             | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
             | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
+            | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
         ).items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
     }
@@ -737,9 +753,11 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: SOURCE_FINGERPRINTS[path]
         for path in _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
-    } == (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE)
+    } == (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
+          | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE)
     for path, digest in (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
-                         | _ISSUE92_COPILOT_REVIEW_FIXTURE).items():
+                         | _ISSUE92_COPILOT_REVIEW_FIXTURE
+                         | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
@@ -794,7 +812,8 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
     | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
-    | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE,
+    | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
+    | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
 def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
@@ -815,7 +834,8 @@ def test_issue83_initial_review_pin_matches_actual_candidate_bytes(path, pins):
 
 
 @pytest.mark.parametrize('pins', [
-    SOURCE_FINGERPRINTS, _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE,
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
+    | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE))
 def test_issue87_bounded_repair_pin_matches_actual_candidate_bytes(path, pins):
@@ -967,8 +987,8 @@ def test_launch_roots_have_complete_fixed_closure_and_independent_unit_pins():
     (('source_ci', 'jobs_complete'), False, 'source-ci-jobs'),
     (('source_ci', 'artifact', 'expired'), True, 'release-artifact-evidence'),
     (('source_ci', 'artifact', 'attestation', 'verified'), False, 'release-attestation'),
-    (('copilot_review', 'reviews', 0, 'id'), True, 'copilot-review'),
-    (('copilot_review', 'reviews', 0, 'commit_id'), 'd' * 40, 'copilot-review'),
+    (('copilot_review', 'reviews', 'latest_copilot', 'id'), True, 'copilot-review'),
+    (('copilot_review', 'reviews', 'latest_copilot', 'commit_id'), 'd' * 40, 'copilot-review'),
     (('copilot_review', 'reviews_complete'), False, 'copilot-review-evidence'),
     (('copilot_review', 'threads', 0, 'isResolved'), False, 'copilot-review-threads'),
     (('protection', 'strict'), False, 'branch-protection'),
@@ -977,7 +997,13 @@ def test_caller_flags_cannot_override_failed_components(phase, sensitive, claime
     evidence = _sensitive_evidence(phase) if sensitive else _phase_evidence(phase)
     node = evidence
     for key in path[:-1]:
-        node = node[key]
+        if key == 'latest_copilot':
+            node = next(
+                review for review in reversed(node)
+                if review.get('user', {}).get('id') == COPILOT_REVIEWER_ID
+            )
+        else:
+            node = node[key]
     node[path[-1]] = value
     # Historical hold flags and a claimed result cannot replace any actual gate.
     evidence.update(pending_source_contract=False, source_contract_reviewed=claimed_ready,
@@ -989,7 +1015,9 @@ def test_caller_flags_cannot_override_failed_components(phase, sensitive, claime
     expected = {blocker}
     if path == ('main', 'current'):
         expected.add('main-source-missing')
-    if sensitive and path == ('copilot_review', 'reviews', 0, 'id'):
+    if sensitive and path in {
+            ('copilot_review', 'reviews', 'latest_copilot', 'id'),
+            ('copilot_review', 'reviews', 'latest_copilot', 'commit_id')}:
         expected.add('sensitive-review-authorization')
     assert validate_transition(evidence, phase=phase) == {
         'ready': False, 'phase': phase, 'blockers': sorted(expected),
@@ -1446,13 +1474,15 @@ def test_additive_staging_latest_review_and_sensitive_exact_head_authorization(p
 
 
 @pytest.mark.parametrize('phase', PHASES)
-def test_sensitive_owner_published_independent_review_matches_authenticated_record(phase):
+def test_sensitive_authorization_matches_authenticated_copilot_review(phase):
     evidence = _sensitive_evidence(phase)
     before = copy.deepcopy(evidence)
     review = evidence['copilot_review']
-    assert current_independent_agent_review(
-        review['reviews'], review['head_sha'], owner_id=OWNER_ID,
-        expected=review['selected_review']) == review['change']['targeted_review']
+    assert selected_copilot_sensitive_review(
+        review['reviews'], review['head_sha'], 3,
+        review['change']['owner_authorization']['body_sha256'],
+        pull_author_id=review['pull_author_id'],
+    ) == review['change']['targeted_review']
     assert validate_transition(evidence, phase=phase) == {
         'ready': True, 'phase': phase, 'blockers': [],
     }
@@ -1460,9 +1490,27 @@ def test_sensitive_owner_published_independent_review_matches_authenticated_reco
 
 
 @pytest.mark.parametrize('phase', PHASES)
-def test_sensitive_owner_review_must_be_a_formal_comment_not_approval(phase):
+def test_sensitive_copilot_review_accepts_approval_state(phase):
     evidence = _sensitive_evidence(phase, 'APPROVED')
-    assert 'sensitive-review-authorization' in _blockers(evidence, phase)
+    assert _blockers(evidence, phase) == set()
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('mutation', [
+    'missing', 'comment_id', 'actor_id', 'body', 'created_at', 'updated_at',
+])
+def test_sensitive_authorization_requires_current_immutable_owner_command(phase, mutation):
+    evidence = _sensitive_evidence(phase)
+    change = evidence['copilot_review']['change']
+    if mutation == 'missing':
+        change.pop('owner_command')
+    else:
+        change['owner_command'][mutation] = {
+            'comment_id': 5, 'actor_id': 1, 'body': '/hermes enroll',
+            'created_at': '2026-10-01T23:00:00Z',
+            'updated_at': '2026-10-01T23:00:00Z',
+        }[mutation]
+    assert _blockers(evidence, phase) == {'sensitive-review-authorization'}
 
 
 @pytest.mark.parametrize('phase', PHASES)
@@ -1477,15 +1525,13 @@ def test_sensitive_owner_review_must_be_a_formal_comment_not_approval(phase):
     pytest.param(lambda review: review['reviews'][-1].pop('user'), id='missing-reviewer'),
     pytest.param(lambda review: review['reviews'][-1].update(commit_id='d' * 40), id='stale-record'),
     pytest.param(lambda review: review['change']['targeted_review'].update(head_sha='d' * 40), id='stale-claim'),
-    pytest.param(lambda review: review['reviews'][-1].update(state='APPROVED'), id='state-mismatch'),
+    pytest.param(lambda review: review['reviews'][-1].update(state='PENDING'), id='pending-record'),
     pytest.param(lambda review: review['reviews'][-1].update(state='DISMISSED'), id='dismissed-record'),
     pytest.param(lambda review: review['reviews'][-1].update(state='CHANGES_REQUESTED'), id='changes-requested'),
-    pytest.param(lambda review: review['reviews'][-1].update(body='malformed report'), id='malformed-report'),
     pytest.param(lambda review: review['reviews'][-1].update(body='edited review'), id='edited-body'),
+    pytest.param(lambda review: review['reviews'][-1].update(body_html=None), id='missing-full-media'),
     pytest.param(lambda review: review['change']['targeted_review'].update(
         body_sha256='d' * 64), id='wrong-body-digest'),
-    pytest.param(lambda review: review['change']['targeted_review'].update(
-        evidence_sha256='d' * 64), id='wrong-evidence-digest'),
     pytest.param(lambda review: review['reviews'][-1].update(
         lastEditedAt='2026-10-01T23:01:00Z'), id='edited-record'),
     pytest.param(lambda review: review['reviews'].append(copy.deepcopy(review['reviews'][-1])), id='duplicate-id'),
@@ -1497,9 +1543,16 @@ def test_sensitive_targeted_review_rejects_unbound_claim(phase, mutate):
     evidence = _sensitive_evidence(phase)
     mutate(evidence['copilot_review'])
     expected = {'sensitive-review-authorization'}
+    changed = evidence['copilot_review']
     if not current_copilot_review_valid(
-            evidence['copilot_review']['reviews'], evidence['copilot_review']['head_sha'],
-            pull_author_id=evidence['copilot_review']['pull_author_id']):
+            changed['reviews'], changed['head_sha'],
+            pull_author_id=changed['pull_author_id']):
+        expected.add('copilot-review')
+    disposition = review_body_disposition(
+        changed['reviews'], changed['head_sha'], reviewer_id=COPILOT_REVIEWER_ID,
+    )
+    if (disposition['findings'] or disposition['ambiguous']
+            or disposition['inventory_complete'] is not True):
         expected.add('copilot-review')
     assert _blockers(evidence, phase) == expected
 
@@ -1514,7 +1567,7 @@ def test_sensitive_review_cannot_be_replaced_by_copilot_or_status(phase):
 
 
 @pytest.mark.parametrize('phase', PHASES)
-@pytest.mark.parametrize('state', ['COMMENTED'])
+@pytest.mark.parametrize('state', ['COMMENTED', 'APPROVED'])
 @pytest.mark.parametrize('timestamp', [
     None, '', 'not-a-date', '2026-10-01T22:00:00',
     '2026-02-30T22:00:00Z', '2026-10-01T22:00:00+25:00', 123, {},
@@ -1526,12 +1579,10 @@ def test_targeted_review_timestamp_must_be_valid_and_timezone_aware(phase, state
         record.pop('submitted_at')
     else:
         record['submitted_at'] = timestamp
-    # A valid timestamp on the claim cannot replace the matched record's timestamp.
-    evidence['copilot_review']['change']['targeted_review']['submitted_at'] = '2026-10-01T22:00:00Z'
     before = copy.deepcopy(evidence)
 
     assert _blockers(evidence, phase) == {
-        'sensitive-review-authorization',
+        'sensitive-review-authorization', 'copilot-review',
     }
     assert evidence == before
 
@@ -1571,10 +1622,10 @@ def test_sensitive_targeted_reviewer_must_be_positive_and_independent(reviewer_i
     review['pull_author_id'] = 77
     review['change']['targeted_review']['reviewer_id'] = reviewer_id
     review['reviews'][-1]['user']['id'] = reviewer_id
-    expected = {'sensitive-review-authorization'}
-    # Assigning the retained independent-report JSON to Copilot is also
-    # invalid body evidence, even if its APPROVED state is well formed.
-    if reviewer_id == COPILOT_REVIEWER_ID or not current_copilot_review_valid(
+    expected = set()
+    if reviewer_id != COPILOT_REVIEWER_ID:
+        expected.add('sensitive-review-authorization')
+    if not current_copilot_review_valid(
             review['reviews'], review['head_sha'],
             pull_author_id=review['pull_author_id']):
         expected.add('copilot-review')

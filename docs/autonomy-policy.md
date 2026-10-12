@@ -39,8 +39,48 @@ python3 scripts/autonomy_policy.py --phase post-cutover /private/path/evidence.j
 Exit status zero means only that the supplied snapshot satisfies the selected
 contract. A nonzero result is blocked; missing, malformed, partial, stale, failed,
 skipped, cancelled, truncated, or mismatched data cannot be treated as success.
-The CLI performs no network calls, writes, status publication, settings changes,
-service activation, checkout, import, or execution of candidate code.
+The default offline CLI performs no network calls, writes, status publication,
+settings changes, service activation, checkout, import, or execution of candidate code.
+
+### Explicit read-only review collection (issue #100)
+
+The opt-in `--collect-review --state STATE_JSON --pull NUMBER --head SHA` mode
+uses the executing trusted checkout's coordinator implementation, an explicit
+read-only coordinator state snapshot, and the positional baseline evidence file.
+There are no default state/evidence paths or candidate-source imports. It assembles
+`copilot_review` through the actual coordinator pull snapshot (including full-media
+reviews, authenticated edit metadata, complete check runs and thread pagination),
+classifies the changed files, and independently fetches the current owner command
+with `_current_sensitive_owner_command`. Persisted authorization alone is not proof.
+The selected enrollment must be explicitly active; disabled or malformed enrollment
+state cannot supply retained authorization. The final state fence detects revocation
+during collection.
+
+```sh
+python3 scripts/autonomy_policy.py --phase staging --collect-review \
+  --state /private/path/state.json --pull 123 --head EXACT_HEAD_SHA \
+  /private/path/evidence.json
+```
+
+Collection fences the authenticated owner/repository, current remote main, exact PR
+identity/head/base/open state, and protections before and after assembly. Only review
+and protection evidence is refreshed. Baseline `main.files`, `source_ci`, artifact
+and attestation evidence remains unchanged and must already be independently trusted;
+this mode does not qualify it as freshly collected or recreate artifact collection.
+The output includes the assembled evidence and the normal validator report. It writes
+no files or state and never plans/applies coordinator actions. A collection error
+blocks without emitting partial evidence or clearing persisted authorization.
+Malformed current owner-comment responses at either the initial or final read
+abort collection with `invalid-evidence`, not `sensitive-review-authorization`;
+no partial evidence is emitted and no authorization is cleared. HTTP 404 or a
+well-formed changed command still blocks sensitive authorization; a change at the
+final fence blocks the entire collection.
+
+Acceptance cases use only synthetic transports/state through the real CLI assembly
+and validator: valid sensitive evidence passes; absent, edited or wrong-context owner
+comments block; transient API failures preserve state and fail closed; final identity,
+head/base/main and protection changes block. The existing offline mode stays unchanged.
+These tests are not live activation evidence or genuine Copilot review.
 
 The evidence must be collected independently from authenticated, read-only GitHub
 API responses for `lindayi/hermes-mobile` (repository ID `1399942965`) and the
@@ -62,6 +102,26 @@ dependencies of the listed roots, including `deploy.observe_release`. Traversal
 resolves relative package imports and initializers and rejects unresolved local or
 unsupported dynamic imports. It does not discover arbitrary subprocess roots or
 establish complete execution-source coverage by itself.
+
+### Combined sensitive authorization and rendered-review candidate
+
+The PR101 + PR103 assembly preserves issue #100's genuine Copilot-bound sensitive
+review, separate immutable owner command and chronology, and read-only collector
+whose malformed/transient reads abort without clearing durable authority. It also
+preserves issue #102's rendered h3/p framing, strict counted inventories, unique
+discussion targets across sections, and conservative ambiguous-prose handling.
+The shared review source pin and newest literal fixture describe the combined
+bytes; neither parent's separate review-source digest describes this assembly.
+
+| Combined candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `0e43fae886f34b897fd62dfd365869718ec40abc0c7e1e26b75adc445c158b33` |
+| `deploy/review_evidence.py` | `bc5218da8a587c198e2fea2ecb7943594514f4a8fbc8d8b7cccd477f56a4ab98` |
+
+Earlier fixture overlays and historical tables remain provenance only. These pins
+are not exact-head review acceptance, hosted CI evidence, merge authorization, or
+permission to deploy. Both behavioral contracts remain specified in
+[the coordinator specification](cloud-coordinator-spec.md).
 
 ### Retained merged source and deliberate native refreshes
 
@@ -541,20 +601,17 @@ current-main readback. Readiness requires:
   and every thread resolved. All three required CI checks must also succeed.
 
 If the PR under review changes sensitive files, readiness additionally requires
-owner ID `5164171` authorization for that exact head, bound to one owner-published
-independent-agent review in the complete authenticated `copilot_review.reviews`
-collection. The existing command is extended to
+owner ID `5164171` authorization for that exact head, bound to one genuine current
+Copilot review in the complete authenticated `copilot_review.reviews` collection.
+The command is
 `/hermes authorize-sensitive <head-sha> review <positive-review-id> <body-sha256>`;
 the former head-only command cannot authorize sensitive work. The review must be a
-unique positive review ID authored by the owner, submitted with a valid
-timezone-aware timestamp, in state `COMMENTED`, on the exact head. Its raw UTF-8
-body must match the command's SHA-256 and be a bounded (at most 4096-character)
-JSON object with exactly these fields: `schema` set to
-`hermes-independent-agent-review-v1`, `reviewed_head_sha`, `review_method` set to
-`independent-agent`, `verdict` set to `pass`, and a lowercase 64-character
-`evidence_sha256`. The owner publication is the trust assertion that independent
-review occurred; it does not prove cryptographic or model independence or claim a
-different GitHub identity. The selected record must remain the sole latest owner
+unique positive review ID authored by reviewer bot `175728472`, submitted with a
+valid timezone-aware timestamp, in state `COMMENTED` or `APPROVED`, on the exact
+head. Its raw UTF-8 body must match the command's SHA-256; complete rendered
+`body_html` and unchanged authenticated edit metadata are required. Historical
+independent reports and coding bot `198982749` do not authorize sensitive work.
+The selected record must remain the unique latest Copilot
 review; a missing, malformed, edited, removed, dismissed, duplicate, stale, negative,
 or conflicting record blocks with `sensitive-review-authorization`. Both the owner
 authorization and selected review are re-read during planning and the fresh status
@@ -607,5 +664,12 @@ for its exact head, complete review/thread pagination, review IDs, authors, vali
 timestamps, states and commit SHAs, resolved thread state, and real required
 check-run evidence. Ordinary merge evidence has no structured independent report.
 For a sensitive change it also carries the exact-head owner authorization and
-targeted-review identities. Consult `deploy/autonomy_policy.py` for the executable
+targeted-review identities. The collector must independently re-read the current
+owner comment from the authenticated GitHub issue-comment endpoint, verify its
+repository and PR `issue_url`, and supply `copilot_review.change.owner_command`
+with exactly `comment_id`, `actor_id`, `body`, `created_at`, and `updated_at`.
+The comment ID, owner identity, raw command body digest and creation time must
+match the authorization; `updated_at` must equal `created_at`. Missing, removed,
+edited or mismatched commands block readiness. Never reconstruct this record
+from the persisted authorization. Consult `deploy/autonomy_policy.py` for the executable
 field contract; missing fields block rather than defaulting to success.
