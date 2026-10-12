@@ -31,6 +31,48 @@ HTML_ESCAPED = (
     "</details></details>"
 )
 
+CURRENT_COPILOT_RAW = (
+    "<!-- ccr-overview-v2 -->\n\n## Copilot review overview\n\n"
+    "### 🔵 Needs a closer look\n\n"
+    "The operator procedure does not bind the active release, application virtualenv, "
+    "or live configuration path, so its commands may fail or operate on the wrong source.\n\n"
+    "<details open>\n<summary><strong>1 open finding</strong></summary>\n\n"
+    "- [Register runtime dependency in pinned execution-source policy]"
+    "(https://github.com/lindayi/hermes-mobile/pull/99#discussion_r4250499422) · New\n"
+    "</details>\n\n"
+    "<details>\n<summary><strong>Previously missed (1)</strong></summary>\n\n"
+    "In code that hasn't changed since last review\n\n"
+    "<details><summary>Operator commands omit deployed source, virtualenv, and live config</summary>\n\n"
+    "`docs/photo-attachments-spec.md:292`\n\n"
+    "These commands do not bind the deployed source, the bridge's virtualenv, or even a value "
+    "for `HERMES_MOBILE_CONFIG`; a normal owner shell does not inherit the service environment. "
+    "Since `backend.manage` imports locked dependencies at startup, bare `python3` may fail or "
+    "may run a checkout different from the active release, so this is not a safe exact operator "
+    "procedure. Use the active `hermes-mobile-deploy/current` working tree, the established "
+    "application virtualenv, and the explicit live config path.\n</details>\n</details>\n\n"
+    "🧠 **Review effort:** Balanced"
+)
+CURRENT_COPILOT_HTML = (
+    "<h2>Copilot review overview</h2><h3>🔵 Needs a closer look</h3>"
+    "<p>The operator procedure does not bind the active release, application virtualenv, "
+    "or live configuration path, so its commands may fail or operate on the wrong source.</p>"
+    "<details open><summary><strong>1 open finding</strong></summary>"
+    "<ul><li><a href=\"https://github.com/lindayi/hermes-mobile/pull/99#discussion_r4250499422\">"
+    "Register runtime dependency in pinned execution-source policy</a> · New</li></ul></details>"
+    "<details><summary><strong>Previously missed (1)</strong></summary>"
+    "In code that hasn't changed since last review"
+    "<details><summary>Operator commands omit deployed source, virtualenv, and live config</summary>"
+    "<p><code>docs/photo-attachments-spec.md:292</code></p>"
+    "<p>These commands do not bind the deployed source, the bridge's virtualenv, or even a value "
+    "for <code>HERMES_MOBILE_CONFIG</code>; a normal owner shell does not inherit the service "
+    "environment. Since <code>backend.manage</code> imports locked dependencies at startup, bare "
+    "<code>python3</code> may fail or may run a checkout different from the active release, so "
+    "this is not a safe exact operator procedure. Use the active "
+    "<code>hermes-mobile-deploy/current</code> working tree, the established application virtualenv, "
+    "and the explicit live config path.</p></details></details>"
+    "<p>🧠 <strong>Review effort:</strong> Balanced</p>"
+)
+
 
 @pytest.mark.parametrize("count", [0, 1, 8, 9])
 def test_rendered_inventory_reports_total_and_cap(count):
@@ -46,6 +88,20 @@ def test_rendered_inventory_reports_total_and_cap(count):
     assert len(result["findings"]) == min(count, 8)
     assert result["truncated"] is (count > 8)
     assert result["inventory_complete"] is (count <= 8)
+
+
+def test_current_copilot_overview_counts_findings_and_preserves_summary_context():
+    review = review_pair(CURRENT_COPILOT_RAW, CURRENT_COPILOT_HTML, state="COMMENTED")
+    result = review_body_disposition([review], HEAD, reviewer_id=review["user"]["id"])
+
+    assert result["inventory_complete"] is True
+    assert result["ambiguous"] is False
+    assert result["findings_total"] == 1
+    [finding] = result["findings"]
+    assert finding["review"] == review["id"] and finding["head"] == HEAD
+    assert "The operator procedure does not bind the active release" in finding["text"]
+    assert "These commands do not bind the deployed source" in finding["text"]
+    assert "Register runtime dependency in pinned execution-source policy" not in finding["text"]
 
 
 @pytest.mark.parametrize("rendered", [
