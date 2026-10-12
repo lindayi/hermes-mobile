@@ -564,6 +564,28 @@ def test_rollback_retries_only_fully_bound_pending_ack(tmp_path, monkeypatch):
     assert callbacks.initial_records['async:deleg_1']['payload_sha256'] == item['payload_sha256']
 
 
+@pytest.mark.parametrize('problem', ['missing', 'token', 'session'])
+def test_rollback_invalid_receipt_precedes_transient_health_churn(tmp_path, monkeypatch, problem):
+    app, outbox, native, paths, callbacks, baseline, old, candidate, event = setup_release(tmp_path)
+    capture_and_handoff(paths, callbacks, baseline, candidate)
+    deliver_before_bridge_ack(app, outbox, event, callbacks.scope)
+    with app.notifications._db() as db:
+        if problem == 'missing':
+            db.execute('DELETE FROM background_receipts')
+        elif problem == 'token':
+            db.execute("UPDATE background_receipts SET lease_token='wrong-token'")
+        else:
+            db.execute("UPDATE inbox SET session_id='wrong-session'")
+    churn_rollback_status(native, monkeypatch)
+    sleeps = []
+    callbacks.sleep = sleeps.append
+    with pytest.raises(RuntimeError, match='receipt'):
+        under_owned_lock(paths, lambda: callbacks.verify_rollback(old, baseline))
+    assert sleeps == [], 'invalid receipts must fail before transient health can authorize retry'
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT owner FROM deployment_gate').fetchone() == (baseline['gate_owner'],)
+
+
 @pytest.mark.parametrize('problem', ['missing', 'token', 'session', 'pending', 'exception'])
 def test_rollback_receipt_failures_remain_closed_without_generic_retry(
         tmp_path, monkeypatch, problem):

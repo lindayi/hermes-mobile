@@ -1027,9 +1027,17 @@ class NativeNotificationCallbacks:
                 self._preserved_receipts(self.initial_receipts.snap, snap)
                 if self.handoff_receipts is not None:
                     self._preserved_receipts(self.handoff_receipts.snap, snap)
+                pending_ack = None
+                try:
+                    self._require_delivered_receipts(snapshot, retry_pending=True)
+                except _EvidenceChanged as error:
+                    # Missing/inconsistent receipts fail before status churn;
+                    # a valid pending ACK may retry only after readiness checks.
+                    pending_ack = error
                 self._require_health(identity=(pid, started), baseline=self.baseline,
                                      require_idle=False, snapshot=snapshot)
-                self._require_delivered_receipts(snapshot, retry_pending=True)
+                if pending_ack is not None:
+                    raise pending_ack
                 return True
             except _EvidenceChanged as error:
                 last_change = error
