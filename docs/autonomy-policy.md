@@ -39,8 +39,40 @@ python3 scripts/autonomy_policy.py --phase post-cutover /private/path/evidence.j
 Exit status zero means only that the supplied snapshot satisfies the selected
 contract. A nonzero result is blocked; missing, malformed, partial, stale, failed,
 skipped, cancelled, truncated, or mismatched data cannot be treated as success.
-The CLI performs no network calls, writes, status publication, settings changes,
-service activation, checkout, import, or execution of candidate code.
+The default offline CLI performs no network calls, writes, status publication,
+settings changes, service activation, checkout, import, or execution of candidate code.
+
+### Explicit read-only review collection (issue #100)
+
+The opt-in `--collect-review --state STATE_JSON --pull NUMBER --head SHA` mode
+uses the executing trusted checkout's coordinator implementation, an explicit
+read-only coordinator state snapshot, and the positional baseline evidence file.
+There are no default state/evidence paths or candidate-source imports. It assembles
+`copilot_review` through the actual coordinator pull snapshot (including full-media
+reviews, authenticated edit metadata, complete check runs and thread pagination),
+classifies the changed files, and independently fetches the current owner command
+with `_current_sensitive_owner_command`. Persisted authorization alone is not proof.
+
+```sh
+python3 scripts/autonomy_policy.py --phase staging --collect-review \
+  --state /private/path/state.json --pull 123 --head EXACT_HEAD_SHA \
+  /private/path/evidence.json
+```
+
+Collection fences the authenticated owner/repository, current remote main, exact PR
+identity/head/base/open state, and protections before and after assembly. Only review
+and protection evidence is refreshed. Baseline `main.files`, `source_ci`, artifact
+and attestation evidence remains unchanged and must already be independently trusted;
+this mode does not qualify it as freshly collected or recreate artifact collection.
+The output includes the assembled evidence and the normal validator report. It writes
+no files or state and never plans/applies coordinator actions. A collection error
+blocks without emitting partial evidence or clearing persisted authorization.
+
+Acceptance cases use only synthetic transports/state through the real CLI assembly
+and validator: valid sensitive evidence passes; absent, edited or wrong-context owner
+comments block; transient API failures preserve state and fail closed; final identity,
+head/base/main and protection changes block. The existing offline mode stays unchanged.
+These tests are not live activation evidence or genuine Copilot review.
 
 The evidence must be collected independently from authenticated, read-only GitHub
 API responses for `lindayi/hermes-mobile` (repository ID `1399942965`) and the
