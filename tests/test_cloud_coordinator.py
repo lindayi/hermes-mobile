@@ -1453,6 +1453,14 @@ def test_review_collection_blocks_owner_review_when_graphql_metadata_is_untruste
                 review["submittedAt"] = "2026-10-01T11:01:00Z"
             return response
 
+    if mutation == "error":
+        # Unavailable metadata is not evidence of deletion or revocation.
+        with pytest.raises(ApiError, match="GitHub GraphQL request failed"):
+            _rest_list(
+                InvalidMetadata(),
+                "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100",
+            )
+        return
     reviews = _rest_list(
         InvalidMetadata(),
         "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100",
