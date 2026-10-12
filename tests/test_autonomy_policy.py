@@ -194,7 +194,7 @@ _ISSUE92_COPILOT_REVIEW_FIXTURE = {
 }
 
 _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE = {
-    'deploy/cloud_coordinator.py': '70cb24963b53fb8a5212ee360e904edbefe497e24a3ac720caec08f83e3af9a4',
+    'deploy/cloud_coordinator.py': '0e43fae886f34b897fd62dfd365869718ec40abc0c7e1e26b75adc445c158b33',
     'deploy/review_evidence.py': '81582ac0ee3523508a16bf437ac3d134a961e45371bed76cd755a1506d71cffa',
 }
 

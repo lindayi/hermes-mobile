@@ -67,6 +67,11 @@ this mode does not qualify it as freshly collected or recreate artifact collecti
 The output includes the assembled evidence and the normal validator report. It writes
 no files or state and never plans/applies coordinator actions. A collection error
 blocks without emitting partial evidence or clearing persisted authorization.
+Malformed current owner-comment responses at either the initial or final read
+abort collection with `invalid-evidence`, not `sensitive-review-authorization`;
+no partial evidence is emitted and no authorization is cleared. HTTP 404 or a
+well-formed changed command still blocks sensitive authorization; a change at the
+final fence blocks the entire collection.
 
 Acceptance cases use only synthetic transports/state through the real CLI assembly
 and validator: valid sensitive evidence passes; absent, edited or wrong-context owner

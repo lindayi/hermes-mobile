@@ -133,6 +133,45 @@ def test_cli_transient_command_read_preserves_authorization(collection, capsys, 
     assert api.writes == api.graphql_writes == []
 
 
+@pytest.mark.parametrize('read', ['initial', 'final'])
+@pytest.mark.parametrize('field, malformed', [
+    (None, None), (None, []), (None, 'not a comment'),
+    ('user', []), ('user', None), ('user', {'id': '1'}),
+    ('body', []), ('body', None), ('created_at', []),
+    ('created_at', 'invalid'), ('updated_at', {}), ('id', True),
+    ('issue_url', []),
+])
+def test_malformed_owner_comment_aborts_collection(collection, capsys, read, field, malformed):
+    api, _, state_path, evidence_path, args, _ = collection
+    before = (state_path.read_bytes(), evidence_path.read_bytes())
+    get = api.get
+    final = False
+    command_reads = 0
+
+    def malformed_get(route):
+        nonlocal final, command_reads
+        value = get(route)
+        # The final identity read is after the initial command has been collected.
+        if route == 'user' and command_reads:
+            final = True
+        if '/issues/comments/' in route:
+            command_reads += 1
+            if read == 'initial' or final:
+                return malformed if field is None else value | {field: malformed}
+        return value
+
+    api.get = malformed_get
+    assert cli.main(args) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        'ready': False, 'phase': 'staging', 'blockers': ['invalid-evidence'],
+    }
+    assert 'Malformed current owner-comment response' in captured.err
+    assert read == 'initial' or (final and command_reads >= 2)
+    assert before == (state_path.read_bytes(), evidence_path.read_bytes())
+    assert api.writes == api.graphql_writes == []
+
+
 @pytest.mark.parametrize('hazard', ['head', 'base', 'pull-id', 'head-repository',
                                   'base-ref', 'author', 'draft', 'main', 'protection',
                                   'owner', 'repository'])

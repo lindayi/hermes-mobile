@@ -156,6 +156,8 @@ def test_transient_authorization_evidence_failure_preserves_state(tmp_path, monk
     path = tmp_path / 'state.json'
     Coordinator(api, StateStore(path)).run(apply=True)
     before = path.read_bytes()
+    api.writes.clear()
+    api.graphql_writes.clear()
     get = api.get
     graphql = api.graphql
 
@@ -174,6 +176,37 @@ def test_transient_authorization_evidence_failure_preserves_state(tmp_path, monk
     with pytest.raises(ApiError, match='temporary outage'):
         Coordinator(api, StateStore(path)).run(apply=True)
     assert path.read_bytes() == before
+    assert api.writes == api.graphql_writes == []
+
+
+@pytest.mark.parametrize('field, malformed', [
+    (None, None), (None, []), (None, 'not a comment'),
+    ('user', []), ('user', None), ('user', {'id': '1'}),
+    ('body', []), ('body', None), ('created_at', []),
+    ('created_at', 'invalid'), ('updated_at', {}), ('id', True),
+    ('issue_url', []),
+])
+def test_malformed_current_comment_preserves_durable_authorization(tmp_path, field, malformed):
+    from deploy.cloud_coordinator import ApiError
+    api = SensitiveCopilotApi()
+    path = tmp_path / 'state.json'
+    Coordinator(api, StateStore(path)).run(apply=True)
+    before = path.read_bytes()
+    api.writes.clear()
+    api.graphql_writes.clear()
+    get = api.get
+
+    def malformed_get(route):
+        value = get(route)
+        if route.endswith(f'/issues/comments/{OWNER_COMMAND_ID}'):
+            return malformed if field is None else value | {field: malformed}
+        return value
+
+    api.get = malformed_get
+    with pytest.raises(ApiError, match='^Malformed current owner-comment response$'):
+        Coordinator(api, StateStore(path)).run(apply=True)
+    assert path.read_bytes() == before
+    assert api.writes == api.graphql_writes == []
 
 
 @pytest.mark.parametrize("mutation", [

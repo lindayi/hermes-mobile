@@ -1491,8 +1491,18 @@ def _current_sensitive_owner_command(api, issue, authorization):
         if error.status == 404:
             return None
         raise
+    # Invalid transport evidence is incomplete, not confirmed command revocation.
+    if (not isinstance(comment, dict)
+            or not isinstance(comment.get("user"), dict)
+            or not positive_id(comment["user"].get("id"))
+            or not positive_id(comment.get("id"))
+            or not isinstance(comment.get("body"), str)
+            or not _valid_timestamp(comment.get("created_at"))
+            or not _valid_timestamp(comment.get("updated_at"))
+            or not isinstance(comment.get("issue_url"), str)):
+        raise ApiError("Malformed current owner-comment response")
     parsed = _is_owner_sensitive_command(comment)
-    user = comment.get("user") if isinstance(comment, dict) else None
+    user = comment["user"]
     if (parsed is None or not isinstance(user, dict)
             or comment.get("issue_url") != (
                 f"https://api.github.com/repos/{REPOSITORY}/issues/{issue}"

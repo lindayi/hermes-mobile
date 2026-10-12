@@ -161,7 +161,12 @@ observations and lifecycle events before export. Historical independent-review
 records remain readable but do not authorize new decisions; unsupported legacy
 enrollment identities are not migrated. Plan mode only projects the change.
 Incomplete collection, preparation or scan-commit failure preserves prior durable
-state, export and consumer ACKs and performs no external write. Revocation itself
+state, export and consumer ACKs and performs no external write. A malformed
+single-comment response (non-object, missing or invalid user/ID/body/timestamps/
+issue URL fields) raises `ApiError` before command parsing: it is incomplete
+collection, not confirmed revocation. HTTP 404 and well-formed but edited,
+foreign-owner or mismatched commands remain confirmed invalid authorization;
+other API failures abort collection. Revocation itself
 consumes no repair attempt and never authorizes merge. Sensitive authorization does
 not replace the separate complete Copilot findings/threads and required-CI merge
 gates: a bounded source repair may proceed while findings remain unresolved, but

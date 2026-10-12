@@ -326,6 +326,7 @@ def test_active_gate_contract_preserves_exact_head_review():
         'authenticated edit metadata, complete check runs and thread pagination',
         'It writes no files or state and never plans/applies coordinator actions.',
         'A collection error blocks without emitting partial evidence or clearing persisted authorization.',
+        'Malformed current owner-comment responses at either the initial or final read abort collection with `invalid-evidence`, not `sensitive-review-authorization`;',
         'does not authenticate the JSON file',
         'Ordinary merge evidence has no structured independent report',
         'Installed-runtime compatibility remains an exact-main guarded deployment gate',
