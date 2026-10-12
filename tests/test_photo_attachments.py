@@ -8,6 +8,7 @@ import errno
 import io
 import json
 import os
+from pathlib import Path
 import sqlite3
 import struct
 import subprocess
@@ -757,6 +758,26 @@ def photo_client(tmp_path, *, gateway_client=None, raise_server_exceptions=True,
         client.headers['Origin'] = ORIGIN
         enroll(client)
         yield app, client
+
+
+def photo_operator_config(app):
+    path = app.state.settings.state_dir / 'operator-config.json'
+    path.write_text(json.dumps({
+        'state_dir': str(app.state.settings.state_dir),
+        'photos_enabled': True,
+        'origin': ORIGIN,
+    }))
+    path.chmod(0o600)
+    return path
+
+
+def photo_operator(command, config):
+    args = [sys.executable, '-m', 'backend.manage', f'photo-{command}',
+            '--config', str(config)]
+    if command in ('disable', 'enable'):
+        args.append('--confirm')
+    return subprocess.run(args, cwd=Path(__file__).resolve().parents[1],
+                          capture_output=True, text=True, timeout=10)
 
 
 def test_photo_upload_returns_private_metadata_for_the_owned_session(tmp_path):
@@ -1938,6 +1959,7 @@ def test_snapshot_alias_queries_are_scoped_to_owned_connected_component(tmp_path
 
 def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
     native_requests = []
+    photo_started, release_photo = threading.Event(), threading.Event()
 
     async def upstream(request):
             if request.url.path == '/api/sessions/wa-1/messages':
@@ -1954,6 +1976,10 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
                 return httpx.Response(202, json={'run_id': run_id})
             if request.url.path.endswith('/events'):
                 run_id = request.url.path.split('/')[-2]
+                if run_id == 'rollback-run-1':
+                    photo_started.set()
+                    await anyio.to_thread.run_sync(release_photo.wait, 5)
+                    assert release_photo.is_set()
                 return httpx.Response(200, text=(
                     'event: run.completed\n'
                     f'data: {{"run_id":"{run_id}","output":"Synthetic answer"}}\n\n'))
@@ -1961,7 +1987,12 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
 
     gateway = GatewayClient('http://127.0.0.1:8642', 'synthetic-test-token',
                                 execution_ready=True, transport=httpx.MockTransport(upstream))
+    cookies, headers = {}, {}
     with photo_client(tmp_path, gateway_client=gateway) as (app, client):
+        operator_config = photo_operator_config(app)
+        initial_status = photo_operator('status', operator_config)
+        assert initial_status.returncode == 0, initial_status.stderr
+        assert json.loads(initial_status.stdout)['photos_enabled'] is True
         first_id = client.post(
             BASE + '/sessions/wa-1/attachments', content=png_fixture(),
             headers={'Idempotency-Key': 'rollback-existing-photo'}).json()['id']
@@ -1996,17 +2027,15 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
         assert concurrent.status_code == 200, concurrent.text
         assert concurrent.json()['id'] == accepted.json()['id']
         assert accepted.status_code == 200, accepted.text
-        for _ in range(100):
-            completed = client.get(BASE + '/runs/' + accepted.json()['id']).json()
-            if completed['status'] == 'completed':
-                break
-            time.sleep(.01)
+        assert photo_started.wait(5)
 
         pending_id = client.post(
             BASE + '/sessions/wa-1/attachments', content=png_fixture(1),
             headers={'Idempotency-Key': 'rollback-pending-photo'}).json()['id']
-        app.state.settings.photos_enabled = False
-        app.state.orchestrator.photos_enabled = False
+        disabled = photo_operator('disable', operator_config)
+        assert disabled.returncode == 0, disabled.stderr
+        assert json.loads(disabled.stdout)['photos_enabled'] is False
+        assert json.loads(photo_operator('status', operator_config).stdout)['photos_enabled'] is False
 
         blocked_upload = client.post(
             BASE + '/sessions/wa-1/attachments', content=png_fixture(2),
@@ -2030,12 +2059,45 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
                         {'session_id': 'other'}, {'selection': {'model': 'other', 'provider': 'other'}}):
             mismatch = client.post(BASE + '/runs', json={**original, **changed})
             assert mismatch.status_code == 409, mismatch.text
+        release_photo.set()
+        for _ in range(100):
+            completed = client.get(BASE + '/runs/' + accepted.json()['id']).json()
+            if completed['status'] == 'completed':
+                break
+            time.sleep(.01)
+        assert completed['status'] == 'completed'
         assert len(native_requests) == 2
         assert 'mobile_attachment_ids' not in native_requests[-1]
         assert client.get(BASE + f'/sessions/wa-1/attachments/{first_id}').status_code == 200
+
+        enabled = photo_operator('enable', operator_config)
+        assert enabled.returncode == 0, enabled.stderr
+        assert json.loads(enabled.stdout)['photos_enabled'] is True
+        resumed_upload = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(3),
+            headers={'Idempotency-Key': 'rollback-reenabled-photo'})
+        assert resumed_upload.status_code == 201, resumed_upload.text
+        disabled = photo_operator('disable', operator_config)
+        assert disabled.returncode == 0, disabled.stderr
+        cookies, headers = dict(client.cookies), dict(client.headers)
 
         with app.state.attachments.connection() as db:
             db.execute('UPDATE attachments SET expires_at=0 WHERE id=?', (pending_id,))
             db.commit()
         assert app.state.attachments.cleanup(now=time.time() + 1) == 1
         assert not (app.state.attachments.objects / f'{pending_id}.png').exists()
+
+    restarted = create_app(app.state.settings, gateway_client=gateway)
+    with TestClient(restarted, base_url=ORIGIN) as client:
+        client.cookies.update(cookies)
+        client.headers.update(headers)
+        after_restart = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(4),
+            headers={'Idempotency-Key': 'rollback-restart-disabled'})
+        assert after_restart.status_code == 503
+        enabled = photo_operator('enable', operator_config)
+        assert enabled.returncode == 0, enabled.stderr
+        restored_upload = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(4),
+            headers={'Idempotency-Key': 'rollback-restart-enabled'})
+        assert restored_upload.status_code == 201, restored_upload.text
