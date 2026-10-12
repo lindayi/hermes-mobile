@@ -103,6 +103,26 @@ resolves relative package imports and initializers and rejects unresolved local 
 unsupported dynamic imports. It does not discover arbitrary subprocess roots or
 establish complete execution-source coverage by itself.
 
+### Combined sensitive authorization and rendered-review candidate
+
+The PR101 + PR103 assembly preserves issue #100's genuine Copilot-bound sensitive
+review, separate immutable owner command and chronology, and read-only collector
+whose malformed/transient reads abort without clearing durable authority. It also
+preserves issue #102's rendered h3/p framing, strict counted inventories, unique
+discussion targets across sections, and conservative ambiguous-prose handling.
+The shared review source pin and newest literal fixture describe the combined
+bytes; neither parent's separate review-source digest describes this assembly.
+
+| Combined candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `0e43fae886f34b897fd62dfd365869718ec40abc0c7e1e26b75adc445c158b33` |
+| `deploy/review_evidence.py` | `191c9633f7a50b8f8b8b58094795984bcedcf10643378e0c15d70da5e575b3f4` |
+
+Earlier fixture overlays and historical tables remain provenance only. These pins
+are not exact-head review acceptance, hosted CI evidence, merge authorization, or
+permission to deploy. Both behavioral contracts remain specified in
+[the coordinator specification](cloud-coordinator-spec.md).
+
 ### Retained merged source and deliberate native refreshes
 
 The release controller imports `deploy/native_notification_release.py`, which

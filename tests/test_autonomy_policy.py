@@ -190,12 +190,12 @@ _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE = {
 
 _ISSUE92_COPILOT_REVIEW_FIXTURE = {
     'deploy/cloud_coordinator.py': '3c2dd4527a1108cce142c6e9e8f70429c4c66153d8cc0193b3d4f041571f1ff1',
-    'deploy/review_evidence.py': 'ca76b89cd3d6b9b01a42d8edc4594574d369bd681316f56cfca2279fe441a124',
+    'deploy/review_evidence.py': '6cad7d062531c829731eba30ccac3dd73b28a748e8d5c0e40cbb8d2995b303c6',
 }
 
 _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE = {
     'deploy/cloud_coordinator.py': '0e43fae886f34b897fd62dfd365869718ec40abc0c7e1e26b75adc445c158b33',
-    'deploy/review_evidence.py': '81582ac0ee3523508a16bf437ac3d134a961e45371bed76cd755a1506d71cffa',
+    'deploy/review_evidence.py': '191c9633f7a50b8f8b8b58094795984bcedcf10643378e0c15d70da5e575b3f4',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
