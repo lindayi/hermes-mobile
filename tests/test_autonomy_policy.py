@@ -185,7 +185,7 @@ _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE = {
 
 _ISSUE92_COPILOT_REVIEW_FIXTURE = {
     'deploy/cloud_coordinator.py': '3c2dd4527a1108cce142c6e9e8f70429c4c66153d8cc0193b3d4f041571f1ff1',
-    'deploy/review_evidence.py': 'c6e40c7166c18334ca53c3d0291341d8927559f35a2ca53742d7aeff288ad972',
+    'deploy/review_evidence.py': '84caec5410cc7d8f7c015a478fd4f81ccf7de8798e5bc517b0d7d5867c8c3762',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {

@@ -211,6 +211,47 @@ def test_counted_inventory_rejects_duplicate_or_multiple_discussion_targets(cate
     assert result["findings"] == []
 
 
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("extra_anchor", [
+    '<a href="https://example.invalid/">Unsupported link</a>',
+    '<a>Missing target</a>',
+    '<a href="#discussion_r1">Repeated target</a>',
+])
+def test_counted_inventory_rejects_extra_live_anchors(category, extra_anchor):
+    rendered = (
+        f"<details><summary>1 {category} finding</summary><ul><li>"
+        '<a href="#discussion_r1">Finding</a>' + extra_anchor
+        + "</li></ul></details>"
+    )
+    result = parse_body(OVERVIEW_MARKER + "\nCounted section", "COMMENTED",
+                        body_html=rendered)
+
+    assert result["inventory_complete"] is False
+    assert result["ambiguous"] is True
+    assert result["findings"] == []
+
+
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("quote_tag", ["code", "pre", "blockquote"])
+def test_counted_inventory_keeps_quoted_anchors_inert_and_decorations(category, quote_tag):
+    rendered = (
+        f"<details><summary>1 {category} finding</summary><ul><li>"
+        '<themed-picture><picture><source srcset="severity.svg">'
+        '<img src="severity.png" alt="Medium severity"></picture></themed-picture>'
+        '<a href="#discussion_r1"><strong>Finding</strong></a>'
+        f'<{quote_tag}><a href="#discussion_r1">Quoted duplicate</a>'
+        '<a href="https://example.invalid/">Quoted unsupported link</a>'
+        f'<a>Quoted missing target</a></{quote_tag}>'
+        "</li></ul></details>"
+    )
+    result = parse_body(OVERVIEW_MARKER + "\nCounted section", "COMMENTED",
+                        body_html=rendered)
+
+    assert result["inventory_complete"] is True
+    assert result["ambiguous"] is False
+    assert result["findings"] == []
+
+
 def test_count_leading_section_inside_quotation_is_incomplete():
     rendered = CURRENT_COPILOT_HTML.replace(
         "<details open><summary><strong>1 open finding</strong></summary>",

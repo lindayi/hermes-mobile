@@ -390,9 +390,13 @@ def _discussion_targets(node):
         if isinstance(child, _Element):
             if child.tag in {"code", "pre", "blockquote"}:
                 continue
-            if child.tag == "a" and isinstance(child.href, str) and (
-                _DISCUSSION_HREF_RE.fullmatch(child.href)
-            ):
+            if child.tag == "a":
+                # Count live anchors, not distinct supported destinations. An
+                # extra or unsupported anchor makes the entire item ambiguous.
+                if targets or not isinstance(child.href, str) or not (
+                    _DISCUSSION_HREF_RE.fullmatch(child.href)
+                ):
+                    return set()
                 # Fragment and absolute links identify the same review comment.
                 targets.add(child.href.rsplit("#", 1)[1].lower())
             pending.extend(reversed(child.children))
