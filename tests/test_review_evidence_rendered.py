@@ -252,6 +252,23 @@ def test_counted_inventory_keeps_quoted_anchors_inert_and_decorations(category, 
     assert result["findings"] == []
 
 
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("location", ["item", "anchor", "summary"])
+def test_counted_inventory_rejects_nested_live_disclosure(category, location):
+    nested = ('<details><summary>Previously missed (1)</summary>'
+              '<p>Reject stale credentials before writing.</p></details>')
+    label = f'1 {category} finding'
+    anchor = '<a href="#discussion_r1">Finding</a>'
+    if location == "anchor":
+        anchor = anchor.replace('</a>', nested + '</a>')
+    item = anchor + (nested if location == "item" else '')
+    summary = label + (nested if location == "summary" else '')
+    rendered = f'<details><summary>{summary}</summary><ul><li>{item}</li></ul></details>'
+    result = parse_body(OVERVIEW_MARKER + '\nCounted section', 'COMMENTED', body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+
+
 def test_count_leading_section_inside_quotation_is_incomplete():
     rendered = CURRENT_COPILOT_HTML.replace(
         "<details open><summary><strong>1 open finding</strong></summary>",

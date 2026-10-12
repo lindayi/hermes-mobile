@@ -193,7 +193,7 @@ SOURCE_FINGERPRINTS = {
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
-    'deploy/review_evidence.py': '84caec5410cc7d8f7c015a478fd4f81ccf7de8798e5bc517b0d7d5867c8c3762',
+    'deploy/review_evidence.py': '33fb3a95d0297a3764b05924082a0e8a9232dc1e56fcba60c3a3c73d6356ee88',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     # Issue #65 producer-only overlay; historical receipt hashes remain documented.

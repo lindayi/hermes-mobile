@@ -417,6 +417,9 @@ def _has_inert_disclosure(root):
 
 
 def _counted_section_matches(node, expected):
+    # Counted links cannot stand in for nested, unclassified live findings.
+    if next(_disclosures(node), None) is not None:
+        return False
     body = [child for child in node.children if child is not _summary(node)]
     elements = [child for child in body if isinstance(child, _Element)]
     if any(isinstance(child, str) and child.strip() for child in body):
