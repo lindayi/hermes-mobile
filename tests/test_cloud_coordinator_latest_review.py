@@ -89,7 +89,8 @@ def test_neutral_prompt_requires_per_hunk_decisions_before_ready_receipt():
     assert "each conflict hunk" in prompt
     assert "classification, decision, and rationale" in prompt
     assert "preserves both branch intents" in prompt
-    assert "PR comment" in prompt and "before returning a `ready` receipt" in prompt
+    assert "blockquoted decision in the one final PR comment" in prompt
+    assert "exactly one `reply_to_comment` call" in prompt
     assert "fresh review and checks" in prompt
 
 

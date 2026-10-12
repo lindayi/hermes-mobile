@@ -38,14 +38,15 @@ class ReceiptError(ValueError):
 
 def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=False):
     posting_instruction = (
-        "After pushing your result and running focused checks, first post the "
-        "conflict decisions in a separate PR comment without the receipt nonce. "
-        "Then construct the complete receipt-only payload below as a separate "
-        "value and validate that exact value with the existing `_v2_fields` "
-        "parser, checking every field against its expected value. Post that "
-        "validated payload as exactly one dedicated PR comment, with no quote, "
-        "fence, prose, extra fields, or trailing content. Never combine the "
-        "decision commentary and receipt, and do not post a second receipt."
+        "After pushing your result and running focused checks, prepare one final "
+        "PR comment. Put each conflict decision in its own Markdown blockquote, "
+        "then put the complete receipt payload below as the final unquoted block. "
+        "Validate that exact payload with the existing `_v2_fields` parser, "
+        "checking every field against its expected value. Publish the combined "
+        "comment with exactly one `reply_to_comment` call. Do not post a preliminary "
+        "comment, edit or reply to the same anchor again, or make a second "
+        "publication. Do not quote or fence the receipt, or add unquoted prose, "
+        "extra fields, or trailing content."
     ) if neutral else (
         "After pushing your result and running focused checks, post exactly one "
         "issue comment on this PR. Put the exact receipt fields below in one "

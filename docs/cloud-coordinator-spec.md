@@ -583,11 +583,11 @@ terminal state. Reactivation, duplicate commands, restart, or uncertain persiste
 must not cause a repeated POST, notice, or accepted result.
 
 Neutral task publication uses one immutable PR comment, not two replies to one
-anchor. That comment contains the conflict decisions in their own section followed
-by the single validated receipt payload in the supported legacy-neutral carrier
-format. The producer instruction and strict consumer parser must agree on the
-serialized form. An edited comment remains invalid; there is no retry or edited
-receipt fallback.
+anchor. That comment contains each conflict decision in its own blockquote followed
+by the single validated v2 receipt payload. The existing strict v2 parser accepts
+only blockquoted context before the exact final receipt block; the producer
+instruction and consumer parser must agree on the serialized form. An edited
+comment remains invalid; there is no retry or edited-receipt fallback.
 
 Finite acceptance for this recovery:
 

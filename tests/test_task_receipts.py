@@ -396,7 +396,7 @@ def test_v2_instruction_requires_complete_context_before_source_edits():
     assert "one result from the closed list" in instruction
 
 
-def test_neutral_instruction_separates_decisions_from_validated_receipt_payload():
+def test_neutral_instruction_uses_one_immutable_publication():
     from deploy.task_receipts import _v2_fields
 
     standard = receipt_instruction(
@@ -407,11 +407,11 @@ def test_neutral_instruction_separates_decisions_from_validated_receipt_payload(
     )
     assert "post exactly one issue comment on this PR" in standard
     assert "separate PR comment without the receipt nonce" not in standard
-    assert "separate PR comment without the receipt nonce" in neutral
-    assert "receipt-only payload below as a separate value" in neutral
-    assert "validate that exact value with the existing `_v2_fields` parser" in neutral
-    assert "Never combine the decision commentary and receipt" in neutral
-    assert "do not post a second receipt" in neutral
+    assert "one `reply_to_comment` call" in neutral
+    assert "each conflict decision in its own Markdown blockquote" in neutral
+    assert "Validate that exact payload with the existing `_v2_fields` parser" in neutral
+    assert "or make a second publication" in neutral
+    assert "separate PR comment without the receipt nonce" not in neutral
 
     payload = (
         "Hermes-Task-Receipt: v2\n"
@@ -423,7 +423,13 @@ def test_neutral_instruction_separates_decisions_from_validated_receipt_payload(
         f"head={RESULT_HEAD}\n"
         "result=ready"
     )
-    assert _v2_fields(payload) == {
+    carrier = (
+        "> Conflict decisions:\n"
+        "> 1. `src/example.py` hunk: Decision: retain both behaviors. "
+        "Rationale: both branch intents remain present.\n\n"
+        + payload
+    )
+    assert _v2_fields(carrier) == {
         "nonce": NONCE, "pr": "16", "start_head": START_HEAD,
         "base": BASE, "session": SESSION_ID, "head": RESULT_HEAD,
         "result": "ready",
