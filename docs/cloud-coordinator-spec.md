@@ -136,30 +136,41 @@ that read remain a remote race, not a claim of permanent body immutability.
 Legacy SHA-only starter output cannot be distinguished from manual authority:
 review in-flight old commands and deploy both sides together before activation.
 
-For a sensitive head, the owner must separately publish a formal `COMMENTED`
-independent-agent review, then comment
+For a sensitive head, the owner must separately comment
 `/hermes authorize-sensitive <head-sha> review <positive-review-id> <body-sha256>`.
-The selected complete authenticated review must be the latest owner review on that
-exact head, have a unique positive ID and timezone-aware submission time, and contain
-at most 4096 characters of JSON with exactly `schema`,
-`reviewed_head_sha`, `review_method`, `verdict`, and `evidence_sha256`. The schema is
-`hermes-independent-agent-review-v1`; the method is `independent-agent`, the verdict
-is `pass`, and the evidence digest is lowercase SHA-256. The command's digest is over
-the exact raw UTF-8 review body. The owner's publication is the trust assertion of
-independent execution, not proof of cryptographic/model independence or a distinct
-GitHub identity. Arbitrary prose/status, self-assessment, and another account do not
-qualify. The previous head-only command remains recognized as no authorization.
-Planning and fresh status/merge fences re-read and revalidate the selected review,
-body digest, author, state, timestamp, ID uniqueness, and head. Removal, edit,
-dismissal, a later negative owner review, or a head change invalidates authorization;
-it is not blanket consent for future commits. Complete scan validation clears all
-three persisted fields (`sensitive_sha`, `sensitive_authorization`, `targeted_review`)
-atomically with commands, observations and lifecycle events before export. This
-also invalidates readable head-only authorization without selected-review proof;
-it does not migrate unsupported legacy enrollment identities. Plan mode only
-projects the change. Incomplete collection, preparation or scan-commit failure
-preserves prior durable state, export and consumer ACKs and performs no external
-write. Revocation itself consumes no repair attempt and never authorizes merge.
+The command is scoped to the exact current head and one complete authenticated
+Copilot review from reviewer bot ID `175728472`. That review must be the unique
+latest review by that bot, have a unique positive ID and timezone-aware submission
+time no later than the immutable owner command creation time, be `COMMENTED` or
+`APPROVED` on the exact head, and include unchanged REST
+metadata and the complete rendered `body_html`. The lowercase SHA-256 in the command
+is over the exact raw UTF-8 review `body`; the selected review identity, head, state,
+and digest are persisted with the owner authorization. Coding bot ID `198982749`,
+the PR author, owner-authored reviews, historical independent-review reports, and
+the previous head-only command do not authorize a sensitive head.
+
+This owner command is a separate, explicit authorization, not an automatic approval
+from enrollment or review prose. Planning and fresh status/merge fences re-read and
+revalidate the command and selected Copilot review, including author, state,
+timestamp, edit metadata, ID uniqueness, full rendered body and head. Removal,
+edit, dismissal, a newer negative or ambiguous Copilot review, or a head change
+invalidates authorization; it is not blanket consent for future commits. Complete
+scan validation clears all three persisted fields (`sensitive_sha`,
+`sensitive_authorization`, `targeted_review`) atomically with commands,
+observations and lifecycle events before export. Historical independent-review
+records remain readable but do not authorize new decisions; unsupported legacy
+enrollment identities are not migrated. Plan mode only projects the change.
+Incomplete collection, preparation or scan-commit failure preserves prior durable
+state, export and consumer ACKs and performs no external write. A malformed
+single-comment response (non-object, missing or invalid user/ID/body/timestamps/
+issue URL fields) raises `ApiError` before command parsing: it is incomplete
+collection, not confirmed revocation. HTTP 404 and well-formed but edited,
+foreign-owner or mismatched commands remain confirmed invalid authorization;
+other API failures abort collection. Revocation itself
+consumes no repair attempt and never authorizes merge. Sensitive authorization does
+not replace the separate complete Copilot findings/threads and required-CI merge
+gates: a bounded source repair may proceed while findings remain unresolved, but
+merge remains blocked until all merge gates pass.
 
 This is a source/first-activation boundary, not an upgrade path for historical
 coordinator state. Version-1 records remain readable for inspection, but active

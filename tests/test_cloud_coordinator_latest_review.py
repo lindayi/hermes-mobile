@@ -331,7 +331,8 @@ def test_apply_refreshes_approval_export_from_current_scan(tmp_path, authorize):
         api.comments.append({
             "id": 124, "user": {"id": 5164171},
             "body": (f"/hermes authorize-sensitive {HEAD} review "
-                     f"{api.owner_review_id} {api.owner_review_digest}"),
+                     f"{api.copilot_review_id} {api.copilot_review_digest}"),
+            "created_at": "2026-10-01T12:10:00Z",
             "updated_at": "2026-10-01T12:10:00Z",
         })
     else:
