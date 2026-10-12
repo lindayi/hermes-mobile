@@ -318,7 +318,13 @@ def test_owner_authorization_must_bind_the_selected_review_and_exact_digest():
     )
 
 
-def test_sensitive_authorization_accepts_a_bound_current_copilot_review():
+@pytest.mark.parametrize("command_created, authorized", [
+    ("2026-10-01T12:29:59Z", False),
+    (SUBMITTED, True),
+    ("2026-10-01T12:31:00Z", True),
+])
+def test_sensitive_authorization_accepts_a_bound_current_copilot_review(
+        command_created, authorized):
     body = "<p>Copilot review body</p>"
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     review = {
@@ -343,7 +349,7 @@ def test_sensitive_authorization_accepts_a_bound_current_copilot_review():
         "body_sha256": digest,
         "command_comment_id": 124,
         "command_body_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
-        "command_created_at": SUBMITTED,
+        "command_created_at": command_created,
     }
     targeted = {
         "review_id": review["id"],
@@ -356,10 +362,10 @@ def test_sensitive_authorization_accepts_a_bound_current_copilot_review():
         [review], HEAD, authorization, targeted, owner_id=OWNER,
         owner_command={
             "comment_id": 124, "actor_id": OWNER, "body": command,
-            "created_at": SUBMITTED, "updated_at": SUBMITTED,
+            "created_at": command_created, "updated_at": command_created,
         },
         pull_author_id=COPILOT_AGENT,
-    )
+    ) is authorized
 
 
 @pytest.mark.parametrize("state", ["COMMENTED", "CHANGES_REQUESTED"])

@@ -1665,8 +1665,8 @@ class FakeApi:
                     f"/hermes authorize-sensitive {authorize_sha} review "
                     f"{self.copilot_review_id} {self.copilot_review_digest}"
                 ),
-                "created_at": "2026-10-01T11:30:00Z",
-                "updated_at": "2026-10-01T11:30:00Z",
+                "created_at": "2026-10-01T12:01:00Z",
+                "updated_at": "2026-10-01T12:01:00Z",
             })
         self._sync_owner_reviews()
 

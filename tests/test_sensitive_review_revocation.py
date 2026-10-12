@@ -39,8 +39,8 @@ def authorize(api, comment_id=124):
         "id": comment_id, "user": {"id": OWNER},
         "body": (f"/hermes authorize-sensitive {api.head_sha} review "
                  f"{api.copilot_review_id} {api.copilot_review_digest}"),
-        "created_at": "2026-10-01T21:00:00Z",
-        "updated_at": "2026-10-01T21:00:00Z",
+        "created_at": "2026-10-01T21:03:00Z",
+        "updated_at": "2026-10-01T21:03:00Z",
     })
 
 

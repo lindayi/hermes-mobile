@@ -336,9 +336,10 @@ def test_active_gate_contract_preserves_exact_head_review():
         assert clause in ' '.join((ROOT / 'AGENTS.md').read_text().split()), clause
     for clause in (
         '`copilot_review.reviews`',
-        '`hermes-independent-agent-review-v1`',
+        '`copilot_review.change.owner_command`',
         '`sensitive-review-authorization`',
-        'owner-published',
+        'current genuine Copilot review',
+        'Never reconstruct this record from the persisted authorization',
     ):
         assert clause in policy, clause
 

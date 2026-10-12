@@ -195,7 +195,7 @@ _ISSUE92_COPILOT_REVIEW_FIXTURE = {
 
 _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE = {
     'deploy/cloud_coordinator.py': '737eb8ac8054a33cef3ba3bec11d869110adc8b08bff5b522a2e922ae4e529a9',
-    'deploy/review_evidence.py': '5329f594b5342e94338a64cc62732ca53642d6c3353ff2d3a1850058bdb3131d',
+    'deploy/review_evidence.py': '81582ac0ee3523508a16bf437ac3d134a961e45371bed76cd755a1506d71cffa',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
@@ -378,12 +378,12 @@ def _sensitive_evidence(phase, state='COMMENTED'):
             'review_id': 3, 'body_sha256': body_sha256,
             'command_comment_id': 4,
             'command_body_sha256': hashlib.sha256(command.encode('utf-8')).hexdigest(),
-            'command_created_at': '2026-10-01T22:59:00Z',
+            'command_created_at': '2026-10-01T23:01:00Z',
         },
         owner_command={
             'comment_id': 4, 'actor_id': OWNER_ID, 'body': command,
-            'created_at': '2026-10-01T22:59:00Z',
-            'updated_at': '2026-10-01T22:59:00Z',
+            'created_at': '2026-10-01T23:01:00Z',
+            'updated_at': '2026-10-01T23:01:00Z',
         },
         targeted_review={
             'review_id': 3, 'reviewer_id': COPILOT_REVIEWER_ID, 'head_sha': head,

@@ -209,7 +209,11 @@ def sensitive_review_authorized(
         owner_authorization.get("body_sha256"), pull_author_id=pull_author_id,
         complete=complete,
     )
-    return expected is not None and targeted_review == expected
+    if expected is None or targeted_review != expected:
+        return False
+    selected = latest_reviews(reviews, COPILOT_REVIEWER_ID)[0]
+    return (review_timestamp(owner_authorization["command_created_at"])
+            >= _review_submission(selected))
 
 
 def selected_copilot_sensitive_review(

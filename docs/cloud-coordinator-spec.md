@@ -141,7 +141,8 @@ For a sensitive head, the owner must separately comment
 The command is scoped to the exact current head and one complete authenticated
 Copilot review from reviewer bot ID `175728472`. That review must be the unique
 latest review by that bot, have a unique positive ID and timezone-aware submission
-time, be `COMMENTED` or `APPROVED` on the exact head, and include unchanged REST
+time no later than the immutable owner command creation time, be `COMMENTED` or
+`APPROVED` on the exact head, and include unchanged REST
 metadata and the complete rendered `body_html`. The lowercase SHA-256 in the command
 is over the exact raw UTF-8 review `body`; the selected review identity, head, state,
 and digest are persisted with the owner authorization. Coding bot ID `198982749`,

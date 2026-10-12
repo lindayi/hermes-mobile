@@ -138,6 +138,7 @@ def test_owner_command_binds_copilot_review_across_cold_restart_and_keeps_merge_
 @pytest.mark.parametrize("mutation", [
     "wrong_identity", "wrong_head", "negative_state", "edited_review", "edited_command",
     "body_changed", "wrong_digest", "ambiguous_latest", "legacy_report",
+    "preauthorized_review",
 ])
 def test_invalid_or_legacy_evidence_does_not_grant_sensitive_authorization(
         tmp_path, mutation):
@@ -164,6 +165,9 @@ def test_invalid_or_legacy_evidence_does_not_grant_sensitive_authorization(
         }
     elif mutation == "legacy_report":
         api.command(OWNER_REVIEW=True)
+    elif mutation == "preauthorized_review":
+        command = next(c for c in api.comments if c["id"] == OWNER_COMMAND_ID)
+        command["created_at"] = command["updated_at"] = "2026-10-01T12:29:59Z"
 
     if mutation == "ambiguous_latest":
         original_get_all = api.get_all
