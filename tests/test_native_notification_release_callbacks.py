@@ -399,6 +399,27 @@ def test_rollback_retries_transient_status_without_replacing_original_proofs(tmp
         (callbacks.initial_records.snap,), (callbacks.handoff_records.snap,)]
 
 
+def test_rollback_rejects_successful_retry_finishing_after_deadline(tmp_path, monkeypatch):
+    from deploy.native_notification_release import ROLLBACK_TIMEOUT
+    _, _, native, paths, callbacks, baseline, old, candidate, _ = setup_release(tmp_path)
+    capture_and_handoff(paths, callbacks, baseline, candidate)
+    churn_rollback_status(native, monkeypatch)
+    now = [0]
+    callbacks.clock = lambda: now[0]
+    callbacks.sleep = lambda _: None
+    health = callbacks._require_health
+
+    def delayed_health(**kwargs):
+        health(**kwargs)
+        now[0] = ROLLBACK_TIMEOUT
+
+    monkeypatch.setattr(callbacks, '_require_health', delayed_health)
+    with pytest.raises(RuntimeError, match='evidence changed'):
+        under_owned_lock(paths, lambda: callbacks.verify_rollback(old, baseline))
+    with sqlite3.connect(paths.database) as db:
+        assert db.execute('SELECT owner FROM deployment_gate').fetchone() == (baseline['gate_owner'],)
+
+
 def test_controller_retries_status_churn_after_original_posthandoff_idle_stop(
         tmp_path, monkeypatch):
     from deploy.assets import _assets

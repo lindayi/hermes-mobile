@@ -116,7 +116,7 @@ _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE = {
 }
 
 _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE = {
-    'deploy/native_notification_release.py': 'a1e265c4ac26d4b9dd160b0b20ffc9ddbfaf1281be11935e5dd51e3f8ca005b1',
+    'deploy/native_notification_release.py': '165622c962554f19263567e7c1bd60ee17cf8e73a9967cc39be995c3d8071ff1',
 }
 
 # Accepted PR29/PR40/PR42 dependency bytes retained from main5316, independently

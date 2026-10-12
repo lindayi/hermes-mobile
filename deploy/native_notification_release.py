@@ -1038,6 +1038,8 @@ class NativeNotificationCallbacks:
                                      require_idle=False, snapshot=snapshot)
                 if pending_ack is not None:
                     raise pending_ack
+                if attempt and self.clock() >= deadline:
+                    raise last_change
                 return True
             except _EvidenceChanged as error:
                 last_change = error
