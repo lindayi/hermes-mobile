@@ -212,15 +212,18 @@ def test_bound_result_head_clears_sensitive_authorization(tmp_path):
     enrollment = store.snapshot()["enrollments"]["16"]
     assert enrollment["sensitive_authorization"] is None
     assert enrollment["targeted_review"] is None
-    api.review_submitted_at = "2026-10-01T12:06:00Z"
-    # Publish a new structured owner review for the result head, then select its
-    # exact raw body digest in a fresh authorization command.
+    # Select a fresh Copilot review for the result head with a new owner command.
     api.authorize_sha = RESULT_HEAD
-    refresh_owner_review(api, RESULT_HEAD, review_id=api.owner_review_id + 1)
+    api.set_copilot_review(
+        review_id=api.copilot_review_id + 1,
+        head_sha=RESULT_HEAD,
+        body=api.copilot_review_body,
+        submitted_at="2026-10-01T12:06:00Z",
+    )
     api.comments.append({
         "id": 10001,
         "body": (f"/hermes authorize-sensitive {RESULT_HEAD} review "
-                 f"{api.owner_review_id} {api.owner_review_digest}"),
+                 f"{api.copilot_review_id} {api.copilot_review_digest}"),
         "user": {"id": OWNER}, "created_at": "2026-10-01T12:11:00Z",
         "updated_at": "2026-10-01T12:11:00Z",
     })
@@ -228,10 +231,10 @@ def test_bound_result_head_clears_sensitive_authorization(tmp_path):
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] == RESULT_HEAD
     enrollment = store.snapshot()["enrollments"]["16"]
     assert enrollment["sensitive_authorization"]["head_sha"] == RESULT_HEAD
-    assert enrollment["sensitive_authorization"]["review_id"] == api.owner_review_id
-    assert enrollment["sensitive_authorization"]["body_sha256"] == api.owner_review_digest
+    assert enrollment["sensitive_authorization"]["review_id"] == api.copilot_review_id
+    assert enrollment["sensitive_authorization"]["body_sha256"] == api.copilot_review_digest
     assert enrollment["targeted_review"]["head_sha"] == RESULT_HEAD
-    assert enrollment["targeted_review"]["review_id"] == api.owner_review_id
+    assert enrollment["targeted_review"]["review_id"] == api.copilot_review_id
     assert result["auto_merge_requested"]
 
 
@@ -895,12 +898,14 @@ def test_actual_starter_dispatches_first_review_without_a_fixer_or_failed_check(
     )
     assert api.review_attempts == 0 and api.fix_attempts == 0
 
-    refresh_owner_review(api, HEAD, submitted_at="2026-10-02T12:00:00Z")
-    review_id = api.owner_review_id
-    review_digest = hashlib.sha256(api.owner_review_body.encode("utf-8")).hexdigest()
+    api.set_copilot_review(
+        review_id=api.copilot_review_id + 1, head_sha=HEAD,
+        body=api.copilot_review_body, submitted_at="2026-10-02T12:00:00Z",
+    )
     api.comments.append({
         "id": 11000, "user": {"id": OWNER},
-        "body": f"/hermes authorize-sensitive {HEAD} review {review_id} {review_digest}",
+        "body": (f"/hermes authorize-sensitive {HEAD} review "
+                 f"{api.copilot_review_id} {api.copilot_review_digest}"),
         "created_at": "2026-10-02T12:01:00Z",
         "updated_at": "2026-10-02T12:01:00Z",
     })

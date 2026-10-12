@@ -1,5 +1,4 @@
 """PR44: selected-review revocation must reach the existing owner Inbox."""
-import hashlib
 import json
 import os
 import sqlite3
@@ -19,15 +18,16 @@ class RevocationApi(FakeApi):
     def get_all(self, route, *, collection=None):
         rows = super().get_all(route, collection=collection)
         if route.endswith("/pulls/16/reviews?per_page=100") and self.revocation:
-            owner = next((r for r in rows if r["id"] == self.owner_review_id), None)
-            if owner and self.revocation == "edited":
-                owner["body"] += " "
-            elif owner and self.revocation == "removed":
-                rows.remove(owner)
-            elif owner and self.revocation == "dismissed":
-                owner["state"] = "DISMISSED"
-            elif owner and self.revocation == "superseded":
-                rows.append(owner | {"id": self.owner_review_id + 1,
+            selected = next((r for r in rows if r["id"] == self.copilot_review_id), None)
+            if selected and self.revocation == "edited":
+                selected["body"] += " "
+            elif selected and self.revocation == "removed":
+                rows.remove(selected)
+            elif selected and self.revocation == "dismissed":
+                selected["state"] = "DISMISSED"
+            elif selected and self.revocation == "superseded":
+                rows.append(selected | {"id": self.copilot_review_id + 1,
+                                     "node_id": None,
                                      "state": "CHANGES_REQUESTED", "body": "Not approved",
                                      "submitted_at": "2026-10-01T20:00:00Z"})
         return rows
@@ -38,7 +38,8 @@ def authorize(api, comment_id=124):
     api.comments.append({
         "id": comment_id, "user": {"id": OWNER},
         "body": (f"/hermes authorize-sensitive {api.head_sha} review "
-                 f"{api.owner_review_id} {api.owner_review_digest}"),
+                 f"{api.copilot_review_id} {api.copilot_review_digest}"),
+        "created_at": "2026-10-01T21:00:00Z",
         "updated_at": "2026-10-01T21:00:00Z",
     })
 
@@ -77,9 +78,12 @@ def test_regressions_revocation_commits_before_export(tmp_path, change):
     # New selected review + genuinely fresh command supersedes this request,
     # without deleting its immutable event or trusting the previous selection.
     api.revocation = None
-    api.owner_review_id += 2
-    api.owner_review_body = api.owner_review_body.replace("c" * 64, "d" * 64)
-    api.owner_review_digest = hashlib.sha256(api.owner_review_body.encode()).hexdigest()
+    api.set_copilot_review(
+        review_id=api.copilot_review_id + 2,
+        head_sha=HEAD,
+        body=api.copilot_review_body,
+        submitted_at="2026-10-01T21:02:00Z",
+    )
     authorize(api, comment_id=125)
     Coordinator(api, StateStore(store.path), clock=lambda: NOW + 3,
                 owner_user_id="synthetic-mobile-owner").run(apply=True)

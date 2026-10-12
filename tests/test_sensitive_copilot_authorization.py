@@ -160,7 +160,7 @@ def test_invalid_or_legacy_evidence_does_not_grant_sensitive_authorization(
     elif mutation == "ambiguous_latest":
         api.extra_copilot_review = api._copilot_review() | {
             "id": REVIEW_ID + 1,
-            "node_id": REVIEW_NODE_ID + "_duplicate",
+            "node_id": None,
         }
     elif mutation == "legacy_report":
         api.command(OWNER_REVIEW=True)

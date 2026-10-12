@@ -21,6 +21,7 @@ MAX_PARSE_DEPTH = 32
 MAX_DISCLOSURES = 256
 FINDING_KINDS = frozenset({"previously-missed", "changes-requested"})
 INDEPENDENT_REVIEW_SCHEMA = "hermes-independent-agent-review-v1"
+COPILOT_REVIEWER_ID = 175728472
 _SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -165,26 +166,83 @@ def current_independent_agent_review(
 
 
 def sensitive_review_authorized(
-        reviews, head_sha, owner_authorization, targeted_review, *, owner_id):
-    """Bind owner approval to one complete, current, structured review record."""
+        reviews, head_sha, owner_authorization, targeted_review, *, owner_id,
+        owner_command=None, pull_author_id=None, complete=True):
+    """Bind explicit owner approval to one exact, current Copilot review."""
     if (not isinstance(owner_authorization, dict)
             or set(owner_authorization) != {
                 "actor_id", "head_sha", "state", "review_id", "body_sha256",
+                "command_comment_id", "command_body_sha256", "command_created_at",
             }
             or owner_authorization.get("actor_id") != owner_id
             or owner_authorization.get("head_sha") != head_sha
             or owner_authorization.get("state") != "approved"
+            or not positive_id(owner_authorization.get("command_comment_id"))
+            or not isinstance(owner_authorization.get("command_body_sha256"), str)
+            or _DIGEST_RE.fullmatch(owner_authorization["command_body_sha256"]) is None
+            or review_timestamp(owner_authorization.get("command_created_at")) is None
+            or not isinstance(owner_command, dict)
+            or set(owner_command) != {
+                "comment_id", "actor_id", "body", "created_at", "updated_at",
+            }
+            or owner_command.get("comment_id") != owner_authorization.get("command_comment_id")
+            or owner_command.get("actor_id") != owner_id
+            or not isinstance(owner_command.get("body"), str)
+            or owner_command.get("created_at") != owner_authorization.get("command_created_at")
+            or owner_command.get("updated_at") != owner_command.get("created_at")
             or not isinstance(targeted_review, dict)
             or set(targeted_review) != {
                 "review_id", "reviewer_id", "head_sha", "state", "body_sha256",
-                "evidence_sha256",
             }):
         return False
-    expected = selected_independent_agent_review(
+    expected_command = (
+        f"/hermes authorize-sensitive {head_sha} review "
+        f"{owner_authorization['review_id']} {owner_authorization['body_sha256']}"
+    )
+    command_body = owner_command["body"]
+    if (command_body != expected_command
+            or hashlib.sha256(command_body.encode("utf-8")).hexdigest()
+            != owner_authorization["command_body_sha256"]):
+        return False
+    expected = selected_copilot_sensitive_review(
         reviews, head_sha, owner_authorization.get("review_id"),
-        owner_authorization.get("body_sha256"), owner_id=owner_id,
+        owner_authorization.get("body_sha256"), pull_author_id=pull_author_id,
+        complete=complete,
     )
     return expected is not None and targeted_review == expected
+
+
+def selected_copilot_sensitive_review(
+        reviews, head_sha, review_id, body_sha256, *, pull_author_id, complete=True):
+    """Return the unique latest unedited full-media Copilot review bound to a head."""
+    if (complete is not True or not positive_id(pull_author_id)
+            or pull_author_id == COPILOT_REVIEWER_ID
+            or not isinstance(head_sha, str) or _SHA_RE.fullmatch(head_sha) is None
+            or not positive_id(review_id) or not isinstance(body_sha256, str)
+            or _DIGEST_RE.fullmatch(body_sha256) is None):
+        return None
+    latest = latest_reviews(reviews, COPILOT_REVIEWER_ID)
+    if not latest or len(latest) != 1:
+        return None
+    review = latest[0]
+    body, body_html = review.get("body"), review.get("body_html")
+    if (review.get("id") != review_id
+            or review.get("state") not in ("COMMENTED", "APPROVED")
+            or review.get("commit_id") != head_sha
+            or review.get("dismissed") is True
+            or review.get("dismissed_at") not in (None, "")
+            or _review_submission(review) is None
+            or not isinstance(body, str) or len(body) > MAX_BODY_CHARS
+            or not isinstance(body_html, str) or len(body_html) > MAX_BODY_CHARS
+            or hashlib.sha256(body.encode("utf-8")).hexdigest() != body_sha256):
+        return None
+    return {
+        "review_id": review_id,
+        "reviewer_id": COPILOT_REVIEWER_ID,
+        "head_sha": head_sha,
+        "state": review["state"],
+        "body_sha256": body_sha256,
+    }
 
 
 def latest_reviews(reviews, reviewer_id):

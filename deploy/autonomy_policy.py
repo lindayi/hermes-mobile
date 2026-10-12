@@ -512,7 +512,9 @@ def _check_review(evidence, main_sha, phase, blockers):
         authorization = change.get('owner_authorization')
         targeted = change.get('targeted_review')
         if not sensitive_review_authorized(
-                reviews, head, authorization, targeted, owner_id=OWNER_ID):
+                reviews, head, authorization, targeted, owner_id=OWNER_ID,
+                pull_author_id=review.get('pull_author_id'),
+                complete=review.get('reviews_complete')):
             blockers.add('sensitive-review-authorization')
 
 

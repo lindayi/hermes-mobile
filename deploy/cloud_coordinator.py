@@ -23,11 +23,13 @@ from urllib.parse import quote, unquote, urlencode
 from deploy.review_evidence import (
     _review_submission,
     FINDING_KINDS,
+    MAX_BODY_CHARS,
     body_findings,
     current_independent_agent_review,
     current_copilot_review_valid,
     latest_reviews,
     positive_id,
+    selected_copilot_sensitive_review,
     selected_independent_agent_review,
     review_body_disposition,
     sensitive_review_authorized,
@@ -159,6 +161,7 @@ query($id: ID!) {
       includesCreatedEdit
       state
       body
+      bodyHTML
       commit { oid }
       author { login }
       pullRequest {
@@ -1451,19 +1454,59 @@ def _is_owner_sensitive_command(comment):
     user = comment.get("user")
     body = comment.get("body")
     if (not isinstance(user, dict) or type(user.get("id")) is not int
-            or user["id"] != OWNER_ID or not isinstance(body, str)):
+            or user["id"] != OWNER_ID or not isinstance(body, str)
+            or not positive_id(comment.get("id"))
+            or not _valid_timestamp(comment.get("created_at"))
+            or comment.get("updated_at") != comment.get("created_at")):
         return None
     match = re.fullmatch(
         r"/hermes authorize-sensitive ([0-9a-f]{40}) review ([1-9][0-9]{0,18}) "
         r"([0-9a-f]{64})",
-        body.strip(),
+        body,
     )
     if not match:
         return None
     review_id = int(match.group(2))
     if not positive_id(review_id):
         return None
-    return {"head": match.group(1), "review_id": review_id, "body_sha256": match.group(3)}
+    return {
+        "head": match.group(1),
+        "review_id": review_id,
+        "body_sha256": match.group(3),
+        "command_comment_id": comment["id"],
+        "command_body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "command_created_at": comment["created_at"],
+    }
+
+
+def _current_sensitive_owner_command(api, issue, authorization):
+    if (not positive_id(issue) or not isinstance(authorization, dict)
+            or not positive_id(authorization.get("command_comment_id"))):
+        return None
+    try:
+        comment = api.get(
+            f"repos/{REPOSITORY}/issues/comments/{authorization['command_comment_id']}",
+        )
+    except ApiError:
+        return None
+    parsed = _is_owner_sensitive_command(comment)
+    user = comment.get("user") if isinstance(comment, dict) else None
+    if (parsed is None or not isinstance(user, dict)
+            or comment.get("issue_url") != (
+                f"https://api.github.com/repos/{REPOSITORY}/issues/{issue}"
+            )
+            or parsed["head"] != authorization.get("head_sha")
+            or parsed["review_id"] != authorization.get("review_id")
+            or parsed["body_sha256"] != authorization.get("body_sha256")
+            or parsed["command_comment_id"] != authorization.get("command_comment_id")
+            or parsed["command_body_sha256"] != authorization.get("command_body_sha256")
+            or parsed["command_created_at"] != authorization.get("command_created_at")):
+        return None
+    return {
+        "comment_id": comment["id"], "actor_id": user["id"],
+        "body": comment["body"], "created_at": comment["created_at"],
+        "updated_at": comment["updated_at"],
+    }
 
 
 def _rest_list(api, route, collection=None):
@@ -1484,14 +1527,15 @@ def _enrich_pull_reviews(api, route, reviews):
             enriched.append(review)
             continue
         user = review.get("user")
-        if not isinstance(user, dict) or user.get("id") != OWNER_ID:
+        if (not isinstance(user, dict)
+                or user.get("id") not in (OWNER_ID, COPILOT_REVIEWER_ID)):
             enriched.append(review)
             continue
-        enriched.append(_bound_owner_review_metadata(api, pull_number, review))
+        enriched.append(_bound_pull_review_metadata(api, pull_number, review))
     return enriched
 
 
-def _bound_owner_review_metadata(api, pull_number, review):
+def _bound_pull_review_metadata(api, pull_number, review):
     node_id = review.get("node_id")
     user = review.get("user")
     if not isinstance(node_id, str) or not node_id:
@@ -1533,6 +1577,9 @@ def _bound_owner_review_metadata(api, pull_number, review):
     enriched["updatedAt"] = node["updatedAt"]
     enriched["lastEditedAt"] = node.get("lastEditedAt")
     enriched["includesCreatedEdit"] = node["includesCreatedEdit"]
+    body_html = node.get("bodyHTML")
+    if isinstance(body_html, str) and len(body_html) <= MAX_BODY_CHARS:
+        enriched["body_html"] = body_html
     return enriched
 
 
@@ -3051,6 +3098,11 @@ class Coordinator:
                     if authorization:
                         commands.append(("authorize", {
                             "issue": issue["number"], "comment": key, **authorization,
+                            "owner_command": {
+                                "comment_id": comment["id"], "actor_id": user["id"],
+                                "body": body, "created_at": comment["created_at"],
+                                "updated_at": comment["updated_at"],
+                            },
                         }))
                         processed.append(key)
         candidates = {key: dict(value) for key, value in state["enrollments"].items()
@@ -3091,6 +3143,8 @@ class Coordinator:
                     and _github_identity(head.get("repo"), REPOSITORY_ID)
                     and isinstance(base, dict) and base.get("ref") == MAIN_BRANCH
                     and _github_identity(base.get("repo"), REPOSITORY_ID)):
+                pull_user = pull.get("user") if isinstance(pull, dict) else None
+                pull_author_id = pull_user.get("id") if isinstance(pull_user, dict) else None
                 reviews = _rest_list(
                     self.api,
                     f"repos/{REPOSITORY}/pulls/{item['issue']}/reviews?per_page=100",
@@ -3098,14 +3152,18 @@ class Coordinator:
                 owner_authorization = {
                     "actor_id": OWNER_ID, "head_sha": item["head"], "state": "approved",
                     "review_id": item["review_id"], "body_sha256": item["body_sha256"],
+                    "command_comment_id": item["command_comment_id"],
+                    "command_body_sha256": item["command_body_sha256"],
+                    "command_created_at": item["command_created_at"],
                 }
-                targeted_review = selected_independent_agent_review(
+                targeted_review = selected_copilot_sensitive_review(
                     reviews, item["head"], item["review_id"], item["body_sha256"],
-                    owner_id=OWNER_ID,
+                    pull_author_id=pull_author_id,
                 )
                 if not targeted_review or not sensitive_review_authorized(
                         reviews, item["head"], owner_authorization, targeted_review,
-                        owner_id=OWNER_ID):
+                        owner_id=OWNER_ID, owner_command=item["owner_command"],
+                        pull_author_id=pull_author_id):
                     continue
                 enrollment["sensitive_sha"] = item["head"]
                 enrollment["sensitive_authorization"] = owner_authorization
@@ -4878,13 +4936,21 @@ class Coordinator:
         sensitive = classify_sensitive_paths(
             snapshot["files"], complete=snapshot["files_complete"],
         )
+        owner_authorization = snapshot["enrollment"].get("sensitive_authorization")
+        owner_command = (
+            _current_sensitive_owner_command(self.api, number, owner_authorization)
+            if sensitive else None
+        )
         authorized = not sensitive or (
             snapshot["enrollment"].get("sensitive_sha") == head
             and sensitive_review_authorized(
                 snapshot["reviews"], head,
-                snapshot["enrollment"].get("sensitive_authorization"),
+                owner_authorization,
                 snapshot["enrollment"].get("targeted_review"),
-                owner_id=OWNER_ID,
+                owner_id=OWNER_ID, owner_command=owner_command,
+                pull_author_id=(
+                    pull_user.get("id") if isinstance(pull_user, dict) else None
+                ),
             )
         )
         required = snapshot["required"]
@@ -5539,6 +5605,14 @@ class Coordinator:
                              snapshot["reviews"], snapshot["head"],
                              enrollment.get("sensitive_authorization"),
                              enrollment.get("targeted_review"), owner_id=OWNER_ID,
+                             owner_command=_current_sensitive_owner_command(
+                                 self.api, snapshot["issue"],
+                                 enrollment.get("sensitive_authorization"),
+                             ),
+                             pull_author_id=(
+                                 snapshot["pull"].get("user", {}).get("id")
+                                 if isinstance(snapshot["pull"].get("user"), dict) else None
+                             ),
                          ))):
                 # Advance once per revoked grant, never per poll or review digest.
                 # This also covers readable head-only authorization without proof.
@@ -5954,6 +6028,16 @@ class Coordinator:
                                     snapshot["enrollment"].get("sensitive_authorization"),
                                     snapshot["enrollment"].get("targeted_review"),
                                     owner_id=OWNER_ID,
+                                    owner_command=_current_sensitive_owner_command(
+                                        self.api, action["issue"],
+                                        snapshot["enrollment"].get(
+                                            "sensitive_authorization",
+                                        ),
+                                    ),
+                                    pull_author_id=(
+                                        pull_user.get("id")
+                                        if isinstance(pull_user, dict) else None
+                                    ),
                                 )
                             ))):
                     self.store.update_action(key, "blocked")
@@ -6076,6 +6160,14 @@ class Coordinator:
                         current["enrollment"].get("sensitive_authorization"),
                         current["enrollment"].get("targeted_review"),
                         owner_id=OWNER_ID,
+                        owner_command=_current_sensitive_owner_command(
+                            self.api, action["issue"],
+                            current["enrollment"].get("sensitive_authorization"),
+                        ),
+                        pull_author_id=(
+                            current_user.get("id")
+                            if isinstance(current_user, dict) else None
+                        ),
                     )):
                 self.store.update_action(key, "blocked")
                 current_plan["auto_merge_eligible"] = False

@@ -23,7 +23,8 @@ from deploy.review_evidence import (
     sensitive_review_authorized,
 )
 from test_cloud_coordinator import (
-    BASE, COPILOT_REVIEWER, HEAD, OWNER, FakeApi, _managed_cycle, enrolled_record, source_run,
+    BASE, COPILOT_AGENT, COPILOT_REVIEWER, HEAD, OWNER, FakeApi, _managed_cycle,
+    enrolled_record, source_run,
 )
 
 PICTURE = (
@@ -174,10 +175,10 @@ def _independent_review_evidence():
     return report, body, review, authorization, targeted
 
 
-def test_owner_published_independent_review_requires_bounded_structured_positive_body():
+def test_historical_independent_report_is_readable_but_not_sensitive_authority():
     report, body, review, authorization, targeted = _independent_review_evidence()
     assert parse_independent_review_body(body, HEAD) == report
-    assert sensitive_review_authorized(
+    assert not sensitive_review_authorized(
         [review], HEAD, authorization, targeted, owner_id=OWNER,
     )
 
@@ -339,6 +340,9 @@ def test_sensitive_authorization_accepts_a_bound_current_copilot_review():
         "state": "approved",
         "review_id": review["id"],
         "body_sha256": digest,
+        "command_comment_id": 124,
+        "command_body_sha256": "d" * 64,
+        "command_created_at": SUBMITTED,
     }
     targeted = {
         "review_id": review["id"],
@@ -349,6 +353,7 @@ def test_sensitive_authorization_accepts_a_bound_current_copilot_review():
     }
     assert sensitive_review_authorized(
         [review], HEAD, authorization, targeted, owner_id=OWNER,
+        pull_author_id=COPILOT_AGENT,
     )
 
 
