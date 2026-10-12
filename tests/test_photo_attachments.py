@@ -1990,6 +1990,7 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
     cookies, headers = {}, {}
     with photo_client(tmp_path, gateway_client=gateway) as (app, client):
         operator_config = photo_operator_config(app)
+        original_operator_config = operator_config.read_bytes()
         initial_status = photo_operator('status', operator_config)
         assert initial_status.returncode == 0, initial_status.stderr
         assert json.loads(initial_status.stdout)['photos_enabled'] is True
@@ -2034,6 +2035,7 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
             headers={'Idempotency-Key': 'rollback-pending-photo'}).json()['id']
         disabled = photo_operator('disable', operator_config)
         assert disabled.returncode == 0, disabled.stderr
+        assert operator_config.read_bytes() == original_operator_config
         assert json.loads(disabled.stdout)['photos_enabled'] is False
         assert json.loads(photo_operator('status', operator_config).stdout)['photos_enabled'] is False
 
@@ -2072,6 +2074,7 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
 
         enabled = photo_operator('enable', operator_config)
         assert enabled.returncode == 0, enabled.stderr
+        assert operator_config.read_bytes() == original_operator_config
         assert json.loads(enabled.stdout)['photos_enabled'] is True
         resumed_upload = client.post(
             BASE + '/sessions/wa-1/attachments', content=png_fixture(3),
@@ -2101,3 +2104,52 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
             BASE + '/sessions/wa-1/attachments', content=png_fixture(4),
             headers={'Idempotency-Key': 'rollback-restart-enabled'})
         assert restored_upload.status_code == 201, restored_upload.text
+
+
+def test_photo_disable_waits_for_inflight_run_admission_and_preserves_its_retry(
+        tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        user = client.get(BASE + '/auth/me').json()['user']
+        uploaded = client.post(
+            BASE + '/sessions/wa-1/attachments', content=png_fixture(),
+            headers={'Idempotency-Key': 'policy-admission-race'}).json()
+        policy = app.state.photo_policy
+        checked, continue_admission, disable_started = (
+            threading.Event(), threading.Event(), threading.Event())
+        require_enabled = policy.require_enabled
+
+        def pause_admission(db):
+            require_enabled(db)
+            checked.set()
+            assert continue_admission.wait(5)
+
+        monkeypatch.setattr(policy, 'require_enabled', pause_admission)
+        body = ('default', 'wa-1', 'Analyze after policy race', 'policy-race-run')
+
+        def submit():
+            return app.state.journal.submit(
+                user['id'], body[0], body[1], body[2], body[3],
+                attachment_ids=[uploaded['id']], attachment_store=app.state.attachments,
+                admission_guard=policy.require_enabled)
+
+        def disable():
+            disable_started.set()
+            return policy.set_enabled(False)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            admission = pool.submit(submit)
+            assert checked.wait(2)
+            mutation = pool.submit(disable)
+            assert disable_started.wait(2)
+            time.sleep(.05)
+            assert not mutation.done()
+            continue_admission.set()
+            admitted, created = admission.result(timeout=5)
+            assert mutation.result(timeout=5) is False
+
+        assert created
+        replay, created = app.state.journal.submit(
+            user['id'], body[0], body[1], body[2], body[3],
+            attachment_ids=[uploaded['id']], attachment_store=app.state.attachments,
+            admission_guard=policy.require_enabled)
+        assert not created and replay['id'] == admitted['id']

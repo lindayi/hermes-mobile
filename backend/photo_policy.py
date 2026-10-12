@@ -20,10 +20,16 @@ class PhotoPolicy:
     def __init__(self, database):
         self.database = Path(database).absolute()
 
-    def connect(self):
+    def connect(self, *, read_only=False):
         if self.database.is_symlink() or not self.database.is_file():
             raise PhotoPolicyError('Photo policy database is unavailable or unsafe.')
-        return sqlite3.connect(self.database, timeout=10)
+        try:
+            if read_only:
+                return sqlite3.connect(
+                    self.database.as_uri() + '?mode=ro', uri=True, timeout=10)
+            return sqlite3.connect(self.database, timeout=10)
+        except sqlite3.Error as exc:
+            raise PhotoPolicyError('Photo policy database is unavailable.') from exc
 
     @classmethod
     def _enabled(cls, db):
@@ -59,7 +65,7 @@ class PhotoPolicy:
         os.chmod(self.database, stat.S_IRUSR | stat.S_IWUSR)
 
     def enabled(self):
-        with closing(self.connect()) as db:
+        with closing(self.connect(read_only=True)) as db:
             return self._enabled(db)
 
     def require_enabled(self, db):

@@ -285,11 +285,11 @@ Use the private `HERMES_MOBILE_CONFIG` file path for the supported operator
 commands. Run them as the owner of the private config and state directory:
 
 ```sh
-python3 -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
-python3 -m backend.manage photo-disable --config "$HERMES_MOBILE_CONFIG" --confirm
-python3 -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
-python3 -m backend.manage photo-enable --config "$HERMES_MOBILE_CONFIG" --confirm
-python3 -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
+python3 -B -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
+python3 -B -m backend.manage photo-disable --config "$HERMES_MOBILE_CONFIG" --confirm
+python3 -B -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
+python3 -B -m backend.manage photo-enable --config "$HERMES_MOBILE_CONFIG" --confirm
+python3 -B -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
 ```
 
 Status is read-only. Its `photos_enabled`, `persisted`, and `live` values come

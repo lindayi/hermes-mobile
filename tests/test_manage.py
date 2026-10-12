@@ -143,11 +143,11 @@ def test_photo_operator_reconciles_a_lost_commit_acknowledgement(tmp_path, monke
         def __getattr__(self, name):
             return getattr(self.database, name)
 
-    def connect_once_with_lost_ack():
+    def connect_once_with_lost_ack(*, read_only=False):
         nonlocal calls
-        database = connect()
+        database = connect(read_only=read_only)
         calls += 1
-        return LostCommit(database) if calls == 1 else database
+        return LostCommit(database) if calls == 1 and not read_only else database
 
     monkeypatch.setattr(policy, 'connect', connect_once_with_lost_ack)
     assert policy.set_enabled(False) is False

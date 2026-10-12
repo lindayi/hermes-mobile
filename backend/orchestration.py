@@ -171,6 +171,9 @@ class Orchestrator:
                 admission_guard=(self.photo_policy.require_enabled if attachment_ids and self.photo_policy else None))
         except PhotosDisabled as exc:
             raise PhotosDisabledBeforeAdmission(str(exc)) from exc
+        except PhotoPolicyError as exc:
+            raise IntegrationUnavailable(
+                'Photo policy is unavailable; no new photo run was admitted.') from exc
         except sqlite3.IntegrityError as exc:
             raise RunConflict('A local run is active or unresolved') from exc
         if created:
