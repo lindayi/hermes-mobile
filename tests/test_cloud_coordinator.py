@@ -4605,9 +4605,26 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             start_head=neutral["head"], base_sha=neutral["main_sha"],
         )
         assert neutral["body"].endswith(f"\n\n{neutral_instruction}")
+        legacy_prompt_fragment = (
+            "record its file/hunk identity, classification, decision, and rationale as a "
+            "separate blockquoted decision in the one final PR comment. Explain how the "
+            "resolution preserves both branch intents (or why they are incompatible), "
+            "then append the validated receipt under the existing task receipt contract. "
+            "Publish that combined comment with exactly one `reply_to_comment` call; do not "
+            "publish a second comment or edit the same anchor. "
+        )
+        legacy_request = neutral["body"][:-len(neutral_instruction) - 2]
+        assert legacy_request.count(legacy_prompt_fragment) == 1
+        legacy_request = legacy_request.replace(
+            legacy_prompt_fragment,
+            "record its file/hunk identity, classification, decision, and rationale in a "
+            "PR comment, explaining how the resolution preserves both branch intents (or "
+            "why they are incompatible), before returning a `ready` receipt under the "
+            "existing task receipt contract. ",
+            1,
+        )
         neutral["body"] = (
-            neutral["body"][:-len(neutral_instruction) - 2]
-            + "\n\n" + legacy_instruction
+            legacy_request + "\n\n" + legacy_instruction
         )
         StateStore(path).update_action(neutral["key"], "sent", body=neutral["body"])
     api.complete_task(

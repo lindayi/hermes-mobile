@@ -123,6 +123,19 @@ are not exact-head review acceptance, hosted CI evidence, merge authorization, o
 permission to deploy. Both behavioral contracts remain specified in
 [the coordinator specification](cloud-coordinator-spec.md).
 
+### PR #105 owner-authorized task-abandonment candidate
+
+PR #105 adds bounded recovery for owner-authorized abandonment of terminal tasks
+with unverified receipts. The current candidate pins identify the exact proposed
+source bytes; prior issue-specific hashes remain historical. Refreshing these pins
+does not clear the `coordinator-review-contract` blocker, satisfy exact-head review,
+or authorize operational activation.
+
+| Candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `9e8afa35f310767624c200ee8237db809b1300ee3bd756f9dae8b754041b4d57` |
+| `deploy/task_receipts.py` | `a97ef169d4515229d9e139fedc668772dffad74198ea2f58c51ab6d5dbf9e433` |
+
 ### Retained merged source and deliberate native refreshes
 
 The release controller imports `deploy/native_notification_release.py`, which
