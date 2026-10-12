@@ -557,6 +557,54 @@ planning without repeating reconciliation; newly derived lifecycle events are
 canonicalized against active/retained history and the same verified ACK snapshot,
 then durably recorded before their outcomes are published. Acknowledged incidents
 remain retired rather than being reinserted with conflicting replay payloads.
+
+An owner may explicitly abandon receipt acceptance for one known-ID task with the
+immutable issue comment `/hermes abandon-unverified <task-id> <current-head-sha>`.
+The command is valid only for the enrolled PR's exact current head and the exact
+uncertain source or neutral reservation named by its persisted task ID. Apply must
+revalidate the unchanged command, pull/node/branch/base/main identity, reservation,
+and a complete fresh remote task inventory immediately before commit. A fresh task
+detail must authenticate the original creator, owner, repository, task creation,
+PR and branch artifacts, unique session identity, exact saved prompt, chronology,
+and positive completed task/session state. Any missing, malformed, active,
+reactivated, unknown, or API-error evidence blocks recovery. A lost-create claim
+without a known task ID is never eligible.
+
+Recovery means only that the owner abandons acceptance of this result. It is not a
+receipt, source-progress credit, successful handoff, review, merge approval, or
+deployment authorization. Persist a bounded, schema-validated supersession record
+bound to the immutable command and a digest of the original reservation. Keep the
+original reservation, authorized head, receipt history, attempt counts, progress
+state, uncertainty and lifecycle history unchanged. The command's exact current
+head may authorize only a distinct bounded continuation; normal current-main and
+sensitive-review fences still apply. Before every later dispatch, collect complete
+fresh remote task occupancy and recheck the recovered task's exact identity and
+terminal state. Reactivation, duplicate commands, restart, or uncertain persistence
+must not cause a repeated POST, notice, or accepted result.
+
+Neutral task publication uses one immutable PR comment, not two replies to one
+anchor. That comment contains the conflict decisions in their own section followed
+by the single validated receipt payload in the supported legacy-neutral carrier
+format. The producer instruction and strict consumer parser must agree on the
+serialized form. An edited comment remains invalid; there is no retry or edited
+receipt fallback.
+
+Finite acceptance for this recovery:
+
+- A synthetic completed known-ID uncertain task with an unusable receipt can be
+  abandoned by one exact immutable owner command, then the coordinator can plan and
+  dispatch a distinct bounded task without reposting the old task.
+- Duplicate command delivery, process restart, and a second poll preserve the same
+  recovery record, source/neutral counters, uncertainty and lifecycle history, and
+  produce no duplicate POST or notice.
+- Reject active, reactivated, absent, unknown, malformed, or API-error tasks; task
+  or command ID mismatch; wrong creator/owner/repository/PR/node/branch artifacts;
+  mismatched prompt/session/timestamps; edited/deleted commands; changed head,
+  main, or reservation; incomplete task pagination; and persistence failure.
+- Prove that a failed or incomplete final fence makes no durable recovery change or
+  network write, and that neutral instructions, serialized synthetic carrier, and
+  strict immutable receipt validation use the same one-comment contract.
+
 Live REST pull numbers, pull IDs, and head/base repository IDs must be positive
 integers at collection and every dispatch, ready/review handoff, and merge fence;
 booleans, floats, strings, and missing values are not identity proof.
