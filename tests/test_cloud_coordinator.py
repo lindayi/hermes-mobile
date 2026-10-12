@@ -1744,6 +1744,14 @@ class FakeApi:
             return {"id": 1399942965}
         if route == "user":
             return {"id": OWNER}
+        if route.startswith("repos/lindayi/hermes-mobile/issues/comments/"):
+            comment_id = int(route.rsplit("/", 1)[-1])
+            for comment in self.comments:
+                if comment.get("id") == comment_id:
+                    return dict(comment, issue_url=(
+                        "https://api.github.com/repos/lindayi/hermes-mobile/issues/16"
+                    ))
+            raise ApiError("comment not found", status=404)
         if route.startswith("agents/repos/lindayi/hermes-mobile/tasks/"):
             task_id = route.rsplit("/", 1)[-1]
             if task_id not in self.tasks:

@@ -541,20 +541,17 @@ current-main readback. Readiness requires:
   and every thread resolved. All three required CI checks must also succeed.
 
 If the PR under review changes sensitive files, readiness additionally requires
-owner ID `5164171` authorization for that exact head, bound to one owner-published
-independent-agent review in the complete authenticated `copilot_review.reviews`
-collection. The existing command is extended to
+owner ID `5164171` authorization for that exact head, bound to one genuine current
+Copilot review in the complete authenticated `copilot_review.reviews` collection.
+The command is
 `/hermes authorize-sensitive <head-sha> review <positive-review-id> <body-sha256>`;
 the former head-only command cannot authorize sensitive work. The review must be a
-unique positive review ID authored by the owner, submitted with a valid
-timezone-aware timestamp, in state `COMMENTED`, on the exact head. Its raw UTF-8
-body must match the command's SHA-256 and be a bounded (at most 4096-character)
-JSON object with exactly these fields: `schema` set to
-`hermes-independent-agent-review-v1`, `reviewed_head_sha`, `review_method` set to
-`independent-agent`, `verdict` set to `pass`, and a lowercase 64-character
-`evidence_sha256`. The owner publication is the trust assertion that independent
-review occurred; it does not prove cryptographic or model independence or claim a
-different GitHub identity. The selected record must remain the sole latest owner
+unique positive review ID authored by reviewer bot `175728472`, submitted with a
+valid timezone-aware timestamp, in state `COMMENTED` or `APPROVED`, on the exact
+head. Its raw UTF-8 body must match the command's SHA-256; complete rendered
+`body_html` and unchanged authenticated edit metadata are required. Historical
+independent reports and coding bot `198982749` do not authorize sensitive work.
+The selected record must remain the unique latest Copilot
 review; a missing, malformed, edited, removed, dismissed, duplicate, stale, negative,
 or conflicting record blocks with `sensitive-review-authorization`. Both the owner
 authorization and selected review are re-read during planning and the fresh status
@@ -607,5 +604,12 @@ for its exact head, complete review/thread pagination, review IDs, authors, vali
 timestamps, states and commit SHAs, resolved thread state, and real required
 check-run evidence. Ordinary merge evidence has no structured independent report.
 For a sensitive change it also carries the exact-head owner authorization and
-targeted-review identities. Consult `deploy/autonomy_policy.py` for the executable
+targeted-review identities. The collector must independently re-read the current
+owner comment from the authenticated GitHub issue-comment endpoint, verify its
+repository and PR `issue_url`, and supply `copilot_review.change.owner_command`
+with exactly `comment_id`, `actor_id`, `body`, `created_at`, and `updated_at`.
+The comment ID, owner identity, raw command body digest and creation time must
+match the authorization; `updated_at` must equal `created_at`. Missing, removed,
+edited or mismatched commands block readiness. Never reconstruct this record
+from the persisted authorization. Consult `deploy/autonomy_policy.py` for the executable
 field contract; missing fields block rather than defaulting to success.

@@ -188,12 +188,12 @@ SOURCE_FINGERPRINTS = {
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     # Issue #92 Copilot-only candidate; historical bounded-repair pins are retained.
-    'deploy/cloud_coordinator.py': '3c2dd4527a1108cce142c6e9e8f70429c4c66153d8cc0193b3d4f041571f1ff1',
+    'deploy/cloud_coordinator.py': '737eb8ac8054a33cef3ba3bec11d869110adc8b08bff5b522a2e922ae4e529a9',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
-    'deploy/review_evidence.py': 'ca76b89cd3d6b9b01a42d8edc4594574d369bd681316f56cfca2279fe441a124',
+    'deploy/review_evidence.py': '5329f594b5342e94338a64cc62732ca53642d6c3353ff2d3a1850058bdb3131d',
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     # Issue #65 producer-only overlay; historical receipt hashes remain documented.
@@ -513,6 +513,7 @@ def _check_review(evidence, main_sha, phase, blockers):
         targeted = change.get('targeted_review')
         if not sensitive_review_authorized(
                 reviews, head, authorization, targeted, owner_id=OWNER_ID,
+                owner_command=change.get('owner_command'),
                 pull_author_id=review.get('pull_author_id'),
                 complete=review.get('reviews_complete')):
             blockers.add('sensitive-review-authorization')

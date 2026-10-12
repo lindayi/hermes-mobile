@@ -193,6 +193,11 @@ _ISSUE92_COPILOT_REVIEW_FIXTURE = {
     'deploy/review_evidence.py': 'ca76b89cd3d6b9b01a42d8edc4594574d369bd681316f56cfca2279fe441a124',
 }
 
+_ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE = {
+    'deploy/cloud_coordinator.py': '737eb8ac8054a33cef3ba3bec11d869110adc8b08bff5b522a2e922ae4e529a9',
+    'deploy/review_evidence.py': '5329f594b5342e94338a64cc62732ca53642d6c3353ff2d3a1850058bdb3131d',
+}
+
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
 }
@@ -253,7 +258,8 @@ def _source_files():
             | _ISSUE65_RECEIPT_PRODUCER_FIXTURE | _PENDING_ISSUE77_CLARIFICATION_FIXTURE
             | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
             | _ISSUE85_PHOTO_FIXTURE | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
-            | _ISSUE92_COPILOT_REVIEW_FIXTURE | _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE)
+            | _ISSUE92_COPILOT_REVIEW_FIXTURE | _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE
+            | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE)
 
 
 def _source_ci():
@@ -373,6 +379,11 @@ def _sensitive_evidence(phase, state='COMMENTED'):
             'command_comment_id': 4,
             'command_body_sha256': hashlib.sha256(command.encode('utf-8')).hexdigest(),
             'command_created_at': '2026-10-01T22:59:00Z',
+        },
+        owner_command={
+            'comment_id': 4, 'actor_id': OWNER_ID, 'body': command,
+            'created_at': '2026-10-01T22:59:00Z',
+            'updated_at': '2026-10-01T22:59:00Z',
         },
         targeted_review={
             'review_id': 3, 'reviewer_id': COPILOT_REVIEWER_ID, 'head_sha': head,
@@ -665,13 +676,13 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         if path in {'deploy/cloud_coordinator.py', 'deploy/issue_starter.py',
                     'deploy/review_evidence.py'}
     } == {
-        'deploy/cloud_coordinator.py': _ISSUE92_COPILOT_REVIEW_FIXTURE[
+        'deploy/cloud_coordinator.py': _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE[
             'deploy/cloud_coordinator.py'
         ],
         'deploy/issue_starter.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
             'deploy/issue_starter.py'
         ],
-        'deploy/review_evidence.py': _ISSUE92_COPILOT_REVIEW_FIXTURE[
+        'deploy/review_evidence.py': _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE[
             'deploy/review_evidence.py'
         ],
     }
@@ -701,6 +712,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
             _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
             | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
             | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
+            | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
         ).items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
     }
@@ -741,9 +753,11 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: SOURCE_FINGERPRINTS[path]
         for path in _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
-    } == (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE)
+    } == (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
+          | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE)
     for path, digest in (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
-                         | _ISSUE92_COPILOT_REVIEW_FIXTURE).items():
+                         | _ISSUE92_COPILOT_REVIEW_FIXTURE
+                         | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
@@ -798,7 +812,8 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
     | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
-    | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE,
+    | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
+    | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
 def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
@@ -819,7 +834,8 @@ def test_issue83_initial_review_pin_matches_actual_candidate_bytes(path, pins):
 
 
 @pytest.mark.parametrize('pins', [
-    SOURCE_FINGERPRINTS, _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE,
+    SOURCE_FINGERPRINTS, _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
+    | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE))
 def test_issue87_bounded_repair_pin_matches_actual_candidate_bytes(path, pins):
@@ -1480,6 +1496,24 @@ def test_sensitive_copilot_review_accepts_approval_state(phase):
 
 
 @pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('mutation', [
+    'missing', 'comment_id', 'actor_id', 'body', 'created_at', 'updated_at',
+])
+def test_sensitive_authorization_requires_current_immutable_owner_command(phase, mutation):
+    evidence = _sensitive_evidence(phase)
+    change = evidence['copilot_review']['change']
+    if mutation == 'missing':
+        change.pop('owner_command')
+    else:
+        change['owner_command'][mutation] = {
+            'comment_id': 5, 'actor_id': 1, 'body': '/hermes enroll',
+            'created_at': '2026-10-01T23:00:00Z',
+            'updated_at': '2026-10-01T23:00:00Z',
+        }[mutation]
+    assert _blockers(evidence, phase) == {'sensitive-review-authorization'}
+
+
+@pytest.mark.parametrize('phase', PHASES)
 @pytest.mark.parametrize('mutate', [
     pytest.param(lambda review: review['reviews'].pop(), id='absent-record'),
     pytest.param(lambda review: review['change'].pop('targeted_review'), id='absent-claim'),
@@ -1548,7 +1582,7 @@ def test_targeted_review_timestamp_must_be_valid_and_timezone_aware(phase, state
     before = copy.deepcopy(evidence)
 
     assert _blockers(evidence, phase) == {
-        'sensitive-review-authorization',
+        'sensitive-review-authorization', 'copilot-review',
     }
     assert evidence == before
 

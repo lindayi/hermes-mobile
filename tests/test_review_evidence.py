@@ -334,6 +334,7 @@ def test_sensitive_authorization_accepts_a_bound_current_copilot_review():
         "body_html": "<p>Copilot review body</p>",
         "user": {"id": COPILOT_REVIEWER, "login": "copilot-pull-request-reviewer"},
     }
+    command = f"/hermes authorize-sensitive {HEAD} review {review['id']} {digest}"
     authorization = {
         "actor_id": OWNER,
         "head_sha": HEAD,
@@ -341,7 +342,7 @@ def test_sensitive_authorization_accepts_a_bound_current_copilot_review():
         "review_id": review["id"],
         "body_sha256": digest,
         "command_comment_id": 124,
-        "command_body_sha256": "d" * 64,
+        "command_body_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
         "command_created_at": SUBMITTED,
     }
     targeted = {
@@ -353,6 +354,10 @@ def test_sensitive_authorization_accepts_a_bound_current_copilot_review():
     }
     assert sensitive_review_authorized(
         [review], HEAD, authorization, targeted, owner_id=OWNER,
+        owner_command={
+            "comment_id": 124, "actor_id": OWNER, "body": command,
+            "created_at": SUBMITTED, "updated_at": SUBMITTED,
+        },
         pull_author_id=COPILOT_AGENT,
     )
 
