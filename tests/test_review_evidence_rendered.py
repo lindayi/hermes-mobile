@@ -152,6 +152,9 @@ def test_current_overview_count_mismatch_duplicate_or_extra_prose_is_incomplete(
     ("0 open findings", 0, "inline"),
     ("1 resolved finding", 1, "resolved"),
     ("2 resolved findings", 2, "resolved"),
+    ("0 resolved since last review", 0, "resolved"),
+    ("1 resolved since last review", 1, "resolved"),
+    ("2 resolved since last review", 2, "resolved"),
 ])
 def test_count_leading_sections_require_matching_linked_items(label, count, classification):
     items = "".join(
@@ -211,6 +214,38 @@ def test_counted_inventory_rejects_duplicate_or_multiple_discussion_targets(cate
     assert result["findings"] == []
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("resolved_label", ["1 resolved finding", "1 resolved since last review"])
+@pytest.mark.parametrize("resolved_target", [
+    "#discussion_r1",
+    "https://github.com/lindayi/hermes-mobile/pull/103#discussion_r1",
+    "#DISCUSSION_R1",
+    "#discussion_r2",
+])
+def test_counted_inventory_requires_disjoint_cross_section_targets(reverse, resolved_label, resolved_target):
+    sections = [
+        '<details><summary>1 open finding</summary><ul><li>'
+        '<a href="#discussion_r1">Open finding</a></li></ul></details>',
+        f'<details><summary>{resolved_label}</summary><ul><li>'
+        f'<a href="{resolved_target}">Resolved finding</a></li></ul></details>',
+    ]
+    if reverse:
+        sections.reverse()
+    rendered = "".join(sections)
+    review = review_pair(OVERVIEW_MARKER + "\nSynthetic counted inventory", rendered,
+                         state="COMMENTED")
+    result = review_body_disposition([review], HEAD, reviewer_id=review["user"]["id"])
+    distinct = resolved_target == "#discussion_r2"
+    assert result["inventory_complete"] is distinct
+    assert result["ambiguous"] is not distinct
+    assert result["findings"] == []
+    # Inventory uncertainty must not erase independently bounded active evidence.
+    with_active = parse_body(review["body"], "COMMENTED", body_html=rendered + HTML_ESCAPED)
+    assert with_active["inventory_complete"] is distinct
+    assert with_active["findings_total"] == 1
+    assert "decode <details> only after validation." in with_active["findings"][0][1]
+
+
 @pytest.mark.parametrize("category", ["open", "resolved"])
 @pytest.mark.parametrize("extra_anchor", [
     '<a href="https://example.invalid/">Unsupported link</a>',
@@ -267,6 +302,160 @@ def test_counted_inventory_rejects_nested_live_disclosure(category, location):
     result = parse_body(OVERVIEW_MARKER + '\nCounted section', 'COMMENTED', body_html=rendered)
     assert result['inventory_complete'] is False
     assert result['ambiguous'] is True
+
+
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("nested", [
+    '<ul><li>Unclassified nested finding</li></ul>',
+    '<ol><li>Unclassified nested finding</li></ol>',
+    '<li>Unclassified nested finding</li>',
+])
+def test_counted_inventory_rejects_nested_list_items(category, nested):
+    rendered = (
+        f'<details><summary>1 {category} finding</summary><ul><li>'
+        '<a href="#discussion_r1">Finding</a>' + nested + '</li></ul></details>'
+    )
+    result = parse_body(OVERVIEW_MARKER + '\nCounted inventory', 'COMMENTED',
+                        body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings'] == []
+
+
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("quote_tag", ["code", "pre", "blockquote"])
+def test_counted_inventory_keeps_nested_quoted_lists_inert(category, quote_tag):
+    rendered = (
+        f'<details><summary>1 {category} finding</summary><ul><li>'
+        '<a href="#discussion_r1">Finding</a>'
+        f'<{quote_tag}><ul><li>Quoted example</li></ul></{quote_tag}>'
+        '</li></ul></details>'
+    )
+    result = parse_body(OVERVIEW_MARKER + '\nCounted inventory', 'COMMENTED',
+                        body_html=rendered)
+    assert result['inventory_complete'] is True
+    assert result['ambiguous'] is False
+
+
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("legacy_first", [False, True])
+def test_counted_inventory_same_kind_sections_remain_incomplete(category, legacy_first):
+    counted = (f'<details><summary>1 {category} finding</summary><ul><li>'
+               '<a href="#discussion_r1">Finding</a></li></ul></details>')
+    legacy_label = 'Open (1)' if category == 'open' else 'Resolved (1)'
+    legacy = f'<details><summary>{legacy_label}</summary>Known legacy context</details>'
+    for rendered in (counted + counted.replace('discussion_r1', 'discussion_r2'),
+                     legacy + counted if legacy_first else counted + legacy):
+        result = parse_body(OVERVIEW_MARKER + '\nCounted inventory', 'COMMENTED',
+                            body_html=rendered)
+        assert result['inventory_complete'] is False
+        assert result['ambiguous'] is True
+
+
+@pytest.mark.parametrize("other_label", ['1 resolved finding', 'Resolved (1)', '1 resolved since last review'])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_resolved_since_alias_rejects_duplicate_category(other_label, reverse):
+    first = ('<details><summary>1 resolved since last review</summary><ul><li>'
+             '<a href="#discussion_r1">Finding</a></li></ul></details>')
+    second = (f'<details><summary>{other_label}</summary><ul><li>'
+              '<a href="#discussion_r2">Other finding</a></li></ul></details>')
+    result = parse_body(OVERVIEW_MARKER + '\nCounted inventory', 'COMMENTED',
+                        body_html=second + first if reverse else first + second)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+
+
+@pytest.mark.parametrize("content", [
+    '', '<p>Unclassified prose</p>',
+    '<ul><li>Unlinked finding</li></ul>',
+    '<ul><li><a href="#discussion_r1">Finding</a><a>Extra anchor</a></li></ul>',
+    '<ul><li><a href="#discussion_r1">Finding</a><ul><li>Hidden item</li></ul></li></ul>',
+    '<ul><li><a href="#discussion_r1">Finding</a>'
+    '<details><summary>Unknown finding</summary>Hidden prose</details></li></ul>',
+    '<ul><li><a href="#discussion_r1">One</a></li><li><a href="#discussion_r2">Two</a></li></ul>',
+])
+def test_resolved_since_alias_requires_complete_linked_inventory(content):
+    rendered = f'<details><summary>1 resolved since last review</summary>{content}</details>'
+    result = parse_body(OVERVIEW_MARKER + '\nCounted inventory', 'COMMENTED', body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings'] == []
+
+
+@pytest.mark.parametrize("label", ['1 resolved since last review extra', '1 resolved finding extra'])
+def test_unsupported_counted_labels_remain_ambiguous_without_hiding_active(label):
+    rendered = (f'<details><summary>{label}</summary><ul><li>'
+                '<a href="#discussion_r1">Finding</a></li></ul></details>')
+    result = parse_body(OVERVIEW_MARKER + '\nCounted inventory', 'COMMENTED',
+                        body_html=rendered + HTML_ESCAPED)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings_total'] == 1
+    assert 'decode <details> only after validation.' in result['findings'][0][1]
+
+
+@pytest.mark.parametrize("extra", [
+    '', '<details><summary>0 resolved since last review</summary></details>',
+    '<details><summary>1 resolved since last review</summary><ul><li>'
+    '<themed-picture><picture><source srcset="severity.svg"><img src="severity.png"></picture>'
+    '</themed-picture><a href="#discussion_r1">Resolved finding</a></li></ul></details>',
+])
+def test_standalone_zero_open_metadata_accepts_clean_provider_frame(extra):
+    rendered = ('<h3>🟢 Looks good</h3><p>No issues were found.</p>'
+                '<p><strong>0 open findings</strong></p>' + extra
+                + '<p>🧠 <strong>Review effort:</strong> Balanced</p>')
+    result = parse_body(OVERVIEW_MARKER + '\nSynthetic clean provider frame', 'COMMENTED',
+                        body_html=rendered)
+    assert result['inventory_complete'] is True
+    assert result['ambiguous'] is False
+    assert result['findings'] == []
+
+
+@pytest.mark.parametrize("extra", [
+    '<p><strong>0 open findings</strong></p>',
+    '<details><summary>0 open findings</summary></details>',
+    '<details><summary>1 open finding</summary><ul><li>'
+    '<a href="#discussion_r1">Finding</a></li></ul></details>',
+    '<details><summary>Open (0)</summary></details>',
+    '<details><summary>Open (1)</summary>Legacy finding</details>',
+    '<p><strong>1 open finding</strong></p>',
+])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_standalone_zero_open_metadata_rejects_conflicting_or_duplicate_open(extra, reverse):
+    zero = '<p><strong>0 open findings</strong></p>'
+    rendered = '<h3>🟢 Looks good</h3><p>No issues were found.</p>' + (
+        extra + zero if reverse else zero + extra)
+    result = parse_body(OVERVIEW_MARKER + '\nSynthetic provider frame', 'COMMENTED',
+                        body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings'] == []
+
+
+@pytest.mark.parametrize("metadata", [
+    '<p><strong>1 open finding</strong></p>',
+    '<p><strong>0 open findings</strong> Unclassified prose.</p>',
+    '<p>Unclassified prose. <strong>0 open findings</strong></p>',
+    '<p><strong>0 open findings Unclassified prose.</strong></p>',
+    '<p><strong><a href="#discussion_r1">0 open findings</a></strong></p>',
+])
+def test_standalone_count_metadata_never_hides_unclassified_content(metadata):
+    rendered = '<h3>🟢 Looks good</h3><p>No issues were found.</p>' + metadata
+    result = parse_body(OVERVIEW_MARKER + '\nSynthetic provider frame', 'COMMENTED',
+                        body_html=rendered + HTML_ESCAPED)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings_total'] == 1
+
+
+def test_standalone_zero_open_metadata_does_not_discard_freeform_summary():
+    rendered = ('<h3>🟢 Looks good</h3><p>The change deserves another look.</p>'
+                '<p><strong>0 open findings</strong></p>')
+    result = parse_body(OVERVIEW_MARKER + '\nSynthetic provider frame', 'COMMENTED',
+                        body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings'] == []
 
 
 def test_count_leading_section_inside_quotation_is_incomplete():

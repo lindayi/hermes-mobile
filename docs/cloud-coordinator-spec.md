@@ -297,11 +297,23 @@ explicit `Previously missed` sections still forward body-only items.
 not authorize repairs; explicitly active disclosures do.
 
 The current `ccr-overview-v2` renderer also labels linked inventory sections
-`N open finding(s)` and `N resolved finding(s)`. The singular/plural form and
+`N open finding(s)`, `N resolved finding(s)`, and `N resolved since last review`.
+The singular/plural form (where present) and
 the number of linked list items in the section's single unordered list must
 match the count. Duplicate, malformed, inert, partial, or mismatched sections
 make the inventory incomplete; a resolved section never becomes active
-evidence. Existing `Open (N)` labels remain supported.
+evidence. Each item must have exactly one supported live discussion anchor;
+normalized targets must be unique within and across counted sections, including
+absolute/fragment aliases. Nested live lists or disclosures cannot hide extra
+items under a counted item. Quoted examples remain inert. Existing `Open (N)`
+labels remain supported.
+
+The whole top-level paragraph `<p><strong>0 open findings</strong></p>` is a
+zero-open inventory declaration, not arbitrary summary prose. It is recognized
+only in marked overviews, and duplicates or any additional open section make the
+inventory incomplete. Nonzero bare counts require linked inventory rather than
+metadata suppression. Extra prose or markup in that paragraph is not discarded;
+free-form summaries still use the existing explicit disposition grammar.
 
 In this renderer only, one top-level paragraph immediately after the exact
 overview heading and recognized status heading is provider summary context.

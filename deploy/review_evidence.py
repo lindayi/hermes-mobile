@@ -352,6 +352,8 @@ def _section_kind(node):
     label = " ".join(_text(summary).split()) if summary else ""
     if summary and _text(summary) != _text(summary, quoted=False):
         return "ambiguous", label
+    if re.fullmatch(r"\d{1,3} resolved since last review", label, re.IGNORECASE):
+        return "counted-resolved", label
     counted = re.fullmatch(
         r"(\d{1,3}) (open|resolved) (findings?)", label, re.IGNORECASE,
     )
@@ -390,6 +392,9 @@ def _discussion_targets(node):
         if isinstance(child, _Element):
             if child.tag in {"code", "pre", "blockquote"}:
                 continue
+            if child.tag in {"ul", "ol", "li"}:
+                # A nested inventory item is not covered by the outer li count.
+                return set()
             if child.tag == "a":
                 # Count live anchors, not distinct supported destinations. An
                 # extra or unsupported anchor makes the entire item ambiguous.
@@ -416,29 +421,33 @@ def _has_inert_disclosure(root):
     return False
 
 
-def _counted_section_matches(node, expected):
+def _counted_section_targets(node, expected):
+    """Return validated normalized targets, or None for an incomplete section."""
     # Counted links cannot stand in for nested, unclassified live findings.
     if next(_disclosures(node), None) is not None:
-        return False
+        return None
     body = [child for child in node.children if child is not _summary(node)]
     elements = [child for child in body if isinstance(child, _Element)]
     if any(isinstance(child, str) and child.strip() for child in body):
-        return False
+        return None
     if expected == 0:
-        return not elements
+        return set() if not elements else None
     if len(elements) != 1 or elements[0].tag != "ul":
-        return False
+        return None
     items = []
     for child in elements[0].children:
         if isinstance(child, str) and not child.strip():
             continue
         if not isinstance(child, _Element) or child.tag != "li":
-            return False
+            return None
         items.append(child)
     targets = [_discussion_targets(item) for item in items]
-    return (len(items) == expected
-            and all(len(item_targets) == 1 for item_targets in targets)
-            and len(set().union(*targets)) == expected)
+    unique_targets = set().union(*targets)
+    if (len(items) != expected
+            or any(len(item_targets) != 1 for item_targets in targets)
+            or len(unique_targets) != expected):
+        return None
+    return unique_targets
 
 
 def _text(node, *, exclude_details=False, exclude_history=False, quoted=True, render_quote=None,
@@ -561,10 +570,24 @@ def _provider_summary(root):
     return summary
 
 
-def _summary_content(root, overview, *, exclude=None):
+def _zero_open_metadata(node):
+    """Only the provider's whole, standalone zero-open paragraph is metadata."""
+    if not isinstance(node, _Element) or node.tag != "p":
+        return False
+    children = [child for child in node.children if not isinstance(child, str) or child.strip()]
+    if (len(children) != 1 or not isinstance(children[0], _Element)
+            or children[0].tag != "strong"
+            or not all(isinstance(child, str) for child in children[0].children)):
+        return False
+    return " ".join(_text(children[0]).split()) == "0 open findings"
+
+
+def _summary_content(root, overview, *, exclude=None, exclude_zero_open=False):
     children = []
     for child in root.children:
         if child is exclude:
+            continue
+        if exclude_zero_open and _zero_open_metadata(child):
             continue
         if overview and isinstance(child, _Element):
             if child.tag == "hr":
@@ -660,7 +683,12 @@ def parse_body(body, state, *, body_html=None):
     sections = list(_disclosures(parser.root)) if overview else []
     positive_open = False
     counted_sections = set()
-    open_section_count = 0
+    counted_targets = set()
+    zero_open_count = sum(_zero_open_metadata(child) for child in parser.root.children) if overview else 0
+    open_section_count = zero_open_count
+    if zero_open_count > 1:
+        result["classifications"].append("ambiguous")
+        result["ambiguous"] = True
     matched_active_sections = []
     active_section_seen = False
     resolved_section_seen = False
@@ -676,12 +704,14 @@ def parse_body(body, state, *, body_html=None):
             duplicate = category in counted_sections or (
                 open_section_count > 0 if category == "open" else resolved_section_seen
             )
-            if duplicate or not _counted_section_matches(node, count):
+            targets = _counted_section_targets(node, count)
+            if duplicate or targets is None or counted_targets.intersection(targets):
                 result["classifications"][-1] = "ambiguous"
                 result["ambiguous"] = True
                 result["inventory_complete"] = False
             else:
                 counted_sections.add(category)
+                counted_targets.update(targets)
                 result["classifications"][-1] = (
                     "inline" if category == "open" else "resolved"
                 )
@@ -765,6 +795,7 @@ def parse_body(body, state, *, body_html=None):
     )
     summary_root = _summary_content(
         parser.root, overview, exclude=provider_summary if attach_provider_summary else None,
+        exclude_zero_open=zero_open_count == 1 and not result["ambiguous"],
     )
     summary = _text(summary_root, exclude_details=True, quoted=False).strip()
     # Keep quoted nodes opaque through footer/framing/status removal as well as
