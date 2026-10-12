@@ -1481,6 +1481,150 @@ def _is_owner_sensitive_command(comment):
     }
 
 
+def _is_owner_unverified_abandonment_command(comment):
+    if not isinstance(comment, dict):
+        return None
+    user = comment.get("user")
+    body = comment.get("body")
+    if (not isinstance(user, dict) or type(user.get("id")) is not int
+            or user["id"] != OWNER_ID or not isinstance(body, str)
+            or not positive_id(comment.get("id"))
+            or not _valid_timestamp(comment.get("created_at"))
+            or comment.get("updated_at") != comment.get("created_at")):
+        return None
+    match = re.fullmatch(
+        r"/hermes abandon-unverified ([A-Za-z0-9._-]{1,128}) ([0-9a-f]{40})",
+        body,
+    )
+    if not match:
+        return None
+    return {
+        "task_id": match.group(1), "head_sha": match.group(2),
+        "command_comment_id": comment["id"], "actor_id": OWNER_ID,
+        "command_body": body, "command_created_at": comment["created_at"],
+    }
+
+
+def _current_owner_unverified_abandonment_command(api, record):
+    if not _owner_abandonment_record_valid(record):
+        return None
+    try:
+        comment = api.get(
+            f"repos/{REPOSITORY}/issues/comments/{record['command_comment_id']}",
+        )
+    except ApiError as error:
+        if error.status == 404:
+            return None
+        raise
+    if (not isinstance(comment, dict)
+            or not isinstance(comment.get("user"), dict)
+            or not positive_id(comment["user"].get("id"))
+            or not positive_id(comment.get("id"))
+            or not isinstance(comment.get("body"), str)
+            or not _valid_timestamp(comment.get("created_at"))
+            or not _valid_timestamp(comment.get("updated_at"))
+            or not isinstance(comment.get("issue_url"), str)):
+        raise ApiError("Malformed current owner-abandonment response")
+    parsed = _is_owner_unverified_abandonment_command(comment)
+    return parsed if (
+        parsed is not None
+        and comment["issue_url"] == (
+            f"https://api.github.com/repos/{REPOSITORY}/issues/{record['issue']}"
+        )
+        and parsed["task_id"] == record["task_id"]
+        and parsed["head_sha"] == record["head_sha"]
+        and parsed["command_comment_id"] == record["command_comment_id"]
+        and parsed["actor_id"] == record["actor_id"]
+        and parsed["command_body"] == record["command_body"]
+        and parsed["command_created_at"] == record["command_created_at"]
+    ) else None
+
+
+def _reservation_sha256(action):
+    try:
+        payload = json.dumps(
+            action, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _owner_abandonment_record_valid(record):
+    fields = {
+        "version", "issue", "action_key", "task_id", "task_created_at",
+        "reservation_sha256", "head_sha", "base_sha", "command_comment_id",
+        "command_body", "command_created_at", "actor_id", "accepted_at",
+    }
+    if (not isinstance(record, dict) or set(record) != fields
+            or type(record.get("version")) is not int or record["version"] != 1
+            or type(record.get("issue")) is not int or record["issue"] < 1
+            or not isinstance(record.get("action_key"), str)
+            or not 1 <= len(record["action_key"]) <= 512
+            or not isinstance(record.get("task_id"), str)
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", record["task_id"]) is None
+            or not all(_valid_timestamp(record.get(field)) for field in (
+                "task_created_at", "command_created_at", "accepted_at",
+            ))
+            or not isinstance(record.get("reservation_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", record["reservation_sha256"]) is None
+            or not _is_sha(record.get("head_sha"))
+            or not _is_sha(record.get("base_sha"))
+            or not positive_id(record.get("command_comment_id"))
+            or record.get("actor_id") != OWNER_ID
+            or record.get("command_body") != (
+                f"/hermes abandon-unverified {record.get('task_id')} "
+                f"{record.get('head_sha')}"
+            )):
+        return False
+    try:
+        return (
+            datetime.fromisoformat(record["task_created_at"].replace("Z", "+00:00"))
+            <= datetime.fromisoformat(
+                record["command_created_at"].replace("Z", "+00:00"),
+            )
+            <= datetime.fromisoformat(record["accepted_at"].replace("Z", "+00:00"))
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _owner_abandonments_valid(records, *, issue=None):
+    return (
+        isinstance(records, list)
+        and len(records) <= REPAIR_LIMIT + NEUTRAL_LIMIT
+        and all(
+            _owner_abandonment_record_valid(record)
+            and (issue is None or record["issue"] == issue)
+            for record in records
+        )
+        and len({record["action_key"] for record in records}) == len(records)
+    )
+
+
+def _owner_abandonment_matches_action(record, action):
+    return (
+        _owner_abandonment_record_valid(record)
+        and isinstance(action, dict)
+        and action.get("key") == record["action_key"]
+        and action.get("issue") == record["issue"]
+        and action.get("kind") == "fix"
+        and action.get("task_type") in {None, "neutral"}
+        and action.get("status") == "uncertain"
+        and action.get("task_id") == record["task_id"]
+        and action.get("task_created_at") == record["task_created_at"]
+        and type(action.get("receipt_waits")) is int
+        and action["receipt_waits"] == MAX_RECEIPT_POLLS
+        and type(action.get("pull_id")) is int and action["pull_id"] > 0
+        and isinstance(action.get("pull_node_id"), str)
+        and bool(action["pull_node_id"])
+        and action.get("owner_id") == OWNER_ID
+        and action.get("repository_id") == REPOSITORY_ID
+        and _reservation_sha256(action) == record["reservation_sha256"]
+    )
+
+
 def _current_sensitive_owner_command(api, issue, authorization):
     if (not positive_id(issue) or not isinstance(authorization, dict)
             or not positive_id(authorization.get("command_comment_id"))):
@@ -1862,6 +2006,105 @@ def _task_scoped(task, snapshot):
         isinstance(session, dict) and session.get("head_ref") == head
         and session.get("base_ref") == MAIN_BRANCH
         for session in sessions or ()
+    )
+
+
+def _owner_abandonment_inventory_valid(tasks, action, snapshot, record):
+    if (not isinstance(tasks, list) or len(tasks) > 10000
+            or _other_task_active(tasks, snapshot)):
+        return False
+    matches = [
+        task for task in tasks
+        if isinstance(task, dict) and task.get("id") == record.get("task_id")
+    ]
+    if len(matches) != 1:
+        return False
+    task = matches[0]
+    return (
+        task.get("state") == "completed"
+        and task.get("created_at") == record.get("task_created_at")
+        and all(_github_identity(task.get(field), expected) for field, expected in (
+            ("creator", OWNER_ID), ("owner", OWNER_ID),
+            ("repository", REPOSITORY_ID),
+        ))
+    )
+
+
+def _owner_abandonment_task_valid(task, action, pull, record, *, now):
+    head = pull.get("head") if isinstance(pull, dict) else None
+    base = pull.get("base") if isinstance(pull, dict) else None
+    if (
+            not _owner_abandonment_matches_action(record, action)
+            or not isinstance(pull, dict)
+            or not _pull_identity(pull, action)
+            or record.get("issue") != pull.get("number")
+            or not isinstance(head, dict)
+            or not isinstance(base, dict)
+            or record.get("head_sha") != head.get("sha")
+            or record.get("base_sha") != base.get("sha")
+            or pull.get("draft") is not False
+            or head.get("ref") != action.get("head_ref")
+            or base.get("ref") != MAIN_BRANCH
+            or not isinstance(task, dict)
+            or task.get("id") != record.get("task_id")
+            or task.get("state") != "completed"
+            or task.get("created_at") != record.get("task_created_at")
+            or not _valid_timestamp(task.get("updated_at"))
+            or not all(_github_identity(task.get(field), expected) for field, expected in (
+                ("creator", OWNER_ID), ("owner", OWNER_ID),
+                ("repository", REPOSITORY_ID),
+            ))):
+        return False
+    artifacts = task.get("artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != 2:
+        return False
+    branches, pulls = [], []
+    for artifact in artifacts:
+        if (not isinstance(artifact, dict) or artifact.get("provider") != "github"
+                or artifact.get("type") not in {"branch", "pull"}
+                or not isinstance(artifact.get("data"), dict)):
+            return False
+        if artifact["type"] == "branch":
+            branches.append(artifact["data"])
+        else:
+            pulls.append(artifact["data"])
+    if (len(branches) != 1 or len(pulls) != 1
+            or branches[0].get("head_ref") != action.get("head_ref")
+            or branches[0].get("base_ref") != MAIN_BRANCH
+            or not _github_identity(pulls[0], action.get("pull_id"))
+            or pulls[0].get("global_id") != action.get("pull_node_id")):
+        return False
+    sessions = task.get("sessions")
+    if not isinstance(sessions, list) or len(sessions) != 1:
+        return False
+    session = sessions[0]
+    if (
+            not isinstance(session, dict)
+            or not _valid_session_id(session.get("id"))
+            or session.get("task_id") != record.get("task_id")
+            or session.get("state") != "completed"
+            or not _github_identity(session.get("user"), OWNER_ID)
+            or not _github_identity(session.get("owner"), OWNER_ID)
+            or not _github_identity(session.get("repository"), REPOSITORY_ID)
+            or session.get("head_ref") != action.get("head_ref")
+            or session.get("base_ref") != MAIN_BRANCH
+            or session.get("prompt") != action.get("body")
+            or not _valid_timestamp(session.get("created_at"))
+            or not _valid_timestamp(session.get("completed_at"))):
+        return False
+    try:
+        created = _time(task["created_at"])
+        session_created = _time(session["created_at"])
+        completed = _time(session["completed_at"])
+        updated = _time(task["updated_at"])
+        command_created = _time(record["command_created_at"])
+        accepted = _time(record["accepted_at"])
+        current = now.astimezone(timezone.utc)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+    return (
+        created <= session_created <= completed <= updated
+        <= command_created <= accepted <= current
     )
 
 
@@ -2750,6 +2993,10 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     authorized = {initial}
     if _is_sha(enrollment.get("owner_authorized_head")):
         authorized.add(enrollment["owner_authorized_head"])
+    for recovery in enrollment.get("owner_abandonments", []):
+        action = actions.get(recovery.get("action_key"))
+        if _owner_abandonment_matches_action(recovery, action):
+            authorized.add(recovery["head_sha"])
     blocked = set()
     candidates = [
         action for action in [*enrollment.get("receipt_proofs", []), *actions.values()]
@@ -2770,6 +3017,19 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
                 blocked.add(result_head)
         if not changed:
             return initial, authorized, blocked
+
+
+def _owner_abandonment_for_action(enrollment, key, action):
+    records = enrollment.get("owner_abandonments", [])
+    if not isinstance(records, list):
+        return None
+    matches = [
+        record for record in records
+        if isinstance(record, dict) and record.get("action_key") == key
+    ]
+    if len(matches) == 1 and _owner_abandonment_matches_action(matches[0], action):
+        return matches[0]
+    return None
 
 
 def _completed_repair_progress(snapshot, actions, current_fingerprints,
@@ -3110,6 +3370,13 @@ class Coordinator:
                         enrollment["last_open_head"] = enrollment["head"]
                         commands.append(("enroll", enrollment))
                 else:
+                    abandonment = _is_owner_unverified_abandonment_command(comment)
+                    if abandonment:
+                        commands.append(("abandon-unverified", {
+                            "issue": issue["number"], **abandonment,
+                        }))
+                        processed.append(key)
+                        continue
                     authorization = _is_owner_sensitive_command(comment)
                     if authorization:
                         commands.append(("authorize", {
@@ -3809,7 +4076,8 @@ class Coordinator:
 
     def _reconcile_actions(self, snapshot, actions, *, apply, handoffs=None,
                            review_publications=None, receipt_recoveries=None,
-                           recovery_keys=None, busy_details=None):
+                           recovery_keys=None, busy_details=None,
+                           owner_abandonment_keys=None):
         # Reconciliation never performs handoff mutations; it only collects them.
         handoffs = [] if handoffs is None else handoffs
         review_publications = [] if review_publications is None else review_publications
@@ -3833,6 +4101,9 @@ class Coordinator:
             # regardless of the detached scan snapshot's iteration order.
             for key, action in actions.items():
                 if recovery_keys is not None and key not in recovery_keys:
+                    continue
+                if (_owner_abandonment_for_action(
+                        snapshot.get("enrollment", {}), key, action) is not None):
                     continue
                 if (action.get("issue") == number and action.get("kind") == "fix"
                         and action.get("status") in {"sending", "uncertain"}
@@ -4134,6 +4405,16 @@ class Coordinator:
             if status == "completed" and action.get("handoff_state") == "failed":
                 mark_busy()
                 continue
+            if status == "uncertain":
+                abandonment = _owner_abandonment_for_action(
+                    snapshot.get("enrollment", {}), key, action,
+                )
+                if abandonment is not None:
+                    if (apply and self._owner_abandonment_task_terminal(
+                            snapshot, action, abandonment, snapshot.get("tasks"))):
+                        continue
+                    mark_busy()
+                    continue
             receipt_recovery_identity = (
                 status == "uncertain"
                 and action.get("kind") == "fix"
@@ -4317,7 +4598,7 @@ class Coordinator:
             or _cloud_agent_active(
                 snapshot.get("workflows", []), snapshot["pull"]["head"]["ref"],
             )
-            or recovery_keys is not None
+            or (recovery_keys is not None and owner_abandonment_keys is None)
         )
         if busy_details is not None:
             busy_details.update(
@@ -5641,10 +5922,63 @@ class Coordinator:
                 for field in ("sensitive_sha", "sensitive_authorization", "targeted_review"):
                     enrollment[field] = None
             scans.append(snapshot)
+        owner_recoveries = []
+        for command, item in commands:
+            if command != "abandon-unverified":
+                continue
+            snapshot = next(
+                (value for value in scans if value["issue"] == item["issue"]), None,
+            )
+            if (snapshot is None or snapshot.get("terminal")
+                    or snapshot["head"] != item["head_sha"]):
+                raise CoordinatorError("Owner abandonment command did not bind the current pull head")
+            actions = [
+                action for action in state["actions"].values()
+                if isinstance(action, dict)
+                and action.get("issue") == item["issue"]
+                and action.get("task_id") == item["task_id"]
+            ]
+            if len(actions) != 1:
+                raise CoordinatorError("Owner abandonment did not identify one reserved task")
+            action = actions[0]
+            pull = snapshot["pull"]
+            pull_head = pull.get("head") if isinstance(pull, dict) else None
+            pull_base = pull.get("base") if isinstance(pull, dict) else None
+            if (action.get("status") != "uncertain"
+                    or not _pull_identity(pull, action)
+                    or not isinstance(pull_head, dict)
+                    or pull_head.get("ref") != action.get("head_ref")
+                    or not isinstance(pull_base, dict)
+                    or not _is_sha(pull_base.get("sha"))):
+                raise CoordinatorError("Owner abandonment did not match the reserved pull")
+            record = {
+                "version": 1, "issue": item["issue"],
+                "action_key": action.get("key"), "task_id": item["task_id"],
+                "task_created_at": action.get("task_created_at"),
+                "reservation_sha256": _reservation_sha256(action),
+                "head_sha": item["head_sha"],
+                "base_sha": pull_base["sha"],
+                "command_comment_id": item["command_comment_id"],
+                "command_body": item["command_body"],
+                "command_created_at": item["command_created_at"],
+                "actor_id": item["actor_id"], "accepted_at": self._now_string(),
+            }
+            if (not _owner_abandonment_record_valid(record)
+                    or not _owner_abandonment_matches_action(record, action)):
+                raise CoordinatorError("Owner abandonment reservation metadata was invalid")
+            item["recovery_record"] = record
+            owner_recoveries.append({
+                "issue": item["issue"], "action_key": action["key"],
+                "record": record,
+            })
         plans = [
             self._plan_pull(snapshot, state["actions"], apply=apply)
             for snapshot in scans
         ]
+        for recovery in owner_recoveries:
+            next(item for item in plans if item["issue"] == recovery["issue"]).setdefault(
+                "owner_recoveries", [],
+            ).append(recovery)
         observations = [
             (snapshot["issue"], snapshot["head"]) for snapshot in scans
             if not snapshot.get("terminal")
@@ -5654,6 +5988,7 @@ class Coordinator:
             "processed": processed, "commands": commands,
             "starter_admissions": admission_checks,
             "starter_sources": starter_sources,
+            "owner_recoveries": owner_recoveries,
             "enrollments": enrollments, "snapshots": scans, "pull_requests": plans,
             "observations": observations, "sensitive_revocations": sensitive_revocations,
             "now": self.clock(),
@@ -5703,6 +6038,77 @@ class Coordinator:
                     )):
                 return False
         return pull
+
+    def _owner_abandonment_task_terminal(self, snapshot, action, record, tasks):
+        if not _owner_abandonment_inventory_valid(tasks, action, snapshot, record):
+            return False
+        try:
+            task = self.api.get(
+                f"agents/repos/{REPOSITORY}/tasks/{quote(record['task_id'], safe='')}",
+            )
+        except CoordinatorError:
+            return False
+        if not _owner_abandonment_task_valid(
+            task, action, snapshot["pull"], record,
+            now=datetime.fromtimestamp(self.clock(), timezone.utc),
+        ):
+            return False
+        comments = snapshot.get("comments")
+        if not isinstance(comments, list):
+            return False
+        try:
+            receipt = validate_task_receipt(
+                task, action, snapshot["pull"], comments,
+                now=datetime.fromtimestamp(self.clock(), timezone.utc),
+            )
+        except (ReceiptError, TypeError, ValueError):
+            return True
+        return receipt is None
+
+    def _fence_owner_abandonment(self, recovery, main_sha):
+        if not isinstance(recovery, dict) or not _owner_abandonment_record_valid(
+                recovery.get("record")):
+            raise CoordinatorError("Owner abandonment record was invalid before commit")
+        record = recovery["record"]
+        baseline = self.store._preparation_base
+        actions = baseline.get("actions") if isinstance(baseline, dict) else None
+        action = actions.get(recovery.get("action_key")) if isinstance(actions, dict) else None
+        if (recovery.get("issue") != record["issue"]
+                or recovery.get("action_key") != record["action_key"]
+                or not _owner_abandonment_matches_action(record, action)):
+            raise CoordinatorError("Owner abandonment reservation changed before commit")
+        command = _current_owner_unverified_abandonment_command(
+            self.api, record,
+        )
+        if command is None:
+            raise CoordinatorError("Owner abandonment command changed before commit")
+        current = self._fence_pull(
+            record["issue"], record["head_sha"], main_sha,
+            allow_historical_reconciliation=action.get("task_type") == "neutral",
+            allow_historical_dirty=action.get("task_type") == "neutral",
+            expected_base_sha=record["base_sha"],
+        )
+        if (not _pull_identity(current, action)
+                or current.get("head", {}).get("ref") != action.get("head_ref")
+                or current.get("base", {}).get("sha") != record["base_sha"]):
+            raise CoordinatorError("Owner abandonment pull or main changed before commit")
+        snapshot = {
+            "issue": record["issue"], "pull": current, "head": record["head_sha"],
+            "main_sha": main_sha,
+            "comments": _all_review_comments(self.api, record["issue"], None),
+        }
+        tasks = _rest_list(
+            self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+            collection="tasks",
+        )
+        if not self._owner_abandonment_task_terminal(snapshot, action, record, tasks):
+            raise CoordinatorError("Owner abandonment task evidence was incomplete")
+        current_state = StateStore(self.store.path).snapshot()
+        latest_action = current_state.get("actions", {}).get(recovery["action_key"])
+        if (latest_action != action
+                or not _owner_abandonment_matches_action(record, latest_action)
+                or _event_consumed(current_state, str(record["command_comment_id"]))):
+            raise CoordinatorError("Owner abandonment reservation changed before commit")
 
     def _authorized_dispatch_head(self, issue, head, base_sha=None, *, receipt_action=None):
         enrollment = self.store.snapshot()["enrollments"].get(str(issue))
@@ -5850,10 +6256,19 @@ class Coordinator:
         branch = current["head"].get("ref")
         if not isinstance(branch, str) or not branch or branch != action["head_ref"]:
             return "superseded"
-        if any(item.get("kind") in {"fix", "review"} and item.get("issue") == action["issue"]
-               and item.get("status") in {"sending", "uncertain", "sent"}
-               for item in self.store.actions().values()):
-            return "agent-running"
+        recovered_claims = []
+        enrollment = self.store.snapshot()["enrollments"].get(str(action["issue"]), {})
+        for prior_key, prior in self.store.actions().items():
+            if (prior.get("kind") not in {"fix", "review"}
+                    or prior.get("issue") != action["issue"]
+                    or prior.get("status") not in {"sending", "uncertain", "sent"}):
+                continue
+            abandonment = _owner_abandonment_for_action(
+                enrollment, prior_key, prior,
+            )
+            if abandonment is None or abandonment["head_sha"] != action["head"]:
+                return "agent-running"
+            recovered_claims.append((prior, abandonment))
         workflows, _ = _workflow_runs(self.api, branch, action["issue"])
         if not review_task:
             threads, complete = collect_review_threads(self.api, action["issue"])
@@ -5904,6 +6319,18 @@ class Coordinator:
         )
         if not _pull_identity(current, action) or current["head"].get("ref") != branch:
             return "superseded"
+        recovery_comments = (
+            _all_review_comments(self.api, action["issue"], None)
+            if recovered_claims else []
+        )
+        for prior, abandonment in recovered_claims:
+            if not self._owner_abandonment_task_terminal(
+                    {
+                        "issue": action["issue"], "pull": current,
+                        "comments": recovery_comments,
+                    },
+                    prior, abandonment, tasks):
+                return "agent-running"
         if (report_correction
                 and not self._report_correction_dispatch_proven(action, current)):
             return "superseded"
@@ -6265,6 +6692,8 @@ class Coordinator:
         self._fence_starter_sources(
             plan.get("starter_sources", ()), plan["enrollments"], plan["main_sha"],
         )
+        for recovery in plan.get("owner_recoveries", ()):
+            self._fence_owner_abandonment(recovery, plan["main_sha"])
         self.store.commit_scan(
             plan["cursor"], plan["processed"], commands=plan["commands"],
             retirements=[
@@ -6341,6 +6770,44 @@ class Coordinator:
                         ) from error
                     for event in events:
                         self.store.record_lifecycle(event, now=plan["now"])
+                    pr_plan = refreshed
+            for recovery in pr_plan.get("owner_recoveries", ()):
+                key = recovery["action_key"]
+                current = self._fence_pull(
+                    snapshot["issue"], snapshot["head"], snapshot["main_sha"],
+                    allow_historical_reconciliation=(
+                        recovery["record"]["base_sha"] != snapshot["main_sha"]
+                    ),
+                    allow_historical_dirty=True,
+                    expected_base_sha=recovery["record"]["base_sha"],
+                )
+                if (not current or current.get("id") != snapshot["pull"].get("id")
+                        or current.get("node_id") != snapshot["pull"].get("node_id")):
+                    continue
+                snapshot["pull"] = current
+                snapshot["tasks"] = _rest_list(
+                    self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+                    collection="tasks",
+                )
+                snapshot["enrollment"] = self.store.snapshot()["enrollments"].get(
+                    str(snapshot["issue"]), {},
+                )
+                busy_details = {}
+                busy = self._reconcile_actions(
+                    snapshot, self.store.actions(), apply=True,
+                    recovery_keys=(key,), busy_details=busy_details,
+                    owner_abandonment_keys=(key,),
+                )
+                if not busy:
+                    refreshed = self._plan_pull(
+                        snapshot, self.store.actions(), apply=True,
+                        reconciled_busy=False,
+                        reconciled_busy_details=busy_details,
+                    )
+                    refreshed["handoffs"].extend(pr_plan["handoffs"])
+                    refreshed.setdefault("review_publications", []).extend(
+                        pr_plan.get("review_publications", ()),
+                    )
                     pr_plan = refreshed
             # Handoff mutations require the successfully committed scan above.
             for key in pr_plan.get("handoffs", ()):
@@ -6785,6 +7252,12 @@ class StateStore:
                and not _valid_initial_source(item["initial_source"])
                for item in data["enrollments"].values()):
             raise CoordinatorError("Initial starter source provenance is invalid")
+        if any("owner_abandonments" in item
+               and not _owner_abandonments_valid(
+                   item["owner_abandonments"], issue=item.get("issue"),
+               )
+               for item in data["enrollments"].values()):
+            raise CoordinatorError("Owner task abandonment history is invalid")
         data.setdefault("lifecycle_events", [])
         if (not isinstance(data["lifecycle_events"], list)
                 or len(data["lifecycle_events"]) > MAX_LIFECYCLE_EVENTS
@@ -7106,6 +7579,26 @@ class StateStore:
                         enrollment["sensitive_sha"] = item["head"]
                         enrollment["sensitive_authorization"] = item["owner_authorization"]
                         enrollment["targeted_review"] = item["targeted_review"]
+                elif action == "abandon-unverified":
+                    enrollment = data["enrollments"].get(str(item.get("issue")))
+                    record = item.get("recovery_record")
+                    action_key = record.get("action_key") if isinstance(record, dict) else None
+                    claimed = data["actions"].get(action_key)
+                    if (not enrollment or enrollment.get("active") is not True
+                            or not _owner_abandonment_record_valid(record)
+                            or not _owner_abandonment_matches_action(record, claimed)):
+                        raise CoordinatorError(
+                            "Owner abandonment did not match the durable task reservation"
+                        )
+                    records = enrollment.setdefault("owner_abandonments", [])
+                    if not _owner_abandonments_valid(
+                            records, issue=enrollment.get("issue")):
+                        raise CoordinatorError("Owner abandonment history is invalid")
+                    if not any(
+                            previous["action_key"] == action_key for previous in records):
+                        if len(records) >= REPAIR_LIMIT + NEUTRAL_LIMIT:
+                            raise CoordinatorError("Owner abandonment history reached its bound")
+                        records.append(deepcopy(record))
             for issue, head, source in starter_sources:
                 enrollment = data["enrollments"].get(str(issue))
                 if (not enrollment or not enrollment.get("active")

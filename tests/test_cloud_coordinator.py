@@ -2878,6 +2878,84 @@ def test_known_id_uncertain_neutral_with_unproven_completion_is_read_once(
     assert api.task_posts == initial_posts
 
 
+def _owner_abandonment_case(tmp_path):
+    api, store, coordinator, _ = _ready_sha_bound_handoff(tmp_path)
+    coordinator.run(apply=True)
+    neutral = next(
+        action for action in store.actions().values()
+        if action.get("task_type") == "neutral"
+    )
+    api.complete_task(
+        neutral["task_id"], neutral, head_sha=NEXT_RESULT_HEAD,
+        base_sha=CURRENT_MAIN,
+    )
+    api.head_sha = api.pull["head"]["sha"] = NEXT_RESULT_HEAD
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    receipt = next(
+        comment for comment in api.comments
+        if isinstance(comment.get("body"), str)
+        and neutral["dispatch_nonce"] in comment["body"]
+        and comment.get("user", {}).get("id") == COPILOT_AGENT
+    )
+    receipt["body"] += "\nedited"
+    receipt["updated_at"] = "2026-10-01T12:06:00Z"
+    event = coordinator._record_uncertain_task(neutral)
+    store.update_action_with_lifecycle(
+        neutral["key"], "uncertain", event, now=1790856660,
+        blocker="execution_uncertain", receipt_waits=MAX_RECEIPT_POLLS,
+        receipt_recovery_attempted=True,
+        receipt_recovery_revision=cloud_coordinator.LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION,
+    )
+    command = (
+        f"/hermes abandon-unverified {neutral['task_id']} {NEXT_RESULT_HEAD}"
+    )
+    api.comments.append({
+        "id": 7771, "user": {"id": OWNER}, "body": command,
+        "created_at": "2026-10-01T12:10:00Z",
+        "updated_at": "2026-10-01T12:10:00Z",
+    })
+    api.source_failure = True
+    api.source_failure_sha = NEXT_RESULT_HEAD
+    return api, store, neutral
+
+
+def test_owner_abandons_unverified_terminal_task_without_rewriting_history(tmp_path):
+    from copy import deepcopy
+
+    api, store, neutral = _owner_abandonment_case(tmp_path)
+    original_reservation = deepcopy(store.action(neutral["key"]))
+    original_events = deepcopy(store.snapshot()["lifecycle_events"])
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+
+    state = StateStore(store.path).snapshot()
+    enrollment = state["enrollments"]["16"]
+    recovery = enrollment["owner_abandonments"][0]
+    assert result["repair_requested"], (
+        result["reasons"], api.task_posts, api.pull_reads, api.task_reads,
+    )
+    assert api.task_posts == 3
+    assert state["actions"][neutral["key"]] == original_reservation
+    assert enrollment["attempts"] == 2
+    assert enrollment["neutral_attempts"] == 1
+    assert state["lifecycle_events"] == original_events
+    recovery = enrollment["owner_abandonments"][0]
+    assert recovery["action_key"] == neutral["key"]
+    assert recovery["task_id"] == neutral["task_id"]
+    assert recovery["head_sha"] == NEXT_RESULT_HEAD
+
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+    assert api.task_posts == 3
+    assert StateStore(store.path).action(neutral["key"]) == original_reservation
+    assert StateStore(store.path).snapshot()["lifecycle_events"] == original_events
+
+
 @pytest.mark.parametrize(
     "base_sha,tip_sha,status,ahead_by",
     [
