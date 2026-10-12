@@ -235,6 +235,7 @@ def current_copilot_review_valid(reviews, head_sha, *, pull_author_id, complete=
 class _Element:
     tag: str
     children: list = field(default_factory=list)
+    href: str | None = None
 
 
 class _DisclosureParser(HTMLParser):
@@ -286,7 +287,9 @@ class _DisclosureParser(HTMLParser):
                 not isinstance(child, str) or child.strip() for child in parent.children
             ):
                 raise ValueError("misplaced-summary")
-        node = _Element(tag)
+        hrefs = [value for name, value in attrs if name == "href"]
+        href = hrefs[0] if len(hrefs) == 1 else None
+        node = _Element(tag, href=href)
         self.stack[-1].children.append(node)
         if tag not in self._VOID:
             self.stack.append(node)
@@ -372,14 +375,23 @@ def _section_kind(node):
     return "ambiguous", label
 
 
-def _has_descendant(node, tag):
+_DISCUSSION_HREF_RE = re.compile(
+    r"(?:#discussion_r[1-9]\d*|"
+    r"https://github\.com/lindayi/hermes-mobile/pull/[1-9]\d+#discussion_r[1-9]\d*)",
+    re.IGNORECASE,
+)
+
+
+def _has_discussion_link(node):
     pending = list(reversed(node.children))
     while pending:
         child = pending.pop()
         if isinstance(child, _Element):
             if child.tag in {"code", "pre", "blockquote"}:
                 continue
-            if child.tag == tag:
+            if child.tag == "a" and isinstance(child.href, str) and (
+                _DISCUSSION_HREF_RE.fullmatch(child.href)
+            ):
                 return True
             pending.extend(reversed(child.children))
     return False
@@ -414,7 +426,7 @@ def _counted_section_matches(node, expected):
         if not isinstance(child, _Element) or child.tag != "li":
             return False
         items.append(child)
-    return len(items) == expected and all(_has_descendant(item, "a") for item in items)
+    return len(items) == expected and all(_has_discussion_link(item) for item in items)
 
 
 def _text(node, *, exclude_details=False, exclude_history=False, quoted=True, render_quote=None,
@@ -518,17 +530,22 @@ def _provider_summary(root):
         child for child in root.children
         if not isinstance(child, str) or child.strip()
     ]
-    if (len(children) < 3 or not all(isinstance(child, _Element) for child in children[:3])
-            or [child.tag for child in children[:3]] != ["h2", "h3", "p"]):
+    if not all(isinstance(child, _Element) for child in children[:3]):
+        if len(children) < 2 or not all(isinstance(child, _Element) for child in children[:2]):
+            return None
+    if [child.tag for child in children[:3]] == ["h2", "h3", "p"]:
+        if _text(children[0], quoted=False).strip() != "Copilot review overview":
+            return None
+        status_node, summary = children[1], children[2]
+    elif [child.tag for child in children[:2]] == ["h3", "p"]:
+        status_node, summary = children[0], children[1]
+    else:
         return None
-    if _text(children[0], quoted=False).strip() != "Copilot review overview":
-        return None
-    status = " ".join(_text(children[1], quoted=False).split())
+    status = " ".join(_text(status_node, quoted=False).split())
     if not re.fullmatch(
             r"(?:[🟢🔵🟡] )?(?:Looks good|Needs a closer look|Changes recommended)",
             status):
         return None
-    summary = children[2]
     if _text(summary, quoted=False) != _text(summary):
         return None
     return summary

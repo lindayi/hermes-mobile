@@ -34,8 +34,7 @@ HTML_ESCAPED = (
 )
 
 CURRENT_COPILOT_RAW = (
-    "<!-- ccr-overview-v2 -->\n\n## Copilot review overview\n\n"
-    "### 🔵 Needs a closer look\n\n"
+    "<!-- ccr-overview-v2 -->\n\n### 🔵 Needs a closer look\n\n"
     "The operator procedure does not bind the active release, application virtualenv, "
     "or live configuration path, so its commands may fail or operate on the wrong source.\n\n"
     "<details open>\n<summary><strong>1 open finding</strong></summary>\n\n"
@@ -55,7 +54,7 @@ CURRENT_COPILOT_RAW = (
     "🧠 **Review effort:** Balanced"
 )
 CURRENT_COPILOT_HTML = (
-    "<h2>Copilot review overview</h2><h3>🔵 Needs a closer look</h3>"
+    "<h3>🔵 Needs a closer look</h3>"
     "<p>The operator procedure does not bind the active release, application virtualenv, "
     "or live configuration path, so its commands may fail or operate on the wrong source.</p>"
     "<details open><summary><strong>1 open finding</strong></summary>"
@@ -149,6 +148,25 @@ def test_count_leading_sections_require_matching_linked_items(label, count, clas
     assert result["inventory_complete"] is True
     assert result["ambiguous"] is False
     assert classification in result["classifications"]
+
+
+@pytest.mark.parametrize("item", [
+    "<a>Finding without a target</a>",
+    '<a href="#discussion_r42" href="https://example.invalid/">Duplicate targets</a>',
+    '<a href="/issues/99">Unrelated relative link</a>',
+    '<a href="https://example.invalid/#discussion_r42">External discussion-like link</a>',
+    "Not linked",
+])
+def test_count_leading_sections_reject_unsupported_discussion_targets(item):
+    rendered = (
+        '<details><summary><strong>1 open finding</strong></summary>'
+        f"<ul><li>{item}</li></ul></details>"
+    )
+    result = parse_body(OVERVIEW_MARKER + "\nCounted section", "COMMENTED",
+                        body_html=rendered)
+
+    assert result["inventory_complete"] is False
+    assert result["ambiguous"] is True
 
 
 def test_count_leading_section_inside_quotation_is_incomplete():
