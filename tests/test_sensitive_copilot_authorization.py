@@ -135,6 +135,47 @@ def test_owner_command_binds_copilot_review_across_cold_restart_and_keeps_merge_
     assert not api.graphql_writes
 
 
+def test_sensitive_repair_uses_enrollment_without_merge_authorization(tmp_path):
+    api = SensitiveCopilotApi()
+    api.comments = [c for c in api.comments if c['id'] != OWNER_COMMAND_ID]
+    store = StateStore(tmp_path / 'state.json')
+    result = Coordinator(api, store).run(apply=True)
+    enrollment = store.snapshot()['enrollments']['16']
+    assert enrollment['sensitive_authorization'] is None
+    assert result['pull_requests'][0]['repair_requested']
+    assert api.fix_attempts == 1
+    assert not result['pull_requests'][0]['auto_merge_eligible']
+    assert not api.graphql_writes
+
+
+@pytest.mark.parametrize('boundary', ['command', 'review'])
+@pytest.mark.parametrize('status', [None, 429, 500])
+def test_transient_authorization_evidence_failure_preserves_state(tmp_path, monkeypatch, boundary, status):
+    from deploy.cloud_coordinator import ApiError
+    api = SensitiveCopilotApi()
+    path = tmp_path / 'state.json'
+    Coordinator(api, StateStore(path)).run(apply=True)
+    before = path.read_bytes()
+    get = api.get
+    graphql = api.graphql
+
+    def failing_get(route):
+        if route.endswith(f'/issues/comments/{OWNER_COMMAND_ID}'):
+            raise ApiError('synthetic temporary outage', status=status)
+        return get(route)
+
+    def failing_graphql(query, variables):
+        if 'PullRequestReview' in query:
+            raise ApiError('synthetic temporary outage', status=status)
+        return graphql(query, variables)
+
+    monkeypatch.setattr(api, 'get' if boundary == 'command' else 'graphql',
+                        failing_get if boundary == 'command' else failing_graphql)
+    with pytest.raises(ApiError, match='temporary outage'):
+        Coordinator(api, StateStore(path)).run(apply=True)
+    assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize("mutation", [
     "wrong_identity", "wrong_head", "negative_state", "edited_review", "edited_command",
     "body_changed", "wrong_digest", "ambiguous_latest", "legacy_report",

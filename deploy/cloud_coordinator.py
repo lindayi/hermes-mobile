@@ -1487,8 +1487,10 @@ def _current_sensitive_owner_command(api, issue, authorization):
         comment = api.get(
             f"repos/{REPOSITORY}/issues/comments/{authorization['command_comment_id']}",
         )
-    except ApiError:
-        return None
+    except ApiError as error:
+        if error.status == 404:
+            return None
+        raise
     parsed = _is_owner_sensitive_command(comment)
     user = comment.get("user") if isinstance(comment, dict) else None
     if (parsed is None or not isinstance(user, dict)
@@ -1544,8 +1546,10 @@ def _bound_pull_review_metadata(api, pull_number, review):
         return review
     try:
         response = api.graphql(GRAPHQL_REVIEW_METADATA, {"id": node_id})
-    except ApiError:
-        return review
+    except ApiError as error:
+        if error.status == 404:
+            return review
+        raise
     node = response.get("data", {}).get("node") if isinstance(response, dict) else None
     commit = node.get("commit") if isinstance(node, dict) else None
     author = node.get("author") if isinstance(node, dict) else None
