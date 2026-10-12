@@ -108,7 +108,9 @@ def collect_review(evidence, number, expected_head, *, api, store):
             or _required_checks(api) != (
                 snapshot['required'], snapshot['policy_complete'],
                 snapshot['up_to_date_required'], snapshot['conversation_resolution_required'])
-            or store.snapshot() != state):
+            or store.snapshot() != state
+            or _current_sensitive_owner_command(api, number, authorization)
+            != evidence['copilot_review']['change']['owner_command']):
         raise ValueError('Final review collection fence changed')
     return evidence
 

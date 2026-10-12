@@ -180,6 +180,54 @@ def test_final_collection_fences_fail_closed(collection, capsys, hazard):
     assert api.writes == api.graphql_writes == []
 
 
+@pytest.mark.parametrize('fence, final_read', [
+    ('/pulls/16', 2), ('/commits/main', 2), ('/branches/main/protection', 3),
+])
+@pytest.mark.parametrize('mutation', ['edited', 'deleted', 401, 403, 429, 500, None])
+def test_final_owner_command_read_fails_closed(collection, capsys, fence, final_read, mutation):
+    api, baseline, state_path, evidence_path, args, _ = collection
+    before = (state_path.read_bytes(), evidence_path.read_bytes())
+    original_pull = copy.deepcopy(api.pull)
+    assert api.pull['head']['sha'] != baseline['main']['sha']
+    get = api.get
+    fence_reads = command_reads = 0
+    changed = False
+
+    def concurrent_change(route):
+        nonlocal fence_reads, command_reads, changed
+        if '/issues/comments/' in route:
+            command_reads += 1
+            if changed and mutation not in ('edited', 'deleted'):
+                raise coordinator.ApiError('synthetic final command unavailable', status=mutation)
+        value = get(route)
+        if route.endswith(fence):
+            fence_reads += 1
+            if fence_reads == final_read:
+                assert command_reads >= 1
+                changed = True
+                if mutation == 'edited':
+                    api.comments[-1]['updated_at'] = '2026-10-02T00:00:00Z'
+                elif mutation == 'deleted':
+                    api.comments.pop()
+        return value
+
+    api.get = concurrent_change
+    assert cli.main(args) == 1
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert changed and command_reads >= 2
+    assert report['ready'] is False
+    assert report['blockers'] == ['invalid-evidence']
+    assert 'evidence' not in report
+    if mutation in ('edited', 'deleted'):
+        assert 'Final review collection fence changed' in captured.err
+    else:
+        assert 'synthetic final command unavailable' in captured.err
+    assert api.pull == original_pull
+    assert before == (state_path.read_bytes(), evidence_path.read_bytes())
+    assert api.writes == api.graphql_writes == []
+
+
 @pytest.mark.parametrize('hazard', ['edited-review', 'pending-check', 'partial-checks', 'malformed-check'])
 def test_real_snapshot_review_and_check_contracts_remain_blocking(collection, capsys, hazard):
     api, _, state_path, _, args, _ = collection
