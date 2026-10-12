@@ -6,7 +6,9 @@ import pytest
 
 from deploy.cloud_coordinator import ApiError, GhApi, StateStore, copilot_review_valid, repair_request
 from deploy.review_evidence import OVERVIEW_MARKER, parse_body, review_body_disposition
-from test_cloud_coordinator import HEAD, _managed_cycle
+from test_cloud_coordinator import (
+    HEAD, ProgressApi, _managed_cycle, refresh_owner_review,
+)
 from test_review_evidence import ReviewApi, copilot_review, _evidence
 
 
@@ -102,6 +104,88 @@ def test_current_copilot_overview_counts_findings_and_preserves_summary_context(
     assert "The operator procedure does not bind the active release" in finding["text"]
     assert "These commands do not bind the deployed source" in finding["text"]
     assert "Register runtime dependency in pinned execution-source policy" not in finding["text"]
+
+
+@pytest.mark.parametrize("rendered", [
+    CURRENT_COPILOT_HTML.replace("1 open finding", "2 open findings"),
+    CURRENT_COPILOT_HTML.replace("Previously missed (1)", "Previously missed (2)"),
+    CURRENT_COPILOT_HTML.replace(
+        "<details><summary><strong>Previously missed",
+        "<details><summary><strong>1 open finding</strong></summary>"
+        "<ul><li><a href=\"#discussion_r445\">Duplicate section</a></li></ul></details>"
+        "<details><summary><strong>Previously missed",
+    ),
+    CURRENT_COPILOT_HTML.replace(
+        "<h3>🔵 Needs a closer look</h3>",
+        "<h3>🔵 Needs a closer look</h3><p>Unaccounted review prose.</p>",
+    ),
+])
+def test_current_overview_count_mismatch_duplicate_or_extra_prose_is_incomplete(rendered):
+    review = review_pair(CURRENT_COPILOT_RAW, rendered, state="COMMENTED")
+    result = review_body_disposition([review], HEAD, reviewer_id=review["user"]["id"])
+
+    assert result["inventory_complete"] is False
+
+
+def test_current_review_resumes_completed_repair_without_replaying_or_losing_thread(
+        tmp_path):
+    api = ProgressApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    incomplete = HTML_ESCAPED.replace("Previously missed (1)", "Previously missed (2)")
+    api.progress_review = review_pair(RAW_ESCAPED, incomplete, state="COMMENTED")
+    path = tmp_path / "state.json"
+
+    first = _managed_cycle(api, path)["pull_requests"][0]
+    assert first["repair_requested"]
+    store = StateStore(path)
+    source_action = next(
+        item for item in store.actions().values()
+        if item["kind"] == "fix" and item["attempt"] == 1
+    )
+    assert source_action["repair_fingerprints_complete"] is False
+
+    result_head = "c" * 40
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.complete_task(source_action["task_id"], source_action, head_sha=result_head)
+    refresh_owner_review(api, result_head, submitted_at="2026-10-01T12:06:00Z")
+    api.progress_review = review_pair(
+        CURRENT_COPILOT_RAW,
+        CURRENT_COPILOT_HTML.replace("4250499422", "445"),
+        state="COMMENTED",
+    ) | {
+        "id": api.progress_review["id"] + 1,
+        "commit_id": result_head,
+        "submitted_at": "2026-10-01T12:10:00Z",
+    }
+
+    second = _managed_cycle(api, path)["pull_requests"][0]
+    saved = StateStore(path).snapshot()
+    enrollment = saved["enrollments"]["16"]
+    progress = enrollment["repair_progress"]
+    assert progress["legacy_unknown"] is True
+    assert progress["evaluated_task_ids"] == [source_action["task_id"]]
+    assert progress["resolved_fingerprints"] == []
+    assert progress["consecutive_no_progress"] == 0
+    assert enrollment["attempts"] == 2
+    assert source_action["receipt_result"] == "ready"
+    assert StateStore(path).action(source_action["key"])["status"] == "completed"
+    assert second["repair_requested"]
+
+    fix_posts = [
+        body for route, body in api.writes if route.endswith("/tasks")
+    ]
+    assert len(fix_posts) == 2
+    assert "Please resolve this finding." in fix_posts[1]["prompt"]
+    assert "Operator commands omit deployed source, virtualenv, and live config" in (
+        fix_posts[1]["prompt"]
+    )
+
+    _managed_cycle(api, path)
+    assert api.fix_attempts == 2
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 2
+    assert len([item for item in StateStore(path).actions().values()
+                if item["kind"] == "fix"]) == 2
 
 
 @pytest.mark.parametrize("rendered", [
