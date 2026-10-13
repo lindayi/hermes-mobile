@@ -677,10 +677,16 @@ def _summary_disposition(summary, *, overview, state, context=None):
     validation = re.compile(
         r"(?:the )?(?:exact-head )?(?:verification|validation) "
         r"(?:remains|is)(?: still)? pending[.!]?", re.IGNORECASE)
-    # This exact provider sentence reports gate-verification status, not gate authority.
-    verification_status = re.compile(
-        r"The operationally sensitive coordinator gate lacks verified latest-head CI "
-        r"and required review evidence[.!]?", re.IGNORECASE)
+    neutral_prefix = re.compile(
+        r"^(?:It changes [^.!?]+, while|"
+        r"The coordinator[’']s authorization and progress seam is security-sensitive,\s+and)\s+",
+        re.IGNORECASE)
+    # Recognized gate status clauses report gate status, never gate authority.
+    gate_status = re.compile(
+        r"(?:The operationally sensitive coordinator gate lacks verified latest-head CI "
+        r"and required review evidence|"
+        r"(?:the )?(?:exact-head )?owner authorization (?:remains|is)(?: still)? absent)[.!]?",
+        re.IGNORECASE)
     # Recognize whole negative verdicts, never arbitrary prose containing 'no'.
     # Scope suffixes are deliberately finite: an unrestricted 'in ...' would
     # swallow a same-sentence defect/correction after an otherwise neutral prefix.
@@ -692,10 +698,10 @@ def _summary_disposition(summary, *, overview, state, context=None):
     negatives = [bool(no_findings.fullmatch(sentence)) for sentence in sentences]
     def is_validation_status(sentence):
         # A neutral template clause is status, not a general 'pending' keyword.
-        clause = re.sub(r"^It changes [^.!?]+, while\s+", "", sentence, flags=re.IGNORECASE)
+        clause = neutral_prefix.sub("", sentence)
         return bool(
             validation.fullmatch(clause)
-            or overview and state == "COMMENTED" and verification_status.fullmatch(sentence)
+            or overview and state == "COMMENTED" and gate_status.fullmatch(clause)
         )
 
     waits = [is_validation_status(sentence) for sentence in sentences]

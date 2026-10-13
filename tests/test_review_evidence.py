@@ -131,6 +131,23 @@ PUBLIC_REVIEW_HTML = f"""<h3>🔵 Needs a closer look</h3>
 </details>
 <p>🧠 <strong>Review effort:</strong> Balanced</p>
 <hr>"""
+PUBLIC_OWNER_STATUS_SUMMARY = (
+    "The coordinator’s authorization and progress seam is security-sensitive, "
+    "and exact-head owner authorization remains absent."
+)
+PUBLIC_OWNER_STATUS_BODY = f"""<!-- ccr-overview-v2 -->
+
+### 🔵 Needs a closer look
+
+{PUBLIC_OWNER_STATUS_SUMMARY}
+
+**0 open findings**
+
+🧠 **Review effort:** Balanced"""
+PUBLIC_OWNER_STATUS_HTML = f"""<h3>🔵 Needs a closer look</h3>
+<p>{PUBLIC_OWNER_STATUS_SUMMARY}</p>
+<p><strong>0 open findings</strong></p>
+<p>🧠 <strong>Review effort:</strong> Balanced</p>"""
 REVIEW_ID = 5300000001
 SUBMITTED = "2026-10-01T12:30:00Z"
 
@@ -147,6 +164,11 @@ def copilot_review(body, *, state="COMMENTED", review_id=REVIEW_ID, commit_id=HE
 
 def public_overview_review(**changes):
     review = copilot_review(PUBLIC_REVIEW_BODY) | {"body_html": PUBLIC_REVIEW_HTML}
+    return review | changes
+
+
+def public_owner_status_review(**changes):
+    review = copilot_review(PUBLIC_OWNER_STATUS_BODY) | {"body_html": PUBLIC_OWNER_STATUS_HTML}
     return review | changes
 
 
@@ -314,6 +336,137 @@ def test_public_verification_overview_does_not_override_review_identity_or_state
         and not disposition["ambiguous"]
         and disposition["classifications"]
     )
+
+
+def test_public_owner_status_overview_is_narrow_validation_status():
+    parsed = parse_body(
+        PUBLIC_OWNER_STATUS_BODY, "COMMENTED", body_html=PUBLIC_OWNER_STATUS_HTML,
+    )
+    assert parsed["classifications"] == ["validation-only"]
+    assert parsed["findings"] == []
+    assert not parsed["ambiguous"] and parsed["inventory_complete"]
+
+    review = public_owner_status_review()
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert disposition["classifications"] == ["validation-only"]
+    assert disposition["findings"] == []
+    assert not disposition["ambiguous"] and disposition["inventory_complete"]
+
+
+def test_public_owner_status_overview_does_not_grant_merge_authority(tmp_path):
+    review = public_owner_status_review()
+    api = ReviewApi([review], sensitive=True)
+    result = _managed_cycle(api, tmp_path / "state.json")
+    [plan] = result["pull_requests"]
+    assert plan["review_valid"]
+    assert plan["required_checks_green"]
+    assert plan["sensitive"]
+    assert not plan["auto_merge_eligible"]
+    assert "sensitive" in plan["reasons"] and "review" not in plan["reasons"]
+    assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("ci_state", ["pending", "failed"])
+def test_public_owner_status_overview_does_not_override_required_ci(tmp_path, ci_state):
+    class FailedCheckReviewApi(ReviewApi):
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if "/check-runs?" in route:
+                return [
+                    value | {"conclusion": "failure"}
+                    if value.get("name") == "integration-tests" else value
+                    for value in values
+                ]
+            return values
+
+    api_type = FailedCheckReviewApi if ci_state == "failed" else ReviewApi
+    api = api_type([public_owner_status_review()], sensitive=True)
+    api.pending_required = ci_state == "pending"
+    result = _managed_cycle(api, tmp_path / f"{ci_state}.json")
+    [plan] = result["pull_requests"]
+    assert plan["review_valid"]
+    assert not plan["required_checks_green"]
+    assert not plan["auto_merge_eligible"]
+    assert "sensitive" in plan["reasons"]
+
+
+@pytest.mark.parametrize("summary", [
+    PUBLIC_OWNER_STATUS_SUMMARY + " The current source is unsafe to merge.",
+    PUBLIC_OWNER_STATUS_SUMMARY[:-1] + ", but the source is unsafe to merge.",
+    "The coordinator’s authorization and progress seam is security-sensitive, and authorization is not enforced.",
+    "The coordinator’s authorization and progress seam is security-sensitive, and exact-head owner authorization is not enforced.",
+])
+def test_public_owner_status_overview_does_not_swallow_concerns(tmp_path, summary):
+    review = public_owner_status_review(
+        body=PUBLIC_OWNER_STATUS_BODY.replace(PUBLIC_OWNER_STATUS_SUMMARY, summary),
+        body_html=PUBLIC_OWNER_STATUS_HTML.replace(PUBLIC_OWNER_STATUS_SUMMARY, summary),
+    )
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert disposition["ambiguous"] and not disposition["inventory_complete"]
+    assert disposition["reason"] == "unclassified-content"
+
+    api = ReviewApi([review], sensitive=True)
+    result = _managed_cycle(api, tmp_path / "state.json")
+    [plan] = result["pull_requests"]
+    assert not plan["review_valid"] and not plan["auto_merge_eligible"]
+
+
+def test_quoted_only_owner_status_overview_remains_ambiguous():
+    review = public_owner_status_review(
+        body=PUBLIC_OWNER_STATUS_BODY.replace(
+            PUBLIC_OWNER_STATUS_SUMMARY, f"> {PUBLIC_OWNER_STATUS_SUMMARY}",
+        ),
+        body_html=PUBLIC_OWNER_STATUS_HTML.replace(
+            f"<p>{PUBLIC_OWNER_STATUS_SUMMARY}</p>",
+            f"<blockquote><p>{PUBLIC_OWNER_STATUS_SUMMARY}</p></blockquote>",
+        ),
+    )
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert disposition["ambiguous"] and not disposition["inventory_complete"]
+    assert disposition["reason"] == "unclassified-content"
+
+
+def test_public_owner_status_overview_requires_complete_rendered_inventory():
+    review = public_owner_status_review(body_html=None)
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert disposition["ambiguous"] and not disposition["inventory_complete"]
+
+    malformed = public_owner_status_review(
+        body=PUBLIC_OWNER_STATUS_BODY.replace("0 open findings", "1 open findings"),
+        body_html=PUBLIC_OWNER_STATUS_HTML.replace("0 open findings", "1 open findings"),
+    )
+    disposition = review_body_disposition(
+        [malformed], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert disposition["ambiguous"] and not disposition["inventory_complete"]
+
+
+@pytest.mark.parametrize("changes", [
+    {"commit_id": BASE},
+    {"user": {"id": OWNER}},
+    {"state": "PENDING", "submitted_at": None},
+    {"state": "DISMISSED"},
+])
+def test_public_owner_status_overview_does_not_override_review_identity_or_state(changes):
+    review = public_owner_status_review(**changes)
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert not disposition["findings"]
+    assert not (
+        disposition["inventory_complete"]
+        and not disposition["ambiguous"]
+        and disposition["classifications"]
+    )
+
 
 
 def _independent_review_evidence():
