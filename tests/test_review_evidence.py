@@ -330,13 +330,56 @@ def test_unknown_content_after_provider_separator_fails_closed(tail):
     assert not parsed["findings"]
 
 
-def test_known_provider_footer_remains_compatible():
+@pytest.mark.parametrize(("body", "body_html"), [
+    (NO_FINDINGS, NO_FINDINGS.removeprefix("<!-- ccr-overview-v2 -->")),
+    (
+        PUBLIC_REVIEW_BODY + FOOTER,
+        PUBLIC_REVIEW_HTML + FOOTER.removeprefix("\n<hr>"),
+    ),
+    (PUBLIC_OWNER_STATUS_BODY + FOOTER, PUBLIC_OWNER_STATUS_HTML + FOOTER),
+], ids=["no-findings", "verification-status", "owner-status"])
+def test_known_provider_footer_remains_compatible(body, body_html):
     parsed = parse_body(
-        NO_FINDINGS, "COMMENTED",
-        body_html=NO_FINDINGS.removeprefix("<!-- ccr-overview-v2 -->"),
+        body, "COMMENTED", body_html=body_html,
     )
     assert not parsed["ambiguous"] and parsed["inventory_complete"]
     assert not parsed["findings"]
+
+
+@pytest.mark.parametrize(("body", "body_html"), [
+    (NO_FINDINGS, NO_FINDINGS.removeprefix("<!-- ccr-overview-v2 -->")),
+    (
+        PUBLIC_REVIEW_BODY + FOOTER,
+        PUBLIC_REVIEW_HTML + FOOTER.removeprefix("\n<hr>"),
+    ),
+    (PUBLIC_OWNER_STATUS_BODY + FOOTER, PUBLIC_OWNER_STATUS_HTML + FOOTER),
+], ids=["no-findings", "verification-status", "owner-status"])
+@pytest.mark.parametrize("separator_case", ["suffix", "before-footer"])
+def test_repeated_provider_separators_fail_closed_through_planner(
+        tmp_path, body, body_html, separator_case):
+    if separator_case == "suffix":
+        body += "\n<hr>"
+        body_html += "<hr>"
+    else:
+        body = body.replace("\n<hr>\n<p>💡", "\n<hr>\n<hr>\n<p>💡", 1)
+        body_html = body_html.replace("<hr>\n<p>💡", "<hr>\n<hr>\n<p>💡", 1)
+
+    review = copilot_review(body) | {"body_html": body_html}
+    parsed = parse_body(body, "COMMENTED", body_html=body_html)
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    api = ReviewApi([review])
+    result = _managed_cycle(api, tmp_path / f"{separator_case}.json")
+    [plan] = result["pull_requests"]
+
+    assert not plan["review_valid"] and not plan["auto_merge_eligible"]
+    assert plan["required_checks_green"] and "review" in plan["reasons"]
+    assert not plan["repair_requested"]
+    assert parsed["ambiguous"] and not parsed["inventory_complete"]
+    assert parsed["findings"] == []
+    assert disposition["ambiguous"] and not disposition["inventory_complete"]
+    assert disposition["findings"] == []
 
 
 @pytest.mark.parametrize("summary", [PUBLIC_REVIEW_SUMMARY, PUBLIC_OWNER_STATUS_SUMMARY])

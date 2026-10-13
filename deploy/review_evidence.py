@@ -682,7 +682,10 @@ def _summary_content(root, overview, *, exclude=None, exclude_zero_open=False):
     after_separator = footer_seen = tail_ambiguous = False
     for child in root.children:
         if overview and isinstance(child, _Element) and child.tag == "hr":
-            after_separator = True
+            if after_separator:
+                tail_ambiguous = True
+            else:
+                after_separator = True
             continue
         if overview and after_separator:
             if isinstance(child, str) and not child.strip():

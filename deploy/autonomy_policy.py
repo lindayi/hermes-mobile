@@ -255,7 +255,7 @@ SOURCE_FINGERPRINTS = {
 }
 # Issue #106 verification-status parser overlay; preserve the earlier review pin above.
 ISSUE106_REVIEW_EVIDENCE_OVERLAY = {
-    'deploy/review_evidence.py': '7066ba04e365ffc528d55d77e87ef247f2041b8287adfaef23a8af1c1936b300',
+    'deploy/review_evidence.py': '7a30ae1ea17916f415aee7d4967aec5995df783bca3d36c2c2f8d958a53d7a69',
 }
 SOURCE_FINGERPRINTS.update(ISSUE106_REVIEW_EVIDENCE_OVERLAY)
 SOURCE_BLOCKERS = {

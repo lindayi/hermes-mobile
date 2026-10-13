@@ -144,7 +144,7 @@ historical provenance.
 
 | Current candidate path | SHA-256 |
 | --- | --- |
-| `deploy/review_evidence.py` | `b82ca32eaa7da7e35982bc690d52ef51ad3e53262a019387fa78b00e5c795a15` |
+| `deploy/review_evidence.py` | `7a30ae1ea17916f415aee7d4967aec5995df783bca3d36c2c2f8d958a53d7a69` |
 
 This candidate still requires fresh exact-head review and all required checks.
 Sensitive owner authorization remains a separate gate.
