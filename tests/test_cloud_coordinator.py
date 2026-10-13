@@ -114,6 +114,7 @@ BASE = "b" * 40
 RESULT_HEAD = "c" * 40
 CURRENT_MAIN = "d" * 40
 NEXT_RESULT_HEAD = "e" * 40
+FINAL_RESULT_HEAD = "f" * 40
 
 
 def Coordinator(api, store, **kwargs):
@@ -2954,6 +2955,102 @@ def test_owner_abandons_unverified_terminal_task_without_rewriting_history(tmp_p
     assert api.task_posts == 3
     assert StateStore(store.path).action(neutral["key"]) == original_reservation
     assert StateStore(store.path).snapshot()["lifecycle_events"] == original_events
+
+
+def test_owner_abandonment_head_is_continuation_only(tmp_path):
+    api, store, _ = _owner_abandonment_case(tmp_path)
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    _, authorized, blocked = _authorized_result_heads(
+        16, enrollment, StateStore(store.path).actions(), api.comments, CURRENT_MAIN,
+    )
+
+    assert result["repair_requested"]
+    assert not result["auto_merge_eligible"]
+    assert NEXT_RESULT_HEAD not in authorized
+    assert NEXT_RESULT_HEAD not in blocked
+
+
+def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_path):
+    api, store, abandoned = _owner_abandonment_case(tmp_path)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    successor = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "fix"
+        and action.get("key") != abandoned["key"]
+        and action.get("head") == NEXT_RESULT_HEAD
+    )
+    _, before_receipt, _ = _authorized_result_heads(
+        16, StateStore(store.path).snapshot()["enrollments"]["16"],
+        StateStore(store.path).actions(), api.comments, CURRENT_MAIN,
+    )
+    assert NEXT_RESULT_HEAD not in before_receipt
+
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=FINAL_RESULT_HEAD, base_sha=CURRENT_MAIN,
+    )
+    api.head_sha = FINAL_RESULT_HEAD
+    api.pull["head"]["sha"] = FINAL_RESULT_HEAD
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.review_sha = NEXT_RESULT_HEAD
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+    _, authorized, blocked = _authorized_result_heads(
+        16, state["enrollments"]["16"], state["actions"], api.comments,
+        CURRENT_MAIN,
+    )
+
+    assert result["head"] == FINAL_RESULT_HEAD
+    assert StateStore(store.path).action(successor["key"])["receipt_result"] == "ready"
+    assert FINAL_RESULT_HEAD in authorized
+    assert FINAL_RESULT_HEAD not in blocked
+
+    task_posts = api.task_posts
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+    review_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert api.task_posts == task_posts
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == review_writes
+
+
+def test_owner_recovery_prevents_legacy_receipt_claim_mutation(tmp_path):
+    api, store, neutral = _owner_abandonment_case(tmp_path)
+
+    def enable_legacy_recovery(state):
+        action = state["actions"][neutral["key"]]
+        action.pop("receipt_recovery_revision")
+        action["receipt_recovery_attempted"] = False
+
+    store._mutate(enable_legacy_recovery)
+    original_reservation = store.action(neutral["key"])
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert result["repair_requested"]
+    assert api.task_posts == 3
+    assert StateStore(store.path).action(neutral["key"]) == original_reservation
 
 
 @pytest.mark.parametrize(

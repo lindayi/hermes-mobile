@@ -1610,7 +1610,9 @@ def _owner_abandonment_matches_action(record, action):
         and action.get("key") == record["action_key"]
         and action.get("issue") == record["issue"]
         and action.get("kind") == "fix"
-        and action.get("task_type") in {None, "neutral"}
+        and action.get("task_type") in {
+            None, "source", "review-followup", "neutral",
+        }
         and action.get("status") == "uncertain"
         and action.get("task_id") == record["task_id"]
         and action.get("task_created_at") == record["task_created_at"]
@@ -2030,7 +2032,8 @@ def _owner_abandonment_inventory_valid(tasks, action, snapshot, record):
     )
 
 
-def _owner_abandonment_task_valid(task, action, pull, record, *, now):
+def _owner_abandonment_task_valid(
+        task, action, pull, record, *, now, continued_head=False):
     head = pull.get("head") if isinstance(pull, dict) else None
     base = pull.get("base") if isinstance(pull, dict) else None
     if (
@@ -2040,7 +2043,10 @@ def _owner_abandonment_task_valid(task, action, pull, record, *, now):
             or record.get("issue") != pull.get("number")
             or not isinstance(head, dict)
             or not isinstance(base, dict)
-            or record.get("head_sha") != head.get("sha")
+            or (
+                record.get("head_sha") != head.get("sha")
+                and not continued_head
+            )
             or record.get("base_sha") != base.get("sha")
             or pull.get("draft") is not False
             or head.get("ref") != action.get("head_ref")
@@ -2993,10 +2999,10 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     authorized = {initial}
     if _is_sha(enrollment.get("owner_authorized_head")):
         authorized.add(enrollment["owner_authorized_head"])
-    for recovery in enrollment.get("owner_abandonments", []):
-        action = actions.get(recovery.get("action_key"))
-        if _owner_abandonment_matches_action(recovery, action):
-            authorized.add(recovery["head_sha"])
+    continuation_heads = {
+        recovery["head_sha"]
+        for _, recovery in _valid_owner_abandonment_claims(enrollment, actions)
+    }
     blocked = set()
     candidates = [
         action for action in [*enrollment.get("receipt_proofs", []), *actions.values()]
@@ -3006,7 +3012,7 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     while True:
         changed = False
         for action in candidates:
-            if action.get("receipt_start_head") not in authorized:
+            if action.get("receipt_start_head") not in authorized | continuation_heads:
                 continue
             result_head = action["receipt_head"]
             if action["receipt_result"] == "ready":
@@ -3017,6 +3023,31 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
                 blocked.add(result_head)
         if not changed:
             return initial, authorized, blocked
+
+
+def _valid_owner_abandonment_claims(enrollment, actions):
+    records = enrollment.get("owner_abandonments", []) if isinstance(
+        enrollment, dict,
+    ) else []
+    if not isinstance(records, list) or not isinstance(actions, dict):
+        return []
+    return [
+        (record["action_key"], record)
+        for record in records
+        if isinstance(record, dict)
+        and _owner_abandonment_matches_action(
+            record, actions.get(record.get("action_key")),
+        )
+    ]
+
+
+def _owner_abandonment_continuation(
+        enrollment, actions, head, base_sha, *, action_key=None):
+    return next((
+        record for key, record in _valid_owner_abandonment_claims(enrollment, actions)
+        if key != action_key and record["head_sha"] == head
+        and record["base_sha"] == base_sha
+    ), None)
 
 
 def _owner_abandonment_for_action(enrollment, key, action):
@@ -3899,8 +3930,13 @@ class Coordinator:
             and action.get("recorded_base_sha") == base.get("sha")
             for action in actions.values()
         )
+        has_owner_continuation = _owner_abandonment_continuation(
+            enrollment, actions, sha, base.get("sha"),
+        ) is not None
         historical_base = (
-            not scoped and (has_ready_handoff or has_neutral_claim)
+            not scoped and (
+                has_ready_handoff or has_neutral_claim or has_owner_continuation
+            )
             and self._historical_base_can_reconcile(
                 pull, main_sha, sha, allow_dirty=True,
             )
@@ -4534,7 +4570,14 @@ class Coordinator:
                                 snapshot["comments"],
                                 snapshot["pull"].get("base", {}).get("sha"),
                             )
-                            if action.get("head") not in authorized_heads:
+                            continuation_start = _owner_abandonment_continuation(
+                                snapshot["enrollment"], self.store.actions(),
+                                action.get("head"),
+                                snapshot["pull"].get("base", {}).get("sha"),
+                                action_key=key,
+                            ) is not None
+                            if (action.get("head") not in authorized_heads
+                                    and not continuation_start):
                                 if apply and not receipt_recovery:
                                     self._record_receipt_wait(key, action)
                                 mark_busy()
@@ -5310,6 +5353,10 @@ class Coordinator:
             number, enrollment, self.store.actions(),
             snapshot["comments"], snapshot["pull"].get("base", {}).get("sha"),
         )
+        continuation_only_head = _owner_abandonment_continuation(
+            enrollment, self.store.actions(), head,
+            snapshot["pull"].get("base", {}).get("sha"),
+        ) is not None
         if head in blocked_heads:
             # A proved typed blocker is meaningful evidence, not an unrelated push.
             outcome = self._outcome(
@@ -5367,7 +5414,8 @@ class Coordinator:
         )
 
         if authorized_head is not None and (
-                not _is_sha(authorized_head) or head not in authorized_heads):
+                not _is_sha(authorized_head)
+                or (head not in authorized_heads and not continuation_only_head)):
             return {
                 "issue": number, "head": head, "sensitive": sensitive,
                 "terminal": False, "review_valid": review_ok,
@@ -5506,7 +5554,8 @@ class Coordinator:
             snapshot["scoped"]
             or (snapshot.get("historical_base")
                 and bool(snapshot.get("stale_handoff_keys")
-                         or snapshot.get("retained_ready_handoff")))
+                         or snapshot.get("retained_ready_handoff")
+                         or continuation_only_head))
         )
         mergeability_unknown = _mergeability_unknown(snapshot["pull"])
         review_followup = None
@@ -5671,6 +5720,9 @@ class Coordinator:
             or snapshot.get("retained_ready_handoff") is True
             or bool(copilot_review_handoff_keys)
         )
+        recovered_claim_keys = {
+            key for key, _ in _valid_owner_abandonment_claims(enrollment, actions)
+        }
         source_work_active = (
             _cloud_agent_active(
                 snapshot["workflows"], snapshot["pull"]["head"]["ref"],
@@ -5685,11 +5737,12 @@ class Coordinator:
                     })
             ], snapshot)
             or any(
-                isinstance(action, dict)
-                and action.get("issue") == number
-                and action.get("kind") == "fix"
-                and action.get("status") in {"sending", "uncertain", "sent"}
-                for action in actions.values()
+                    isinstance(action, dict)
+                    and key not in recovered_claim_keys
+                    and action.get("issue") == number
+                    and action.get("kind") == "fix"
+                    and action.get("status") in {"sending", "uncertain", "sent"}
+                    for key, action in actions.items()
             )
         )
         has_current_copilot_review = any(
@@ -5801,7 +5854,9 @@ class Coordinator:
             snapshot["execution_stop_detail"] = _exhaustion_detail(
                 snapshot, "neutral-ceiling", neutral_attempts, NEUTRAL_LIMIT,
             )
-        merge = snapshot["scoped"] and eligible_for_auto_merge(
+        merge = (
+            not continuation_only_head
+            and snapshot["scoped"] and eligible_for_auto_merge(
             snapshot["pull"], current_main_sha=snapshot["main_sha"],
             required_checks=required, check_runs=snapshot["check_runs"],
             statuses=snapshot["statuses"], checks_complete=snapshot["policy_complete"],
@@ -5810,6 +5865,7 @@ class Coordinator:
             conversation_resolution_required=snapshot["conversation_resolution_required"],
             agent_running=(agent_busy or repair is not None or bool(neutral_blocker)
                            or budget_needed),
+            )
         )
         if status and not status_owned:
             merge = False
@@ -5868,6 +5924,7 @@ class Coordinator:
                            or not new_handoff_review_activity
                        )
                        and source_provenance_verified
+                       and not continuation_only_head
                        and not source_work_active) else None
                 ),
                 "status_action": status_action,
@@ -5976,9 +6033,14 @@ class Coordinator:
             for snapshot in scans
         ]
         for recovery in owner_recoveries:
-            next(item for item in plans if item["issue"] == recovery["issue"]).setdefault(
-                "owner_recoveries", [],
-            ).append(recovery)
+            pull_plan = next(
+                item for item in plans if item["issue"] == recovery["issue"]
+            )
+            pull_plan.setdefault("owner_recoveries", []).append(recovery)
+            pull_plan["receipt_recoveries"] = [
+                key for key in pull_plan.get("receipt_recoveries", ())
+                if key != recovery["action_key"]
+            ]
         observations = [
             (snapshot["issue"], snapshot["head"]) for snapshot in scans
             if not snapshot.get("terminal")
@@ -6039,6 +6101,33 @@ class Coordinator:
                 return False
         return pull
 
+    def _owner_abandonment_successor_proven(self, snapshot, record):
+        pull = snapshot.get("pull")
+        head = pull.get("head") if isinstance(pull, dict) else None
+        base = pull.get("base") if isinstance(pull, dict) else None
+        actions = self.store.actions()
+        return any(
+            isinstance(successor, dict)
+            and successor.get("key") != record["action_key"]
+            and successor.get("kind") == "fix"
+            and successor.get("task_type") in {
+                None, "source", "review-followup", "neutral",
+            }
+            and successor.get("task_id") != record["task_id"]
+            and successor.get("status") == "completed"
+            and successor.get("receipt_result") == "ready"
+            and successor.get("receipt_start_head") == record["head_sha"]
+            and successor.get("receipt_head") == (
+                head.get("sha") if isinstance(head, dict) else None
+            )
+            and successor.get("receipt_base") == record["base_sha"]
+            and isinstance(base, dict)
+            and base.get("sha") == record["base_sha"]
+            and _pull_identity(pull, successor)
+            and _valid_receipt_proof(successor, snapshot.get("comments"))
+            for successor in actions.values()
+        )
+
     def _owner_abandonment_task_terminal(self, snapshot, action, record, tasks):
         if not _owner_abandonment_inventory_valid(tasks, action, snapshot, record):
             return False
@@ -6051,6 +6140,9 @@ class Coordinator:
         if not _owner_abandonment_task_valid(
             task, action, snapshot["pull"], record,
             now=datetime.fromtimestamp(self.clock(), timezone.utc),
+            continued_head=self._owner_abandonment_successor_proven(
+                snapshot, record,
+            ),
         ):
             return False
         comments = snapshot.get("comments")
@@ -6084,8 +6176,8 @@ class Coordinator:
             raise CoordinatorError("Owner abandonment command changed before commit")
         current = self._fence_pull(
             record["issue"], record["head_sha"], main_sha,
-            allow_historical_reconciliation=action.get("task_type") == "neutral",
-            allow_historical_dirty=action.get("task_type") == "neutral",
+            allow_historical_reconciliation=True,
+            allow_historical_dirty=True,
             expected_base_sha=record["base_sha"],
         )
         if (not _pull_identity(current, action)
@@ -6110,7 +6202,8 @@ class Coordinator:
                 or _event_consumed(current_state, str(record["command_comment_id"]))):
             raise CoordinatorError("Owner abandonment reservation changed before commit")
 
-    def _authorized_dispatch_head(self, issue, head, base_sha=None, *, receipt_action=None):
+    def _authorized_dispatch_head(self, issue, head, base_sha=None, *,
+                                  receipt_action=None, continuation_action=None):
         enrollment = self.store.snapshot()["enrollments"].get(str(issue))
         if not enrollment or not enrollment.get("active"):
             return False
@@ -6126,7 +6219,24 @@ class Coordinator:
         _, authorized, blocked = _authorized_result_heads(
             issue, enrollment, self.store.actions(), comments, base,
         )
-        return head in authorized and head not in blocked
+        if head in authorized and head not in blocked:
+            return True
+        if (not isinstance(continuation_action, dict)
+                or continuation_action.get("issue") != issue
+                or continuation_action.get("kind") != "fix"
+                or continuation_action.get("task_type") not in {
+                    None, "source", "review-followup", "neutral",
+                }
+                or continuation_action.get("head") != head):
+            return False
+        return any(
+            key != continuation_action.get("key")
+            and record["head_sha"] == head
+            and record["base_sha"] == base
+            for key, record in _valid_owner_abandonment_claims(
+                enrollment, self.store.actions(),
+            )
+        )
 
     def _request_copilot_review(self, action):
         """Reserve one genuine request per head; uncertain writes are never replayed."""
@@ -6192,12 +6302,31 @@ class Coordinator:
         report_correction = action.get("task_type") == "report-correction"
         if not _is_sha(action.get("main_sha")):
             return "superseded"
+        enrollment = self.store.snapshot()["enrollments"].get(
+            str(action.get("issue")), {},
+        )
+        continuation_record = next((
+            record for key, record in _valid_owner_abandonment_claims(
+                enrollment, self.store.actions(),
+            )
+            if key != action.get("key")
+            and record["head_sha"] == action.get("head")
+            and action.get("kind") == "fix"
+            and action.get("task_type") in {
+                None, "source", "review-followup", "neutral",
+            }
+        ), None)
         current = self._fence_pull(
             action["issue"], action["head"], action["main_sha"],
-            allow_historical_reconciliation=neutral or report_correction,
+            allow_historical_reconciliation=(
+                neutral or report_correction or continuation_record is not None
+            ),
             allow_historical_dirty=neutral,
             expected_base_sha=(
-                action.get("recorded_base_sha") if neutral else None
+                action.get("recorded_base_sha") if neutral else (
+                    continuation_record.get("base_sha")
+                    if continuation_record is not None else None
+                )
             ),
         )
         if not current:
@@ -6238,6 +6367,7 @@ class Coordinator:
         if (not self._authorized_dispatch_head(
                     action["issue"], action["head"],
                     current.get("base", {}).get("sha"),
+                    continuation_action=action,
                 )
                 or (self.store.snapshot()["enrollments"].get(
                     str(action["issue"]), {},
@@ -6337,6 +6467,7 @@ class Coordinator:
         if not self._authorized_dispatch_head(
                 action["issue"], action["head"],
                 current.get("base", {}).get("sha"),
+                continuation_action=action,
         ):
             return "superseded"
         if _mergeability_unknown(current):
@@ -6791,6 +6922,15 @@ class Coordinator:
                 )
                 snapshot["enrollment"] = self.store.snapshot()["enrollments"].get(
                     str(snapshot["issue"]), {},
+                )
+                snapshot["historical_base"] = (
+                    not snapshot.get("scoped")
+                    and recovery["record"]["base_sha"]
+                        == current.get("base", {}).get("sha")
+                    and self._historical_base_can_reconcile(
+                        current, plan["main_sha"], snapshot["head"],
+                        allow_dirty=True,
+                    )
                 )
                 busy_details = {}
                 busy = self._reconcile_actions(
