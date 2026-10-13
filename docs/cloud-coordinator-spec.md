@@ -456,8 +456,11 @@ then dispatch at most one neutral task with its original causal binding. It must
 not repost or infer missing binding data. A changed scope, altered/deleted/
 ambiguous anchor or incomplete remote read cannot reuse the old binding. Source
 and neutral attempt counts, claims, receipts and uncertainty history remain
-unchanged by retirement and re-enrollment; ordinary active main churn still
-compacts obsolete anchors under the existing lifetime bound.
+unchanged by retirement and re-enrollment. Active main churn retains complete
+sent neutral receipt-anchor bindings on the current PR head within the same
+lifetime reservation bound; a main change does not make those bindings eligible
+for compaction. Obsolete unclaimed review-correction anchors retain their separate
+existing compaction behavior.
 
 Publish exactly one receipt-only PR reply. Its payload contains only the canonical
 v2 header and seven bound fields, with no decision, report, URL, prose, or extra
