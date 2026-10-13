@@ -281,15 +281,26 @@ its admission, so an operator change is ordered against new work. A request
 already admitted before disable may finish. Existing run retries, authenticated
 reads, metadata, and normal cleanup remain available while disabled.
 
-Use the private `HERMES_MOBILE_CONFIG` file path for the supported operator
-commands. Run them as the owner of the private config and state directory:
+Run the supported operator commands as the owner of the private config and state
+directory. The owner shell does not inherit the service environment. Bind the
+active release source, application virtualenv, and live config explicitly before
+any status or mutation command. These paths match `deploy/hermes-mobile.service`
+and the `deploy/self_deploy.py` working-directory drop-in. Do not run from a
+checkout or use the shell's default Python:
 
 ```sh
-python3 -B -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
-python3 -B -m backend.manage photo-disable --config "$HERMES_MOBILE_CONFIG" --confirm
-python3 -B -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
-python3 -B -m backend.manage photo-enable --config "$HERMES_MOBILE_CONFIG" --confirm
-python3 -B -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
+(
+set -eu
+cd /home/lindayi/.local/share/hermes-mobile-deploy/current
+export HERMES_MOBILE_CONFIG=/home/lindayi/.local/share/hermes-mobile-live/config.json
+unset PYTHONPATH PYTHONHOME
+PYTHON=/home/lindayi/projects/hermes-mobile/.venv/bin/python
+"$PYTHON" -B -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
+"$PYTHON" -B -m backend.manage photo-disable --config "$HERMES_MOBILE_CONFIG" --confirm
+"$PYTHON" -B -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
+"$PYTHON" -B -m backend.manage photo-enable --config "$HERMES_MOBILE_CONFIG" --confirm
+"$PYTHON" -B -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
+)
 ```
 
 Status is read-only. Its `photos_enabled`, `persisted`, and `live` values come

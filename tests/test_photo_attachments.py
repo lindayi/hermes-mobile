@@ -2068,6 +2068,12 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
             'session_id': 'wa-1', 'input': 'Text still works',
             'idempotency_key': 'rollback-text-only'})
         assert text_run.status_code == 200, text_run.text
+        for _ in range(100):
+            completed_text = client.get(BASE + '/runs/' + text_run.json()['id']).json()
+            if completed_text['status'] == 'completed':
+                break
+            time.sleep(.01)
+        assert completed_text['status'] == 'completed'
         assert len(native_requests) == 2
         assert 'mobile_attachment_ids' not in native_requests[-1]
         assert client.get(BASE + f'/sessions/wa-1/attachments/{first_id}').status_code == 200
@@ -2104,6 +2110,53 @@ def test_photo_rollback_gate_preserves_text_retries_reads_and_cleanup(tmp_path):
             BASE + '/sessions/wa-1/attachments', content=png_fixture(4),
             headers={'Idempotency-Key': 'rollback-restart-enabled'})
         assert restored_upload.status_code == 201, restored_upload.text
+
+
+def test_photo_disable_waits_for_inflight_upload_admission_and_preserves_its_retry(
+        tmp_path, monkeypatch):
+    with photo_client(tmp_path) as (app, client):
+        policy = app.state.photo_policy
+        checked, continue_admission, disable_started = (
+            threading.Event(), threading.Event(), threading.Event())
+        require_enabled, connect = policy.require_enabled, policy.connect
+
+        def pause_admission(db):
+            require_enabled(db)
+            checked.set()
+            assert continue_admission.wait(5)
+
+        def traced_connect(**kwargs):
+            db = connect(**kwargs)
+            db.set_trace_callback(
+                lambda sql: disable_started.set() if sql == 'BEGIN IMMEDIATE' else None)
+            return db
+
+        monkeypatch.setattr(policy, 'require_enabled', pause_admission)
+        monkeypatch.setattr(policy, 'connect', traced_connect)
+        path = BASE + '/sessions/wa-1/attachments'
+        headers = {'Idempotency-Key': 'policy-upload-race'}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            admission = pool.submit(
+                client.post, path, content=png_fixture(), headers=headers)
+            try:
+                assert checked.wait(2)
+                mutation = pool.submit(policy.set_enabled, False)
+                assert disable_started.wait(2)
+                assert not wait((mutation,), timeout=.1)[0]
+            finally:
+                continue_admission.set()
+            admitted = admission.result(timeout=5)
+            assert mutation.result(timeout=5) is False
+
+        assert admitted.status_code == 201, admitted.text
+        assert policy.enabled() is False
+        replay = client.post(path, content=png_fixture(), headers=headers)
+        assert replay.status_code == 201, replay.text
+        assert replay.json()['id'] == admitted.json()['id']
+        blocked = client.post(path, content=png_fixture(1),
+                              headers={'Idempotency-Key': 'policy-upload-after-disable'})
+        assert blocked.status_code == 503
+        assert 'disabled' in blocked.json()['detail']
 
 
 def test_photo_disable_waits_for_inflight_run_admission_and_preserves_its_retry(
