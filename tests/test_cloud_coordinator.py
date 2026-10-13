@@ -1249,6 +1249,73 @@ def test_current_copilot_rejection_advances_progress_but_cannot_merge(monkeypatc
     )
 
 
+def test_commented_copilot_findings_are_negative_progress_not_review_approval():
+    review = _progress_review(
+        HEAD, 64002, "Finding remains.", "2026-10-01T12:10:00Z",
+    )
+    current_progress = cloud_coordinator._current_copilot_rejection_progress
+    assert current_progress(
+        [review], HEAD, pull_author_id=OWNER, reviews_complete=True,
+    )
+    assert not cloud_coordinator.independent_review_valid(
+        HEAD, [review], [], pull_author_id=OWNER,
+        threads_complete=True, reviews_complete=True,
+    )
+
+    empty_html = (
+        "<h2>Copilot review overview</h2>"
+        "<h3>🟢 Looks good</h3>"
+        "<p>No findings were found in the changes.</p>"
+        "<p><strong>Findings:</strong> None</p>"
+    )
+    empty_review = review | {
+        "body": "<!-- ccr-overview-v2 -->\n" + empty_html,
+        "body_html": empty_html,
+    }
+    assert cloud_coordinator.review_body_disposition(
+        [empty_review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )["findings"] == []
+    assert not current_progress(
+        [empty_review], HEAD, pull_author_id=OWNER, reviews_complete=True,
+    )
+    assert not current_progress(
+        [review], HEAD, pull_author_id=COPILOT_REVIEWER, reviews_complete=True,
+    )
+    assert not current_progress(
+        [review | {"commit_id": RESULT_HEAD}], HEAD,
+        pull_author_id=OWNER, reviews_complete=True,
+    )
+    assert not current_progress(
+        [review | {"dismissed": True}], HEAD,
+        pull_author_id=OWNER, reviews_complete=True,
+    )
+    assert not current_progress(
+        [review | {"state": "PENDING"}], HEAD,
+        pull_author_id=OWNER, reviews_complete=True,
+    )
+    assert not current_progress(
+        [review | {"body_html": "<details>ambiguous</details>"}], HEAD,
+        pull_author_id=OWNER, reviews_complete=True,
+    )
+    ambiguous_html = (
+        "<details><summary>Unknown inventory</summary>"
+        "<p>Uncertain.</p></details>"
+    )
+    ambiguous_review = review | {
+        "body": "<!-- ccr-overview-v2 -->\n" + ambiguous_html,
+        "body_html": ambiguous_html,
+    }
+    assert cloud_coordinator.review_body_disposition(
+        [ambiguous_review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )["ambiguous"]
+    assert not current_progress(
+        [ambiguous_review], HEAD, pull_author_id=OWNER, reviews_complete=True,
+    )
+    assert not current_progress(
+        [review], HEAD, pull_author_id=OWNER, reviews_complete=False,
+    )
+
+
 def test_legacy_neutral_recovery_splits_shared_counter_atomically(tmp_path):
     store = StateStore(tmp_path / "state.json")
     store.enroll(enrolled_record())
@@ -3634,6 +3701,122 @@ def test_rejecting_review_progress_uses_non_review_checks_in_the_planner(
         assert api.fix_attempts == 2
         if non_review_status == "failure":
             assert progress["resolved_fingerprints"] == []
+
+
+@pytest.mark.parametrize("advance_head", [False, True])
+@pytest.mark.parametrize("hold", ["checks", "threads"])
+def test_commented_findings_evaluate_completed_receipt_and_resume_once(
+        tmp_path, advance_head, hold):
+    api = ProgressApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    finding = "Finding A remains."
+    api.progress_review = _progress_review(
+        HEAD, 63002, finding, "2026-10-01T12:10:00Z",
+    )
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    initial = Coordinator(
+        api, store, clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    assert initial["repair_requested"] is True
+    source = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    source_fingerprint = cloud_coordinator._repair_fingerprint(
+        "finding", f"Synthetic finding {finding}",
+    )
+    assert source_fingerprint in source["repair_fingerprints"]
+
+    result_head = RESULT_HEAD if advance_head else HEAD
+    api.head_sha = api.pull["head"]["sha"] = result_head
+    api.complete_task(source["task_id"], source, head_sha=result_head)
+    api.unresolved = True
+    if hold == "checks":
+        api.pending_required = True
+    else:
+        original_graphql = api.graphql
+
+        def incomplete_threads(query, variables):
+            result = original_graphql(query, variables)
+            if "reviewThreads" in query:
+                page = result["data"]["repository"]["pullRequest"]["reviewThreads"]
+                page["pageInfo"] = {
+                    "hasNextPage": True, "endCursor": "synthetic-next-page",
+                }
+            return result
+
+        api.graphql = incomplete_threads
+    api.review_state = "COMMENTED"
+    api.review_sha = result_head
+    api.review_submitted_at = "2026-10-01T12:11:00Z"
+    api.progress_review = _progress_review(
+        result_head, 63003, finding, "2026-10-01T12:11:00Z",
+    )
+
+    waiting = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    waiting_state = StateStore(path).snapshot()["enrollments"]["16"]
+    source_proof = next(
+        proof for proof in waiting_state["receipt_proofs"]
+        if proof["task_id"] == source["task_id"]
+    )
+    receipt_fields = (
+        "task_id", "dispatch_nonce", "receipt_result", "receipt_comment_id",
+        "receipt_body", "receipt_head", "receipt_base", "attempt",
+    )
+    immutable_receipt = {field: source_proof[field] for field in receipt_fields}
+    assert source_proof["receipt_result"] == "ready"
+    assert source_proof["receipt_head"] == result_head
+    assert waiting["review_valid"] is False
+    assert waiting["required_checks_green"] is (hold == "threads")
+    assert waiting["auto_merge_eligible"] is False
+    assert waiting_state["attempts"] == 1
+    assert waiting_state["repair_progress"]["evaluated_task_ids"] == []
+    assert waiting["repair_requested"] is False
+
+    if advance_head:
+        StateStore(path).retire(16, result_head, BASE)
+        assert StateStore(path).action(source["key"]) is None
+    else:
+        assert StateStore(path).action(source["key"])["status"] == "completed"
+    assert next(
+        proof for proof in StateStore(path).snapshot()["enrollments"]["16"]["receipt_proofs"]
+        if proof["task_id"] == source["task_id"]
+    ) == source_proof
+
+    if hold == "checks":
+        api.pending_required = False
+    else:
+        api.graphql = original_graphql
+    for _ in range(2):
+        summary = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+        assert enrollment["attempts"] == 2
+        assert enrollment["repair_progress"]["evaluated_task_ids"] == [
+            source["task_id"],
+        ]
+        assert enrollment["repair_progress"]["consecutive_no_progress"] == 1
+        assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+        assert summary["review_valid"] is False
+        assert summary["required_checks_green"] is True
+        assert summary["auto_merge_eligible"] is False
+
+    followup = next(
+        action for action in StateStore(path).actions().values()
+        if action["kind"] == "fix" and action["attempt"] == 2
+    )
+    assert followup["status"] == "sent"
+    assert finding in followup["body"]
+    assert source_fingerprint in followup["repair_fingerprints"]
+    assert api.fix_attempts == 2
+    persisted_receipt = next(
+        proof for proof in StateStore(path).snapshot()["enrollments"]["16"]["receipt_proofs"]
+        if proof["task_id"] == source["task_id"]
+    )
+    assert {field: persisted_receipt[field] for field in receipt_fields} == immutable_receipt
 
 
 @pytest.mark.parametrize("producer", ["source", "review-followup", "neutral"])

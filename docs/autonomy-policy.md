@@ -531,6 +531,16 @@ These pins identify candidate bytes only. Both files retain the
 `coordinator-review-contract` blocker; refreshing pins does not satisfy independent
 review, clear the source-contract hold, or authorize operational activation.
 
+Issue #106 updates only the current coordinator candidate pin for bounded evaluation
+of complete exact-head COMMENTED findings. The body must provide a complete,
+unambiguous actionable inventory; this evidence does not grant review approval,
+merge authority, or deployment authority. The independent fixture preserves the
+historical issue #100 pin, and the source-contract blocker remains active:
+
+| Issue #106 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `ab17d1c0e437e7d228849aeccdd5018d069a24e35fc9794546d4c5ca463eedd6` |
+
 Before the Issue #50 overlay, this assembly integrated final PR40 main
 `5316f7c75dced1bffafdb545cdd7677e98e855a6`, preserving its parser and previously
 merged retention behavior. The Issue #50 transport adjustment is separately pinned

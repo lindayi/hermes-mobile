@@ -2108,8 +2108,9 @@ def _current_copilot_rejection_progress(reviews, head_sha, *, pull_author_id,
             or pull_author_id == COPILOT_REVIEWER_ID):
         return False
     latest = latest_reviews(reviews, COPILOT_REVIEWER_ID)
+    review_state = latest[0].get("state") if latest and len(latest) == 1 else None
     if (not latest or len(latest) != 1
-            or latest[0].get("state") != "CHANGES_REQUESTED"
+            or review_state not in {"CHANGES_REQUESTED", "COMMENTED"}
             or latest[0].get("commit_id") != head_sha
             or latest[0].get("dismissed") is True
             or latest[0].get("dismissed_at") not in (None, "")):
@@ -2120,6 +2121,10 @@ def _current_copilot_rejection_progress(reviews, head_sha, *, pull_author_id,
     return (
         disposition["inventory_complete"] is True
         and disposition["ambiguous"] is False
+        and (
+            review_state == "CHANGES_REQUESTED"
+            or bool(disposition["findings"])
+        )
     )
 
 
