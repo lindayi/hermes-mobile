@@ -5489,7 +5489,7 @@ def test_a_b_a_finding_cycle_does_not_earn_progress_credit(tmp_path):
     assert "budget" in result["reasons"]
 
 
-def test_a_b_a_c_b_comments_cannot_clear_prior_targets(tmp_path):
+def test_a_b_a_c_comments_cannot_clear_prior_targets(tmp_path):
     api = ProgressApi(unresolved=False)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     api.progress_review = _progress_review(

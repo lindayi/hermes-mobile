@@ -2110,7 +2110,7 @@ def _current_copilot_rejection_progress(reviews, head_sha, *, pull_author_id,
     latest = latest_reviews(reviews, COPILOT_REVIEWER_ID)
     review_state = latest[0].get("state") if latest and len(latest) == 1 else None
     if (not latest or len(latest) != 1
-            or review_state not in {"CHANGES_REQUESTED", "COMMENTED"}
+            or review_state not in ("CHANGES_REQUESTED", "COMMENTED")
             or latest[0].get("commit_id") != head_sha
             or latest[0].get("dismissed") is True
             or latest[0].get("dismissed_at") not in (None, "")):

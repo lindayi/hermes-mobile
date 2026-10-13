@@ -539,7 +539,7 @@ historical issue #100 pin, and the source-contract blocker remains active:
 
 | Issue #106 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `6c249bc710cea02b14dd649321835fcc3e363e8fa3a26dc7d666af414b9c088e` |
+| `deploy/cloud_coordinator.py` | `c054860bbb9834343148b7dc295ff17cf17a93a9969f918bcc79895b348f0e0f` |
 
 Before the Issue #50 overlay, this assembly integrated final PR40 main
 `5316f7c75dced1bffafdb545cdd7677e98e855a6`, preserving its parser and previously
