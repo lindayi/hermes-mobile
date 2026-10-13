@@ -108,6 +108,7 @@ FIX_MARKER_PREFIX = "hermes-coordinator-fix:"
 OUTBOX_MARKER_PREFIX = "hermes-coordinator-outcome:"
 REVIEW_ANCHOR_PREFIX = "Hermes-Review-Anchor: "
 REVIEW_ANCHOR_MARKER_PREFIX = "hermes-coordinator-review-anchor:"
+NEUTRAL_RECEIPT_ANCHOR_MARKER_PREFIX = "hermes-coordinator-neutral-receipt:"
 LIFECYCLE_FILE_NAME = "workflow-events.json"
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_EVENTS = 4000
@@ -908,6 +909,44 @@ def neutral_reconciliation_request(snapshot, attempts):
         "issue": snapshot["issue"], "kind": "fix", "task_type": "neutral",
         "head_ref": branch, "main_sha": main_sha,
         "recorded_base_sha": base["sha"],
+    }
+
+
+def _neutral_receipt_anchor_request(action, nonce):
+    if (
+            not isinstance(action, dict)
+            or action.get("task_type") != "neutral"
+            or not isinstance(action.get("key"), str)
+            or type(action.get("issue")) is not int
+            or type(action.get("attempt")) is not int
+            or not _is_sha(action.get("head"))
+            or not _is_sha(action.get("main_sha"))
+            or not _is_sha(action.get("recorded_base_sha"))
+            or not isinstance(nonce, str)
+            or not 1 <= len(nonce) <= 128):
+        return None
+    binding = (
+        f"neutral-receipt-anchor:v1:{action['key']}:{action['issue']}:"
+        f"{action['head']}:{action['main_sha']}:{action['recorded_base_sha']}:"
+        f"{action['attempt']}:{nonce}"
+    )
+    marker = (
+        f"{NEUTRAL_RECEIPT_ANCHOR_MARKER_PREFIX}"
+        f"{hashlib.sha256(binding.encode('utf-8')).hexdigest()[:20]}"
+    )
+    return {
+        "kind": "neutral-receipt-anchor",
+        "key": f"neutral-receipt-anchor:{action['key']}",
+        "task_key": action["key"],
+        "issue": action["issue"],
+        "head": action["head"],
+        "main_sha": action["main_sha"],
+        "recorded_base_sha": action["recorded_base_sha"],
+        "head_ref": action.get("head_ref"),
+        "attempt": action["attempt"],
+        "nonce": nonce,
+        "marker": marker,
+        "body": marker,
     }
 
 
@@ -3083,16 +3122,29 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
                     start_head=record["head"], base_sha=record["receipt_base"],
                 )
             )
+            anchored_neutral_instruction = (
+                receipt_instruction(
+                    record["dispatch_nonce"], pull_number=record["issue"],
+                    start_head=record["head"], base_sha=record["receipt_base"],
+                    neutral=True,
+                    anchor_comment_id=record.get("receipt_anchor_comment_id"),
+                    anchor_body=record.get("receipt_anchor_body"),
+                )
+                if ("receipt_anchor_comment_id" in record
+                    or "receipt_anchor_body" in record) else None
+            )
+            reconstructed_instructions = [
+                neutral_instruction, historical_neutral_instruction,
+                previous_release_neutral_instruction,
+            ]
+            if anchored_neutral_instruction is not None:
+                reconstructed_instructions.append(anchored_neutral_instruction)
             if not (
                     expected_instruction in session["prompt"]
                     or (
                         is_neutral
                         and any(session["prompt"].endswith(f"\n\n{instruction}")
-                                for instruction in (
-                                    neutral_instruction,
-                                    historical_neutral_instruction,
-                                    previous_release_neutral_instruction,
-                                ))
+                                for instruction in reconstructed_instructions)
                     )
             ):
                 return None
@@ -6571,6 +6623,179 @@ class Coordinator:
         self.store.update_action(key, "sent")
         return "sent"
 
+    @staticmethod
+    def _neutral_anchor_comment_matches(comment, entry, *, require_issue_url=False):
+        if (
+                not isinstance(comment, dict)
+                or type(comment.get("id")) is not int
+                or not 0 < comment["id"] <= 2**63 - 1
+                or not _github_identity(comment.get("user"), OWNER_ID)
+                or comment.get("body") != entry.get("body")
+                or not _valid_timestamp(comment.get("created_at"))
+                or comment.get("updated_at") != comment.get("created_at")
+                or not _valid_timestamp(entry.get("created_at"))
+                or _time(comment["created_at"]) < _time(entry["created_at"])
+        ):
+            return False
+        return (
+            not require_issue_url
+            or comment.get("issue_url")
+                == f"https://api.github.com/repos/{REPOSITORY}/issues/{entry['issue']}"
+        )
+
+    def _neutral_writer_free(self, action):
+        current = self._fence_pull(
+            action["issue"], action["head"], action["main_sha"],
+            allow_historical_reconciliation=True,
+            allow_historical_dirty=True,
+            expected_base_sha=action.get("recorded_base_sha"),
+        )
+        if (not _pull_identity(current, action)
+                or current.get("head", {}).get("ref") != action.get("head_ref")
+                or not self._authorized_dispatch_head(
+                    action["issue"], action["head"],
+                    current.get("base", {}).get("sha"),
+                    continuation_action=action,
+                )
+                or not _reconciliation_reasons(current)):
+            return False
+        try:
+            tasks = _rest_list(
+                self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+                collection="tasks",
+            )
+            workflows, _ = _workflow_runs(
+                self.api, action["head_ref"], action["issue"],
+            )
+        except CoordinatorError:
+            return False
+        return (
+            not _other_task_active(tasks, {"pull": current})
+            and not _cloud_agent_active(workflows, action["head_ref"])
+        )
+
+    def _ensure_neutral_receipt_anchor(self, action):
+        anchor_key = f"neutral-receipt-anchor:{action['key']}"
+        stored = self.store.snapshot()["outbox"].get(anchor_key)
+        if stored is None:
+            nonce = secrets.token_urlsafe(32)
+            reserved = _neutral_receipt_anchor_request(action, nonce)
+            if reserved is None:
+                return None
+            reserved.update(status="pending", created_at=self._now_string())
+            if not self.store.add_outbox(anchor_key, reserved):
+                stored = self.store.snapshot()["outbox"].get(anchor_key)
+            else:
+                stored = self.store.snapshot()["outbox"].get(anchor_key)
+        if not isinstance(stored, dict):
+            return None
+        expected = _neutral_receipt_anchor_request(action, stored.get("nonce"))
+        if (
+                expected is None
+                or any(stored.get(field) != expected.get(field) for field in (
+                    "kind", "key", "task_key", "issue", "head", "main_sha",
+                    "recorded_base_sha", "head_ref", "attempt", "marker", "body",
+                ))
+                or stored.get("status") not in {"pending", "sending", "uncertain", "sent"}
+                or not _valid_timestamp(stored.get("created_at"))
+                or ("receipt_anchor_comment_id" in action
+                    and action.get("receipt_anchor_comment_id")
+                        != stored.get("comment_id"))
+                or ("receipt_anchor_body" in action
+                    and action.get("receipt_anchor_body") != stored.get("body"))
+        ):
+            return None
+
+        def find_matches(comments):
+            return [
+                comment for comment in comments
+                if isinstance(comment, dict)
+                and isinstance(comment.get("body"), str)
+                and expected["marker"] in comment["body"]
+            ]
+
+        try:
+            comments = _all_review_comments(self.api, action["issue"], None)
+        except CoordinatorError:
+            return None
+        matches = find_matches(comments)
+        status = stored["status"]
+        if status == "pending":
+            if matches or not self._neutral_writer_free(action):
+                return None
+            try:
+                comments = _all_review_comments(self.api, action["issue"], None)
+            except CoordinatorError:
+                return None
+            if find_matches(comments):
+                return None
+            if not self.store.claim_outbox_send(anchor_key, stored):
+                return None
+            stored = self.store.snapshot()["outbox"].get(anchor_key)
+            status = "sending"
+            try:
+                response = self.api.write(
+                    f"repos/{REPOSITORY}/issues/{action['issue']}/comments",
+                    {"body": expected["body"]},
+                )
+            except CoordinatorError:
+                self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            if not self._neutral_anchor_comment_matches(
+                    response, stored, require_issue_url=True):
+                self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            comment_id = response["id"]
+            try:
+                comments = _all_review_comments(self.api, action["issue"], None)
+                readback = self.api.get(
+                    f"repos/{REPOSITORY}/issues/comments/{comment_id}",
+                )
+            except CoordinatorError:
+                self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            matches = find_matches(comments)
+            if (len(matches) != 1 or matches[0].get("id") != comment_id
+                    or not self._neutral_anchor_comment_matches(
+                        matches[0], stored)
+                    or not self._neutral_anchor_comment_matches(
+                        readback, stored, require_issue_url=True)):
+                self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            self.store.update_outbox(
+                anchor_key, "sent", comment_id=comment_id,
+                anchor_created_at=readback["created_at"],
+            )
+            stored = self.store.snapshot()["outbox"].get(anchor_key)
+            status = "sent"
+        if status in {"sending", "uncertain", "sent"}:
+            if len(matches) != 1:
+                if status != "sent":
+                    self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            comment = matches[0]
+            comment_id = comment.get("id")
+            if (not self._neutral_anchor_comment_matches(comment, stored)
+                    or (status == "sent" and comment_id != stored.get("comment_id"))):
+                self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            try:
+                readback = self.api.get(
+                    f"repos/{REPOSITORY}/issues/comments/{comment_id}",
+                )
+            except CoordinatorError:
+                return None
+            if not self._neutral_anchor_comment_matches(
+                    readback, stored, require_issue_url=True):
+                self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            self.store.update_outbox(
+                anchor_key, "sent", comment_id=comment_id,
+                anchor_created_at=readback["created_at"],
+            )
+            return self.store.snapshot()["outbox"].get(anchor_key)
+        return None
+
     def _dispatch_task(self, action):
         if action.get("kind") == "review":
             return "retired"
@@ -6755,11 +6980,81 @@ class Coordinator:
         if (_other_task_active(tasks, {"pull": current})
                 or _cloud_agent_active(workflows, branch)):
             return "agent-running"
+        if neutral:
+            anchor = self._ensure_neutral_receipt_anchor(action)
+            if not isinstance(anchor, dict) or anchor.get("status") != "sent":
+                return "receipt-anchor-uncertain"
+            action = action | {
+                "dispatch_nonce": anchor["nonce"],
+                "receipt_anchor_key": anchor["key"],
+                "receipt_anchor_comment_id": anchor["comment_id"],
+                "receipt_anchor_body": anchor["body"],
+            }
+            if not self._neutral_writer_free(action):
+                return "agent-running"
         claimed = self.store.claim_action(key, action)
         if not claimed:
             existing = self.store.action(key)
             return existing.get("status") if existing else "not-claimed"
         claimed_action = self.store.action(key)
+        if neutral:
+            current = self._fence_pull(
+                claimed_action["issue"], claimed_action["head"],
+                claimed_action["main_sha"],
+                allow_historical_reconciliation=True,
+                allow_historical_dirty=True,
+                expected_base_sha=claimed_action.get("recorded_base_sha"),
+            )
+            if (
+                    not _pull_identity(current, claimed_action)
+                    or current.get("head", {}).get("ref") != branch
+                    or not self._authorized_dispatch_head(
+                        claimed_action["issue"], claimed_action["head"],
+                        current.get("base", {}).get("sha"),
+                        continuation_action=claimed_action,
+                    )
+                    or not _reconciliation_reasons(current)):
+                self.store.update_action(key, "superseded")
+                return "superseded"
+            try:
+                final_tasks = _rest_list(
+                    self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+                    collection="tasks",
+                )
+                final_workflows, _ = _workflow_runs(
+                    self.api, branch, claimed_action["issue"],
+                )
+            except CoordinatorError:
+                self.store.update_action(key, "superseded")
+                return "superseded"
+            if (_other_task_active(final_tasks, {"pull": current})
+                    or _cloud_agent_active(final_workflows, branch)):
+                self.store.update_action(key, "superseded")
+                return "agent-running"
+            final_anchor = self._ensure_neutral_receipt_anchor(claimed_action)
+            if (not isinstance(final_anchor, dict)
+                    or final_anchor.get("status") != "sent"
+                    or final_anchor.get("comment_id")
+                        != claimed_action.get("receipt_anchor_comment_id")):
+                self.store.update_action(key, "superseded")
+                return "superseded"
+            expected_instruction = receipt_instruction(
+                claimed_action["dispatch_nonce"],
+                pull_number=claimed_action["issue"],
+                start_head=claimed_action["head"],
+                base_sha=claimed_action["main_sha"],
+                neutral=True,
+                anchor_comment_id=claimed_action["receipt_anchor_comment_id"],
+                anchor_body=claimed_action["receipt_anchor_body"],
+            )
+            if claimed_action.get("body") != (
+                    f"{claimed_action['task_request_body']}\n\n{expected_instruction}"):
+                self.store.update_action(key, "superseded")
+                return "superseded"
+            if not self.store.mark_neutral_task_dispatch_started(key):
+                self.store.update_action(key, "superseded")
+                return "superseded"
+            claimed_action = self.store.action(key)
         try:
             response = self.api.write(
                 f"agents/repos/{REPOSITORY}/tasks",
@@ -7251,7 +7546,8 @@ class Coordinator:
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") not in {"sending", "uncertain"}):
                     continue
-                if self._legacy_review_report_kind(key, entry) == "observation":
+                if (key.startswith("neutral-receipt-anchor:")
+                        or self._legacy_review_report_kind(key, entry) == "observation"):
                     continue
                 found = _matching_owner_comment(
                     comments, entry.get("marker"), expected_body=entry.get("body"),
@@ -7270,7 +7566,10 @@ class Coordinator:
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") != "pending"):
                     continue
-                if (key.startswith(("review-anchor:", "review-correction-anchor:"))
+                if (key.startswith((
+                            "review-anchor:", "review-correction-anchor:",
+                            "neutral-receipt-anchor:",
+                        ))
                         or str(entry.get("marker", "")).startswith(REVIEW_ANCHOR_MARKER_PREFIX)):
                     continue
                 current = self._fence_pull(entry["issue"], entry["head"])
@@ -8229,16 +8528,49 @@ class StateStore:
                             claimed.get("repair_target_map", {}),
                             claimed["repair_fingerprints"]):
                         return False
+                if neutral:
+                    anchor_key = claimed.get("receipt_anchor_key")
+                    anchor = data["outbox"].get(anchor_key)
+                    comment_id = claimed.get("receipt_anchor_comment_id")
+                    anchor_body = claimed.get("receipt_anchor_body")
+                    if (
+                            claimed.get("attempt") != attempts + 1
+                            or not isinstance(anchor_key, str)
+                            or not isinstance(anchor, dict)
+                            or anchor.get("status") != "sent"
+                            or anchor.get("task_key") != key
+                            or anchor.get("issue") != claimed.get("issue")
+                            or anchor.get("head") != claimed.get("head")
+                            or anchor.get("main_sha") != claimed.get("main_sha")
+                            or anchor.get("recorded_base_sha")
+                                != claimed.get("recorded_base_sha")
+                            or anchor.get("attempt") != attempts + 1
+                            or anchor.get("nonce") != claimed.get("dispatch_nonce")
+                            or anchor.get("comment_id") != comment_id
+                            or anchor.get("body") != anchor_body
+                            or type(comment_id) is not int
+                            or not 0 < comment_id <= 2**63 - 1):
+                        return False
                 enrollment[counter] += 1
                 claimed["attempt"] = enrollment[counter]
-                nonce = secrets.token_urlsafe(32)
+                nonce = (
+                    claimed.get("dispatch_nonce")
+                    if neutral else secrets.token_urlsafe(32)
+                )
                 claimed["dispatch_nonce"] = nonce
                 claimed["owner_id"] = OWNER_ID
                 claimed["repository_id"] = REPOSITORY_ID
+                if neutral:
+                    claimed["task_request_body"] = claimed.get("body", "")
+                    claimed["task_dispatch_started"] = False
                 instruction = receipt_instruction(
                     nonce, pull_number=claimed.get("issue"),
                     start_head=claimed.get("head"), base_sha=claimed.get("main_sha"),
                     neutral=neutral,
+                    **({
+                        "anchor_comment_id": claimed["receipt_anchor_comment_id"],
+                        "anchor_body": claimed["receipt_anchor_body"],
+                    } if neutral else {}),
                 )
                 claimed["body"] = f"{claimed.get('body', '')}\n\n{instruction}"
             created_at = time.time()
@@ -8266,6 +8598,49 @@ class StateStore:
                 action["status"] = status
                 action.update(fields)
         self._mutate(update)
+
+    def mark_neutral_task_dispatch_started(self, key):
+        def mark(data):
+            action = data["actions"].get(key)
+            anchor = (
+                data["outbox"].get(action.get("receipt_anchor_key"))
+                if isinstance(action, dict) else None
+            )
+            if (
+                    not isinstance(action, dict)
+                    or action.get("kind") != "fix"
+                    or action.get("task_type") != "neutral"
+                    or action.get("status") != "sending"
+                    or action.get("task_dispatch_started") is not False
+                    or action.get("task_id") is not None
+                    or not isinstance(anchor, dict)
+                    or anchor.get("status") != "sent"
+                    or anchor.get("task_key") != key
+                    or anchor.get("nonce") != action.get("dispatch_nonce")
+                    or anchor.get("comment_id")
+                        != action.get("receipt_anchor_comment_id")
+                    or anchor.get("body") != action.get("receipt_anchor_body")
+            ):
+                return False
+            try:
+                instruction = receipt_instruction(
+                    action["dispatch_nonce"], pull_number=action["issue"],
+                    start_head=action["head"], base_sha=action["main_sha"],
+                    neutral=True,
+                    anchor_comment_id=action["receipt_anchor_comment_id"],
+                    anchor_body=action["receipt_anchor_body"],
+                )
+            except (KeyError, ReceiptError, TypeError, ValueError):
+                return False
+            if (
+                    not isinstance(action.get("task_request_body"), str)
+                    or action.get("body") != (
+                        f"{action['task_request_body']}\n\n{instruction}"
+                    )):
+                return False
+            action["task_dispatch_started"] = True
+            return True
+        return self._mutate(mark)
 
     def claim_receipt_recovery(self, key, expected):
         if self._prepared is not None:
@@ -8427,6 +8802,16 @@ class StateStore:
             if key in data["outbox"]:
                 data["outbox"][key].update({"status": status, **fields})
         self._mutate(update)
+
+    def claim_outbox_send(self, key, expected):
+        def claim(data):
+            entry = data["outbox"].get(key)
+            if not isinstance(entry, dict) or entry != expected \
+                    or entry.get("status") != "pending":
+                return False
+            entry["status"] = "sending"
+            return True
+        return self._mutate(claim)
 
     def status_generation_floor(self, issue):
         tombstone = self._load()["retired"].get(str(issue), {})

@@ -444,6 +444,87 @@ def test_neutral_instruction_uses_one_immutable_publication():
     }
 
 
+def test_anchored_neutral_receipt_accepts_only_the_exact_bounded_carrier():
+    from deploy.task_receipts import _v2_fields
+
+    task, action, pull, comments = v2_binding()
+    anchor_id = 888
+    anchor_body = "hermes-coordinator-neutral-receipt:" + "c" * 20
+    action.update(
+        kind="fix", task_type="neutral", main_sha=BASE,
+        receipt_anchor_comment_id=anchor_id,
+        receipt_anchor_body=anchor_body,
+    )
+    instruction = receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+        neutral=True, anchor_comment_id=anchor_id, anchor_body=anchor_body,
+    )
+    action["body"] = f"Neutral reconciliation request.\n\n{instruction}"
+    task["sessions"][0]["prompt"] = action["body"]
+    comments[0]["body"] = (
+        f"\n> {anchor_body}\n\n"
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={NONCE}\n"
+        "pr=16\n"
+        f"start_head={START_HEAD}\n"
+        f"base={BASE}\n"
+        f"session={SESSION_ID}\n"
+        f"head={RESULT_HEAD}\n"
+        "result=ready"
+    )
+    receipt = validate_task_receipt(task, action, pull, comments, now=NOW)
+
+    assert receipt["comment_id"] != anchor_id
+    assert receipt["body"].startswith(f"\n> {anchor_body}\n\n")
+    assert _v2_fields(receipt["body"]) == {
+        "nonce": NONCE, "pr": "16", "start_head": START_HEAD,
+        "base": BASE, "session": SESSION_ID, "head": RESULT_HEAD,
+        "result": "ready",
+    }
+    assert len(receipt["body"].encode("utf-8")) < 8192
+    assert len(receipt["body"].split("\n")) < 64
+
+
+@pytest.mark.parametrize("mutation", [
+    "wrong-anchor-id", "wrong-anchor-body", "missing-leading-blank",
+    "missing-separator", "extra-quote-line",
+])
+def test_anchored_neutral_receipt_rejects_prompt_or_carrier_mutation(mutation):
+    task, action, pull, comments = v2_binding()
+    anchor_id = 888
+    anchor_body = "hermes-coordinator-neutral-receipt:" + "c" * 20
+    action.update(
+        kind="fix", task_type="neutral", main_sha=BASE,
+        receipt_anchor_comment_id=anchor_id,
+        receipt_anchor_body=anchor_body,
+    )
+    instruction = receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+        neutral=True, anchor_comment_id=anchor_id, anchor_body=anchor_body,
+    )
+    action["body"] = f"Neutral reconciliation request.\n\n{instruction}"
+    task["sessions"][0]["prompt"] = action["body"]
+    if mutation == "wrong-anchor-id":
+        action["receipt_anchor_comment_id"] += 1
+    elif mutation == "wrong-anchor-body":
+        action["receipt_anchor_body"] += "x"
+    else:
+        fields = (
+            "Hermes-Task-Receipt: v2\n"
+            f"nonce={NONCE}\npr=16\nstart_head={START_HEAD}\nbase={BASE}\n"
+            f"session={SESSION_ID}\nhead={RESULT_HEAD}\nresult=ready"
+        )
+        prefix = f"\n> {anchor_body}\n\n"
+        comments[0]["body"] = {
+            "missing-leading-blank": f"> {anchor_body}\n\n{fields}",
+            "missing-separator": f"\n> {anchor_body}\n{fields}",
+            "extra-quote-line": f"{prefix}> copied\n\n{fields}",
+        }[mutation]
+
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, comments, now=NOW)
+
+
 def test_receipt_only_provider_carrier_validates_and_survives_proof_recheck():
     from deploy.cloud_coordinator import _valid_receipt_proof
 

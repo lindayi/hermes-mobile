@@ -73,8 +73,30 @@ def _receipt_instruction(nonce, *, pull_number, start_head, base_sha,
     )
 
 
-def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=False):
-    posting_instruction = (
+def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=False,
+                        anchor_comment_id=None, anchor_body=None):
+    if neutral and (anchor_comment_id is not None or anchor_body is not None):
+        if (type(anchor_comment_id) is not int
+                or not 0 < anchor_comment_id <= 2**63 - 1
+                or not isinstance(anchor_body, str)
+                or not anchor_body.isascii()
+                or not 1 <= len(anchor_body) <= 80):
+            raise ReceiptError("Neutral receipt anchor binding is incomplete")
+        posting_instruction = (
+            "After resolving the task and running applicable focused checks, call "
+            "`engine-tools-reply_to_comment` exactly once with "
+            f"`commentId={anchor_comment_id}`. The exact reserved anchor body is "
+            f"`{anchor_body}`. The only supported carrier is one leading blank line, "
+            f"one quote line `> {anchor_body}`, one blank separator, and the eight "
+            "canonical receipt lines below. Include no decision, report, URL, prose, "
+            "extra field, or trailing content. Before publication, construct that "
+            "complete carrier with the actual bound values and validate it with "
+            "the existing `_v2_fields` parser. If the exact carrier cannot be "
+            "established or exceeds either limit, stop before publishing. Never "
+            "retry, edit the reply, or publish a second comment."
+        )
+    elif neutral:
+        posting_instruction = (
         "After resolving the task and running applicable focused checks, prepare "
         "one receipt-only PR reply. A `ready` result requires the pushed "
         "audit-bearing merge commit. For `conflict_incompatible` or `policy_broken`, "
@@ -90,7 +112,9 @@ def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=Fal
         "with a transport blocker before publishing; never send it and retry, edit "
         "the reply, or publish a second comment. Publish with exactly one "
         "`reply_to_comment` call."
-    ) if neutral else (
+        )
+    else:
+        posting_instruction = (
         "After pushing your result and running focused checks, post exactly one "
         "issue comment on this PR. Put the exact receipt fields below in one "
         "contiguous, unquoted final block, with no extra fields or unquoted prose. "
@@ -98,11 +122,28 @@ def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=Fal
         "separated from the receipt by an ASCII blank line (empty or only spaces/tabs), "
         "or reorder fields; do not quote or fence the receipt itself, and include each "
         "field exactly once."
-    )
-    return _receipt_instruction(
+        )
+    instruction = _receipt_instruction(
         nonce, pull_number=pull_number, start_head=start_head, base_sha=base_sha,
         posting_instruction=posting_instruction, neutral=neutral,
     )
+    if neutral and anchor_comment_id is not None:
+        carrier = (
+            f"\n> {anchor_body}\n\n"
+            f"{V2_RECEIPT_HEADER}\nnonce={nonce}\npr={pull_number}\n"
+            f"start_head={start_head}\nbase={base_sha}\n"
+            f"session={'S' * 128}\nhead={'f' * 40}\n"
+            "result=conflict_incompatible"
+        )
+        fields = _v2_fields(carrier)
+        if (fields != {
+                "nonce": nonce, "pr": str(pull_number),
+                "start_head": start_head, "base": base_sha,
+                "session": "S" * 128, "head": "f" * 40,
+                "result": "conflict_incompatible",
+        }):
+            raise ReceiptError("Neutral receipt carrier is not canonically bound")
+    return instruction
 
 
 def _historical_neutral_receipt_instruction(nonce, *, pull_number,
@@ -739,8 +780,26 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     if len(matches) != 1:
         raise ReceiptError("Task nonce does not identify exactly one returned session")
     session = matches[0]
+    anchored_neutral = (
+        "receipt_anchor_comment_id" in action
+        or "receipt_anchor_body" in action
+    )
+    if anchored_neutral:
+        anchor_instruction = receipt_instruction(
+            nonce, pull_number=action.get("issue"),
+            start_head=action.get("head"), base_sha=action.get("main_sha"),
+            neutral=True,
+            anchor_comment_id=action.get("receipt_anchor_comment_id"),
+            anchor_body=action.get("receipt_anchor_body"),
+        )
+        if (action.get("task_type") != "neutral"
+                or not isinstance(action.get("body"), str)
+                or session.get("prompt") != action.get("body")
+                or not action["body"].endswith(f"\n\n{anchor_instruction}")):
+            raise ReceiptError("Neutral receipt anchor prompt is not exactly bound")
     legacy_neutral = (
-        len(sessions) == 1 and _legacy_neutral_prompt_matches(action, session)
+        not anchored_neutral and len(sessions) == 1
+        and _legacy_neutral_prompt_matches(action, session)
     )
     task_updated = _time(task.get("updated_at"))
     completed_at = _time(session.get("completed_at"))
@@ -765,6 +824,14 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     )
     if receipt is None:
         return None
+    if anchored_neutral:
+        anchor_id = action["receipt_anchor_comment_id"]
+        anchor_body = action["receipt_anchor_body"]
+        if (receipt["comment_id"] == anchor_id
+                or not receipt["body"].startswith(
+                    f"\n> {anchor_body}\n\n{V2_RECEIPT_HEADER}\n",
+                )):
+            raise ReceiptError("Neutral receipt does not quote its reserved anchor")
     # Return chronology only after the exact session and its receipt validate.
     # Task updated_at and coordinator observation time are not completion proof.
     return {

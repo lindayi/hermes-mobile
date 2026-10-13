@@ -1108,9 +1108,28 @@ def test_neutral_reconciliation_uses_only_its_own_bounded_counter(tmp_path):
     store.enroll(enrolled_record())
     for attempt in range(NEUTRAL_LIMIT):
         key = f"neutral:{attempt}"
-        assert store.claim_action(key, {
+        action = {
             "kind": "fix", "task_type": "neutral", "issue": 16,
-        })
+            "key": key, "attempt": attempt + 1, "head": HEAD,
+            "main_sha": BASE, "recorded_base_sha": BASE, "head_ref": "topic",
+            "body": "bounded neutral request",
+        }
+        anchor_key = f"neutral-receipt-anchor:{key}"
+        anchor = cloud_coordinator._neutral_receipt_anchor_request(
+            action, f"nonce-{attempt}",
+        )
+        assert store.add_outbox(anchor_key, anchor)
+        store._mutate(lambda data: data["outbox"][anchor_key].update(
+            status="sent", created_at="2026-10-01T12:00:00Z",
+            comment_id=1000 + attempt,
+        ))
+        comment_id = 1000 + attempt
+        action.update(
+            dispatch_nonce=anchor["nonce"], receipt_anchor_key=anchor_key,
+            receipt_anchor_comment_id=comment_id,
+            receipt_anchor_body=anchor["body"],
+        )
+        assert store.claim_action(key, action)
         store.update_action(key, "completed")
 
     restarted = StateStore(path)
@@ -1653,6 +1672,7 @@ class FakeApi:
         self.owner_reviews = []
         self.graphql_writes = []
         self.next_issue_comment_id = 1000
+        self.reply_calls = []
         self.next_review_id = 65000
         self.pull = valid_pr() | {
             "node_id": "PR_node_16", "auto_merge": None,
@@ -1757,8 +1777,9 @@ class FakeApi:
             comment_id = int(route.rsplit("/", 1)[-1])
             for comment in self.comments:
                 if comment.get("id") == comment_id:
-                    return dict(comment, issue_url=(
-                        "https://api.github.com/repos/lindayi/hermes-mobile/issues/16"
+                    return dict(comment, issue_url=comment.get(
+                        "issue_url",
+                        "https://api.github.com/repos/lindayi/hermes-mobile/issues/16",
                     ))
             raise ApiError("comment not found", status=404)
         if route.startswith("agents/repos/lindayi/hermes-mobile/tasks/"):
@@ -2046,12 +2067,23 @@ class FakeApi:
         if body.get("context") in {"cloud-review", "agent-review"}:
             response.update(state=body["state"], creator={"id": OWNER})
         if route.endswith("/comments"):
+            anchor_comment = body["body"].startswith(
+                "hermes-coordinator-neutral-receipt:",
+            )
+            created_at = (
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                if anchor_comment else "2026-10-01T12:06:00Z"
+            )
             comment = {
                 "id": self.next_issue_comment_id,
                 "user": {"id": OWNER},
                 "body": body["body"],
-                "created_at": "2026-10-01T12:06:00Z",
-                "updated_at": "2026-10-01T12:06:00Z",
+                "created_at": created_at,
+                "updated_at": created_at,
+                "issue_url": (
+                    f"https://api.github.com/repos/lindayi/hermes-mobile/issues/"
+                    f"{route.split('/issues/', 1)[1].split('/', 1)[0]}"
+                ),
             }
             self.next_issue_comment_id += 1
             self.comments.append(comment)
@@ -2114,23 +2146,47 @@ class FakeApi:
         )
         current_head = head_sha or self.head_sha
         nonce = action["dispatch_nonce"]
-        body = (
-            "Hermes-Task-Receipt: v1\n"
-            f"nonce={nonce}\n"
-            f"task={task_id}\n"
-            f"session={session_id}\n"
-            "pr=16\n"
-            f"start_head={action['head']}\n"
-            f"head={current_head}\n"
-            f"base={base_sha}\n"
-            f"result={result}"
-        )
+        if action.get("receipt_anchor_comment_id") is not None:
+            body = (
+                f"\n> {action['receipt_anchor_body']}\n\n"
+                "Hermes-Task-Receipt: v2\n"
+                f"nonce={nonce}\n"
+                "pr=16\n"
+                f"start_head={action['head']}\n"
+                f"base={base_sha}\n"
+                f"session={session_id}\n"
+                f"head={current_head}\n"
+                f"result={result}"
+            )
+            self.reply_to_comment(action["receipt_anchor_comment_id"], body)
+        else:
+            body = (
+                "Hermes-Task-Receipt: v1\n"
+                f"nonce={nonce}\n"
+                f"task={task_id}\n"
+                f"session={session_id}\n"
+                "pr=16\n"
+                f"start_head={action['head']}\n"
+                f"head={current_head}\n"
+                f"base={base_sha}\n"
+                f"result={result}"
+            )
+            self.comments.append({
+                "id": 9000 + self.fix_attempts,
+                "user": {"id": 198982749},
+                "body": body,
+                "created_at": comment_created,
+                "updated_at": comment_created,
+            })
+
+    def reply_to_comment(self, comment_id, body):
+        self.reply_calls.append({"commentId": comment_id, "body": body})
         self.comments.append({
             "id": 9000 + self.fix_attempts,
-            "user": {"id": 198982749},
+            "user": {"id": COPILOT_AGENT},
             "body": body,
-            "created_at": comment_created,
-            "updated_at": comment_created,
+            "created_at": "2026-10-01T12:05:00Z",
+            "updated_at": "2026-10-01T12:05:00Z",
         })
 
     def complete_review_task(self, task_id, action, *, source_action, verdict="pass",
@@ -6179,6 +6235,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         neutral_instruction = receipt_instruction(
             neutral["dispatch_nonce"], pull_number=neutral["issue"],
             start_head=neutral["head"], base_sha=neutral["main_sha"], neutral=True,
+            anchor_comment_id=neutral["receipt_anchor_comment_id"],
+            anchor_body=neutral["receipt_anchor_body"],
         )
         legacy_instruction = receipt_instruction(
             neutral["dispatch_nonce"], pull_number=neutral["issue"],
@@ -6230,7 +6288,25 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
         neutral["body"] = (
             legacy_request + "\n\n" + legacy_instruction
         )
-        StateStore(path).update_action(neutral["key"], "sent", body=neutral["body"])
+        anchor_comment_id = neutral["receipt_anchor_comment_id"]
+        anchor_key = neutral["receipt_anchor_key"]
+
+        def restore_legacy_neutral(state):
+            action = state["actions"][neutral["key"]]
+            action.update(status="sent", body=neutral["body"])
+            for field in (
+                    "receipt_anchor_key", "receipt_anchor_comment_id",
+                    "receipt_anchor_body", "task_dispatch_started",
+            ):
+                action.pop(field, None)
+            state["outbox"].pop(anchor_key, None)
+
+        StateStore(path)._mutate(restore_legacy_neutral)
+        api.comments = [
+            comment for comment in api.comments
+            if comment.get("id") != anchor_comment_id
+        ]
+        neutral = StateStore(path).action(neutral["key"])
     api.complete_task(
         neutral["task_id"], neutral, head_sha=neutral_head, base_sha=CURRENT_MAIN,
     )
@@ -8529,6 +8605,389 @@ def test_conflict_uses_one_neutral_task_with_both_intents_and_no_force_push(tmp_
     assert len([body for route, body in api.writes if route.endswith("/tasks")]) == 1
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
     assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
+
+
+def test_neutral_anchor_receipt_dispatch_and_retained_proof_survive_restart(tmp_path):
+    from deploy.cloud_coordinator import (
+        _authorized_result_heads, _valid_receipt_proof,
+    )
+
+    api = FakeApi()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856540)
+
+    coordinator.run(apply=True)
+    action = next(item for item in store.actions().values()
+                  if item.get("task_type") == "neutral")
+    anchor = store.snapshot()["outbox"][action["receipt_anchor_key"]]
+    task_prompt = next(body["prompt"] for route, body in api.writes
+                       if route.endswith("/tasks"))
+    assert anchor["status"] == "sent"
+    assert anchor["comment_id"] == action["receipt_anchor_comment_id"]
+    assert anchor["body"] == action["receipt_anchor_body"]
+    assert f"commentId={anchor['comment_id']}" in task_prompt
+    assert anchor["body"] in task_prompt
+    assert "one quote line" in task_prompt
+    assert action["task_dispatch_started"] is True
+    assert len([
+        call for call in api.writes
+        if call[0] == "repos/lindayi/hermes-mobile/issues/16/comments"
+    ]) == 1
+
+    api.complete_task(action["task_id"], action, head_sha=HEAD, base_sha=BASE)
+    assert len(api.reply_calls) == 1
+    reply = api.reply_calls[0]
+    assert reply["commentId"] == anchor["comment_id"]
+    assert task_prompt == api.tasks[action["task_id"]]["sessions"][0]["prompt"]
+    assert reply["body"].startswith(f"\n> {anchor['body']}\n\nHermes-Task-Receipt: v2\n")
+
+    coordinator.run(apply=True)
+    completed = store.action(action["key"])
+    assert completed["status"] == "completed"
+    assert completed["receipt_anchor_comment_id"] == anchor["comment_id"]
+    assert completed["receipt_version"] == "v2"
+    assert _valid_receipt_proof(completed, api.comments)
+    retained = store.snapshot()["enrollments"]["16"] | {
+        "authorized_head": HEAD, "receipt_proofs": [completed],
+    }
+    _, retained_heads, retained_blockers = _authorized_result_heads(
+        16, retained, {}, api.comments, BASE,
+    )
+    assert HEAD in retained_heads and HEAD not in retained_blockers
+
+    neutral_actions = [
+        item for item in store.actions().values()
+        if item.get("task_type") == "neutral"
+    ]
+    assert [item["attempt"] for item in neutral_actions] == [1, 2]
+    assert len({
+        item["receipt_anchor_comment_id"] for item in neutral_actions
+    }) == 2
+    second_action = neutral_actions[1]
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.complete_task(
+        second_action["task_id"], second_action, head_sha=HEAD, base_sha=BASE,
+    )
+    coordinator.run(apply=True)
+    completed_actions = [
+        store.action(item["key"]) for item in neutral_actions
+    ]
+    assert all(item["status"] == "completed" for item in completed_actions)
+    assert all(_valid_receipt_proof(item, api.comments) for item in completed_actions)
+    assert [call["commentId"] for call in api.reply_calls] == [
+        item["receipt_anchor_comment_id"] for item in completed_actions
+    ]
+    writes = list(api.writes)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+    assert api.writes == writes
+    assert len(api.reply_calls) == 2
+    assert len([
+        call for call in api.writes
+        if call[0] == "repos/lindayi/hermes-mobile/issues/16/comments"
+    ]) == 2
+    assert len([call for call in api.writes if call[0].endswith("/tasks")]) == 2
+    assert StateStore(path).action(action["key"])["receipt_comment_id"] == completed[
+        "receipt_comment_id"
+    ]
+
+
+def test_lost_neutral_anchor_post_recovers_without_reposting_or_spending_budget(tmp_path):
+    class LostAnchorResponse(FakeApi):
+        lost = False
+
+        def write(self, route, body):
+            response = super().write(route, body)
+            if (route.endswith("/issues/16/comments")
+                    and body["body"].startswith(
+                        "hermes-coordinator-neutral-receipt:",
+                    )
+                    and not self.lost):
+                self.lost = True
+                raise ApiError("anchor response was lost", status=503)
+            return response
+
+    api = LostAnchorResponse()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856540)
+
+    coordinator.run(apply=True)
+    anchor = next(iter(store.snapshot()["outbox"].values()))
+    assert anchor["status"] == "uncertain"
+    anchor_comment_id = next(
+        comment["id"] for comment in api.comments
+        if comment.get("body") == anchor["body"]
+    )
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 0
+    assert api.fix_attempts == 0
+    assert len([
+        call for call in api.writes
+        if call[0] == "repos/lindayi/hermes-mobile/issues/16/comments"
+    ]) == 1
+
+    coordinator.run(apply=True)
+    action = next(item for item in store.actions().values()
+                  if item.get("task_type") == "neutral")
+    assert store.snapshot()["outbox"][action["receipt_anchor_key"]]["status"] == "sent"
+    assert action["receipt_anchor_comment_id"] == anchor_comment_id
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
+    assert api.fix_attempts == 1
+    assert len([
+        call for call in api.writes
+        if call[0] == "repos/lindayi/hermes-mobile/issues/16/comments"
+    ]) == 1
+
+    writes = list(api.writes)
+    coordinator.run(apply=True)
+    assert api.writes == writes
+    assert api.fix_attempts == 1
+
+
+def test_competing_neutral_anchor_sender_cannot_post_twice_or_dispatch_early(tmp_path):
+    class ContendingStore(StateStore):
+        api = None
+        competed = False
+
+        def claim_outbox_send(self, key, expected):
+            if not self.competed:
+                self.competed = True
+                assert super().claim_outbox_send(key, expected)
+                self.api.write(
+                    f"repos/{cloud_coordinator.REPOSITORY}/issues/"
+                    f"{expected['issue']}/comments",
+                    {"body": expected["body"]},
+                )
+                return False
+            return super().claim_outbox_send(key, expected)
+
+    api = FakeApi()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = ContendingStore(tmp_path / "state.json")
+    store.api = api
+    coordinator = Coordinator(api, store, clock=lambda: 1790856540)
+
+    coordinator.run(apply=True)
+
+    anchor_posts = [
+        call for call in api.writes
+        if call[0] == "repos/lindayi/hermes-mobile/issues/16/comments"
+    ]
+    assert len(anchor_posts) == 1
+    anchor = next(iter(store.snapshot()["outbox"].values()))
+    assert anchor["status"] == "sending"
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 0
+    assert api.fix_attempts == 0
+
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856540).run(
+        apply=True,
+    )
+
+    assert len([
+        call for call in api.writes
+        if call[0] == "repos/lindayi/hermes-mobile/issues/16/comments"
+    ]) == 1
+    assert len([call for call in api.writes if call[0].endswith("/tasks")]) == 1
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
+    assert api.fix_attempts == 1
+
+
+@pytest.mark.parametrize("hazard", [
+    "edited", "deleted", "wrong-author", "wrong-body", "wrong-pr",
+])
+def test_invalid_neutral_anchor_readback_never_dispatches_task(tmp_path, hazard):
+    class InvalidAnchorReadback(FakeApi):
+        def write(self, route, body):
+            response = super().write(route, body)
+            if (route.endswith("/issues/16/comments")
+                    and body["body"].startswith(
+                        "hermes-coordinator-neutral-receipt:",
+                    )):
+                comment = self.comments[-1]
+                if hazard == "edited":
+                    comment["updated_at"] = "2026-10-13T16:00:00Z"
+                elif hazard == "deleted":
+                    self.comments.pop()
+                elif hazard == "wrong-author":
+                    comment["user"] = {"id": 123}
+                elif hazard == "wrong-body":
+                    comment["body"] += " mutated"
+                elif hazard == "wrong-pr":
+                    comment["issue_url"] = (
+                        "https://api.github.com/repos/lindayi/hermes-mobile/issues/17"
+                    )
+            return response
+
+    api = InvalidAnchorReadback()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+
+    Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    entry = next(iter(store.snapshot()["outbox"].values()))
+    assert entry["status"] == "uncertain"
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 0
+    assert api.fix_attempts == 0
+    assert not [body for route, body in api.writes if route.endswith("/tasks")]
+
+    writes = list(api.writes)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856540).run(apply=True)
+    assert api.writes == writes
+    assert api.fix_attempts == 0
+
+
+@pytest.mark.parametrize("mutation", ["head", "base", "active-task"])
+def test_post_anchor_scope_or_writer_change_blocks_task_post(tmp_path, mutation):
+    class ChangedAfterAnchor(FakeApi):
+        def write(self, route, body):
+            response = super().write(route, body)
+            if (route.endswith("/issues/16/comments")
+                    and body["body"].startswith(
+                        "hermes-coordinator-neutral-receipt:",
+                    )):
+                if mutation == "head":
+                    self.pull["head"]["sha"] = "c" * 40
+                elif mutation == "base":
+                    self.pull["base"]["sha"] = CURRENT_MAIN
+                else:
+                    self.tasks["external-task"] = {
+                        "id": "external-task", "state": "in_progress",
+                        "artifacts": [
+                            {"provider": "github", "type": "branch",
+                             "data": {"head_ref": "topic", "base_ref": "main"}},
+                            {"provider": "github", "type": "pull",
+                             "data": {"id": 160000016}},
+                        ],
+                    }
+            return response
+
+    api = ChangedAfterAnchor()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+
+    Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 0
+    assert api.fix_attempts == 0
+    assert not [body for route, body in api.writes if route.endswith("/tasks")]
+    assert len([
+        call for call in api.writes
+        if call[0] == "repos/lindayi/hermes-mobile/issues/16/comments"
+    ]) == 1
+
+
+def test_incomplete_anchor_readback_is_uncertain_until_complete_inventory(tmp_path):
+    class IncompleteAnchorReadback(FakeApi):
+        fail_next_comments = False
+
+        def write(self, route, body):
+            response = super().write(route, body)
+            if (route.endswith("/issues/16/comments")
+                    and body["body"].startswith(
+                        "hermes-coordinator-neutral-receipt:",
+                    )):
+                self.fail_next_comments = True
+            return response
+
+        def get_all(self, route, *, collection=None):
+            if (route.startswith(
+                    "repos/lindayi/hermes-mobile/issues/16/comments?per_page=100")
+                    and self.fail_next_comments):
+                self.fail_next_comments = False
+                raise ApiError("comment inventory page failed", status=503)
+            values = super().get_all(route, collection=collection)
+            return values
+
+    api = IncompleteAnchorReadback()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    coordinator = Coordinator(api, store, clock=lambda: 1790856540)
+
+    coordinator.run(apply=True)
+    anchor = next(iter(store.snapshot()["outbox"].values()))
+    assert anchor["status"] == "uncertain"
+    assert api.fix_attempts == 0
+    assert not [body for route, body in api.writes if route.endswith("/tasks")]
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 0
+
+    coordinator.run(apply=True)
+    assert api.fix_attempts == 1
+    assert len([
+        call for call in api.writes
+        if call[0] == "repos/lindayi/hermes-mobile/issues/16/comments"
+    ]) == 1
+
+
+def test_atomic_anchor_reservation_failure_has_no_remote_write(tmp_path, monkeypatch):
+    api = FakeApi()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    add_outbox = store.add_outbox
+
+    def fail_anchor(key, entry):
+        if key.startswith("neutral-receipt-anchor:"):
+            raise CoordinatorError("synthetic atomic reservation failure")
+        return add_outbox(key, entry)
+
+    monkeypatch.setattr(store, "add_outbox", fail_anchor)
+
+    with pytest.raises(CoordinatorError, match="synthetic atomic reservation failure"):
+        Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    assert api.fix_attempts == 0
+    assert not [
+        call for call in api.writes
+        if call[0] == "repos/lindayi/hermes-mobile/issues/16/comments"
+        or call[0].endswith("/tasks")
+    ]
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 0
+
+
+@pytest.mark.parametrize("mutation", ["edit-anchor", "task-prompt", "anchor-id"])
+def test_last_dispatch_fence_rejects_anchor_or_saved_prompt_mutation(tmp_path, mutation):
+    class EditAfterInitialReadback(FakeApi):
+        anchor_reads = 0
+
+        def get(self, route):
+            response = super().get(route)
+            if "/issues/comments/" in route and response.get("body", "").startswith(
+                    "hermes-coordinator-neutral-receipt:"):
+                self.anchor_reads += 1
+                if self.anchor_reads == 1:
+                    next(comment for comment in self.comments
+                         if comment["id"] == response["id"])[
+                             "updated_at"
+                         ] = "2026-10-13T16:00:00Z"
+            return response
+
+    class MutatingStore(StateStore):
+        def claim_action(self, key, action):
+            claimed = super().claim_action(key, action)
+            if claimed and action.get("task_type") == "neutral":
+                if mutation == "task-prompt":
+                    self.update_action(key, "sending", body=(
+                        self.action(key)["body"] + " changed"
+                    ))
+                elif mutation == "anchor-id":
+                    self.update_action(
+                        key, "sending",
+                        receipt_anchor_comment_id=action["receipt_anchor_comment_id"] + 1,
+                    )
+            return claimed
+
+    api = EditAfterInitialReadback() if mutation == "edit-anchor" else FakeApi()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = MutatingStore(tmp_path / "state.json")
+
+    Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    assert api.fix_attempts == 0
+    assert not [body for route, body in api.writes if route.endswith("/tasks")]
+    assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == (
+        0 if mutation == "edit-anchor" else 1
+    )
+    assert bool(store.actions()) is (mutation != "edit-anchor")
 
 
 def test_neutral_and_ordinary_repairs_share_one_task_lock(tmp_path):

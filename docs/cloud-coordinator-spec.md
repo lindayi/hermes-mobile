@@ -420,33 +420,47 @@ how the resolution preserves both branch intents. The pushed result receipt bind
 that audit-bearing merge commit by its exact head SHA. A ready receipt requires
 this merge commit; a truthful `conflict_incompatible` or `policy_broken` receipt
 does not require or claim one. The audit is not a new receipt field or an automatic
-semantic approval. A current-main fence is rechecked before dispatch.
+semantic approval. A current-main fence is rechecked before dispatch. Before a new neutral task is
+claimed, the coordinator durably reserves one short owner-authored receipt anchor
+in the outbox. Its marker binds the exact task key, PR, head, main/base, attempt,
+and nonce. A pending-to-sending compare-and-set is required before the comment
+POST, so a second writer cannot post the same anchor. The returned ID and exact
+body must match; complete comment inventory and direct ID readback must confirm
+the owner, PR, unchanged body, and chronology. An uncertain POST is never
+repeated. Recovery accepts only one exact authenticated match; incomplete
+inventory, edits, deletion, or ambiguity block task dispatch. A final pull,
+writer, anchor, and saved-prompt fence runs before the task POST. The prompt
+binds the explicit comment ID and anchor body. Only after that verified anchor
+does the neutral attempt consume its existing budget.
 
 Publish exactly one receipt-only PR reply. Its payload contains only the canonical
 v2 header and seven bound fields, with no decision, report, URL, prose, or extra
 fields. Before publication, the producer validates the complete supported
-serialized carrier, including any unchanged provider quote, leading blank,
-ASCII separator, and actual bound values, with the existing strict parser. If
-the complete carrier cannot be established or exceeds either existing limit,
-stop with a transport blocker before publishing. Never send and retry, edit the
-reply, or post a second comment. The receipt is completion evidence only; it is
-not CI, review, merge, or deployment approval.
+serialized carrier, including the supported leading blank, one unchanged quote
+line containing the anchor body, blank separator, and actual bound values, with
+the existing strict parser and existing byte/line limits. No other quote or
+carrier shape is accepted for newly anchored tasks. If the complete carrier
+cannot be established or exceeds either existing limit, stop with a transport
+blocker before publishing. Never send and retry, edit the reply, or post a
+second comment. The receipt is completion evidence only; it is not CI, review,
+merge, or deployment approval.
 The prompt directs genuinely incompatible requirements or broken required policy
 to a fixed typed result; these stop further repair for that exact head. Waiting or
 uncertain tasks retain the shared lock. Ordinary technical conflicts are repaired
 within the shared budget; exhaustion or ambiguous execution becomes a meaningful
 owner blocker rather than an unbounded retry.
 
-One bounded compatibility rule covers the already-dispatched legacy neutral
-reservation whose original prompt asked for the conflict decisions in a PR
-comment while requiring a prose-free receipt in that same comment. Only the
-saved neutral reservation and its byte-identical authenticated task-session
-prompt can enable recognition; comment labels or body text cannot opt in. The
-comment must be from the immutable Copilot bot author, unchanged, within the
-ordinary v2 byte and line limits, and contain exactly one final canonical v2
-receipt. Before it, the parser accepts only the observed legacy decision-envelope
-shape: its provider quote is inert and must match the saved starting head. The
-quoted outcome marker may be either complete or exactly provider-truncated as
+Cold compatibility reconstruction recognizes only exact saved neutral prompts
+from known released producers, including the previous two-comment instruction
+and the later combined-comment instructions. Each historical prompt must
+reconstruct byte-for-byte from its saved reservation; no broad suffix or
+comment-based opt-in is allowed. For the already-dispatched legacy reservation
+that asked for conflict decisions in a PR comment, the comment must be from the
+immutable Copilot bot author, unchanged, within the ordinary v2 byte and line
+limits, and contain exactly one final canonical v2 receipt. Before it, the
+parser accepts only the observed legacy decision-envelope shape: its provider
+quote is inert and must match the saved starting head. The quoted outcome marker
+may be either complete or exactly provider-truncated as
 `<20 lowercase hex characters> -...`; neither marker form is authority. It is
 followed by one unquoted reconciliation assertion matching the reserved PR,
 starting head, dispatch base, and receipt result head, the conflict-decision
