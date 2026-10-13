@@ -3559,27 +3559,22 @@ class ProgressApi(FakeApi):
         return result
 
 
-@pytest.mark.parametrize("repairs", [4, 15, REPAIR_LIMIT])
-def test_progressing_source_repairs_continue_to_the_twenty_attempt_ceiling(
-        tmp_path, repairs):
+def test_commented_finding_changes_reach_no_progress_ceiling(tmp_path):
     api = ProgressApi(unresolved=False)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     api.progress_review = _progress_review(
         HEAD, 63002, "The first synthetic blocker remains.", "2026-10-01T12:10:00Z",
     )
     store = StateStore(tmp_path / "state.json")
-    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    initial = Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    assert initial["pull_requests"][0]["repair_requested"]
 
-    first = coordinator.run(apply=True)["pull_requests"][0]
-    assert first["repair_requested"]
-    assert api.fix_attempts == 1, (first, store.actions())
-    for attempt in range(1, repairs):
-        fix_actions = [
-            item for item in store.actions().values() if item["kind"] == "fix"
-        ]
-        assert fix_actions, (first, store.actions(), api.writes)
-        action = max(fix_actions, key=lambda item: item.get("attempt", 0))
-        assert action["status"] == "sent", (action, store.actions(), api.fix_attempts)
+    for attempt in range(1, NO_PROGRESS_LIMIT + 1):
+        action = max(
+            (item for item in StateStore(store.path).actions().values()
+             if item["kind"] == "fix"),
+            key=lambda item: item["attempt"],
+        )
         result_head = f"{attempt + 1:040x}"
         api.head_sha = result_head
         api.pull["head"]["sha"] = result_head
@@ -3593,50 +3588,22 @@ def test_progressing_source_repairs_continue_to_the_twenty_attempt_ceiling(
             f"2026-10-01T12:{10 + attempt}:00Z",
         )
 
-        result = coordinator.run(apply=True)["pull_requests"][0]
-        if attempt < repairs - 1:
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+        assert action["task_id"] in enrollment["repair_progress"]["evaluated_task_ids"]
+        assert enrollment["repair_progress"]["consecutive_no_progress"] == attempt
+        if attempt < NO_PROGRESS_LIMIT:
             assert result["repair_requested"], result["reasons"]
+        else:
+            assert not result["repair_requested"]
+            assert "budget" in result["reasons"]
 
-    assert api.fix_attempts == repairs
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == repairs
-    if repairs < REPAIR_LIMIT:
-        assert result["repair_requested"]
-    else:
-        action = max(
-            (item for item in store.actions().values() if item["kind"] == "fix"),
-            key=lambda item: item["attempt"],
-        )
-        result_head = f"{repairs + 1:040x}"
-        api.head_sha = result_head
-        api.pull["head"]["sha"] = result_head
-        api.complete_task(action["task_id"], action, head_sha=result_head)
-        refresh_owner_review(
-            api, result_head, submitted_at="2026-10-01T12:45:00Z",
-        )
-        api.progress_review = _progress_review(
-            result_head, 63030, "A new synthetic blocker remains.",
-            "2026-10-01T12:46:00Z",
-        )
-
-        result = coordinator.run(apply=True)["pull_requests"][0]
-
-        assert not result["repair_requested"]
-        assert "budget" in result["reasons"]
-        assert api.fix_attempts == REPAIR_LIMIT
-        assert any(
-            event["reason"] == "execution_exhausted"
-            for event in store.snapshot()["lifecycle_events"]
-        )
-        stopped = next(
-            event for event in store.snapshot()["lifecycle_events"]
-            if event["reason"] == "execution_exhausted"
-        )
-        assert stopped["issue_number"] == 16 and stopped["pr_number"] == 16
-        assert stopped["stop_detail"] == {
-            "cause": "source-ceiling", "used": REPAIR_LIMIT, "remaining": 0,
-            "limit": REPAIR_LIMIT, "source_used": REPAIR_LIMIT,
-            "source_ceiling": REPAIR_LIMIT, "stagnation_count": 0,
-        }
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert api.fix_attempts == NO_PROGRESS_LIMIT
+    assert enrollment["attempts"] == NO_PROGRESS_LIMIT
+    assert enrollment["repair_progress"]["resolved_fingerprints"] == []
 
 
 @pytest.mark.parametrize("non_review_status", ["success", "in_progress", "failure"])
@@ -3730,7 +3697,7 @@ def test_commented_findings_evaluate_completed_receipt_and_resume_once(
     result_head = RESULT_HEAD if advance_head else HEAD
     api.head_sha = api.pull["head"]["sha"] = result_head
     api.complete_task(source["task_id"], source, head_sha=result_head)
-    api.unresolved = True
+    api.unresolved = False
     if hold == "checks":
         api.pending_required = True
     else:
@@ -5478,7 +5445,7 @@ def test_failed_and_noop_repairs_cannot_credit_dropped_findings(
     assert api.fix_attempts == 3
 
 
-def test_a_b_a_finding_cycle_never_reearns_progress_credit(tmp_path):
+def test_a_b_a_finding_cycle_does_not_earn_progress_credit(tmp_path):
     api = ProgressApi(unresolved=False)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     api.progress_review = _progress_review(
@@ -5488,7 +5455,7 @@ def test_a_b_a_finding_cycle_never_reearns_progress_credit(tmp_path):
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     observed_streaks = []
     findings = ("Finding B remains.", "Finding A remains.",
-                "Finding B remains.", "Finding B remains.")
+                "Finding B remains.")
 
     for attempt, finding in enumerate(findings, 1):
         action = max(
@@ -5513,16 +5480,16 @@ def test_a_b_a_finding_cycle_never_reearns_progress_credit(tmp_path):
         ).run(apply=True)["pull_requests"][0]
         progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
         observed_streaks.append(progress["consecutive_no_progress"])
-        if attempt < len(findings):
+        if attempt < NO_PROGRESS_LIMIT:
             assert result["repair_requested"]
 
-    assert observed_streaks == [0, 1, 2, NO_PROGRESS_LIMIT]
-    assert api.fix_attempts == 4
+    assert observed_streaks == [1, 2, NO_PROGRESS_LIMIT]
+    assert api.fix_attempts == NO_PROGRESS_LIMIT
     assert not result["repair_requested"]
     assert "budget" in result["reasons"]
 
 
-def test_a_b_a_c_b_retains_every_cleared_target(tmp_path):
+def test_a_b_a_c_b_comments_cannot_clear_prior_targets(tmp_path):
     api = ProgressApi(unresolved=False)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     api.progress_review = _progress_review(
@@ -5531,7 +5498,7 @@ def test_a_b_a_c_b_retains_every_cleared_target(tmp_path):
     path = tmp_path / "state.json"
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     streaks = []
-    for attempt, finding in enumerate(("B", "A", "C", "B"), 1):
+    for attempt, finding in enumerate(("B", "A", "C"), 1):
         source = max(
             (a for a in StateStore(path).actions().values() if a["kind"] == "fix"),
             key=lambda a: a["attempt"],
@@ -5547,9 +5514,9 @@ def test_a_b_a_c_b_retains_every_cleared_target(tmp_path):
         Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
         progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
         streaks.append(progress["consecutive_no_progress"])
-    assert streaks == [0, 1, 2, 3]
-    assert _repair_target("Synthetic finding Finding B remains.") in progress["resolved_fingerprints"]
-    assert api.fix_attempts == 4
+    assert streaks == [1, 2, NO_PROGRESS_LIMIT]
+    assert progress["resolved_fingerprints"] == []
+    assert api.fix_attempts == NO_PROGRESS_LIMIT
 
 
 def _repair_target(text):
@@ -11327,7 +11294,7 @@ def test_crash_after_reservation_cannot_replay_task_post(tmp_path):
     assert store.action(action["key"])["status"] == "uncertain"
 
 
-def test_task_dispatch_is_bounded_to_twenty_after_verified_completion(tmp_path):
+def test_task_dispatch_stops_after_unverified_commented_repairs(tmp_path):
     api = ProgressApi(unresolved=False)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     api.progress_review = _progress_review(
@@ -11335,7 +11302,7 @@ def test_task_dispatch_is_bounded_to_twenty_after_verified_completion(tmp_path):
     )
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
-    for attempt in range(REPAIR_LIMIT):
+    for attempt in range(NO_PROGRESS_LIMIT):
         result = coordinator.run(apply=True)["pull_requests"][0]
         assert result["repair_requested"]
         assert api.fix_attempts == attempt + 1
@@ -11357,8 +11324,11 @@ def test_task_dispatch_is_bounded_to_twenty_after_verified_completion(tmp_path):
         )
 
     result = coordinator.run(apply=True)
-    assert api.fix_attempts == REPAIR_LIMIT
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == REPAIR_LIMIT
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert api.fix_attempts == NO_PROGRESS_LIMIT
+    assert enrollment["attempts"] == NO_PROGRESS_LIMIT
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == NO_PROGRESS_LIMIT
+    assert enrollment["repair_progress"]["resolved_fingerprints"] == []
     assert "budget" in result["pull_requests"][0]["reasons"]
 
 

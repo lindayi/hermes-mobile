@@ -5116,12 +5116,16 @@ class Coordinator:
                 reviews_complete=snapshot["reviews_complete"],
             ) if not review_ok else ([], False)
         )
-        if not negative_review_complete and not review_ok:
-            negative_review_complete = _current_copilot_rejection_progress(
+        current_copilot_negative_progress = (
+            _current_copilot_rejection_progress(
                 snapshot["reviews"], head,
                 pull_author_id=pull_user.get("id") if isinstance(pull_user, dict) else None,
                 reviews_complete=snapshot["reviews_complete"],
             )
+            if not review_ok else False
+        )
+        if not negative_review_complete and not review_ok:
+            negative_review_complete = current_copilot_negative_progress
         if negative_review_complete:
             current_fingerprints = sorted(
                 set(current_fingerprints) | set(negative_review_fingerprints),
@@ -5183,7 +5187,9 @@ class Coordinator:
         )
         progress = _completed_repair_progress(
             snapshot, progress_actions, current_fingerprints, authorized_heads,
-            review_ok=progress_review_ok, checks_ok=progress_checks_ok,
+            review_ok=(
+                progress_review_ok and not current_copilot_negative_progress
+            ), checks_ok=progress_checks_ok,
             current_fingerprints_complete=current_fingerprints_complete,
             negative_review_complete=negative_review_complete,
             checks_terminal=checks_terminal,
