@@ -653,16 +653,50 @@ def _zero_open_metadata(node):
     return " ".join(_text(children[0]).split()) == "0 open findings"
 
 
+def _provider_footer(node):
+    if not isinstance(node, _Element) or node.tag != "p":
+        return False
+    children = [child for child in node.children if not isinstance(child, str) or child.strip()]
+    if (len(children) != 2 or children[0] != "💡 "
+            or not isinstance(children[1], _Element) or children[1].tag != "a"
+            or children[1].href != (
+                "/lindayi/hermes-mobile/new/main?filename=.github/skills/code-review/SKILL.md"
+            )):
+        return False
+    link_children = [
+        child for child in children[1].children
+        if not isinstance(child, str) or child.strip()
+    ]
+    return (
+        len(link_children) == 3
+        and link_children[0] == "Add a "
+        and isinstance(link_children[1], _Element)
+        and link_children[1].tag == "code"
+        and link_children[1].children == ["code-review"]
+        and link_children[2] == " agent skill"
+    )
+
+
 def _summary_content(root, overview, *, exclude=None, exclude_zero_open=False):
     children = []
+    after_separator = footer_seen = tail_ambiguous = False
     for child in root.children:
+        if overview and isinstance(child, _Element) and child.tag == "hr":
+            after_separator = True
+            continue
+        if overview and after_separator:
+            if isinstance(child, str) and not child.strip():
+                continue
+            if not footer_seen and _provider_footer(child):
+                footer_seen = True
+                continue
+            tail_ambiguous = True
+            continue
         if child is exclude:
             continue
         if exclude_zero_open and _zero_open_metadata(child):
             continue
         if overview and isinstance(child, _Element):
-            if child.tag == "hr":
-                break
             if child.tag == "p":
                 child = _without_metadata(child)
             label = " ".join(_text(child, quoted=False).split())
@@ -672,7 +706,7 @@ def _summary_content(root, overview, *, exclude=None, exclude_zero_open=False):
                     ):
                 continue
         children.append(child)
-    return _Element("root", children)
+    return _Element("root", children), tail_ambiguous
 
 
 def _summary_disposition(summary, *, overview, state, context=None):
@@ -895,7 +929,7 @@ def parse_body(body, state, *, body_html=None):
         and len(result["findings"]) == 1
         and result["findings"][0][0] == "previously-missed"
     )
-    summary_root = _summary_content(
+    summary_root, summary_tail_ambiguous = _summary_content(
         parser.root, overview, exclude=provider_summary if attach_provider_summary else None,
         exclude_zero_open=zero_open_count == 1 and not result["ambiguous"],
     )
@@ -927,6 +961,8 @@ def parse_body(body, state, *, body_html=None):
     if kind == "active" and not positive_open and not result["findings"] and not result["ambiguous"]:
         result["findings"].append(("changes-requested", prose))
     elif kind == "ambiguous":
+        result["ambiguous"] = True
+    if summary_tail_ambiguous:
         result["ambiguous"] = True
     # Ambiguity is local: never quote the unknown section, but never erase
     # independently bounded active sections because an unrelated footer changed.

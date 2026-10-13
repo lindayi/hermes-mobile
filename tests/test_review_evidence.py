@@ -285,6 +285,60 @@ def test_public_verification_overview_does_not_swallow_concerns(tmp_path, summar
     assert not plan["review_valid"] and not plan["auto_merge_eligible"]
 
 
+@pytest.mark.parametrize(("status", "summary"), [
+    ("🔵 Needs a closer look", PUBLIC_REVIEW_SUMMARY),
+    ("🔵 Needs a closer look", PUBLIC_OWNER_STATUS_SUMMARY),
+    ("🟢 Looks good", "No code issues were found."),
+])
+def test_review_summary_after_horizontal_rule_is_not_discarded(tmp_path, status, summary):
+    body = overview(status, summary, "None")
+    substantive = "The source may still skip authorization."
+    body = body.replace(
+        f"<p>{summary}</p>",
+        f"<p>{summary}</p>\n<hr>\n<p>{substantive}</p>",
+    )
+    body_html = body.removeprefix("<!-- ccr-overview-v2 -->")
+    review = copilot_review(body) | {"body_html": body_html}
+
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert disposition["ambiguous"] and not disposition["inventory_complete"]
+    assert not disposition["findings"]
+
+    api = ReviewApi([review], sensitive=True)
+    result = _managed_cycle(api, tmp_path / "state.json")
+    [plan] = result["pull_requests"]
+    assert not plan["review_valid"] and not plan["auto_merge_eligible"]
+
+
+@pytest.mark.parametrize("tail", [
+    "\n<hr><hr>\n<p>The source may skip authorization.</p>",
+    "\n<blockquote><p>The source may skip authorization.</p></blockquote>",
+    "\n<p><code>Required correction: skip authorization.</code></p>",
+    "\n<blockquote><p>Quoted concern.</p></blockquote>"
+    "<p><code>Required correction: skip authorization.</code></p>",
+    '\n<hr><p>💡 <a href="/unknown">Add a <code>code-review</code> agent skill</a></p>',
+    FOOTER + "\n<hr>\n<p>Extra substantive review text.</p>",
+])
+def test_unknown_content_after_provider_separator_fails_closed(tail):
+    body = NO_FINDINGS + tail
+    parsed = parse_body(
+        body, "COMMENTED", body_html=body.removeprefix("<!-- ccr-overview-v2 -->"),
+    )
+    assert parsed["ambiguous"] and not parsed["inventory_complete"]
+    assert not parsed["findings"]
+
+
+def test_known_provider_footer_remains_compatible():
+    parsed = parse_body(
+        NO_FINDINGS, "COMMENTED",
+        body_html=NO_FINDINGS.removeprefix("<!-- ccr-overview-v2 -->"),
+    )
+    assert not parsed["ambiguous"] and parsed["inventory_complete"]
+    assert not parsed["findings"]
+
+
 @pytest.mark.parametrize("summary", [PUBLIC_REVIEW_SUMMARY, PUBLIC_OWNER_STATUS_SUMMARY])
 def test_quoted_only_verification_overview_remains_ambiguous(summary):
     body = PUBLIC_REVIEW_BODY.replace(

@@ -341,6 +341,14 @@ inventory incomplete. Nonzero bare counts require linked inventory rather than
 metadata suppression. Extra prose or markup in that paragraph is not discarded;
 free-form summaries still use the existing explicit disposition grammar.
 
+Top-level horizontal rules do not end summary inspection. Only the exact known
+rendered `Add a code-review agent skill` footer immediately after a separator is
+ignored. Any other content after a separator, including content after that
+footer, makes the summary ambiguous and the inventory incomplete; this content
+cannot create body-only repair evidence. Multiple separators do not clear this
+condition. Quoted and code/pre content remains inert, but its presence after a
+separator still makes the inventory incomplete.
+
 In this renderer only, one top-level paragraph immediately after the exact
 overview heading and recognized status heading is provider summary context.
 It is attached literally to the single count-matched `Previously missed (1)`
