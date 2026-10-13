@@ -658,6 +658,21 @@ def test_current_source_pins_match_actual_candidate_bytes(path, pins):
     assert pins[path] == hashlib.sha256(source.read_bytes()).hexdigest()
 
 
+def test_current_pr105_candidate_table_matches_source_bytes():
+    root = Path(__file__).resolve().parents[1]
+    docs = (root / 'docs/autonomy-policy.md').read_text()
+    section = docs.split(
+        '### PR #105 owner-authorized task-abandonment and anchor-retention candidate', 1,
+    )[1].split('### Retained merged source and deliberate native refreshes', 1)[0]
+    rows = [
+        line for line in section.splitlines()
+        if line.startswith('| `deploy/cloud_coordinator.py` |')
+    ]
+
+    actual = hashlib.sha256((root / 'deploy/cloud_coordinator.py').read_bytes()).hexdigest()
+    assert rows == [f'| `deploy/cloud_coordinator.py` | `{actual}` |']
+
+
 def test_reviewed_source_fixture_matches_complete_required_contract():
     pending = {'deploy/cloud_coordinator.py', 'deploy/native_notification_release.py',
                'deploy/review_evidence.py'} | set(_PENDING_PR40_LIFECYCLE_FIXTURE)

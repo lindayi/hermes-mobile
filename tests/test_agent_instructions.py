@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+from datetime import datetime, timezone
 
 import pytest
 import yaml
@@ -452,10 +453,25 @@ BLOCKED_KEYS = {
     'gate_evidence', 'evidence',
 }
 SHA = r'[a-f0-9]{40}'
-TIME = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'
+TIME = r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
+AUDIT_REFERENCE_NOW = datetime(2026, 1, 1, 0, 0, 10, tzinfo=timezone.utc)
 
 
-def _validate_blocked_record(fixture):
+def _audit_datetime(value, now):
+    assert type(now) is datetime and now.tzinfo is not None and \
+        now.utcoffset().total_seconds() == 0
+    assert type(value) is str and re.fullmatch(TIME, value)
+    try:
+        parsed = datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ').replace(
+            tzinfo=timezone.utc,
+        )
+    except ValueError as error:
+        raise AssertionError('timestamp must be a valid UTC calendar date') from error
+    assert parsed <= now, 'timestamp must not be in the future'
+    return parsed
+
+
+def _validate_blocked_record(fixture, *, now=AUDIT_REFERENCE_NOW):
     """Validate a complete synthetic blocked record, its root bindings and evidence graph."""
     record = {key: value for key, value in fixture.items() if key != 'fixture'}
     assert set(record) == BLOCKED_KEYS
@@ -472,9 +488,9 @@ def _validate_blocked_record(fixture):
     for root in ('head_sha', 'base_sha'):
         assert type(record[root]) is str and re.fullmatch(SHA, record[root]), \
             'blocked root bindings must be known SHAs'
-    assert re.fullmatch(TIME, record['reserved_at'])
-    assert re.fullmatch(TIME, record['observed_at'])
-    assert record['reserved_at'] <= record['observed_at']
+    reserved_at = _audit_datetime(record['reserved_at'], now)
+    observed_at = _audit_datetime(record['observed_at'], now)
+    assert reserved_at <= observed_at
     binding = {
         'repository_id': record['repository']['id'],
         'pull_number': record['pull']['number'],
@@ -502,8 +518,7 @@ def _validate_blocked_record(fixture):
         assert type(entry['bytes']) is int and 1 <= entry['bytes'] <= 2097152
         assert entry['url'].startswith('https://api.github.com/')
         assert entry['method'] in {'GET', 'POST-read-only'}
-        assert re.fullmatch(TIME, entry['retrieved_at'])
-        assert entry['retrieved_at'] <= record['observed_at']
+        assert _audit_datetime(entry['retrieved_at'], now) <= observed_at
         assert entry['identity'] == binding, 'evidence binding differs from the root'
         for page in entry['pagination']:
             assert set(page) == {'connection', 'page', 'cursor', 'next', 'total', 'count'}
@@ -525,15 +540,15 @@ def _validate_blocked_record(fixture):
         if item.get('head_sha') is not None:
             assert item['head_sha'] == record['head_sha'], 'gate binding differs from the root'
         if item.get('completed_at') is not None:
-            assert item['completed_at'] <= record['observed_at']
+            assert _audit_datetime(item['completed_at'], now) <= observed_at
     assert referenced <= set(by_key), 'dangling reference'
     assert set(by_key) <= referenced, 'unreferenced evidence'
 
 
-def _validate_gate_outcome_fixture(fixture):
+def _validate_gate_outcome_fixture(fixture, *, now=AUDIT_REFERENCE_NOW):
     """Validate the documented gate fixtures without implementing a runtime validator."""
     if fixture['fixture'] in BLOCKED_FIXTURES:
-        _validate_blocked_record(fixture)
+        _validate_blocked_record(fixture, now=now)
     else:
         assert set(fixture) == {
             'fixture', 'kind', 'status', 'prior_comment_id', 'head_sha', 'base_sha',
@@ -551,8 +566,11 @@ def _validate_gate_outcome_fixture(fixture):
         assert fixture['changed_binding']['proof'] in fixture['evidence_refs']
         assert {'prior-record', fixture['changed_binding']['proof']} <= \
             set(fixture['evidence_refs'])
-        assert fixture['changed_binding']['observed_at'] <= fixture['observed_at']
-        assert fixture['reserved_at'] <= fixture['observed_at']
+        reserved_at = _audit_datetime(fixture['reserved_at'], now)
+        observed_at = _audit_datetime(fixture['observed_at'], now)
+        changed_at = _audit_datetime(fixture['changed_binding']['observed_at'], now)
+        assert changed_at <= observed_at
+        assert reserved_at <= observed_at
         assert fixture['changed_binding']['head_sha'] != fixture['head_sha']
 
 
@@ -591,6 +609,144 @@ def test_manual_qualification_documents_truthful_blocked_and_invalidation_varian
     assert [(item['gate'], item['outcome']) for item in solely_unknown
             if item['gate'] not in {'check', 'source-run'}] == [
         ('sensitive', 'not-required'), ('review', 'unknown')]
+
+
+def test_blocked_record_rejects_impossible_calendar_timestamps():
+    record = deepcopy(_gate_fixtures()['blocked-checks'])
+    impossible = '2026-02-30T00:00:00Z'
+    record['reserved_at'] = record['observed_at'] = impossible
+    for entry in record['evidence']:
+        entry['retrieved_at'] = impossible
+    for gate in record['gate_evidence']:
+        if gate.get('completed_at') is not None:
+            gate['completed_at'] = impossible
+
+    with pytest.raises(AssertionError):
+        _validate_blocked_record(record)
+
+
+@pytest.mark.parametrize('location', (
+    'blocked-reserved', 'blocked-observed', 'blocked-evidence', 'blocked-gate',
+    'invalidation-reserved', 'invalidation-observed', 'invalidation-change',
+))
+def test_audit_artifacts_reject_impossible_dates_at_every_timestamp_location(location):
+    invalidation = location.startswith('invalidation-')
+    record = deepcopy(_gate_fixtures()['invalidation' if invalidation else 'blocked-checks'])
+    impossible = '2026-02-30T00:00:00Z'
+    if location.endswith('reserved'):
+        record['reserved_at'] = impossible
+    elif location.endswith('observed'):
+        record['observed_at'] = impossible
+    elif location == 'blocked-evidence':
+        record['evidence'][0]['retrieved_at'] = impossible
+    elif location == 'blocked-gate':
+        next(item for item in record['gate_evidence']
+             if item.get('completed_at') is not None)['completed_at'] = impossible
+    else:
+        record['changed_binding']['observed_at'] = impossible
+
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(
+            record, now=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        )
+
+
+@pytest.mark.parametrize('value', (
+    '2025-02-29T00:00:00Z',
+    '2026-13-01T00:00:00Z',
+    '2026-01-00T00:00:00Z',
+    '2026-01-32T00:00:00Z',
+    '2026-01-01T24:00:00Z',
+    '2026-01-01T00:60:00Z',
+    '2026-01-01T00:00:60Z',
+    '2026-1-01T00:00:00Z',
+    '2026-01-01T00:00:00.000Z',
+    '2026-01-01T00:00:00+00:00',
+    None,
+    1,
+))
+def test_blocked_record_rejects_invalid_or_noncanonical_timestamps(value):
+    record = deepcopy(_gate_fixtures()['blocked-checks'])
+    record['reserved_at'] = value
+
+    with pytest.raises(AssertionError):
+        _validate_blocked_record(
+            record, now=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        )
+
+
+@pytest.mark.parametrize('location', (
+    'blocked-reserved', 'blocked-observed', 'blocked-evidence', 'blocked-gate',
+    'invalidation-reserved', 'invalidation-observed', 'invalidation-change',
+))
+def test_audit_artifacts_reject_future_timestamps_at_every_timestamp_location(location):
+    invalidation = location.startswith('invalidation-')
+    record = deepcopy(_gate_fixtures()['invalidation' if invalidation else 'blocked-checks'])
+    if location.endswith('reserved'):
+        record['reserved_at'] = '2026-01-01T00:00:11Z'
+    elif location.endswith('observed'):
+        record['observed_at'] = '2026-01-01T00:00:11Z'
+    elif location == 'blocked-evidence':
+        record['evidence'][0]['retrieved_at'] = '2026-01-01T00:00:11Z'
+    elif location == 'blocked-gate':
+        next(item for item in record['gate_evidence']
+             if item.get('completed_at') is not None)['completed_at'] = \
+            '2026-01-01T00:00:11Z'
+    else:
+        record['changed_binding']['observed_at'] = '2026-01-01T00:00:11Z'
+
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(
+            record, now=datetime(2026, 1, 1, 0, 0, 10, tzinfo=timezone.utc),
+        )
+
+
+def test_audit_timestamp_accepts_valid_leap_date_and_equal_now():
+    record = deepcopy(_gate_fixtures()['blocked-checks'])
+    exact_now = '2024-02-29T12:34:56Z'
+    record['reserved_at'] = record['observed_at'] = exact_now
+    for entry in record['evidence']:
+        entry['retrieved_at'] = exact_now
+    for gate in record['gate_evidence']:
+        if gate.get('completed_at') is not None:
+            gate['completed_at'] = exact_now
+
+    _validate_blocked_record(
+        record, now=datetime(2024, 2, 29, 12, 34, 56, tzinfo=timezone.utc),
+    )
+
+
+def test_invalidation_accepts_equal_timestamps():
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    exact_now = '2026-01-01T00:00:10Z'
+    record['reserved_at'] = record['observed_at'] = exact_now
+    record['changed_binding']['observed_at'] = exact_now
+
+    _validate_gate_outcome_fixture(
+        record, now=datetime(2026, 1, 1, 0, 0, 10, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.parametrize('location', (
+    'blocked-reserved', 'blocked-evidence', 'blocked-gate',
+    'invalidation-reserved', 'invalidation-change',
+))
+def test_audit_artifacts_reject_timestamp_order_violations(location):
+    invalidation = location.startswith('invalidation-')
+    record = deepcopy(_gate_fixtures()['invalidation' if invalidation else 'blocked-checks'])
+    later = '2026-01-01T00:00:06Z'
+    if location.endswith('reserved'):
+        record['reserved_at'] = later
+    elif location == 'blocked-evidence':
+        record['evidence'][0]['retrieved_at'] = later
+    elif location == 'blocked-gate':
+        next(item for item in record['gate_evidence']
+             if item.get('completed_at') is not None)['completed_at'] = later
+    else:
+        record['changed_binding']['observed_at'] = later
+
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(record)
 
 
 def test_blocked_record_rejects_supervised_only_with_all_successful_gates():
