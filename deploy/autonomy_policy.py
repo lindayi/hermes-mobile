@@ -188,7 +188,7 @@ SOURCE_FINGERPRINTS = {
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     # PR #105 abandonment and neutral audit-carrier candidate; earlier pins are historical.
-    'deploy/cloud_coordinator.py': '918d02cc37253315ed8efacacf4c2091bf049becf51b9a2f5053b3d3206cf068',
+    'deploy/cloud_coordinator.py': '12215aa6a3ee3f3f4fbf9d9e1e68e4a95f3a6ae6da6d94ce80de028ff7ea3077',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
@@ -198,7 +198,7 @@ SOURCE_FINGERPRINTS = {
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     # Issue #65 producer-only overlay; historical receipt hashes remain documented.
     # PR #105 receipt-only neutral transport candidate; prior receipt pins remain historical.
-    'deploy/task_receipts.py': '93d1ed4ff614c9183fed2de3a594e581ad9af047345e1e15ea5d1de330827c29',
+    'deploy/task_receipts.py': 'bc7bd054c18d65e9713d435b46709ee20abddb9eda1f61cb7ba08b514b0db618',
     # Issue #87 bounded-repair lifecycle overlay; earlier hashes remain historical.
     'deploy/workflow_events.py': '63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e',
     'deploy/workflow_lifecycle.py': 'f8ecf4fa881d907d41a3f8482fa60f1166591dd51e75108aaa4d31f4f2df65b0',

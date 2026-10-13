@@ -459,6 +459,9 @@ def test_anchored_neutral_receipt_accepts_only_the_exact_bounded_carrier():
         NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
         neutral=True, anchor_comment_id=anchor_id, anchor_body=anchor_body,
     )
+    assert "message must contain only the eight canonical receipt lines" in instruction
+    assert "provider prepends the bound quote and blank separator" in instruction
+    assert "Do not include the quote or leading blanks in the tool message" in instruction
     action["body"] = f"Neutral reconciliation request.\n\n{instruction}"
     task["sessions"][0]["prompt"] = action["body"]
     comments[0]["body"] = (

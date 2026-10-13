@@ -2147,8 +2147,9 @@ class FakeApi:
         current_head = head_sha or self.head_sha
         nonce = action["dispatch_nonce"]
         if action.get("receipt_anchor_comment_id") is not None:
+            from deploy.task_receipts import _v2_fields
+
             body = (
-                f"\n> {action['receipt_anchor_body']}\n\n"
                 "Hermes-Task-Receipt: v2\n"
                 f"nonce={nonce}\n"
                 "pr=16\n"
@@ -2158,6 +2159,12 @@ class FakeApi:
                 f"head={current_head}\n"
                 f"result={result}"
             )
+            carrier = f"\n> {action['receipt_anchor_body']}\n\n{body}"
+            assert _v2_fields(carrier) == {
+                "nonce": nonce, "pr": "16", "start_head": action["head"],
+                "base": base_sha, "session": session_id,
+                "head": current_head, "result": result,
+            }
             self.reply_to_comment(action["receipt_anchor_comment_id"], body)
         else:
             body = (
@@ -2179,8 +2186,10 @@ class FakeApi:
                 "updated_at": comment_created,
             })
 
-    def reply_to_comment(self, comment_id, body):
-        self.reply_calls.append({"commentId": comment_id, "body": body})
+    def reply_to_comment(self, comment_id, message):
+        anchor = next(comment for comment in self.comments if comment["id"] == comment_id)
+        body = f"\n> {anchor['body']}\n\n{message}"
+        self.reply_calls.append({"commentId": comment_id, "message": message, "body": body})
         self.comments.append({
             "id": 9000 + self.fix_attempts,
             "user": {"id": COPILOT_AGENT},
@@ -2614,12 +2623,13 @@ def test_stale_base_reconciliation_accepts_a_validated_new_head_handoff(tmp_path
         base_sha=CURRENT_MAIN,
     )
     api.comments[-1]["body"] = (
+        f"\n> {neutral['receipt_anchor_body']}\n\n"
         "Hermes-Task-Receipt: v2\n"
         f"nonce={neutral['dispatch_nonce']}\n"
         "pr=16\n"
-        f"session=session-{neutral['task_id']}\n"
         f"start_head={RESULT_HEAD}\n"
         f"base={CURRENT_MAIN}\n"
+        f"session=session-{neutral['task_id']}\n"
         f"head={NEXT_RESULT_HEAD}\n"
         "result=ready"
     )
@@ -8607,6 +8617,25 @@ def test_conflict_uses_one_neutral_task_with_both_intents_and_no_force_push(tmp_
     assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
 
 
+def test_neutral_dispatch_binds_returned_anchor_before_task_post(tmp_path):
+    api = FakeApi()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+
+    Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+
+    action = next(item for item in store.actions().values()
+                  if item.get("task_type") == "neutral")
+    assert action.get("receipt_anchor_comment_id") is not None
+    anchor = store.snapshot()["outbox"][action["receipt_anchor_key"]]
+    prompt = next(body["prompt"] for route, body in api.writes
+                  if route.endswith("/tasks"))
+    assert anchor["status"] == "sent"
+    assert anchor["comment_id"] == action["receipt_anchor_comment_id"]
+    assert f"commentId={anchor['comment_id']}" in prompt
+    assert anchor["body"] in prompt
+
+
 def test_neutral_anchor_receipt_dispatch_and_retained_proof_survive_restart(tmp_path):
     from deploy.cloud_coordinator import (
         _authorized_result_heads, _valid_receipt_proof,
@@ -8642,6 +8671,17 @@ def test_neutral_anchor_receipt_dispatch_and_retained_proof_survive_restart(tmp_
     assert reply["commentId"] == anchor["comment_id"]
     assert task_prompt == api.tasks[action["task_id"]]["sessions"][0]["prompt"]
     assert reply["body"].startswith(f"\n> {anchor['body']}\n\nHermes-Task-Receipt: v2\n")
+    assert reply["message"].startswith("Hermes-Task-Receipt: v2\n")
+    assert len(reply["message"].splitlines()) == 8
+    assert reply["body"] == f"\n> {anchor['body']}\n\n{reply['message']}"
+    assert api.comments[-1]["body"] == reply["body"]
+    from deploy.task_receipts import validate_task_receipt
+
+    receipt = validate_task_receipt(
+        api.tasks[action["task_id"]], action, api.pull, api.comments,
+        now=datetime.fromtimestamp(1790856540, timezone.utc),
+    )
+    assert receipt["body"] == reply["body"]
 
     coordinator.run(apply=True)
     completed = store.action(action["key"])

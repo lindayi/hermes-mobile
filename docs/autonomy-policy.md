@@ -129,14 +129,20 @@ PR #105 adds bounded recovery for owner-authorized abandonment of terminal tasks
 with unverified receipts. The current candidate pins identify the exact proposed
 source bytes; prior issue-specific hashes remain historical. Refreshing these pins
 does not clear the `coordinator-review-contract` blocker, satisfy exact-head review,
-or authorize operational activation. Its neutral producer now keeps the complete
-per-hunk audit in the pushed merge commit message and publishes one receipt-only
-reply. The existing strict receipt carrier limits and validation remain unchanged.
+or authorize operational activation. The coordinator durably reserves and verifies
+one short owner-authored anchor before neutral task dispatch. The prompt binds its
+returned comment ID and exact body. The neutral producer keeps the complete
+per-hunk audit in the pushed merge commit message. It sends only the eight canonical
+receipt lines as the tool message in one reply to that anchor; the provider adds
+the supported leading blank, bound quote line, and blank separator. Prevalidation
+covers the complete serialized carrier. Synthetic tests prove this bounded known
+shape, not a live provider call. Strict carrier binding, byte/line limits, immutable
+receipt checks, retained proof validation, and the existing attempt budget remain.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `918d02cc37253315ed8efacacf4c2091bf049becf51b9a2f5053b3d3206cf068` |
-| `deploy/task_receipts.py` | `93d1ed4ff614c9183fed2de3a594e581ad9af047345e1e15ea5d1de330827c29` |
+| `deploy/cloud_coordinator.py` | `12215aa6a3ee3f3f4fbf9d9e1e68e4a95f3a6ae6da6d94ce80de028ff7ea3077` |
+| `deploy/task_receipts.py` | `bc7bd054c18d65e9713d435b46709ee20abddb9eda1f61cb7ba08b514b0db618` |
 
 ### Retained merged source and deliberate native refreshes
 
