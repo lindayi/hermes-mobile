@@ -6350,6 +6350,13 @@ class Coordinator:
         head = pull.get("head") if isinstance(pull, dict) else None
         base = pull.get("base") if isinstance(pull, dict) else None
         actions = self.store.actions()
+        enrollment = self.store.snapshot()["enrollments"].get(
+            str(record.get("issue")), {},
+        )
+        successors = [
+            *actions.values(),
+            *enrollment.get("receipt_proofs", []),
+        ]
         return any(
             _owner_abandonment_successor_matches(record, successor)
             and successor.get("receipt_result") == "ready"
@@ -6364,7 +6371,7 @@ class Coordinator:
             )
             and _pull_identity(pull, successor)
             and _valid_receipt_proof(successor, snapshot.get("comments"))
-            for successor in actions.values()
+            for successor in successors
         )
 
     def _owner_abandonment_task_terminal(self, snapshot, action, record, tasks):
@@ -6646,7 +6653,7 @@ class Coordinator:
             abandonment = _owner_abandonment_for_action(
                 enrollment, prior_key, prior,
             )
-            if abandonment is None or abandonment["head_sha"] != action["head"]:
+            if abandonment is None:
                 return "agent-running"
             recovered_claims.append((prior, abandonment))
         workflows, _ = _workflow_runs(self.api, branch, action["issue"])
@@ -8313,6 +8320,7 @@ class StateStore:
                     "receipt_completed_at", "receipt_session_completed_at",
                     "receipt_nonce", "receipt_start_head", "receipt_head", "receipt_base",
                     "receipt_legacy_neutral",
+                    "recorded_base_sha",
                     "owner_abandonment_binding", "owner_abandonment_attestation",
                     "attempt", "owner_id", "repository_id", "pull_id", "pull_node_id",
                     "repair_policy_version", "repair_fingerprints",

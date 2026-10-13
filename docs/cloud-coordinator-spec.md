@@ -587,6 +587,11 @@ must keep the recovery record's historical base in `recorded_base_sha` while its
 v2 receipt base and current pull base continue to match that continuation's
 current `main_sha`. After a valid continuation receipt, bind the recovered task's
 terminal check to that exact receipt lineage even when the PR head has advanced.
+The terminal check uses both live actions and the enrollment's authenticated
+`receipt_proofs`; compaction must retain the neutral continuation's
+`recorded_base_sha` as well as its receipt and owner-abandonment bindings. A
+different current head is accepted only when that retained or live proof validates
+for the exact current pull identity, head, and applicable source or neutral base.
 The recovery head remains continuation-only only while it lacks general receipt
 provenance. A distinct, bound ready receipt that returns the same head releases this
 restriction, including after a cold restart; recovery alone never does.

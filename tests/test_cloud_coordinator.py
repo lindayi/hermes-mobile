@@ -3259,6 +3259,150 @@ def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_pat
         write for write in api.writes
         if write[0].endswith("/requested_reviewers")
     ] == review_writes
+    api.review_state = "APPROVED"
+    api.review_sha = FINAL_RESULT_HEAD
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert StateStore(store.path).action(successor["key"]) is None
+    recovery = StateStore(store.path).snapshot()["enrollments"]["16"][
+        "owner_abandonments"
+    ][0]
+    assert Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )._owner_abandonment_successor_proven(
+        {"pull": api.pull, "comments": api.comments}, recovery,
+    )
+
+
+@pytest.mark.parametrize("proof_hazard", [None, "missing", "substituted"])
+def test_owner_abandonment_retained_neutral_proof_survives_compaction_for_later_repair(
+        tmp_path, proof_hazard):
+    advanced_main = FINAL_RESULT_HEAD
+    successor_head = "9" * 40
+    api, store, _ = _owner_abandonment_historical_neutral_case(tmp_path)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    _advance_owner_abandonment_main(api)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    successor = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "fix"
+        and action.get("task_type") == "neutral"
+        and action.get("status") == "sent"
+        and action.get("head") == NEXT_RESULT_HEAD
+    )
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=successor_head, base_sha=advanced_main,
+    )
+    api.head_sha = successor_head
+    api.pull["head"]["sha"] = successor_head
+    api.pull["base"]["sha"] = advanced_main
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    api.review_sha = successor_head
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    proof = next(
+        proof for proof in StateStore(store.path).snapshot()["enrollments"]["16"][
+            "receipt_proofs"
+        ]
+        if proof.get("task_id") == successor["task_id"]
+    )
+    assert proof["receipt_result"] == "ready"
+    recovery = StateStore(store.path).snapshot()["enrollments"]["16"][
+        "owner_abandonments"
+    ][0]
+    assert cloud_coordinator._valid_receipt_proof(proof, api.comments)
+    assert cloud_coordinator._owner_abandonment_successor_matches(
+        recovery, proof,
+    )
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+    recovery_snapshot = {"pull": api.pull, "comments": api.comments}
+    assert coordinator._owner_abandonment_successor_proven(
+        recovery_snapshot, recovery,
+    )
+    assert coordinator._owner_abandonment_task_terminal(
+        recovery_snapshot,
+        StateStore(store.path).action(recovery["action_key"]),
+        recovery,
+        api.get_all(
+            "agents/repos/lindayi/hermes-mobile/tasks?per_page=100",
+            collection="tasks",
+        ),
+    )
+    assert StateStore(store.path).action(successor["key"]) is None
+    StateStore(store.path).retire(
+        16, successor_head, current_main_sha=advanced_main,
+    )
+    assert StateStore(store.path).action(successor["key"]) is None
+    assert any(
+        item.get("task_id") == successor["task_id"]
+        for item in StateStore(store.path).snapshot()["enrollments"]["16"][
+            "receipt_proofs"
+        ]
+    )
+    if proof_hazard is not None:
+        def corrupt_proof(state):
+            proofs = state["enrollments"]["16"]["receipt_proofs"]
+            index = next(
+                index for index, item in enumerate(proofs)
+                if item.get("task_id") == successor["task_id"]
+            )
+            if proof_hazard == "missing":
+                del proofs[index]
+            else:
+                binding = dict(proofs[index]["owner_abandonment_binding"])
+                binding["command_comment_id"] += 1
+                proofs[index]["owner_abandonment_binding"] = binding
+
+        StateStore(store.path)._mutate(corrupt_proof)
+    expected_proven = proof_hazard is None
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+    recovery_snapshot = {"pull": api.pull, "comments": api.comments}
+    assert coordinator._owner_abandonment_successor_proven(
+        recovery_snapshot, recovery,
+    ) is expected_proven
+    assert coordinator._owner_abandonment_task_terminal(
+        recovery_snapshot,
+        StateStore(store.path).action(recovery["action_key"]),
+        recovery,
+        api.get_all(
+            "agents/repos/lindayi/hermes-mobile/tasks?per_page=100",
+            collection="tasks",
+        ),
+    ) is expected_proven
+
+    task_posts = api.task_posts
+    api.source_failure = True
+    api.source_failure_sha = successor_head
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert result["repair_requested"] is expected_proven
+    if expected_proven:
+        assert api.task_posts == task_posts + 1
+        posts_after_repair = api.task_posts
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        assert api.task_posts == posts_after_repair
+    else:
+        assert api.task_posts == task_posts
 
 
 def test_owner_abandonment_same_second_precovery_completion_cannot_grant_provenance(
