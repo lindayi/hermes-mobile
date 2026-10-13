@@ -7016,21 +7016,6 @@ class Coordinator:
                     or not _reconciliation_reasons(current)):
                 self.store.update_action(key, "superseded")
                 return "superseded"
-            try:
-                final_tasks = _rest_list(
-                    self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
-                    collection="tasks",
-                )
-                final_workflows, _ = _workflow_runs(
-                    self.api, branch, claimed_action["issue"],
-                )
-            except CoordinatorError:
-                self.store.update_action(key, "superseded")
-                return "superseded"
-            if (_other_task_active(final_tasks, {"pull": current})
-                    or _cloud_agent_active(final_workflows, branch)):
-                self.store.update_action(key, "superseded")
-                return "agent-running"
             final_anchor = self._ensure_neutral_receipt_anchor(claimed_action)
             if (not isinstance(final_anchor, dict)
                     or final_anchor.get("status") != "sent"
@@ -7051,6 +7036,72 @@ class Coordinator:
                     f"{claimed_action['task_request_body']}\n\n{expected_instruction}"):
                 self.store.update_action(key, "superseded")
                 return "superseded"
+        if neutral or recovered_claims:
+            try:
+                current = self._fence_pull(
+                    claimed_action["issue"], claimed_action["head"],
+                    claimed_action["main_sha"],
+                    allow_historical_reconciliation=True,
+                    allow_historical_dirty=neutral,
+                    expected_base_sha=(
+                        claimed_action.get("recorded_base_sha") if neutral
+                        else continuation_record.get("base_sha")
+                        if continuation_record is not None else None
+                    ),
+                )
+                if (not _pull_identity(current, claimed_action)
+                        or current.get("head", {}).get("ref") != branch
+                        or not self._authorized_dispatch_head(
+                            claimed_action["issue"], claimed_action["head"],
+                            current.get("base", {}).get("sha"),
+                            continuation_action=claimed_action,
+                        )
+                        or (neutral and not _reconciliation_reasons(current))):
+                    self.store.update_action(key, "superseded")
+                    return "superseded"
+                final_tasks = _rest_list(
+                    self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+                    collection="tasks",
+                )
+                final_workflows, _ = _workflow_runs(
+                    self.api, branch, claimed_action["issue"],
+                )
+                final_comments = (
+                    _all_review_comments(self.api, claimed_action["issue"], None)
+                    if recovered_claims else []
+                )
+                for prior, abandonment in recovered_claims:
+                    if (_current_owner_unverified_abandonment_command(
+                            self.api, abandonment) is None
+                            or not self._owner_abandonment_task_terminal(
+                                {
+                                    "issue": claimed_action["issue"], "pull": current,
+                                    "comments": final_comments,
+                                }, prior, abandonment, final_tasks)):
+                        self.store.update_action(key, "superseded")
+                        return "agent-running"
+                final_state = StateStore(self.store.path).snapshot()
+                final_enrollment = final_state["enrollments"].get(
+                    str(claimed_action["issue"]), {},
+                )
+                if (final_state["actions"].get(key) != claimed_action
+                        or any(
+                            final_state["actions"].get(prior["key"]) != prior
+                            or _owner_abandonment_for_action(
+                                final_enrollment, prior["key"], prior,
+                            ) != abandonment
+                            for prior, abandonment in recovered_claims
+                        )):
+                    self.store.update_action(key, "superseded")
+                    return "superseded"
+            except CoordinatorError:
+                self.store.update_action(key, "superseded")
+                return "superseded"
+            if (_other_task_active(final_tasks, {"pull": current})
+                    or _cloud_agent_active(final_workflows, branch)):
+                self.store.update_action(key, "superseded")
+                return "agent-running"
+        if neutral:
             if not self.store.mark_neutral_task_dispatch_started(key):
                 self.store.update_action(key, "superseded")
                 return "superseded"
@@ -7942,7 +7993,7 @@ class StateStore:
                or not 0 <= item.get("sensitive_generation", 0) <= 2**31 - 1
                for item in data["enrollments"].values()):
             raise CoordinatorError("Sensitive authorization episode is invalid")
-        for enrollment in data["enrollments"].values():
+        for issue_key, enrollment in data["enrollments"].items():
             enrollment.setdefault("attempts", REPAIR_LIMIT)
             missing_neutral_count = "neutral_attempts" not in enrollment
             if missing_neutral_count:
@@ -7955,9 +8006,22 @@ class StateStore:
                     or type(enrollment["neutral_attempts"]) is not int
                     or not 0 <= enrollment["neutral_attempts"] <= 2**31 - 1
                     or type(enrollment["neutral_attempts_unknown"]) is not bool
+                    or type(enrollment.get("neutral_anchor_reservations", 0)) is not int
+                    or not 0 <= enrollment.get("neutral_anchor_reservations", 0) <= 2**31 - 1
                     or ("repair_progress" in enrollment
                         and not _repair_progress_valid(enrollment["repair_progress"]))):
                 raise CoordinatorError("Repair budget or progress history is invalid")
+            if "neutral_anchor_reservations" not in enrollment:
+                enrollment["neutral_anchor_reservations"] = max(
+                    enrollment["neutral_attempts"]
+                    if not enrollment["neutral_attempts_unknown"] else 0,
+                    sum(
+                        entry.get("kind") == "neutral-receipt-anchor"
+                        and str(entry.get("issue")) == issue_key
+                        for entry in data["outbox"].values()
+                        if isinstance(entry, dict)
+                    ),
+                )
         if any("starter_admission" in item
                and not _valid_starter_admission(item["starter_admission"])
                for item in data["enrollments"].values()):
@@ -8275,6 +8339,9 @@ class StateStore:
                         **item, "attempts": attempts,
                         "neutral_attempts": neutral_attempts,
                         "neutral_attempts_unknown": neutral_attempts_unknown,
+                        "neutral_anchor_reservations": previous.get(
+                            "neutral_anchor_reservations", 0,
+                        ),
                         "repair_progress": repair_progress,
                         "sensitive_sha": None, "active": True,
                     }
@@ -8761,6 +8828,12 @@ class StateStore:
             tombstone = data["retired"].get(str(entry.get("issue")), {})
             if key in data["outbox"] or _tombstone_digest(key) in tombstone.get("outbox", ()):
                 return False
+            if entry.get("kind") == "neutral-receipt-anchor":
+                enrollment = data["enrollments"].get(str(entry.get("issue")))
+                if (not enrollment or not enrollment.get("active")
+                        or enrollment["neutral_anchor_reservations"] >= NEUTRAL_LIMIT):
+                    return False
+                enrollment["neutral_anchor_reservations"] += 1
             data["outbox"][key] = {**entry, "status": "pending"}
             return True
         return self._mutate(add)

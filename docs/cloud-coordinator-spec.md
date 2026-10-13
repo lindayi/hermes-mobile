@@ -433,6 +433,20 @@ writer, anchor, and saved-prompt fence runs before the task POST. The prompt
 binds the explicit comment ID and anchor body. Only after that verified anchor
 does the neutral attempt consume its existing budget.
 
+Preclaim publication has a separate lifetime bound of three neutral receipt-anchor
+reservations per enrollment, charged atomically when a new outbox entry is added.
+The durable `neutral_anchor_reservations` count survives restart, main/head changes,
+retirement, renewal, and re-enrollment. It never resets the source or neutral task
+attempt counts. Older state initializes it conservatively from the greater of the
+known neutral attempt count and retained neutral receipt-anchor count; this is
+not a reconstruction or deletion of historical publication evidence. Sent and
+uncertain anchors remain unchanged. Recovery of the same anchor consumes no new
+reservation and never repeats its POST. Once the bound is reached, no new anchor
+entry or public comment is admitted, even if main changes before every action
+claim. Acceptance exercises successive main/base changes with a fixed PR head
+across cold restart, finite entries/comments, retained evidence and counters, plus
+normal dispatch and lost-POST readback without duplicates.
+
 Publish exactly one receipt-only PR reply. Its payload contains only the canonical
 v2 header and seven bound fields, with no decision, report, URL, prose, or extra
 fields. Before publication, the producer validates the complete supported
@@ -629,6 +643,12 @@ edited comment remains invalid; there is no retry or edited-receipt fallback.
 
 Finite acceptance for this recovery:
 
+- After the last neutral-anchor readback (or source action claim), the actual
+  dispatch fence refreshes complete task occupancy, comments, and each exact
+  recovered task and immutable owner command. Completed tasks with changed
+  creator, artifacts, session, or prompt, reactivation, missing detail, API errors,
+  incomplete inventory, and command edits/deletion must block the successor POST.
+  The original reservation and recovery record must still match at this fence.
 - A synthetic completed known-ID uncertain task with an unusable receipt can be
   abandoned by one exact immutable owner command, then the coordinator can plan and
   dispatch a distinct bounded task without reposting the old task.

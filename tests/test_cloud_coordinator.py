@@ -3154,6 +3154,116 @@ def test_owner_abandonment_same_head_successor_releases_continuation_only_after_
     assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
 
 
+@pytest.mark.parametrize("successor_type", ["neutral", "source"])
+@pytest.mark.parametrize("hazard", [
+    None, "creator", "artifacts", "session", "prompt", "reactivated",
+    "missing", "detail-error", "inventory-error", "incomplete-inventory",
+    "edited-command", "deleted-command", "changed-reservation",
+])
+def test_recovered_successor_final_dispatch_fence(
+        tmp_path, monkeypatch, successor_type, hazard):
+    from copy import deepcopy
+
+    api, store, prior = _owner_abandonment_historical_neutral_case(tmp_path)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+    if successor_type == "neutral":
+        _advance_owner_abandonment_main(api)
+    else:
+        api.source_failure = True
+        api.source_failure_sha = NEXT_RESULT_HEAD
+    before = StateStore(store.path).snapshot()
+    original_get = api.get
+    original_get_all = api.get_all
+    original_anchor = CloudCoordinator._ensure_neutral_receipt_anchor
+    original_claim = StateStore.claim_action
+    injected = []
+
+    def mutate():
+        injected.append(hazard)
+        task = api.tasks[prior["task_id"]]
+        if hazard == "creator":
+            task["creator"]["id"] = 42
+        elif hazard == "artifacts":
+            task["artifacts"] = []
+        elif hazard == "session":
+            task["sessions"][0]["task_id"] = "other-task"
+        elif hazard == "prompt":
+            task["sessions"][0]["prompt"] += " changed"
+        elif hazard == "reactivated":
+            task["state"] = "in_progress"
+        elif hazard == "missing":
+            del api.tasks[prior["task_id"]]
+        elif hazard in {"edited-command", "deleted-command"}:
+            command = next(item for item in api.comments if item["id"] == 7771)
+            if hazard == "edited-command":
+                command["body"] += " changed"
+                command["updated_at"] = "2026-10-01T12:12:00Z"
+            else:
+                api.comments.remove(command)
+        elif hazard == "changed-reservation":
+            StateStore(store.path).update_action(
+                prior["key"], "uncertain", receipt_waits=MAX_RECEIPT_POLLS - 1,
+            )
+
+    def get(route):
+        if (injected and hazard == "detail-error"
+                and route.endswith(f"/tasks/{prior['task_id']}")):
+            raise ApiError("fresh task detail unavailable", status=503)
+        return original_get(route)
+
+    def get_all(route, *, collection=None):
+        if injected and route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
+            if hazard == "inventory-error":
+                raise ApiError("fresh inventory unavailable", status=503)
+            if hazard == "incomplete-inventory":
+                return []
+            if hazard == "reactivated":
+                inventory = deepcopy(original_get_all(route, collection=collection))
+                for item in inventory:
+                    if item["id"] == prior["task_id"]:
+                        item["state"] = "completed"
+                return inventory
+        return original_get_all(route, collection=collection)
+
+    def anchor(self, action):
+        result = original_anchor(self, action)
+        if "owner_abandonment_binding" in action and not injected:
+            mutate()
+        return result
+
+    def claim(self, key, action):
+        result = original_claim(self, key, action)
+        if (result and successor_type == "source"
+                and action.get("kind") == "fix" and not injected):
+            mutate()
+        return result
+
+    api.get = get
+    api.get_all = get_all
+    monkeypatch.setattr(CloudCoordinator, "_ensure_neutral_receipt_anchor", anchor)
+    monkeypatch.setattr(StateStore, "claim_action", claim)
+    task_posts = api.task_posts
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+    assert injected == [hazard]
+    assert api.task_posts == task_posts + (hazard is None)
+    after = StateStore(store.path).snapshot()
+    assert after["enrollments"]["16"]["owner_abandonments"] == (
+        before["enrollments"]["16"]["owner_abandonments"]
+    )
+    if hazard != "changed-reservation":
+        assert after["actions"][prior["key"]] == before["actions"][prior["key"]]
+    if hazard is None:
+        successor = next(
+            item for key, item in after["actions"].items()
+            if key != prior["key"] and item.get("kind") == "fix"
+        )
+        assert successor["status"] == "sent"
+        assert successor["owner_abandonment_binding"]
+        writes = list(api.writes)
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+        assert api.writes == writes
+
+
 def test_owner_abandonment_neutral_successor_survives_main_advance_and_reopens(
         tmp_path):
     advanced_main = FINAL_RESULT_HEAD
@@ -8617,6 +8727,88 @@ def test_conflict_uses_one_neutral_task_with_both_intents_and_no_force_push(tmp_
     assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
 
 
+def test_neutral_preclaim_anchor_admission_is_finite_across_restart(
+        tmp_path, monkeypatch):
+    from copy import deepcopy
+
+    api = FakeApi()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    original_claim = StateStore.claim_action
+    original_head = api.pull["head"]["sha"]
+    obsolete = []
+
+    def advance_before_claim(self, key, action):
+        if action.get("task_type") == "neutral":
+            obsolete.append(deepcopy(self.snapshot()["outbox"]))
+            api.current_main_sha = f"{len(obsolete) + 10:040x}"
+            api.pull["base"]["sha"] = api.current_main_sha
+            return False
+        return original_claim(self, key, action)
+
+    monkeypatch.setattr(StateStore, "claim_action", advance_before_claim)
+    for _ in range(cloud_coordinator.NEUTRAL_LIMIT + 3):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856540).run(apply=True)
+
+    state = StateStore(store.path).snapshot()
+    anchors = {
+        key: entry for key, entry in state["outbox"].items()
+        if entry.get("kind") == "neutral-receipt-anchor"
+    }
+    comments = [
+        body for route, body in api.writes
+        if route.endswith("/issues/16/comments")
+        and body["body"].startswith("hermes-coordinator-neutral-receipt:")
+    ]
+    assert len(comments) == cloud_coordinator.NEUTRAL_LIMIT
+    assert len(anchors) == cloud_coordinator.NEUTRAL_LIMIT
+    assert len({entry["main_sha"] for entry in anchors.values()}) == len(anchors)
+    assert all(entry["status"] == "sent" for entry in anchors.values())
+    for snapshot in obsolete:
+        assert all(state["outbox"][key] == entry for key, entry in snapshot.items()
+                   if entry.get("kind") == "neutral-receipt-anchor")
+    assert api.pull["head"]["sha"] == original_head
+    assert api.fix_attempts == 0
+    assert state["enrollments"]["16"]["attempts"] == 0
+    assert state["enrollments"]["16"]["neutral_attempts"] == 0
+    assert state["enrollments"]["16"]["neutral_anchor_reservations"] == (
+        cloud_coordinator.NEUTRAL_LIMIT
+    )
+    writes = list(api.writes)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856540).run(apply=True)
+    assert api.writes == writes
+
+
+@pytest.mark.parametrize("stored_count", [None, 2, True, -1, "1", 2**31])
+def test_neutral_anchor_budget_migration_and_validation(tmp_path, stored_count):
+    api = FakeApi()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    store = StateStore(tmp_path / "state.json")
+    Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+    state = store.snapshot()
+    enrollment = state["enrollments"]["16"]
+    if stored_count is None:
+        del enrollment["neutral_anchor_reservations"]
+    else:
+        enrollment["neutral_anchor_reservations"] = stored_count
+    store._save(state)
+    if stored_count is not None and (
+            type(stored_count) is not int or not 0 <= stored_count < 2**31):
+        with pytest.raises(CoordinatorError, match="budget"):
+            StateStore(store.path).snapshot()
+        return
+    expected = 1 if stored_count is None else stored_count
+    restarted = StateStore(store.path)
+    assert restarted.snapshot()["enrollments"]["16"][
+        "neutral_anchor_reservations"
+    ] == expected
+    renewed = enrolled_record(comment=126)
+    restarted.enroll(renewed)
+    assert restarted.snapshot()["enrollments"]["16"][
+        "neutral_anchor_reservations"
+    ] == expected
+
+
 def test_neutral_dispatch_binds_returned_anchor_before_task_post(tmp_path):
     api = FakeApi()
     api.pull.update(mergeable=False, mergeable_state="dirty")
@@ -8634,6 +8826,7 @@ def test_neutral_dispatch_binds_returned_anchor_before_task_post(tmp_path):
     assert anchor["comment_id"] == action["receipt_anchor_comment_id"]
     assert f"commentId={anchor['comment_id']}" in prompt
     assert anchor["body"] in prompt
+    assert store.snapshot()["enrollments"]["16"]["neutral_anchor_reservations"] == 1
 
 
 def test_neutral_anchor_receipt_dispatch_and_retained_proof_survive_restart(tmp_path):
@@ -8761,6 +8954,7 @@ def test_lost_neutral_anchor_post_recovers_without_reposting_or_spending_budget(
         if comment.get("body") == anchor["body"]
     )
     assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 0
+    assert store.snapshot()["enrollments"]["16"]["neutral_anchor_reservations"] == 1
     assert api.fix_attempts == 0
     assert len([
         call for call in api.writes
@@ -8773,6 +8967,7 @@ def test_lost_neutral_anchor_post_recovers_without_reposting_or_spending_budget(
     assert store.snapshot()["outbox"][action["receipt_anchor_key"]]["status"] == "sent"
     assert action["receipt_anchor_comment_id"] == anchor_comment_id
     assert store.snapshot()["enrollments"]["16"]["neutral_attempts"] == 1
+    assert store.snapshot()["enrollments"]["16"]["neutral_anchor_reservations"] == 1
     assert api.fix_attempts == 1
     assert len([
         call for call in api.writes
