@@ -41,6 +41,51 @@ checks enforce only the three CI contexts above. The internal
 and cannot be a required branch context. An absent review still blocks merge.
 Do not add replacement statuses, wrappers, review services, or human-review gates.
 
+## Supervised manual qualification
+
+This is a narrow operator disposition, not a new reviewer requirement, a parser
+exception, or an approval. It applies only when the complete authenticated raw
+and rendered review bodies for the latest exact-head Copilot review, and all
+complete paginated nested review threads, have been examined. The review must be
+current on the exact head and in `COMMENTED` or `APPROVED` state. The bodies must
+be unchanged. The review's finding counts, sections, inline findings, body-only
+findings, and thread states must agree. A zero-findings headline alone is
+insufficient.
+
+For example, the exact overview
+“The authorization-sensitive coordinator and review-evidence changes require
+final human security review despite extensive regression coverage.”
+is a generic request for a non-required reviewer role; it does not itself
+identify a source defect, an uncertain safety concern, or a requested source
+correction. The operator may record that semantic disposition only when
+authenticated evidence positively establishes that this role request is the sole
+remaining issue. There may be no unresolved or uncertain source or safety
+concern. Any substantive or ambiguous concern, requested correction, rejecting
+review, malformed or count-inconsistent evidence, open thread, or missing,
+edited, or stale evidence blocks qualification.
+
+Qualification also requires a durable supervised qualification record tied to
+the exact head and base, plus complete authenticated task/session evidence
+showing no active or unknown task occupancy and certain source receipt and
+reservation provenance. Verify fresh-main ancestry, all three current exact-head
+required checks, and the same-run complete `source-ci` aggregate. For a
+sensitive change, independently read back the actual exact-head sensitive owner
+command and verify its binding to the selected review ID and SHA-256 of the exact
+raw UTF-8 review body, including author, repository, review identity,
+submission/edit chronology, and command time; the command must be created no
+earlier than the unchanged review submission. The command mechanics are specified in
+[`cloud-coordinator-spec.md`](cloud-coordinator-spec.md).
+
+The record preserves the exact bot prose and the operator's reasoned
+disposition. Any head, base, review, or command change invalidates it;
+missing, uncertain, or failing evidence blocks. The manual record does not
+change `review_valid`, the owner-authorization ledger, or collected evidence.
+The parser and collector retain their actual fail-closed result; supervised
+eligibility is recorded separately. It does not alter receipts, claims, budgets,
+protections, or guarded deployment, and it is not an autonomous-trial success.
+A later merge remains a separate, independently verified, normal protected
+merge without bypass.
+
 ## Migration baseline
 
 The baseline is a separately verified deployed release, not the older project

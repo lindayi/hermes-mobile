@@ -851,6 +851,13 @@ workloads.
 
 ## Review, checks, and merge
 
+The exceptional supervised semantic disposition for a generic request for a
+non-required reviewer role is defined by
+[`Supervised manual qualification`](git-development-spec.md#supervised-manual-qualification)
+in `docs/git-development-spec.md`.
+It does not change this collector's fail-closed result or any durable machine
+authorization.
+
 Owner-authorized issue #92 replaces independent-review merge gating. Technical
 acceptance requires the latest authenticated Copilot review from reviewer bot ID
 `175728472` on the exact current head, in state `COMMENTED` or `APPROVED`. Coding

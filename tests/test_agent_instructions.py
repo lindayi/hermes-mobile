@@ -248,6 +248,45 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         assert clause in template, clause
 
 
+def test_supervised_review_qualification_contract_is_separate_and_fail_closed():
+    spec = ' '.join((ROOT / 'docs/git-development-spec.md').read_text().split())
+    assert 'Supervised manual qualification' in spec
+    for clause in (
+        'not a new reviewer requirement',
+        'generic request for a non-required reviewer role',
+        'no unresolved or uncertain source or safety concern',
+        'zero-findings headline alone is insufficient',
+        'complete authenticated raw and rendered review',
+        'complete paginated nested review threads',
+        'current on the exact head and in `COMMENTED` or `APPROVED` state',
+        'exact-head sensitive owner command',
+        'SHA-256 of the exact raw UTF-8 review body',
+        'command must be created no earlier than the unchanged review submission',
+        'no active or unknown task occupancy',
+        'certain source receipt and reservation provenance',
+        'fresh-main ancestry',
+        'all three current exact-head required checks',
+        'same-run complete `source-ci` aggregate',
+        'durable supervised qualification record',
+        'does not change `review_valid`, the owner-authorization ledger',
+        'Any head, base, review, or command change invalidates',
+        'missing, uncertain, or failing evidence blocks',
+        'does not alter receipts, claims, budgets',
+        'not an autonomous-trial success',
+        'normal protected merge without bypass',
+    ):
+        assert clause in spec, clause
+
+    for path in (
+        'AGENTS.md',
+        'docs/autonomy-policy.md',
+        'docs/cloud-coordinator-spec.md',
+        'docs/development-workflow.md',
+    ):
+        text = ' '.join((ROOT / path).read_text().split())
+        assert 'Supervised manual qualification' in text, path
+
+
 def test_all_active_context_lists_include_issue_link():
     for path in (
         'AGENTS.md',

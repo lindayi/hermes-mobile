@@ -23,6 +23,10 @@ but GraphQL `statusCheckRollup` omits it and protected merge still reports it as
 expected. Thus `copilot-pull-request-reviewer` cannot be a required branch context.
 An absent review still blocks merge. Do not publish a replacement status or add
 a workflow wrapper, review service, independent reviewer, or human-review gate.
+A supervised operator may disposition a generic request for a non-required
+reviewer role only under the bounded
+[Supervised manual qualification contract](git-development-spec.md#supervised-manual-qualification);
+automatic evidence and authorization remain unchanged.
 
 ## Read-only validator
 
