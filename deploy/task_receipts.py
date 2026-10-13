@@ -37,7 +37,12 @@ class ReceiptError(ValueError):
 
 
 def _receipt_instruction(nonce, *, pull_number, start_head, base_sha,
-                         posting_instruction):
+                         posting_instruction, neutral=False):
+    head_instruction = (
+        "the actual PR head SHA bound by the result (the audit-bearing merge "
+        "commit for `ready`, or the actual current PR head for a typed blocker)"
+        if neutral else "the pushed PR head SHA"
+    )
     return (
         "Before any source edits, verify that nonce, pr, start_head and base are all "
         "present and complete in the template below, and read a nonblank "
@@ -52,7 +57,7 @@ def _receipt_instruction(nonce, *, pull_number, start_head, base_sha,
         "binds task identity through its authenticated task API; do not discover "
         "or echo a task UUID, obtain extra credentials, or request an owner comment. "
         "Replace the session label with that exact session ID and "
-        "the head label with the pushed PR head SHA; these "
+        f"the head label with {head_instruction}; these "
         "replacement labels are not receipt values. Choose one result from the closed list. "
         "Do not wait for CI or review after pushing and focused checks; the parent "
         "controller handles CI/review. A ready receipt is not passing CI and does "
@@ -70,8 +75,11 @@ def _receipt_instruction(nonce, *, pull_number, start_head, base_sha,
 
 def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=False):
     posting_instruction = (
-        "After pushing the audit-bearing merge commit and running focused checks, "
-        "prepare one receipt-only PR reply. The comment payload must contain only "
+        "After resolving the task and running applicable focused checks, prepare "
+        "one receipt-only PR reply. A `ready` result requires the pushed "
+        "audit-bearing merge commit. For `conflict_incompatible` or `policy_broken`, "
+        "do not fabricate or require a merge commit; use the actual current PR head. "
+        "The comment payload must contain only "
         "the eight canonical receipt lines below, with no decision, report, URL, "
         "prose, extra field, or trailing content. Establish the exact complete "
         "serialized carrier, including the provider's unchanged quoted anchor, "
@@ -93,7 +101,7 @@ def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=Fal
     )
     return _receipt_instruction(
         nonce, pull_number=pull_number, start_head=start_head, base_sha=base_sha,
-        posting_instruction=posting_instruction,
+        posting_instruction=posting_instruction, neutral=neutral,
     )
 
 

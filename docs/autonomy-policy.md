@@ -136,7 +136,7 @@ reply. The existing strict receipt carrier limits and validation remain unchange
 | Candidate path | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `918d02cc37253315ed8efacacf4c2091bf049becf51b9a2f5053b3d3206cf068` |
-| `deploy/task_receipts.py` | `15b01e88d6c8bf27b180d952ec7e97f4088117db091e688462d6d3d740733421` |
+| `deploy/task_receipts.py` | `93d1ed4ff614c9183fed2de3a594e581ad9af047345e1e15ea5d1de330827c29` |
 
 ### Retained merged source and deliberate native refreshes
 

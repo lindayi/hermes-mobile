@@ -198,7 +198,7 @@ SOURCE_FINGERPRINTS = {
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     # Issue #65 producer-only overlay; historical receipt hashes remain documented.
     # PR #105 receipt-only neutral transport candidate; prior receipt pins remain historical.
-    'deploy/task_receipts.py': '15b01e88d6c8bf27b180d952ec7e97f4088117db091e688462d6d3d740733421',
+    'deploy/task_receipts.py': '93d1ed4ff614c9183fed2de3a594e581ad9af047345e1e15ea5d1de330827c29',
     # Issue #87 bounded-repair lifecycle overlay; earlier hashes remain historical.
     'deploy/workflow_events.py': '63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e',
     'deploy/workflow_lifecycle.py': 'f8ecf4fa881d907d41a3f8482fa60f1166591dd51e75108aaa4d31f4f2df65b0',

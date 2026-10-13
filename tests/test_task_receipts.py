@@ -412,6 +412,9 @@ def test_neutral_instruction_uses_one_immutable_publication():
     assert "one `reply_to_comment` call" in neutral
     assert "receipt-only PR reply" in neutral
     assert "only the eight canonical receipt lines" in neutral
+    assert "A `ready` result requires the pushed audit-bearing merge commit" in neutral
+    assert "do not fabricate or require a merge commit" in neutral
+    assert "use the actual current PR head" in neutral
     assert "complete serialized carrier" in neutral
     assert "provider's unchanged quoted anchor" in neutral
     assert "ASCII blank separator" in neutral
