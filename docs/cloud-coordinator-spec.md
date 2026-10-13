@@ -609,6 +609,13 @@ Finite acceptance for this recovery:
   handoff then proceeds across cold restart without duplicate work.
 - Source and review-followup fix reservations are eligible; independent review and
   report-correction reservations are not.
+- A current-head owner command that names a fully observed local nonmatch (for
+  example an ineligible review/report-correction reservation, pull/ref mismatch,
+  or unsupported local receipt/identity metadata) is consumed once through the
+  ordinary durable scan path, grants no recovery or continuation, preserves the
+  original reservation bytes/history, and cannot block unrelated PR work. Remote
+  ambiguity, malformed snapshots, pagination gaps, API errors, or post-admission
+  changes still fail closed with no recovery and no network write.
 - Duplicate command delivery, process restart, and a second poll preserve the same
   recovery record, source/neutral counters, uncertainty and lifecycle history, and
   produce no duplicate POST or notice.

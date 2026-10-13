@@ -3789,7 +3789,15 @@ def test_stale_owner_abandonment_command_is_consumed_once_without_blocking_unrel
     ]) == len(task_writes) + 1
 
 
-@pytest.mark.parametrize("scenario", ["unknown-task", "known-nonmatching-reservation"])
+@pytest.mark.parametrize("scenario", [
+    "unknown-task",
+    "known-terminal-reservation",
+    "known-uncertain-review-report-correction",
+    "known-uncertain-pull-identity-mismatch",
+    "known-uncertain-head-ref-mismatch",
+    "known-uncertain-receipt-metadata-mismatch",
+    "known-uncertain-owner-identity-mismatch",
+])
 def test_current_head_unusable_owner_abandonment_command_is_consumed_once_without_blocking_unrelated_prs(
         tmp_path, scenario):
     from copy import deepcopy
@@ -3797,18 +3805,33 @@ def test_current_head_unusable_owner_abandonment_command_is_consumed_once_withou
     other_head = "2" * 40
     api, store, neutral = _owner_abandonment_case(tmp_path)
     command = next(comment for comment in api.comments if comment.get("id") == 7771)
+    targeted_reservation = None
     if scenario == "unknown-task":
         command["body"] = (
             f"/hermes abandon-unverified unknown-task {NEXT_RESULT_HEAD}"
         )
     else:
         extra = deepcopy(store.action(neutral["key"]))
-        extra["key"] = "known-nonmatching-reservation"
-        extra["task_id"] = "known-nonmatching-task"
-        extra["status"] = "sent"
+        extra["key"] = scenario
+        extra["task_id"] = f"{scenario}-task"
+        if scenario == "known-terminal-reservation":
+            extra["status"] = "sent"
+        elif scenario == "known-uncertain-review-report-correction":
+            extra.update(kind="review", task_type="report-correction")
+        elif scenario == "known-uncertain-pull-identity-mismatch":
+            extra["pull_id"] += 1
+        elif scenario == "known-uncertain-head-ref-mismatch":
+            extra["head_ref"] = "other-topic"
+        elif scenario == "known-uncertain-receipt-metadata-mismatch":
+            extra["receipt_waits"] -= 1
+        elif scenario == "known-uncertain-owner-identity-mismatch":
+            extra["owner_id"] += 1
+        else:
+            raise AssertionError(f"unexpected scenario: {scenario}")
         store._mutate(
             lambda state: state["actions"].__setitem__(extra["key"], extra),
         )
+        targeted_reservation = deepcopy(extra)
         command["body"] = (
             f"/hermes abandon-unverified {extra['task_id']} {NEXT_RESULT_HEAD}"
         )
@@ -3911,6 +3934,8 @@ def test_current_head_unusable_owner_abandonment_command_is_consumed_once_withou
     assert first_issue17["repair_requested"]
     assert not second_issue17["repair_requested"]
     assert state["actions"][neutral["key"]] == original_reservation
+    if targeted_reservation is not None and targeted_reservation["status"] == "uncertain":
+        assert state["actions"][targeted_reservation["key"]] == targeted_reservation
     assert state["enrollments"]["16"]["authorized_head"] == (
         issue16_enrollment["authorized_head"]
     )

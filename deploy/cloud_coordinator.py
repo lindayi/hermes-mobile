@@ -1600,7 +1600,7 @@ def _owner_abandonments_valid(records, *, issue=None):
             and (issue is None or record["issue"] == issue)
             for record in records
         )
-        and len({record["action_key"] for record in records}) == len(records        )
+        and len({record["action_key"] for record in records}) == len(records)
     )
 
 
@@ -2053,13 +2053,51 @@ def _task_scoped(task, snapshot):
     )
 
 
-def _owner_abandonment_locally_rejected(action):
+def _owner_abandonment_locally_rejected(action, *, pull=None, item=None, accepted_at=None):
+    if (
+            isinstance(action, dict)
+            and isinstance(action.get("status"), str)
+            and action["status"] in {
+                "blocked", "completed", "sending", "sent", "superseded",
+            }
+    ):
+        return True
+    pull_head = pull.get("head") if isinstance(pull, dict) else None
+    pull_base = pull.get("base") if isinstance(pull, dict) else None
+    if (
+            not isinstance(action, dict)
+            or action.get("status") != "uncertain"
+            or not isinstance(item, dict)
+            or not isinstance(pull, dict)
+            or type(pull.get("number")) is not int
+            or pull["number"] <= 0
+            or type(pull.get("id")) is not int
+            or pull["id"] <= 0
+            or not isinstance(pull.get("node_id"), str)
+            or not pull["node_id"]
+            or not isinstance(pull_head, dict)
+            or not isinstance(pull_base, dict)
+            or not isinstance(pull_head.get("ref"), str)
+            or not _is_sha(pull_base.get("sha"))
+    ):
+        return False
+    if not _pull_identity(pull, action) or pull_head["ref"] != action.get("head_ref"):
+        return True
+    record = {
+        "version": 1, "issue": item["issue"],
+        "action_key": action.get("key"), "task_id": item["task_id"],
+        "task_created_at": action.get("task_created_at"),
+        "reservation_sha256": _reservation_sha256(action),
+        "head_sha": item["head_sha"],
+        "base_sha": pull_base["sha"],
+        "command_comment_id": item["command_comment_id"],
+        "command_body": item["command_body"],
+        "command_created_at": item["command_created_at"],
+        "actor_id": item["actor_id"], "accepted_at": accepted_at,
+    }
     return (
-        isinstance(action, dict)
-        and isinstance(action.get("status"), str)
-        and action["status"] in {
-            "blocked", "completed", "sending", "sent", "superseded",
-        }
+        not _owner_abandonment_record_valid(record)
+        or not _owner_abandonment_matches_action(record, action)
     )
 
 
@@ -6145,9 +6183,10 @@ class Coordinator:
             if len(actions) != 1:
                 raise CoordinatorError("Owner abandonment did not identify one reserved task")
             action = actions[0]
-            if _owner_abandonment_locally_rejected(action):
-                continue
             pull = snapshot["pull"]
+            if _owner_abandonment_locally_rejected(
+                    action, pull=pull, item=item, accepted_at=self._now_string()):
+                continue
             pull_head = pull.get("head") if isinstance(pull, dict) else None
             pull_base = pull.get("base") if isinstance(pull, dict) else None
             if (action.get("status") != "uncertain"
