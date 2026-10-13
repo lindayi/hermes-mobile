@@ -203,7 +203,7 @@ _ISSUE106_COMMENTED_PROGRESS_FIXTURE = {
 }
 
 _ISSUE107_REVIEW_SUMMARY_FIXTURE = {
-    'deploy/review_evidence.py': '6501305dd2fdbd3a6d9f3000ee90d29d54ece50a39f5c62bb3c111835cf3e7f2',
+    'deploy/review_evidence.py': 'ebd59e9bce883d8c816ac4d035278d1ef8229e38459ca17cb2a2fa26e89d5a1b',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {

@@ -277,11 +277,18 @@ Neutral-only content cannot supply a finding; genuine corrections, independent
 siblings and their literal context remain eligible.
 Unsupported top-level disclosures remain ambiguous, not implicitly resolved.
 
-For a canonically marked `COMMENTED` overview only, the exact sentence
-`The operationally sensitive coordinator gate lacks verified latest-head CI and
-required review evidence.` is recognized as verification status. It classifies
-prose only; it does not prove review, CI, or owner authorization. Added or changed
-prose in the same or another sentence remains ambiguous, as does quoted-only text.
+For a canonically marked `COMMENTED` overview only, these two complete sentences
+are recognized as gate-status prose:
+
+`The operationally sensitive coordinator gate lacks verified latest-head CI and required review evidence.`
+
+`The coordinator’s authorization and progress seam is security-sensitive, and exact-head owner authorization remains absent.`
+
+This exact whole-summary match classifies prose only; it does not prove review, CI,
+or owner authorization. Changed case or punctuation, optional-word changes,
+negation, an ASCII apostrophe, a substantive prefix, or added prose in the same
+or another sentence—including a no-code-findings sentence—remains ambiguous.
+Quoted-only text also remains ambiguous.
 
 Validation-only requires complete recognized status prose (optionally accompanied
 by no-code-issues sentences), not the presence of `pending` anywhere. Examples

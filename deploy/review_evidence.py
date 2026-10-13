@@ -13,6 +13,12 @@ import json
 import re
 
 OVERVIEW_MARKER = "<!-- ccr-overview-v2 -->"
+_COMMENTED_GATE_STATUS_SUMMARIES = frozenset({
+    "The operationally sensitive coordinator gate lacks verified latest-head CI "
+    "and required review evidence.",
+    "The coordinator’s authorization and progress seam is security-sensitive, "
+    "and exact-head owner authorization remains absent.",
+})
 MAX_BODY_CHARS = 64 * 1024
 MAX_INDEPENDENT_REVIEW_CHARS = 4096
 MAX_BODY_FINDINGS = 8
@@ -671,6 +677,8 @@ def _summary_disposition(summary, *, overview, state, context=None):
     # and can be forwarded only after live prose independently proves a finding.
     prose = summary.strip()
     context = (context if context is not None else summary).strip()
+    if overview and state == "COMMENTED" and prose in _COMMENTED_GATE_STATUS_SUMMARIES:
+        return "validation-only", prose
     if not prose:
         return ("ambiguous", context) if context else ("no-findings", "")
     sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", prose) if part.strip()]
@@ -680,12 +688,6 @@ def _summary_disposition(summary, *, overview, state, context=None):
     neutral_prefix = re.compile(
         r"^(?:It changes [^.!?]+, while|"
         r"The coordinator[’']s authorization and progress seam is security-sensitive,\s+and)\s+",
-        re.IGNORECASE)
-    # Recognized gate status clauses report gate status, never gate authority.
-    gate_status = re.compile(
-        r"(?:The operationally sensitive coordinator gate lacks verified latest-head CI "
-        r"and required review evidence|"
-        r"(?:the )?(?:exact-head )?owner authorization (?:remains|is)(?: still)? absent)[.!]?",
         re.IGNORECASE)
     # Recognize whole negative verdicts, never arbitrary prose containing 'no'.
     # Scope suffixes are deliberately finite: an unrestricted 'in ...' would
@@ -699,10 +701,7 @@ def _summary_disposition(summary, *, overview, state, context=None):
     def is_validation_status(sentence):
         # A neutral template clause is status, not a general 'pending' keyword.
         clause = neutral_prefix.sub("", sentence)
-        return bool(
-            validation.fullmatch(clause)
-            or overview and state == "COMMENTED" and gate_status.fullmatch(clause)
-        )
+        return bool(validation.fullmatch(clause))
 
     waits = [is_validation_status(sentence) for sentence in sentences]
     if any(waits) and all(wait or negative for wait, negative in zip(waits, negatives)):

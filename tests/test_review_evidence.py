@@ -355,6 +355,56 @@ def test_public_owner_status_overview_is_narrow_validation_status():
     assert not disposition["ambiguous"] and disposition["inventory_complete"]
 
 
+@pytest.mark.parametrize("summary", [
+    PUBLIC_REVIEW_SUMMARY.replace("The", "the", 1),
+    PUBLIC_REVIEW_SUMMARY.replace(".", "!", 1),
+    PUBLIC_REVIEW_SUMMARY[:-1],
+    PUBLIC_REVIEW_SUMMARY + " No code findings were identified.",
+    PUBLIC_OWNER_STATUS_SUMMARY + " No code findings were identified.",
+    PUBLIC_OWNER_STATUS_SUMMARY.replace("The", "the", 1),
+    PUBLIC_OWNER_STATUS_SUMMARY.replace(".", "!", 1),
+    "The coordinator’s authorization and progress seam is security-sensitive, and "
+    "owner authorization remains absent.",
+    "The coordinator’s authorization and progress seam is security-sensitive, and "
+    "the owner authorization remains absent.",
+    "The coordinator’s authorization and progress seam is security-sensitive, and "
+    "exact-head owner authorization is absent.",
+    "The coordinator’s authorization and progress seam is security-sensitive, and "
+    "the exact-head owner authorization is still absent.",
+    "The coordinator's authorization and progress seam is security-sensitive, and "
+    "exact-head owner authorization remains absent.",
+    "The coordinator’s authorization and progress seam is security-sensitive, and "
+    "exact-head owner authorization is not absent.",
+    "It changes authentication to skip owner checks, while " + PUBLIC_REVIEW_SUMMARY,
+    "It changes authentication to skip owner checks, while the exact-head owner "
+    "authorization remains absent.",
+    PUBLIC_REVIEW_SUMMARY + " The current source is unsafe to merge.",
+    PUBLIC_REVIEW_SUMMARY[:-1] + ", but the source is unsafe to merge.",
+    PUBLIC_OWNER_STATUS_SUMMARY + " The current source is unsafe to merge.",
+    PUBLIC_OWNER_STATUS_SUMMARY[:-1] + ", but the source is unsafe to merge.",
+])
+def test_unapproved_gate_status_variants_remain_ambiguous_through_coordinator(
+        tmp_path, summary):
+    review = public_overview_review(
+        body=PUBLIC_REVIEW_BODY.replace(PUBLIC_REVIEW_SUMMARY, summary),
+        body_html=PUBLIC_REVIEW_HTML.replace(PUBLIC_REVIEW_SUMMARY, summary),
+    )
+    parsed = parse_body(review["body"], "COMMENTED", body_html=review["body_html"])
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    api = ReviewApi([review], sensitive=True)
+    result = _managed_cycle(api, tmp_path / "state.json")
+    [plan] = result["pull_requests"]
+
+    assert not plan["review_valid"]
+    assert plan["required_checks_green"]
+    assert plan["sensitive"] and not plan["auto_merge_eligible"]
+    assert "review" in plan["reasons"] and "sensitive" in plan["reasons"]
+    assert parsed["ambiguous"] and not parsed["inventory_complete"], parsed
+    assert disposition["ambiguous"] and not disposition["inventory_complete"]
+
+
 def test_public_owner_status_overview_does_not_grant_merge_authority(tmp_path):
     review = public_owner_status_review()
     api = ReviewApi([review], sensitive=True)
