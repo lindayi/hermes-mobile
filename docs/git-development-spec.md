@@ -88,9 +88,13 @@ merge without bypass.
 
 ### Manual audit artifact v1
 
-The durable artifact is an append-only PR issue comment authored by the repository
-owner, not a bot or a delegated writer. A delegate may prepare evidence; the owner
-must publish and independently verify it. This is documented manual validation.
+The durable artifact is an append-only PR issue comment published by the
+authenticated owner or an explicitly delegated operator. Disclose the unchanged
+owner authority, exact delegate identity, scope, and publication permission.
+Bot authorship or an assertion of delegation is insufficient. Publication and a
+distinct fresh verification pass may use the same authorized operator: this is
+not a second person, human security review, self-approval, or independent-review
+gate. Sensitive owner commands still require the actual owner.
 No runtime validator or coordinator qualification command is implemented.
 Documentation tests check this contract, not a live artifact or authorization.
 
@@ -110,7 +114,7 @@ booleans are not integers. This schema is an audit format, not proof of acceptan
 | `prior_comment_id` | ID or null | Null only for the first qualification; otherwise the superseded event. |
 | `repository` | Repository | Immutable repository identity. |
 | `pull` | Pull | Immutable PR identity. |
-| `operator` | Operator | Owner publisher and preparation authority. |
+| `operator` | Operator | Authenticated publisher and disclosed owner authority. |
 | `head_sha` | SHA | Frozen PR head. |
 | `base_sha` | SHA | Freshly fetched main SHA, not just the PR merge base. |
 | `reserved_at` | Time | Local publication reservation time. |
@@ -127,7 +131,7 @@ booleans are not integers. This schema is an audit format, not proof of acceptan
 | `machine_outcome` | MachineOutcome | Actual parser, collector, and authorization observations. |
 | `status` | Enum `supervised-only`, `blocked`, `invalidated` | Manual outcome, never automatic approval. |
 | `reason` | Text | Outcome explanation, including every blocker or invalidation. |
-| `evidence` | Array of 1–128 Evidence objects | Retained authenticated public evidence inventory. |
+| `evidence` | Array of 1–128 Evidence objects | Public responses, compound manifests, and bounded private attestations. |
 
 Primitive types: ID is an integer from 1 through 2^63−1. SHA is exactly 40 lowercase
 hex characters; Digest is exactly 64 lowercase hex characters. Time is a UTC RFC3339
@@ -135,7 +139,11 @@ string `YYYY-MM-DDTHH:MM:SSZ`, with a valid calendar date, no future value, and 
 invented precision. Key matches `[A-Za-z0-9._:-]{1,128}`. Text is a nonempty UTF-8
 string of at most 8192 bytes. URL is an HTTPS GitHub API or github.com URL of at
 most 2048 bytes for this repository (the owner user endpoint is also allowed).
-EvidenceRef is a Key naming exactly one `evidence` entry; keys and paths are unique.
+EvidenceRef is a Key naming exactly one `evidence` entry; keys and public paths are
+unique. Compound fields reference a manifest, never pretend that one response
+contains unrelated endpoints or local bytes. The reference graph is acyclic, with
+a maximum reference depth of 8 and no dangling or unused entries. All references,
+including delegation and correlation, participate in these checks.
 Digest calculation never trims, normalizes, decodes HTML entities, or reserializes
 the body being hashed.
 
@@ -143,24 +151,24 @@ Named object types, with all keys mandatory:
 
 - Repository: `name` (literal `lindayi/hermes-mobile`), `id` (ID).
 - Pull: `number` (ID), `node_id` (Text), `url` (URL).
-- Operator: `login` (Text), `id` (ID), `delegation` (EvidenceRef). Authenticate
-  owner identity from GitHub, not a login string or this object's assertion.
+- Operator: `login` (Text), `id` (ID), `delegation` (EvidenceRef to a public response).
+  Authenticate publisher and owner identities from GitHub, not login strings.
   The reference retains the unchanged owner scope/authority and delegate identity,
   or the owner's direct preparation statement.
 - Review: `id` (ID), `node_id` (Text), `author_id` (literal integer 175728472),
   `state` (enum `COMMENTED`, `APPROVED`), `commit_id` (SHA equal to `head_sha`),
   `submitted_at` (Time), `last_edited_at` (Time or null), `raw_sha256` (Digest),
-  `rendered_sha256` (Digest), `metadata` (EvidenceRef). Require sha256 over the
+  `rendered_sha256` (Digest), `metadata` (EvidenceRef to a review-metadata manifest). Require sha256 over the
   exact raw UTF-8 `body` and sha256 over the exact rendered UTF-8 `body_html`.
   Metadata retains authenticated full-media bodies and complete edit history;
   explicit null means proven no edit, not absent metadata. An edited review blocks.
 - Check: `name` (enum `source-ci`, `integration-tests`, `issue-link`), `id` (ID),
   `app_id` (ID or null), `head_sha` (SHA), `conclusion` (literal `success`),
-  `completed_at` (Time), `proof` (EvidenceRef). Require Actions app 15368 for
+  `completed_at` (Time), `proof` (EvidenceRef to a check manifest). Require Actions app 15368 for
   `source-ci` and `issue-link`; `integration-tests` remains app-unbound but the
   observed app ID or explicit null must be retained. All heads equal `head_sha`.
 - SourceRun: `id` (ID), `attempt` (integer 1–100), `head_sha` (SHA),
-  `conclusion` (literal `success`), `proof` (EvidenceRef). Retain workflow identity,
+  `conclusion` (literal `success`), `proof` (EvidenceRef to a source-run manifest). Retain workflow identity,
   run URL, complete jobs/pages, and every hosted suite's success; its head must
   equal the root `head_sha`. Bind `source-ci`
   and `integration-tests` check IDs to the same run ID and run attempt; a rerun,
@@ -168,7 +176,7 @@ Named object types, with all keys mandatory:
 - Sensitive: `comment_id` (ID), `author_id` (ID equal to owner), `body_sha256`
   (Digest), `created_at` (Time), `updated_at` (Time equal to `created_at`),
   `review_id` (ID equal to `review.id`), `review_raw_sha256` (Digest equal to
-  `review.raw_sha256`), `head_sha` (SHA equal to root head), `proof` (EvidenceRef).
+  `review.raw_sha256`), `head_sha` (SHA equal to root head), `proof` (EvidenceRef to a sensitive manifest).
   Read the actual `/hermes authorize-sensitive <head-sha> review
   <positive-review-id> <body-sha256>` command separately. Retain its exact body,
   GitHub identity, repository/PR binding, and complete edit history. Require command
@@ -179,13 +187,76 @@ Named object types, with all keys mandatory:
   `not-required`), `blocked_reason` (Text). Record actual machine acceptance or
   rejection, including the blocked parser/collector disposition and the observed
   source revision and time. `not-required` needs nonsensitive diff proof.
+  Each reference names a machine manifest for that actual observation.
   An unavailable observation is `unknown`, never inferred acceptance.
-- Evidence: `key` (Key), `path` (relative POSIX path of at most 256 bytes, without
-  absolute, empty, `.` or `..` components), `sha256` (Digest), `bytes` (integer
-  1–2097152), `url` (URL), `retrieved_at` (Time). These are hashes of retained
-  exact response bytes, not redacted replacements. An inventory entry may point
-  to a manifest of responses from that endpoint; its member paths, hashes, sizes,
-  retrieval times, and request/page/cursor identities must also be retained.
+- Evidence is a discriminated union, selected by `type`. Each alternative has
+  only its exact keys below; none can substitute for another.
+- Public response: `key` (Key), `type` (literal `public-response`), `path` (relative
+  POSIX path of at most 256 bytes, without absolute, empty, `.` or `..` components),
+  `sha256` (Digest), `bytes` (integer 1–2097152), `url` (URL), `retrieved_at` (Time),
+  `method` (enum `GET`, `POST-read-only`), `request_sha256` (Digest), `identity`
+  (Binding), `pagination` (array of 0–128 Page objects). Retain exact response and
+  request bytes, including GraphQL query/variables and full-media headers, locally.
+  POST-read-only permits only GraphQL queries, never mutations. The GraphQL
+  `https://api.github.com/graphql` URL is allowed only with proved repository identity.
+  Only approved public responses may enter this inventory; API visibility alone
+  does not make task/session contents safe to publish.
+- Binding: `repository_id` (ID), `pull_number` (ID), `head_sha` (SHA), `base_sha`
+  (SHA). All equal the root bindings for qualification/revalidation. Invalidation
+  alone may retain new change-evidence bindings alongside the frozen old bindings;
+  label their chronology in its reason and never treat old proof as current.
+  Check actual endpoint identities, numeric
+  authors, PR node IDs, source SHAs, and command/review identities; a self-declared
+  Binding or request URL is not identity proof.
+- Page: `connection` (Text identifying the endpoint or nested connection),
+  `page` (integer 1–20), `cursor` (Text or null), `next` (Text or null), `total`
+  (integer 0–2000), `count` (integer 0–100). Null cursor starts a collection;
+  null next means proved termination, not an absent field. For each connection,
+  require all consecutive pages, matching next/cursor or REST next URL, consistent
+  totals equal to summed counts, no duplicate nodes, and authenticated terminal
+  `hasNextPage=false` or REST Link/last-page proof. Nested comments have their own
+  connection identities. Noncollection responses use an empty pagination array.
+- Manifest: `key` (Key), `type` (literal `manifest`), `purpose` (enum from the
+  table below), `members` (array of 1–8 Member objects). Member: `role` (enum from
+  its purpose row), `refs` (array of 1–20 distinct EvidenceRefs). Roles are unique
+  and must equal the complete required set, not a subset. Each reference has the
+  specified target type. Reuse a leaf across roles only if it actually proves both.
+- Private attestation: `key` (Key), `type` (literal `private-attestation`), `kind`
+  (enum `coordinator-reservation`, `supervisor-reservation`, `publication-reservation`,
+  `machine-observation`), `reference` (Key locating an operator-only proof),
+  `snapshot_id` (Key), `observed_at` (Time), `verifier` (Operator), `bindings`
+  (PrivateBinding), `correlation` (array of 1–20 distinct EvidenceRefs to public
+  responses, together covering all applicable immutable remote bindings), `result`
+  (enum `verified`, `blocked`, `unknown`), `reason` (Text). No local paths or private
+  hashes are public fields. Publish only owner-approved public bindings and this
+  bounded attestation/reference; missing approval blocks publication.
+- PrivateBinding: all Binding keys, plus `task_id` (Text or null), `session_id`
+  (Text or null), `receipt_comment_id` (ID or null), `prompt_sha256` (Digest or null).
+  Reservation correlation requires the actual task/session/receipt/prompt bindings;
+  null is allowed only when genuinely inapplicable in a verified proof. A blocked
+  or unknown attestation may use null for unavailable bindings, with the precise
+  missing facts in its reason and a private deficiency observation at its reference;
+  it never qualifies. Publication
+  and machine observations instead correlate to their actual public review/command
+  snapshot through `correlation`. A verified attestation requires the separately
+  retained original proof and authorized fresh read; its assertion alone cannot pass.
+
+| Manifest purpose | Required member roles and target types |
+| --- | --- |
+| `review-inventory` | `reviews`, `threads`: public-response; `metadata`: review-metadata manifest. |
+| `review-metadata` | `full-media`, `edit-history`: public-response. |
+| `source` | `tasks`, `sessions`, `receipts`, `prompts`, `commands`, `ancestry`, `diff`: public-response; `reservations`: coordinator/supervisor-reservation private-attestation. |
+| `occupancy` | `tasks`, `sessions`, `workflows`, `comments`: public-response; `state`: coordinator/supervisor-reservation private-attestation; `publication-reservation`: publication-reservation private-attestation. |
+| `check` | `check-runs`, `binding`: public-response. |
+| `source-run` | `run`, `jobs`, `binding`: public-response. |
+| `sensitive` | `command`, `edit-history`: public-response; `review`: review-metadata manifest. |
+| `machine` | `observation`: machine-observation private-attestation; `source`: public-response. |
+
+Root `review_inventory`, `source_proof`, and `occupancy_proof` reference the
+review-inventory, source, and occupancy purposes respectively. Member arrays
+contain every required response page and relevant record within the bounds, not
+just one representative endpoint. Metadata and other compound proofs use the same
+representation. Private proof also counts toward the 20 MiB bundle bound.
 
 Each collection allows at most 20 pages of 100 nodes, including nested connections;
 the bundle allows at most 20 MiB in total. A larger collection blocks this bounded
@@ -200,27 +271,119 @@ reservation, then hydrate relevant task/session details. Active or unknown write
 review workflows, claims, sent/uncertain publications, or unmatched reservations
 block; a terminal task alone is not absence-of-occupancy proof.
 
+### SYNTHETIC compound proof example
+
+This complete reference graph illustrates four compound proofs, not a full
+qualification record or live acceptance evidence. All identities, digests, times,
+and responses are fictional public synthetic diagnostics. The omitted surrounding
+root fields retain the inventory above. The task response contains a synthetic
+task/session inventory and original prompt; the separate receipt response binds
+that task/session to the result. Real sessions needing detail hydration require
+additional entries. Private originals remain
+outside this graph. Documentation/example validation is test-only, not a runtime
+validator.
+
+```json
+{
+  "roots": {"review_inventory": "inventory", "source_proof": "source", "occupancy_proof": "occupancy", "machine": "machine"},
+  "evidence": [
+    {"key": "inventory", "type": "manifest", "purpose": "review-inventory", "members": [{"role": "reviews", "refs": ["rest"]}, {"role": "threads", "refs": ["graphql"]}, {"role": "metadata", "refs": ["metadata"]}]},
+    {"key": "metadata", "type": "manifest", "purpose": "review-metadata", "members": [{"role": "full-media", "refs": ["rest"]}, {"role": "edit-history", "refs": ["graphql"]}]},
+    {"key": "source", "type": "manifest", "purpose": "source", "members": [{"role": "tasks", "refs": ["task"]}, {"role": "sessions", "refs": ["task"]}, {"role": "receipts", "refs": ["receipt"]}, {"role": "prompts", "refs": ["task"]}, {"role": "commands", "refs": ["authority"]}, {"role": "ancestry", "refs": ["commit"]}, {"role": "diff", "refs": ["commit"]}, {"role": "reservations", "refs": ["reservation"]}]},
+    {"key": "occupancy", "type": "manifest", "purpose": "occupancy", "members": [{"role": "tasks", "refs": ["task"]}, {"role": "sessions", "refs": ["task"]}, {"role": "workflows", "refs": ["workflows"]}, {"role": "comments", "refs": ["comments"]}, {"role": "state", "refs": ["reservation"]}, {"role": "publication-reservation", "refs": ["publication"]}]},
+    {"key": "machine", "type": "manifest", "purpose": "machine", "members": [{"role": "observation", "refs": ["observation"]}, {"role": "source", "refs": ["commit"]}]},
+    {"key": "rest", "type": "public-response", "path": "reviews.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 100, "url": "https://api.github.com/repos/lindayi/hermes-mobile/pulls/1/reviews", "retrieved_at": "2026-01-01T00:00:01Z", "method": "GET", "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "reviews", "page": 1, "cursor": null, "next": null, "total": 1, "count": 1}]},
+    {"key": "graphql", "type": "public-response", "path": "threads.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 100, "url": "https://api.github.com/graphql", "retrieved_at": "2026-01-01T00:00:01Z", "method": "POST-read-only", "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "threads", "page": 1, "cursor": null, "next": null, "total": 0, "count": 0}, {"connection": "review-edits", "page": 1, "cursor": null, "next": null, "total": 0, "count": 0}]},
+    {"key": "task", "type": "public-response", "path": "task.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 100, "url": "https://api.github.com/agents/repos/lindayi/hermes-mobile/tasks", "retrieved_at": "2026-01-01T00:00:01Z", "method": "GET", "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "tasks", "page": 1, "cursor": null, "next": null, "total": 1, "count": 1}]},
+    {"key": "authority", "type": "public-response", "path": "authority.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 100, "url": "https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/1", "retrieved_at": "2026-01-01T00:00:01Z", "method": "GET", "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []},
+    {"key": "receipt", "type": "public-response", "path": "receipt.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 100, "url": "https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/2", "retrieved_at": "2026-01-01T00:00:01Z", "method": "GET", "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []},
+    {"key": "commit", "type": "public-response", "path": "compare.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 100, "url": "https://api.github.com/repos/lindayi/hermes-mobile/compare/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "retrieved_at": "2026-01-01T00:00:01Z", "method": "GET", "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "commits", "page": 1, "cursor": null, "next": null, "total": 1, "count": 1}]},
+    {"key": "workflows", "type": "public-response", "path": "workflows.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 100, "url": "https://api.github.com/repos/lindayi/hermes-mobile/actions/runs", "retrieved_at": "2026-01-01T00:00:01Z", "method": "GET", "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "workflows", "page": 1, "cursor": null, "next": null, "total": 0, "count": 0}]},
+    {"key": "comments", "type": "public-response", "path": "comments.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 100, "url": "https://api.github.com/repos/lindayi/hermes-mobile/issues/1/comments", "retrieved_at": "2026-01-01T00:00:01Z", "method": "GET", "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "comments", "page": 1, "cursor": null, "next": null, "total": 1, "count": 1}]},
+    {"key": "reservation", "type": "private-attestation", "kind": "supervisor-reservation", "reference": "synthetic-original", "snapshot_id": "synthetic-snapshot", "observed_at": "2026-01-01T00:00:02Z", "verifier": {"login": "synthetic-operator", "id": 2, "delegation": "authority"}, "bindings": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "task_id": "synthetic-task", "session_id": "synthetic-session", "receipt_comment_id": 2, "prompt_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "correlation": ["task", "receipt", "authority", "commit"], "result": "verified", "reason": "SYNTHETIC authorized read of original supervisor reservation; not remote proof."},
+    {"key": "publication", "type": "private-attestation", "kind": "publication-reservation", "reference": "synthetic-publication", "snapshot_id": "synthetic-snapshot", "observed_at": "2026-01-01T00:00:02Z", "verifier": {"login": "synthetic-operator", "id": 2, "delegation": "authority"}, "bindings": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "task_id": null, "session_id": null, "receipt_comment_id": null, "prompt_sha256": null}, "correlation": ["comments", "rest", "authority"], "result": "verified", "reason": "SYNTHETIC original create-once publication reservation."},
+    {"key": "observation", "type": "private-attestation", "kind": "machine-observation", "reference": "synthetic-observation", "snapshot_id": "synthetic-snapshot", "observed_at": "2026-01-01T00:00:02Z", "verifier": {"login": "synthetic-operator", "id": 2, "delegation": "authority"}, "bindings": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "task_id": null, "session_id": null, "receipt_comment_id": null, "prompt_sha256": null}, "correlation": ["rest", "graphql", "authority", "commit"], "result": "verified", "reason": "SYNTHETIC observed parser denial retained privately; not acceptance."}
+  ]
+}
+```
+
 ### Publication and independent manual validation
 
 Keep the retained public evidence bundle outside the checkout at
 `${XDG_STATE_HOME:-$HOME/.local/state}/hermes-mobile/manual-qualification/PR/record_key/`,
-with directory mode 0700 and files 0600. The PR comment is the durable public index;
-retain exact comment/request/readback bytes, response manifest, reservation, and all
-historical events locally. Another manual operator must independently repeat every
-read from the referenced authenticated public endpoints, recompute the hashes, and
-verify identities and chronology; possession of this local bundle is not authority.
-Private evidence must not be uploaded or placed in the public bundle. If necessary
-proof cannot be reproduced from public authenticated evidence, this path blocks.
-Never store credentials in the bundle.
+with directory mode 0700 and files 0600. Store private proof separately in an
+owner-only sibling directory `manual-qualification-private/PR/record_key/` with the
+same modes. The public bundle and comment never contain private originals.
+Retain exact comment/request/readback bytes and public responses in the public
+bundle; reservation originals and observation records belong only in private
+storage. Private evidence must not be uploaded. Never store credentials in either
+bundle. Possession of copied bytes is not authority.
 
-Use supported `gh api` commands as the authenticated owner. The variables below
+An authorized operator must independently repeat every read from the referenced
+authenticated public endpoints, check identities, chronology and complete
+pagination, and recompute hashes over the retained bytes. Fresh responses may
+have different transport bytes or updated fields: retain and hash them separately,
+compare the frozen facts, and block on a changed binding rather than invent byte
+equality. The distinct fresh pass must also verify private originals as follows:
+
+1. Establish the configured state origin and owning OS identity from trusted
+   operator configuration, not from an arbitrary supplied JSON file. On that
+   authorized non-coding-agent boundary, open the existing private
+   `.<state-name>.run.lock` and `.<state-name>.lock` with `O_RDONLY` and
+   `O_NOFOLLOW`, without creating files. Validate regular file, single link,
+   owner, private modes and inode/path identity. Acquire `LOCK_SH | LOCK_NB` on the run lock
+   first, then the state lock; contention or missing locks blocks, never stops a
+   service or substitutes a new lock. These coordinate with StateStore's
+   exclusive apply and mutation locks. No mutation method or apply cycle is called.
+2. Under both locks read the exact existing state bytes once, with verified private
+   directory/file ownership, no symlinks, stable inode and size, and
+   `MAX_STATE_BYTES` bound. Preserve those bytes before parsing. Validate through
+   the actual trusted version-1 StateStore read path on an isolated private copy,
+   with no preparation state; `StateStore.snapshot() alone does not lock` and a
+   missing/nonprivate file can return empty state, which is not absence proof.
+   In-memory defaults are not original bytes. Version 1 has `cursor`, `events`,
+   `event_watermark`, `enrollments`, `actions`, `outbox`, `retired`, and optional
+   lifecycle data; require the applicable original fields and history, not invented
+   defaults. Release locks after the coherent copy, without writing live state.
+3. Retain privately the snapshot ID, trusted origin/configuration, OS owner and
+   inode metadata, lock identities, source revision, exact byte hash/size, read
+   start/end times, and verified bindings. Verify original `actions` reservations,
+   enrollment counts, retained receipt proofs and tombstones against remote
+   task/session/receipt/prompt/head/base records. `claim_action` persists its
+   sending reservation and nonce-bound prompt before task POST; a current snapshot
+   or tombstone alone cannot prove that earlier write. Require retained original
+   pre-send provenance and chronology, never reconstruct it from a listed task.
+4. A later disclosed supervisor reservation is not a coordinator action. Read the
+   original supervisor create-once reservation and original request/response log
+   from its independently established owner-controlled origin, under its actual
+   writer lock or immutable closed-event boundary. Retain exact bytes, hashes,
+   ownership and observation times privately. Correlate unchanged authority, prompt,
+   starting/result head/base, task/session and receipt identity and pre-POST order.
+   StateStore has no supervisor-reservation format to invent or import. If that
+   original format, origin, lock or chronology cannot be verified, record the exact
+   blocker. Neither reservation replaces the other or clears an uncertain claim.
+5. Retain actual local parser/collector/authorization observation bytes, source
+   revision, input snapshot hashes, execution origin, observation times, stdout,
+   stderr and exit privately. Verify their coherent input correlation against the
+   public responses and state snapshot. An operator attestation is
+   not cryptographic remote proof of a local pre-POST write or machine execution.
+   Public GitHub authenticates only remote facts. Missing, uncertain, mismatched,
+   or unavailable original private proof blocks, even with a public attestation.
+
+This is a read-only operator procedure, not a new validator command or permission
+for a cloud coding task to inspect production, collect private proof, or attest it.
+Do not rewrite receipts, claims, reservations, counters or history. Keep the actual
+machine result and every original failure.
+
+Use supported `gh api` commands as the authenticated authorized publisher. The variables below
 are manually checked values: REPO is `lindayi/hermes-mobile`, PR is the target PR
 number, BUNDLE is the absolute directory above, and COMMENT_ID is the returned
-positive ID, not a guessed value. These are operator examples, not coding-agent
+positive ID, not a guessed value. PRIVATE is the separate owner-only directory;
+no actual private path is published. These are operator examples, not coding-agent
 actions and not a new validator CLI.
 
 ```sh
-gh api user > "$BUNDLE/owner.json"
+gh api user > "$BUNDLE/publisher.json"
 gh api "repos/$REPO" > "$BUNDLE/repository.json"
 gh api "repos/$REPO/pulls/$PR" > "$BUNDLE/pull.json"
 gh api --paginate --slurp -H 'Accept: application/vnd.github.full+json' \
@@ -229,7 +392,7 @@ gh api --paginate --slurp -H 'Accept: application/vnd.github.full+json' \
 
 Before POST, prepare `comment.txt` in the exact format and persist a create-once
 reservation using exclusive creation, for example
-`( set -C; printf '%s\n' "$RECORD_KEY" > "$BUNDLE/reservation" )`.
+`( set -C; printf '%s\n' "$RECORD_KEY" > "$PRIVATE/reservation" )`.
 Retain the frozen request digest, owner/repo/PR/head/base/review/command identities,
 reserved time, and pre-send comment high-water ID with that reservation. Flush the
 files durably before sending. Complete the final evidence reads after reservation,
@@ -253,10 +416,10 @@ gh api --paginate --slurp -H 'Accept: application/vnd.github.full+json' \
 ```
 
 Read back the returned ID and the complete comment inventory. Verify exact raw
-body bytes, marker/schema, immutable owner/time/repo binding, unique record key,
+body bytes, marker/schema, immutable authorized publisher/time/repo binding, unique record key,
 and absent edit history. No PATCH or DELETE is permitted. Never replay an uncertain
 POST: reconcile by fresh complete authenticated comment pages after the saved
-high-water, match exactly one owner/body/key/repo/PR publication, then hydrate its
+high-water, match exactly one authorized publisher/body/key/repo/PR publication, then hydrate its
 ID and edit history. Zero matches, duplicate matches, incomplete pages, or a timeout
 remain blocked/uncertain, even if a later list is empty. Preserve the reservation;
 do not publish a second qualification to work around uncertainty.
@@ -268,8 +431,9 @@ check and the complete same-attempt Source run, and the separate sensitive comma
 Compare raw and rendered prose semantically without changing the parser. Preserve
 the exact quotation and explain why no substantive or ambiguous concern remains;
 a headline or this schema is not sufficient. Retain validation time, validating
-operator identity, request URLs/pages, and digests in a new owner's `revalidation`
-event (`operator` identifies its publisher). This is a second manual read, not an
+operator identity, request URLs/pages, and public digests in a new authorized `revalidation`
+event (`operator` identifies its publisher). Reverify private originals separately.
+This is a second manual read, not an
 independent-review task or an extra required reviewer role.
 
 `supervised-only` records only that narrow manual semantic disposition; it is not
@@ -280,6 +444,15 @@ runtime path. In particular, if the existing sensitive command is rejected becau
 the selected review remains ambiguous, a manual record cannot authorize it:
 record that exact contract conflict as `blocked`. Do not invent a command, positive
 collector outcome, new status, or approval to bridge the conflict.
+
+Read-only inspection of `selected_copilot_sensitive_review` and
+`sensitive_review_authorized` shows that selection does not call the prose parser.
+It checks the unique latest bot review, head/state, full-media bodies, raw digest
+and submission identity; authorization separately binds the unchanged actual owner
+command and its creation time. Do not infer either acceptance or rejection from
+parser denial. Without actual command/state/collector observations, authorization
+is `unknown`. The existing prose parser can still block review/merge independently;
+this manual contract changes neither function nor runtime gate.
 
 Immediately before any merge, perform and publish fresh complete revalidation,
 including readback of every prior event and absence of competing successors.

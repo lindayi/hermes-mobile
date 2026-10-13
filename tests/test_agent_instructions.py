@@ -294,7 +294,8 @@ def test_manual_qualification_artifact_has_an_exact_typed_field_inventory():
     assert '### Manual audit artifact v1' in spec
     section = spec.split('### Manual audit artifact v1', 1)[1].split(
         '### Publication and independent manual validation', 1)[0]
-    fields = re.findall(r'^\| `([^`]+)` \| ([^|]+) \|', section, re.MULTILINE)
+    fields = re.findall(r'^\| `([^`]+)` \| ([^|]+) \|',
+                        section.split('Primitive types:', 1)[0], re.MULTILINE)
     assert dict(fields) == {
         'schema': 'Literal `hermes-supervised-qualification/v1`',
         'kind': 'Enum `qualification`, `revalidation`, `invalidation`',
@@ -351,6 +352,8 @@ def _validate_documented_graph(example, private_proofs):
     assert 1 <= len(entries) <= 128
     by_key = {entry['key']: entry for entry in entries}
     assert len(by_key) == len(entries)
+    binding = next(entry['identity'] for entry in entries
+                   if entry['type'] == 'public-response')
     visiting, visited = set(), set()
 
     def visit(key, depth=0):
@@ -399,6 +402,7 @@ def _validate_documented_graph(example, private_proofs):
             assert entry['method'] in {'GET', 'POST-read-only'}
             assert entry['url'].startswith('https://api.github.com/')
             assert set(entry['identity']) == {'repository_id', 'pull_number', 'head_sha', 'base_sha'}
+            assert entry['identity'] == binding
             for page in entry['pagination']:
                 assert set(page) == {'connection', 'page', 'cursor', 'next', 'total', 'count'}
                 assert page['page'] == 1 and page['next'] is None  # One-page synthetic collections.
@@ -414,8 +418,12 @@ def _validate_documented_graph(example, private_proofs):
                 'task_id', 'session_id', 'receipt_comment_id', 'prompt_sha256',
             }
             visit(entry['verifier']['delegation'], depth + 1)
-            visit(entry['correlation'], depth + 1)
-            assert by_key[entry['correlation']]['type'] == 'public-response'
+            refs = entry['correlation']
+            assert 1 <= len(refs) <= 20 and len(set(refs)) == len(refs)
+            for ref in refs:
+                visit(ref, depth + 1)
+                assert by_key[ref]['type'] == 'public-response'
+            assert all(entry['bindings'][key] == value for key, value in binding.items())
             assert entry['reference'] in private_proofs, 'absent private proof'
             proof = private_proofs[entry['reference']]
             assert proof['snapshot_id'] == entry['snapshot_id']
@@ -456,11 +464,18 @@ def test_compound_example_represents_rest_graphql_and_separate_private_proof():
     }
     assert all('path' not in entry and 'sha256' not in entry
                for entry in example['evidence'] if entry['type'] == 'private-attestation')
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    table = spec.split('| Manifest purpose |', 1)[1].split(
+        'Root `review_inventory`', 1)[0]
+    rows = re.findall(r'^\| `([^`]+)` \| ([^|]+) \|', table, re.MULTILINE)
+    assert {purpose: set(re.findall(r'`([^`]+)`', roles))
+            for purpose, roles in rows} == MANIFEST_ROLES
 
 
 @pytest.mark.parametrize('defect', (
     'missing-member', 'dangling', 'cycle', 'duplicate', 'wrong-type', 'absent-private',
-    'unknown-origin', 'changed-binding',
+    'unknown-origin', 'changed-binding', 'duplicate-role', 'duplicate-ref',
+    'private-cycle', 'private-dangling', 'wrong-identity', 'incomplete-page',
 ))
 def test_compound_example_rejects_incomplete_or_uncertain_proof(defect):
     example = deepcopy(_compound_example())
@@ -474,6 +489,19 @@ def test_compound_example_rejects_incomplete_or_uncertain_proof(defect):
         }[defect]]
     elif defect == 'duplicate':
         example['evidence'].append(deepcopy(example['evidence'][0]))
+    elif defect == 'duplicate-role':
+        manifest['members'].append(deepcopy(manifest['members'][0]))
+    elif defect == 'duplicate-ref':
+        manifest['members'][0]['refs'] *= 2
+    elif defect in {'private-cycle', 'private-dangling'}:
+        entry = next(entry for entry in example['evidence'] if entry['type'] == 'private-attestation')
+        entry['correlation'] = [entry['key'] if defect == 'private-cycle' else 'missing']
+    elif defect == 'wrong-identity':
+        next(entry for entry in example['evidence']
+             if entry['key'] == 'graphql')['identity']['repository_id'] = 99
+    elif defect == 'incomplete-page':
+        next(entry for entry in example['evidence']
+             if entry['key'] == 'graphql')['pagination'][0]['next'] = 'unread-cursor'
     elif defect == 'absent-private':
         proofs.clear()
     elif defect == 'unknown-origin':
