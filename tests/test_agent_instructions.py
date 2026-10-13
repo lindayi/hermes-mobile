@@ -550,28 +550,284 @@ def _validate_gate_outcome_fixture(fixture, *, now=AUDIT_REFERENCE_NOW):
     if fixture['fixture'] in BLOCKED_FIXTURES:
         _validate_blocked_record(fixture, now=now)
     else:
-        assert set(fixture) == {
-            'fixture', 'kind', 'status', 'prior_comment_id', 'head_sha', 'base_sha',
-            'changed_binding', 'reserved_at', 'observed_at', 'reason', 'evidence_refs',
+        _validate_invalidation_record(fixture, now=now)
+
+
+def _validate_invalidation_record(fixture, *, prior_readback=None, now=AUDIT_REFERENCE_NOW):
+    """Check this complete synthetic event, not runtime qualification or live proof."""
+    record = {key: value for key, value in fixture.items() if key != 'fixture'}
+    assert set(record) == {
+        'schema', 'kind', 'record_key', 'prior_comment_id', 'repository', 'pull',
+        'operator', 'head_sha', 'base_sha', 'changed_binding', 'reserved_at',
+        'observed_at', 'status', 'reason', 'evidence',
+    }, 'invalidation must be a complete event'
+    assert fixture['fixture'] == 'invalidation'
+    assert record['schema'] == 'hermes-supervised-qualification/v1'
+    assert record['kind'] == 'invalidation' and record['status'] == 'invalidated'
+    assert re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', record['record_key'])
+    assert type(record['prior_comment_id']) is int and 1 <= record['prior_comment_id'] < 2**63
+    assert record['repository'] == {'name': 'lindayi/hermes-mobile', 'id': 1}
+    assert record['pull'] == {
+        'number': 1, 'node_id': 'SYNTHETIC_PR_NODE',
+        'url': 'https://api.github.com/repos/lindayi/hermes-mobile/pulls/1',
+    }
+    assert set(record['operator']) == {'login', 'id', 'delegation'}
+    assert record['operator']['login']
+    assert type(record['operator']['id']) is int and 1 <= record['operator']['id'] < 2**63
+    assert type(record['reason']) is str and 0 < len(record['reason'].encode()) <= 8192
+    changed = record['changed_binding']
+    assert set(changed) == {'head_sha', 'base_sha', 'observed_at', 'proof'}
+    for snapshot in (record, changed):
+        for field in ('head_sha', 'base_sha'):
+            assert type(snapshot[field]) is str and re.fullmatch(SHA, snapshot[field]), \
+                'invalidation bindings must be known SHAs'
+    reserved_at = _audit_datetime(record['reserved_at'], now)
+    observed_at = _audit_datetime(record['observed_at'], now)
+    changed_at = _audit_datetime(changed['observed_at'], now)
+    assert reserved_at <= observed_at and changed_at <= observed_at
+    old_binding = {
+        'repository_id': record['repository']['id'], 'pull_number': record['pull']['number'],
+        'head_sha': record['head_sha'], 'base_sha': record['base_sha'],
+    }
+    fresh_binding = dict(old_binding, head_sha=changed['head_sha'], base_sha=changed['base_sha'])
+    entries = record['evidence']
+    assert 1 <= len(entries) <= 128
+    by_key = {entry['key']: entry for entry in entries}
+    assert len(by_key) == len(entries), 'duplicate evidence key'
+    assert len({entry['path'] for entry in entries}) == len(entries), 'duplicate evidence path'
+    refs = {record['operator']['delegation'], 'prior-record', changed['proof']}
+    assert refs <= set(by_key), 'dangling reference'
+    assert set(by_key) <= refs, 'unreferenced evidence'
+    assert len(refs) == 3, 'old readback, fresh change and authority are distinct responses'
+    for entry in entries:
+        assert set(entry) == {
+            'key', 'type', 'path', 'sha256', 'bytes', 'url', 'retrieved_at',
+            'method', 'request_sha256', 'identity', 'pagination',
         }
-        assert fixture['fixture'] == 'invalidation'
-        assert fixture['kind'] == 'invalidation'
-        assert fixture['status'] == 'invalidated'
-        assert type(fixture['prior_comment_id']) is int and fixture['prior_comment_id'] > 0
-        assert set(fixture['changed_binding']) == {
-            'head_sha', 'base_sha', 'observed_at', 'proof',
+        assert entry['type'] == 'public-response'
+        assert re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', entry['key'])
+        assert 0 < len(entry['path'].encode()) <= 256 and not entry['path'].startswith('/')
+        assert all(part not in {'', '.', '..'} for part in entry['path'].split('/'))
+        assert re.fullmatch(r'[a-f0-9]{64}', entry['sha256'])
+        assert re.fullmatch(r'[a-f0-9]{64}', entry['request_sha256'])
+        assert type(entry['bytes']) is int and 1 <= entry['bytes'] <= 2097152
+        assert entry['url'].startswith('https://api.github.com/repos/lindayi/hermes-mobile/')
+        assert entry['method'] == 'GET' and entry['pagination'] == []
+        retrieved_at = _audit_datetime(entry['retrieved_at'], now)
+        assert retrieved_at <= observed_at
+        if entry['key'] == changed['proof']:
+            assert entry['identity'] == fresh_binding, 'change proof must bind the fresh snapshot'
+            assert retrieved_at <= changed_at
+        else:
+            assert entry['identity'] == old_binding, 'historical proof must bind the old snapshot'
+
+    # The prior comment's full synthetic body is the documented blocked-checks record.
+    if prior_readback is None:
+        prior_readback = {
+            'id': 99, 'record': {
+                key: value for key, value in _gate_fixtures()['blocked-checks'].items()
+                if key != 'fixture'
+            },
         }
-        assert re.fullmatch(r'[a-f0-9]{40}', fixture['head_sha'])
-        assert re.fullmatch(r'[a-f0-9]{40}', fixture['base_sha'])
-        assert fixture['changed_binding']['proof'] in fixture['evidence_refs']
-        assert {'prior-record', fixture['changed_binding']['proof']} <= \
-            set(fixture['evidence_refs'])
-        reserved_at = _audit_datetime(fixture['reserved_at'], now)
-        observed_at = _audit_datetime(fixture['observed_at'], now)
-        changed_at = _audit_datetime(fixture['changed_binding']['observed_at'], now)
-        assert changed_at <= observed_at
-        assert reserved_at <= observed_at
-        assert fixture['changed_binding']['head_sha'] != fixture['head_sha']
+    assert record['prior_comment_id'] == prior_readback['id'], 'prior comment ID mismatch'
+    assert by_key['prior-record']['url'] == (
+        f"https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/{prior_readback['id']}"
+    )
+    prior = prior_readback['record']
+    for field in ('repository', 'pull', 'head_sha', 'base_sha'):
+        assert record[field] == prior[field], 'prior record binding mismatch'
+    assert _audit_datetime(prior['observed_at'], now) <= \
+        _audit_datetime(by_key['prior-record']['retrieved_at'], now)
+    assert _audit_datetime(prior['observed_at'], now) <= \
+        _audit_datetime(by_key[changed['proof']]['retrieved_at'], now) <= changed_at
+
+
+def test_invalidation_documents_known_fresh_bindings_and_private_unavailable_reads():
+    spec = ' '.join((ROOT / 'docs/git-development-spec.md').read_text().split())
+    for clause in (
+        'new head and base must both be known SHAs actually observed',
+        'no public invalidation event',
+        'preserve the failed or incomplete read and reservation privately',
+        'Unavailable evidence prevents reuse of prior qualification',
+        'even when no invalidation can be published',
+        'The head and base need not differ from the old snapshot',
+    ):
+        assert clause in spec, clause
+    assert 'new SHAs are the values actually observed or null when unavailable' not in spec
+
+
+@pytest.mark.parametrize('fields', (
+    ('head_sha',), ('base_sha',), ('head_sha', 'base_sha'),
+))
+@pytest.mark.parametrize('value', (None, 'missing', 'A' * 40, 'a' * 39))
+def test_invalidation_rejects_unavailable_or_malformed_changed_bindings(fields, value):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    for field in fields:
+        if value == 'missing':
+            del record['changed_binding'][field]
+        else:
+            record['changed_binding'][field] = value
+    with pytest.raises(AssertionError):
+        _validate_invalidation_record(record)
+
+
+@pytest.mark.parametrize('key', ('authority', 'prior-record', 'fresh-head'))
+@pytest.mark.parametrize('field', ('head_sha', 'base_sha', 'repository_id', 'pull_number'))
+@pytest.mark.parametrize('value', (None, 'mismatch'))
+def test_invalidation_rejects_null_or_mismatched_evidence_bindings(key, field, value):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    entry = next(item for item in record['evidence'] if item['key'] == key)
+    entry['identity'][field] = (
+        None if value is None else ('d' * 40 if field.endswith('sha') else 99)
+    )
+    with pytest.raises(AssertionError):
+        _validate_invalidation_record(record)
+
+
+@pytest.mark.parametrize('defect', (
+    'dangling-proof', 'dangling-delegation', 'missing-prior', 'duplicate-key',
+    'duplicate-path', 'unused-evidence', 'old-as-fresh', 'extra-key', 'missing-key',
+    'prior-id', 'prior-head', 'prior-base', 'prior-repository', 'prior-pull',
+    'prior-url', 'unknown-kind', 'qualification-kind', 'revalidation-kind',
+    'blocked-status', 'supervised-only-status', 'unknown-schema',
+))
+def test_invalidation_rejects_inconsistent_identity_references_and_promotion(defect):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    evidence = record['evidence']
+    if defect == 'dangling-proof':
+        record['changed_binding']['proof'] = 'absent'
+    elif defect == 'dangling-delegation':
+        record['operator']['delegation'] = 'absent'
+    elif defect == 'missing-prior':
+        evidence[:] = [item for item in evidence if item['key'] != 'prior-record']
+    elif defect == 'duplicate-key':
+        evidence.append(deepcopy(evidence[0]))
+    elif defect == 'duplicate-path':
+        evidence[2]['path'] = evidence[1]['path']
+    elif defect == 'unused-evidence':
+        extra = deepcopy(evidence[0])
+        extra.update(key='extra', path='extra.json')
+        evidence.append(extra)
+    elif defect == 'old-as-fresh':
+        record['changed_binding']['proof'] = 'prior-record'
+    elif defect == 'extra-key':
+        record['evidence_refs'] = []
+    elif defect == 'missing-key':
+        del record['reason']
+    elif defect == 'prior-id':
+        record['prior_comment_id'] = 98
+    elif defect in {'prior-head', 'prior-base', 'prior-repository', 'prior-pull'}:
+        if defect in {'prior-head', 'prior-base'}:
+            field = defect.split('-', 1)[1] + '_sha'
+            record[field] = 'd' * 40
+            for entry in evidence:
+                if entry['key'] != 'fresh-head':
+                    entry['identity'][field] = record[field]
+        elif defect == 'prior-repository':
+            record['repository']['id'] = 99
+        else:
+            record['pull']['number'] = 99
+    elif defect == 'prior-url':
+        next(item for item in evidence if item['key'] == 'prior-record')['url'] = (
+            'https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/98'
+        )
+    elif defect.endswith('kind'):
+        record['kind'] = defect.removesuffix('-kind')
+    elif defect.endswith('status'):
+        record['status'] = defect.removesuffix('-status')
+    else:
+        record['schema'] = 'hermes-supervised-qualification/v2'
+    with pytest.raises(AssertionError):
+        _validate_invalidation_record(record)
+
+
+@pytest.mark.parametrize('field', ('repository', 'pull', 'head_sha', 'base_sha', 'id'))
+def test_invalidation_matches_the_prior_comment_readback(field):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    prior = {'id': 99, 'record': deepcopy(_gate_fixtures()['blocked-checks'])}
+    if field == 'id':
+        prior['id'] = 98
+    else:
+        prior['record'][field] = None
+    with pytest.raises(AssertionError):
+        _validate_invalidation_record(record, prior_readback=prior)
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES))
+def test_blocked_record_cannot_be_promoted_to_an_invalidation(name):
+    record = deepcopy(_gate_fixtures()[name])
+    record.update(kind='invalidation', status='invalidated', prior_comment_id=99)
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(record)
+
+
+@pytest.mark.parametrize('surface', ('review', 'command', 'check', 'attempt', 'occupancy'))
+def test_invalidation_accepts_changed_evidence_at_the_same_head_and_base(surface):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    record['changed_binding']['head_sha'] = record['head_sha']
+    fresh = next(item for item in record['evidence'] if item['key'] == 'fresh-head')
+    fresh['identity']['head_sha'] = record['head_sha']
+    fresh['url'] = 'https://api.github.com/repos/lindayi/hermes-mobile/' + {
+        'review': 'pulls/1/reviews/10', 'command': 'issues/comments/10',
+        'check': 'check-runs/10', 'attempt': 'actions/runs/10/attempts/2',
+        'occupancy': 'agents/tasks/synthetic-task',
+    }[surface]
+    record['reason'] = f'SYNTHETIC {surface} changed at the same head/base'
+    _validate_invalidation_record(record)
+
+
+@pytest.mark.parametrize('fields', (
+    ('head_sha',), ('base_sha',), ('head_sha', 'base_sha'),
+))
+def test_invalidation_accepts_actual_binding_changes_with_distinct_old_and_new_proof(fields):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    fresh = next(item for item in record['evidence'] if item['key'] == 'fresh-head')
+    record['changed_binding']['head_sha'] = record['head_sha']
+    fresh['identity']['head_sha'] = record['head_sha']
+    for field in fields:
+        record['changed_binding'][field] = fresh['identity'][field] = 'c' * 40
+    _validate_invalidation_record(record)
+    prior = next(item for item in record['evidence'] if item['key'] == 'prior-record')
+    assert prior['identity'] != fresh['identity']
+
+
+@pytest.mark.parametrize('field', ('reserved_at', 'observed_at', 'changed_at', 'retrieved_at'))
+@pytest.mark.parametrize('value', (
+    '2025-02-29T00:00:00Z', '2026-01-01T24:00:00Z', '2026-01-01T00:00:60Z',
+    '2026-1-01T00:00:00Z', '2026-01-01T00:00:00.000Z',
+    '2026-01-01T00:00:00+00:00', None, 1,
+))
+def test_invalidation_rejects_invalid_or_noncanonical_timestamps(field, value):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    if field == 'changed_at':
+        record['changed_binding']['observed_at'] = value
+    elif field == 'retrieved_at':
+        record['evidence'][0][field] = value
+    else:
+        record[field] = value
+    with pytest.raises(AssertionError):
+        _validate_invalidation_record(record)
+
+
+@pytest.mark.parametrize('defect', (
+    'late-evidence', 'late-change-proof', 'early-prior', 'early-change', 'stale-change-proof',
+))
+def test_invalidation_rejects_evidence_chronology_violations(defect):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    by_key = {entry['key']: entry for entry in record['evidence']}
+    if defect == 'late-evidence':
+        by_key['authority']['retrieved_at'] = '2026-01-01T00:00:09Z'
+    elif defect == 'late-change-proof':
+        by_key['fresh-head']['retrieved_at'] = '2026-01-01T00:00:08Z'
+    elif defect == 'early-prior':
+        by_key['prior-record']['retrieved_at'] = '2026-01-01T00:00:04Z'
+    elif defect == 'stale-change-proof':
+        by_key['fresh-head']['retrieved_at'] = '2026-01-01T00:00:04Z'
+    else:
+        record['changed_binding']['observed_at'] = '2026-01-01T00:00:04Z'
+        by_key['fresh-head']['retrieved_at'] = '2026-01-01T00:00:04Z'
+    with pytest.raises(AssertionError):
+        _validate_invalidation_record(record)
 
 
 def _gate_fixtures():
@@ -628,6 +884,7 @@ def test_blocked_record_rejects_impossible_calendar_timestamps():
 @pytest.mark.parametrize('location', (
     'blocked-reserved', 'blocked-observed', 'blocked-evidence', 'blocked-gate',
     'invalidation-reserved', 'invalidation-observed', 'invalidation-change',
+    'invalidation-evidence',
 ))
 def test_audit_artifacts_reject_impossible_dates_at_every_timestamp_location(location):
     invalidation = location.startswith('invalidation-')
@@ -637,7 +894,7 @@ def test_audit_artifacts_reject_impossible_dates_at_every_timestamp_location(loc
         record['reserved_at'] = impossible
     elif location.endswith('observed'):
         record['observed_at'] = impossible
-    elif location == 'blocked-evidence':
+    elif location in {'blocked-evidence', 'invalidation-evidence'}:
         record['evidence'][0]['retrieved_at'] = impossible
     elif location == 'blocked-gate':
         next(item for item in record['gate_evidence']
@@ -678,6 +935,7 @@ def test_blocked_record_rejects_invalid_or_noncanonical_timestamps(value):
 @pytest.mark.parametrize('location', (
     'blocked-reserved', 'blocked-observed', 'blocked-evidence', 'blocked-gate',
     'invalidation-reserved', 'invalidation-observed', 'invalidation-change',
+    'invalidation-evidence',
 ))
 def test_audit_artifacts_reject_future_timestamps_at_every_timestamp_location(location):
     invalidation = location.startswith('invalidation-')
@@ -686,7 +944,7 @@ def test_audit_artifacts_reject_future_timestamps_at_every_timestamp_location(lo
         record['reserved_at'] = '2026-01-01T00:00:11Z'
     elif location.endswith('observed'):
         record['observed_at'] = '2026-01-01T00:00:11Z'
-    elif location == 'blocked-evidence':
+    elif location in {'blocked-evidence', 'invalidation-evidence'}:
         record['evidence'][0]['retrieved_at'] = '2026-01-01T00:00:11Z'
     elif location == 'blocked-gate':
         next(item for item in record['gate_evidence']
@@ -734,7 +992,7 @@ def test_invalidation_accepts_equal_timestamps():
 def test_audit_artifacts_reject_timestamp_order_violations(location):
     invalidation = location.startswith('invalidation-')
     record = deepcopy(_gate_fixtures()['invalidation' if invalidation else 'blocked-checks'])
-    later = '2026-01-01T00:00:06Z'
+    later = '2026-01-01T00:00:09Z' if invalidation else '2026-01-01T00:00:06Z'
     if location.endswith('reserved'):
         record['reserved_at'] = later
     elif location == 'blocked-evidence':

@@ -195,15 +195,22 @@ The exact top-level keys for an `invalidated` event are `schema`, `kind`,
 and `evidence`. `kind` and `status` are the literals `invalidation` and
 `invalidated`; `prior_comment_id` is a positive ID. `head_sha` and `base_sha` preserve
 the old frozen snapshot. `changed_binding` has exactly `head_sha`, `base_sha`,
-`observed_at`, and `proof`; new SHAs are the values actually observed or null when
-unavailable. Its proof references fresh change evidence, including any changed
+`observed_at`, and `proof`; new head and base must both be known SHAs actually
+observed, never null. If either fresh binding is unavailable, there is no public
+invalidation event: preserve the failed or incomplete read and reservation privately,
+and block publication and merge without inventing a binding or replaying publication.
+Unavailable evidence prevents reuse of prior qualification, even when no invalidation
+can be published. Its proof references fresh change evidence, including any changed
 review, command, check, run attempt, or occupancy binding. `observed_at` is no earlier
 than `reserved_at` or the change observation. The reason identifies the changed
-surface. The prior record retains the old positive evidence; the invalidation does
+surface. The head and base need not differ from the old snapshot when another bound
+surface changes. The prior record retains the old positive evidence; the invalidation does
 not copy it as current proof or invent a replacement review, command, check, or
 machine observation. Retain an authenticated readback of the prior record and the
 fresh change proof in `evidence`; the prior comment ID and old root bindings must
-match that readback.
+match that readback. The prior snapshot time must be no later than its readback
+or the fresh change proof's retrieval; that retrieval must be no later than the
+change observation. Every evidence retrieval must be no later than the root observation.
 
 For either variant, evidence keys and references follow the same bounds, exact
 discriminators, identity rules, and acyclic graph rules below. Every blocker and
@@ -283,8 +290,9 @@ Named object types, with all keys mandatory:
   (SHA). In `supervised-only` qualification/revalidation, all equal the root
   bindings. Invalidation and blocked variants retain each observed binding alongside the frozen root
   binding; label chronology and mismatches, and never treat old proof as current.
-  Every root head/base, including a blocked record's, is a known SHA; an unread
-  binding blocks before publication (see the blocked keys above).
+  Every root head/base and invalidation's fresh `changed_binding` head/base is a
+  known SHA; an unread binding blocks publication, merge, and reuse of prior
+  qualification (see the blocked and invalidated keys above).
   Check actual endpoint identities, numeric
   authors, PR node IDs, source SHAs, and command/review identities; a self-declared
   Binding or request URL is not identity proof.
@@ -389,13 +397,16 @@ validator.
 
 ### SYNTHETIC gate outcome examples
 
-These complete blocked records use fictional values and known synthetic head/base
-bindings; they are not live evidence. `fixture` is a test label, not an artifact field.
+These complete blocked and invalidated records use fictional values and known
+synthetic head/base bindings; they are not live evidence. `fixture` is a test label,
+not an artifact field.
 Each record carries every top-level key, typed gate observations, and the complete
 `evidence` entries that its operator delegation and gate observations reference,
-with no unused entries. The invalidation fragment is not a complete root
-comment; its referenced evidence names stand in for entries in a full record's
-`evidence` array and its `evidence_refs` is also a test label.
+with no unused entries. The invalidation retains a synthetic readback of prior
+comment 99, whose body is the `blocked-checks` record below without its `fixture`
+label, plus a separate fresh PR binding response. The prior response binds the old
+root; the fresh response binds `changed_binding`. Neither is current qualification
+proof. The unchanged authority response discloses the synthetic operator delegation.
 
 ```json
 {
@@ -501,16 +512,25 @@ comment; its referenced evidence names stand in for entries in a full record's
 ```json
 {
   "fixture": "invalidation",
+  "schema": "hermes-supervised-qualification/v1",
   "kind": "invalidation",
+  "record_key": "synthetic-invalidation",
   "status": "invalidated",
   "prior_comment_id": 99,
+  "repository": {"name": "lindayi/hermes-mobile", "id": 1},
+  "pull": {"number": 1, "node_id": "SYNTHETIC_PR_NODE", "url": "https://api.github.com/repos/lindayi/hermes-mobile/pulls/1"},
+  "operator": {"login": "synthetic-operator", "id": 2, "delegation": "authority"},
   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "changed_binding": {"head_sha": "cccccccccccccccccccccccccccccccccccccccc", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "observed_at": "2026-01-01T00:00:03Z", "proof": "fresh-head"},
-  "reserved_at": "2026-01-01T00:00:01Z",
-  "observed_at": "2026-01-01T00:00:04Z",
-  "reason": "SYNTHETIC head changed after the prior record",
-  "evidence_refs": ["prior-record", "fresh-head"]
+  "changed_binding": {"head_sha": "cccccccccccccccccccccccccccccccccccccccc", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "observed_at": "2026-01-01T00:00:07Z", "proof": "fresh-head"},
+  "reserved_at": "2026-01-01T00:00:06Z",
+  "observed_at": "2026-01-01T00:00:08Z",
+  "reason": "SYNTHETIC head changed after the prior blocked qualification",
+  "evidence": [
+    {"key": "authority", "type": "public-response", "path": "authority.json", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "bytes": 101, "url": "https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/1", "retrieved_at": "2026-01-01T00:00:06Z", "method": "GET", "request_sha256": "9999999999999999999999999999999999999999999999999999999999999999", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []},
+    {"key": "prior-record", "type": "public-response", "path": "prior-record.json", "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "bytes": 102, "url": "https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/99", "retrieved_at": "2026-01-01T00:00:06Z", "method": "GET", "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []},
+    {"key": "fresh-head", "type": "public-response", "path": "fresh-head.json", "sha256": "3333333333333333333333333333333333333333333333333333333333333333", "bytes": 103, "url": "https://api.github.com/repos/lindayi/hermes-mobile/pulls/1", "retrieved_at": "2026-01-01T00:00:07Z", "method": "GET", "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "cccccccccccccccccccccccccccccccccccccccc", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []}
+  ]
 }
 ```
 
@@ -752,10 +772,14 @@ Immediately before any merge, perform and publish fresh complete revalidation,
 including readback of every prior event and absence of competing successors.
 Any head/base/review/command/check/run-attempt/occupancy change or edited/deleted
 record invalidates the old snapshot immediately, whether or not an invalidation
-has yet been published. On change, append a new `invalidation` record with a new
-key, `prior_comment_id`, `status=invalidated`, the old bound snapshot, current
-observation time, and a precise reason plus fresh change evidence. Old references
-are historical, not asserted current by an invalidation. A replacement qualification
+has yet been published. Unavailable evidence also blocks reuse of the old
+qualification immediately; absence of a publishable invalidation never permits
+stale positive evidence. On change with known fresh head and base, append a new `invalidation` record
+with a new key, `prior_comment_id`, `status=invalidated`, the old bound snapshot, current
+observation time, and a precise reason plus fresh change evidence. If either fresh
+binding cannot be read, keep the failed/incomplete read and reservation private,
+block publication and merge, and reconcile without replay before any later event.
+Old references are historical, not asserted current by an invalidation. A replacement qualification
 must reference that invalidation, gather entirely fresh proof, and preserve all old
 records, failures, reservations, and counters. A revalidation references the latest
 qualification/revalidation and repeats the full schema; it never revives an
