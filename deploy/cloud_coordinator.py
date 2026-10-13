@@ -5533,8 +5533,9 @@ class Coordinator:
             number, enrollment, self.store.actions(),
             snapshot["comments"], snapshot["pull"].get("base", {}).get("sha"),
         )
-        continuation_only_head = _owner_abandonment_available(
-            enrollment, self.store.actions(), head,
+        continuation_only_head = (
+            _owner_abandonment_available(enrollment, self.store.actions(), head)
+            and head not in authorized_heads
         )
         if head in blocked_heads:
             # A proved typed blocker is meaningful evidence, not an unrelated push.

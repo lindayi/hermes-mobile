@@ -3048,6 +3048,46 @@ def test_owner_abandonment_head_is_continuation_only(tmp_path):
     assert NEXT_RESULT_HEAD not in blocked
 
 
+def test_owner_abandonment_same_head_successor_releases_continuation_only_after_restart(
+        tmp_path):
+    api, store, abandoned = _owner_abandonment_case(tmp_path)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    successor = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "fix"
+        and action.get("key") != abandoned["key"]
+        and action.get("head") == NEXT_RESULT_HEAD
+    )
+
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=NEXT_RESULT_HEAD, base_sha=CURRENT_MAIN,
+    )
+    api.head_sha = NEXT_RESULT_HEAD
+    api.pull["head"]["sha"] = NEXT_RESULT_HEAD
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.unresolved = False
+    api.review_state = None
+    api.review_sha = None
+
+    accepted = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    assert accepted["head"] == NEXT_RESULT_HEAD
+    assert StateStore(store.path).action(successor["key"])["receipt_result"] == "ready"
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+
+
 def test_owner_abandonment_neutral_successor_survives_main_advance_and_reopens(
         tmp_path):
     advanced_main = FINAL_RESULT_HEAD

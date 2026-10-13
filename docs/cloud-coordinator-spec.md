@@ -587,6 +587,9 @@ must keep the recovery record's historical base in `recorded_base_sha` while its
 v2 receipt base and current pull base continue to match that continuation's
 current `main_sha`. After a valid continuation receipt, bind the recovered task's
 terminal check to that exact receipt lineage even when the PR head has advanced.
+The recovery head remains continuation-only only while it lacks general receipt
+provenance. A distinct, bound ready receipt that returns the same head releases this
+restriction, including after a cold restart; recovery alone never does.
 Reactivation, duplicate commands, restart, or uncertain persistence must not cause
 a repeated POST, notice, or accepted result.
 
