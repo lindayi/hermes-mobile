@@ -1440,6 +1440,8 @@ def test_review_collection_enriches_owner_review_with_bound_graphql_edit_metadat
 @pytest.mark.parametrize("mutation", [
     "error", "missing-node", "edited", "created-edit", "body", "head",
     "author", "node", "repository", "pull", "submitted",
+    "actor-id", "actor-bool", "actor-float", "actor-node", "actor-type",
+    "missing-actor-id", "missing-actor-node", "missing-actor-type",
 ])
 def test_review_collection_blocks_owner_review_when_graphql_metadata_is_untrusted(mutation):
     class InvalidMetadata(FakeApi):
@@ -1469,6 +1471,21 @@ def test_review_collection_blocks_owner_review_when_graphql_metadata_is_untruste
                 review["pullRequest"]["repository"]["databaseId"] = 9
             elif mutation == "pull":
                 review["pullRequest"]["number"] = 17
+            elif mutation == "actor-id":
+                review["author"]["databaseId"] = COPILOT_REVIEWER
+            elif mutation == "actor-bool":
+                review["author"]["databaseId"] = True
+            elif mutation == "actor-float":
+                review["author"]["databaseId"] = float(OWNER)
+            elif mutation == "actor-node":
+                review["author"]["id"] = "U_other"
+            elif mutation == "actor-type":
+                review["author"]["__typename"] = "Bot"
+            elif mutation.startswith("missing-actor-"):
+                review["author"].pop({
+                    "missing-actor-id": "databaseId", "missing-actor-node": "id",
+                    "missing-actor-type": "__typename",
+                }[mutation])
             else:
                 review["submittedAt"] = "2026-10-01T11:01:00Z"
             return response
@@ -1707,7 +1724,8 @@ class FakeApi:
             "commit_id": self.owner_review_head_sha,
             "submitted_at": self.owner_review_submitted_at,
             "body": self.owner_review_body,
-            "user": {"id": OWNER, "login": self.owner_login},
+            "user": {"id": OWNER, "login": self.owner_login,
+                     "node_id": "U_synthetic_owner", "type": "User"},
         }
         if graphql:
             record.update(
@@ -1729,7 +1747,8 @@ class FakeApi:
             "commit_id": self.review_sha or self.head_sha,
             "submitted_at": self.review_submitted_at,
             "body": self.copilot_review_body,
-            "user": {"id": COPILOT_REVIEWER, "login": "copilot-pull-request-reviewer"},
+            "user": {"id": COPILOT_REVIEWER, "login": "copilot-pull-request-reviewer",
+                     "node_id": "BOT_synthetic_reviewer", "type": "Bot"},
         }
         if graphql:
             review.update(
@@ -1956,7 +1975,9 @@ class FakeApi:
                         "body": review["body"],
                         "bodyHTML": self.copilot_review_html,
                         "commit": {"oid": review["commit_id"]},
-                        "author": {"login": "copilot-pull-request-reviewer"},
+                        "author": {"login": "copilot-pull-request-reviewer",
+                                   "databaseId": COPILOT_REVIEWER,
+                                   "id": "BOT_synthetic_reviewer", "__typename": "Bot"},
                         "pullRequest": {
                             "number": 16,
                             "repository": {
@@ -1989,7 +2010,8 @@ class FakeApi:
                         "state": review["state"],
                         "body": review["body"],
                         "commit": {"oid": review["commit_id"]},
-                        "author": {"login": self.owner_login},
+                        "author": {"login": self.owner_login, "databaseId": OWNER,
+                                   "id": "U_synthetic_owner", "__typename": "User"},
                         "pullRequest": {
                             "number": 16,
                             "repository": {

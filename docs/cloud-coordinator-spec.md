@@ -149,6 +149,16 @@ and digest are persisted with the owner authorization. Coding bot ID `198982749`
 the PR author, owner-authored reviews, historical independent-review reports, and
 the previous head-only command do not authorize a sensitive head.
 
+Review edit metadata enrichment binds the authenticated REST actor to GraphQL by
+strict positive integer numeric ID, identical nonempty node ID, and actor type:
+the owner is a User and reviewer `175728472` is a Bot. Both API identities and
+logins must be present. Logins must match exactly except for that reviewer's
+explicit REST `copilot-pull-request-reviewer[bot]` and GraphQL
+`copilot-pull-request-reviewer` pair. A suffix alone never establishes identity.
+Missing, malformed or mismatched actor identity cannot supply edit metadata.
+This binding does not change the prose disposition or make an ambiguous overview
+automatic review acceptance, even when the separate sensitive command binds.
+
 This owner command is a separate, explicit authorization, not an automatic approval
 from enrollment or review prose. Planning and fresh status/merge fences re-read and
 revalidate the command and selected Copilot review, including author, state,

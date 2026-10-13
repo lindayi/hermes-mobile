@@ -169,7 +169,12 @@ query($id: ID!) {
       body
       bodyHTML
       commit { oid }
-      author { login }
+      author {
+        __typename
+        login
+        ... on Bot { id databaseId }
+        ... on User { id databaseId }
+      }
       pullRequest {
         number
         repository {
@@ -1820,6 +1825,29 @@ def _enrich_pull_reviews(api, route, reviews):
     return enriched
 
 
+def _review_actor_matches(user, author):
+    if (not isinstance(user, dict) or not isinstance(author, dict)
+            or not positive_id(user.get("id"))
+            or not positive_id(author.get("databaseId"))
+            or user["id"] != author["databaseId"]
+            or not isinstance(user.get("node_id"), str) or not user["node_id"]
+            or not isinstance(author.get("id"), str)
+            or user["node_id"] != author["id"]
+            or user.get("type") != author.get("__typename")
+            or (user["id"], user.get("type")) not in (
+                (OWNER_ID, "User"), (COPILOT_REVIEWER_ID, "Bot"),
+            )
+            or not isinstance(user.get("login"), str) or not user["login"]
+            or not isinstance(author.get("login"), str) or not author["login"]):
+        return False
+    return user["login"] == author["login"] or (
+        user["id"] == COPILOT_REVIEWER_ID
+        and user["type"] == "Bot"
+        and user["login"] == "copilot-pull-request-reviewer[bot]"
+        and author["login"] == "copilot-pull-request-reviewer"
+    )
+
+
 def _bound_pull_review_metadata(api, pull_number, review):
     node_id = review.get("node_id")
     user = review.get("user")
@@ -1833,7 +1861,11 @@ def _bound_pull_review_metadata(api, pull_number, review):
         if error.status == 404:
             return review
         raise
-    node = response.get("data", {}).get("node") if isinstance(response, dict) else None
+    if (not isinstance(response, dict) or response.get("errors")
+            or not isinstance(response.get("data"), dict)
+            or "node" not in response["data"]):
+        raise ApiError("Malformed GitHub review metadata response")
+    node = response["data"]["node"]
     commit = node.get("commit") if isinstance(node, dict) else None
     author = node.get("author") if isinstance(node, dict) else None
     pull = node.get("pullRequest") if isinstance(node, dict) else None
@@ -1847,8 +1879,7 @@ def _bound_pull_review_metadata(api, pull_number, review):
             or node.get("body") != review.get("body")
             or not isinstance(commit, dict)
             or commit.get("oid") != review.get("commit_id")
-            or not isinstance(author, dict)
-            or author.get("login") != user.get("login")
+            or not _review_actor_matches(user, author)
             or not isinstance(pull, dict)
             or pull.get("number") != pull_number
             or not isinstance(repository, dict)
