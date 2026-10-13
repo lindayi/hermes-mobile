@@ -123,6 +123,23 @@ def _historical_neutral_receipt_instruction(nonce, *, pull_number,
     )
 
 
+def _previous_release_neutral_receipt_instruction(nonce, *, pull_number,
+                                                  start_head, base_sha):
+    return _receipt_instruction(
+        nonce, pull_number=pull_number, start_head=start_head, base_sha=base_sha,
+        posting_instruction=(
+            "After pushing your result and running focused checks, first post the "
+            "conflict decisions in a separate PR comment without the receipt nonce. "
+            "Then construct the complete receipt-only payload below as a separate "
+            "value and validate that exact value with the existing `_v2_fields` "
+            "parser, checking every field against its expected value. Post that "
+            "validated payload as exactly one dedicated PR comment, with no quote, "
+            "fence, prose, extra fields, or trailing content. Never combine the "
+            "decision commentary and receipt, and do not post a second receipt."
+        ),
+    )
+
+
 def _time(value):
     if not isinstance(value, str) or not value or len(value) > 64:
         raise ReceiptError("Receipt timestamp is missing")

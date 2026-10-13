@@ -60,6 +60,7 @@ from deploy.task_receipts import (
     _bounded_path,
     _legacy_neutral_dispatch_matches,
     _historical_neutral_receipt_instruction,
+    _previous_release_neutral_receipt_instruction,
     find_review_report,
     find_receipt,
     receipt_body_matches,
@@ -3076,6 +3077,12 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
                 record["dispatch_nonce"], pull_number=record["issue"],
                 start_head=record["head"], base_sha=record["receipt_base"],
             )
+            previous_release_neutral_instruction = (
+                _previous_release_neutral_receipt_instruction(
+                    record["dispatch_nonce"], pull_number=record["issue"],
+                    start_head=record["head"], base_sha=record["receipt_base"],
+                )
+            )
             if not (
                     expected_instruction in session["prompt"]
                     or (
@@ -3084,6 +3091,7 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
                                 for instruction in (
                                     neutral_instruction,
                                     historical_neutral_instruction,
+                                    previous_release_neutral_instruction,
                                 ))
                     )
             ):

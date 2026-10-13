@@ -489,6 +489,89 @@ def test_historical_neutral_instruction_remains_exact_for_saved_prompts():
     assert "only the eight canonical receipt lines" not in historical
 
 
+def test_previous_two_comment_neutral_prompt_reconstructs_cold_receipt_budget():
+    from deploy.cloud_coordinator import (
+        _legacy_neutral_attempt_count, neutral_reconciliation_request,
+    )
+    from deploy.task_receipts import (
+        _previous_release_neutral_receipt_instruction, _receipt_instruction,
+    )
+
+    task, action, pull, comments = v2_binding()
+    action.update(
+        kind="fix", task_type="neutral", status="completed", attempt=1,
+        head_ref="topic",
+    )
+    pull["head"]["ref"] = "topic"
+    snapshot = {
+        "issue": 16, "head": START_HEAD, "main_sha": BASE,
+        "pull": {
+            "base": {"sha": BASE}, "head": {"ref": "topic"},
+            "title": "Synthetic PR", "body": "Synthetic intent",
+        },
+    }
+    request = neutral_reconciliation_request(snapshot, 0)
+    replaced = (
+        "For every conflict hunk, put its complete audit, including file/hunk identity, "
+        "classification, decision, and rationale, in the pushed merge commit message; "
+        "explain how the resolution preserves both branch intents. Do not omit or "
+        "summarize decisions. If there are no conflict hunks, record that explicitly. "
+        "Finalize this audit-bearing merge commit before pushing; a `ready` receipt "
+        "requires its exact commit SHA as the pushed result head. Keep all decision "
+        "audit out of the PR comment: publish only the validated receipt payload under "
+        "the existing task receipt contract. Do not create a separate decision comment. "
+        "A truthful `conflict_incompatible` or `policy_broken` result does not require "
+        "or claim a merge commit. "
+    )
+    historical_request = (
+        "For each conflict hunk, record its file/hunk identity, classification, "
+        "decision, and rationale in a PR comment, explaining how the resolution "
+        "preserves both branch intents (or why they are incompatible), before "
+        "returning a `ready` receipt under the existing task receipt contract. "
+    )
+    assert request["body"].count(replaced) == 1
+    body = request["body"].replace(replaced, historical_request, 1)
+    instruction = _receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+        posting_instruction=(
+            "After pushing your result and running focused checks, first post the "
+            "conflict decisions in a separate PR comment without the receipt nonce. "
+            "Then construct the complete receipt-only payload below as a separate "
+            "value and validate that exact value with the existing `_v2_fields` "
+            "parser, checking every field against its expected value. Post that "
+            "validated payload as exactly one dedicated PR comment, with no quote, "
+            "fence, prose, extra fields, or trailing content. Never combine the "
+            "decision commentary and receipt, and do not post a second receipt."
+        ),
+    )
+    assert instruction == _previous_release_neutral_receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+    )
+    body += f"\n\n{instruction}"
+    action.update(marker=request["marker"], body=body)
+    task["sessions"][0]["prompt"] = body
+
+    receipt = validate_task_receipt(task, action, pull, comments, now=NOW)
+    record = {
+        **action,
+        **{f"receipt_{key}": value for key, value in receipt.items()},
+        "receipt_session_completed_at": receipt["completed_at"],
+    }
+
+    assert "first post the conflict decisions" in task["sessions"][0]["prompt"]
+    assert _legacy_neutral_attempt_count(
+        {"issue": 16, "attempts": 1, "authorized_head": START_HEAD,
+         "receipt_proofs": []},
+        {"historical-neutral": record}, comments,
+        tasks=[task], snapshot={
+            "issue": 16,
+            "pull": {"id": pull["id"], "node_id": pull["node_id"],
+                     "head": {"ref": "topic"}},
+        },
+        now=NOW,
+    ) == 1
+
+
 @pytest.mark.parametrize("historical", [False, True])
 def test_neutral_prompt_contract_reconstructs_cold_receipt_budget(historical):
     import copy
