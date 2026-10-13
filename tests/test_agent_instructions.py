@@ -613,6 +613,107 @@ def test_manual_qualification_artifact_lifecycle_is_documented(clause):
     assert clause in spec, clause
 
 
+def test_manual_qualification_shell_outputs_and_reservation_are_private(tmp_path):
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    section = spec.split('Use supported `gh api` commands', 1)[1]
+    blocks = re.findall(r'```sh\n(.*?)\n```', section, re.DOTALL)
+    setup = next(block for block in blocks if 'gh api user >' in block)
+    publication = next(block for block in blocks if 'jq -Rs' in block)
+    reservation = re.search(r'`(\( set -C; printf .*?\))`', section).group(1)
+
+    bundle = tmp_path / 'bundle'
+    private = tmp_path / 'private'
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    fake_gh = fake_bin / 'gh'
+    fake_gh.write_text(
+        '#!/bin/sh\nprintf invoked >> "$GH_CALL_LOG"\n'
+        'if [ ! -f "$BUNDLE/comment.txt" ]; then '
+        'printf synthetic > "$BUNDLE/comment.txt"; fi\n'
+        'printf \'{"synthetic":true}\\n\'\n')
+    fake_gh.chmod(0o700)
+    env = dict(os.environ)
+    env.update({
+        'PATH': f'{fake_bin}:{env["PATH"]}',
+        'BUNDLE': str(bundle),
+        'PRIVATE': str(private),
+        'REPO': 'lindayi/hermes-mobile',
+        'PR': '107',
+        'RECORD_KEY': 'synthetic-record',
+        'COMMENT_ID': '1',
+        'GH_CALL_LOG': str(tmp_path / 'gh-calls'),
+    })
+    result = subprocess.run(
+        ['/bin/bash', '-e', '-c',
+         f'umask 022\n{setup}\n{reservation}\n{publication}'],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert all(path.stat().st_mode & 0o777 == 0o700 for path in (bundle, private))
+    files = list(bundle.iterdir()) + list(private.iterdir())
+    assert {path.name for path in files} == {
+        'publisher.json', 'repository.json', 'pull.json', 'comments-before.json',
+        'comment.txt', 'request.json', 'create-response.json', 'readback.json',
+        'comments-after.json', 'reservation',
+    }
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in files)
+    assert (private / 'reservation').read_text() == 'synthetic-record\n'
+
+
+@pytest.mark.parametrize('target', ('BUNDLE', 'PRIVATE'))
+@pytest.mark.parametrize('kind', ('directory', 'symlink', 'file'))
+def test_manual_qualification_shell_rejects_existing_destinations(tmp_path, target, kind):
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    section = spec.split('Use supported `gh api` commands', 1)[1]
+    blocks = re.findall(r'```sh\n(.*?)\n```', section, re.DOTALL)
+    setup = next(block for block in blocks if 'gh api user >' in block)
+    reservation = re.search(r'`(\( set -C; printf .*?\))`', section).group(1)
+    bundle = tmp_path / 'bundle'
+    private = tmp_path / 'private'
+    unsafe = bundle if target == 'BUNDLE' else private
+    if kind == 'directory':
+        unsafe.mkdir()
+        unsafe.chmod(0o755)
+    elif kind == 'symlink':
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        unsafe.symlink_to(outside, target_is_directory=True)
+    else:
+        unsafe.write_text('preserve')
+
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    fake_gh = fake_bin / 'gh'
+    fake_gh.write_text(
+        '#!/bin/sh\nprintf invoked >> "$GH_CALL_LOG"\n'
+        'printf \'{"synthetic":true}\\n\'\n')
+    fake_gh.chmod(0o700)
+    env = dict(os.environ)
+    env.update({
+        'PATH': f'{fake_bin}:{env["PATH"]}',
+        'BUNDLE': str(bundle),
+        'PRIVATE': str(private),
+        'REPO': 'lindayi/hermes-mobile',
+        'PR': '107',
+        'RECORD_KEY': 'synthetic-record',
+        'COMMENT_ID': '1',
+        'GH_CALL_LOG': str(tmp_path / 'gh-calls'),
+    })
+    result = subprocess.run(
+        ['/bin/bash', '-e', '-c', f'umask 022\n{setup}\n{reservation}'],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / 'gh-calls').exists()
+    if kind == 'directory':
+        assert unsafe.stat().st_mode & 0o777 == 0o755
+    elif kind == 'symlink':
+        assert unsafe.is_symlink()
+        assert not any(outside.iterdir())
+    else:
+        assert unsafe.read_text() == 'preserve'
+
+
 def test_all_active_context_lists_include_issue_link():
     for path in (
         'AGENTS.md',

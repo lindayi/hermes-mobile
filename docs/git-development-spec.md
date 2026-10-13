@@ -380,9 +380,27 @@ are manually checked values: REPO is `lindayi/hermes-mobile`, PR is the target P
 number, BUNDLE is the absolute directory above, and COMMENT_ID is the returned
 positive ID, not a guessed value. PRIVATE is the separate owner-only directory;
 no actual private path is published. These are operator examples, not coding-agent
-actions and not a new validator CLI.
+actions and not a new validator CLI. Set BUNDLE and PRIVATE to new, distinct absolute
+record-key directories under already verified, owner-only, non-symlink parent
+directories. Run the setup below once in the same shell. It refuses existing
+destinations; choose a fresh record key rather than reusing or changing permissions
+on an existing tree.
 
 ```sh
+set -eu
+umask 077
+case "$BUNDLE" in /*) ;; *) exit 1;; esac
+case "$PRIVATE" in /*) ;; *) exit 1;; esac
+test "$BUNDLE" != "$PRIVATE"
+case "$BUNDLE/" in "$PRIVATE/"*) exit 1;; esac
+case "$PRIVATE/" in "$BUNDLE/"*) exit 1;; esac
+mkdir -m 700 -- "$BUNDLE" "$PRIVATE"
+for directory in "$BUNDLE" "$PRIVATE"; do
+  test -d "$directory"
+  test ! -L "$directory"
+  test "$(stat -c '%a' -- "$directory")" = 700
+  test "$(stat -c '%u' -- "$directory")" = "$(id -u)"
+done
 gh api user > "$BUNDLE/publisher.json"
 gh api "repos/$REPO" > "$BUNDLE/repository.json"
 gh api "repos/$REPO/pulls/$PR" > "$BUNDLE/pull.json"
