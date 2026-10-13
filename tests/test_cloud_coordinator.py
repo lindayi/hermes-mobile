@@ -3013,6 +3013,15 @@ def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_pat
     assert StateStore(store.path).action(successor["key"])["receipt_result"] == "ready"
     assert FINAL_RESULT_HEAD in authorized
     assert FINAL_RESULT_HEAD not in blocked
+    preexisting_actions = dict(state["actions"])
+    preexisting_actions[successor["key"]] = dict(
+        preexisting_actions[successor["key"]], created_at=0.0,
+    )
+    _, preexisting_authorized, _ = _authorized_result_heads(
+        16, state["enrollments"]["16"], preexisting_actions, api.comments,
+        CURRENT_MAIN,
+    )
+    assert FINAL_RESULT_HEAD not in preexisting_authorized
 
     task_posts = api.task_posts
     Coordinator(
@@ -3051,6 +3060,248 @@ def test_owner_recovery_prevents_legacy_receipt_claim_mutation(tmp_path):
     assert result["repair_requested"]
     assert api.task_posts == 3
     assert StateStore(store.path).action(neutral["key"]) == original_reservation
+
+
+@pytest.mark.parametrize(
+    "task_type,kind,expected",
+    [
+        (None, "fix", True),
+        ("source", "fix", True),
+        ("review-followup", "fix", True),
+        ("neutral", "fix", True),
+        ("report-correction", "fix", False),
+        ("source", "review", False),
+    ],
+)
+def test_owner_abandonment_covers_only_source_fix_reservations(
+        tmp_path, task_type, kind, expected):
+    from copy import deepcopy
+
+    api, store, neutral = _owner_abandonment_case(tmp_path)
+    action = deepcopy(store.action(neutral["key"]))
+    action["task_type"] = task_type
+    action["kind"] = kind
+    record = {
+        "version": 1, "issue": action["issue"], "action_key": action["key"],
+        "task_id": action["task_id"], "task_created_at": action["task_created_at"],
+        "reservation_sha256": cloud_coordinator._reservation_sha256(action),
+        "head_sha": NEXT_RESULT_HEAD, "base_sha": CURRENT_MAIN,
+        "command_comment_id": 7771,
+        "command_body": (
+            f"/hermes abandon-unverified {action['task_id']} {NEXT_RESULT_HEAD}"
+        ),
+        "command_created_at": "2026-10-01T12:10:00Z", "actor_id": OWNER,
+        "accepted_at": "2026-10-01T12:11:00Z",
+    }
+
+    assert cloud_coordinator._owner_abandonment_matches_action(
+        record, action,
+    ) is expected
+
+
+@pytest.mark.parametrize("hazard", [
+    "task-id", "task-created", "task-active", "creator", "owner", "repository",
+    "branch-artifact", "base-artifact", "pull-artifact", "pull-node",
+    "sessions-malformed", "session-id", "session-task", "session-state",
+    "session-user", "session-owner", "session-repository", "session-head",
+    "session-base", "prompt", "session-created", "session-completed",
+    "task-updated", "created-after-command",
+])
+def test_owner_abandonment_task_identity_matrix_fails_closed(tmp_path, hazard):
+    from copy import deepcopy
+
+    api, store, neutral = _owner_abandonment_case(tmp_path)
+    action = store.action(neutral["key"])
+    task = deepcopy(api.tasks[neutral["task_id"]])
+    record = {
+        "version": 1, "issue": 16, "action_key": action["key"],
+        "task_id": action["task_id"], "task_created_at": action["task_created_at"],
+        "reservation_sha256": cloud_coordinator._reservation_sha256(action),
+        "head_sha": NEXT_RESULT_HEAD, "base_sha": CURRENT_MAIN,
+        "command_comment_id": 7771,
+        "command_body": (
+            f"/hermes abandon-unverified {action['task_id']} {NEXT_RESULT_HEAD}"
+        ),
+        "command_created_at": "2026-10-01T12:10:00Z", "actor_id": OWNER,
+        "accepted_at": "2026-10-01T12:11:00Z",
+    }
+    session = task["sessions"][0]
+    if hazard == "task-id":
+        task["id"] = "different-task"
+    elif hazard == "task-created":
+        task["created_at"] = "2026-10-01T12:02:00Z"
+    elif hazard == "task-active":
+        task["state"] = "in_progress"
+    elif hazard == "creator":
+        task["creator"]["id"] = 42
+    elif hazard == "owner":
+        task["owner"]["id"] = 42
+    elif hazard == "repository":
+        task["repository"]["id"] = 42
+    elif hazard in {"branch-artifact", "base-artifact", "pull-artifact", "pull-node"}:
+        branch = next(item for item in task["artifacts"] if item["type"] == "branch")
+        pull = next(item for item in task["artifacts"] if item["type"] == "pull")
+        if hazard == "branch-artifact":
+            branch["data"]["head_ref"] = "other"
+        elif hazard == "base-artifact":
+            branch["data"]["base_ref"] = "other"
+        elif hazard == "pull-artifact":
+            pull["data"]["id"] = 9
+        else:
+            pull["data"]["global_id"] = "other-node"
+    elif hazard == "sessions-malformed":
+        task["sessions"] = {}
+    elif hazard == "session-id":
+        session["id"] = ""
+    elif hazard == "session-task":
+        session["task_id"] = "different-task"
+    elif hazard == "session-state":
+        session["state"] = "running"
+    elif hazard == "session-user":
+        session["user"]["id"] = 42
+    elif hazard == "session-owner":
+        session["owner"]["id"] = 42
+    elif hazard == "session-repository":
+        session["repository"]["id"] = 42
+    elif hazard == "session-head":
+        session["head_ref"] = "other"
+    elif hazard == "session-base":
+        session["base_ref"] = "other"
+    elif hazard == "prompt":
+        session["prompt"] += " edited"
+    elif hazard == "session-created":
+        session["created_at"] = "2026-10-01T12:06:00Z"
+    elif hazard == "session-completed":
+        session["completed_at"] = "2026-10-01T12:00:30Z"
+    elif hazard == "task-updated":
+        task["updated_at"] = "2026-10-01T12:00:30Z"
+    elif hazard == "created-after-command":
+        task["created_at"] = "2026-10-01T12:10:30Z"
+
+    assert not cloud_coordinator._owner_abandonment_task_valid(
+        task, action, api.pull, record,
+        now=datetime.fromtimestamp(1790856720, timezone.utc),
+    )
+
+
+@pytest.mark.parametrize("hazard", [
+    "edited-command", "deleted-command", "wrong-task-command", "active-task",
+    "malformed-task", "missing-task", "changed-head", "changed-base",
+    "changed-main", "changed-reservation", "incomplete-occupancy", "api-error",
+])
+def test_owner_abandonment_fences_reject_incomplete_evidence(tmp_path, hazard):
+    api, store, neutral = _owner_abandonment_case(tmp_path)
+    task_posts = api.task_posts
+    task_writes = [
+        item for item in api.writes
+        if item[0] == "agents/repos/lindayi/hermes-mobile/tasks"
+    ]
+    command = next(comment for comment in api.comments if comment.get("id") == 7771)
+
+    if hazard in {"edited-command", "wrong-task-command"}:
+        command["body"] = command["body"].replace(
+            neutral["task_id"],
+            "different-task" if hazard == "wrong-task-command" else neutral["task_id"],
+        )
+        if hazard == "edited-command":
+            command["body"] += " edited"
+            command["updated_at"] = "2026-10-01T12:12:00Z"
+    elif hazard == "deleted-command":
+        api.comments.remove(command)
+    elif hazard == "active-task":
+        api.tasks[neutral["task_id"]]["state"] = "in_progress"
+    elif hazard == "malformed-task":
+        api.tasks[neutral["task_id"]]["sessions"] = {}
+    elif hazard == "missing-task":
+        del api.tasks[neutral["task_id"]]
+    elif hazard == "changed-head":
+        api.head_sha = api.pull["head"]["sha"] = FINAL_RESULT_HEAD
+    elif hazard == "changed-base":
+        api.pull["base"]["sha"] = FINAL_RESULT_HEAD
+    elif hazard == "changed-main":
+        api.current_main_sha = FINAL_RESULT_HEAD
+    elif hazard == "changed-reservation":
+        store.update_action(
+            neutral["key"], "uncertain",
+            receipt_waits=MAX_RECEIPT_POLLS - 1,
+        )
+    elif hazard == "incomplete-occupancy":
+        original_get_all = api.get_all
+
+        def omit_task_inventory(route, *, collection=None):
+            if route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
+                return []
+            return original_get_all(route, collection=collection)
+
+        api.get_all = omit_task_inventory
+    elif hazard == "api-error":
+        original_get_all = api.get_all
+
+        def fail_task_inventory(route, *, collection=None):
+            if route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
+                raise ApiError("task inventory unavailable", status=503)
+            return original_get_all(route, collection=collection)
+
+        api.get_all = fail_task_inventory
+
+    try:
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+    except CoordinatorError:
+        pass
+
+    state = StateStore(store.path).snapshot()
+    assert not state["enrollments"]["16"].get("owner_abandonments")
+    assert api.task_posts == task_posts
+    assert [
+        item for item in api.writes
+        if item[0] == "agents/repos/lindayi/hermes-mobile/tasks"
+    ] == task_writes
+
+
+def test_owner_reactivated_task_blocks_dispatch_after_recovery_commit(tmp_path):
+    api, store, neutral = _owner_abandonment_case(tmp_path)
+    original_get = api.get
+    task_detail_reads = 0
+
+    def reactivate_after_recovery(route):
+        nonlocal task_detail_reads
+        if route.endswith(f"/tasks/{neutral['task_id']}"):
+            task_detail_reads += 1
+            if task_detail_reads > 1:
+                api.tasks[neutral["task_id"]]["state"] = "in_progress"
+        return original_get(route)
+
+    api.get = reactivate_after_recovery
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert task_detail_reads >= 2
+    assert not result["repair_requested"]
+    assert api.task_posts == 2
+    assert len(StateStore(store.path).snapshot()["enrollments"]["16"][
+        "owner_abandonments"
+    ]) == 1
+
+
+def test_owner_abandonment_persistence_failure_has_no_network_write(tmp_path):
+    class FailingCommitStore(StateStore):
+        def commit_scan(self, *args, **kwargs):
+            raise CoordinatorError("synthetic persistence failure")
+
+    api, store, _ = _owner_abandonment_case(tmp_path)
+    original_writes = list(api.writes)
+    with pytest.raises(CoordinatorError, match="persistence failure"):
+        Coordinator(
+            api, FailingCommitStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+
+    assert api.writes == original_writes
+    assert not StateStore(store.path).snapshot()["enrollments"]["16"].get(
+        "owner_abandonments",
+    )
 
 
 @pytest.mark.parametrize(

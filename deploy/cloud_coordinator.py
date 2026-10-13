@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -2999,10 +3000,11 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     authorized = {initial}
     if _is_sha(enrollment.get("owner_authorized_head")):
         authorized.add(enrollment["owner_authorized_head"])
-    continuation_heads = {
-        recovery["head_sha"]
-        for _, recovery in _valid_owner_abandonment_claims(enrollment, actions)
-    }
+    continuation_records = [
+        recovery for _, recovery in _valid_owner_abandonment_claims(
+            enrollment, actions,
+        )
+    ]
     blocked = set()
     candidates = [
         action for action in [*enrollment.get("receipt_proofs", []), *actions.values()]
@@ -3012,7 +3014,11 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     while True:
         changed = False
         for action in candidates:
-            if action.get("receipt_start_head") not in authorized | continuation_heads:
+            start_head = action.get("receipt_start_head")
+            if (start_head not in authorized and not any(
+                    recovery["head_sha"] == start_head
+                    and _owner_abandonment_successor_matches(recovery, action)
+                    for recovery in continuation_records)):
                 continue
             result_head = action["receipt_head"]
             if action["receipt_result"] == "ready":
@@ -3048,6 +3054,34 @@ def _owner_abandonment_continuation(
         if key != action_key and record["head_sha"] == head
         and record["base_sha"] == base_sha
     ), None)
+
+
+def _owner_abandonment_successor_matches(record, action):
+    created_at = action.get("created_at") if isinstance(action, dict) else None
+    if (not _owner_abandonment_record_valid(record)
+            or not isinstance(action, dict)
+            or action.get("key") == record["action_key"]
+            or action.get("task_id") == record["task_id"]
+            or action.get("issue") != record["issue"]
+            or action.get("kind") != "fix"
+            or action.get("task_type") not in {
+                None, "source", "review-followup", "neutral",
+            }
+            or action.get("status") != "completed"
+            or action.get("receipt_start_head") != record["head_sha"]
+            or action.get("receipt_base") != record["base_sha"]
+            or type(created_at) not in (int, float)):
+        return False
+    try:
+        if not math.isfinite(created_at):
+            return False
+        return datetime.fromtimestamp(
+            created_at, timezone.utc,
+        ) >= datetime.fromisoformat(
+            record["accepted_at"].replace("Z", "+00:00"),
+        )
+    except (OverflowError, OSError, TypeError, ValueError):
+        return False
 
 
 def _owner_abandonment_for_action(enrollment, key, action):
@@ -6107,20 +6141,11 @@ class Coordinator:
         base = pull.get("base") if isinstance(pull, dict) else None
         actions = self.store.actions()
         return any(
-            isinstance(successor, dict)
-            and successor.get("key") != record["action_key"]
-            and successor.get("kind") == "fix"
-            and successor.get("task_type") in {
-                None, "source", "review-followup", "neutral",
-            }
-            and successor.get("task_id") != record["task_id"]
-            and successor.get("status") == "completed"
+            _owner_abandonment_successor_matches(record, successor)
             and successor.get("receipt_result") == "ready"
-            and successor.get("receipt_start_head") == record["head_sha"]
             and successor.get("receipt_head") == (
                 head.get("sha") if isinstance(head, dict) else None
             )
-            and successor.get("receipt_base") == record["base_sha"]
             and isinstance(base, dict)
             and base.get("sha") == record["base_sha"]
             and _pull_identity(pull, successor)

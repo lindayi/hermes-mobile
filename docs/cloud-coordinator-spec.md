@@ -576,11 +576,16 @@ deployment authorization. Persist a bounded, schema-validated supersession recor
 bound to the immutable command and a digest of the original reservation. Keep the
 original reservation, authorized head, receipt history, attempt counts, progress
 state, uncertainty and lifecycle history unchanged. The command's exact current
-head may authorize only a distinct bounded continuation; normal current-main and
-sensitive-review fences still apply. Before every later dispatch, collect complete
-fresh remote task occupancy and recheck the recovered task's exact identity and
-terminal state. Reactivation, duplicate commands, restart, or uncertain persistence
-must not cause a repeated POST, notice, or accepted result.
+head may authorize only a distinct bounded source, review-followup, or neutral fix
+reserved after recovery commits. It is not result provenance or merge authority.
+Only that later task's valid ready receipt may add its result head to general
+provenance; an older task or the abandoned task cannot do so. Normal current-main
+and sensitive-review fences still apply. Before every later dispatch, collect
+complete fresh remote task occupancy and recheck the recovered task's exact identity
+and terminal state. After a valid continuation receipt, bind the recovered task's
+terminal check to that exact receipt lineage even when the PR head has advanced.
+Reactivation, duplicate commands, restart, or uncertain persistence must not cause
+a repeated POST, notice, or accepted result.
 
 Neutral task publication uses one immutable PR comment, not two replies to one
 anchor. That comment contains each conflict decision in its own blockquote followed
@@ -594,6 +599,11 @@ Finite acceptance for this recovery:
 - A synthetic completed known-ID uncertain task with an unusable receipt can be
   abandoned by one exact immutable owner command, then the coordinator can plan and
   dispatch a distinct bounded task without reposting the old task.
+- A valid distinct continuation may return a different result head; that head is
+  accepted only from its immutable ready receipt, after which Copilot review handoff
+  proceeds across cold restart without duplicate work.
+- Source and review-followup fix reservations are eligible; independent review and
+  report-correction reservations are not.
 - Duplicate command delivery, process restart, and a second poll preserve the same
   recovery record, source/neutral counters, uncertainty and lifecycle history, and
   produce no duplicate POST or notice.
