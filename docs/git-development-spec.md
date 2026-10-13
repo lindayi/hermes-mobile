@@ -375,10 +375,11 @@ for a cloud coding task to inspect production, collect private proof, or attest 
 Do not rewrite receipts, claims, reservations, counters or history. Keep the actual
 machine result and every original failure.
 
-Use supported `gh api` commands as the authenticated authorized publisher. The variables below
-are manually checked values: REPO is `lindayi/hermes-mobile`, PR is the target PR
-number, BUNDLE is the absolute directory above, and COMMENT_ID is the returned
-positive ID, not a guessed value. PRIVATE is the separate owner-only directory;
+Use supported `gh api` commands as the authenticated authorized publisher. The
+manually checked values are REPO=`lindayi/hermes-mobile`, PR=the target PR number,
+and BUNDLE=the absolute directory above. COMMENT_ID is assigned only from a
+validated positive integer in the successful POST response. PRIVATE is the separate
+owner-only directory;
 no actual private path is published. These are operator examples, not coding-agent
 actions and not a new validator CLI. Set BUNDLE and PRIVATE to new, distinct absolute
 record-key directories under already verified, owner-only, non-symlink parent
@@ -427,6 +428,14 @@ jq -Rs '{body: .}' "$BUNDLE/comment.txt" > "$BUNDLE/request.json"
 gh api --method POST -H 'Accept: application/vnd.github.full+json' \
   "repos/$REPO/issues/$PR/comments" --input "$BUNDLE/request.json" \
   > "$BUNDLE/create-response.json"
+COMMENT_ID="$(jq -ser '
+  if length == 1 and (.[0] | type == "object") then .[0].id
+  else error("expected one response object")
+  end
+  | if type == "number" then . else error("id must be a number") end
+  | select(. > 0 and floor == .)
+  | tostring
+' "$BUNDLE/create-response.json")"
 gh api -H 'Accept: application/vnd.github.full+json' \
   "repos/$REPO/issues/comments/$COMMENT_ID" > "$BUNDLE/readback.json"
 gh api --paginate --slurp -H 'Accept: application/vnd.github.full+json' \

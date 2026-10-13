@@ -630,7 +630,10 @@ def test_manual_qualification_shell_outputs_and_reservation_are_private(tmp_path
         '#!/bin/sh\nprintf invoked >> "$GH_CALL_LOG"\n'
         'if [ ! -f "$BUNDLE/comment.txt" ]; then '
         'printf synthetic > "$BUNDLE/comment.txt"; fi\n'
-        'printf \'{"synthetic":true}\\n\'\n')
+        'case "$*" in\n'
+        '  *"--method POST"*) printf \'{"id":7}\\n\';;\n'
+        '  *) printf \'{"synthetic":true}\\n\';;\n'
+        'esac\n')
     fake_gh.chmod(0o700)
     env = dict(os.environ)
     env.update({
@@ -640,7 +643,6 @@ def test_manual_qualification_shell_outputs_and_reservation_are_private(tmp_path
         'REPO': 'lindayi/hermes-mobile',
         'PR': '107',
         'RECORD_KEY': 'synthetic-record',
-        'COMMENT_ID': '1',
         'GH_CALL_LOG': str(tmp_path / 'gh-calls'),
     })
     result = subprocess.run(
@@ -657,6 +659,117 @@ def test_manual_qualification_shell_outputs_and_reservation_are_private(tmp_path
         'comments-after.json', 'reservation',
     }
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in files)
+    assert (private / 'reservation').read_text() == 'synthetic-record\n'
+
+
+def _run_manual_qualification_publication(
+        tmp_path, *, inherited_comment_id=None, post_response='{"id":731}',
+        post_fails=False):
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    section = spec.split('Use supported `gh api` commands', 1)[1]
+    blocks = re.findall(r'```sh\n(.*?)\n```', section, re.DOTALL)
+    setup = next(block for block in blocks if 'gh api user >' in block)
+    publication = next(block for block in blocks if 'jq -Rs' in block)
+    reservation = re.search(r'`(\( set -C; printf .*?\))`', section).group(1)
+    bundle = tmp_path / 'bundle'
+    private = tmp_path / 'private'
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    fake_gh = fake_bin / 'gh'
+    fake_gh.write_text(
+        '#!/usr/bin/env python3\n'
+        'import json, os, sys\n'
+        'args = sys.argv[1:]\n'
+        'with open(os.environ["GH_CALL_LOG"], "a") as calls:\n'
+        '    calls.write(" ".join(args) + "\\n")\n'
+        'route = next((arg for arg in args if arg == "user" or arg.startswith("repos/")), "")\n'
+        'if "--method" in args and "POST" in args:\n'
+        '    if os.environ["POST_FAIL"] == "1":\n'
+        '        sys.exit(22)\n'
+        '    print(os.environ["POST_RESPONSE"])\n'
+        'elif route == "user":\n'
+        '    open(os.path.join(os.environ["BUNDLE"], "comment.txt"), "w").write("synthetic")\n'
+        '    print(\'{"login":"synthetic","id":1}\')\n'
+        'elif route == "repos/lindayi/hermes-mobile":\n'
+        '    print(\'{"id":2}\')\n'
+        'elif route == "repos/lindayi/hermes-mobile/pulls/107":\n'
+        '    print(\'{"number":107}\')\n'
+        'elif route == "repos/lindayi/hermes-mobile/issues/107/comments?per_page=100":\n'
+        '    print("[]")\n'
+        'elif route.startswith("repos/lindayi/hermes-mobile/issues/comments/"):\n'
+        '    print(\'{"id":731}\')\n'
+        'else:\n'
+        '    sys.exit(23)\n')
+    fake_gh.chmod(0o700)
+    call_log = tmp_path / 'gh-calls'
+    env = dict(os.environ)
+    env.update({
+        'PATH': f'{fake_bin}:{env["PATH"]}',
+        'BUNDLE': str(bundle),
+        'PRIVATE': str(private),
+        'REPO': 'lindayi/hermes-mobile',
+        'PR': '107',
+        'RECORD_KEY': 'synthetic-record',
+        'GH_CALL_LOG': str(call_log),
+        'POST_RESPONSE': post_response,
+        'POST_FAIL': '1' if post_fails else '0',
+    })
+    if inherited_comment_id is not None:
+        env['COMMENT_ID'] = inherited_comment_id
+    result = subprocess.run(
+        ['/bin/bash', '-e', '-c',
+         f'umask 022\n{setup}\n{reservation}\n{publication}'],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
+    )
+    calls = call_log.read_text().splitlines() if call_log.exists() else []
+    return result, calls, private
+
+
+@pytest.mark.parametrize('inherited_comment_id', (None, '999'))
+def test_manual_qualification_shell_reads_the_id_returned_by_post(
+        tmp_path, inherited_comment_id):
+    result, calls, private = _run_manual_qualification_publication(
+        tmp_path, inherited_comment_id=inherited_comment_id)
+
+    assert result.returncode == 0, result.stderr
+    assert sum('--method POST' in call for call in calls) == 1
+    assert any('repos/lindayi/hermes-mobile/issues/comments/731' in call
+               for call in calls)
+    assert not any('repos/lindayi/hermes-mobile/issues/comments/999' in call
+                   for call in calls)
+    assert (private / 'reservation').read_text() == 'synthetic-record\n'
+
+
+@pytest.mark.parametrize('post_response', (
+    '{}',
+    '{"id":null}',
+    '{"id":"731"}',
+    '{"id":true}',
+    '{"id":731.5}',
+    '{"id":0}',
+    '{"id":-1}',
+    'not-json',
+))
+def test_manual_qualification_shell_rejects_invalid_post_ids_before_readback(
+        tmp_path, post_response):
+    result, calls, private = _run_manual_qualification_publication(
+        tmp_path, inherited_comment_id='999', post_response=post_response)
+
+    assert result.returncode != 0
+    assert sum('--method POST' in call for call in calls) == 1
+    assert not any('repos/lindayi/hermes-mobile/issues/comments/' in call
+                   for call in calls)
+    assert (private / 'reservation').read_text() == 'synthetic-record\n'
+
+
+def test_manual_qualification_shell_keeps_reservation_when_post_fails(tmp_path):
+    result, calls, private = _run_manual_qualification_publication(
+        tmp_path, inherited_comment_id='999', post_fails=True)
+
+    assert result.returncode != 0
+    assert sum('--method POST' in call for call in calls) == 1
+    assert not any('repos/lindayi/hermes-mobile/issues/comments/' in call
+                   for call in calls)
     assert (private / 'reservation').read_text() == 'synthetic-record\n'
 
 
@@ -696,7 +809,6 @@ def test_manual_qualification_shell_rejects_existing_destinations(tmp_path, targ
         'REPO': 'lindayi/hermes-mobile',
         'PR': '107',
         'RECORD_KEY': 'synthetic-record',
-        'COMMENT_ID': '1',
         'GH_CALL_LOG': str(tmp_path / 'gh-calls'),
     })
     result = subprocess.run(
