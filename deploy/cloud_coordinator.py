@@ -59,6 +59,7 @@ from deploy.task_receipts import (
     _time,
     _bounded_path,
     _legacy_neutral_dispatch_matches,
+    _historical_neutral_receipt_instruction,
     find_review_report,
     find_receipt,
     receipt_body_matches,
@@ -884,12 +885,15 @@ def neutral_reconciliation_request(snapshot, attempts):
         "Preserve both branch intents: retain all existing main behavior at the exact main SHA, "
         "and retain the PR behavior described in the untrusted intent below. Inspect both "
         "branches and their combined changes; do not choose either side wholesale. Merge current "
-        "main into the PR branch, never rebase, and never force-push. For each conflict hunk, "
-        "record its file/hunk identity, classification, decision, and rationale as a separate "
-        "blockquoted decision in the one final PR comment. Explain how the resolution preserves "
-        "both branch intents (or why they are incompatible), then append the validated receipt "
-        "under the existing task receipt contract. Publish that combined comment with exactly "
-        "one `reply_to_comment` call; do not publish a second comment or edit the same anchor. "
+        "main into the PR branch, never rebase, and never force-push. For every conflict hunk, "
+        "put its complete audit, including file/hunk identity, classification, decision, and "
+        "rationale, in the pushed merge commit message; explain how the resolution preserves "
+        "both branch intents. Do not omit or summarize decisions. If there are no conflict hunks, "
+        "record that explicitly. Finalize this audit-bearing merge commit before pushing; a `ready` "
+        "receipt requires its exact commit SHA as the pushed result head. Keep all decision audit "
+        "out of the PR comment: publish only the validated receipt payload under the existing "
+        "task receipt contract. Do not create a separate decision comment. A truthful "
+        "`conflict_incompatible` or `policy_broken` result does not require or claim a merge commit. "
         "Test both intended behaviors and their interaction, then leave the PR branch for fresh "
         "review and checks. If the "
         "product requirements are genuinely incompatible, stop without guessing and report the "
@@ -3068,13 +3072,19 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
                 start_head=record["head"], base_sha=record["receipt_base"],
                 neutral=True,
             )
+            historical_neutral_instruction = _historical_neutral_receipt_instruction(
+                record["dispatch_nonce"], pull_number=record["issue"],
+                start_head=record["head"], base_sha=record["receipt_base"],
+            )
             if not (
                     expected_instruction in session["prompt"]
                     or (
                         is_neutral
-                        and session["prompt"].endswith(
-                            f"\n\n{neutral_instruction}",
-                        )
+                        and any(session["prompt"].endswith(f"\n\n{instruction}")
+                                for instruction in (
+                                    neutral_instruction,
+                                    historical_neutral_instruction,
+                                ))
                     )
             ):
                 return None

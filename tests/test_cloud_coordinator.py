@@ -6185,6 +6185,31 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             start_head=neutral["head"], base_sha=neutral["main_sha"],
         )
         assert neutral["body"].endswith(f"\n\n{neutral_instruction}")
+        current_prompt_fragment = (
+            "For every conflict hunk, put its complete audit, including file/hunk identity, "
+            "classification, decision, and rationale, in the pushed merge commit message; "
+            "explain how the resolution preserves both branch intents. Do not omit or "
+            "summarize decisions. If there are no conflict hunks, record that explicitly. "
+            "Finalize this audit-bearing merge commit before pushing; a `ready` receipt "
+            "requires its exact commit SHA as the pushed result head. Keep all decision "
+            "audit out of the PR comment: publish only the validated receipt payload under "
+            "the existing task receipt contract. Do not create a separate decision comment. "
+            "A truthful `conflict_incompatible` or `policy_broken` result does not require "
+            "or claim a merge commit. "
+        )
+        historical_prompt_fragment = (
+            "For each conflict hunk, record its file/hunk identity, classification, "
+            "decision, and rationale as a separate blockquoted decision in the one final "
+            "PR comment. Explain how the resolution preserves both branch intents (or why "
+            "they are incompatible), then append the validated receipt under the existing "
+            "task receipt contract. Publish that combined comment with exactly one "
+            "`reply_to_comment` call; do not publish a second comment or edit the same anchor. "
+        )
+        legacy_request = neutral["body"][:-len(neutral_instruction) - 2]
+        assert legacy_request.count(current_prompt_fragment) == 1
+        legacy_request = legacy_request.replace(
+            current_prompt_fragment, historical_prompt_fragment, 1,
+        )
         legacy_prompt_fragment = (
             "record its file/hunk identity, classification, decision, and rationale as a "
             "separate blockquoted decision in the one final PR comment. Explain how the "
@@ -6193,7 +6218,6 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             "Publish that combined comment with exactly one `reply_to_comment` call; do not "
             "publish a second comment or edit the same anchor. "
         )
-        legacy_request = neutral["body"][:-len(neutral_instruction) - 2]
         assert legacy_request.count(legacy_prompt_fragment) == 1
         legacy_request = legacy_request.replace(
             legacy_prompt_fragment,

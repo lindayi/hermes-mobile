@@ -36,26 +36,8 @@ class ReceiptError(ValueError):
     """A receipt is missing, conflicting, edited, stale, or unbound."""
 
 
-def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=False):
-    posting_instruction = (
-        "After pushing your result and running focused checks, prepare one final "
-        "PR comment. Put each conflict decision in its own Markdown blockquote, "
-        "then put the complete receipt payload below as the final unquoted block. "
-        "Validate that exact payload with the existing `_v2_fields` parser, "
-        "checking every field against its expected value. Publish the combined "
-        "comment with exactly one `reply_to_comment` call. Do not post a preliminary "
-        "comment, edit or reply to the same anchor again, or make a second "
-        "publication. Do not quote or fence the receipt, or add unquoted prose, "
-        "extra fields, or trailing content."
-    ) if neutral else (
-        "After pushing your result and running focused checks, post exactly one "
-        "issue comment on this PR. Put the exact receipt fields below in one "
-        "contiguous, unquoted final block, with no extra fields or unquoted prose. "
-        "The posting transport may prepend an unchanged Markdown blockquote, "
-        "separated from the receipt by an ASCII blank line (empty or only spaces/tabs), "
-        "or reorder fields; do not quote or fence the receipt itself, and include each "
-        "field exactly once."
-    )
+def _receipt_instruction(nonce, *, pull_number, start_head, base_sha,
+                         posting_instruction):
     return (
         "Before any source edits, verify that nonce, pr, start_head and base are all "
         "present and complete in the template below, and read a nonblank "
@@ -83,6 +65,53 @@ def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=Fal
         "session=SESSION_ID_REPLACE_ME\n"
         "head=PUSHED_PULL_HEAD_SHA_REPLACE_ME\n"
         "result=ready|conflict_incompatible|policy_broken"
+    )
+
+
+def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=False):
+    posting_instruction = (
+        "After pushing the audit-bearing merge commit and running focused checks, "
+        "prepare one receipt-only PR reply. The comment payload must contain only "
+        "the eight canonical receipt lines below, with no decision, report, URL, "
+        "prose, extra field, or trailing content. Establish the exact complete "
+        "serialized carrier, including the provider's unchanged quoted anchor, "
+        "any leading blank line, the ASCII blank separator, and the actual bound "
+        "receipt values. Validate that complete carrier with the existing "
+        "`_v2_fields` parser and confirm every field before the single publication. "
+        "If the exact carrier cannot be established or exceeds either limit, stop "
+        "with a transport blocker before publishing; never send it and retry, edit "
+        "the reply, or publish a second comment. Publish with exactly one "
+        "`reply_to_comment` call."
+    ) if neutral else (
+        "After pushing your result and running focused checks, post exactly one "
+        "issue comment on this PR. Put the exact receipt fields below in one "
+        "contiguous, unquoted final block, with no extra fields or unquoted prose. "
+        "The posting transport may prepend an unchanged Markdown blockquote, "
+        "separated from the receipt by an ASCII blank line (empty or only spaces/tabs), "
+        "or reorder fields; do not quote or fence the receipt itself, and include each "
+        "field exactly once."
+    )
+    return _receipt_instruction(
+        nonce, pull_number=pull_number, start_head=start_head, base_sha=base_sha,
+        posting_instruction=posting_instruction,
+    )
+
+
+def _historical_neutral_receipt_instruction(nonce, *, pull_number,
+                                            start_head, base_sha):
+    return _receipt_instruction(
+        nonce, pull_number=pull_number, start_head=start_head, base_sha=base_sha,
+        posting_instruction=(
+            "After pushing your result and running focused checks, prepare one final "
+            "PR comment. Put each conflict decision in its own Markdown blockquote, "
+            "then put the complete receipt payload below as the final unquoted block. "
+            "Validate that exact payload with the existing `_v2_fields` parser, "
+            "checking every field against its expected value. Publish the combined "
+            "comment with exactly one `reply_to_comment` call. Do not post a preliminary "
+            "comment, edit or reply to the same anchor again, or make a second "
+            "publication. Do not quote or fence the receipt, or add unquoted prose, "
+            "extra fields, or trailing content."
+        ),
     )
 
 

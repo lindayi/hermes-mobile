@@ -129,12 +129,14 @@ PR #105 adds bounded recovery for owner-authorized abandonment of terminal tasks
 with unverified receipts. The current candidate pins identify the exact proposed
 source bytes; prior issue-specific hashes remain historical. Refreshing these pins
 does not clear the `coordinator-review-contract` blocker, satisfy exact-head review,
-or authorize operational activation.
+or authorize operational activation. Its neutral producer now keeps the complete
+per-hunk audit in the pushed merge commit message and publishes one receipt-only
+reply. The existing strict receipt carrier limits and validation remain unchanged.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `76a31c36748261efb66f19e169d6a9a2e54c8caf08619829811a71258c5cce44` |
-| `deploy/task_receipts.py` | `a97ef169d4515229d9e139fedc668772dffad74198ea2f58c51ab6d5dbf9e433` |
+| `deploy/cloud_coordinator.py` | `918d02cc37253315ed8efacacf4c2091bf049becf51b9a2f5053b3d3206cf068` |
+| `deploy/task_receipts.py` | `15b01e88d6c8bf27b180d952ec7e97f4088117db091e688462d6d3d740733421` |
 
 ### Retained merged source and deliberate native refreshes
 
@@ -468,12 +470,14 @@ These changes retain the progress fingerprint bounds, canonical target maps,
 `budget-v2:` identities, occupancy fences, stable lifecycle identities and distinct
 source/merge/deployment authority. The current delta validates raw GraphQL thread
 identities before writes and leaves incomplete retained history in recoverable
-waiting without an exhaustion notice. The neutral receipt continuation separates
-conflict-decision commentary from one dedicated receipt-only comment and asks the
-task to validate that exact payload with the unchanged strict v2 parser before
-posting it. A narrowly gated compatibility reader recognizes only the original
-saved neutral prompt and its exact bound decision envelope; ordinary v1/v2 grammar
-remains strict. A known-ID uncertain neutral task receives at most one read-only
+waiting without an exhaustion notice. Historical issue #87 producer wording
+separated conflict-decision commentary from one receipt-only comment; that wording
+is superseded for PR #105. The current PR #105 producer keeps the full audit in the
+audit-bearing merge commit and validates one receipt-only reply with the unchanged
+strict v2 parser before publication. A narrowly gated compatibility reader
+recognizes only the original saved neutral prompt and its exact bound decision
+envelope; ordinary v1/v2 grammar remains strict. A known-ID uncertain neutral task
+receives at most one read-only
 reconciliation attempt, with no new POST, wait, event, or budget change; unknown-ID
 uncertainty remains locked. Synthetic cold-state tests do not establish that the
 live task recovered, source4 occurred, or CI/review/merge/deployment gates passed.

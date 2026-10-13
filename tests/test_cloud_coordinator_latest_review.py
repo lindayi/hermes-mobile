@@ -1,6 +1,7 @@
 """Direct seam regressions for PR33 review 5388069795."""
 import base64
 import json
+import subprocess
 
 import pytest
 
@@ -80,18 +81,132 @@ def test_legacy_enrollment_reports_unsupported_upgrade_without_changing_state(tm
     assert not api.writes and not api.graphql_writes
 
 
-def test_neutral_prompt_requires_per_hunk_decisions_before_ready_receipt():
+def test_neutral_prompt_keeps_hunk_audit_out_of_the_receipt_carrier():
+    from deploy.task_receipts import receipt_instruction
+
     api = FakeApi()
     request = neutral_reconciliation_request({
         "issue": 16, "head": HEAD, "main_sha": BASE, "pull": api.pull,
     }, 0)
-    prompt = request["body"]
-    assert "each conflict hunk" in prompt
-    assert "classification, decision, and rationale" in prompt
+    prompt = request["body"] + "\n\n" + receipt_instruction(
+        "N" * 42, pull_number=16, start_head=HEAD, base_sha=BASE, neutral=True,
+    )
+    assert "every conflict hunk" in prompt
+    assert "file/hunk identity, classification, decision, and rationale" in prompt
+    assert "complete audit, including file/hunk identity" in prompt
     assert "preserves both branch intents" in prompt
-    assert "blockquoted decision in the one final PR comment" in prompt
-    assert "exactly one `reply_to_comment` call" in prompt
+    assert "a `ready` receipt requires its exact commit SHA as the pushed result head" in prompt
+    assert "receipt-only PR reply" in prompt
+    assert "complete serialized carrier" in prompt
+    assert "provider's unchanged quoted anchor" in prompt
+    assert "before the single publication" in prompt
+    assert "stop with a transport blocker before publishing" in prompt
+    assert "one `reply_to_comment` call" in prompt
     assert "fresh review and checks" in prompt
+    assert "separate PR comment with conflict decisions" not in prompt
+
+
+@pytest.mark.parametrize(("hunks", "rationale"), [
+    (0, ""),
+    (2, ""),
+    (56, ""),
+    (1, "保存双方分支意图。" * 1500),
+])
+def test_neutral_merge_commit_retains_complete_audit_at_receipt_head(
+        tmp_path, hunks, rationale):
+    repository = tmp_path / f"merge-{hunks}-{len(rationale)}"
+    repository.mkdir()
+
+    def git(*args, check=True):
+        return subprocess.run(
+            ["git", "-C", str(repository), *args], check=check,
+            capture_output=True, text=True,
+        )
+
+    git("init", "--quiet", "--initial-branch=main")
+    git("config", "user.name", "Synthetic test")
+    git("config", "user.email", "synthetic@example.invalid")
+    if hunks:
+        for index in range(hunks):
+            path = repository / "shared" / f"hunk-{index:02}.txt"
+            path.parent.mkdir(exist_ok=True)
+            path.write_text("base behavior\n")
+    else:
+        (repository / "base.txt").write_text("base behavior\n")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "base")
+    git("switch", "--quiet", "-c", "pull")
+    if hunks:
+        for index in range(hunks):
+            (repository / "shared" / f"hunk-{index:02}.txt").write_text(
+                "PR behavior\n",
+            )
+    else:
+        (repository / "pr-only.txt").write_text("PR behavior\n")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "PR intent")
+    git("switch", "--quiet", "main")
+    if hunks:
+        for index in range(hunks):
+            (repository / "shared" / f"hunk-{index:02}.txt").write_text(
+                "main behavior\n",
+            )
+    else:
+        (repository / "main-only.txt").write_text("main behavior\n")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "main intent")
+    git("switch", "--quiet", "pull")
+
+    merge = git("merge", "--no-commit", "main", check=False)
+    audit = []
+    if hunks:
+        assert merge.returncode != 0
+        for index in range(hunks):
+            path = f"shared/hunk-{index:02}.txt"
+            (repository / path).write_text("main behavior\nPR behavior\n")
+            audit.append(
+                f"{index + 1}. {path} (hunk {index + 1}): "
+                "classification=technical; decision=retain both branch intents; "
+                f"rationale={rationale or 'Preserve main behavior and PR behavior.'}"
+            )
+        git("add", ".")
+        audit_body = "\n".join(audit)
+    else:
+        assert merge.returncode == 0
+        audit_body = (
+            "No conflict hunks. Preserve both main behavior and PR behavior."
+        )
+    message = (
+        "Reconcile current main with PR intent\n\n"
+        "Complete conflict hunk audit:\n" + audit_body
+    )
+    git("commit", "--quiet", "-m", message)
+
+    receipt_head = git("rev-parse", "HEAD").stdout.strip()
+    commit = git("show", "-s", "--format=%B", receipt_head).stdout
+    parents = git("rev-list", "--parents", "-n", "1", receipt_head).stdout.split()
+    assert len(parents) == 3
+    assert commit.startswith("Reconcile current main with PR intent\n\n")
+    assert audit_body in commit
+    if hunks == 56 or rationale:
+        assert len(commit.encode("utf-8")) > 8192
+    for item in audit:
+        assert item in commit
+
+    from deploy.task_receipts import _v2_fields
+
+    payload = (
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={'N' * 42}\n"
+        "pr=16\n"
+        f"start_head={HEAD}\n"
+        f"base={BASE}\n"
+        "session=synthetic-session\n"
+        f"head={receipt_head}\n"
+        "result=ready"
+    )
+    carrier = "\n> Hermes coordinator: reserved anchor\n> \n\n" + payload
+    assert _v2_fields(carrier)["head"] == receipt_head
 
 
 @pytest.mark.parametrize("correction", [False, True])

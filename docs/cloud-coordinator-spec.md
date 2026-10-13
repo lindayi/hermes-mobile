@@ -414,18 +414,23 @@ attempt budget as ordinary repair tasks. Its bounded prompt identifies both exac
 branch SHAs and the PR's sanitized title/description as untrusted intent; the task
 must preserve both sides, merge main into the PR branch (never rebase or force-push),
 and test the combined behavior. Before returning a `ready` receipt, the prompt
-requires a PR comment recording each conflict hunk's file/hunk identity,
-classification, decision, and rationale explaining preservation of both branch
-intents (or genuine incompatibility). This is a deliverable under the existing
-task receipt and independent-review contract, not a new receipt schema or an
-automatic semantic approval. A current-main fence is rechecked before dispatch.
-The decision commentary and receipt are separate comments: first post the
-conflict decisions as a PR comment, then construct and validate the exact
-receipt-only payload before posting one dedicated receipt comment. That comment
-contains only the canonical v2 header and its seven bound fields, in the
-documented order, with no quote, fence, prose, or extra fields. Do not combine
-the decision commentary and receipt in one comment. The receipt comment is
-completion evidence only; it is not CI, review, merge, or deployment approval.
+requires the immutable merge commit's message to retain the complete audit for
+every conflict hunk: file/hunk identity, classification, decision, rationale, and
+how the resolution preserves both branch intents. The pushed result receipt binds
+that audit-bearing merge commit by its exact head SHA. A ready receipt requires
+this merge commit; a truthful `conflict_incompatible` or `policy_broken` receipt
+does not require or claim one. The audit is not a new receipt field or an automatic
+semantic approval. A current-main fence is rechecked before dispatch.
+
+Publish exactly one receipt-only PR reply. Its payload contains only the canonical
+v2 header and seven bound fields, with no decision, report, URL, prose, or extra
+fields. Before publication, the producer validates the complete supported
+serialized carrier, including any unchanged provider quote, leading blank,
+ASCII separator, and actual bound values, with the existing strict parser. If
+the complete carrier cannot be established or exceeds either existing limit,
+stop with a transport blocker before publishing. Never send and retry, edit the
+reply, or post a second comment. The receipt is completion evidence only; it is
+not CI, review, merge, or deployment approval.
 The prompt directs genuinely incompatible requirements or broken required policy
 to a fixed typed result; these stop further repair for that exact head. Waiting or
 uncertain tasks retain the shared lock. Ordinary technical conflicts are repaired
@@ -601,12 +606,12 @@ restriction, including after a cold restart; recovery alone never does.
 Reactivation, duplicate commands, restart, or uncertain persistence must not cause
 a repeated POST, notice, or accepted result.
 
-Neutral task publication uses one immutable PR comment, not two replies to one
-anchor. That comment contains each conflict decision in its own blockquote followed
-by the single validated v2 receipt payload. The existing strict v2 parser accepts
-only blockquoted context before the exact final receipt block; the producer
-instruction and consumer parser must agree on the serialized form. An edited
-comment remains invalid; there is no retry or edited-receipt fallback.
+Neutral task publication uses one immutable receipt-only PR reply, not a decision
+comment followed by a receipt comment. The complete per-hunk decision audit stays
+in the merge commit message. The existing strict v2 parser accepts only supported
+quoted context before the exact final receipt block; the producer validates the
+whole carrier before publication and the consumer parser remains unchanged. An
+edited comment remains invalid; there is no retry or edited-receipt fallback.
 
 Finite acceptance for this recovery:
 
@@ -1332,12 +1337,17 @@ are accepted. Quoted or code-formatted content is never receipt evidence.
 
 The entire unchanged v2 comment is limited to **8192 UTF-8 bytes and 64 LF-delimited
 lines**, inclusive of the quoted prefix, blank lines, header and seven fields.
-These finite limits leave room for a short quoted report and the eight-line receipt
-without admitting arbitrarily large stored proofs. Reject character lengths over
-8192 before encoding, reject malformed Unicode, then enforce the byte limit before
-counting or splitting; enforce the line limit before splitting. The same limits
-apply at first acceptance and persisted-proof revalidation. Plain v2 remains valid
-within these limits; the exact-body v1 contract is unchanged.
+These finite limits leave room for a short quoted anchor and the eight-line receipt
+without admitting arbitrarily large stored proofs. For the neutral producer this
+is the unchanged reply anchor, not decision audit or report text. Reject character
+lengths over 8192 before encoding, reject malformed Unicode, then enforce the byte
+limit before counting or splitting; enforce the line limit before splitting. The same limits
+apply at first acceptance and persisted-proof revalidation. A neutral producer must
+construct and validate the complete carrier with the actual bound values, including
+the provider's exact available quoted anchor, any leading blank, and the ASCII
+separator, before its sole publication. If the exact supported carrier cannot be
+established within these limits, it must stop before publication. Plain v2 remains
+valid within these limits; the exact-body v1 contract is unchanged.
 
 ```text
 Hermes-Task-Receipt: v2
