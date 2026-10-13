@@ -125,13 +125,20 @@ permission to deploy. Both behavioral contracts remain specified in
 
 ### Issue #106 verification-status parser overlay
 
-The current PR107 review-evidence overlay recognizes one exact `COMMENTED`
-overview sentence as verification status. It does not confer review, CI, or owner
+The current PR107 review-evidence overlay recognizes exactly two complete `COMMENTED`
+overview sentences as verification status:
+
+`The operationally sensitive coordinator gate lacks verified latest-head CI and required review evidence.`
+
+`The coordinator’s authorization and progress seam is security-sensitive, and exact-head owner authorization remains absent.`
+
+Changed prose or a stripped substantive prefix does not extend this set.
+It does not confer review, CI, or owner
 authority; the earlier issue #100 pin remains retained as historical provenance.
 
 | Current candidate path | SHA-256 |
 | --- | --- |
-| `deploy/review_evidence.py` | `6501305dd2fdbd3a6d9f3000ee90d29d54ece50a39f5c62bb3c111835cf3e7f2` |
+| `deploy/review_evidence.py` | `41025e4dae30207b0ea15beb0b7899d1b8779811ba4ed089f89cfeb10572f3de` |
 
 This candidate still requires fresh exact-head review and all required checks.
 Sensitive owner authorization remains a separate gate.

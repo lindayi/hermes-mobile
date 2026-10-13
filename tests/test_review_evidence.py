@@ -364,6 +364,8 @@ def test_public_owner_status_overview_is_narrow_validation_status():
     PUBLIC_OWNER_STATUS_SUMMARY.replace("The", "the", 1),
     PUBLIC_OWNER_STATUS_SUMMARY.replace(".", "!", 1),
     "The coordinator’s authorization and progress seam is security-sensitive, and "
+    "exact-head verification remains pending.",
+    "The coordinator’s authorization and progress seam is security-sensitive, and "
     "owner authorization remains absent.",
     "The coordinator’s authorization and progress seam is security-sensitive, and "
     "the owner authorization remains absent.",

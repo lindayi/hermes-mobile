@@ -686,8 +686,7 @@ def _summary_disposition(summary, *, overview, state, context=None):
         r"(?:the )?(?:exact-head )?(?:verification|validation) "
         r"(?:remains|is)(?: still)? pending[.!]?", re.IGNORECASE)
     neutral_prefix = re.compile(
-        r"^(?:It changes [^.!?]+, while|"
-        r"The coordinator[’']s authorization and progress seam is security-sensitive,\s+and)\s+",
+        r"^It changes [^.!?]+, while\s+",
         re.IGNORECASE)
     # Recognize whole negative verdicts, never arbitrary prose containing 'no'.
     # Scope suffixes are deliberately finite: an unrestricted 'in ...' would
