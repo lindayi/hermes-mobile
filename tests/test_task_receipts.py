@@ -444,14 +444,25 @@ def test_neutral_instruction_uses_one_immutable_publication():
     }
 
 
-def test_anchored_neutral_receipt_accepts_only_the_exact_bounded_carrier():
-    from deploy.task_receipts import _v2_fields
+@pytest.mark.parametrize("leading", ["", "\n"])
+@pytest.mark.parametrize("before", ["", ">\n", "> \n"])
+@pytest.mark.parametrize("after", ["", ">\n", "> \n"])
+@pytest.mark.parametrize("separator", ["", " ", "\t"])
+@pytest.mark.parametrize("historical", [False, True])
+def test_anchored_neutral_receipt_accepts_only_the_exact_bounded_carrier(
+        leading, before, after, separator, historical):
+    import hashlib
+
+    from deploy.cloud_coordinator import (
+        _legacy_neutral_attempt_count, _valid_receipt_proof,
+    )
+    from deploy.task_receipts import _anchored_neutral_receipt_instruction_v1, _v2_fields
 
     task, action, pull, comments = v2_binding()
     anchor_id = 888
     anchor_body = "hermes-coordinator-neutral-receipt:" + "c" * 20
     action.update(
-        kind="fix", task_type="neutral", main_sha=BASE,
+        kind="fix", task_type="neutral", main_sha=BASE, status="completed", attempt=1,
         receipt_anchor_comment_id=anchor_id,
         receipt_anchor_body=anchor_body,
     )
@@ -460,12 +471,23 @@ def test_anchored_neutral_receipt_accepts_only_the_exact_bounded_carrier():
         neutral=True, anchor_comment_id=anchor_id, anchor_body=anchor_body,
     )
     assert "message must contain only the eight canonical receipt lines" in instruction
-    assert "provider prepends the bound quote and blank separator" in instruction
+    assert "anchor body" in instruction
     assert "Do not include the quote or leading blanks in the tool message" in instruction
-    action["body"] = f"Neutral reconciliation request.\n\n{instruction}"
+    if historical:
+        instruction = _anchored_neutral_receipt_instruction_v1(
+            NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+            anchor_comment_id=anchor_id, anchor_body=anchor_body,
+        )
+        assert hashlib.sha256(instruction.encode()).hexdigest() == (
+            "7112f767fa99088821bb287130d90ceb5328a63554f3c8fa33fe8e7a04fb7850"
+        )
+    action["body"] = (
+        f"Neutral reconciliation for PR #16 at exact PR head `{START_HEAD}`. "
+        f"The current target main is `{BASE}`.\n\n{instruction}"
+    )
     task["sessions"][0]["prompt"] = action["body"]
     comments[0]["body"] = (
-        f"\n> {anchor_body}\n\n"
+        f"{leading}{before}> {anchor_body}\n{after}{separator}\n"
         "Hermes-Task-Receipt: v2\n"
         f"nonce={NONCE}\n"
         "pr=16\n"
@@ -478,7 +500,7 @@ def test_anchored_neutral_receipt_accepts_only_the_exact_bounded_carrier():
     receipt = validate_task_receipt(task, action, pull, comments, now=NOW)
 
     assert receipt["comment_id"] != anchor_id
-    assert receipt["body"].startswith(f"\n> {anchor_body}\n\n")
+    assert receipt["body"] == comments[0]["body"]
     assert _v2_fields(receipt["body"]) == {
         "nonce": NONCE, "pr": "16", "start_head": START_HEAD,
         "base": BASE, "session": SESSION_ID, "head": RESULT_HEAD,
@@ -486,10 +508,26 @@ def test_anchored_neutral_receipt_accepts_only_the_exact_bounded_carrier():
     }
     assert len(receipt["body"].encode("utf-8")) < 8192
     assert len(receipt["body"].split("\n")) < 64
+    record = {
+        **action, **{f"receipt_{key}": value for key, value in receipt.items()},
+        "receipt_session_completed_at": receipt["completed_at"],
+    }
+    saved_prompt = action["body"]
+    record = json.loads(json.dumps(record))
+    assert _valid_receipt_proof(record, comments)
+    assert _legacy_neutral_attempt_count(
+        {"issue": 16, "attempts": 1, "authorized_head": START_HEAD,
+         "receipt_proofs": [record]},
+        {}, comments, tasks=[task],
+        snapshot={"issue": 16, "pull": {
+            "id": pull["id"], "node_id": pull["node_id"], "head": {"ref": "topic"},
+        }}, now=NOW,
+    ) == 1
+    assert record["body"] == task["sessions"][0]["prompt"] == saved_prompt
 
 
 @pytest.mark.parametrize("mutation", [
-    "wrong-anchor-id", "wrong-anchor-body", "missing-leading-blank",
+    "wrong-anchor-id", "wrong-anchor-body",
     "missing-separator", "extra-quote-line",
 ])
 def test_anchored_neutral_receipt_rejects_prompt_or_carrier_mutation(mutation):
@@ -519,13 +557,127 @@ def test_anchored_neutral_receipt_rejects_prompt_or_carrier_mutation(mutation):
         )
         prefix = f"\n> {anchor_body}\n\n"
         comments[0]["body"] = {
-            "missing-leading-blank": f"> {anchor_body}\n\n{fields}",
             "missing-separator": f"\n> {anchor_body}\n{fields}",
             "extra-quote-line": f"{prefix}> copied\n\n{fields}",
         }[mutation]
 
     with pytest.raises(ReceiptError):
         validate_task_receipt(task, action, pull, comments, now=NOW)
+
+
+@pytest.mark.parametrize("mutation", [
+    "changed-anchor", "missing-anchor", "duplicate-anchor", "quote-prose",
+    "quote-receipt", "quote-header", "no-separator", "nbsp", "control", "cr",
+    "long-separator", "two-leading-blanks", "two-quoted-blanks", "fenced-receipt",
+    "quoted-receipt", "byte-limit", "line-limit", "tail", "forged-author",
+    "session", "prompt", "action-body", "edited", "duplicate-comment",
+    "wrong-head", "wrong-base", "nonce", "pr", "task",
+])
+def test_anchored_transport_rejects_unknown_envelopes_and_changed_bindings(mutation):
+    from deploy.cloud_coordinator import _valid_receipt_proof
+
+    task, action, pull, comments = v2_binding()
+    anchor = "hermes-coordinator-neutral-receipt:" + "c" * 20
+    action.update(
+        kind="fix", task_type="neutral", main_sha=BASE, status="completed",
+        receipt_anchor_comment_id=888, receipt_anchor_body=anchor,
+    )
+    instruction = receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+        neutral=True, anchor_comment_id=888, anchor_body=anchor,
+    )
+    action["body"] = f"Neutral reconciliation request.\n\n{instruction}"
+    task["sessions"][0]["prompt"] = action["body"]
+    payload = comments[0]["body"]
+    comments[0]["body"] = f"> {anchor}\n> \n\n{payload}"
+    receipt = validate_task_receipt(task, action, pull, comments, now=NOW)
+    record = {**action, **{f"receipt_{key}": value for key, value in receipt.items()}}
+    prefixes = {
+        "changed-anchor": f"> {anchor}x\n\n",
+        "missing-anchor": "> \n\n",
+        "duplicate-anchor": f"> {anchor}\n> {anchor}\n\n",
+        "quote-prose": f"> {anchor}\n> extra excerpt\n\n",
+        "quote-receipt": f"> {anchor}\n> nonce=extra\n\n",
+        "quote-header": f"> {anchor}\n> Hermes-Task-Receipt: v2\n\n",
+        "no-separator": f"> {anchor}\n",
+        "nbsp": f"> {anchor}\n\u00a0\n",
+        "control": f"> {anchor}\n\v\n",
+        "cr": f"> {anchor}\r\n\n",
+        "long-separator": f"> {anchor}\n  \n",
+        "two-leading-blanks": f"\n\n> {anchor}\n\n",
+        "two-quoted-blanks": f"> {anchor}\n>\n>\n\n",
+        "byte-limit": f"> {anchor}\n> " + "x" * 8192 + "\n\n",
+        "line-limit": f"> {anchor}\n" + ">\n" * 64 + "\n",
+    }
+    if mutation in prefixes:
+        comments[0]["body"] = prefixes[mutation] + payload
+    elif mutation == "fenced-receipt":
+        comments[0]["body"] = f"> {anchor}\n\n```\n{payload}\n```"
+    elif mutation == "quoted-receipt":
+        comments[0]["body"] = f"> {anchor}\n\n> " + payload.replace("\n", "\n> ")
+    elif mutation == "tail":
+        comments[0]["body"] += "\nextra"
+    elif mutation == "forged-author":
+        comments[0]["user"]["id"] = 175728472
+    elif mutation == "session":
+        task["sessions"][0]["id"] += "x"
+    elif mutation == "prompt":
+        task["sessions"][0]["prompt"] += "x"
+    elif mutation == "action-body":
+        action["body"] += "x"
+    elif mutation == "edited":
+        comments[0]["updated_at"] = "2026-10-01T12:05:01Z"
+    elif mutation == "duplicate-comment":
+        comments.append({**comments[0], "id": 778})
+    elif mutation == "wrong-head":
+        pull["head"]["sha"] = "d" * 40
+    elif mutation == "wrong-base":
+        action["main_sha"] = "d" * 40
+    elif mutation == "nonce":
+        comments[0]["body"] = comments[0]["body"].replace(NONCE, NONCE + "x")
+    elif mutation == "pr":
+        comments[0]["body"] = comments[0]["body"].replace("pr=16", "pr=17")
+    elif mutation == "task":
+        task["id"] += "x"
+    try:
+        rejected = validate_task_receipt(task, action, pull, comments, now=NOW)
+    except ReceiptError:
+        rejected = None
+    assert rejected is None
+    if mutation in prefixes or mutation in {"fenced-receipt", "quoted-receipt", "tail"}:
+        record["receipt_body"] = comments[0]["body"]
+        assert not _valid_receipt_proof(record, comments)
+    elif mutation in {"forged-author", "edited", "duplicate-comment", "nonce", "pr"}:
+        assert not _valid_receipt_proof(record, comments)
+
+
+def test_anchored_producer_prevalidates_every_finite_complete_carrier(monkeypatch):
+    from deploy import task_receipts
+
+    carriers = []
+    original = task_receipts._v2_fields
+
+    def parse(body):
+        carriers.append(body)
+        return original(body)
+
+    monkeypatch.setattr(task_receipts, "_v2_fields", parse)
+    receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+        neutral=True, anchor_comment_id=888, anchor_body="A" * 80,
+    )
+    assert len(carriers) == len(set(carriers)) == 54
+    assert max(len(body.split("\n")) for body in carriers) == 13
+    assert max(len(body.encode()) for body in carriers) == (
+        92 + len(carriers[0][carriers[0].index("Hermes-Task-Receipt: v2"):].encode())
+    )
+    assert all("session=" + "S" * 128 in body for body in carriers)
+    assert all(body.endswith("result=conflict_incompatible") for body in carriers)
+    with pytest.raises(ReceiptError, match="byte budget"):
+        receipt_instruction(
+            "x" * 8192, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+            neutral=True, anchor_comment_id=888, anchor_body="A" * 80,
+        )
 
 
 def test_receipt_only_provider_carrier_validates_and_survives_proof_recheck():

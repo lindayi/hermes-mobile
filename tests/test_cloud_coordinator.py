@@ -2188,7 +2188,10 @@ class FakeApi:
 
     def reply_to_comment(self, comment_id, message):
         anchor = next(comment for comment in self.comments if comment["id"] == comment_id)
-        body = f"\n> {anchor['body']}\n\n{message}"
+        leading, before, after, separator = getattr(
+            self, "neutral_quote_envelope", ("\n", "", "", ""),
+        )
+        body = f"{leading}{before}> {anchor['body']}\n{after}{separator}\n{message}"
         self.reply_calls.append({"commentId": comment_id, "message": message, "body": body})
         self.comments.append({
             "id": 9000 + self.fix_attempts,
@@ -8978,12 +8981,35 @@ def test_neutral_dispatch_binds_returned_anchor_before_task_post(tmp_path):
     assert store.snapshot()["enrollments"]["16"]["neutral_anchor_reservations"] == 1
 
 
-def test_neutral_anchor_receipt_dispatch_and_retained_proof_survive_restart(tmp_path):
+@pytest.mark.parametrize("envelope", [
+    ("\n", "", "", ""),
+    ("", "", "", ""),
+    ("", ">\n", "> \n", "\t"),
+    ("\n", "> \n", ">\n", " "),
+])
+@pytest.mark.parametrize("historical", [False, True])
+def test_neutral_anchor_receipt_dispatch_and_retained_proof_survive_restart(
+        tmp_path, monkeypatch, envelope, historical):
     from deploy.cloud_coordinator import (
         _authorized_result_heads, _valid_receipt_proof,
     )
+    if historical:
+        from deploy.task_receipts import _anchored_neutral_receipt_instruction_v1
+
+        current_instruction = cloud_coordinator.receipt_instruction
+
+        def released_instruction(nonce, **kwargs):
+            if kwargs.get("neutral") and kwargs.get("anchor_comment_id") is not None:
+                return _anchored_neutral_receipt_instruction_v1(
+                    nonce, **{key: value for key, value in kwargs.items()
+                              if key != "neutral"},
+                )
+            return current_instruction(nonce, **kwargs)
+
+        monkeypatch.setattr(cloud_coordinator, "receipt_instruction", released_instruction)
 
     api = FakeApi()
+    api.neutral_quote_envelope = envelope
     api.pull.update(mergeable=False, mergeable_state="dirty")
     path = tmp_path / "state.json"
     store = StateStore(path)
@@ -9000,7 +9026,7 @@ def test_neutral_anchor_receipt_dispatch_and_retained_proof_survive_restart(tmp_
     assert anchor["body"] == action["receipt_anchor_body"]
     assert f"commentId={anchor['comment_id']}" in task_prompt
     assert anchor["body"] in task_prompt
-    assert "one quote line" in task_prompt
+    assert "anchor body" in task_prompt
     assert action["task_dispatch_started"] is True
     assert len([
         call for call in api.writes
@@ -9012,10 +9038,12 @@ def test_neutral_anchor_receipt_dispatch_and_retained_proof_survive_restart(tmp_
     reply = api.reply_calls[0]
     assert reply["commentId"] == anchor["comment_id"]
     assert task_prompt == api.tasks[action["task_id"]]["sessions"][0]["prompt"]
-    assert reply["body"].startswith(f"\n> {anchor['body']}\n\nHermes-Task-Receipt: v2\n")
+    leading, before, after, separator = envelope
+    prefix = f"{leading}{before}> {anchor['body']}\n{after}{separator}\n"
+    assert reply["body"].startswith(f"{prefix}Hermes-Task-Receipt: v2\n")
     assert reply["message"].startswith("Hermes-Task-Receipt: v2\n")
     assert len(reply["message"].splitlines()) == 8
-    assert reply["body"] == f"\n> {anchor['body']}\n\n{reply['message']}"
+    assert reply["body"] == prefix + reply["message"]
     assert api.comments[-1]["body"] == reply["body"]
     from deploy.task_receipts import validate_task_receipt
 
@@ -9073,6 +9101,8 @@ def test_neutral_anchor_receipt_dispatch_and_retained_proof_survive_restart(tmp_
     assert StateStore(path).action(action["key"])["receipt_comment_id"] == completed[
         "receipt_comment_id"
     ]
+    assert StateStore(path).action(action["key"])["body"] == task_prompt
+    assert api.tasks[action["task_id"]]["sessions"][0]["prompt"] == task_prompt
 
 
 def test_lost_neutral_anchor_post_recovers_without_reposting_or_spending_budget(tmp_path):

@@ -199,8 +199,8 @@ _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE = {
 }
 
 _PR105_OWNER_ABANDONMENT_FIXTURE = {
-    'deploy/cloud_coordinator.py': '1dc88cd26b9de3b43832c1c87b63bbc21a9fee1d8877222f8bd4f703ffe6ae33',
-    'deploy/task_receipts.py': 'bc7bd054c18d65e9713d435b46709ee20abddb9eda1f61cb7ba08b514b0db618',
+    'deploy/cloud_coordinator.py': '40b88943f50d7c44d1f74d86f8e72b17b4c4b5ee2339850657821936b37ad40b',
+    'deploy/task_receipts.py': '1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {

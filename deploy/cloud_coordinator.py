@@ -61,6 +61,8 @@ from deploy.task_receipts import (
     _legacy_neutral_dispatch_matches,
     _historical_neutral_receipt_instruction,
     _previous_release_neutral_receipt_instruction,
+    _anchored_neutral_receipt_instruction_v1,
+    _neutral_receipt_body_matches,
     find_review_report,
     find_receipt,
     receipt_body_matches,
@@ -2897,6 +2899,15 @@ def _valid_receipt_proof(action, comments):
                 legacy_neutral=legacy_neutral,
             )):
         return False
+    if ("receipt_anchor_comment_id" in action or "receipt_anchor_body" in action):
+        anchor_id = action.get("receipt_anchor_comment_id")
+        if (action.get("task_type") != "neutral" or version != "v2"
+                or type(anchor_id) is not int or not 0 < anchor_id <= 2**63 - 1
+                or action["receipt_comment_id"] == anchor_id
+                or not _neutral_receipt_body_matches(
+                    action["receipt_body"], action.get("receipt_anchor_body"),
+                )):
+            return False
     candidates = [
         comment for comment in comments
         if isinstance(comment, dict)
@@ -3139,6 +3150,14 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
             ]
             if anchored_neutral_instruction is not None:
                 reconstructed_instructions.append(anchored_neutral_instruction)
+                reconstructed_instructions.append(
+                    _anchored_neutral_receipt_instruction_v1(
+                        record["dispatch_nonce"], pull_number=record["issue"],
+                        start_head=record["head"], base_sha=record["receipt_base"],
+                        anchor_comment_id=record["receipt_anchor_comment_id"],
+                        anchor_body=record["receipt_anchor_body"],
+                    )
+                )
             if not (
                     expected_instruction in session["prompt"]
                     or (

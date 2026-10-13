@@ -133,10 +133,13 @@ or authorize operational activation. The coordinator durably reserves and verifi
 one short owner-authored anchor before neutral task dispatch. The prompt binds its
 returned comment ID and exact body. The neutral producer keeps the complete
 per-hunk audit in the pushed merge commit message. It sends only the eight canonical
-receipt lines as the tool message in one reply to that anchor; the provider adds
-the supported leading blank, bound quote line, and blank separator. Prevalidation
-covers the complete serialized carrier. Synthetic tests prove this bounded known
-shape, not a live provider call. Strict carrier binding, byte/line limits, immutable
+receipt lines as the tool message in one reply to that anchor. Prevalidation covers
+all 54 supported complete carriers: an optional empty leading line, one exact
+anchor quote, optional single quoted blanks on either side, and one empty/space/tab
+ASCII separator. Unknown shapes and semantic quote text remain rejected. Synthetic
+tests prove finite support, not a provider serializer guarantee or live acceptance.
+Exact historical constructors preserve saved prompts, including anchored v1.
+Strict carrier binding, byte/line limits, immutable
 receipt checks, retained proof validation, and the existing attempt budget remain.
 Inactive retirement retains complete sent neutral-anchor bindings within the
 existing lifetime bound, so same-scope re-enrollment can recover the exact anchor;
@@ -144,8 +147,8 @@ changed scope and incomplete or mismatched readback still block reuse.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `1dc88cd26b9de3b43832c1c87b63bbc21a9fee1d8877222f8bd4f703ffe6ae33` |
-| `deploy/task_receipts.py` | `bc7bd054c18d65e9713d435b46709ee20abddb9eda1f61cb7ba08b514b0db618` |
+| `deploy/cloud_coordinator.py` | `40b88943f50d7c44d1f74d86f8e72b17b4c4b5ee2339850657821936b37ad40b` |
+| `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
 
 ### Retained merged source and deliberate native refreshes
 

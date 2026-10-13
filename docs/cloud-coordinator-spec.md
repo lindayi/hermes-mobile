@@ -461,15 +461,36 @@ compacts obsolete anchors under the existing lifetime bound.
 
 Publish exactly one receipt-only PR reply. Its payload contains only the canonical
 v2 header and seven bound fields, with no decision, report, URL, prose, or extra
-fields. Before publication, the producer validates the complete supported
-serialized carrier, including the supported leading blank, one unchanged quote
-line containing the anchor body, blank separator, and actual bound values, with
-the existing strict parser and existing byte/line limits. No other quote or
-carrier shape is accepted for newly anchored tasks. If the complete carrier
-cannot be established or exceeds either existing limit, stop with a transport
-blocker before publishing. Never send and retry, edit the reply, or post a
+fields. The finite anchored envelope has zero or one empty leading line, exactly
+one `> ` line containing the complete short reserved anchor body, zero or one
+quoted blank line before and after that anchor (each either `>` or `> `), then
+exactly one ASCII separator line (empty, one space, or one tab). These 54 shapes
+support blank formatting differences, not arbitrary excerpts or semantic quote
+text. The anchor cannot be missing, changed, truncated, or duplicated. Extra
+quoted prose, headers or receipts, missing separators, other whitespace, CR,
+fences, extra fields and tails fail closed. The unchanged whole comment still
+must fit 8192 UTF-8 bytes and 64 LF-delimited lines.
+
+Before its sole publication, the producer prevalidates all 54 complete carriers
+with actual bound values and the strict parser, including worst-case overhead.
+This finite support is not a guarantee of provider serialization: public immutable
+comment 6134321641 establishes an observed quoted excerpt plus separator, not a
+universal prefix bound or live acceptance of these synthetic shapes. Unknown
+shapes remain rejected. The tool receives only the eight-line payload. Never
+send and retry, edit the reply, or post a
 second comment. The receipt is completion evidence only; it is not CI, review,
 merge, or deployment approval.
+
+Acceptance must demonstrate managed RED then GREEN at initial
+`validate_task_receipt`, retained-proof validation, cold budget reconstruction,
+and real synthetic Coordinator acceptance/handoff for alternate blank envelopes
+at the same exact anchor. Verify payload-only tool input, one publication per
+anchor, immutable comment readback, durable completion and restart without replay.
+Keep identity, session/prompt/body, nonce/PR/head/base/task, chronology,
+edit/duplicate and byte/line rejection gates. Preserve all existing historical
+producer prompts, including the superseded anchored exact-prefix prompt, through
+explicit byte-exact constructors; do not rewrite reservations or the frozen
+`coordinator-budget-v1-requests.json` fixture.
 The prompt directs genuinely incompatible requirements or broken required policy
 to a fixed typed result; these stop further repair for that exact head. Waiting or
 uncertain tasks retain the shared lock. Ordinary technical conflicts are repaired
@@ -477,8 +498,9 @@ within the shared budget; exhaustion or ambiguous execution becomes a meaningful
 owner blocker rather than an unbounded retry.
 
 Cold compatibility reconstruction recognizes only exact saved neutral prompts
-from known released producers, including the previous two-comment instruction
-and the later combined-comment instructions. Each historical prompt must
+from known released producers, including the previous two-comment instruction,
+the later combined-comment instructions, and the anchored exact-prefix v1
+instruction. Each historical prompt must
 reconstruct byte-for-byte from its saved reservation; no broad suffix or
 comment-based opt-in is allowed. For the already-dispatched legacy reservation
 that asked for conflict decisions in a PR comment, the comment must be from the
@@ -1388,11 +1410,12 @@ without admitting arbitrarily large stored proofs. For the neutral producer this
 is the unchanged reply anchor, not decision audit or report text. Reject character
 lengths over 8192 before encoding, reject malformed Unicode, then enforce the byte
 limit before counting or splitting; enforce the line limit before splitting. The same limits
-apply at first acceptance and persisted-proof revalidation. A neutral producer must
-construct and validate the complete carrier with the actual bound values, including
-the provider's exact available quoted anchor, any leading blank, and the ASCII
-separator, before its sole publication. If the exact supported carrier cannot be
-established within these limits, it must stop before publication. Plain v2 remains
+apply at first acceptance and persisted-proof revalidation. Newly anchored neutral
+producers prevalidate the 54 complete carriers specified above, with actual bound
+values, before their sole publication. The largest supported prefix is 92 bytes
+and five LF characters at the 80-byte anchor bound; it yields at most 13 total lines.
+This is a finite contract bound, not a universal provider bound. If any supported
+carrier fails validation or exceeds these limits, stop before publication. Plain v2 remains
 valid within these limits; the exact-body v1 contract is unchanged.
 
 ```text
