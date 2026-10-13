@@ -680,7 +680,8 @@ def _summary_disposition(summary, *, overview, state, context=None):
     # and can be forwarded only after live prose independently proves a finding.
     prose = summary.strip()
     context = (context if context is not None else summary).strip()
-    if overview and state == "COMMENTED" and prose in _COMMENTED_GATE_STATUS_SUMMARIES:
+    if (overview and state == "COMMENTED" and prose in _COMMENTED_GATE_STATUS_SUMMARIES
+            and context == prose):
         return "validation-only", prose
     if not prose:
         return ("ambiguous", context) if context else ("no-findings", "")

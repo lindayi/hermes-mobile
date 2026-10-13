@@ -132,13 +132,15 @@ overview sentences as verification status:
 
 `The coordinator’s authorization and progress seam is security-sensitive, and exact-head owner authorization remains absent.`
 
-Changed prose or a stripped substantive prefix does not extend this set.
-It does not confer review, CI, or owner
-authority; the earlier issue #100 pin remains retained as historical provenance.
+The complete rendered context must equal the exact entity-decoded live sentence;
+added blockquote, `code`, or `pre` material fails closed. Changed prose or a
+stripped substantive prefix does not extend this set. It does not confer review,
+CI, or owner authority; the earlier issue #100 pin remains retained as
+historical provenance.
 
 | Current candidate path | SHA-256 |
 | --- | --- |
-| `deploy/review_evidence.py` | `c1742ecb600b8372aa4382b5ab4e3647a3aa494b736dd6dd510d23fe5514a781` |
+| `deploy/review_evidence.py` | `b82ca32eaa7da7e35982bc690d52ef51ad3e53262a019387fa78b00e5c795a15` |
 
 This candidate still requires fresh exact-head review and all required checks.
 Sensitive owner authorization remains a separate gate.

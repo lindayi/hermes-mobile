@@ -285,16 +285,19 @@ def test_public_verification_overview_does_not_swallow_concerns(tmp_path, summar
     assert not plan["review_valid"] and not plan["auto_merge_eligible"]
 
 
-def test_quoted_only_verification_overview_remains_ambiguous():
-    review = public_overview_review(
-        body=PUBLIC_REVIEW_BODY.replace(
-            PUBLIC_REVIEW_SUMMARY, f"> {PUBLIC_REVIEW_SUMMARY}",
-        ),
-        body_html=PUBLIC_REVIEW_HTML.replace(
-            f"<p>{PUBLIC_REVIEW_SUMMARY}</p>",
-            f"<blockquote><p>{PUBLIC_REVIEW_SUMMARY}</p></blockquote>",
-        ),
+@pytest.mark.parametrize("summary", [PUBLIC_REVIEW_SUMMARY, PUBLIC_OWNER_STATUS_SUMMARY])
+def test_quoted_only_verification_overview_remains_ambiguous(summary):
+    body = PUBLIC_REVIEW_BODY.replace(
+        PUBLIC_REVIEW_SUMMARY, summary,
+    ).replace(PUBLIC_OWNER_STATUS_SUMMARY, summary).replace(summary, f"> {summary}")
+    rendered = PUBLIC_REVIEW_HTML.replace(
+        f"<p>{PUBLIC_REVIEW_SUMMARY}</p>",
+        f"<blockquote><p>{summary}</p></blockquote>",
+    ).replace(
+        f"<p>{PUBLIC_OWNER_STATUS_SUMMARY}</p>",
+        f"<blockquote><p>{summary}</p></blockquote>",
     )
+    review = copilot_review(body) | {"body_html": rendered}
     disposition = review_body_disposition(
         [review], HEAD, reviewer_id=COPILOT_REVIEWER,
     )
@@ -418,6 +421,80 @@ def test_public_owner_status_overview_does_not_grant_merge_authority(tmp_path):
     assert not plan["auto_merge_eligible"]
     assert "sensitive" in plan["reasons"] and "review" not in plan["reasons"]
     assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("summary", [PUBLIC_REVIEW_SUMMARY, PUBLIC_OWNER_STATUS_SUMMARY])
+@pytest.mark.parametrize("context", ["prefix", "suffix", "blockquote", "code", "pre"])
+def test_gate_status_requires_complete_unquoted_summary_context(tmp_path, summary, context):
+    substantive = "The source skips owner checks."
+    if context == "prefix":
+        body_summary = f"{substantive} {summary}"
+        html_summary = f"{substantive} {summary}"
+        html_tail = ""
+    elif context == "suffix":
+        body_summary = f"{summary} {substantive}"
+        html_summary = f"{summary} {substantive}"
+        html_tail = ""
+    elif context == "blockquote":
+        body_summary = f"{summary}\n\n> {substantive}"
+        html_summary = summary
+        html_tail = f"<blockquote><p>{substantive}</p></blockquote>"
+    elif context == "code":
+        body_summary = f"{summary} `{substantive}`"
+        html_summary = summary
+        html_tail = f" <code>{substantive}</code>"
+    else:
+        body_summary = f"{summary}\n\n```\n{substantive}\n```"
+        html_summary = summary
+        html_tail = f"<pre>{substantive}</pre>"
+
+    body = PUBLIC_REVIEW_BODY.replace(PUBLIC_REVIEW_SUMMARY, body_summary).replace(
+        PUBLIC_OWNER_STATUS_SUMMARY, body_summary,
+    )
+    rendered = PUBLIC_REVIEW_HTML.replace(
+        f"<p>{PUBLIC_REVIEW_SUMMARY}</p>",
+        f"<p>{html_summary}{html_tail}</p>" if context == "code"
+        else f"<p>{html_summary}</p>{html_tail}",
+    ).replace(
+        f"<p>{PUBLIC_OWNER_STATUS_SUMMARY}</p>",
+        f"<p>{html_summary}{html_tail}</p>" if context == "code"
+        else f"<p>{html_summary}</p>{html_tail}",
+    )
+    review = copilot_review(body) | {"body_html": rendered}
+    parsed = parse_body(body, "COMMENTED", body_html=rendered)
+    api = ReviewApi([review], sensitive=True)
+    result = _managed_cycle(api, tmp_path / "state.json")
+    [plan] = result["pull_requests"]
+
+    assert not plan["review_valid"] and not plan["auto_merge_eligible"]
+    assert plan["required_checks_green"] and plan["sensitive"]
+    assert parsed["ambiguous"] and not parsed["inventory_complete"], parsed
+
+
+@pytest.mark.parametrize(("summary", "encoded"), [
+    (PUBLIC_REVIEW_SUMMARY, PUBLIC_REVIEW_SUMMARY.replace("verified", "verifi&#101;d")),
+    (PUBLIC_OWNER_STATUS_SUMMARY, PUBLIC_OWNER_STATUS_SUMMARY.replace("’", "&#8217;")),
+])
+def test_gate_status_accepts_entity_decoded_exact_live_summary(tmp_path, summary, encoded):
+    body_template = PUBLIC_REVIEW_BODY.replace(
+        PUBLIC_REVIEW_SUMMARY, summary,
+    ).replace(PUBLIC_OWNER_STATUS_SUMMARY, summary)
+    html_template = PUBLIC_REVIEW_HTML.replace(
+        f"<p>{PUBLIC_REVIEW_SUMMARY}</p>", f"<p>{encoded}</p>",
+    ).replace(
+        f"<p>{PUBLIC_OWNER_STATUS_SUMMARY}</p>", f"<p>{encoded}</p>",
+    )
+    review = copilot_review(body_template) | {"body_html": html_template}
+    parsed = parse_body(body_template, "COMMENTED", body_html=html_template)
+    api = ReviewApi([review], sensitive=True)
+    result = _managed_cycle(api, tmp_path / "state.json")
+    [plan] = result["pull_requests"]
+
+    assert "validation-only" in parsed["classifications"]
+    assert parsed["findings"] == []
+    assert not parsed["ambiguous"] and parsed["inventory_complete"]
+    assert plan["review_valid"] and plan["required_checks_green"]
+    assert plan["sensitive"] and not plan["auto_merge_eligible"]
 
 
 @pytest.mark.parametrize("ci_state", ["pending", "failed"])

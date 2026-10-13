@@ -285,10 +285,12 @@ are recognized as gate-status prose:
 `The coordinator’s authorization and progress seam is security-sensitive, and exact-head owner authorization remains absent.`
 
 This exact whole-summary match classifies prose only; it does not prove review, CI,
-or owner authorization. Changed case or punctuation, optional-word changes,
-negation, an ASCII apostrophe, a substantive prefix, or added prose in the same
-or another sentence—including a no-code-findings sentence—remains ambiguous.
-Quoted-only text also remains ambiguous.
+or owner authorization. The complete rendered context must equal the exact
+entity-decoded live sentence. Added text, including inert blockquote, `code`, or
+`pre` context, makes the summary ambiguous. Changed case or punctuation,
+optional-word changes, negation, an ASCII apostrophe, a substantive prefix, or
+added prose in the same or another sentence—including a no-code-findings
+sentence—also remains ambiguous. Quoted-only text remains ambiguous.
 
 Validation-only requires complete recognized status prose (optionally accompanied
 by no-code-issues sentences), not the presence of `pending` anywhere. Examples
