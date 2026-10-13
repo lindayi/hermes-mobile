@@ -2012,6 +2012,16 @@ def _task_scoped(task, snapshot):
     )
 
 
+def _owner_abandonment_locally_rejected(action):
+    return (
+        isinstance(action, dict)
+        and isinstance(action.get("status"), str)
+        and action["status"] in {
+            "blocked", "completed", "sending", "sent", "superseded",
+        }
+    )
+
+
 def _owner_abandonment_inventory_valid(tasks, action, snapshot, record):
     if (not isinstance(tasks, list) or len(tasks) > 10000
             or _other_task_active(tasks, snapshot)):
@@ -6046,9 +6056,13 @@ class Coordinator:
                 and action.get("issue") == item["issue"]
                 and action.get("task_id") == item["task_id"]
             ]
+            if not actions:
+                continue
             if len(actions) != 1:
                 raise CoordinatorError("Owner abandonment did not identify one reserved task")
             action = actions[0]
+            if _owner_abandonment_locally_rejected(action):
+                continue
             pull = snapshot["pull"]
             pull_head = pull.get("head") if isinstance(pull, dict) else None
             pull_base = pull.get("base") if isinstance(pull, dict) else None
