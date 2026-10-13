@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -58,6 +59,10 @@ from deploy.task_receipts import (
     _time,
     _bounded_path,
     _legacy_neutral_dispatch_matches,
+    _historical_neutral_receipt_instruction,
+    _previous_release_neutral_receipt_instruction,
+    _anchored_neutral_receipt_instruction_v1,
+    _neutral_receipt_body_matches,
     find_review_report,
     find_receipt,
     receipt_body_matches,
@@ -105,6 +110,7 @@ FIX_MARKER_PREFIX = "hermes-coordinator-fix:"
 OUTBOX_MARKER_PREFIX = "hermes-coordinator-outcome:"
 REVIEW_ANCHOR_PREFIX = "Hermes-Review-Anchor: "
 REVIEW_ANCHOR_MARKER_PREFIX = "hermes-coordinator-review-anchor:"
+NEUTRAL_RECEIPT_ANCHOR_MARKER_PREFIX = "hermes-coordinator-neutral-receipt:"
 LIFECYCLE_FILE_NAME = "workflow-events.json"
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_EVENTS = 4000
@@ -173,8 +179,8 @@ query($id: ID!) {
       author {
         __typename
         login
-        ... on User { id databaseId }
         ... on Bot { id databaseId }
+        ... on User { id databaseId }
       }
       pullRequest {
         number
@@ -896,10 +902,15 @@ def neutral_reconciliation_request(snapshot, attempts):
         "Preserve both branch intents: retain all existing main behavior at the exact main SHA, "
         "and retain the PR behavior described in the untrusted intent below. Inspect both "
         "branches and their combined changes; do not choose either side wholesale. Merge current "
-        "main into the PR branch, never rebase, and never force-push. For each conflict hunk, "
-        "record its file/hunk identity, classification, decision, and rationale in a PR comment, "
-        "explaining how the resolution preserves both branch intents (or why they are incompatible), "
-        "before returning a `ready` receipt under the existing task receipt contract. "
+        "main into the PR branch, never rebase, and never force-push. For every conflict hunk, "
+        "put its complete audit, including file/hunk identity, classification, decision, and "
+        "rationale, in the pushed merge commit message; explain how the resolution preserves "
+        "both branch intents. Do not omit or summarize decisions. If there are no conflict hunks, "
+        "record that explicitly. Finalize this audit-bearing merge commit before pushing; a `ready` "
+        "receipt requires its exact commit SHA as the pushed result head. Keep all decision audit "
+        "out of the PR comment: publish only the validated receipt payload under the existing "
+        "task receipt contract. Do not create a separate decision comment. A truthful "
+        "`conflict_incompatible` or `policy_broken` result does not require or claim a merge commit. "
         "Test both intended behaviors and their interaction, then leave the PR branch for fresh "
         "review and checks. If the "
         "product requirements are genuinely incompatible, stop without guessing and report the "
@@ -913,6 +924,44 @@ def neutral_reconciliation_request(snapshot, attempts):
         "issue": snapshot["issue"], "kind": "fix", "task_type": "neutral",
         "head_ref": branch, "main_sha": main_sha,
         "recorded_base_sha": base["sha"],
+    }
+
+
+def _neutral_receipt_anchor_request(action, nonce):
+    if (
+            not isinstance(action, dict)
+            or action.get("task_type") != "neutral"
+            or not isinstance(action.get("key"), str)
+            or type(action.get("issue")) is not int
+            or type(action.get("attempt")) is not int
+            or not _is_sha(action.get("head"))
+            or not _is_sha(action.get("main_sha"))
+            or not _is_sha(action.get("recorded_base_sha"))
+            or not isinstance(nonce, str)
+            or not 1 <= len(nonce) <= 128):
+        return None
+    binding = (
+        f"neutral-receipt-anchor:v1:{action['key']}:{action['issue']}:"
+        f"{action['head']}:{action['main_sha']}:{action['recorded_base_sha']}:"
+        f"{action['attempt']}:{nonce}"
+    )
+    marker = (
+        f"{NEUTRAL_RECEIPT_ANCHOR_MARKER_PREFIX}"
+        f"{hashlib.sha256(binding.encode('utf-8')).hexdigest()[:20]}"
+    )
+    return {
+        "kind": "neutral-receipt-anchor",
+        "key": f"neutral-receipt-anchor:{action['key']}",
+        "task_key": action["key"],
+        "issue": action["issue"],
+        "head": action["head"],
+        "main_sha": action["main_sha"],
+        "recorded_base_sha": action["recorded_base_sha"],
+        "head_ref": action.get("head_ref"),
+        "attempt": action["attempt"],
+        "nonce": nonce,
+        "marker": marker,
+        "body": marker,
     }
 
 
@@ -1492,6 +1541,230 @@ def _is_owner_sensitive_command(comment):
     }
 
 
+def _is_owner_unverified_abandonment_command(comment):
+    if not isinstance(comment, dict):
+        return None
+    user = comment.get("user")
+    body = comment.get("body")
+    if (not isinstance(user, dict) or type(user.get("id")) is not int
+            or user["id"] != OWNER_ID or not isinstance(body, str)
+            or not positive_id(comment.get("id"))
+            or not _valid_timestamp(comment.get("created_at"))
+            or comment.get("updated_at") != comment.get("created_at")):
+        return None
+    match = re.fullmatch(
+        r"/hermes abandon-unverified ([A-Za-z0-9._-]{1,128}) ([0-9a-f]{40})",
+        body,
+    )
+    if not match:
+        return None
+    return {
+        "task_id": match.group(1), "head_sha": match.group(2),
+        "command_comment_id": comment["id"], "actor_id": OWNER_ID,
+        "command_body": body, "command_created_at": comment["created_at"],
+    }
+
+
+def _current_owner_unverified_abandonment_command(api, record):
+    if not _owner_abandonment_record_valid(record):
+        return None
+    try:
+        comment = api.get(
+            f"repos/{REPOSITORY}/issues/comments/{record['command_comment_id']}",
+        )
+    except ApiError as error:
+        if error.status == 404:
+            return None
+        raise
+    if (not isinstance(comment, dict)
+            or not isinstance(comment.get("user"), dict)
+            or not positive_id(comment["user"].get("id"))
+            or not positive_id(comment.get("id"))
+            or not isinstance(comment.get("body"), str)
+            or not _valid_timestamp(comment.get("created_at"))
+            or not _valid_timestamp(comment.get("updated_at"))
+            or not isinstance(comment.get("issue_url"), str)):
+        raise ApiError("Malformed current owner-abandonment response")
+    parsed = _is_owner_unverified_abandonment_command(comment)
+    return parsed if (
+        parsed is not None
+        and comment["issue_url"] == (
+            f"https://api.github.com/repos/{REPOSITORY}/issues/{record['issue']}"
+        )
+        and parsed["task_id"] == record["task_id"]
+        and parsed["head_sha"] == record["head_sha"]
+        and parsed["command_comment_id"] == record["command_comment_id"]
+        and parsed["actor_id"] == record["actor_id"]
+        and parsed["command_body"] == record["command_body"]
+        and parsed["command_created_at"] == record["command_created_at"]
+    ) else None
+
+
+def _reservation_sha256(action):
+    try:
+        payload = json.dumps(
+            action, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _owner_abandonment_record_valid(record):
+    fields = {
+        "version", "issue", "action_key", "task_id", "task_created_at",
+        "reservation_sha256", "head_sha", "base_sha", "command_comment_id",
+        "command_body", "command_created_at", "actor_id", "accepted_at",
+    }
+    if (not isinstance(record, dict) or set(record) != fields
+            or type(record.get("version")) is not int or record["version"] != 1
+            or type(record.get("issue")) is not int or record["issue"] < 1
+            or not isinstance(record.get("action_key"), str)
+            or not 1 <= len(record["action_key"]) <= 512
+            or not isinstance(record.get("task_id"), str)
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", record["task_id"]) is None
+            or not all(_valid_timestamp(record.get(field)) for field in (
+                "task_created_at", "command_created_at", "accepted_at",
+            ))
+            or not isinstance(record.get("reservation_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", record["reservation_sha256"]) is None
+            or not _is_sha(record.get("head_sha"))
+            or not _is_sha(record.get("base_sha"))
+            or not positive_id(record.get("command_comment_id"))
+            or record.get("actor_id") != OWNER_ID
+            or record.get("command_body") != (
+                f"/hermes abandon-unverified {record.get('task_id')} "
+                f"{record.get('head_sha')}"
+            )):
+        return False
+    try:
+        return (
+            datetime.fromisoformat(record["task_created_at"].replace("Z", "+00:00"))
+            <= datetime.fromisoformat(
+                record["command_created_at"].replace("Z", "+00:00"),
+            )
+            <= datetime.fromisoformat(record["accepted_at"].replace("Z", "+00:00"))
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _owner_abandonments_valid(records, *, issue=None):
+    return (
+        isinstance(records, list)
+        and len(records) <= REPAIR_LIMIT + NEUTRAL_LIMIT
+        and all(
+            _owner_abandonment_record_valid(record)
+            and (issue is None or record["issue"] == issue)
+            for record in records
+        )
+        and len({record["action_key"] for record in records}) == len(records)
+    )
+
+
+def _owner_abandonment_successor_binding(record):
+    return {
+        "version": 1,
+        "action_key": record["action_key"],
+        "task_id": record["task_id"],
+        "task_created_at": record["task_created_at"],
+        "reservation_sha256": record["reservation_sha256"],
+        "head_sha": record["head_sha"],
+        "base_sha": record["base_sha"],
+        "command_comment_id": record["command_comment_id"],
+        "command_created_at": record["command_created_at"],
+        "accepted_at": record["accepted_at"],
+    } if _owner_abandonment_record_valid(record) else None
+
+
+def _owner_abandonment_successor_attestation(record, action):
+    binding = _owner_abandonment_successor_binding(record)
+    if (
+            binding is None
+            or not isinstance(action, dict)
+            or not isinstance(action.get("key"), str)
+            or not action["key"]
+            or not isinstance(action.get("dispatch_nonce"), str)
+            or not action["dispatch_nonce"]
+            or not isinstance(action.get("created_at"), (int, float))
+            or isinstance(action.get("created_at"), bool)
+    ):
+        return None
+    try:
+        payload = json.dumps(
+            {
+                "binding": binding,
+                "key": action["key"],
+                "dispatch_nonce": action["dispatch_nonce"],
+                "created_at": action["created_at"],
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _owner_abandonment_successor_candidate_matches(record, action):
+    neutral = isinstance(action, dict) and action.get("task_type") == "neutral"
+    expected_binding = _owner_abandonment_successor_binding(record)
+    expected_attestation = _owner_abandonment_successor_attestation(record, action)
+    return (
+        _owner_abandonment_record_valid(record)
+        and isinstance(action, dict)
+        and expected_binding is not None
+        and action.get("key") != record["action_key"]
+        and action.get("task_id") != record["task_id"]
+        and action.get("issue") == record["issue"]
+        and action.get("kind") == "fix"
+        and action.get("task_type") in {
+            None, "source", "review-followup", "neutral",
+        }
+        and action.get("head") == record["head_sha"]
+        and (
+            (
+                action.get("owner_abandonment_binding") == expected_binding
+                and expected_attestation is not None
+                and action.get("owner_abandonment_attestation")
+                    == expected_attestation
+            )
+            or action.get("owner_abandonment_intent") == expected_binding
+        )
+        and (
+            neutral and action.get("recorded_base_sha") == record["base_sha"]
+            or not neutral and action.get("main_sha") == record["base_sha"]
+        )
+    )
+
+
+def _owner_abandonment_matches_action(record, action):
+    return (
+        _owner_abandonment_record_valid(record)
+        and isinstance(action, dict)
+        and action.get("key") == record["action_key"]
+        and action.get("issue") == record["issue"]
+        and action.get("kind") == "fix"
+        and action.get("task_type") in {
+            None, "source", "review-followup", "neutral",
+        }
+        and action.get("status") == "uncertain"
+        and action.get("task_id") == record["task_id"]
+        and action.get("task_created_at") == record["task_created_at"]
+        and type(action.get("receipt_waits")) is int
+        and action["receipt_waits"] == MAX_RECEIPT_POLLS
+        and type(action.get("pull_id")) is int and action["pull_id"] > 0
+        and isinstance(action.get("pull_node_id"), str)
+        and bool(action["pull_node_id"])
+        and action.get("owner_id") == OWNER_ID
+        and action.get("repository_id") == REPOSITORY_ID
+        and _reservation_sha256(action) == record["reservation_sha256"]
+    )
+
+
 def _current_sensitive_owner_command(api, issue, authorization):
     if (not positive_id(issue) or not isinstance(authorization, dict)
             or not positive_id(authorization.get("command_comment_id"))):
@@ -1560,6 +1833,33 @@ def _enrich_pull_reviews(api, route, reviews):
     return enriched
 
 
+def _review_actor_matches(user, author):
+    if (not isinstance(user, dict) or not isinstance(author, dict)
+            or not positive_id(user.get("id"))
+            or not positive_id(author.get("databaseId"))
+            or user["id"] != author["databaseId"]
+            or not isinstance(user.get("node_id"), str) or not user["node_id"]
+            or not isinstance(author.get("id"), str)
+            or user["node_id"] != author["id"]
+            or user.get("type") != author.get("__typename")
+            or (user["id"], user.get("type")) not in (
+                (OWNER_ID, "User"), (COPILOT_REVIEWER_ID, "Bot"),
+            )
+            or not isinstance(user.get("login"), str) or not user["login"]
+            or not isinstance(author.get("login"), str) or not author["login"]):
+        return False
+    if user["id"] == COPILOT_REVIEWER_ID:
+        return (
+            user["type"] == "Bot"
+            and user["login"] in (
+                "copilot-pull-request-reviewer",
+                "copilot-pull-request-reviewer[bot]",
+            )
+            and author["login"] == "copilot-pull-request-reviewer"
+        )
+    return user["login"] == author["login"]
+
+
 def _bound_pull_review_metadata(api, pull_number, review):
     node_id = review.get("node_id")
     user = review.get("user")
@@ -1577,10 +1877,11 @@ def _bound_pull_review_metadata(api, pull_number, review):
         if error.status == 404:
             return review
         raise
-    if not isinstance(response, dict) or response.get("errors"):
-        return review
-    data = response.get("data")
-    node = data.get("node") if isinstance(data, dict) else None
+    if (not isinstance(response, dict) or response.get("errors")
+            or not isinstance(response.get("data"), dict)
+            or "node" not in response["data"]):
+        raise ApiError("Malformed GitHub review metadata response")
+    node = response["data"]["node"]
     commit = node.get("commit") if isinstance(node, dict) else None
     author = node.get("author") if isinstance(node, dict) else None
     pull = node.get("pullRequest") if isinstance(node, dict) else None
@@ -1594,11 +1895,7 @@ def _bound_pull_review_metadata(api, pull_number, review):
             or node.get("body") != review.get("body")
             or not isinstance(commit, dict)
             or commit.get("oid") != review.get("commit_id")
-            or not isinstance(author, dict)
-            or not positive_id(author.get("databaseId"))
-            or author.get("databaseId") != user["id"]
-            or author.get("id") != user["node_id"]
-            or author.get("__typename") != user["type"]
+            or not _review_actor_matches(user, author)
             or not isinstance(pull, dict)
             or pull.get("number") != pull_number
             or not isinstance(repository, dict)
@@ -1883,6 +2180,161 @@ def _task_scoped(task, snapshot):
         isinstance(session, dict) and session.get("head_ref") == head
         and session.get("base_ref") == MAIN_BRANCH
         for session in sessions or ()
+    )
+
+
+def _owner_abandonment_locally_rejected(action, *, pull=None, item=None, accepted_at=None):
+    if (
+            isinstance(action, dict)
+            and isinstance(action.get("status"), str)
+            and action["status"] in {
+                "blocked", "completed", "sending", "sent", "superseded",
+            }
+    ):
+        return True
+    pull_head = pull.get("head") if isinstance(pull, dict) else None
+    pull_base = pull.get("base") if isinstance(pull, dict) else None
+    if (
+            not isinstance(action, dict)
+            or action.get("status") != "uncertain"
+            or not isinstance(item, dict)
+            or not isinstance(pull, dict)
+            or type(pull.get("number")) is not int
+            or pull["number"] <= 0
+            or type(pull.get("id")) is not int
+            or pull["id"] <= 0
+            or not isinstance(pull.get("node_id"), str)
+            or not pull["node_id"]
+            or not isinstance(pull_head, dict)
+            or not isinstance(pull_base, dict)
+            or not isinstance(pull_head.get("ref"), str)
+            or not _is_sha(pull_base.get("sha"))
+    ):
+        return False
+    if not _pull_identity(pull, action) or pull_head["ref"] != action.get("head_ref"):
+        return True
+    record = {
+        "version": 1, "issue": item["issue"],
+        "action_key": action.get("key"), "task_id": item["task_id"],
+        "task_created_at": action.get("task_created_at"),
+        "reservation_sha256": _reservation_sha256(action),
+        "head_sha": item["head_sha"],
+        "base_sha": pull_base["sha"],
+        "command_comment_id": item["command_comment_id"],
+        "command_body": item["command_body"],
+        "command_created_at": item["command_created_at"],
+        "actor_id": item["actor_id"], "accepted_at": accepted_at,
+    }
+    return (
+        not _owner_abandonment_record_valid(record)
+        or not _owner_abandonment_matches_action(record, action)
+    )
+
+
+def _owner_abandonment_inventory_valid(tasks, action, snapshot, record):
+    if (not isinstance(tasks, list) or len(tasks) > 10000
+            or _other_task_active(tasks, snapshot)):
+        return False
+    matches = [
+        task for task in tasks
+        if isinstance(task, dict) and task.get("id") == record.get("task_id")
+    ]
+    if len(matches) != 1:
+        return False
+    task = matches[0]
+    return (
+        task.get("state") == "completed"
+        and task.get("created_at") == record.get("task_created_at")
+        and all(_github_identity(task.get(field), expected) for field, expected in (
+            ("creator", OWNER_ID), ("owner", OWNER_ID),
+            ("repository", REPOSITORY_ID),
+        ))
+    )
+
+
+def _owner_abandonment_task_valid(
+        task, action, pull, record, *, now, continued_head=False,
+        historical_base=False):
+    head = pull.get("head") if isinstance(pull, dict) else None
+    base = pull.get("base") if isinstance(pull, dict) else None
+    if (
+            not _owner_abandonment_matches_action(record, action)
+            or not isinstance(pull, dict)
+            or not _pull_identity(pull, action)
+            or record.get("issue") != pull.get("number")
+            or not isinstance(head, dict)
+            or not isinstance(base, dict)
+            or (
+                record.get("head_sha") != head.get("sha")
+                and not continued_head
+            )
+            or (
+                record.get("base_sha") != base.get("sha")
+                and not (continued_head or historical_base)
+            )
+            or pull.get("draft") is not False
+            or head.get("ref") != action.get("head_ref")
+            or base.get("ref") != MAIN_BRANCH
+            or not isinstance(task, dict)
+            or task.get("id") != record.get("task_id")
+            or task.get("state") != "completed"
+            or task.get("created_at") != record.get("task_created_at")
+            or not _valid_timestamp(task.get("updated_at"))
+            or not all(_github_identity(task.get(field), expected) for field, expected in (
+                ("creator", OWNER_ID), ("owner", OWNER_ID),
+                ("repository", REPOSITORY_ID),
+            ))):
+        return False
+    artifacts = task.get("artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != 2:
+        return False
+    branches, pulls = [], []
+    for artifact in artifacts:
+        if (not isinstance(artifact, dict) or artifact.get("provider") != "github"
+                or artifact.get("type") not in {"branch", "pull"}
+                or not isinstance(artifact.get("data"), dict)):
+            return False
+        if artifact["type"] == "branch":
+            branches.append(artifact["data"])
+        else:
+            pulls.append(artifact["data"])
+    if (len(branches) != 1 or len(pulls) != 1
+            or branches[0].get("head_ref") != action.get("head_ref")
+            or branches[0].get("base_ref") != MAIN_BRANCH
+            or not _github_identity(pulls[0], action.get("pull_id"))
+            or pulls[0].get("global_id") != action.get("pull_node_id")):
+        return False
+    sessions = task.get("sessions")
+    if not isinstance(sessions, list) or len(sessions) != 1:
+        return False
+    session = sessions[0]
+    if (
+            not isinstance(session, dict)
+            or not _valid_session_id(session.get("id"))
+            or session.get("task_id") != record.get("task_id")
+            or session.get("state") != "completed"
+            or not _github_identity(session.get("user"), OWNER_ID)
+            or not _github_identity(session.get("owner"), OWNER_ID)
+            or not _github_identity(session.get("repository"), REPOSITORY_ID)
+            or session.get("head_ref") != action.get("head_ref")
+            or session.get("base_ref") != MAIN_BRANCH
+            or session.get("prompt") != action.get("body")
+            or not _valid_timestamp(session.get("created_at"))
+            or not _valid_timestamp(session.get("completed_at"))):
+        return False
+    try:
+        created = _time(task["created_at"])
+        session_created = _time(session["created_at"])
+        completed = _time(session["completed_at"])
+        updated = _time(task["updated_at"])
+        command_created = _time(record["command_created_at"])
+        accepted = _time(record["accepted_at"])
+        current = now.astimezone(timezone.utc)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+    return (
+        created <= session_created <= completed <= updated
+        <= command_created <= accepted <= current
     )
 
 
@@ -2569,6 +3021,15 @@ def _valid_receipt_proof(action, comments):
                 legacy_neutral=legacy_neutral,
             )):
         return False
+    if ("receipt_anchor_comment_id" in action or "receipt_anchor_body" in action):
+        anchor_id = action.get("receipt_anchor_comment_id")
+        if (action.get("task_type") != "neutral" or version != "v2"
+                or type(anchor_id) is not int or not 0 < anchor_id <= 2**63 - 1
+                or action["receipt_comment_id"] == anchor_id
+                or not _neutral_receipt_body_matches(
+                    action["receipt_body"], action.get("receipt_anchor_body"),
+                )):
+            return False
     candidates = [
         comment for comment in comments
         if isinstance(comment, dict)
@@ -2784,13 +3245,47 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
                 start_head=record["head"], base_sha=record["receipt_base"],
                 neutral=True,
             )
+            historical_neutral_instruction = _historical_neutral_receipt_instruction(
+                record["dispatch_nonce"], pull_number=record["issue"],
+                start_head=record["head"], base_sha=record["receipt_base"],
+            )
+            previous_release_neutral_instruction = (
+                _previous_release_neutral_receipt_instruction(
+                    record["dispatch_nonce"], pull_number=record["issue"],
+                    start_head=record["head"], base_sha=record["receipt_base"],
+                )
+            )
+            anchored_neutral_instruction = (
+                receipt_instruction(
+                    record["dispatch_nonce"], pull_number=record["issue"],
+                    start_head=record["head"], base_sha=record["receipt_base"],
+                    neutral=True,
+                    anchor_comment_id=record.get("receipt_anchor_comment_id"),
+                    anchor_body=record.get("receipt_anchor_body"),
+                )
+                if ("receipt_anchor_comment_id" in record
+                    or "receipt_anchor_body" in record) else None
+            )
+            reconstructed_instructions = [
+                neutral_instruction, historical_neutral_instruction,
+                previous_release_neutral_instruction,
+            ]
+            if anchored_neutral_instruction is not None:
+                reconstructed_instructions.append(anchored_neutral_instruction)
+                reconstructed_instructions.append(
+                    _anchored_neutral_receipt_instruction_v1(
+                        record["dispatch_nonce"], pull_number=record["issue"],
+                        start_head=record["head"], base_sha=record["receipt_base"],
+                        anchor_comment_id=record["receipt_anchor_comment_id"],
+                        anchor_body=record["receipt_anchor_body"],
+                    )
+                )
             if not (
                     expected_instruction in session["prompt"]
                     or (
                         is_neutral
-                        and session["prompt"].endswith(
-                            f"\n\n{neutral_instruction}",
-                        )
+                        and any(session["prompt"].endswith(f"\n\n{instruction}")
+                                for instruction in reconstructed_instructions)
                     )
             ):
                 return None
@@ -2846,6 +3341,11 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     authorized = {initial}
     if _is_sha(enrollment.get("owner_authorized_head")):
         authorized.add(enrollment["owner_authorized_head"])
+    continuation_records = [
+        recovery for _, recovery in _valid_owner_abandonment_claims(
+            enrollment, actions,
+        )
+    ]
     blocked = set()
     candidates = [
         action for action in [*enrollment.get("receipt_proofs", []), *actions.values()]
@@ -2855,7 +3355,11 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     while True:
         changed = False
         for action in candidates:
-            if action.get("receipt_start_head") not in authorized:
+            start_head = action.get("receipt_start_head")
+            if (start_head not in authorized and not any(
+                    recovery["head_sha"] == start_head
+                    and _owner_abandonment_successor_matches(recovery, action)
+                    for recovery in continuation_records)):
                 continue
             result_head = action["receipt_head"]
             if action["receipt_result"] == "ready":
@@ -2866,6 +3370,85 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
                 blocked.add(result_head)
         if not changed:
             return initial, authorized, blocked
+
+
+def _valid_owner_abandonment_claims(enrollment, actions):
+    records = enrollment.get("owner_abandonments", []) if isinstance(
+        enrollment, dict,
+    ) else []
+    if not isinstance(records, list) or not isinstance(actions, dict):
+        return []
+    return [
+        (record["action_key"], record)
+        for record in records
+        if isinstance(record, dict)
+        and _owner_abandonment_matches_action(
+            record, actions.get(record.get("action_key")),
+        )
+    ]
+
+
+def _owner_abandonment_continuation(
+        enrollment, actions, head, base_sha, *, action_key=None):
+    return next((
+        record for key, record in _valid_owner_abandonment_claims(enrollment, actions)
+        if key != action_key and record["head_sha"] == head
+        and any(
+            isinstance(candidate, dict)
+            and candidate.get("key") not in {action_key, key}
+            and candidate.get("issue") == record["issue"]
+            and candidate.get("head") == head
+            and _owner_abandonment_successor_matches(record, candidate)
+            and (
+                base_sha is None
+                or candidate.get("task_type") == "neutral"
+                or candidate.get("main_sha") == base_sha
+            )
+            for candidate in actions.values()
+        )
+    ), None)
+
+
+def _owner_abandonment_available(enrollment, actions, head, *, action_key=None):
+    return any(
+        key != action_key and record["head_sha"] == head
+        for key, record in _valid_owner_abandonment_claims(enrollment, actions)
+    )
+
+
+def _owner_abandonment_successor_matches(record, action, *, allow_intent=False):
+    neutral = isinstance(action, dict) and action.get("task_type") == "neutral"
+    if (
+            not _owner_abandonment_successor_candidate_matches(record, action)
+            or action.get("status") != "completed"
+            or action.get("receipt_start_head") != record["head_sha"]
+            or (
+                neutral and action.get("receipt_base") != action.get("main_sha")
+            )
+            or (
+                not neutral and action.get("receipt_base") != record["base_sha"]
+            )
+            or (
+                not allow_intent
+                and action.get("owner_abandonment_binding")
+                    != _owner_abandonment_successor_binding(record)
+            )
+    ):
+        return False
+    return True
+
+
+def _owner_abandonment_for_action(enrollment, key, action):
+    records = enrollment.get("owner_abandonments", [])
+    if not isinstance(records, list):
+        return None
+    matches = [
+        record for record in records
+        if isinstance(record, dict) and record.get("action_key") == key
+    ]
+    if len(matches) == 1 and _owner_abandonment_matches_action(matches[0], action):
+        return matches[0]
+    return None
 
 
 def _completed_repair_progress(snapshot, actions, current_fingerprints,
@@ -3206,6 +3789,13 @@ class Coordinator:
                         enrollment["last_open_head"] = enrollment["head"]
                         commands.append(("enroll", enrollment))
                 else:
+                    abandonment = _is_owner_unverified_abandonment_command(comment)
+                    if abandonment:
+                        commands.append(("abandon-unverified", {
+                            "issue": issue["number"], **abandonment,
+                        }))
+                        processed.append(key)
+                        continue
                     authorization = _is_owner_sensitive_command(comment)
                     if authorization:
                         commands.append(("authorize", {
@@ -3728,8 +4318,13 @@ class Coordinator:
             and action.get("recorded_base_sha") == base.get("sha")
             for action in actions.values()
         )
+        has_owner_continuation = _owner_abandonment_available(
+            enrollment, actions, sha,
+        )
         historical_base = (
-            not scoped and (has_ready_handoff or has_neutral_claim)
+            not scoped and (
+                has_ready_handoff or has_neutral_claim or has_owner_continuation
+            )
             and self._historical_base_can_reconcile(
                 pull, main_sha, sha, allow_dirty=True,
             )
@@ -3905,7 +4500,8 @@ class Coordinator:
 
     def _reconcile_actions(self, snapshot, actions, *, apply, handoffs=None,
                            review_publications=None, receipt_recoveries=None,
-                           recovery_keys=None, busy_details=None):
+                           recovery_keys=None, busy_details=None,
+                           owner_abandonment_keys=None):
         # Reconciliation never performs handoff mutations; it only collects them.
         handoffs = [] if handoffs is None else handoffs
         review_publications = [] if review_publications is None else review_publications
@@ -3929,6 +4525,9 @@ class Coordinator:
             # regardless of the detached scan snapshot's iteration order.
             for key, action in actions.items():
                 if recovery_keys is not None and key not in recovery_keys:
+                    continue
+                if (_owner_abandonment_for_action(
+                        snapshot.get("enrollment", {}), key, action) is not None):
                     continue
                 if (action.get("issue") == number and action.get("kind") == "fix"
                         and action.get("status") in {"sending", "uncertain"}
@@ -4230,6 +4829,16 @@ class Coordinator:
             if status == "completed" and action.get("handoff_state") == "failed":
                 mark_busy()
                 continue
+            if status == "uncertain":
+                abandonment = _owner_abandonment_for_action(
+                    snapshot.get("enrollment", {}), key, action,
+                )
+                if abandonment is not None:
+                    if (apply and self._owner_abandonment_task_terminal(
+                            snapshot, action, abandonment, snapshot.get("tasks"))):
+                        continue
+                    mark_busy()
+                    continue
             receipt_recovery_identity = (
                 status == "uncertain"
                 and action.get("kind") == "fix"
@@ -4349,7 +4958,17 @@ class Coordinator:
                                 snapshot["comments"],
                                 snapshot["pull"].get("base", {}).get("sha"),
                             )
-                            if action.get("head") not in authorized_heads:
+                            continuation_start = any(
+                                prior_key != key
+                                and _owner_abandonment_successor_candidate_matches(
+                                    record, action,
+                                )
+                                for prior_key, record in _valid_owner_abandonment_claims(
+                                    snapshot["enrollment"], self.store.actions(),
+                                )
+                            )
+                            if (action.get("head") not in authorized_heads
+                                    and not continuation_start):
                                 if apply and not receipt_recovery:
                                     self._record_receipt_wait(key, action)
                                 mark_busy()
@@ -4413,7 +5032,7 @@ class Coordinator:
             or _cloud_agent_active(
                 snapshot.get("workflows", []), snapshot["pull"]["head"]["ref"],
             )
-            or recovery_keys is not None
+            or (recovery_keys is not None and owner_abandonment_keys is None)
         )
         if busy_details is not None:
             busy_details.update(
@@ -5125,6 +5744,10 @@ class Coordinator:
             number, enrollment, self.store.actions(),
             snapshot["comments"], snapshot["pull"].get("base", {}).get("sha"),
         )
+        continuation_only_head = (
+            _owner_abandonment_available(enrollment, self.store.actions(), head)
+            and head not in authorized_heads
+        )
         if head in blocked_heads:
             # A proved typed blocker is meaningful evidence, not an unrelated push.
             outcome = self._outcome(
@@ -5182,7 +5805,8 @@ class Coordinator:
         )
 
         if authorized_head is not None and (
-                not _is_sha(authorized_head) or head not in authorized_heads):
+                not _is_sha(authorized_head)
+                or (head not in authorized_heads and not continuation_only_head)):
             return {
                 "issue": number, "head": head, "sensitive": sensitive,
                 "terminal": False, "review_valid": review_ok,
@@ -5330,7 +5954,8 @@ class Coordinator:
             snapshot["scoped"]
             or (snapshot.get("historical_base")
                 and bool(snapshot.get("stale_handoff_keys")
-                         or snapshot.get("retained_ready_handoff")))
+                         or snapshot.get("retained_ready_handoff")
+                         or continuation_only_head))
         )
         mergeability_unknown = _mergeability_unknown(snapshot["pull"])
         review_followup = None
@@ -5386,6 +6011,25 @@ class Coordinator:
                     pull_number=number, source_failure=snapshot["source_failure"],
                     reviews=snapshot["reviews"],
                 )
+        owner_abandonment_recovery = next((
+            record for key, record in _valid_owner_abandonment_claims(
+                snapshot["enrollment"], actions,
+            )
+            if record["head_sha"] == head
+            and (
+                repair.get("task_type") == "neutral"
+                and repair.get("recorded_base_sha") == record["base_sha"]
+                or repair.get("task_type") != "neutral"
+                and repair.get("main_sha") == record["base_sha"]
+            )
+        ), None) if repair is not None else None
+        if owner_abandonment_recovery is not None:
+            repair = {
+                **repair,
+                "owner_abandonment_intent": _owner_abandonment_successor_binding(
+                    owner_abandonment_recovery,
+                ),
+            }
         latest_copilot = latest_reviews(snapshot["reviews"], COPILOT_REVIEWER_ID)
         neutral_rejection_ready = (
             snapshot["reviews_complete"] is True
@@ -5432,6 +6076,24 @@ class Coordinator:
             repair.setdefault("main_sha", snapshot["main_sha"])
             repair.setdefault("pull_id", snapshot["pull"].get("id"))
             repair.setdefault("pull_node_id", snapshot["pull"].get("node_id"))
+            owner_abandonment_recovery = next((
+                record for key, record in _valid_owner_abandonment_claims(
+                    snapshot["enrollment"], actions,
+                )
+                if record["head_sha"] == head
+                and (
+                    repair.get("task_type") == "neutral"
+                    and repair.get("recorded_base_sha") == record["base_sha"]
+                    or repair.get("task_type") != "neutral"
+                    and repair.get("main_sha") == record["base_sha"]
+                )
+            ), None)
+            if owner_abandonment_recovery is not None:
+                repair["owner_abandonment_intent"] = (
+                    _owner_abandonment_successor_binding(
+                        owner_abandonment_recovery,
+                    )
+                )
         else:
             repair = None
         reasons = []
@@ -5495,6 +6157,9 @@ class Coordinator:
             or snapshot.get("retained_ready_handoff") is True
             or bool(copilot_review_handoff_keys)
         )
+        recovered_claim_keys = {
+            key for key, _ in _valid_owner_abandonment_claims(enrollment, actions)
+        }
         source_work_active = (
             _cloud_agent_active(
                 snapshot["workflows"], snapshot["pull"]["head"]["ref"],
@@ -5509,11 +6174,12 @@ class Coordinator:
                     })
             ], snapshot)
             or any(
-                isinstance(action, dict)
-                and action.get("issue") == number
-                and action.get("kind") == "fix"
-                and action.get("status") in {"sending", "uncertain", "sent"}
-                for action in actions.values()
+                    isinstance(action, dict)
+                    and key not in recovered_claim_keys
+                    and action.get("issue") == number
+                    and action.get("kind") == "fix"
+                    and action.get("status") in {"sending", "uncertain", "sent"}
+                    for key, action in actions.items()
             )
         )
         has_current_copilot_review = any(
@@ -5625,7 +6291,9 @@ class Coordinator:
             snapshot["execution_stop_detail"] = _exhaustion_detail(
                 snapshot, "neutral-ceiling", neutral_attempts, NEUTRAL_LIMIT,
             )
-        merge = snapshot["scoped"] and eligible_for_auto_merge(
+        merge = (
+            not continuation_only_head
+            and snapshot["scoped"] and eligible_for_auto_merge(
             snapshot["pull"], current_main_sha=snapshot["main_sha"],
             required_checks=required, check_runs=snapshot["check_runs"],
             statuses=snapshot["statuses"], checks_complete=snapshot["policy_complete"],
@@ -5634,6 +6302,7 @@ class Coordinator:
             conversation_resolution_required=snapshot["conversation_resolution_required"],
             agent_running=(agent_busy or repair is not None or bool(neutral_blocker)
                            or budget_needed),
+            )
         )
         if status and not status_owned:
             merge = False
@@ -5692,6 +6361,7 @@ class Coordinator:
                            or not new_handoff_review_activity
                        )
                        and source_provenance_verified
+                       and not continuation_only_head
                        and not source_work_active) else None
                 ),
                 "status_action": status_action,
@@ -5746,19 +6416,105 @@ class Coordinator:
                 for field in ("sensitive_sha", "sensitive_authorization", "targeted_review"):
                     enrollment[field] = None
             scans.append(snapshot)
+        accepted_commands = [
+            (command, item) for command, item in commands
+            if command != "abandon-unverified"
+        ]
+        owner_recoveries = []
+        for command, item in commands:
+            if command != "abandon-unverified":
+                continue
+            snapshot = next(
+                (value for value in scans if value["issue"] == item["issue"]), None,
+            )
+            if (snapshot is None or snapshot.get("terminal")
+                    or snapshot["head"] != item["head_sha"]):
+                continue
+            actions = [
+                action for action in state["actions"].values()
+                if isinstance(action, dict)
+                and action.get("issue") == item["issue"]
+                and action.get("task_id") == item["task_id"]
+            ]
+            if not actions:
+                continue
+            if len(actions) != 1:
+                raise CoordinatorError("Owner abandonment did not identify one reserved task")
+            action = actions[0]
+            pull = snapshot["pull"]
+            if _owner_abandonment_locally_rejected(
+                    action, pull=pull, item=item, accepted_at=self._now_string()):
+                continue
+            pull_head = pull.get("head") if isinstance(pull, dict) else None
+            pull_base = pull.get("base") if isinstance(pull, dict) else None
+            if (action.get("status") != "uncertain"
+                    or not _pull_identity(pull, action)
+                    or not isinstance(pull_head, dict)
+                    or pull_head.get("ref") != action.get("head_ref")
+                    or not isinstance(pull_base, dict)
+                    or not _is_sha(pull_base.get("sha"))):
+                raise CoordinatorError("Owner abandonment did not match the reserved pull")
+            record = {
+                "version": 1, "issue": item["issue"],
+                "action_key": action.get("key"), "task_id": item["task_id"],
+                "task_created_at": action.get("task_created_at"),
+                "reservation_sha256": _reservation_sha256(action),
+                "head_sha": item["head_sha"],
+                "base_sha": pull_base["sha"],
+                "command_comment_id": item["command_comment_id"],
+                "command_body": item["command_body"],
+                "command_created_at": item["command_created_at"],
+                "actor_id": item["actor_id"], "accepted_at": self._now_string(),
+            }
+            if (not _owner_abandonment_record_valid(record)
+                    or not _owner_abandonment_matches_action(record, action)):
+                raise CoordinatorError("Owner abandonment reservation metadata was invalid")
+            item["recovery_record"] = record
+            accepted_commands.append((command, item))
+            owner_recoveries.append({
+                "issue": item["issue"], "action_key": action["key"],
+                "record": record,
+            })
         plans = [
             self._plan_pull(snapshot, state["actions"], apply=apply)
             for snapshot in scans
         ]
+        for recovery in owner_recoveries:
+            pull_plan = next(
+                item for item in plans if item["issue"] == recovery["issue"]
+            )
+            repair = pull_plan.get("repair")
+            record = recovery["record"]
+            if (
+                    isinstance(repair, dict)
+                    and record["head_sha"] == pull_plan.get("head")
+                    and (
+                        repair.get("task_type") == "neutral"
+                        and repair.get("recorded_base_sha") == record["base_sha"]
+                        or repair.get("task_type") != "neutral"
+                        and repair.get("main_sha") == record["base_sha"]
+                    )):
+                pull_plan["repair"] = {
+                    **repair,
+                    "owner_abandonment_intent": _owner_abandonment_successor_binding(
+                        record,
+                    ),
+                }
+            pull_plan.setdefault("owner_recoveries", []).append(recovery)
+            pull_plan["receipt_recoveries"] = [
+                key for key in pull_plan.get("receipt_recoveries", ())
+                if key != recovery["action_key"]
+            ]
         observations = [
             (snapshot["issue"], snapshot["head"]) for snapshot in scans
             if not snapshot.get("terminal")
         ]
         return {
             "cursor": cursor, "main_sha": main_sha,
-            "processed": processed, "commands": commands,
+            "processed": processed, "commands": accepted_commands,
             "starter_admissions": admission_checks,
             "starter_sources": starter_sources,
+            "owner_recoveries": owner_recoveries,
             "enrollments": enrollments, "snapshots": scans, "pull_requests": plans,
             "observations": observations, "sensitive_revocations": sensitive_revocations,
             "now": self.clock(),
@@ -5809,7 +6565,123 @@ class Coordinator:
                 return False
         return pull
 
-    def _authorized_dispatch_head(self, issue, head, base_sha=None, *, receipt_action=None):
+    def _owner_abandonment_successor_proven(self, snapshot, record):
+        pull = snapshot.get("pull")
+        head = pull.get("head") if isinstance(pull, dict) else None
+        base = pull.get("base") if isinstance(pull, dict) else None
+        actions = self.store.actions()
+        enrollment = self.store.snapshot()["enrollments"].get(
+            str(record.get("issue")), {},
+        )
+        successors = [
+            *actions.values(),
+            *enrollment.get("receipt_proofs", []),
+        ]
+        return any(
+            _owner_abandonment_successor_matches(record, successor)
+            and successor.get("receipt_result") == "ready"
+            and successor.get("receipt_head") == (
+                head.get("sha") if isinstance(head, dict) else None
+            )
+            and isinstance(base, dict)
+            and base.get("sha") == (
+                successor.get("main_sha")
+                if successor.get("task_type") == "neutral"
+                else record["base_sha"]
+            )
+            and _pull_identity(pull, successor)
+            and _valid_receipt_proof(successor, snapshot.get("comments"))
+            for successor in successors
+        )
+
+    def _owner_abandonment_task_terminal(self, snapshot, action, record, tasks):
+        if not _owner_abandonment_inventory_valid(tasks, action, snapshot, record):
+            return False
+        try:
+            task = self.api.get(
+                f"agents/repos/{REPOSITORY}/tasks/{quote(record['task_id'], safe='')}",
+            )
+        except CoordinatorError:
+            return False
+        pull = snapshot.get("pull")
+        base = pull.get("base") if isinstance(pull, dict) else None
+        head = pull.get("head") if isinstance(pull, dict) else None
+        continued_head = self._owner_abandonment_successor_proven(snapshot, record)
+        historical_base = (
+            isinstance(base, dict)
+            and isinstance(head, dict)
+            and _is_sha(record.get("base_sha"))
+            and base.get("sha") != record["base_sha"]
+            and head.get("sha") == record.get("head_sha")
+            and self._compare_proves_ancestry(record["base_sha"], base.get("sha"))
+            and self._compare_proves_ancestry(record["base_sha"], head.get("sha"))
+        )
+        if not _owner_abandonment_task_valid(
+            task, action, pull, record,
+            now=datetime.fromtimestamp(self.clock(), timezone.utc),
+            continued_head=continued_head,
+            historical_base=historical_base,
+        ):
+            return False
+        comments = snapshot.get("comments")
+        if not isinstance(comments, list):
+            return False
+        try:
+            receipt = validate_task_receipt(
+                task, action, snapshot["pull"], comments,
+                now=datetime.fromtimestamp(self.clock(), timezone.utc),
+            )
+        except (ReceiptError, TypeError, ValueError):
+            return True
+        return receipt is None
+
+    def _fence_owner_abandonment(self, recovery, main_sha):
+        if not isinstance(recovery, dict) or not _owner_abandonment_record_valid(
+                recovery.get("record")):
+            raise CoordinatorError("Owner abandonment record was invalid before commit")
+        record = recovery["record"]
+        baseline = self.store._preparation_base
+        actions = baseline.get("actions") if isinstance(baseline, dict) else None
+        action = actions.get(recovery.get("action_key")) if isinstance(actions, dict) else None
+        if (recovery.get("issue") != record["issue"]
+                or recovery.get("action_key") != record["action_key"]
+                or not _owner_abandonment_matches_action(record, action)):
+            raise CoordinatorError("Owner abandonment reservation changed before commit")
+        command = _current_owner_unverified_abandonment_command(
+            self.api, record,
+        )
+        if command is None:
+            raise CoordinatorError("Owner abandonment command changed before commit")
+        current = self._fence_pull(
+            record["issue"], record["head_sha"], main_sha,
+            allow_historical_reconciliation=True,
+            allow_historical_dirty=True,
+            expected_base_sha=record["base_sha"],
+        )
+        if (not _pull_identity(current, action)
+                or current.get("head", {}).get("ref") != action.get("head_ref")
+                or current.get("base", {}).get("sha") != record["base_sha"]):
+            raise CoordinatorError("Owner abandonment pull or main changed before commit")
+        snapshot = {
+            "issue": record["issue"], "pull": current, "head": record["head_sha"],
+            "main_sha": main_sha,
+            "comments": _all_review_comments(self.api, record["issue"], None),
+        }
+        tasks = _rest_list(
+            self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+            collection="tasks",
+        )
+        if not self._owner_abandonment_task_terminal(snapshot, action, record, tasks):
+            raise CoordinatorError("Owner abandonment task evidence was incomplete")
+        current_state = StateStore(self.store.path).snapshot()
+        latest_action = current_state.get("actions", {}).get(recovery["action_key"])
+        if (latest_action != action
+                or not _owner_abandonment_matches_action(record, latest_action)
+                or _event_consumed(current_state, str(record["command_comment_id"]))):
+            raise CoordinatorError("Owner abandonment reservation changed before commit")
+
+    def _authorized_dispatch_head(self, issue, head, base_sha=None, *,
+                                  receipt_action=None, continuation_action=None):
         enrollment = self.store.snapshot()["enrollments"].get(str(issue))
         if not enrollment or not enrollment.get("active"):
             return False
@@ -5825,7 +6697,27 @@ class Coordinator:
         _, authorized, blocked = _authorized_result_heads(
             issue, enrollment, self.store.actions(), comments, base,
         )
-        return head in authorized and head not in blocked
+        if head in authorized and head not in blocked:
+            return True
+        if (not isinstance(continuation_action, dict)
+                or continuation_action.get("issue") != issue
+                or continuation_action.get("kind") != "fix"
+                or continuation_action.get("task_type") not in {
+                    None, "source", "review-followup", "neutral",
+                }
+                or continuation_action.get("head") != head):
+            return False
+        return any(
+            key != continuation_action.get("key")
+            and _owner_abandonment_successor_candidate_matches(
+                record, continuation_action,
+            )
+            and record["head_sha"] == head
+            and record["base_sha"] == base
+            for key, record in _valid_owner_abandonment_claims(
+                enrollment, self.store.actions(),
+            )
+        )
 
     def _request_copilot_review(self, action):
         """Reserve one genuine request per head; uncertain writes are never replayed."""
@@ -5881,6 +6773,179 @@ class Coordinator:
         self.store.update_action(key, "sent")
         return "sent"
 
+    @staticmethod
+    def _neutral_anchor_comment_matches(comment, entry, *, require_issue_url=False):
+        if (
+                not isinstance(comment, dict)
+                or type(comment.get("id")) is not int
+                or not 0 < comment["id"] <= 2**63 - 1
+                or not _github_identity(comment.get("user"), OWNER_ID)
+                or comment.get("body") != entry.get("body")
+                or not _valid_timestamp(comment.get("created_at"))
+                or comment.get("updated_at") != comment.get("created_at")
+                or not _valid_timestamp(entry.get("created_at"))
+                or _time(comment["created_at"]) < _time(entry["created_at"])
+        ):
+            return False
+        return (
+            not require_issue_url
+            or comment.get("issue_url")
+                == f"https://api.github.com/repos/{REPOSITORY}/issues/{entry['issue']}"
+        )
+
+    def _neutral_writer_free(self, action):
+        current = self._fence_pull(
+            action["issue"], action["head"], action["main_sha"],
+            allow_historical_reconciliation=True,
+            allow_historical_dirty=True,
+            expected_base_sha=action.get("recorded_base_sha"),
+        )
+        if (not _pull_identity(current, action)
+                or current.get("head", {}).get("ref") != action.get("head_ref")
+                or not self._authorized_dispatch_head(
+                    action["issue"], action["head"],
+                    current.get("base", {}).get("sha"),
+                    continuation_action=action,
+                )
+                or not _reconciliation_reasons(current)):
+            return False
+        try:
+            tasks = _rest_list(
+                self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+                collection="tasks",
+            )
+            workflows, _ = _workflow_runs(
+                self.api, action["head_ref"], action["issue"],
+            )
+        except CoordinatorError:
+            return False
+        return (
+            not _other_task_active(tasks, {"pull": current})
+            and not _cloud_agent_active(workflows, action["head_ref"])
+        )
+
+    def _ensure_neutral_receipt_anchor(self, action):
+        anchor_key = f"neutral-receipt-anchor:{action['key']}"
+        stored = self.store.snapshot()["outbox"].get(anchor_key)
+        if stored is None:
+            nonce = secrets.token_urlsafe(32)
+            reserved = _neutral_receipt_anchor_request(action, nonce)
+            if reserved is None:
+                return None
+            reserved.update(status="pending", created_at=self._now_string())
+            if not self.store.add_outbox(anchor_key, reserved):
+                stored = self.store.snapshot()["outbox"].get(anchor_key)
+            else:
+                stored = self.store.snapshot()["outbox"].get(anchor_key)
+        if not isinstance(stored, dict):
+            return None
+        expected = _neutral_receipt_anchor_request(action, stored.get("nonce"))
+        if (
+                expected is None
+                or any(stored.get(field) != expected.get(field) for field in (
+                    "kind", "key", "task_key", "issue", "head", "main_sha",
+                    "recorded_base_sha", "head_ref", "attempt", "marker", "body",
+                ))
+                or stored.get("status") not in {"pending", "sending", "uncertain", "sent"}
+                or not _valid_timestamp(stored.get("created_at"))
+                or ("receipt_anchor_comment_id" in action
+                    and action.get("receipt_anchor_comment_id")
+                        != stored.get("comment_id"))
+                or ("receipt_anchor_body" in action
+                    and action.get("receipt_anchor_body") != stored.get("body"))
+        ):
+            return None
+
+        def find_matches(comments):
+            return [
+                comment for comment in comments
+                if isinstance(comment, dict)
+                and isinstance(comment.get("body"), str)
+                and expected["marker"] in comment["body"]
+            ]
+
+        try:
+            comments = _all_review_comments(self.api, action["issue"], None)
+        except CoordinatorError:
+            return None
+        matches = find_matches(comments)
+        status = stored["status"]
+        if status == "pending":
+            if matches or not self._neutral_writer_free(action):
+                return None
+            try:
+                comments = _all_review_comments(self.api, action["issue"], None)
+            except CoordinatorError:
+                return None
+            if find_matches(comments):
+                return None
+            if not self.store.claim_outbox_send(anchor_key, stored):
+                return None
+            stored = self.store.snapshot()["outbox"].get(anchor_key)
+            status = "sending"
+            try:
+                response = self.api.write(
+                    f"repos/{REPOSITORY}/issues/{action['issue']}/comments",
+                    {"body": expected["body"]},
+                )
+            except CoordinatorError:
+                self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            if not self._neutral_anchor_comment_matches(
+                    response, stored, require_issue_url=True):
+                self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            comment_id = response["id"]
+            try:
+                comments = _all_review_comments(self.api, action["issue"], None)
+                readback = self.api.get(
+                    f"repos/{REPOSITORY}/issues/comments/{comment_id}",
+                )
+            except CoordinatorError:
+                self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            matches = find_matches(comments)
+            if (len(matches) != 1 or matches[0].get("id") != comment_id
+                    or not self._neutral_anchor_comment_matches(
+                        matches[0], stored)
+                    or not self._neutral_anchor_comment_matches(
+                        readback, stored, require_issue_url=True)):
+                self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            self.store.update_outbox(
+                anchor_key, "sent", comment_id=comment_id,
+                anchor_created_at=readback["created_at"],
+            )
+            stored = self.store.snapshot()["outbox"].get(anchor_key)
+            status = "sent"
+        if status in {"sending", "uncertain", "sent"}:
+            if len(matches) != 1:
+                if status != "sent":
+                    self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            comment = matches[0]
+            comment_id = comment.get("id")
+            if (not self._neutral_anchor_comment_matches(comment, stored)
+                    or (status == "sent" and comment_id != stored.get("comment_id"))):
+                self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            try:
+                readback = self.api.get(
+                    f"repos/{REPOSITORY}/issues/comments/{comment_id}",
+                )
+            except CoordinatorError:
+                return None
+            if not self._neutral_anchor_comment_matches(
+                    readback, stored, require_issue_url=True):
+                self.store.update_outbox(anchor_key, "uncertain")
+                return None
+            self.store.update_outbox(
+                anchor_key, "sent", comment_id=comment_id,
+                anchor_created_at=readback["created_at"],
+            )
+            return self.store.snapshot()["outbox"].get(anchor_key)
+        return None
+
     def _dispatch_task(self, action):
         if action.get("kind") == "review":
             return "retired"
@@ -5891,12 +6956,27 @@ class Coordinator:
         report_correction = action.get("task_type") == "report-correction"
         if not _is_sha(action.get("main_sha")):
             return "superseded"
+        enrollment = self.store.snapshot()["enrollments"].get(
+            str(action.get("issue")), {},
+        )
+        continuation_record = next((
+            record for key, record in _valid_owner_abandonment_claims(
+                enrollment, self.store.actions(),
+            )
+            if key != action.get("key")
+            and _owner_abandonment_successor_candidate_matches(record, action)
+        ), None)
         current = self._fence_pull(
             action["issue"], action["head"], action["main_sha"],
-            allow_historical_reconciliation=neutral or report_correction,
+            allow_historical_reconciliation=(
+                neutral or report_correction or continuation_record is not None
+            ),
             allow_historical_dirty=neutral,
             expected_base_sha=(
-                action.get("recorded_base_sha") if neutral else None
+                action.get("recorded_base_sha") if neutral else (
+                    continuation_record.get("base_sha")
+                    if continuation_record is not None else None
+                )
             ),
         )
         if not current:
@@ -5937,6 +7017,7 @@ class Coordinator:
         if (not self._authorized_dispatch_head(
                     action["issue"], action["head"],
                     current.get("base", {}).get("sha"),
+                    continuation_action=action,
                 )
                 or (self.store.snapshot()["enrollments"].get(
                     str(action["issue"]), {},
@@ -5955,10 +7036,19 @@ class Coordinator:
         branch = current["head"].get("ref")
         if not isinstance(branch, str) or not branch or branch != action["head_ref"]:
             return "superseded"
-        if any(item.get("kind") in {"fix", "review"} and item.get("issue") == action["issue"]
-               and item.get("status") in {"sending", "uncertain", "sent"}
-               for item in self.store.actions().values()):
-            return "agent-running"
+        recovered_claims = []
+        enrollment = self.store.snapshot()["enrollments"].get(str(action["issue"]), {})
+        for prior_key, prior in self.store.actions().items():
+            if (prior.get("kind") not in {"fix", "review"}
+                    or prior.get("issue") != action["issue"]
+                    or prior.get("status") not in {"sending", "uncertain", "sent"}):
+                continue
+            abandonment = _owner_abandonment_for_action(
+                enrollment, prior_key, prior,
+            )
+            if abandonment is None:
+                return "agent-running"
+            recovered_claims.append((prior, abandonment))
         workflows, _ = _workflow_runs(self.api, branch, action["issue"])
         if not review_task:
             threads, complete = collect_review_threads(self.api, action["issue"])
@@ -6009,12 +7099,25 @@ class Coordinator:
         )
         if not _pull_identity(current, action) or current["head"].get("ref") != branch:
             return "superseded"
+        recovery_comments = (
+            _all_review_comments(self.api, action["issue"], None)
+            if recovered_claims else []
+        )
+        for prior, abandonment in recovered_claims:
+            if not self._owner_abandonment_task_terminal(
+                    {
+                        "issue": action["issue"], "pull": current,
+                        "comments": recovery_comments,
+                    },
+                    prior, abandonment, tasks):
+                return "agent-running"
         if (report_correction
                 and not self._report_correction_dispatch_proven(action, current)):
             return "superseded"
         if not self._authorized_dispatch_head(
                 action["issue"], action["head"],
                 current.get("base", {}).get("sha"),
+                continuation_action=action,
         ):
             return "superseded"
         if _mergeability_unknown(current):
@@ -6027,11 +7130,132 @@ class Coordinator:
         if (_other_task_active(tasks, {"pull": current})
                 or _cloud_agent_active(workflows, branch)):
             return "agent-running"
+        if neutral:
+            anchor = self._ensure_neutral_receipt_anchor(action)
+            if not isinstance(anchor, dict) or anchor.get("status") != "sent":
+                return "receipt-anchor-uncertain"
+            action = action | {
+                "dispatch_nonce": anchor["nonce"],
+                "receipt_anchor_key": anchor["key"],
+                "receipt_anchor_comment_id": anchor["comment_id"],
+                "receipt_anchor_body": anchor["body"],
+            }
+            if not self._neutral_writer_free(action):
+                return "agent-running"
         claimed = self.store.claim_action(key, action)
         if not claimed:
             existing = self.store.action(key)
             return existing.get("status") if existing else "not-claimed"
         claimed_action = self.store.action(key)
+        if neutral:
+            current = self._fence_pull(
+                claimed_action["issue"], claimed_action["head"],
+                claimed_action["main_sha"],
+                allow_historical_reconciliation=True,
+                allow_historical_dirty=True,
+                expected_base_sha=claimed_action.get("recorded_base_sha"),
+            )
+            if (
+                    not _pull_identity(current, claimed_action)
+                    or current.get("head", {}).get("ref") != branch
+                    or not self._authorized_dispatch_head(
+                        claimed_action["issue"], claimed_action["head"],
+                        current.get("base", {}).get("sha"),
+                        continuation_action=claimed_action,
+                    )
+                    or not _reconciliation_reasons(current)):
+                self.store.update_action(key, "superseded")
+                return "superseded"
+            final_anchor = self._ensure_neutral_receipt_anchor(claimed_action)
+            if (not isinstance(final_anchor, dict)
+                    or final_anchor.get("status") != "sent"
+                    or final_anchor.get("comment_id")
+                        != claimed_action.get("receipt_anchor_comment_id")):
+                self.store.update_action(key, "superseded")
+                return "superseded"
+            expected_instruction = receipt_instruction(
+                claimed_action["dispatch_nonce"],
+                pull_number=claimed_action["issue"],
+                start_head=claimed_action["head"],
+                base_sha=claimed_action["main_sha"],
+                neutral=True,
+                anchor_comment_id=claimed_action["receipt_anchor_comment_id"],
+                anchor_body=claimed_action["receipt_anchor_body"],
+            )
+            if claimed_action.get("body") != (
+                    f"{claimed_action['task_request_body']}\n\n{expected_instruction}"):
+                self.store.update_action(key, "superseded")
+                return "superseded"
+        if neutral or recovered_claims:
+            try:
+                current = self._fence_pull(
+                    claimed_action["issue"], claimed_action["head"],
+                    claimed_action["main_sha"],
+                    allow_historical_reconciliation=True,
+                    allow_historical_dirty=neutral,
+                    expected_base_sha=(
+                        claimed_action.get("recorded_base_sha") if neutral
+                        else continuation_record.get("base_sha")
+                        if continuation_record is not None else None
+                    ),
+                )
+                if (not _pull_identity(current, claimed_action)
+                        or current.get("head", {}).get("ref") != branch
+                        or not self._authorized_dispatch_head(
+                            claimed_action["issue"], claimed_action["head"],
+                            current.get("base", {}).get("sha"),
+                            continuation_action=claimed_action,
+                        )
+                        or (neutral and not _reconciliation_reasons(current))):
+                    self.store.update_action(key, "superseded")
+                    return "superseded"
+                final_tasks = _rest_list(
+                    self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+                    collection="tasks",
+                )
+                final_workflows, _ = _workflow_runs(
+                    self.api, branch, claimed_action["issue"],
+                )
+                final_comments = (
+                    _all_review_comments(self.api, claimed_action["issue"], None)
+                    if recovered_claims else []
+                )
+                for prior, abandonment in recovered_claims:
+                    if (_current_owner_unverified_abandonment_command(
+                            self.api, abandonment) is None
+                            or not self._owner_abandonment_task_terminal(
+                                {
+                                    "issue": claimed_action["issue"], "pull": current,
+                                    "comments": final_comments,
+                                }, prior, abandonment, final_tasks)):
+                        self.store.update_action(key, "superseded")
+                        return "agent-running"
+                final_state = StateStore(self.store.path).snapshot()
+                final_enrollment = final_state["enrollments"].get(
+                    str(claimed_action["issue"]), {},
+                )
+                if (final_state["actions"].get(key) != claimed_action
+                        or any(
+                            final_state["actions"].get(prior["key"]) != prior
+                            or _owner_abandonment_for_action(
+                                final_enrollment, prior["key"], prior,
+                            ) != abandonment
+                            for prior, abandonment in recovered_claims
+                        )):
+                    self.store.update_action(key, "superseded")
+                    return "superseded"
+            except CoordinatorError:
+                self.store.update_action(key, "superseded")
+                return "superseded"
+            if (_other_task_active(final_tasks, {"pull": current})
+                    or _cloud_agent_active(final_workflows, branch)):
+                self.store.update_action(key, "superseded")
+                return "agent-running"
+        if neutral:
+            if not self.store.mark_neutral_task_dispatch_started(key):
+                self.store.update_action(key, "superseded")
+                return "superseded"
+            claimed_action = self.store.action(key)
         try:
             response = self.api.write(
                 f"agents/repos/{REPOSITORY}/tasks",
@@ -6370,6 +7594,8 @@ class Coordinator:
         self._fence_starter_sources(
             plan.get("starter_sources", ()), plan["enrollments"], plan["main_sha"],
         )
+        for recovery in plan.get("owner_recoveries", ()):
+            self._fence_owner_abandonment(recovery, plan["main_sha"])
         self.store.commit_scan(
             plan["cursor"], plan["processed"], commands=plan["commands"],
             retirements=[
@@ -6447,6 +7673,53 @@ class Coordinator:
                     for event in events:
                         self.store.record_lifecycle(event, now=plan["now"])
                     pr_plan = refreshed
+            for recovery in pr_plan.get("owner_recoveries", ()):
+                key = recovery["action_key"]
+                current = self._fence_pull(
+                    snapshot["issue"], snapshot["head"], snapshot["main_sha"],
+                    allow_historical_reconciliation=(
+                        recovery["record"]["base_sha"] != snapshot["main_sha"]
+                    ),
+                    allow_historical_dirty=True,
+                    expected_base_sha=recovery["record"]["base_sha"],
+                )
+                if (not current or current.get("id") != snapshot["pull"].get("id")
+                        or current.get("node_id") != snapshot["pull"].get("node_id")):
+                    continue
+                snapshot["pull"] = current
+                snapshot["tasks"] = _rest_list(
+                    self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+                    collection="tasks",
+                )
+                snapshot["enrollment"] = self.store.snapshot()["enrollments"].get(
+                    str(snapshot["issue"]), {},
+                )
+                snapshot["historical_base"] = (
+                    not snapshot.get("scoped")
+                    and recovery["record"]["base_sha"]
+                        == current.get("base", {}).get("sha")
+                    and self._historical_base_can_reconcile(
+                        current, plan["main_sha"], snapshot["head"],
+                        allow_dirty=True,
+                    )
+                )
+                busy_details = {}
+                busy = self._reconcile_actions(
+                    snapshot, self.store.actions(), apply=True,
+                    recovery_keys=(key,), busy_details=busy_details,
+                    owner_abandonment_keys=(key,),
+                )
+                if not busy:
+                    refreshed = self._plan_pull(
+                        snapshot, self.store.actions(), apply=True,
+                        reconciled_busy=False,
+                        reconciled_busy_details=busy_details,
+                    )
+                    refreshed["handoffs"].extend(pr_plan["handoffs"])
+                    refreshed.setdefault("review_publications", []).extend(
+                        pr_plan.get("review_publications", ()),
+                    )
+                    pr_plan = refreshed
             # Handoff mutations require the successfully committed scan above.
             for key in pr_plan.get("handoffs", ()):
                 handoff = self.store.action(key)
@@ -6474,7 +7747,8 @@ class Coordinator:
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") not in {"sending", "uncertain"}):
                     continue
-                if self._legacy_review_report_kind(key, entry) == "observation":
+                if (key.startswith("neutral-receipt-anchor:")
+                        or self._legacy_review_report_kind(key, entry) == "observation"):
                     continue
                 found = _matching_owner_comment(
                     comments, entry.get("marker"), expected_body=entry.get("body"),
@@ -6493,7 +7767,10 @@ class Coordinator:
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") != "pending"):
                     continue
-                if (key.startswith(("review-anchor:", "review-correction-anchor:"))
+                if (key.startswith((
+                            "review-anchor:", "review-correction-anchor:",
+                            "neutral-receipt-anchor:",
+                        ))
                         or str(entry.get("marker", "")).startswith(REVIEW_ANCHOR_MARKER_PREFIX)):
                     continue
                 current = self._fence_pull(entry["issue"], entry["head"])
@@ -6866,7 +8143,7 @@ class StateStore:
                or not 0 <= item.get("sensitive_generation", 0) <= 2**31 - 1
                for item in data["enrollments"].values()):
             raise CoordinatorError("Sensitive authorization episode is invalid")
-        for enrollment in data["enrollments"].values():
+        for issue_key, enrollment in data["enrollments"].items():
             enrollment.setdefault("attempts", REPAIR_LIMIT)
             missing_neutral_count = "neutral_attempts" not in enrollment
             if missing_neutral_count:
@@ -6879,9 +8156,22 @@ class StateStore:
                     or type(enrollment["neutral_attempts"]) is not int
                     or not 0 <= enrollment["neutral_attempts"] <= 2**31 - 1
                     or type(enrollment["neutral_attempts_unknown"]) is not bool
+                    or type(enrollment.get("neutral_anchor_reservations", 0)) is not int
+                    or not 0 <= enrollment.get("neutral_anchor_reservations", 0) <= 2**31 - 1
                     or ("repair_progress" in enrollment
                         and not _repair_progress_valid(enrollment["repair_progress"]))):
                 raise CoordinatorError("Repair budget or progress history is invalid")
+            if "neutral_anchor_reservations" not in enrollment:
+                enrollment["neutral_anchor_reservations"] = max(
+                    enrollment["neutral_attempts"]
+                    if not enrollment["neutral_attempts_unknown"] else 0,
+                    sum(
+                        entry.get("kind") == "neutral-receipt-anchor"
+                        and str(entry.get("issue")) == issue_key
+                        for entry in data["outbox"].values()
+                        if isinstance(entry, dict)
+                    ),
+                )
         if any("starter_admission" in item
                and not _valid_starter_admission(item["starter_admission"])
                for item in data["enrollments"].values()):
@@ -6890,6 +8180,12 @@ class StateStore:
                and not _valid_initial_source(item["initial_source"])
                for item in data["enrollments"].values()):
             raise CoordinatorError("Initial starter source provenance is invalid")
+        if any("owner_abandonments" in item
+               and not _owner_abandonments_valid(
+                   item["owner_abandonments"], issue=item.get("issue"),
+               )
+               for item in data["enrollments"].values()):
+            raise CoordinatorError("Owner task abandonment history is invalid")
         data.setdefault("lifecycle_events", [])
         if (not isinstance(data["lifecycle_events"], list)
                 or len(data["lifecycle_events"]) > MAX_LIFECYCLE_EVENTS
@@ -7193,6 +8489,9 @@ class StateStore:
                         **item, "attempts": attempts,
                         "neutral_attempts": neutral_attempts,
                         "neutral_attempts_unknown": neutral_attempts_unknown,
+                        "neutral_anchor_reservations": previous.get(
+                            "neutral_anchor_reservations", 0,
+                        ),
                         "repair_progress": repair_progress,
                         "sensitive_sha": None, "active": True,
                     }
@@ -7201,6 +8500,17 @@ class StateStore:
                             raise CoordinatorError("Stored task receipt proofs are invalid")
                         enrollment["receipt_proofs"] = deepcopy(
                             previous["receipt_proofs"],
+                        )
+                    if "owner_abandonments" in previous:
+                        if not _owner_abandonments_valid(
+                                previous["owner_abandonments"],
+                                issue=item.get("issue"),
+                        ):
+                            raise CoordinatorError(
+                                "Stored owner abandonment history is invalid"
+                            )
+                        enrollment["owner_abandonments"] = deepcopy(
+                            previous["owner_abandonments"],
                         )
                     data["enrollments"][key] = enrollment
             for action, item in commands:
@@ -7211,6 +8521,26 @@ class StateStore:
                         enrollment["sensitive_sha"] = item["head"]
                         enrollment["sensitive_authorization"] = item["owner_authorization"]
                         enrollment["targeted_review"] = item["targeted_review"]
+                elif action == "abandon-unverified":
+                    enrollment = data["enrollments"].get(str(item.get("issue")))
+                    record = item.get("recovery_record")
+                    action_key = record.get("action_key") if isinstance(record, dict) else None
+                    claimed = data["actions"].get(action_key)
+                    if (not enrollment or enrollment.get("active") is not True
+                            or not _owner_abandonment_record_valid(record)
+                            or not _owner_abandonment_matches_action(record, claimed)):
+                        raise CoordinatorError(
+                            "Owner abandonment did not match the durable task reservation"
+                        )
+                    records = enrollment.setdefault("owner_abandonments", [])
+                    if not _owner_abandonments_valid(
+                            records, issue=enrollment.get("issue")):
+                        raise CoordinatorError("Owner abandonment history is invalid")
+                    if not any(
+                            previous["action_key"] == action_key for previous in records):
+                        if len(records) >= REPAIR_LIMIT + NEUTRAL_LIMIT:
+                            raise CoordinatorError("Owner abandonment history reached its bound")
+                        records.append(deepcopy(record))
             for issue, head, source in starter_sources:
                 enrollment = data["enrollments"].get(str(issue))
                 if (not enrollment or not enrollment.get("active")
@@ -7282,6 +8612,7 @@ class StateStore:
     def claim_action(self, key, action):
         def claim(data):
             claimed = dict(action)
+            owner_abandonment_record = None
             existing = data["actions"].get(key)
             tombstone = data["retired"].get(str(claimed.get("issue")), {})
             if not existing and (
@@ -7345,6 +8676,45 @@ class StateStore:
                 enrollment = data["enrollments"].get(str(claimed.get("issue")))
                 if not enrollment or not enrollment.get("active"):
                     return False
+                if "owner_abandonment_binding" in claimed:
+                    return False
+                owner_abandonment_intent = claimed.pop(
+                    "owner_abandonment_intent", None,
+                )
+                if owner_abandonment_intent is not None:
+                    matching_owner_abandonments = [
+                        record for key, record in _valid_owner_abandonment_claims(
+                            enrollment, data["actions"],
+                        )
+                        if key != claimed.get("key")
+                        and owner_abandonment_intent
+                            == _owner_abandonment_successor_binding(record)
+                    ]
+                    if len(matching_owner_abandonments) != 1:
+                        return False
+                    owner_abandonment_record = matching_owner_abandonments[0]
+                if owner_abandonment_record is not None:
+                    neutral_successor = claimed.get("task_type") == "neutral"
+                    if (
+                            claimed.get("task_type") not in {
+                                None, "source", "review-followup", "neutral",
+                            }
+                            or (
+                                neutral_successor
+                                and claimed.get("recorded_base_sha")
+                                    != owner_abandonment_record["base_sha"]
+                            )
+                            or (
+                                not neutral_successor
+                                and claimed.get("main_sha")
+                                    != owner_abandonment_record["base_sha"]
+                            )):
+                        return False
+                    claimed["owner_abandonment_binding"] = (
+                        _owner_abandonment_successor_binding(
+                            owner_abandonment_record,
+                        )
+                    )
                 neutral = claimed.get("task_type") == "neutral"
                 counter = "neutral_attempts" if neutral else "attempts"
                 limit = NEUTRAL_LIMIT if neutral else REPAIR_LIMIT
@@ -7375,20 +8745,60 @@ class StateStore:
                             claimed.get("repair_target_map", {}),
                             claimed["repair_fingerprints"]):
                         return False
+                if neutral:
+                    anchor_key = claimed.get("receipt_anchor_key")
+                    anchor = data["outbox"].get(anchor_key)
+                    comment_id = claimed.get("receipt_anchor_comment_id")
+                    anchor_body = claimed.get("receipt_anchor_body")
+                    if (
+                            claimed.get("attempt") != attempts + 1
+                            or not isinstance(anchor_key, str)
+                            or not isinstance(anchor, dict)
+                            or anchor.get("status") != "sent"
+                            or anchor.get("task_key") != key
+                            or anchor.get("issue") != claimed.get("issue")
+                            or anchor.get("head") != claimed.get("head")
+                            or anchor.get("main_sha") != claimed.get("main_sha")
+                            or anchor.get("recorded_base_sha")
+                                != claimed.get("recorded_base_sha")
+                            or anchor.get("attempt") != attempts + 1
+                            or anchor.get("nonce") != claimed.get("dispatch_nonce")
+                            or anchor.get("comment_id") != comment_id
+                            or anchor.get("body") != anchor_body
+                            or type(comment_id) is not int
+                            or not 0 < comment_id <= 2**63 - 1):
+                        return False
                 enrollment[counter] += 1
                 claimed["attempt"] = enrollment[counter]
-                nonce = secrets.token_urlsafe(32)
+                nonce = (
+                    claimed.get("dispatch_nonce")
+                    if neutral else secrets.token_urlsafe(32)
+                )
                 claimed["dispatch_nonce"] = nonce
                 claimed["owner_id"] = OWNER_ID
                 claimed["repository_id"] = REPOSITORY_ID
+                if neutral:
+                    claimed["task_request_body"] = claimed.get("body", "")
+                    claimed["task_dispatch_started"] = False
                 instruction = receipt_instruction(
                     nonce, pull_number=claimed.get("issue"),
                     start_head=claimed.get("head"), base_sha=claimed.get("main_sha"),
                     neutral=neutral,
+                    **({
+                        "anchor_comment_id": claimed["receipt_anchor_comment_id"],
+                        "anchor_body": claimed["receipt_anchor_body"],
+                    } if neutral else {}),
                 )
                 claimed["body"] = f"{claimed.get('body', '')}\n\n{instruction}"
-            data["actions"][key] = {**claimed, "status": "sending",
-                                    "created_at": time.time()}
+            created_at = time.time()
+            claimed["created_at"] = created_at
+            if owner_abandonment_record is not None:
+                claimed["owner_abandonment_attestation"] = (
+                _owner_abandonment_successor_attestation(
+                    owner_abandonment_record, claimed,
+                )
+                )
+            data["actions"][key] = {**claimed, "status": "sending"}
             return True
         return self._mutate(claim)
 
@@ -7405,6 +8815,49 @@ class StateStore:
                 action["status"] = status
                 action.update(fields)
         self._mutate(update)
+
+    def mark_neutral_task_dispatch_started(self, key):
+        def mark(data):
+            action = data["actions"].get(key)
+            anchor = (
+                data["outbox"].get(action.get("receipt_anchor_key"))
+                if isinstance(action, dict) else None
+            )
+            if (
+                    not isinstance(action, dict)
+                    or action.get("kind") != "fix"
+                    or action.get("task_type") != "neutral"
+                    or action.get("status") != "sending"
+                    or action.get("task_dispatch_started") is not False
+                    or action.get("task_id") is not None
+                    or not isinstance(anchor, dict)
+                    or anchor.get("status") != "sent"
+                    or anchor.get("task_key") != key
+                    or anchor.get("nonce") != action.get("dispatch_nonce")
+                    or anchor.get("comment_id")
+                        != action.get("receipt_anchor_comment_id")
+                    or anchor.get("body") != action.get("receipt_anchor_body")
+            ):
+                return False
+            try:
+                instruction = receipt_instruction(
+                    action["dispatch_nonce"], pull_number=action["issue"],
+                    start_head=action["head"], base_sha=action["main_sha"],
+                    neutral=True,
+                    anchor_comment_id=action["receipt_anchor_comment_id"],
+                    anchor_body=action["receipt_anchor_body"],
+                )
+            except (KeyError, ReceiptError, TypeError, ValueError):
+                return False
+            if (
+                    not isinstance(action.get("task_request_body"), str)
+                    or action.get("body") != (
+                        f"{action['task_request_body']}\n\n{instruction}"
+                    )):
+                return False
+            action["task_dispatch_started"] = True
+            return True
+        return self._mutate(mark)
 
     def claim_receipt_recovery(self, key, expected):
         if self._prepared is not None:
@@ -7481,12 +8934,15 @@ class StateStore:
                 # Persist the validated proof in the same write as completion,
                 # independently of the action that lifecycle compaction retires.
                 proof_fields = {
-                    "issue", "kind", "status", "head", "task_id", "dispatch_nonce",
+                    "key", "issue", "kind", "status", "head", "task_id",
+                    "dispatch_nonce", "created_at",
                     "receipt_result", "receipt_comment_id", "receipt_created_at",
                     "receipt_body", "receipt_task_id", "receipt_session_id",
                     "receipt_completed_at", "receipt_session_completed_at",
                     "receipt_nonce", "receipt_start_head", "receipt_head", "receipt_base",
                     "receipt_legacy_neutral",
+                    "recorded_base_sha",
+                    "owner_abandonment_binding", "owner_abandonment_attestation",
                     "attempt", "owner_id", "repository_id", "pull_id", "pull_node_id",
                     "repair_policy_version", "repair_fingerprints",
                     "repair_fingerprints_complete", "repair_fingerprint_version",
@@ -7522,6 +8978,12 @@ class StateStore:
             tombstone = data["retired"].get(str(entry.get("issue")), {})
             if key in data["outbox"] or _tombstone_digest(key) in tombstone.get("outbox", ()):
                 return False
+            if entry.get("kind") == "neutral-receipt-anchor":
+                enrollment = data["enrollments"].get(str(entry.get("issue")))
+                if (not enrollment or not enrollment.get("active")
+                        or enrollment["neutral_anchor_reservations"] >= NEUTRAL_LIMIT):
+                    return False
+                enrollment["neutral_anchor_reservations"] += 1
             data["outbox"][key] = {**entry, "status": "pending"}
             return True
         return self._mutate(add)
@@ -7563,6 +9025,16 @@ class StateStore:
             if key in data["outbox"]:
                 data["outbox"][key].update({"status": status, **fields})
         self._mutate(update)
+
+    def claim_outbox_send(self, key, expected):
+        def claim(data):
+            entry = data["outbox"].get(key)
+            if not isinstance(entry, dict) or entry != expected \
+                    or entry.get("status") != "pending":
+                return False
+            entry["status"] = "sending"
+            return True
+        return self._mutate(claim)
 
     def status_generation_floor(self, issue):
         tombstone = self._load()["retired"].get(str(issue), {})
@@ -7652,8 +9124,14 @@ class StateStore:
                     and anchor_main_sha != current_main_sha
                     and not claimed_anchor
                 )
+                preserved_inactive_neutral_anchor = (
+                    inactive
+                    and entry.get("status") == "sent"
+                    and entry.get("kind") == "neutral-receipt-anchor"
+                )
                 if (entry.get("issue") != issue
                         or entry.get("status") not in {"sent", "superseded"}
+                        or preserved_inactive_neutral_anchor
                         or (not inactive and entry.get("head") == current_head
                             and not obsolete_preclaim_anchor)):
                     continue

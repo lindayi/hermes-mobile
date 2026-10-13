@@ -2,7 +2,7 @@ import hashlib
 
 import pytest
 
-from deploy.cloud_coordinator import CoordinatorError, StateStore, _rest_list
+from deploy.cloud_coordinator import ApiError, CoordinatorError, StateStore, _rest_list
 from test_cloud_coordinator import (
     BASE,
     COPILOT_AGENT,
@@ -28,6 +28,7 @@ class SensitiveCopilotApi(FakeApi):
         self.copilot_state = "COMMENTED"
         self.copilot_head = HEAD
         self.copilot_author = COPILOT_REVIEWER
+        self.graphql_copilot_author = COPILOT_REVIEWER
         self.updated_at = SUBMITTED
         self.last_edited_at = None
         self.includes_created_edit = False
@@ -68,7 +69,7 @@ class SensitiveCopilotApi(FakeApi):
                 "id": self.copilot_author,
                 "node_id": "BOT_kgDOCnlnWA",
                 "type": "Bot",
-                "login": "Copilot",
+                "login": "copilot-pull-request-reviewer[bot]",
             },
         }
 
@@ -97,10 +98,10 @@ class SensitiveCopilotApi(FakeApi):
                 "bodyHTML": self.body_html,
                 "commit": {"oid": self.copilot_head},
                 "author": {
-                    "__typename": "Bot",
-                    "databaseId": self.copilot_author,
-                    "id": "BOT_kgDOCnlnWA",
                     "login": "copilot-pull-request-reviewer",
+                    "databaseId": self.graphql_copilot_author,
+                    "id": "BOT_kgDOCnlnWA",
+                    "__typename": "Bot",
                 },
                 "pullRequest": {
                     "number": 16,
@@ -254,6 +255,12 @@ def test_unbound_metadata_does_not_authorize(tmp_path, mutation):
     api.graphql = malformed_graphql
     api.get_all = duplicate_review
     path = tmp_path / "state.json"
+    if mutation in {"errors", "data"}:
+        with pytest.raises(ApiError, match="^Malformed GitHub review metadata response$"):
+            Coordinator(api, StateStore(path)).run(apply=True)
+        assert StateStore(path).snapshot()["enrollments"] == {}
+        assert api.writes == api.graphql_writes == []
+        return
     result = Coordinator(api, StateStore(path)).run(apply=True)
     enrollment = StateStore(path).snapshot()["enrollments"]["16"]
     assert enrollment["sensitive_sha"] is None

@@ -36,24 +36,12 @@ class ReceiptError(ValueError):
     """A receipt is missing, conflicting, edited, stale, or unbound."""
 
 
-def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=False):
-    posting_instruction = (
-        "After pushing your result and running focused checks, first post the "
-        "conflict decisions in a separate PR comment without the receipt nonce. "
-        "Then construct the complete receipt-only payload below as a separate "
-        "value and validate that exact value with the existing `_v2_fields` "
-        "parser, checking every field against its expected value. Post that "
-        "validated payload as exactly one dedicated PR comment, with no quote, "
-        "fence, prose, extra fields, or trailing content. Never combine the "
-        "decision commentary and receipt, and do not post a second receipt."
-    ) if neutral else (
-        "After pushing your result and running focused checks, post exactly one "
-        "issue comment on this PR. Put the exact receipt fields below in one "
-        "contiguous, unquoted final block, with no extra fields or unquoted prose. "
-        "The posting transport may prepend an unchanged Markdown blockquote, "
-        "separated from the receipt by an ASCII blank line (empty or only spaces/tabs), "
-        "or reorder fields; do not quote or fence the receipt itself, and include each "
-        "field exactly once."
+def _receipt_instruction(nonce, *, pull_number, start_head, base_sha,
+                         posting_instruction, neutral=False):
+    head_instruction = (
+        "the actual PR head SHA bound by the result (the audit-bearing merge "
+        "commit for `ready`, or the actual current PR head for a typed blocker)"
+        if neutral else "the pushed PR head SHA"
     )
     return (
         "Before any source edits, verify that nonce, pr, start_head and base are all "
@@ -69,7 +57,7 @@ def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=Fal
         "binds task identity through its authenticated task API; do not discover "
         "or echo a task UUID, obtain extra credentials, or request an owner comment. "
         "Replace the session label with that exact session ID and "
-        "the head label with the pushed PR head SHA; these "
+        f"the head label with {head_instruction}; these "
         "replacement labels are not receipt values. Choose one result from the closed list. "
         "Do not wait for CI or review after pushing and focused checks; the parent "
         "controller handles CI/review. A ready receipt is not passing CI and does "
@@ -82,6 +70,168 @@ def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=Fal
         "session=SESSION_ID_REPLACE_ME\n"
         "head=PUSHED_PULL_HEAD_SHA_REPLACE_ME\n"
         "result=ready|conflict_incompatible|policy_broken"
+    )
+
+
+def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=False,
+                        anchor_comment_id=None, anchor_body=None):
+    if neutral and (anchor_comment_id is not None or anchor_body is not None):
+        if (type(anchor_comment_id) is not int
+                or not 0 < anchor_comment_id <= 2**63 - 1
+                or not _neutral_anchor_body_valid(anchor_body)):
+            raise ReceiptError("Neutral receipt anchor binding is incomplete")
+        posting_instruction = (
+            "After resolving the task and running applicable focused checks, call "
+            "`engine-tools-reply_to_comment` exactly once with "
+            f"`commentId={anchor_comment_id}`. The exact reserved anchor body is "
+            f"`{anchor_body}`. The tool message must contain only the eight canonical receipt lines "
+            "below; supported provider wrapping quotes the exact reserved anchor body. "
+            "Do not include the quote or leading blanks in the tool message. "
+            "The 54 supported envelopes have zero or one empty leading line, "
+            f"exactly one quote line `> {anchor_body}`, zero or one quoted blank "
+            "before and after it (each `>` or `> `), and exactly one ASCII separator "
+            "line (empty, one space, or one tab) before the eight canonical receipt lines. "
+            "Include no decision, report, URL, prose, extra field, or trailing content. "
+            "Before publication, construct all complete supported carriers with actual "
+            "bound values using `_neutral_receipt_prefixes` and validate each with "
+            "the existing `_v2_fields` parser, including worst-case overhead. This "
+            "finite support does not guarantee provider serialization; unknown shapes "
+            "are rejected. If any supported carrier exceeds either limit or fails "
+            "validation, stop before publishing. Never "
+            "retry, edit the reply, or publish a second comment."
+        )
+    elif neutral:
+        posting_instruction = (
+        "After resolving the task and running applicable focused checks, prepare "
+        "one receipt-only PR reply. A `ready` result requires the pushed "
+        "audit-bearing merge commit. For `conflict_incompatible` or `policy_broken`, "
+        "do not fabricate or require a merge commit; use the actual current PR head. "
+        "The comment payload must contain only "
+        "the eight canonical receipt lines below, with no decision, report, URL, "
+        "prose, extra field, or trailing content. Establish the exact complete "
+        "serialized carrier, including the provider's unchanged quoted anchor, "
+        "any leading blank line, the ASCII blank separator, and the actual bound "
+        "receipt values. Validate that complete carrier with the existing "
+        "`_v2_fields` parser and confirm every field before the single publication. "
+        "If the exact carrier cannot be established or exceeds either limit, stop "
+        "with a transport blocker before publishing; never send it and retry, edit "
+        "the reply, or publish a second comment. Publish with exactly one "
+        "`reply_to_comment` call."
+        )
+    else:
+        posting_instruction = (
+        "After pushing your result and running focused checks, post exactly one "
+        "issue comment on this PR. Put the exact receipt fields below in one "
+        "contiguous, unquoted final block, with no extra fields or unquoted prose. "
+        "The posting transport may prepend an unchanged Markdown blockquote, "
+        "separated from the receipt by an ASCII blank line (empty or only spaces/tabs), "
+        "or reorder fields; do not quote or fence the receipt itself, and include each "
+        "field exactly once."
+        )
+    instruction = _receipt_instruction(
+        nonce, pull_number=pull_number, start_head=start_head, base_sha=base_sha,
+        posting_instruction=posting_instruction, neutral=neutral,
+    )
+    if neutral and anchor_comment_id is not None:
+        payload = (
+            f"{V2_RECEIPT_HEADER}\nnonce={nonce}\npr={pull_number}\n"
+            f"start_head={start_head}\nbase={base_sha}\n"
+            f"session={'S' * 128}\nhead={'f' * 40}\n"
+            "result=conflict_incompatible"
+        )
+        expected = {
+                "nonce": nonce, "pr": str(pull_number),
+                "start_head": start_head, "base": base_sha,
+                "session": "S" * 128, "head": "f" * 40,
+                "result": "conflict_incompatible",
+        }
+        for prefix in _neutral_receipt_prefixes(anchor_body):
+            if _v2_fields(prefix + payload) != expected:
+                raise ReceiptError("Neutral receipt carrier is not canonically bound")
+    return instruction
+
+
+def _neutral_anchor_body_valid(body):
+    return (isinstance(body, str) and 1 <= len(body) <= 80
+            and re.fullmatch(r"[ -~]+", body) is not None and bool(body.strip(" ")))
+
+
+def _neutral_receipt_prefixes(anchor_body):
+    if not _neutral_anchor_body_valid(anchor_body):
+        raise ReceiptError("Neutral receipt anchor binding is incomplete")
+    return tuple(
+        f"{leading}{before}> {anchor_body}\n{after}{separator}\n"
+        for leading in ("", "\n")
+        for before in ("", ">\n", "> \n")
+        for after in ("", ">\n", "> \n")
+        for separator in ("", " ", "\t")
+    )
+
+
+def _neutral_receipt_body_matches(body, anchor_body):
+    try:
+        _v2_fields(body)
+        return any(body.startswith(f"{prefix}{V2_RECEIPT_HEADER}\n")
+                   for prefix in _neutral_receipt_prefixes(anchor_body))
+    except ReceiptError:
+        return False
+
+
+def _anchored_neutral_receipt_instruction_v1(nonce, *, pull_number, start_head,
+                                            base_sha, anchor_comment_id, anchor_body):
+    return _receipt_instruction(
+        nonce, pull_number=pull_number, start_head=start_head, base_sha=base_sha,
+        neutral=True, posting_instruction=(
+            "After resolving the task and running applicable focused checks, call "
+            "`engine-tools-reply_to_comment` exactly once with "
+            f"`commentId={anchor_comment_id}`. The exact reserved anchor body is "
+            f"`{anchor_body}`. The tool message must contain only the eight canonical receipt lines "
+            "below; the provider prepends the bound quote and blank separator. "
+            "Do not include the quote or leading blanks in the tool message. "
+            "The only supported carrier is one leading blank line, "
+            f"one quote line `> {anchor_body}`, one blank separator, and the eight "
+            "canonical receipt lines below. Include no decision, report, URL, prose, "
+            "extra field, or trailing content. Before publication, construct that "
+            "complete carrier with the actual bound values and validate it with "
+            "the existing `_v2_fields` parser. If the exact carrier cannot be "
+            "established or exceeds either limit, stop before publishing. Never "
+            "retry, edit the reply, or publish a second comment."
+        ),
+    )
+
+
+def _historical_neutral_receipt_instruction(nonce, *, pull_number,
+                                            start_head, base_sha):
+    return _receipt_instruction(
+        nonce, pull_number=pull_number, start_head=start_head, base_sha=base_sha,
+        posting_instruction=(
+            "After pushing your result and running focused checks, prepare one final "
+            "PR comment. Put each conflict decision in its own Markdown blockquote, "
+            "then put the complete receipt payload below as the final unquoted block. "
+            "Validate that exact payload with the existing `_v2_fields` parser, "
+            "checking every field against its expected value. Publish the combined "
+            "comment with exactly one `reply_to_comment` call. Do not post a preliminary "
+            "comment, edit or reply to the same anchor again, or make a second "
+            "publication. Do not quote or fence the receipt, or add unquoted prose, "
+            "extra fields, or trailing content."
+        ),
+    )
+
+
+def _previous_release_neutral_receipt_instruction(nonce, *, pull_number,
+                                                  start_head, base_sha):
+    return _receipt_instruction(
+        nonce, pull_number=pull_number, start_head=start_head, base_sha=base_sha,
+        posting_instruction=(
+            "After pushing your result and running focused checks, first post the "
+            "conflict decisions in a separate PR comment without the receipt nonce. "
+            "Then construct the complete receipt-only payload below as a separate "
+            "value and validate that exact value with the existing `_v2_fields` "
+            "parser, checking every field against its expected value. Post that "
+            "validated payload as exactly one dedicated PR comment, with no quote, "
+            "fence, prose, extra fields, or trailing content. Never combine the "
+            "decision commentary and receipt, and do not post a second receipt."
+        ),
     )
 
 
@@ -684,8 +834,30 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     if len(matches) != 1:
         raise ReceiptError("Task nonce does not identify exactly one returned session")
     session = matches[0]
+    anchored_neutral = (
+        "receipt_anchor_comment_id" in action
+        or "receipt_anchor_body" in action
+    )
+    if anchored_neutral:
+        anchor_bindings = {
+            "pull_number": action.get("issue"), "start_head": action.get("head"),
+            "base_sha": action.get("main_sha"),
+            "anchor_comment_id": action.get("receipt_anchor_comment_id"),
+            "anchor_body": action.get("receipt_anchor_body"),
+        }
+        anchor_instructions = (
+            receipt_instruction(nonce, neutral=True, **anchor_bindings),
+            _anchored_neutral_receipt_instruction_v1(nonce, **anchor_bindings),
+        )
+        if (action.get("task_type") != "neutral"
+                or not isinstance(action.get("body"), str)
+                or session.get("prompt") != action.get("body")
+                or not any(action["body"].endswith(f"\n\n{instruction}")
+                           for instruction in anchor_instructions)):
+            raise ReceiptError("Neutral receipt anchor prompt is not exactly bound")
     legacy_neutral = (
-        len(sessions) == 1 and _legacy_neutral_prompt_matches(action, session)
+        not anchored_neutral and len(sessions) == 1
+        and _legacy_neutral_prompt_matches(action, session)
     )
     task_updated = _time(task.get("updated_at"))
     completed_at = _time(session.get("completed_at"))
@@ -710,6 +882,12 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     )
     if receipt is None:
         return None
+    if anchored_neutral:
+        anchor_id = action["receipt_anchor_comment_id"]
+        anchor_body = action["receipt_anchor_body"]
+        if (receipt["comment_id"] == anchor_id
+                or not _neutral_receipt_body_matches(receipt["body"], anchor_body)):
+            raise ReceiptError("Neutral receipt does not quote its reserved anchor")
     # Return chronology only after the exact session and its receipt validate.
     # Task updated_at and coordinator observation time are not completion proof.
     return {
