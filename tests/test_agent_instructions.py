@@ -461,7 +461,7 @@ def _validate_blocked_record(fixture):
     assert set(record) == BLOCKED_KEYS
     assert record['schema'] == 'hermes-supervised-qualification/v1'
     assert record['kind'] in {'qualification', 'revalidation'}
-    assert record['status'] in {'blocked', 'supervised-only'}
+    assert record['status'] == 'blocked'
     assert re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', record['record_key'])
     prior = record['prior_comment_id']
     assert (prior is None) == (record['kind'] == 'qualification')
@@ -591,6 +591,20 @@ def test_manual_qualification_documents_truthful_blocked_and_invalidation_varian
     assert [(item['gate'], item['outcome']) for item in solely_unknown
             if item['gate'] not in {'check', 'source-run'}] == [
         ('sensitive', 'not-required'), ('review', 'unknown')]
+
+
+def test_blocked_record_rejects_supervised_only_with_all_successful_gates():
+    record = deepcopy(_gate_fixtures()['blocked-unknown-gate'])
+    record['gate_evidence'] = [
+        item for item in record['gate_evidence'] if item['gate'] != 'review'
+    ]
+    record['evidence'] = [
+        item for item in record['evidence'] if item['key'] != 'review-pages'
+    ]
+    record['status'] = 'supervised-only'
+
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(record)
 
 
 @pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES))
