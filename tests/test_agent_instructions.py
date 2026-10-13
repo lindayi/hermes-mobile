@@ -298,7 +298,7 @@ def test_manual_qualification_artifact_has_an_exact_typed_field_inventory():
                         section.split('Primitive types:', 1)[0], re.MULTILINE)
     assert dict(fields) == {
         'schema': 'Literal `hermes-supervised-qualification/v1`',
-        'kind': 'Enum `qualification`, `revalidation`, `invalidation`',
+        'kind': 'Enum `qualification`, `revalidation`',
         'record_key': 'Key',
         'prior_comment_id': 'ID or null',
         'repository': 'Repository',
@@ -312,17 +312,183 @@ def test_manual_qualification_artifact_has_an_exact_typed_field_inventory():
         'review_inventory': 'EvidenceRef',
         'source_proof': 'EvidenceRef',
         'occupancy_proof': 'EvidenceRef',
-        'checks': 'Array of exactly three Check objects',
-        'source_run': 'SourceRun',
+        'checks': 'Array of exactly three successful Check objects',
+        'source_run': 'Successful SourceRun',
         'sensitive': 'Sensitive or null',
         'role_request': 'Text',
         'reasoning': 'Text',
         'machine_outcome': 'MachineOutcome',
-        'status': 'Enum `supervised-only`, `blocked`, `invalidated`',
+        'status': 'Literal `supervised-only`',
         'reason': 'Text',
         'evidence': 'Array of 1–128 Evidence objects',
     }
     assert len(fields) == len(dict(fields)), 'Duplicate fields are not a contract'
+    assert 'The exact top-level keys for a `blocked` qualification or revalidation are' in spec
+    assert 'The exact top-level keys for an `invalidated` event are' in spec
+    assert '`supervised-only` qualification or revalidation' in spec
+
+
+def _validate_gate_outcome_fixture(fixture):
+    """Validate the documented gate fragments without implementing a runtime validator."""
+    if fixture['fixture'] in {'blocked-checks', 'blocked-sensitive'}:
+        assert set(fixture) == {'fixture', 'kind', 'status', 'gate_evidence', 'evidence_refs'}
+        assert fixture['kind'] in {'qualification', 'revalidation'}
+        assert fixture['status'] in {'blocked', 'supervised-only'}
+        refs = set(fixture['evidence_refs'])
+        observations = fixture['gate_evidence']
+        assert all(item['gate'] in {
+            'check', 'source-run', 'sensitive', 'review', 'source',
+            'occupancy', 'machine', 'authorization',
+        }
+                   for item in observations)
+        checks = [item for item in observations if item['gate'] == 'check']
+        assert len(checks) == 3
+        assert {item['name'] for item in checks} == {
+            'source-ci', 'integration-tests', 'issue-link',
+        }
+        for check in checks:
+            assert set(check) == {
+                'gate', 'name', 'outcome', 'id', 'app_id', 'head_sha',
+                'check_status', 'conclusion', 'completed_at', 'proof', 'reason',
+            }
+            assert check['outcome'] in {
+                'success', 'failure', 'pending', 'missing', 'unknown',
+            }
+            assert check['proof'] in refs
+            assert check['reason']
+            if check['outcome'] == 'missing':
+                assert all(check[key] is None for key in (
+                    'id', 'app_id', 'head_sha', 'check_status', 'conclusion',
+                    'completed_at',
+                ))
+            elif check['outcome'] == 'pending':
+                assert type(check['id']) is int and check['id'] > 0
+                assert re.fullmatch(r'[a-f0-9]{40}', check['head_sha'])
+                assert check['check_status'] and check['conclusion'] is None
+                assert check['completed_at'] is None
+            elif check['outcome'] in {'success', 'failure'}:
+                assert type(check['id']) is int and check['id'] > 0
+                assert re.fullmatch(r'[a-f0-9]{40}', check['head_sha'])
+                assert check['check_status']
+                assert check['conclusion'] is not None
+                assert (check['conclusion'] == 'success') == \
+                    (check['outcome'] == 'success')
+                assert check['completed_at']
+            else:
+                assert check['id'] is None or check['id'] > 0
+                assert check['head_sha'] is None or \
+                    re.fullmatch(r'[a-f0-9]{40}', check['head_sha'])
+            if check['name'] in {'source-ci', 'issue-link'} and check['id'] is not None:
+                assert check['app_id'] == 15368
+
+        source = next(item for item in observations if item['gate'] == 'source-run')
+        assert set(source) == {
+            'gate', 'outcome', 'id', 'attempt', 'head_sha', 'run_status', 'conclusion',
+            'completed_at', 'proof', 'reason',
+        }
+        assert source['outcome'] in {'success', 'failure', 'pending', 'missing', 'unknown'}
+        assert source['proof'] in refs
+        assert source['reason']
+        if source['outcome'] == 'missing':
+            assert all(source[key] is None for key in (
+                'id', 'attempt', 'head_sha', 'run_status', 'conclusion', 'completed_at',
+            ))
+        elif source['outcome'] == 'pending':
+            assert type(source['id']) is int and source['id'] > 0
+            assert type(source['attempt']) is int and 1 <= source['attempt'] <= 100
+            assert re.fullmatch(r'[a-f0-9]{40}', source['head_sha'])
+            assert source['run_status'] and source['conclusion'] is None
+            assert source['completed_at'] is None
+        elif source['outcome'] in {'success', 'failure'}:
+            assert type(source['id']) is int and source['id'] > 0
+            assert type(source['attempt']) is int and 1 <= source['attempt'] <= 100
+            assert re.fullmatch(r'[a-f0-9]{40}', source['head_sha'])
+            assert source['run_status']
+            assert source['completed_at']
+            assert source['conclusion'] is not None
+            assert (source['conclusion'] == 'success') == \
+                (source['outcome'] == 'success')
+        else:
+            assert source['id'] is None or source['id'] > 0
+            assert source['attempt'] is None or 1 <= source['attempt'] <= 100
+            assert source['head_sha'] is None or \
+                re.fullmatch(r'[a-f0-9]{40}', source['head_sha'])
+
+        sensitive = next(item for item in observations if item['gate'] == 'sensitive')
+        assert set(sensitive) == {'gate', 'outcome', 'command', 'proof', 'reason'}
+        assert sensitive['outcome'] in {
+            'authorized', 'not-required', 'missing', 'rejected', 'unknown',
+        }
+        assert sensitive['proof'] in refs and sensitive['reason']
+        if sensitive['outcome'] in {'missing', 'not-required'}:
+            assert sensitive['command'] is None
+        elif sensitive['outcome'] in {'authorized', 'rejected'}:
+            if sensitive['outcome'] == 'rejected':
+                assert sensitive['command'] in refs
+            else:
+                assert isinstance(sensitive['command'], dict)
+        else:
+            assert sensitive['command'] is None or sensitive['command'] in refs
+
+        other = [item for item in observations if item['gate'] not in {
+            'check', 'source-run', 'sensitive',
+        }]
+        for item in other:
+            assert set(item) == {'gate', 'outcome', 'observation', 'proof', 'reason'}
+            assert item['outcome'] in {
+                'missing', 'pending', 'failure', 'rejected', 'stale', 'unknown', 'uncertain',
+            }
+            assert item['observation'] is None or item['observation'] in refs
+            assert item['proof'] in refs and item['reason']
+
+        if fixture['status'] == 'supervised-only':
+            assert not other
+            assert all(check['outcome'] == 'success' for check in checks)
+            assert source['outcome'] == 'success'
+            assert sensitive['outcome'] in {'authorized', 'not-required'}
+        else:
+            assert any(check['outcome'] != 'success' for check in checks) or \
+                source['outcome'] != 'success' or \
+                sensitive['outcome'] not in {'authorized', 'not-required'}
+    else:
+        assert set(fixture) == {
+            'fixture', 'kind', 'status', 'prior_comment_id', 'head_sha', 'base_sha',
+            'changed_binding', 'reserved_at', 'observed_at', 'reason', 'evidence_refs',
+        }
+        assert fixture['fixture'] == 'invalidation'
+        assert fixture['kind'] == 'invalidation'
+        assert fixture['status'] == 'invalidated'
+        assert type(fixture['prior_comment_id']) is int and fixture['prior_comment_id'] > 0
+        assert set(fixture['changed_binding']) == {
+            'head_sha', 'base_sha', 'observed_at', 'proof',
+        }
+        assert re.fullmatch(r'[a-f0-9]{40}', fixture['head_sha'])
+        assert re.fullmatch(r'[a-f0-9]{40}', fixture['base_sha'])
+        assert fixture['changed_binding']['proof'] in fixture['evidence_refs']
+        assert {'prior-record', fixture['changed_binding']['proof']} <= \
+            set(fixture['evidence_refs'])
+        assert fixture['changed_binding']['observed_at'] <= fixture['observed_at']
+        assert fixture['reserved_at'] <= fixture['observed_at']
+        assert fixture['changed_binding']['head_sha'] != fixture['head_sha']
+
+
+def test_manual_qualification_documents_truthful_blocked_and_invalidation_variants():
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    section = spec.split('### SYNTHETIC gate outcome examples', 1)[1].split(
+        '### Publication and independent manual validation', 1)[0]
+    fixtures = [json.loads(value) for value in re.findall(
+        r'```json\n(.*?)\n```', section, re.DOTALL)]
+    assert {fixture['fixture'] for fixture in fixtures} == {
+        'blocked-checks', 'blocked-sensitive', 'invalidation',
+    }
+    for fixture in fixtures:
+        _validate_gate_outcome_fixture(fixture)
+
+    for fixture in fixtures[:2]:
+        promoted = deepcopy(fixture)
+        promoted['status'] = 'supervised-only'
+        with pytest.raises(AssertionError):
+            _validate_gate_outcome_fixture(promoted)
 
 
 MANIFEST_ROLES = {
@@ -664,15 +830,18 @@ def test_manual_qualification_shell_outputs_and_reservation_are_private(tmp_path
 
 def _run_manual_qualification_publication(
         tmp_path, *, inherited_comment_id=None, post_response='{"id":731}',
-        post_fails=False):
+        post_fails=False, bundle_path=None, private_path=None, setup_only=False,
+        fake_parent_uid=None):
     spec = (ROOT / 'docs/git-development-spec.md').read_text()
     section = spec.split('Use supported `gh api` commands', 1)[1]
     blocks = re.findall(r'```sh\n(.*?)\n```', section, re.DOTALL)
     setup = next(block for block in blocks if 'gh api user >' in block)
     publication = next(block for block in blocks if 'jq -Rs' in block)
     reservation = re.search(r'`(\( set -C; printf .*?\))`', section).group(1)
-    bundle = tmp_path / 'bundle'
-    private = tmp_path / 'private'
+    bundle_env = str(bundle_path) if bundle_path is not None else str(tmp_path / 'bundle')
+    private_env = str(private_path) if private_path is not None else str(tmp_path / 'private')
+    bundle = Path(bundle_env)
+    private = Path(private_env)
     fake_bin = tmp_path / 'bin'
     fake_bin.mkdir()
     fake_gh = fake_bin / 'gh'
@@ -701,12 +870,22 @@ def _run_manual_qualification_publication(
         'else:\n'
         '    sys.exit(23)\n')
     fake_gh.chmod(0o700)
+    if fake_parent_uid is not None:
+        fake_stat = fake_bin / 'stat'
+        fake_stat.write_text(
+            '#!/bin/sh\n'
+            'case "$2" in\n'
+            '  %a) printf "700\\n";;\n'
+            f'  %u) printf "{fake_parent_uid}\\n";;\n'
+            '  *) exit 1;;\n'
+            'esac\n')
+        fake_stat.chmod(0o700)
     call_log = tmp_path / 'gh-calls'
     env = dict(os.environ)
     env.update({
         'PATH': f'{fake_bin}:{env["PATH"]}',
-        'BUNDLE': str(bundle),
-        'PRIVATE': str(private),
+        'BUNDLE': bundle_env,
+        'PRIVATE': private_env,
         'REPO': 'lindayi/hermes-mobile',
         'PR': '107',
         'RECORD_KEY': 'synthetic-record',
@@ -718,11 +897,63 @@ def _run_manual_qualification_publication(
         env['COMMENT_ID'] = inherited_comment_id
     result = subprocess.run(
         ['/bin/bash', '-e', '-c',
-         f'umask 022\n{setup}\n{reservation}\n{publication}'],
+         f'umask 022\n{setup}' +
+         ('' if setup_only else f'\n{reservation}\n{publication}')],
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
     )
     calls = call_log.read_text().splitlines() if call_log.exists() else []
     return result, calls, private
+
+
+@pytest.mark.parametrize('unsafe_layout', (
+    'dot-component', 'private-dot-component', 'empty-component',
+    'private-empty-component', 'aliased-bundle-contains-private',
+    'aliased-private-contains-bundle', 'equal-paths', 'symlink-parent',
+    'unsafe-parent-mode', 'unsafe-parent-owner',
+))
+def test_manual_qualification_shell_rejects_aliased_or_untrusted_paths_before_output(
+        tmp_path, unsafe_layout):
+    parent = tmp_path / 'trusted-parent'
+    parent.mkdir(mode=0o700)
+    parent.chmod(0o700)
+    bundle = parent / 'bundle'
+    private = parent / 'private'
+    if unsafe_layout == 'dot-component':
+        bundle = f'{parent}/./bundle'
+    elif unsafe_layout == 'private-dot-component':
+        private = f'{parent}/./private'
+    elif unsafe_layout == 'empty-component':
+        bundle = f'{parent}//bundle'
+    elif unsafe_layout == 'private-empty-component':
+        private = f'{parent}//private'
+    elif unsafe_layout == 'aliased-bundle-contains-private':
+        (parent / 'alias').mkdir(mode=0o700)
+        bundle = f'{parent}/alias/../record'
+        private = parent / 'record/private'
+    elif unsafe_layout == 'aliased-private-contains-bundle':
+        (parent / 'alias').mkdir(mode=0o700)
+        private = f'{parent}/alias/../record'
+        bundle = parent / 'record/bundle'
+    elif unsafe_layout == 'equal-paths':
+        bundle = private = parent / 'record'
+    elif unsafe_layout == 'symlink-parent':
+        real_parent = tmp_path / 'real-parent'
+        real_parent.mkdir(mode=0o700)
+        real_parent.chmod(0o700)
+        (tmp_path / 'linked-parent').symlink_to(real_parent, target_is_directory=True)
+        bundle = tmp_path / 'linked-parent/bundle'
+        private = real_parent / 'private'
+    elif unsafe_layout == 'unsafe-parent-mode':
+        parent.chmod(0o755)
+
+    result, calls, _ = _run_manual_qualification_publication(
+        tmp_path, bundle_path=bundle, private_path=private, setup_only=True,
+        fake_parent_uid=(os.getuid() + 1 if unsafe_layout == 'unsafe-parent-owner' else None))
+
+    assert result.returncode != 0
+    assert not calls
+    assert not Path(bundle).exists()
+    assert not Path(private).exists()
 
 
 @pytest.mark.parametrize('inherited_comment_id', (None, '999'))
@@ -817,6 +1048,7 @@ def test_manual_qualification_shell_rejects_existing_destinations(tmp_path, targ
     )
     assert result.returncode != 0
     assert not (tmp_path / 'gh-calls').exists()
+    assert not (private if target == 'BUNDLE' else bundle).exists()
     if kind == 'directory':
         assert unsafe.stat().st_mode & 0o777 == 0o755
     elif kind == 'symlink':

@@ -100,16 +100,17 @@ Documentation tests check this contract, not a live artifact or authorization.
 
 The comment contains exactly `<!-- hermes-supervised-qualification/v1 -->`, a
 newline, one fenced `json` object, and a final newline. No other prose is allowed.
-The whole comment is at most 60 KiB of UTF-8. The following table is the exact
-top-level field inventory; the named object types below also have exact key sets.
-Missing, extra, duplicate, mistyped, or malformed fields block, as do unknown
-versions, nulls except where allowed, truncation, and any exceeded bound. JSON
-booleans are not integers. This schema is an audit format, not proof of acceptance.
+The whole comment is at most 60 KiB of UTF-8. The following is the exact top-level
+field inventory for a `supervised-only` qualification or revalidation. Its named
+object types also have exact key sets. Missing, extra, duplicate, mistyped, or
+malformed fields block, as do unknown versions, nulls except where allowed,
+truncation, and any exceeded bound. JSON booleans are not integers. This strict
+schema is an audit format, not proof of acceptance.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `schema` | Literal `hermes-supervised-qualification/v1` | Fixed version. |
-| `kind` | Enum `qualification`, `revalidation`, `invalidation` | Lifecycle event. |
+| `kind` | Enum `qualification`, `revalidation` | Lifecycle event. |
 | `record_key` | Key | Unique create-once publication reservation. |
 | `prior_comment_id` | ID or null | Null only for the first qualification; otherwise the superseded event. |
 | `repository` | Repository | Immutable repository identity. |
@@ -123,15 +124,89 @@ booleans are not integers. This schema is an audit format, not proof of acceptan
 | `review_inventory` | EvidenceRef | Complete reviews and nested threads/comments manifest. |
 | `source_proof` | EvidenceRef | Source, receipt, reservation, ancestry, and diff proof. |
 | `occupancy_proof` | EvidenceRef | Complete task/session and publication occupancy proof. |
-| `checks` | Array of exactly three Check objects | One successful check per required context. |
-| `source_run` | SourceRun | Complete hosted Source run and attempt. |
+| `checks` | Array of exactly three successful Check objects | One successful check per required context. |
+| `source_run` | Successful SourceRun | Complete hosted Source run and attempt. |
 | `sensitive` | Sensitive or null | Separate immutable owner command; null only for proven nonsensitive scope. |
 | `role_request` | Text | Exact bot quotation, without rewriting or paraphrase. |
 | `reasoning` | Text | Why that quotation is solely a non-required role request. |
 | `machine_outcome` | MachineOutcome | Actual parser, collector, and authorization observations. |
-| `status` | Enum `supervised-only`, `blocked`, `invalidated` | Manual outcome, never automatic approval. |
+| `status` | Literal `supervised-only` | Manual outcome, never automatic approval. |
 | `reason` | Text | Outcome explanation, including every blocker or invalidation. |
 | `evidence` | Array of 1–128 Evidence objects | Public responses, compound manifests, and bounded private attestations. |
+
+`blocked` and `invalidated` are separate schema variants. They do not weaken this
+successful qualification/revalidation shape, and must not be represented by filling
+its required positive fields with invented values.
+
+The exact top-level keys for a `blocked` qualification or revalidation are
+`schema`, `kind`, `record_key`, `prior_comment_id`, `repository`, `pull`, `operator`,
+`head_sha`, `base_sha`, `reserved_at`, `observed_at`, `status`, `reason`,
+`gate_evidence`, and `evidence`. Here `kind` is `qualification` or `revalidation`,
+`status` is the literal `blocked`, head/base SHA may be null only when not actually
+observed, `gate_evidence` has 1–32 typed observations, and `evidence` retains 1–128
+bounded evidence entries. A missing head/base needs an evidence reference proving
+the failed or incomplete read and a reason; do not infer either binding.
+
+Gate observations are discriminated objects with exact keys:
+
+- Check: `gate` (`check`), `name` (one of the three required contexts), `outcome`
+  (`success`, `failure`, `pending`, `missing`, or `unknown`), `id` (ID or null),
+  `app_id` (ID or null), `head_sha` (SHA or null), `conclusion` (Text or null),
+  `check_status` (Text or null), `completed_at` (Time or null), `proof`
+  (EvidenceRef), and `reason` (Text).
+- Source run: `gate` (`source-run`), `outcome` (`success`, `failure`, `pending`,
+  `missing`, or `unknown`), `id` (ID or null), `attempt` (integer 1–100 or null),
+  `head_sha` (SHA or null), `run_status` (Text or null), `conclusion` (Text or null),
+  `completed_at` (Time or null), `proof` (EvidenceRef), and `reason` (Text).
+- Sensitive authorization: `gate` (`sensitive`), `outcome` (`authorized`,
+  `not-required`, `missing`, `rejected`, or `unknown`), `command` (Sensitive,
+  EvidenceRef, or null), `proof` (EvidenceRef), and `reason` (Text). `authorized`
+  requires the complete `Sensitive` object directly in `command`; `not-required`
+  requires `command=null` and proof of a nonsensitive diff. `missing` requires
+  `command=null` and a complete command inventory proving absence. `rejected`
+  requires an EvidenceRef to the actual rejected command and its observed rejection.
+  `unknown` retains whatever command evidence exists and never implies acceptance.
+- Other gate: `gate` (`review`, `source`, `occupancy`, `machine`, or
+  `authorization`), `outcome` (`missing`, `pending`, `failure`, `rejected`, `stale`,
+  `unknown`, or `uncertain`), `observation` (EvidenceRef or null), `proof`
+  (EvidenceRef), and `reason` (Text). Null observation is allowed only when the
+  referenced complete inventory proves that no observation is available.
+
+Every observation has a nonempty reason and a proof reference to actual retained
+evidence. For an observed check or source run, include the actual ID, head, conclusion,
+and completion time when available, plus the API status when observed. A pending
+check or run retains its actual pending status and null conclusion and completion
+time. A `missing` result has null ID, app ID, head, API status, conclusion, and
+completion time, with evidence of the complete endpoint inventory. `unknown`
+preserves only fields actually observed. The root `observed_at` must be no earlier
+than every referenced observation time.
+Require all three check contexts when a complete check inventory was read. The
+required app binding still applies to observed `source-ci` and `issue-link` checks.
+The record is `blocked` if any required gate is missing, pending, failing, rejected,
+stale, unknown, or uncertain. Successful observations in a blocked record do not
+qualify it.
+
+The exact top-level keys for an `invalidated` event are `schema`, `kind`,
+`record_key`, `prior_comment_id`, `repository`, `pull`, `operator`, `head_sha`,
+`base_sha`, `reserved_at`, `observed_at`, `status`, `changed_binding`, `reason`,
+and `evidence`. `kind` and `status` are the literals `invalidation` and
+`invalidated`; `prior_comment_id` is a positive ID. `head_sha` and `base_sha` preserve
+the old frozen snapshot. `changed_binding` has exactly `head_sha`, `base_sha`,
+`observed_at`, and `proof`; new SHAs are the values actually observed or null when
+unavailable. Its proof references fresh change evidence, including any changed
+review, command, check, run attempt, or occupancy binding. `observed_at` is no earlier
+than `reserved_at` or the change observation. The reason identifies the changed
+surface. The prior record retains the old positive evidence; the invalidation does
+not copy it as current proof or invent a replacement review, command, check, or
+machine observation. Retain an authenticated readback of the prior record and the
+fresh change proof in `evidence`; the prior comment ID and old root bindings must
+match that readback.
+
+For either variant, evidence keys and references follow the same bounds, exact
+discriminators, identity rules, and acyclic graph rules below. Every blocker and
+change reference must resolve to actual retained evidence. An invalidation is
+historical only; it cannot be promoted to `supervised-only`. A replacement
+qualification references it and gathers fresh evidence.
 
 Primitive types: ID is an integer from 1 through 2^63−1. SHA is exactly 40 lowercase
 hex characters; Digest is exactly 64 lowercase hex characters. Time is a UTC RFC3339
@@ -202,9 +277,11 @@ Named object types, with all keys mandatory:
   Only approved public responses may enter this inventory; API visibility alone
   does not make task/session contents safe to publish.
 - Binding: `repository_id` (ID), `pull_number` (ID), `head_sha` (SHA), `base_sha`
-  (SHA). All equal the root bindings for qualification/revalidation. Invalidation
-  alone may retain new change-evidence bindings alongside the frozen old bindings;
-  label their chronology in its reason and never treat old proof as current.
+  (SHA). In `supervised-only` qualification/revalidation, all equal the root
+  bindings. Invalidation and blocked variants retain each observed binding alongside the frozen root
+  binding; label chronology and mismatches, and never treat old proof as current.
+  A missing root head/base is permitted only in a blocked record with evidence and
+  a reason. Evidence retains the actual SHA values when they were observed.
   Check actual endpoint identities, numeric
   authors, PR node IDs, source SHAs, and command/review identities; a self-declared
   Binding or request URL is not identity proof.
@@ -307,6 +384,68 @@ validator.
 }
 ```
 
+### SYNTHETIC gate outcome examples
+
+These fragments use fictional values and exercise only the blocked/invalidation
+variants; they are not complete root comments or live evidence. `fixture` and
+`evidence_refs` are test labels, not artifact fields. The referenced evidence names
+stand in for entries in each full record's `evidence` array.
+
+```json
+{
+  "fixture": "blocked-checks",
+  "kind": "qualification",
+  "status": "blocked",
+  "gate_evidence": [
+    {"gate": "check", "name": "source-ci", "outcome": "missing", "id": null, "app_id": null, "head_sha": null, "check_status": null, "conclusion": null, "completed_at": null, "proof": "checks", "reason": "SYNTHETIC complete inventory has no check"},
+    {"gate": "check", "name": "integration-tests", "outcome": "failure", "id": 71, "app_id": null, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "failure", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC failed check"},
+    {"gate": "check", "name": "issue-link", "outcome": "success", "id": 72, "app_id": 15368, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC successful check retained with the failures"},
+    {"gate": "source-run", "outcome": "pending", "id": 73, "attempt": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "run_status": "in_progress", "conclusion": null, "completed_at": null, "proof": "source-run", "reason": "SYNTHETIC Source run is still pending"},
+    {"gate": "sensitive", "outcome": "missing", "command": null, "proof": "owner-comments", "reason": "SYNTHETIC complete inventory has no owner command"}
+  ],
+  "evidence_refs": ["checks", "source-run", "owner-comments"]
+}
+```
+
+```json
+{
+  "fixture": "blocked-sensitive",
+  "kind": "qualification",
+  "status": "blocked",
+  "gate_evidence": [
+    {"gate": "check", "name": "source-ci", "outcome": "success", "id": 81, "app_id": 15368, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC successful check"},
+    {"gate": "check", "name": "integration-tests", "outcome": "success", "id": 82, "app_id": null, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC successful check"},
+    {"gate": "check", "name": "issue-link", "outcome": "success", "id": 83, "app_id": 15368, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC successful check"},
+    {"gate": "source-run", "outcome": "success", "id": 84, "attempt": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "run_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "source-run", "reason": "SYNTHETIC complete Source run succeeded"},
+    {"gate": "sensitive", "outcome": "rejected", "command": "rejected-command", "proof": "command-readback", "reason": "SYNTHETIC observed owner command was rejected"},
+    {"gate": "review", "outcome": "unknown", "observation": null, "proof": "review-pages", "reason": "SYNTHETIC complete inventory did not establish a usable latest review"}
+  ],
+  "evidence_refs": ["checks", "source-run", "rejected-command", "command-readback", "review-pages"]
+}
+```
+
+```json
+{
+  "fixture": "invalidation",
+  "kind": "invalidation",
+  "status": "invalidated",
+  "prior_comment_id": 99,
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "changed_binding": {"head_sha": "cccccccccccccccccccccccccccccccccccccccc", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "observed_at": "2026-01-01T00:00:03Z", "proof": "fresh-head"},
+  "reserved_at": "2026-01-01T00:00:01Z",
+  "observed_at": "2026-01-01T00:00:04Z",
+  "reason": "SYNTHETIC head changed after the prior record",
+  "evidence_refs": ["prior-record", "fresh-head"]
+}
+```
+
+The examples contain no usable owner command, review, private proof, or live
+observation. Their positive IDs and results exist only where the synthetic evidence
+shows them. A blocked fragment cannot be changed to `status=supervised-only`: all
+three successful checks, a successful complete Source run, and the valid sensitive
+command or nonsensitive proof remain mandatory under the strict qualification schema.
+
 ### Publication and independent manual validation
 
 Keep the retained public evidence bundle outside the checkout at
@@ -384,18 +523,44 @@ no actual private path is published. These are operator examples, not coding-age
 actions and not a new validator CLI. Set BUNDLE and PRIVATE to new, distinct absolute
 record-key directories under already verified, owner-only, non-symlink parent
 directories. Run the setup below once in the same shell. It refuses existing
-destinations; choose a fresh record key rather than reusing or changing permissions
-on an existing tree.
+destinations. It rejects noncanonical path components and symlinked parent ancestry
+before any output or `mkdir`; each immediate parent must resolve to itself and be
+owned by the current user with mode 0700. Choose a fresh record key rather than
+reusing or changing permissions on an existing tree.
 
 ```sh
 set -eu
 umask 077
-case "$BUNDLE" in /*) ;; *) exit 1;; esac
-case "$PRIVATE" in /*) ;; *) exit 1;; esac
+validate_record_path() {
+  case "$1" in /*) ;; *) exit 1;; esac
+  case "$1" in
+    /|*/|*//*|*/./*|*/../*|*/.|*/..|/.|/..)
+      exit 1;;
+  esac
+}
+validate_record_path "$BUNDLE"
+validate_record_path "$PRIVATE"
 test "$BUNDLE" != "$PRIVATE"
 case "$BUNDLE/" in "$PRIVATE/"*) exit 1;; esac
 case "$PRIVATE/" in "$BUNDLE/"*) exit 1;; esac
-mkdir -m 700 -- "$BUNDLE" "$PRIVATE"
+for directory in "$BUNDLE" "$PRIVATE"; do
+  parent="${directory%/*}"
+  test -n "$parent" || parent=/
+  test -d "$parent"
+  test ! -L "$parent"
+  test "$(realpath -e -- "$parent")" = "$parent"
+  test "$(stat -c '%a' -- "$parent")" = 700
+  test "$(stat -c '%u' -- "$parent")" = "$(id -u)"
+done
+for directory in "$BUNDLE" "$PRIVATE"; do
+  test ! -e "$directory"
+  test ! -L "$directory"
+done
+mkdir -m 700 -- "$BUNDLE"
+if ! mkdir -m 700 -- "$PRIVATE"; then
+  rmdir -- "$BUNDLE"
+  exit 1
+fi
 for directory in "$BUNDLE" "$PRIVATE"; do
   test -d "$directory"
   test ! -L "$directory"
