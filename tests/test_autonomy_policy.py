@@ -190,12 +190,17 @@ _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE = {
 
 _ISSUE92_COPILOT_REVIEW_FIXTURE = {
     'deploy/cloud_coordinator.py': '3c2dd4527a1108cce142c6e9e8f70429c4c66153d8cc0193b3d4f041571f1ff1',
-    'deploy/review_evidence.py': 'ca76b89cd3d6b9b01a42d8edc4594574d369bd681316f56cfca2279fe441a124',
+    'deploy/review_evidence.py': '6cad7d062531c829731eba30ccac3dd73b28a748e8d5c0e40cbb8d2995b303c6',
 }
 
 _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE = {
     'deploy/cloud_coordinator.py': '0e43fae886f34b897fd62dfd365869718ec40abc0c7e1e26b75adc445c158b33',
-    'deploy/review_evidence.py': '81582ac0ee3523508a16bf437ac3d134a961e45371bed76cd755a1506d71cffa',
+    'deploy/review_evidence.py': '191c9633f7a50b8f8b8b58094795984bcedcf10643378e0c15d70da5e575b3f4',
+}
+
+_PR105_OWNER_ABANDONMENT_FIXTURE = {
+    'deploy/cloud_coordinator.py': '97bdfddcb2453fc95ee5ec7e09a746ee79566f8cff72d6416a494b163365392f',
+    'deploy/task_receipts.py': '1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
@@ -268,7 +273,8 @@ def _source_files():
             | _ISSUE85_PHOTO_FIXTURE | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
             | _ISSUE92_COPILOT_REVIEW_FIXTURE | _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE
             | _ISSUE98_PHOTO_POLICY_FIXTURE
-            | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE)
+            | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
+            | _PR105_OWNER_ABANDONMENT_FIXTURE)
 
 
 def _source_ci():
@@ -686,7 +692,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         if path in {'deploy/cloud_coordinator.py', 'deploy/issue_starter.py',
                     'deploy/review_evidence.py'}
     } == {
-        'deploy/cloud_coordinator.py': _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE[
+        'deploy/cloud_coordinator.py': _PR105_OWNER_ABANDONMENT_FIXTURE[
             'deploy/cloud_coordinator.py'
         ],
         'deploy/issue_starter.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
@@ -723,6 +729,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
             | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
             | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
             | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
+            | _PR105_OWNER_ABANDONMENT_FIXTURE
         ).items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
     }
@@ -766,10 +773,11 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: SOURCE_FINGERPRINTS[path]
         for path in _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
     } == (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
-          | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE)
+          | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE | _PR105_OWNER_ABANDONMENT_FIXTURE)
     for path, digest in (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
                          | _ISSUE92_COPILOT_REVIEW_FIXTURE
-                         | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE).items():
+                         | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
+                         | _PR105_OWNER_ABANDONMENT_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
@@ -825,7 +833,7 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
     SOURCE_FINGERPRINTS, _PENDING_ISSUE50_RECEIPT_FIXTURE | _ISSUE65_RECEIPT_PRODUCER_FIXTURE
     | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
     | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
-    | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE,
+    | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE | _PR105_OWNER_ABANDONMENT_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
 def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
@@ -847,7 +855,7 @@ def test_issue83_initial_review_pin_matches_actual_candidate_bytes(path, pins):
 
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
-    | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE,
+    | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE | _PR105_OWNER_ABANDONMENT_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE))
 def test_issue87_bounded_repair_pin_matches_actual_candidate_bytes(path, pins):

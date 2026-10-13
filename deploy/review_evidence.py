@@ -297,6 +297,7 @@ def current_copilot_review_valid(reviews, head_sha, *, pull_author_id, complete=
 class _Element:
     tag: str
     children: list = field(default_factory=list)
+    href: str | None = None
 
 
 class _DisclosureParser(HTMLParser):
@@ -348,7 +349,9 @@ class _DisclosureParser(HTMLParser):
                 not isinstance(child, str) or child.strip() for child in parent.children
             ):
                 raise ValueError("misplaced-summary")
-        node = _Element(tag)
+        hrefs = [value for name, value in attrs if name == "href"]
+        href = hrefs[0] if len(hrefs) == 1 else None
+        node = _Element(tag, href=href)
         self.stack[-1].children.append(node)
         if tag not in self._VOID:
             self.stack.append(node)
@@ -411,6 +414,18 @@ def _section_kind(node):
     label = " ".join(_text(summary).split()) if summary else ""
     if summary and _text(summary) != _text(summary, quoted=False):
         return "ambiguous", label
+    if re.fullmatch(r"\d{1,3} resolved since last review", label, re.IGNORECASE):
+        return "counted-resolved", label
+    counted = re.fullmatch(
+        r"(\d{1,3}) (open|resolved) (findings?)", label, re.IGNORECASE,
+    )
+    if counted:
+        count = int(counted[1])
+        plural = counted[3].lower() == "findings"
+        if plural == (count != 1):
+            return ("counted-open" if counted[2].lower() == "open"
+                    else "counted-resolved"), label
+        return "ambiguous", label
     # Only complete section labels confer scope; a finding title containing
     # 'resolved' or 'history' must not silently become an exclusion boundary.
     for kind, pattern in (
@@ -422,6 +437,79 @@ def _section_kind(node):
         if re.fullmatch(pattern, label, re.IGNORECASE):
             return kind, label
     return "ambiguous", label
+
+
+_DISCUSSION_HREF_RE = re.compile(
+    r"(?:#discussion_r[1-9]\d*|"
+    r"https://github\.com/lindayi/hermes-mobile/pull/[1-9]\d+#discussion_r[1-9]\d*)",
+    re.IGNORECASE,
+)
+
+
+def _discussion_targets(node):
+    targets = set()
+    pending = list(reversed(node.children))
+    while pending:
+        child = pending.pop()
+        if isinstance(child, _Element):
+            if child.tag in {"code", "pre", "blockquote"}:
+                continue
+            if child.tag in {"ul", "ol", "li"}:
+                # A nested inventory item is not covered by the outer li count.
+                return set()
+            if child.tag == "a":
+                # Count live anchors, not distinct supported destinations. An
+                # extra or unsupported anchor makes the entire item ambiguous.
+                if targets or not isinstance(child.href, str) or not (
+                    _DISCUSSION_HREF_RE.fullmatch(child.href)
+                ):
+                    return set()
+                # Fragment and absolute links identify the same review comment.
+                targets.add(child.href.rsplit("#", 1)[1].lower())
+            pending.extend(reversed(child.children))
+    return targets
+
+
+def _has_inert_disclosure(root):
+    pending = [(root, False)]
+    while pending:
+        node, quoted = pending.pop()
+        if not isinstance(node, _Element):
+            continue
+        quoted = quoted or node.tag in {"code", "pre", "blockquote"}
+        if quoted and node.tag == "details":
+            return True
+        pending.extend((child, quoted) for child in reversed(node.children))
+    return False
+
+
+def _counted_section_targets(node, expected):
+    """Return validated normalized targets, or None for an incomplete section."""
+    # Counted links cannot stand in for nested, unclassified live findings.
+    if next(_disclosures(node), None) is not None:
+        return None
+    body = [child for child in node.children if child is not _summary(node)]
+    elements = [child for child in body if isinstance(child, _Element)]
+    if any(isinstance(child, str) and child.strip() for child in body):
+        return None
+    if expected == 0:
+        return set() if not elements else None
+    if len(elements) != 1 or elements[0].tag != "ul":
+        return None
+    items = []
+    for child in elements[0].children:
+        if isinstance(child, str) and not child.strip():
+            continue
+        if not isinstance(child, _Element) or child.tag != "li":
+            return None
+        items.append(child)
+    targets = [_discussion_targets(item) for item in items]
+    unique_targets = set().union(*targets)
+    if (len(items) != expected
+            or any(len(item_targets) != 1 for item_targets in targets)
+            or len(unique_targets) != expected):
+        return None
+    return unique_targets
 
 
 def _text(node, *, exclude_details=False, exclude_history=False, quoted=True, render_quote=None,
@@ -497,6 +585,10 @@ def _without_metadata(node):
         ):
             index += 1
             continue
+        if (index == 0 and isinstance(child, str)
+                and re.fullmatch(r"🧠\s+", child)):
+            index += 1
+            continue
         if not isinstance(child, _Element) or child.tag != "strong":
             break
         label = _text(child).strip()
@@ -515,9 +607,50 @@ def _without_metadata(node):
     return _Element(node.tag, children[index:])
 
 
-def _summary_content(root, overview):
+def _provider_summary(root):
+    """Return only the summary paragraph in the current structured overview frame."""
+    children = [
+        child for child in root.children
+        if not isinstance(child, str) or child.strip()
+    ]
+    tags = [child.tag if isinstance(child, _Element) else None for child in children[:3]]
+    if tags == ["h2", "h3", "p"]:
+        if _text(children[0], quoted=False).strip() != "Copilot review overview":
+            return None
+        status_node, summary = children[1], children[2]
+    elif tags[:2] == ["h3", "p"]:
+        status_node, summary = children[0], children[1]
+    else:
+        return None
+    status = " ".join(_text(status_node, quoted=False).split())
+    if not re.fullmatch(
+            r"(?:[🟢🔵🟡] )?(?:Looks good|Needs a closer look|Changes recommended)",
+            status):
+        return None
+    if _text(summary, quoted=False) != _text(summary):
+        return None
+    return summary
+
+
+def _zero_open_metadata(node):
+    """Only the provider's whole, standalone zero-open paragraph is metadata."""
+    if not isinstance(node, _Element) or node.tag != "p":
+        return False
+    children = [child for child in node.children if not isinstance(child, str) or child.strip()]
+    if (len(children) != 1 or not isinstance(children[0], _Element)
+            or children[0].tag != "strong"
+            or not all(isinstance(child, str) for child in children[0].children)):
+        return False
+    return " ".join(_text(children[0]).split()) == "0 open findings"
+
+
+def _summary_content(root, overview, *, exclude=None, exclude_zero_open=False):
     children = []
     for child in root.children:
+        if child is exclude:
+            continue
+        if exclude_zero_open and _zero_open_metadata(child):
+            continue
         if overview and isinstance(child, _Element):
             if child.tag == "hr":
                 break
@@ -610,13 +743,71 @@ def parse_body(body, state, *, body_html=None):
                     reason="unstructured-comment", inventory_complete=False)
 
     sections = list(_disclosures(parser.root)) if overview else []
+    if overview:
+        headings = []
+        heading_positions = []
+        children = [node for node in parser.root.children
+                    if not isinstance(node, str) or node.strip()]
+        for position, node in enumerate(children):
+            if not isinstance(node, _Element) or node.tag not in {'h2', 'h3'}:
+                continue
+            label = ' '.join(_text(node, quoted=False).split())
+            if (node.tag == 'h2' and label == 'Copilot review overview'
+                    or node.tag == 'h3' and re.fullmatch(
+                        r'(?:[🟢🔵🟡] )?(?:Looks good|Needs a closer look|Changes recommended)', label)):
+                headings.append(node.tag)
+                heading_positions.append(position)
+        if (headings not in ([], ['h2'], ['h3'], ['h2', 'h3'])
+                or heading_positions != list(range(len(headings)))):
+            result['classifications'].append('ambiguous')
+            result['ambiguous'] = True
+            result['inventory_complete'] = False
     positive_open = False
+    counted_sections = set()
+    counted_targets = set()
+    zero_open_count = sum(_zero_open_metadata(child) for child in parser.root.children) if overview else 0
+    open_section_count = zero_open_count
+    if zero_open_count > 1:
+        result["classifications"].append("ambiguous")
+        result["ambiguous"] = True
+    matched_active_sections = []
+    active_section_seen = False
+    resolved_section_seen = False
+    history_section_seen = False
     for node in sections:
         kind, label = _section_kind(node)
         result["classifications"].append(kind)
         if kind == "ambiguous":
             result["ambiguous"] = True
+        elif kind in {"counted-open", "counted-resolved"}:
+            category = "open" if kind == "counted-open" else "resolved"
+            count = int(re.match(r"\d+", label)[0])
+            duplicate = category in counted_sections or (
+                open_section_count > 0 if category == "open" else resolved_section_seen
+            )
+            targets = _counted_section_targets(node, count)
+            if duplicate or targets is None or counted_targets.intersection(targets):
+                result["classifications"][-1] = "ambiguous"
+                result["ambiguous"] = True
+                result["inventory_complete"] = False
+            else:
+                counted_sections.add(category)
+                counted_targets.update(targets)
+                result["classifications"][-1] = (
+                    "inline" if category == "open" else "resolved"
+                )
+                if category == "open":
+                    open_section_count += 1
+                    if count:
+                        positive_open = True
+                else:
+                    resolved_section_seen = True
         elif kind == "inline":
+            if open_section_count:
+                result["classifications"][-1] = "ambiguous"
+                result["ambiguous"] = True
+                result["inventory_complete"] = False
+            open_section_count += 1
             count = int(re.search(r"\((\d+)\)$", label)[1])
             if count:
                 positive_open = True
@@ -638,6 +829,8 @@ def parse_body(body, state, *, body_html=None):
                          if _has_live_content(child)]
                 if len(texts) != expected:
                     result["inventory_complete"] = False
+                elif expected == 1:
+                    matched_active_sections.append((expected, texts))
             else:
                 result["inventory_complete"] = False
                 # Count/shape uncertainty may preserve a populated active section,
@@ -647,8 +840,44 @@ def parse_body(body, state, *, body_html=None):
             if not texts:
                 result["classifications"][-1] = "no-findings"
             result["findings"].extend(("previously-missed", text) for text in texts if text)
+            if active_section_seen:
+                result["classifications"][-1] = "ambiguous"
+                result["ambiguous"] = True
+                result["inventory_complete"] = False
+            active_section_seen = True
+        elif kind == "resolved":
+            if resolved_section_seen:
+                result["classifications"][-1] = "ambiguous"
+                result["ambiguous"] = True
+                result["inventory_complete"] = False
+            resolved_section_seen = True
+        elif kind == "history":
+            if history_section_seen:
+                result["classifications"][-1] = "ambiguous"
+                result["ambiguous"] = True
+                result["inventory_complete"] = False
+            history_section_seen = True
 
-    summary_root = _summary_content(parser.root, overview)
+    if overview and _has_inert_disclosure(parser.root):
+        result["classifications"].append("ambiguous")
+        result["ambiguous"] = True
+        result["inventory_complete"] = False
+
+    provider_summary = _provider_summary(parser.root) if overview else None
+    attach_provider_summary = (
+        provider_summary is not None
+        and result["inventory_complete"] is True
+        and result["ambiguous"] is False
+        and open_section_count == 1
+        and "open" in counted_sections
+        and len(matched_active_sections) == 1
+        and len(result["findings"]) == 1
+        and result["findings"][0][0] == "previously-missed"
+    )
+    summary_root = _summary_content(
+        parser.root, overview, exclude=provider_summary if attach_provider_summary else None,
+        exclude_zero_open=zero_open_count == 1 and not result["ambiguous"],
+    )
     summary = _text(summary_root, exclude_details=True, quoted=False).strip()
     # Keep quoted nodes opaque through footer/framing/status removal as well as
     # classification. Fresh render tokens cannot collide with any input text;
@@ -666,6 +895,13 @@ def parse_body(body, state, *, body_html=None):
     kind, prose = _summary_disposition(summary, overview=overview, state=state, context=context)
     prose = re.sub(re.escape(prefix) + r"(\d+)" + re.escape(prefix),
                    lambda match: quotations[int(match[1])], prose)
+    if attach_provider_summary and kind in {"no-findings", "validation-only"}:
+        summary_text = _text(provider_summary).strip()
+        finding_kind, finding_text = result["findings"][0]
+        result["findings"][0] = (
+            finding_kind, summary_text + "\n\n" + finding_text,
+        )
+        kind = "no-findings"
     result["classifications"].append(kind)
     if kind == "active" and not positive_open and not result["findings"] and not result["ambiguous"]:
         result["findings"].append(("changes-requested", prose))

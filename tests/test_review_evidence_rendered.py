@@ -6,7 +6,9 @@ import pytest
 
 from deploy.cloud_coordinator import ApiError, GhApi, StateStore, copilot_review_valid, repair_request
 from deploy.review_evidence import OVERVIEW_MARKER, parse_body, review_body_disposition
-from test_cloud_coordinator import HEAD, _managed_cycle
+from test_cloud_coordinator import (
+    HEAD, ProgressApi, _managed_cycle, refresh_owner_review,
+)
 from test_review_evidence import ReviewApi, copilot_review, _evidence
 
 
@@ -31,6 +33,47 @@ HTML_ESCAPED = (
     "</details></details>"
 )
 
+CURRENT_COPILOT_RAW = (
+    "<!-- ccr-overview-v2 -->\n\n### 🔵 Needs a closer look\n\n"
+    "The operator procedure does not bind the active release, application virtualenv, "
+    "or live configuration path, so its commands may fail or operate on the wrong source.\n\n"
+    "<details open>\n<summary><strong>1 open finding</strong></summary>\n\n"
+    "- [Register runtime dependency in pinned execution-source policy]"
+    "(https://github.com/lindayi/hermes-mobile/pull/99#discussion_r4250499422) · New\n"
+    "</details>\n\n"
+    "<details>\n<summary><strong>Previously missed (1)</strong></summary>\n\n"
+    "In code that hasn't changed since last review\n\n"
+    "<details><summary>Operator commands omit deployed source, virtualenv, and live config</summary>\n\n"
+    "`docs/photo-attachments-spec.md:292`\n\n"
+    "These commands do not bind the deployed source, the bridge's virtualenv, or even a value "
+    "for `HERMES_MOBILE_CONFIG`; a normal owner shell does not inherit the service environment. "
+    "Since `backend.manage` imports locked dependencies at startup, bare `python3` may fail or "
+    "may run a checkout different from the active release, so this is not a safe exact operator "
+    "procedure. Use the active `hermes-mobile-deploy/current` working tree, the established "
+    "application virtualenv, and the explicit live config path.\n</details>\n</details>\n\n"
+    "🧠 **Review effort:** Balanced"
+)
+CURRENT_COPILOT_HTML = (
+    "<h3>🔵 Needs a closer look</h3>"
+    "<p>The operator procedure does not bind the active release, application virtualenv, "
+    "or live configuration path, so its commands may fail or operate on the wrong source.</p>"
+    "<details open><summary><strong>1 open finding</strong></summary>"
+    "<ul><li><a href=\"https://github.com/lindayi/hermes-mobile/pull/99#discussion_r4250499422\">"
+    "Register runtime dependency in pinned execution-source policy</a> · New</li></ul></details>"
+    "<details><summary><strong>Previously missed (1)</strong></summary>"
+    "In code that hasn't changed since last review"
+    "<details><summary>Operator commands omit deployed source, virtualenv, and live config</summary>"
+    "<p><code>docs/photo-attachments-spec.md:292</code></p>"
+    "<p>These commands do not bind the deployed source, the bridge's virtualenv, or even a value "
+    "for <code>HERMES_MOBILE_CONFIG</code>; a normal owner shell does not inherit the service "
+    "environment. Since <code>backend.manage</code> imports locked dependencies at startup, bare "
+    "<code>python3</code> may fail or may run a checkout different from the active release, so "
+    "this is not a safe exact operator procedure. Use the active "
+    "<code>hermes-mobile-deploy/current</code> working tree, the established application virtualenv, "
+    "and the explicit live config path.</p></details></details>"
+    "<p>🧠 <strong>Review effort:</strong> Balanced</p>"
+)
+
 
 @pytest.mark.parametrize("count", [0, 1, 8, 9])
 def test_rendered_inventory_reports_total_and_cap(count):
@@ -46,6 +89,494 @@ def test_rendered_inventory_reports_total_and_cap(count):
     assert len(result["findings"]) == min(count, 8)
     assert result["truncated"] is (count > 8)
     assert result["inventory_complete"] is (count <= 8)
+
+
+@pytest.mark.parametrize("legacy_heading", ["", "<h2>Copilot review overview</h2>"])
+def test_current_copilot_overview_counts_findings_and_preserves_summary_context(legacy_heading):
+    review = review_pair(CURRENT_COPILOT_RAW, legacy_heading + CURRENT_COPILOT_HTML,
+                         state="COMMENTED")
+    result = review_body_disposition([review], HEAD, reviewer_id=review["user"]["id"])
+
+    assert result["inventory_complete"] is True
+    assert result["ambiguous"] is False
+    assert result["findings_total"] == 1
+    [finding] = result["findings"]
+    assert finding["review"] == review["id"] and finding["head"] == HEAD
+    assert "The operator procedure does not bind the active release" in finding["text"]
+    assert "These commands do not bind the deployed source" in finding["text"]
+    assert "Register runtime dependency in pinned execution-source policy" not in finding["text"]
+
+
+@pytest.mark.parametrize('location', ['after-summary', 'after-inventory'])
+def test_misplaced_single_legacy_heading_is_ambiguous(location):
+    heading = '<h2>Copilot review overview</h2>'
+    rendered = CURRENT_COPILOT_HTML
+    if location == 'after-summary':
+        rendered = rendered.replace('</p>', '</p>' + heading, 1)
+    else:
+        rendered += heading
+    result = parse_body(CURRENT_COPILOT_RAW, 'COMMENTED', body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings_total'] == 1
+
+
+@pytest.mark.parametrize('heading', ['<h3>Looks good</h3>', '<h3>🔵 Needs a closer look</h3>',
+                                     '<h2>Copilot review overview</h2>'])
+@pytest.mark.parametrize('location', ['before', 'middle', 'after'])
+def test_duplicate_provider_frame_headings_are_ambiguous(heading, location):
+    rendered = '<h2>Copilot review overview</h2>' + CURRENT_COPILOT_HTML
+    if location == 'before':
+        rendered = heading + rendered
+    elif location == 'middle':
+        rendered = rendered.replace('</p>', '</p>' + heading, 1)
+    else:
+        rendered += heading
+    result = parse_body(CURRENT_COPILOT_RAW, 'COMMENTED', body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings_total'] == 1
+
+
+@pytest.mark.parametrize("legacy_heading", ["", "<h2>Copilot review overview</h2>"])
+@pytest.mark.parametrize("text_position", ["before-status", "before-summary", "after-summary"])
+def test_provider_summary_root_text_is_incomplete_without_crashing(legacy_heading, text_position):
+    rendered = legacy_heading + CURRENT_COPILOT_HTML
+    if text_position == "before-status":
+        rendered = rendered.replace("<h3>", "Unclassified root text.<h3>", 1)
+    elif text_position == "before-summary":
+        rendered = rendered.replace("<p>", "Unclassified root text.<p>", 1)
+    else:
+        rendered = rendered.replace("</p>", "</p>Unclassified root text.", 1)
+    result = parse_body(CURRENT_COPILOT_RAW, "COMMENTED", body_html=rendered)
+
+    assert result["inventory_complete"] is False
+    assert result["ambiguous"] is True
+    assert result["findings_total"] == 1
+    assert "These commands do not bind the deployed source" in result["findings"][0][1]
+
+
+@pytest.mark.parametrize("rendered", [
+    CURRENT_COPILOT_HTML.replace("1 open finding", "2 open findings"),
+    CURRENT_COPILOT_HTML.replace("Previously missed (1)", "Previously missed (2)"),
+    CURRENT_COPILOT_HTML.replace(
+        "<details><summary><strong>Previously missed",
+        "<details><summary><strong>1 open finding</strong></summary>"
+        "<ul><li><a href=\"#discussion_r445\">Duplicate section</a></li></ul></details>"
+        "<details><summary><strong>Previously missed",
+    ),
+    CURRENT_COPILOT_HTML.replace(
+        "<h3>🔵 Needs a closer look</h3>",
+        "<h3>🔵 Needs a closer look</h3><p>Unaccounted review prose.</p>",
+    ),
+])
+def test_current_overview_count_mismatch_duplicate_or_extra_prose_is_incomplete(rendered):
+    review = review_pair(CURRENT_COPILOT_RAW, rendered, state="COMMENTED")
+    result = review_body_disposition([review], HEAD, reviewer_id=review["user"]["id"])
+
+    assert result["inventory_complete"] is False
+
+
+@pytest.mark.parametrize(("label", "count", "classification"), [
+    ("1 open finding", 1, "inline"),
+    ("2 open findings", 2, "inline"),
+    ("0 open findings", 0, "inline"),
+    ("1 resolved finding", 1, "resolved"),
+    ("2 resolved findings", 2, "resolved"),
+    ("0 resolved since last review", 0, "resolved"),
+    ("1 resolved since last review", 1, "resolved"),
+    ("2 resolved since last review", 2, "resolved"),
+])
+def test_count_leading_sections_require_matching_linked_items(label, count, classification):
+    items = "".join(
+        f'<li><a href="#discussion_r{index + 1}">Finding {index + 1}</a></li>'
+        for index in range(count)
+    )
+    listing = f"<ul>{items}</ul>" if count else ""
+    rendered = (
+        f"<details><summary><strong>{label}</strong></summary>{listing}</details>"
+    )
+    result = parse_body(OVERVIEW_MARKER + "\nCounted section", "COMMENTED",
+                        body_html=rendered)
+
+    assert result["inventory_complete"] is True
+    assert result["ambiguous"] is False
+    assert classification in result["classifications"]
+
+
+@pytest.mark.parametrize("item", [
+    "<a>Finding without a target</a>",
+    '<a href="#discussion_r42" href="https://example.invalid/">Duplicate targets</a>',
+    '<a href="/issues/99">Unrelated relative link</a>',
+    '<a href="https://example.invalid/#discussion_r42">External discussion-like link</a>',
+    "Not linked",
+])
+def test_count_leading_sections_reject_unsupported_discussion_targets(item):
+    rendered = (
+        '<details><summary><strong>1 open finding</strong></summary>'
+        f"<ul><li>{item}</li></ul></details>"
+    )
+    result = parse_body(OVERVIEW_MARKER + "\nCounted section", "COMMENTED",
+                        body_html=rendered)
+
+    assert result["inventory_complete"] is False
+    assert result["ambiguous"] is True
+
+
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("targets", [
+    (("#discussion_r1",), ("#discussion_r1",)),
+    (("#discussion_r1",), ("https://github.com/lindayi/hermes-mobile/pull/103#discussion_r1",)),
+    (("#discussion_r1", "#discussion_r2"),),
+])
+def test_counted_inventory_rejects_duplicate_or_multiple_discussion_targets(category, targets):
+    count = len(targets)
+    label = f"{count} {category} finding" + ("s" if count != 1 else "")
+    items = "".join(
+        "<li>" + "".join(f'<a href="{target}">Finding</a>' for target in item) + "</li>"
+        for item in targets
+    )
+    rendered = f"<details><summary>{label}</summary><ul>{items}</ul></details>"
+    result = parse_body(OVERVIEW_MARKER + "\nCounted section", "COMMENTED",
+                        body_html=rendered)
+
+    assert result["inventory_complete"] is False
+    assert result["ambiguous"] is True
+    assert result["findings"] == []
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("resolved_label", ["1 resolved finding", "1 resolved since last review"])
+@pytest.mark.parametrize("resolved_target", [
+    "#discussion_r1",
+    "https://github.com/lindayi/hermes-mobile/pull/103#discussion_r1",
+    "#DISCUSSION_R1",
+    "#discussion_r2",
+])
+def test_counted_inventory_requires_disjoint_cross_section_targets(reverse, resolved_label, resolved_target):
+    sections = [
+        '<details><summary>1 open finding</summary><ul><li>'
+        '<a href="#discussion_r1">Open finding</a></li></ul></details>',
+        f'<details><summary>{resolved_label}</summary><ul><li>'
+        f'<a href="{resolved_target}">Resolved finding</a></li></ul></details>',
+    ]
+    if reverse:
+        sections.reverse()
+    rendered = "".join(sections)
+    review = review_pair(OVERVIEW_MARKER + "\nSynthetic counted inventory", rendered,
+                         state="COMMENTED")
+    result = review_body_disposition([review], HEAD, reviewer_id=review["user"]["id"])
+    distinct = resolved_target == "#discussion_r2"
+    assert result["inventory_complete"] is distinct
+    assert result["ambiguous"] is not distinct
+    assert result["findings"] == []
+    # Inventory uncertainty must not erase independently bounded active evidence.
+    with_active = parse_body(review["body"], "COMMENTED", body_html=HTML_ESCAPED + rendered)
+    assert with_active["inventory_complete"] is distinct
+    assert with_active["findings_total"] == 1
+    assert "decode <details> only after validation." in with_active["findings"][0][1]
+
+
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("extra_anchor", [
+    '<a href="https://example.invalid/">Unsupported link</a>',
+    '<a>Missing target</a>',
+    '<a href="#discussion_r1">Repeated target</a>',
+])
+def test_counted_inventory_rejects_extra_live_anchors(category, extra_anchor):
+    rendered = (
+        f"<details><summary>1 {category} finding</summary><ul><li>"
+        '<a href="#discussion_r1">Finding</a>' + extra_anchor
+        + "</li></ul></details>"
+    )
+    result = parse_body(OVERVIEW_MARKER + "\nCounted section", "COMMENTED",
+                        body_html=rendered)
+
+    assert result["inventory_complete"] is False
+    assert result["ambiguous"] is True
+    assert result["findings"] == []
+
+
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("quote_tag", ["code", "pre", "blockquote"])
+def test_counted_inventory_keeps_quoted_anchors_inert_and_decorations(category, quote_tag):
+    rendered = (
+        f"<details><summary>1 {category} finding</summary><ul><li>"
+        '<themed-picture><picture><source srcset="severity.svg">'
+        '<img src="severity.png" alt="Medium severity"></picture></themed-picture>'
+        '<a href="#discussion_r1"><strong>Finding</strong></a>'
+        f'<{quote_tag}><a href="#discussion_r1">Quoted duplicate</a>'
+        '<a href="https://example.invalid/">Quoted unsupported link</a>'
+        f'<a>Quoted missing target</a></{quote_tag}>'
+        "</li></ul></details>"
+    )
+    result = parse_body(OVERVIEW_MARKER + "\nCounted section", "COMMENTED",
+                        body_html=rendered)
+
+    assert result["inventory_complete"] is True
+    assert result["ambiguous"] is False
+    assert result["findings"] == []
+
+
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("location", ["item", "anchor", "summary"])
+def test_counted_inventory_rejects_nested_live_disclosure(category, location):
+    nested = ('<details><summary>Previously missed (1)</summary>'
+              '<p>Reject stale credentials before writing.</p></details>')
+    label = f'1 {category} finding'
+    anchor = '<a href="#discussion_r1">Finding</a>'
+    if location == "anchor":
+        anchor = anchor.replace('</a>', nested + '</a>')
+    item = anchor + (nested if location == "item" else '')
+    summary = label + (nested if location == "summary" else '')
+    rendered = f'<details><summary>{summary}</summary><ul><li>{item}</li></ul></details>'
+    result = parse_body(OVERVIEW_MARKER + '\nCounted section', 'COMMENTED', body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+
+
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("nested", [
+    '<ul><li>Unclassified nested finding</li></ul>',
+    '<ol><li>Unclassified nested finding</li></ol>',
+    '<li>Unclassified nested finding</li>',
+])
+def test_counted_inventory_rejects_nested_list_items(category, nested):
+    rendered = (
+        f'<details><summary>1 {category} finding</summary><ul><li>'
+        '<a href="#discussion_r1">Finding</a>' + nested + '</li></ul></details>'
+    )
+    result = parse_body(OVERVIEW_MARKER + '\nCounted inventory', 'COMMENTED',
+                        body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings'] == []
+
+
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("quote_tag", ["code", "pre", "blockquote"])
+def test_counted_inventory_keeps_nested_quoted_lists_inert(category, quote_tag):
+    rendered = (
+        f'<details><summary>1 {category} finding</summary><ul><li>'
+        '<a href="#discussion_r1">Finding</a>'
+        f'<{quote_tag}><ul><li>Quoted example</li></ul></{quote_tag}>'
+        '</li></ul></details>'
+    )
+    result = parse_body(OVERVIEW_MARKER + '\nCounted inventory', 'COMMENTED',
+                        body_html=rendered)
+    assert result['inventory_complete'] is True
+    assert result['ambiguous'] is False
+
+
+@pytest.mark.parametrize("category", ["open", "resolved"])
+@pytest.mark.parametrize("legacy_first", [False, True])
+def test_counted_inventory_same_kind_sections_remain_incomplete(category, legacy_first):
+    counted = (f'<details><summary>1 {category} finding</summary><ul><li>'
+               '<a href="#discussion_r1">Finding</a></li></ul></details>')
+    legacy_label = 'Open (1)' if category == 'open' else 'Resolved (1)'
+    legacy = f'<details><summary>{legacy_label}</summary>Known legacy context</details>'
+    for rendered in (counted + counted.replace('discussion_r1', 'discussion_r2'),
+                     legacy + counted if legacy_first else counted + legacy):
+        result = parse_body(OVERVIEW_MARKER + '\nCounted inventory', 'COMMENTED',
+                            body_html=rendered)
+        assert result['inventory_complete'] is False
+        assert result['ambiguous'] is True
+
+
+@pytest.mark.parametrize("other_label", ['1 resolved finding', 'Resolved (1)', '1 resolved since last review'])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_resolved_since_alias_rejects_duplicate_category(other_label, reverse):
+    first = ('<details><summary>1 resolved since last review</summary><ul><li>'
+             '<a href="#discussion_r1">Finding</a></li></ul></details>')
+    second = (f'<details><summary>{other_label}</summary><ul><li>'
+              '<a href="#discussion_r2">Other finding</a></li></ul></details>')
+    result = parse_body(OVERVIEW_MARKER + '\nCounted inventory', 'COMMENTED',
+                        body_html=second + first if reverse else first + second)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+
+
+@pytest.mark.parametrize("content", [
+    '', '<p>Unclassified prose</p>',
+    '<ul><li>Unlinked finding</li></ul>',
+    '<ul><li><a href="#discussion_r1">Finding</a><a>Extra anchor</a></li></ul>',
+    '<ul><li><a href="#discussion_r1">Finding</a><ul><li>Hidden item</li></ul></li></ul>',
+    '<ul><li><a href="#discussion_r1">Finding</a>'
+    '<details><summary>Unknown finding</summary>Hidden prose</details></li></ul>',
+    '<ul><li><a href="#discussion_r1">One</a></li><li><a href="#discussion_r2">Two</a></li></ul>',
+])
+def test_resolved_since_alias_requires_complete_linked_inventory(content):
+    rendered = f'<details><summary>1 resolved since last review</summary>{content}</details>'
+    result = parse_body(OVERVIEW_MARKER + '\nCounted inventory', 'COMMENTED', body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings'] == []
+
+
+@pytest.mark.parametrize("label", ['1 resolved since last review extra', '1 resolved finding extra'])
+def test_unsupported_counted_labels_remain_ambiguous_without_hiding_active(label):
+    rendered = (f'<details><summary>{label}</summary><ul><li>'
+                '<a href="#discussion_r1">Finding</a></li></ul></details>')
+    result = parse_body(OVERVIEW_MARKER + '\nCounted inventory', 'COMMENTED',
+                        body_html=rendered + HTML_ESCAPED)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings_total'] == 1
+    assert 'decode <details> only after validation.' in result['findings'][0][1]
+
+
+@pytest.mark.parametrize("extra", [
+    '', '<details><summary>0 resolved since last review</summary></details>',
+    '<details><summary>1 resolved since last review</summary><ul><li>'
+    '<themed-picture><picture><source srcset="severity.svg"><img src="severity.png"></picture>'
+    '</themed-picture><a href="#discussion_r1">Resolved finding</a></li></ul></details>',
+])
+def test_standalone_zero_open_metadata_accepts_clean_provider_frame(extra):
+    rendered = ('<h3>🟢 Looks good</h3><p>No issues were found.</p>'
+                '<p><strong>0 open findings</strong></p>' + extra
+                + '<p>🧠 <strong>Review effort:</strong> Balanced</p>')
+    result = parse_body(OVERVIEW_MARKER + '\nSynthetic clean provider frame', 'COMMENTED',
+                        body_html=rendered)
+    assert result['inventory_complete'] is True
+    assert result['ambiguous'] is False
+    assert result['findings'] == []
+
+
+@pytest.mark.parametrize("extra", [
+    '<p><strong>0 open findings</strong></p>',
+    '<details><summary>0 open findings</summary></details>',
+    '<details><summary>1 open finding</summary><ul><li>'
+    '<a href="#discussion_r1">Finding</a></li></ul></details>',
+    '<details><summary>Open (0)</summary></details>',
+    '<details><summary>Open (1)</summary>Legacy finding</details>',
+    '<p><strong>1 open finding</strong></p>',
+])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_standalone_zero_open_metadata_rejects_conflicting_or_duplicate_open(extra, reverse):
+    zero = '<p><strong>0 open findings</strong></p>'
+    rendered = '<h3>🟢 Looks good</h3><p>No issues were found.</p>' + (
+        extra + zero if reverse else zero + extra)
+    result = parse_body(OVERVIEW_MARKER + '\nSynthetic provider frame', 'COMMENTED',
+                        body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings'] == []
+
+
+@pytest.mark.parametrize("metadata", [
+    '<p><strong>1 open finding</strong></p>',
+    '<p><strong>0 open findings</strong> Unclassified prose.</p>',
+    '<p>Unclassified prose. <strong>0 open findings</strong></p>',
+    '<p><strong>0 open findings Unclassified prose.</strong></p>',
+    '<p><strong><a href="#discussion_r1">0 open findings</a></strong></p>',
+])
+def test_standalone_count_metadata_never_hides_unclassified_content(metadata):
+    rendered = '<h3>🟢 Looks good</h3><p>No issues were found.</p>' + metadata
+    result = parse_body(OVERVIEW_MARKER + '\nSynthetic provider frame', 'COMMENTED',
+                        body_html=rendered + HTML_ESCAPED)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings_total'] == 1
+
+
+def test_standalone_zero_open_metadata_does_not_discard_freeform_summary():
+    rendered = ('<h3>🟢 Looks good</h3><p>The change deserves another look.</p>'
+                '<p><strong>0 open findings</strong></p>')
+    result = parse_body(OVERVIEW_MARKER + '\nSynthetic provider frame', 'COMMENTED',
+                        body_html=rendered)
+    assert result['inventory_complete'] is False
+    assert result['ambiguous'] is True
+    assert result['findings'] == []
+
+
+def test_count_leading_section_inside_quotation_is_incomplete():
+    rendered = CURRENT_COPILOT_HTML.replace(
+        "<details open><summary><strong>1 open finding</strong></summary>",
+        "<blockquote><details open><summary><strong>1 open finding</strong></summary>",
+    ).replace(
+        "</ul></details><details><summary><strong>Previously missed",
+        "</ul></details></blockquote><details><summary><strong>Previously missed",
+    )
+    result = parse_body(CURRENT_COPILOT_RAW, "COMMENTED", body_html=rendered)
+
+    assert result["inventory_complete"] is False
+    assert result["ambiguous"] is True
+    assert len(result["findings"]) == 1
+
+
+def test_current_review_resumes_completed_repair_without_replaying_or_losing_thread(
+        tmp_path):
+    api = ProgressApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    incomplete = HTML_ESCAPED.replace("Previously missed (1)", "Previously missed (2)")
+    api.progress_review = review_pair(RAW_ESCAPED, incomplete, state="COMMENTED")
+    path = tmp_path / "state.json"
+
+    first = _managed_cycle(api, path)["pull_requests"][0]
+    assert first["repair_requested"]
+    store = StateStore(path)
+    source_action = next(
+        item for item in store.actions().values()
+        if item["kind"] == "fix" and item["attempt"] == 1
+    )
+    assert source_action["repair_fingerprints_complete"] is False
+
+    result_head = "c" * 40
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.complete_task(source_action["task_id"], source_action, head_sha=result_head)
+    refresh_owner_review(api, result_head, submitted_at="2026-10-01T12:06:00Z")
+    api.progress_review = review_pair(
+        CURRENT_COPILOT_RAW,
+        CURRENT_COPILOT_HTML.replace("4250499422", "445"),
+        state="COMMENTED",
+    ) | {
+        "id": api.progress_review["id"] + 1,
+        "commit_id": result_head,
+        "submitted_at": "2026-10-01T12:10:00Z",
+    }
+
+    second = _managed_cycle(api, path)["pull_requests"][0]
+    saved = StateStore(path).snapshot()
+    enrollment = saved["enrollments"]["16"]
+    progress = enrollment["repair_progress"]
+    assert progress["legacy_unknown"] is True
+    assert progress["evaluated_task_ids"] == [source_action["task_id"]]
+    assert progress["resolved_fingerprints"] == []
+    assert progress["consecutive_no_progress"] == 0
+    assert enrollment["attempts"] == 2
+    proof = next(
+        item for item in enrollment["receipt_proofs"]
+        if item["task_id"] == source_action["task_id"]
+    )
+    assert proof["status"] == "completed" and proof["receipt_result"] == "ready"
+    assert proof["attempt"] == 1 and proof["repair_fingerprints_complete"] is False
+    assert second["repair_requested"]
+
+    fix_posts = [
+        body for route, body in api.writes if route.endswith("/tasks")
+    ]
+    assert len(fix_posts) == 2
+    assert "Please resolve this finding." in fix_posts[1]["prompt"]
+    assert "Operator commands omit deployed source, virtualenv, and live config" in (
+        fix_posts[1]["prompt"]
+    )
+
+    _managed_cycle(api, path)
+    assert api.fix_attempts == 2
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 2
+    active_fixes = [
+        item for item in StateStore(path).actions().values()
+        if item["kind"] == "fix" and item.get("status") == "sent"
+    ]
+    assert len(active_fixes) == 1 and active_fixes[0]["attempt"] == 2
+    targets = active_fixes[0]["repair_target_map"].values()
+    assert any(target == {"kind": "thread", "target": "prrt kw1"} for target in targets)
+    assert any(
+        target["kind"] == "finding"
+        and "operator commands omit deployed source" in target["target"]
+        for target in targets
+    )
 
 
 @pytest.mark.parametrize("rendered", [

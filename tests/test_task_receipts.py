@@ -300,10 +300,12 @@ def test_v2_transport_ascii_quote_boundary(check_v2_transport, prefix, accepted)
 @pytest.mark.parametrize("character", ["x", "\u00e9", "\U0001f680"])
 def test_v2_transport_utf8_byte_budget(check_v2_transport, size, character):
     plain = transported_v2_body().split("\n\n", 1)[1]
-    framing = "> \n\n" + plain
+    framing = "\n> \n> \n\n" + plain
     count, remainder = divmod(size - len(framing.encode("utf-8")),
                               len(character.encode("utf-8")))
-    body = "> " + character * count + "x" * remainder + "\n\n" + plain
+    body = (
+        "\n> " + character * count + "x" * remainder + "\n> \n\n" + plain
+    )
     assert len(body.encode("utf-8")) == size
     check_v2_transport(body, accepted=size <= 8192)
 
@@ -311,7 +313,7 @@ def test_v2_transport_utf8_byte_budget(check_v2_transport, size, character):
 @pytest.mark.parametrize("line_count", [63, 64, 65])
 def test_v2_transport_line_budget(check_v2_transport, line_count):
     plain = transported_v2_body().split("\n\n", 1)[1]
-    body = "> quoted\n" * (line_count - 9) + "\n" + plain
+    body = "\n" + "> quoted\n" * (line_count - 10) + "\n" + plain
     assert len(body.split("\n")) == line_count
     check_v2_transport(body, accepted=line_count <= 64)
 
@@ -396,7 +398,7 @@ def test_v2_instruction_requires_complete_context_before_source_edits():
     assert "one result from the closed list" in instruction
 
 
-def test_neutral_instruction_separates_decisions_from_validated_receipt_payload():
+def test_neutral_instruction_uses_one_immutable_publication():
     from deploy.task_receipts import _v2_fields
 
     standard = receipt_instruction(
@@ -407,11 +409,19 @@ def test_neutral_instruction_separates_decisions_from_validated_receipt_payload(
     )
     assert "post exactly one issue comment on this PR" in standard
     assert "separate PR comment without the receipt nonce" not in standard
-    assert "separate PR comment without the receipt nonce" in neutral
-    assert "receipt-only payload below as a separate value" in neutral
-    assert "validate that exact value with the existing `_v2_fields` parser" in neutral
-    assert "Never combine the decision commentary and receipt" in neutral
-    assert "do not post a second receipt" in neutral
+    assert "one `reply_to_comment` call" in neutral
+    assert "receipt-only PR reply" in neutral
+    assert "only the eight canonical receipt lines" in neutral
+    assert "A `ready` result requires the pushed audit-bearing merge commit" in neutral
+    assert "do not fabricate or require a merge commit" in neutral
+    assert "use the actual current PR head" in neutral
+    assert "complete serialized carrier" in neutral
+    assert "provider's unchanged quoted anchor" in neutral
+    assert "ASCII blank separator" in neutral
+    assert "Validate that complete carrier with the existing `_v2_fields` parser" in neutral
+    assert "stop with a transport blocker before publishing" in neutral
+    assert "never send it and retry" in neutral
+    assert "separate PR comment without the receipt nonce" not in neutral
 
     payload = (
         "Hermes-Task-Receipt: v2\n"
@@ -423,11 +433,454 @@ def test_neutral_instruction_separates_decisions_from_validated_receipt_payload(
         f"head={RESULT_HEAD}\n"
         "result=ready"
     )
-    assert _v2_fields(payload) == {
+    carrier = (
+        "\n> Hermes coordinator: reserved anchor\n> \n\n"
+        + payload
+    )
+    assert _v2_fields(carrier) == {
         "nonce": NONCE, "pr": "16", "start_head": START_HEAD,
         "base": BASE, "session": SESSION_ID, "head": RESULT_HEAD,
         "result": "ready",
     }
+
+
+@pytest.mark.parametrize("leading", ["", "\n"])
+@pytest.mark.parametrize("before", ["", ">\n", "> \n"])
+@pytest.mark.parametrize("after", ["", ">\n", "> \n"])
+@pytest.mark.parametrize("separator", ["", " ", "\t"])
+@pytest.mark.parametrize("historical", [False, True])
+def test_anchored_neutral_receipt_accepts_only_the_exact_bounded_carrier(
+        leading, before, after, separator, historical):
+    import hashlib
+
+    from deploy.cloud_coordinator import (
+        _legacy_neutral_attempt_count, _valid_receipt_proof,
+    )
+    from deploy.task_receipts import _anchored_neutral_receipt_instruction_v1, _v2_fields
+
+    task, action, pull, comments = v2_binding()
+    anchor_id = 888
+    anchor_body = "hermes-coordinator-neutral-receipt:" + "c" * 20
+    action.update(
+        kind="fix", task_type="neutral", main_sha=BASE, status="completed", attempt=1,
+        receipt_anchor_comment_id=anchor_id,
+        receipt_anchor_body=anchor_body,
+    )
+    instruction = receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+        neutral=True, anchor_comment_id=anchor_id, anchor_body=anchor_body,
+    )
+    assert "message must contain only the eight canonical receipt lines" in instruction
+    assert "anchor body" in instruction
+    assert "Do not include the quote or leading blanks in the tool message" in instruction
+    if historical:
+        instruction = _anchored_neutral_receipt_instruction_v1(
+            NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+            anchor_comment_id=anchor_id, anchor_body=anchor_body,
+        )
+        assert hashlib.sha256(instruction.encode()).hexdigest() == (
+            "7112f767fa99088821bb287130d90ceb5328a63554f3c8fa33fe8e7a04fb7850"
+        )
+    action["body"] = (
+        f"Neutral reconciliation for PR #16 at exact PR head `{START_HEAD}`. "
+        f"The current target main is `{BASE}`.\n\n{instruction}"
+    )
+    task["sessions"][0]["prompt"] = action["body"]
+    comments[0]["body"] = (
+        f"{leading}{before}> {anchor_body}\n{after}{separator}\n"
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={NONCE}\n"
+        "pr=16\n"
+        f"start_head={START_HEAD}\n"
+        f"base={BASE}\n"
+        f"session={SESSION_ID}\n"
+        f"head={RESULT_HEAD}\n"
+        "result=ready"
+    )
+    receipt = validate_task_receipt(task, action, pull, comments, now=NOW)
+
+    assert receipt["comment_id"] != anchor_id
+    assert receipt["body"] == comments[0]["body"]
+    assert _v2_fields(receipt["body"]) == {
+        "nonce": NONCE, "pr": "16", "start_head": START_HEAD,
+        "base": BASE, "session": SESSION_ID, "head": RESULT_HEAD,
+        "result": "ready",
+    }
+    assert len(receipt["body"].encode("utf-8")) < 8192
+    assert len(receipt["body"].split("\n")) < 64
+    record = {
+        **action, **{f"receipt_{key}": value for key, value in receipt.items()},
+        "receipt_session_completed_at": receipt["completed_at"],
+    }
+    saved_prompt = action["body"]
+    record = json.loads(json.dumps(record))
+    assert _valid_receipt_proof(record, comments)
+    assert _legacy_neutral_attempt_count(
+        {"issue": 16, "attempts": 1, "authorized_head": START_HEAD,
+         "receipt_proofs": [record]},
+        {}, comments, tasks=[task],
+        snapshot={"issue": 16, "pull": {
+            "id": pull["id"], "node_id": pull["node_id"], "head": {"ref": "topic"},
+        }}, now=NOW,
+    ) == 1
+    assert record["body"] == task["sessions"][0]["prompt"] == saved_prompt
+
+
+@pytest.mark.parametrize("mutation", [
+    "wrong-anchor-id", "wrong-anchor-body",
+    "missing-separator", "extra-quote-line",
+])
+def test_anchored_neutral_receipt_rejects_prompt_or_carrier_mutation(mutation):
+    task, action, pull, comments = v2_binding()
+    anchor_id = 888
+    anchor_body = "hermes-coordinator-neutral-receipt:" + "c" * 20
+    action.update(
+        kind="fix", task_type="neutral", main_sha=BASE,
+        receipt_anchor_comment_id=anchor_id,
+        receipt_anchor_body=anchor_body,
+    )
+    instruction = receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+        neutral=True, anchor_comment_id=anchor_id, anchor_body=anchor_body,
+    )
+    action["body"] = f"Neutral reconciliation request.\n\n{instruction}"
+    task["sessions"][0]["prompt"] = action["body"]
+    if mutation == "wrong-anchor-id":
+        action["receipt_anchor_comment_id"] += 1
+    elif mutation == "wrong-anchor-body":
+        action["receipt_anchor_body"] += "x"
+    else:
+        fields = (
+            "Hermes-Task-Receipt: v2\n"
+            f"nonce={NONCE}\npr=16\nstart_head={START_HEAD}\nbase={BASE}\n"
+            f"session={SESSION_ID}\nhead={RESULT_HEAD}\nresult=ready"
+        )
+        prefix = f"\n> {anchor_body}\n\n"
+        comments[0]["body"] = {
+            "missing-separator": f"\n> {anchor_body}\n{fields}",
+            "extra-quote-line": f"{prefix}> copied\n\n{fields}",
+        }[mutation]
+
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, comments, now=NOW)
+
+
+@pytest.mark.parametrize("mutation", [
+    "changed-anchor", "missing-anchor", "duplicate-anchor", "quote-prose",
+    "quote-receipt", "quote-header", "no-separator", "nbsp", "control", "cr",
+    "long-separator", "two-leading-blanks", "two-quoted-blanks", "fenced-receipt",
+    "quoted-receipt", "byte-limit", "line-limit", "tail", "forged-author",
+    "session", "prompt", "action-body", "edited", "duplicate-comment",
+    "wrong-head", "wrong-base", "nonce", "pr", "task",
+])
+def test_anchored_transport_rejects_unknown_envelopes_and_changed_bindings(mutation):
+    from deploy.cloud_coordinator import _valid_receipt_proof
+
+    task, action, pull, comments = v2_binding()
+    anchor = "hermes-coordinator-neutral-receipt:" + "c" * 20
+    action.update(
+        kind="fix", task_type="neutral", main_sha=BASE, status="completed",
+        receipt_anchor_comment_id=888, receipt_anchor_body=anchor,
+    )
+    instruction = receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+        neutral=True, anchor_comment_id=888, anchor_body=anchor,
+    )
+    action["body"] = f"Neutral reconciliation request.\n\n{instruction}"
+    task["sessions"][0]["prompt"] = action["body"]
+    payload = comments[0]["body"]
+    comments[0]["body"] = f"> {anchor}\n> \n\n{payload}"
+    receipt = validate_task_receipt(task, action, pull, comments, now=NOW)
+    record = {**action, **{f"receipt_{key}": value for key, value in receipt.items()}}
+    prefixes = {
+        "changed-anchor": f"> {anchor}x\n\n",
+        "missing-anchor": "> \n\n",
+        "duplicate-anchor": f"> {anchor}\n> {anchor}\n\n",
+        "quote-prose": f"> {anchor}\n> extra excerpt\n\n",
+        "quote-receipt": f"> {anchor}\n> nonce=extra\n\n",
+        "quote-header": f"> {anchor}\n> Hermes-Task-Receipt: v2\n\n",
+        "no-separator": f"> {anchor}\n",
+        "nbsp": f"> {anchor}\n\u00a0\n",
+        "control": f"> {anchor}\n\v\n",
+        "cr": f"> {anchor}\r\n\n",
+        "long-separator": f"> {anchor}\n  \n",
+        "two-leading-blanks": f"\n\n> {anchor}\n\n",
+        "two-quoted-blanks": f"> {anchor}\n>\n>\n\n",
+        "byte-limit": f"> {anchor}\n> " + "x" * 8192 + "\n\n",
+        "line-limit": f"> {anchor}\n" + ">\n" * 64 + "\n",
+    }
+    if mutation in prefixes:
+        comments[0]["body"] = prefixes[mutation] + payload
+    elif mutation == "fenced-receipt":
+        comments[0]["body"] = f"> {anchor}\n\n```\n{payload}\n```"
+    elif mutation == "quoted-receipt":
+        comments[0]["body"] = f"> {anchor}\n\n> " + payload.replace("\n", "\n> ")
+    elif mutation == "tail":
+        comments[0]["body"] += "\nextra"
+    elif mutation == "forged-author":
+        comments[0]["user"]["id"] = 175728472
+    elif mutation == "session":
+        task["sessions"][0]["id"] += "x"
+    elif mutation == "prompt":
+        task["sessions"][0]["prompt"] += "x"
+    elif mutation == "action-body":
+        action["body"] += "x"
+    elif mutation == "edited":
+        comments[0]["updated_at"] = "2026-10-01T12:05:01Z"
+    elif mutation == "duplicate-comment":
+        comments.append({**comments[0], "id": 778})
+    elif mutation == "wrong-head":
+        pull["head"]["sha"] = "d" * 40
+    elif mutation == "wrong-base":
+        action["main_sha"] = "d" * 40
+    elif mutation == "nonce":
+        comments[0]["body"] = comments[0]["body"].replace(NONCE, NONCE + "x")
+    elif mutation == "pr":
+        comments[0]["body"] = comments[0]["body"].replace("pr=16", "pr=17")
+    elif mutation == "task":
+        task["id"] += "x"
+    try:
+        rejected = validate_task_receipt(task, action, pull, comments, now=NOW)
+    except ReceiptError:
+        rejected = None
+    assert rejected is None
+    if mutation in prefixes or mutation in {"fenced-receipt", "quoted-receipt", "tail"}:
+        record["receipt_body"] = comments[0]["body"]
+        assert not _valid_receipt_proof(record, comments)
+    elif mutation in {"forged-author", "edited", "duplicate-comment", "nonce", "pr"}:
+        assert not _valid_receipt_proof(record, comments)
+
+
+def test_anchored_producer_prevalidates_every_finite_complete_carrier(monkeypatch):
+    from deploy import task_receipts
+
+    carriers = []
+    original = task_receipts._v2_fields
+
+    def parse(body):
+        carriers.append(body)
+        return original(body)
+
+    monkeypatch.setattr(task_receipts, "_v2_fields", parse)
+    receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+        neutral=True, anchor_comment_id=888, anchor_body="A" * 80,
+    )
+    assert len(carriers) == len(set(carriers)) == 54
+    assert max(len(body.split("\n")) for body in carriers) == 13
+    assert max(len(body.encode()) for body in carriers) == (
+        92 + len(carriers[0][carriers[0].index("Hermes-Task-Receipt: v2"):].encode())
+    )
+    assert all("session=" + "S" * 128 in body for body in carriers)
+    assert all(body.endswith("result=conflict_incompatible") for body in carriers)
+    with pytest.raises(ReceiptError, match="byte budget"):
+        receipt_instruction(
+            "x" * 8192, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+            neutral=True, anchor_comment_id=888, anchor_body="A" * 80,
+        )
+
+
+def test_receipt_only_provider_carrier_validates_and_survives_proof_recheck():
+    from deploy.cloud_coordinator import _valid_receipt_proof
+
+    task, action, pull, comments = v2_binding()
+    comments[0]["body"] = "\n> Hermes coordinator: reserved anchor\n> \n\n" + (
+        comments[0]["body"]
+    )
+
+    receipt = validate_task_receipt(task, action, pull, comments, now=NOW)
+    record = {
+        **action,
+        "kind": "fix", "status": "completed",
+        "receipt_result": receipt["result"],
+        "receipt_comment_id": receipt["comment_id"],
+        "receipt_task_id": receipt["task_id"],
+        "receipt_session_id": receipt["session_id"],
+        "receipt_nonce": receipt["nonce"],
+        "receipt_start_head": receipt["start_head"],
+        "receipt_head": receipt["head"],
+        "receipt_base": receipt["base"],
+        "receipt_body": receipt["body"],
+        "receipt_created_at": receipt["created_at"],
+        "receipt_completed_at": receipt["completed_at"],
+        "receipt_version": receipt["version"],
+    }
+
+    assert receipt["body"] == comments[0]["body"]
+    assert _valid_receipt_proof(record, comments)
+
+
+def test_historical_neutral_instruction_remains_exact_for_saved_prompts():
+    from deploy.task_receipts import _historical_neutral_receipt_instruction
+
+    historical = _historical_neutral_receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+    )
+    current = receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE, neutral=True,
+    )
+    assert historical != current
+    assert "each conflict decision in its own Markdown blockquote" in historical
+    assert "Publish the combined comment" in historical
+    assert "only the eight canonical receipt lines" not in historical
+
+
+def test_previous_two_comment_neutral_prompt_reconstructs_cold_receipt_budget():
+    from deploy.cloud_coordinator import (
+        _legacy_neutral_attempt_count, neutral_reconciliation_request,
+    )
+    from deploy.task_receipts import (
+        _previous_release_neutral_receipt_instruction, _receipt_instruction,
+    )
+
+    task, action, pull, comments = v2_binding()
+    action.update(
+        kind="fix", task_type="neutral", status="completed", attempt=1,
+        head_ref="topic",
+    )
+    pull["head"]["ref"] = "topic"
+    snapshot = {
+        "issue": 16, "head": START_HEAD, "main_sha": BASE,
+        "pull": {
+            "base": {"sha": BASE}, "head": {"ref": "topic"},
+            "title": "Synthetic PR", "body": "Synthetic intent",
+        },
+    }
+    request = neutral_reconciliation_request(snapshot, 0)
+    replaced = (
+        "For every conflict hunk, put its complete audit, including file/hunk identity, "
+        "classification, decision, and rationale, in the pushed merge commit message; "
+        "explain how the resolution preserves both branch intents. Do not omit or "
+        "summarize decisions. If there are no conflict hunks, record that explicitly. "
+        "Finalize this audit-bearing merge commit before pushing; a `ready` receipt "
+        "requires its exact commit SHA as the pushed result head. Keep all decision "
+        "audit out of the PR comment: publish only the validated receipt payload under "
+        "the existing task receipt contract. Do not create a separate decision comment. "
+        "A truthful `conflict_incompatible` or `policy_broken` result does not require "
+        "or claim a merge commit. "
+    )
+    historical_request = (
+        "For each conflict hunk, record its file/hunk identity, classification, "
+        "decision, and rationale in a PR comment, explaining how the resolution "
+        "preserves both branch intents (or why they are incompatible), before "
+        "returning a `ready` receipt under the existing task receipt contract. "
+    )
+    assert request["body"].count(replaced) == 1
+    body = request["body"].replace(replaced, historical_request, 1)
+    instruction = _receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+        posting_instruction=(
+            "After pushing your result and running focused checks, first post the "
+            "conflict decisions in a separate PR comment without the receipt nonce. "
+            "Then construct the complete receipt-only payload below as a separate "
+            "value and validate that exact value with the existing `_v2_fields` "
+            "parser, checking every field against its expected value. Post that "
+            "validated payload as exactly one dedicated PR comment, with no quote, "
+            "fence, prose, extra fields, or trailing content. Never combine the "
+            "decision commentary and receipt, and do not post a second receipt."
+        ),
+    )
+    assert instruction == _previous_release_neutral_receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+    )
+    body += f"\n\n{instruction}"
+    action.update(marker=request["marker"], body=body)
+    task["sessions"][0]["prompt"] = body
+
+    receipt = validate_task_receipt(task, action, pull, comments, now=NOW)
+    record = {
+        **action,
+        **{f"receipt_{key}": value for key, value in receipt.items()},
+        "receipt_session_completed_at": receipt["completed_at"],
+    }
+
+    assert "first post the conflict decisions" in task["sessions"][0]["prompt"]
+    assert _legacy_neutral_attempt_count(
+        {"issue": 16, "attempts": 1, "authorized_head": START_HEAD,
+         "receipt_proofs": []},
+        {"historical-neutral": record}, comments,
+        tasks=[task], snapshot={
+            "issue": 16,
+            "pull": {"id": pull["id"], "node_id": pull["node_id"],
+                     "head": {"ref": "topic"}},
+        },
+        now=NOW,
+    ) == 1
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_neutral_prompt_contract_reconstructs_cold_receipt_budget(historical):
+    import copy
+
+    from deploy.cloud_coordinator import _legacy_neutral_attempt_count
+    from deploy.task_receipts import (
+        _historical_neutral_receipt_instruction,
+    )
+
+    task, action, pull, comments = v2_binding()
+    action.update(
+        kind="fix", task_type="neutral", status="completed", attempt=1,
+        head_ref="topic",
+    )
+    pull["head"]["ref"] = "topic"
+    marker = "hermes-coordinator-fix:" + "c" * 20
+    request = (
+        f"Neutral reconciliation for PR #16 at exact PR head `{START_HEAD}`. "
+        f"The current target main is `{BASE}`.\n\n<!-- {marker} -->"
+    )
+    instruction = (
+        _historical_neutral_receipt_instruction(
+            NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+        )
+        if historical else receipt_instruction(
+            NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE, neutral=True,
+        )
+    )
+    action["marker"] = marker
+    action["body"] = request + "\n\n" + instruction
+    task["sessions"][0]["prompt"] = action["body"]
+    receipt = validate_task_receipt(task, action, pull, comments, now=NOW)
+    record = {
+        **action,
+        "receipt_result": receipt["result"],
+        "receipt_comment_id": receipt["comment_id"],
+        "receipt_task_id": receipt["task_id"],
+        "receipt_session_id": receipt["session_id"],
+        "receipt_nonce": receipt["nonce"],
+        "receipt_start_head": receipt["start_head"],
+        "receipt_head": receipt["head"],
+        "receipt_base": receipt["base"],
+        "receipt_body": receipt["body"],
+        "receipt_created_at": receipt["created_at"],
+        "receipt_completed_at": receipt["completed_at"],
+        "receipt_session_completed_at": receipt["completed_at"],
+        "receipt_version": receipt["version"],
+    }
+    enrollment = {
+        "issue": 16, "attempts": 1, "authorized_head": START_HEAD,
+        "receipt_proofs": [],
+    }
+    snapshot = {
+        "issue": 16,
+        "pull": {
+            "id": pull["id"], "node_id": pull["node_id"],
+            "head": {"ref": "topic"},
+        },
+    }
+
+    assert _legacy_neutral_attempt_count(
+        enrollment, {"neutral": record}, comments, tasks=[task], now=NOW,
+        snapshot=snapshot,
+    ) == 1
+
+    changed = copy.deepcopy(record)
+    changed["body"] += " copied"
+    changed_task = copy.deepcopy(task)
+    changed_task["sessions"][0]["prompt"] += " copied"
+    assert _legacy_neutral_attempt_count(
+        enrollment, {"neutral": changed}, comments, tasks=[changed_task],
+        now=NOW, snapshot=snapshot,
+    ) is None
 
 
 def test_legacy_neutral_decision_envelope_accepts_only_its_bound_final_receipt():
