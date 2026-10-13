@@ -520,7 +520,10 @@ no predecessor wait is charged and neither claim nor predecessor can trigger a
 duplicate POST or a false `execution_exhausted` lifecycle event. Superseded completed
 handoffs are terminal for retirement,
 while their validated receipt proofs remain in the enrollment across compaction and
-re-enrollment. Replay does not dispatch an accepted task twice. Historical-base
+re-enrollment. Validated owner-abandonment records also survive inactive
+re-enrollment as deep-copied audit bindings; this does not preserve sensitive
+authorization or reset the existing counters, progress, receipt proofs, or claims.
+Replay does not dispatch an accepted task twice. Historical-base
 scope is not current-main eligibility: stale PRs receive no status action or merge
 eligibility, and exact current-main, fresh review/check, status, and merge fences
 remain mandatory after reconciliation.

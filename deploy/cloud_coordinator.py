@@ -7967,6 +7967,17 @@ class StateStore:
                         enrollment["receipt_proofs"] = deepcopy(
                             previous["receipt_proofs"],
                         )
+                    if "owner_abandonments" in previous:
+                        if not _owner_abandonments_valid(
+                                previous["owner_abandonments"],
+                                issue=item.get("issue"),
+                        ):
+                            raise CoordinatorError(
+                                "Stored owner abandonment history is invalid"
+                            )
+                        enrollment["owner_abandonments"] = deepcopy(
+                            previous["owner_abandonments"],
+                        )
                     data["enrollments"][key] = enrollment
             for action, item in commands:
                 if action == "authorize" and item.get("validated") is True:

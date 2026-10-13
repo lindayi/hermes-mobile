@@ -3405,6 +3405,94 @@ def test_owner_abandonment_retained_neutral_proof_survives_compaction_for_later_
         assert api.task_posts == task_posts
 
 
+@pytest.mark.parametrize("history_hazard", [None, "wrong-issue"])
+def test_owner_abandonment_history_survives_inactive_reenrollment(
+        tmp_path, history_hazard):
+    from copy import deepcopy
+
+    api, store, abandoned = _owner_abandonment_case(tmp_path)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    successor = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "fix"
+        and action.get("key") != abandoned["key"]
+        and action.get("head") == NEXT_RESULT_HEAD
+    )
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=FINAL_RESULT_HEAD, base_sha=CURRENT_MAIN,
+    )
+    api.head_sha = FINAL_RESULT_HEAD
+    api.pull["head"]["sha"] = FINAL_RESULT_HEAD
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.unresolved = False
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    prior = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert prior["owner_abandonments"]
+    assert any(
+        proof.get("task_id") == successor["task_id"]
+        for proof in prior["receipt_proofs"]
+    )
+    original_history = deepcopy(prior["owner_abandonments"])
+    original_proofs = deepcopy(prior["receipt_proofs"])
+    original_attempts = prior["attempts"]
+    original_neutral_attempts = prior["neutral_attempts"]
+    original_progress = deepcopy(prior["repair_progress"])
+    original_claim = deepcopy(StateStore(store.path).action(abandoned["key"]))
+
+    api.pull.update(
+        state="closed", merged=False, closed_at="2026-10-01T12:10:00Z",
+    )
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert StateStore(store.path).snapshot()["enrollments"]["16"]["active"] is False
+
+    if history_hazard == "wrong-issue":
+        StateStore(store.path)._mutate(
+            lambda state: state["enrollments"]["16"]["owner_abandonments"][0].update(
+                issue=17,
+            ),
+        )
+    api.pull.update(state="open", closed_at=None)
+    api.comments.append({
+        "id": 7772, "user": {"id": OWNER},
+        "body": f"/hermes enroll {FINAL_RESULT_HEAD}",
+        "created_at": "2026-10-01T12:11:00Z",
+        "updated_at": "2026-10-01T12:11:00Z",
+    })
+    if history_hazard == "wrong-issue":
+        invalid_state = store.path.read_bytes()
+        with pytest.raises(CoordinatorError):
+            Coordinator(
+                api, StateStore(store.path), clock=lambda: 1790856660,
+            ).run(apply=True)
+        assert store.path.read_bytes() == invalid_state
+        return
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    replacement = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert replacement["active"] is True
+    assert replacement["owner_abandonments"] == original_history
+    assert replacement["receipt_proofs"] == original_proofs
+    assert replacement["attempts"] == original_attempts
+    assert replacement["neutral_attempts"] == original_neutral_attempts
+    assert replacement["repair_progress"] == original_progress
+    assert replacement["sensitive_sha"] is None
+    assert replacement.get("sensitive_authorization") is None
+    assert StateStore(store.path).action(abandoned["key"]) == original_claim
+
+
 def test_owner_abandonment_same_second_precovery_completion_cannot_grant_provenance(
         tmp_path):
     api, store, _ = _owner_abandonment_case(tmp_path)
