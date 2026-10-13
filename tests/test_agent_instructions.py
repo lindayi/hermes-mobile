@@ -480,8 +480,8 @@ def _validate_blocked_record(fixture, *, now=AUDIT_REFERENCE_NOW):
     assert record['status'] == 'blocked'
     assert re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', record['record_key'])
     prior = record['prior_comment_id']
-    assert (prior is None) == (record['kind'] == 'qualification')
-    assert prior is None or (type(prior) is int and prior > 0)
+    assert prior is None or (type(prior) is int and 1 <= prior < 2**63)
+    assert record['kind'] != 'revalidation' or prior is not None
     assert record['repository'] == {'name': 'lindayi/hermes-mobile', 'id': 1}
     assert set(record['pull']) == {'number', 'node_id', 'url'}
     assert record['reason']
@@ -865,6 +865,42 @@ def test_manual_qualification_documents_truthful_blocked_and_invalidation_varian
     assert [(item['gate'], item['outcome']) for item in solely_unknown
             if item['gate'] not in {'check', 'source-run'}] == [
         ('sensitive', 'not-required'), ('review', 'unknown')]
+
+
+def test_replacement_qualification_references_the_invalidation_it_supersedes():
+    fixtures = _gate_fixtures()
+    first = deepcopy(fixtures['blocked-checks'])
+    _validate_blocked_record(first)
+
+    invalidation = deepcopy(fixtures['invalidation'])
+    _validate_invalidation_record(invalidation)
+    invalidation_readback = {
+        'id': 100,
+        'record': {key: value for key, value in invalidation.items() if key != 'fixture'},
+    }
+
+    replacement = deepcopy(first)
+    replacement.update(
+        record_key='synthetic-replacement-qualification',
+        prior_comment_id=invalidation_readback['id'],
+    )
+    assert replacement['prior_comment_id'] == invalidation_readback['id']
+    _validate_blocked_record(replacement)
+
+
+@pytest.mark.parametrize('kind', ('qualification', 'revalidation'))
+def test_blocked_record_accepts_maximum_prior_comment_id(kind):
+    record = deepcopy(_gate_fixtures()['blocked-checks'])
+    record.update(kind=kind, prior_comment_id=2**63 - 1)
+    _validate_blocked_record(record)
+
+
+@pytest.mark.parametrize('prior', (2**63, 0, -1, True, '99', 1.0, None))
+def test_blocked_revalidation_rejects_invalid_prior_comment_ids(prior):
+    record = deepcopy(_gate_fixtures()['blocked-checks'])
+    record.update(kind='revalidation', prior_comment_id=prior)
+    with pytest.raises(AssertionError):
+        _validate_blocked_record(record)
 
 
 def test_blocked_record_rejects_impossible_calendar_timestamps():
