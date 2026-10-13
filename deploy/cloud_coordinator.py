@@ -1840,12 +1840,16 @@ def _review_actor_matches(user, author):
             or not isinstance(user.get("login"), str) or not user["login"]
             or not isinstance(author.get("login"), str) or not author["login"]):
         return False
-    return user["login"] == author["login"] or (
-        user["id"] == COPILOT_REVIEWER_ID
-        and user["type"] == "Bot"
-        and user["login"] == "copilot-pull-request-reviewer[bot]"
-        and author["login"] == "copilot-pull-request-reviewer"
-    )
+    if user["id"] == COPILOT_REVIEWER_ID:
+        return (
+            user["type"] == "Bot"
+            and user["login"] in (
+                "copilot-pull-request-reviewer",
+                "copilot-pull-request-reviewer[bot]",
+            )
+            and author["login"] == "copilot-pull-request-reviewer"
+        )
+    return user["login"] == author["login"]
 
 
 def _bound_pull_review_metadata(api, pull_number, review):

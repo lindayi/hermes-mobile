@@ -152,10 +152,12 @@ the previous head-only command do not authorize a sensitive head.
 Review edit metadata enrichment binds the authenticated REST actor to GraphQL by
 strict positive integer numeric ID, identical nonempty node ID, and actor type:
 the owner is a User and reviewer `175728472` is a Bot. Both API identities and
-logins must be present. Logins must match exactly except for that reviewer's
-explicit REST `copilot-pull-request-reviewer[bot]` and GraphQL
-`copilot-pull-request-reviewer` pair. A suffix alone never establishes identity.
-Missing, malformed or mismatched actor identity cannot supply edit metadata.
+logins must be present. The owner's logins must match exactly. For reviewer
+`175728472`, REST login must be exactly `copilot-pull-request-reviewer` or
+`copilot-pull-request-reviewer[bot]`, and GraphQL login must be exactly
+`copilot-pull-request-reviewer`; equality between any other pair is not identity.
+A suffix alone never establishes identity. Missing, malformed or mismatched actor
+identity cannot supply edit metadata.
 This binding does not change the prose disposition or make an ambiguous overview
 automatic review acceptance, even when the separate sensitive command binds.
 

@@ -7,7 +7,7 @@ import subprocess
 import pytest
 
 from deploy.cloud_coordinator import (
-    ApiError, _blob_bytes, _rest_list, copilot_review_valid,
+    ApiError, _blob_bytes, _rest_list, _review_actor_matches, copilot_review_valid,
     neutral_reconciliation_request, review_task_request,
 )
 from deploy.review_evidence import selected_copilot_sensitive_review
@@ -95,8 +95,60 @@ def test_actor_identity_collector_binds_bot_presentation_without_prose_acceptanc
     assert not api.writes and not api.graphql_writes and api.task_posts == 0
 
 
-def test_actor_identity_sensitive_command_and_cold_read_only_collector(tmp_path):
-    api = ActorIdentityApi()
+@pytest.mark.parametrize(("rest_login", "graphql_login"), [
+    ("arbitrary", "arbitrary"),
+    ("arbitrary", "copilot-pull-request-reviewer"),
+    ("copilot-pull-request-reviewer", "arbitrary"),
+    ("", ""),
+    ("", "copilot-pull-request-reviewer"),
+    ("copilot-pull-request-reviewer", ""),
+    (None, None),
+    (None, "copilot-pull-request-reviewer"),
+    (" ", "copilot-pull-request-reviewer"),
+    ("copilot-pull-request-reviewer", " "),
+    (" copilot-pull-request-reviewer ", " copilot-pull-request-reviewer "),
+    ("Copilot-pull-request-reviewer", "Copilot-pull-request-reviewer"),
+    ("copilot-pull-request-reviewer", "Copilot-pull-request-reviewer"),
+    ("Copilot-pull-request-reviewer", "copilot-pull-request-reviewer"),
+    ("copilot-pull-request-reviewer[bot]", "copilot-pull-request-reviewer[bot]"),
+    ("copilot-pull-request-reviewer", "copilot-pull-request-reviewer[bot]"),
+])
+def test_unsupported_copilot_logins_block_collector_and_sensitive_command(
+        tmp_path, rest_login, graphql_login):
+    api = ActorIdentityApi(
+        rest_change={"login": rest_login},
+        graphql_change={"login": graphql_login},
+    )
+    reviews = _actor_reviews(api)
+    assert "updatedAt" not in reviews[0]
+    assert _actor_selected(api, reviews) is None
+
+    store = StateStore(tmp_path / "state.json")
+    result = Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
+    assert not result["pull_requests"][0]["auto_merge_eligible"]
+    assert not api.graphql_writes and api.task_posts == 0
+
+
+def test_owner_actor_login_requires_exact_equality():
+    user = {
+        "id": 5164171, "node_id": "MDQ6VXNlcjUxNjQxNzE=",
+        "type": "User", "login": "lindayi",
+    }
+    author = {
+        "databaseId": 5164171, "id": "MDQ6VXNlcjUxNjQxNzE=",
+        "__typename": "User", "login": "lindayi",
+    }
+    assert _review_actor_matches(user, author)
+    assert not _review_actor_matches(user | {"login": "Lindayi"}, author)
+    assert not _review_actor_matches(user | {"login": "other"}, author)
+
+
+@pytest.mark.parametrize("login", [
+    "copilot-pull-request-reviewer", "copilot-pull-request-reviewer[bot]",
+])
+def test_actor_identity_sensitive_command_and_cold_read_only_collector(tmp_path, login):
+    api = ActorIdentityApi(rest_change={"login": login})
     path = tmp_path / "state.json"
     store = StateStore(path)
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
