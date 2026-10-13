@@ -170,7 +170,12 @@ query($id: ID!) {
       body
       bodyHTML
       commit { oid }
-      author { login }
+      author {
+        __typename
+        login
+        ... on User { id databaseId }
+        ... on Bot { id databaseId }
+      }
       pullRequest {
         number
         repository {
@@ -1560,7 +1565,11 @@ def _bound_pull_review_metadata(api, pull_number, review):
     user = review.get("user")
     if not isinstance(node_id, str) or not node_id:
         return review
-    if not isinstance(user, dict) or not isinstance(user.get("login"), str) or not user["login"]:
+    if (not isinstance(user, dict)
+            or not positive_id(user.get("id"))
+            or user.get("id") not in (OWNER_ID, COPILOT_REVIEWER_ID)
+            or user.get("type") != ("User" if user["id"] == OWNER_ID else "Bot")
+            or not isinstance(user.get("node_id"), str) or not user["node_id"]):
         return review
     try:
         response = api.graphql(GRAPHQL_REVIEW_METADATA, {"id": node_id})
@@ -1568,7 +1577,10 @@ def _bound_pull_review_metadata(api, pull_number, review):
         if error.status == 404:
             return review
         raise
-    node = response.get("data", {}).get("node") if isinstance(response, dict) else None
+    if not isinstance(response, dict) or response.get("errors"):
+        return review
+    data = response.get("data")
+    node = data.get("node") if isinstance(data, dict) else None
     commit = node.get("commit") if isinstance(node, dict) else None
     author = node.get("author") if isinstance(node, dict) else None
     pull = node.get("pullRequest") if isinstance(node, dict) else None
@@ -1583,7 +1595,10 @@ def _bound_pull_review_metadata(api, pull_number, review):
             or not isinstance(commit, dict)
             or commit.get("oid") != review.get("commit_id")
             or not isinstance(author, dict)
-            or author.get("login") != user.get("login")
+            or not positive_id(author.get("databaseId"))
+            or author.get("databaseId") != user["id"]
+            or author.get("id") != user["node_id"]
+            or author.get("__typename") != user["type"]
             or not isinstance(pull, dict)
             or pull.get("number") != pull_number
             or not isinstance(repository, dict)

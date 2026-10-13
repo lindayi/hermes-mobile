@@ -149,6 +149,16 @@ and digest are persisted with the owner authorization. Coding bot ID `198982749`
 the PR author, owner-authored reviews, historical independent-review reports, and
 the previous head-only command do not authorize a sensitive head.
 
+Review metadata hydration binds the REST author's positive numeric `id`, nonempty
+`node_id`, and `type` to GraphQL `databaseId`, `id`, and `__typename`. Request
+numeric and node IDs through the supported User/Bot fragments. The owner must be
+a User and reviewer `175728472` a Bot. REST `Copilot` and GraphQL
+`copilot-pull-request-reviewer` login strings may differ; login text is not identity
+proof. Missing, mistyped, or inconsistent stable identity and partial GraphQL
+errors do not enrich a review. Owner review hydration uses the same identity proof.
+Review ID/node, repository, PR, head, body, submission and edit bindings remain
+required.
+
 This owner command is a separate, explicit authorization, not an automatic approval
 from enrollment or review prose. Planning and fresh status/merge fences re-read and
 revalidate the command and selected Copilot review, including author, state,

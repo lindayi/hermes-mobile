@@ -1511,6 +1511,7 @@ def test_review_collection_blocks_owner_review_when_graphql_metadata_is_untruste
                 review["commit"]["oid"] = "c" * 40
             elif mutation == "author":
                 review["author"]["login"] = "someone-else"
+                review["author"]["databaseId"] = 81235
             elif mutation == "node":
                 review["id"] = "PRR_other"
             elif mutation == "repository":
@@ -1754,7 +1755,8 @@ class FakeApi:
             "commit_id": self.owner_review_head_sha,
             "submitted_at": self.owner_review_submitted_at,
             "body": self.owner_review_body,
-            "user": {"id": OWNER, "login": self.owner_login},
+            "user": {"id": OWNER, "login": self.owner_login,
+                     "node_id": "U_synthetic_owner", "type": "User"},
         }
         if graphql:
             record.update(
@@ -1776,7 +1778,8 @@ class FakeApi:
             "commit_id": self.review_sha or self.head_sha,
             "submitted_at": self.review_submitted_at,
             "body": self.copilot_review_body,
-            "user": {"id": COPILOT_REVIEWER, "login": "copilot-pull-request-reviewer"},
+            "user": {"id": COPILOT_REVIEWER, "login": "copilot-pull-request-reviewer",
+                     "node_id": "BOT_kgDOCnlnWA", "type": "Bot"},
         }
         if graphql:
             review.update(
@@ -2002,7 +2005,9 @@ class FakeApi:
                         "body": review["body"],
                         "bodyHTML": self.copilot_review_html,
                         "commit": {"oid": review["commit_id"]},
-                        "author": {"login": "copilot-pull-request-reviewer"},
+                        "author": {"login": "copilot-pull-request-reviewer",
+                                   "__typename": "Bot", "databaseId": COPILOT_REVIEWER,
+                                   "id": "BOT_kgDOCnlnWA"},
                         "pullRequest": {
                             "number": 16,
                             "repository": {
@@ -2035,7 +2040,8 @@ class FakeApi:
                         "state": review["state"],
                         "body": review["body"],
                         "commit": {"oid": review["commit_id"]},
-                        "author": {"login": self.owner_login},
+                        "author": {"login": self.owner_login, "__typename": "User",
+                                   "databaseId": OWNER, "id": "U_synthetic_owner"},
                         "pullRequest": {
                             "number": 16,
                             "repository": {
@@ -2086,7 +2092,8 @@ class FakeApi:
                 "commit_id": body["commit_id"],
                 "submitted_at": submitted_at,
                 "body": body["body"],
-                "user": {"id": OWNER, "login": self.owner_login},
+                "user": {"id": OWNER, "login": self.owner_login,
+                         "node_id": "U_synthetic_owner", "type": "User"},
             }
         if route == "agents/repos/lindayi/hermes-mobile/tasks":
             self.task_posts += 1

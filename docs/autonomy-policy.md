@@ -570,7 +570,13 @@ blocker remains active:
 
 | Issue #106 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `1f3d179d38ea1d322a6492c8e0ba023c91ea06186d3f2263a9de53edca45ed75` |
+| `deploy/cloud_coordinator.py` | `cd53b5d13b1a8792a79aabb319ff19d95f941eb6852f229d850269b7f36c54f6` |
+
+The current issue #106 candidate also binds REST and GraphQL review authors by
+matching positive numeric IDs, node IDs, and User/Bot types. Transport login
+differences do not establish or invalidate identity. Missing or inconsistent
+stable identity and partial GraphQL errors block enrichment. This does not change
+the review parser, sensitive owner command, or merge gates.
 
 Before the Issue #50 overlay, this assembly integrated final PR40 main
 `5316f7c75dced1bffafdb545cdd7677e98e855a6`, preserving its parser and previously

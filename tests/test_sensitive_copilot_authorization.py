@@ -2,7 +2,7 @@ import hashlib
 
 import pytest
 
-from deploy.cloud_coordinator import CoordinatorError, StateStore
+from deploy.cloud_coordinator import CoordinatorError, StateStore, _rest_list
 from test_cloud_coordinator import (
     BASE,
     COPILOT_AGENT,
@@ -66,7 +66,9 @@ class SensitiveCopilotApi(FakeApi):
             "body": self.copilot_body,
             "user": {
                 "id": self.copilot_author,
-                "login": "copilot-pull-request-reviewer",
+                "node_id": "BOT_kgDOCnlnWA",
+                "type": "Bot",
+                "login": "Copilot",
             },
         }
 
@@ -94,7 +96,12 @@ class SensitiveCopilotApi(FakeApi):
                 "body": self.copilot_body,
                 "bodyHTML": self.body_html,
                 "commit": {"oid": self.copilot_head},
-                "author": {"login": "copilot-pull-request-reviewer"},
+                "author": {
+                    "__typename": "Bot",
+                    "databaseId": self.copilot_author,
+                    "id": "BOT_kgDOCnlnWA",
+                    "login": "copilot-pull-request-reviewer",
+                },
                 "pullRequest": {
                     "number": 16,
                     "repository": {
@@ -110,6 +117,15 @@ def test_owner_command_binds_copilot_review_across_cold_restart_and_keeps_merge_
         tmp_path):
     api = SensitiveCopilotApi()
     state_path = tmp_path / "coordinator-state.json"
+
+    original = api._copilot_review()
+    reviews = _rest_list(api, "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100")
+    enriched = next(review for review in reviews if review["id"] == REVIEW_ID)
+    assert {key: enriched[key] for key in original} == original
+    assert enriched["updatedAt"] == SUBMITTED
+    assert enriched["lastEditedAt"] is None
+    assert enriched["includesCreatedEdit"] is False
+    assert enriched["body_html"] == BODY_ONLY
 
     result = Coordinator(api, StateStore(state_path)).run(apply=True)
     enrollment = StateStore(state_path).snapshot()["enrollments"]["16"]
@@ -133,6 +149,126 @@ def test_owner_command_binds_copilot_review_across_cold_restart_and_keeps_merge_
     assert not replay["pull_requests"][0]["auto_merge_eligible"]
     assert api.fix_attempts == 1
     assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("transport, field, value", [
+    ("rest", "id", None), ("rest", "id", True),
+    ("rest", "id", str(COPILOT_REVIEWER)),
+    ("rest", "id", COPILOT_AGENT), ("rest", "id", OWNER),
+    ("rest", "node_id", None), ("rest", "node_id", ""),
+    ("rest", "node_id", True), ("rest", "node_id", "BOT_other"),
+    ("rest", "type", None), ("rest", "type", "User"),
+    ("graphql", "databaseId", None), ("graphql", "databaseId", True),
+    ("graphql", "databaseId", str(COPILOT_REVIEWER)),
+    ("graphql", "databaseId", COPILOT_AGENT), ("graphql", "databaseId", OWNER),
+    ("graphql", "id", None), ("graphql", "id", ""),
+    ("graphql", "id", True), ("graphql", "id", "BOT_other"),
+    ("graphql", "__typename", None), ("graphql", "__typename", "User"),
+    ("graphql", "__typename", "Organization"),
+])
+def test_unproved_transport_actor_does_not_authorize(tmp_path, transport, field, value):
+    api = SensitiveCopilotApi()
+    if transport == "rest":
+        original = api._copilot_review
+
+        def malformed_review():
+            review = original()
+            review["user"][field] = value
+            return review
+
+        api._copilot_review = malformed_review
+    else:
+        original = api.graphql
+
+        def malformed_graphql(query, variables):
+            response = original(query, variables)
+            if variables.get("id") == REVIEW_NODE_ID:
+                response["data"]["node"]["author"][field] = value
+            return response
+
+        api.graphql = malformed_graphql
+
+    path = tmp_path / "state.json"
+    result = Coordinator(api, StateStore(path)).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    assert enrollment["sensitive_sha"] is None
+    assert enrollment["sensitive_authorization"] is None
+    assert enrollment["targeted_review"] is None
+    assert not result["pull_requests"][0]["auto_merge_eligible"]
+    assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("mutation", [
+    "errors", "data", "node", "author", "review_node", "review_id",
+    "repository", "repository_name", "pull", "head", "body", "submitted",
+    "updated", "missing_edit", "created_edit", "duplicate_review",
+])
+def test_unbound_metadata_does_not_authorize(tmp_path, mutation):
+    api = SensitiveCopilotApi()
+    graphql = api.graphql
+    get_all = api.get_all
+
+    def malformed_graphql(query, variables):
+        response = graphql(query, variables)
+        if variables.get("id") != REVIEW_NODE_ID:
+            return response
+        node = response["data"]["node"]
+        if mutation == "errors":
+            response["errors"] = [{"message": "synthetic partial response"}]
+        elif mutation == "data":
+            response["data"] = []
+        elif mutation == "node":
+            response["data"]["node"] = None
+        elif mutation == "author":
+            node["author"] = []
+        elif mutation == "review_node":
+            node["id"] = "PRR_other"
+        elif mutation == "review_id":
+            node["databaseId"] = REVIEW_ID + 1
+        elif mutation == "repository":
+            node["pullRequest"]["repository"]["databaseId"] = 9
+        elif mutation == "repository_name":
+            node["pullRequest"]["repository"]["nameWithOwner"] = "lindayi/other"
+        elif mutation == "pull":
+            node["pullRequest"]["number"] = 17
+        elif mutation == "head":
+            node["commit"]["oid"] = BASE
+        elif mutation == "body":
+            node["body"] += " "
+        elif mutation == "submitted":
+            node["submittedAt"] = "2026-10-01T12:29:00Z"
+        elif mutation == "updated":
+            node["updatedAt"] = "2026-10-01T12:31:00Z"
+        elif mutation == "missing_edit":
+            del node["lastEditedAt"]
+        elif mutation == "created_edit":
+            node["includesCreatedEdit"] = True
+        return response
+
+    def duplicate_review(route, *, collection=None):
+        rows = get_all(route, collection=collection)
+        if mutation == "duplicate_review" and route.endswith("/pulls/16/reviews?per_page=100"):
+            rows.insert(1, api._copilot_review())
+        return rows
+
+    api.graphql = malformed_graphql
+    api.get_all = duplicate_review
+    path = tmp_path / "state.json"
+    result = Coordinator(api, StateStore(path)).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    assert enrollment["sensitive_sha"] is None
+    assert enrollment["sensitive_authorization"] is None
+    assert enrollment["targeted_review"] is None
+    assert not result["pull_requests"][0]["auto_merge_eligible"]
+    assert not api.graphql_writes
+
+
+def test_metadata_query_requests_supported_stable_actor_fields():
+    from deploy.cloud_coordinator import GRAPHQL_REVIEW_METADATA
+
+    assert "__typename" in GRAPHQL_REVIEW_METADATA
+    assert "... on User { id databaseId }" in GRAPHQL_REVIEW_METADATA
+    assert "... on Bot { id databaseId }" in GRAPHQL_REVIEW_METADATA
 
 
 def test_sensitive_repair_uses_enrollment_without_merge_authorization(tmp_path):
