@@ -287,6 +287,71 @@ def test_supervised_review_qualification_contract_is_separate_and_fail_closed():
         assert 'Supervised manual qualification' in text, path
 
 
+def test_manual_qualification_artifact_has_an_exact_typed_field_inventory():
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    assert '### Manual audit artifact v1' in spec
+    section = spec.split('### Manual audit artifact v1', 1)[1].split(
+        '### Publication and independent manual validation', 1)[0]
+    fields = re.findall(r'^\| `([^`]+)` \| ([^|]+) \|', section, re.MULTILINE)
+    assert dict(fields) == {
+        'schema': 'Literal `hermes-supervised-qualification/v1`',
+        'kind': 'Enum `qualification`, `revalidation`, `invalidation`',
+        'record_key': 'Key',
+        'prior_comment_id': 'ID or null',
+        'repository': 'Repository',
+        'pull': 'Pull',
+        'operator': 'Operator',
+        'head_sha': 'SHA',
+        'base_sha': 'SHA',
+        'reserved_at': 'Time',
+        'observed_at': 'Time',
+        'review': 'Review',
+        'review_inventory': 'EvidenceRef',
+        'source_proof': 'EvidenceRef',
+        'occupancy_proof': 'EvidenceRef',
+        'checks': 'Array of exactly three Check objects',
+        'source_run': 'SourceRun',
+        'sensitive': 'Sensitive or null',
+        'role_request': 'Text',
+        'reasoning': 'Text',
+        'machine_outcome': 'MachineOutcome',
+        'status': 'Enum `supervised-only`, `blocked`, `invalidated`',
+        'reason': 'Text',
+        'evidence': 'Array of 1–128 Evidence objects',
+    }
+    assert len(fields) == len(dict(fields)), 'Duplicate fields are not a contract'
+
+
+@pytest.mark.parametrize('clause', (
+    '<!-- hermes-supervised-qualification/v1 -->',
+    'at most 60 KiB of UTF-8',
+    'Missing, extra, duplicate, mistyped, or malformed fields block',
+    'No runtime validator or coordinator qualification command is implemented',
+    'sha256 over the exact raw UTF-8',
+    'sha256 over the exact rendered UTF-8 `body_html`',
+    'complete review/thread/comment pagination',
+    'complete source task/session, receipt, reservation, and prompt bindings',
+    'full repository task inventory',
+    'same run ID and run attempt',
+    'actual machine acceptance or rejection',
+    'never set `review_valid` or edit a ledger',
+    'gh api --method POST',
+    'gh api --paginate --slurp',
+    'repos/$REPO/issues/comments/$COMMENT_ID',
+    'create-once reservation',
+    'Never replay an uncertain POST',
+    'No PATCH or DELETE',
+    'Immediately before any merge',
+    'append a new `invalidation` record',
+    'independently repeat every read',
+    'A runtime rejection still blocks that runtime path',
+    'Private evidence must not be uploaded',
+))
+def test_manual_qualification_artifact_lifecycle_is_documented(clause):
+    spec = ' '.join((ROOT / 'docs/git-development-spec.md').read_text().split())
+    assert clause in spec, clause
+
+
 def test_all_active_context_lists_include_issue_link():
     for path in (
         'AGENTS.md',
