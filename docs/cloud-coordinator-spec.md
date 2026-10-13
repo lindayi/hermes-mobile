@@ -849,6 +849,13 @@ malformed, or mismatched targets do not admit evaluation. An `inline` label or
 an unrelated unresolved thread alone is not proof. Positive open targets also
 prevent a generic COMMENTED review state from supplying successful progress
 or merge evidence. Unknown summary prose remains ambiguous.
+Every COMMENTED admission also requires a structurally complete thread inventory
+with unique bounded thread IDs and unique positive comment IDs, even when all
+actionable findings are body-only. Each returned thread must contain at least one
+fully collected comment; a complete empty inventory is valid. When inline targets
+exist, exact target-to-comment, author, review-head, and timestamp matching remains
+an additional requirement. This inventory prerequisite does not change the
+existing CHANGES_REQUESTED path.
 This admission is distinct from the owner-published proof required
 to consume `progress_disposition.resolved`; a rejected, edited, superseded, or
 otherwise unproven owner follow-up cannot earn resolution credit. Findings present

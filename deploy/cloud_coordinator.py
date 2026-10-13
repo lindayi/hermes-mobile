@@ -2577,9 +2577,37 @@ def _negative_review_progress_fingerprints(actions, issue, head_sha, reviews, *,
     return _review_finding_fingerprints(report.get("findings"))
 
 
+def _complete_unique_thread_inventory(threads, *, threads_complete):
+    if threads_complete is not True or not isinstance(threads, list):
+        return False
+    thread_ids = set()
+    comment_ids = set()
+    for thread in threads:
+        if (not isinstance(thread, dict)
+                or type(thread.get("isResolved")) is not bool
+                or thread.get("comments_complete") is not True
+                or not isinstance(thread.get("id"), str)
+                or not thread["id"]
+                or len(thread["id"]) > MAX_THREAD_ID_LENGTH
+                or thread["id"] in thread_ids
+                or not isinstance(thread.get("comments"), list)
+                or not thread["comments"]):
+            return False
+        thread_ids.add(thread["id"])
+        for comment in thread["comments"]:
+            if (not isinstance(comment, dict)
+                    or not positive_id(comment.get("databaseId"))
+                    or comment["databaseId"] in comment_ids):
+                return False
+            comment_ids.add(comment["databaseId"])
+    return True
+
+
 def _matched_inline_inventory(targets, review, threads, *, pull_number,
                               threads_complete):
-    if (threads_complete is not True or not isinstance(threads, list)
+    if (not _complete_unique_thread_inventory(
+                threads, threads_complete=threads_complete,
+            )
             or not targets or not positive_id(pull_number)
             or not _valid_timestamp(review.get("submitted_at"))):
         return False
@@ -2596,18 +2624,8 @@ def _matched_inline_inventory(targets, review, threads, *, pull_number,
             return False
         expected.add(int(match[1]))
     observed = set()
-    thread_ids = set()
     for thread in threads:
-        if (not isinstance(thread, dict) or type(thread.get("isResolved")) is not bool
-                or thread.get("comments_complete") is not True
-                or not isinstance(thread.get("id"), str) or not thread["id"]
-                or thread["id"] in thread_ids
-                or not isinstance(thread.get("comments"), list) or not thread["comments"]):
-            return False
-        thread_ids.add(thread["id"])
         for comment in thread["comments"]:
-            if not isinstance(comment, dict) or not positive_id(comment.get("databaseId")):
-                return False
             comment_id = comment["databaseId"]
             current = (
                 isinstance(comment.get("pullRequestReview"), dict)
@@ -2651,13 +2669,20 @@ def _current_copilot_rejection_progress(reviews, head_sha, *, pull_author_id,
     disposition = review_body_disposition(
         reviews, head_sha, reviewer_id=COPILOT_REVIEWER_ID,
     )
+    commented_inventory_complete = (
+        review_state != "COMMENTED"
+        or _complete_unique_thread_inventory(
+            threads, threads_complete=threads_complete,
+        )
+    )
     return (
         disposition["inventory_complete"] is True
         and disposition["ambiguous"] is False
         and (
             review_state == "CHANGES_REQUESTED"
             or (
-                (bool(disposition["findings"]) or bool(disposition["inline_targets"]))
+                commented_inventory_complete
+                and (bool(disposition["findings"]) or bool(disposition["inline_targets"]))
                 and (
                     not disposition["inline_count"]
                     or (

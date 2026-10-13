@@ -1275,8 +1275,12 @@ def test_commented_copilot_findings_are_negative_progress_not_review_approval():
         HEAD, 64002, "Finding remains.", "2026-10-01T12:10:00Z",
     )
     current_progress = cloud_coordinator._current_copilot_rejection_progress
+    complete_empty_inventory = {
+        "threads": [], "threads_complete": True, "pull_number": 16,
+    }
     assert current_progress(
         [review], HEAD, pull_author_id=OWNER, reviews_complete=True,
+        **complete_empty_inventory,
     )
     assert not cloud_coordinator.independent_review_valid(
         HEAD, [review], [], pull_author_id=OWNER,
@@ -1298,25 +1302,27 @@ def test_commented_copilot_findings_are_negative_progress_not_review_approval():
     )["findings"] == []
     assert not current_progress(
         [empty_review], HEAD, pull_author_id=OWNER, reviews_complete=True,
+        **complete_empty_inventory,
     )
     assert not current_progress(
         [review], HEAD, pull_author_id=COPILOT_REVIEWER, reviews_complete=True,
+        **complete_empty_inventory,
     )
     assert not current_progress(
         [review | {"commit_id": RESULT_HEAD}], HEAD,
-        pull_author_id=OWNER, reviews_complete=True,
+        pull_author_id=OWNER, reviews_complete=True, **complete_empty_inventory,
     )
     assert not current_progress(
         [review | {"dismissed": True}], HEAD,
-        pull_author_id=OWNER, reviews_complete=True,
+        pull_author_id=OWNER, reviews_complete=True, **complete_empty_inventory,
     )
     assert not current_progress(
         [review | {"state": "PENDING"}], HEAD,
-        pull_author_id=OWNER, reviews_complete=True,
+        pull_author_id=OWNER, reviews_complete=True, **complete_empty_inventory,
     )
     assert not current_progress(
         [review | {"body_html": "<details>ambiguous</details>"}], HEAD,
-        pull_author_id=OWNER, reviews_complete=True,
+        pull_author_id=OWNER, reviews_complete=True, **complete_empty_inventory,
     )
     ambiguous_html = (
         "<details><summary>Unknown inventory</summary>"
@@ -1331,9 +1337,65 @@ def test_commented_copilot_findings_are_negative_progress_not_review_approval():
     )["ambiguous"]
     assert not current_progress(
         [ambiguous_review], HEAD, pull_author_id=OWNER, reviews_complete=True,
+        **complete_empty_inventory,
     )
     assert not current_progress(
         [review], HEAD, pull_author_id=OWNER, reviews_complete=False,
+        **complete_empty_inventory,
+    )
+    assert not current_progress(
+        [review], HEAD, pull_author_id=OWNER, reviews_complete=True,
+    )
+
+
+@pytest.mark.parametrize(("threads", "threads_complete"), [
+    (None, True),
+    ([], False),
+    ([{"id": "PRRT_one", "isResolved": True,
+       "comments_complete": True, "comments": []}], True),
+    ([{"id": "PRRT_one", "isResolved": True,
+       "comments_complete": True, "comments": None}], True),
+    ([{"id": "PRRT_one", "isResolved": 1,
+       "comments_complete": True, "comments": [{"databaseId": 1}]}], True),
+    ([{"id": "", "isResolved": True,
+       "comments_complete": True, "comments": [{"databaseId": 1}]}], True),
+    ([{"id": "x" * 257, "isResolved": True,
+       "comments_complete": True, "comments": [{"databaseId": 1}]}], True),
+    ([{"id": "PRRT_one", "isResolved": True,
+       "comments_complete": False, "comments": [{"databaseId": 1}]}], True),
+    ([{"id": "PRRT_one", "isResolved": True,
+       "comments_complete": True, "comments": [{}]}], True),
+    ([{"id": "PRRT_one", "isResolved": True,
+       "comments_complete": True, "comments": [{"databaseId": True}]}], True),
+    ([{"id": "PRRT_one", "isResolved": True, "comments_complete": True,
+       "comments": [{"databaseId": 1}]},
+      {"id": "PRRT_one", "isResolved": True, "comments_complete": True,
+       "comments": [{"databaseId": 2}]}], True),
+    ([{"id": "PRRT_one", "isResolved": True, "comments_complete": True,
+       "comments": [{"databaseId": 1}]},
+      {"id": "PRRT_two", "isResolved": True, "comments_complete": True,
+       "comments": [{"databaseId": 1}]}], True),
+])
+def test_complete_unique_thread_inventory_rejects_malformed_shape(
+        threads, threads_complete):
+    assert not cloud_coordinator._complete_unique_thread_inventory(
+        threads, threads_complete=threads_complete,
+    )
+
+
+def test_complete_unique_thread_inventory_accepts_empty_and_unique_collections():
+    assert cloud_coordinator._complete_unique_thread_inventory(
+        [], threads_complete=True,
+    )
+    assert cloud_coordinator._complete_unique_thread_inventory(
+        [{
+            "id": "PRRT_one", "isResolved": True, "comments_complete": True,
+            "comments": [{"databaseId": 1}],
+        }, {
+            "id": "PRRT_two", "isResolved": False, "comments_complete": True,
+            "comments": [{"databaseId": 2}],
+        }],
+        threads_complete=True,
     )
 
 
@@ -6015,6 +6077,132 @@ def test_commented_findings_evaluate_completed_receipt_and_resume_once(
         if proof["task_id"] == source["task_id"]
     )
     assert {field: persisted_receipt[field] for field in receipt_fields} == immutable_receipt
+
+
+@pytest.mark.parametrize(("hazard", "advance_head", "recovered_inventory"), [
+    ("duplicate-thread", False, "empty"),
+    ("empty-comments", True, "unique"),
+    ("invalid-resolution", False, "unique"),
+    ("incomplete-comments", True, "empty"),
+])
+def test_body_only_commented_progress_requires_complete_unique_inventory(
+        tmp_path, hazard, advance_head, recovered_inventory):
+    api = ProgressApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    finding = "Finding A remains."
+    api.progress_review = _progress_review(
+        HEAD, 63002, finding, "2026-10-01T12:10:00Z",
+    )
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    source = next(
+        action for action in store.actions().values() if action["kind"] == "fix"
+    )
+    result_head = RESULT_HEAD if advance_head else HEAD
+    api.complete_task(source["task_id"], source, head_sha=result_head)
+    api.head_sha = api.pull["head"]["sha"] = result_head
+    api.unresolved = False
+    api.review_state = "COMMENTED"
+    api.review_sha = result_head
+    api.review_submitted_at = "2026-10-01T12:11:00Z"
+    api.progress_review = _progress_review(
+        result_head, 63003, finding, "2026-10-01T12:11:00Z",
+    )
+    original_graphql = api.graphql
+
+    def malformed_resolved_thread(query, variables):
+        result = original_graphql(query, variables)
+        if "reviewThreads" in query:
+            thread = {
+                "id": "PRRT_resolved",
+                "isResolved": True,
+                "comments": {
+                    "nodes": [{
+                        "databaseId": 447, "body": "Previously resolved comment.",
+                    }],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+            }
+            nodes = [thread]
+            if hazard == "duplicate-thread":
+                nodes.append(deepcopy(thread))
+            elif hazard == "empty-comments":
+                thread["comments"]["nodes"] = []
+            elif hazard == "invalid-resolution":
+                thread["isResolved"] = None
+            elif hazard == "incomplete-comments":
+                thread["comments"]["pageInfo"] = {
+                    "hasNextPage": True, "endCursor": "synthetic-next-page",
+                }
+            result["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] = nodes
+        return result
+
+    api.graphql = malformed_resolved_thread
+
+    summary = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    [proof] = enrollment["receipt_proofs"]
+    assert proof["receipt_result"] == "ready"
+    assert proof["receipt_head"] == result_head
+    assert enrollment["repair_progress"]["evaluated_task_ids"] == []
+    assert enrollment["repair_progress"]["consecutive_no_progress"] == 0
+    assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+    assert enrollment["attempts"] == 1
+    assert api.fix_attempts == 1
+    assert summary["required_checks_green"]
+    assert not summary["repair_requested"]
+    if advance_head:
+        StateStore(path).retire(16, result_head, BASE)
+        assert StateStore(path).action(source["key"]) is None
+    else:
+        assert StateStore(path).action(source["key"])["status"] == "completed"
+    assert StateStore(path).snapshot()["enrollments"]["16"]["receipt_proofs"] == [proof]
+
+    api.graphql = original_graphql
+    if recovered_inventory == "unique":
+        def unique_resolved_thread(query, variables):
+            result = original_graphql(query, variables)
+            if "reviewThreads" in query:
+                result["data"]["repository"]["pullRequest"]["reviewThreads"][
+                    "nodes"
+                ] = [{
+                    "id": "PRRT_valid",
+                    "isResolved": True,
+                    "comments": {
+                        "nodes": [{
+                            "databaseId": 448, "body": "Resolved comment.",
+                        }],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                }]
+            return result
+
+        api.graphql = unique_resolved_thread
+    for _ in range(2):
+        summary = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+        assert enrollment["repair_progress"]["evaluated_task_ids"] == [
+            source["task_id"],
+        ]
+        assert enrollment["repair_progress"]["consecutive_no_progress"] == 1
+        assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+        assert enrollment["attempts"] == 2
+        assert summary["required_checks_green"]
+        assert not summary["auto_merge_eligible"]
+    followup = next(
+        action for action in StateStore(path).actions().values()
+        if action["kind"] == "fix" and action["attempt"] == 2
+    )
+    assert followup["status"] == "sent"
+    assert finding in followup["body"]
+    assert api.fix_attempts == 2
+    assert StateStore(path).snapshot()["enrollments"]["16"]["receipt_proofs"] == [proof]
 
 
 @pytest.mark.parametrize("producer", ["source", "review-followup", "neutral"])

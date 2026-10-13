@@ -596,9 +596,11 @@ review, clear the source-contract hold, or authorize operational activation.
 
 Issue #106 updates only the current coordinator candidate pin for bounded evaluation
 of complete exact-head COMMENTED findings. The full-media body must provide a
-complete, unambiguous actionable inventory. Linked open targets must match the
-authenticated current-review/head thread inventory; body-only findings remain
-supported. Generic COMMENTED state and unrelated unresolved threads do not
+complete, unambiguous actionable inventory. Every COMMENTED admission also requires
+a complete, structurally valid thread inventory with unique bounded thread and
+comment IDs; a complete empty inventory remains valid for body-only findings.
+Linked open targets must additionally match the authenticated current-review/head
+thread inventory. Generic COMMENTED state and unrelated unresolved threads do not
 prove negative admission. This evidence does not grant review approval,
 merge authority, or deployment authority. COMMENTED admission is separate from the
 owner-published proof needed to consume a follow-up resolution disposition. The
@@ -607,7 +609,7 @@ blocker remains active:
 
 | Issue #106 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `a5c817fb8e8a3f7190a8eed8804dea4123e69fb68b0806e8c6474e8e55810092` |
+| `deploy/cloud_coordinator.py` | `58e123eb6537dfdc6df6251c69c40418c940101d705ae9c377137d848071503c` |
 
 The reconciled issue #106 and PR #105 candidate also binds REST and GraphQL review
 authors by matching positive numeric IDs, node IDs, and User/Bot types. Reviewer

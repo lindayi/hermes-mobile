@@ -199,7 +199,7 @@ _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE = {
 }
 
 _ISSUE106_COMMENTED_PROGRESS_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'a5c817fb8e8a3f7190a8eed8804dea4123e69fb68b0806e8c6474e8e55810092',
+    'deploy/cloud_coordinator.py': '58e123eb6537dfdc6df6251c69c40418c940101d705ae9c377137d848071503c',
 }
 
 _ISSUE106_REVIEW_SUMMARY_FIXTURE = {
@@ -207,7 +207,7 @@ _ISSUE106_REVIEW_SUMMARY_FIXTURE = {
 }
 
 _PR105_OWNER_ABANDONMENT_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'a5c817fb8e8a3f7190a8eed8804dea4123e69fb68b0806e8c6474e8e55810092',
+    'deploy/cloud_coordinator.py': '58e123eb6537dfdc6df6251c69c40418c940101d705ae9c377137d848071503c',
     'deploy/task_receipts.py': '1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231',
 }
 
