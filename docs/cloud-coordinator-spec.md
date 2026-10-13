@@ -604,9 +604,9 @@ Finite acceptance for this recovery:
   dispatch a distinct bounded task without reposting the old task.
 - A valid distinct continuation may return a different result head; that head is
   accepted only from its immutable ready receipt after a genuinely new durable
-  reservation records an explicit binding to the committed recovery; same-second
-  older reservations or copied/malformed bindings fail closed. Copilot review
-  handoff then proceeds across cold restart without duplicate work.
+  reservation records an explicit attested binding to the committed recovery;
+  same-second older reservations or copied/malformed bindings fail closed.
+  Copilot review handoff then proceeds across cold restart without duplicate work.
 - Source and review-followup fix reservations are eligible; independent review and
   report-correction reservations are not.
 - A current-head owner command that names a fully observed local nonmatch (for

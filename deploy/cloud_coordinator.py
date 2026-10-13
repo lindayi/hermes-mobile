@@ -1619,9 +1619,41 @@ def _owner_abandonment_successor_binding(record):
     } if _owner_abandonment_record_valid(record) else None
 
 
+def _owner_abandonment_successor_attestation(record, action):
+    binding = _owner_abandonment_successor_binding(record)
+    if (
+            binding is None
+            or not isinstance(action, dict)
+            or not isinstance(action.get("key"), str)
+            or not action["key"]
+            or not isinstance(action.get("dispatch_nonce"), str)
+            or not action["dispatch_nonce"]
+            or not isinstance(action.get("created_at"), (int, float))
+            or isinstance(action.get("created_at"), bool)
+    ):
+        return None
+    try:
+        payload = json.dumps(
+            {
+                "binding": binding,
+                "key": action["key"],
+                "dispatch_nonce": action["dispatch_nonce"],
+                "created_at": action["created_at"],
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _owner_abandonment_successor_candidate_matches(record, action):
     neutral = isinstance(action, dict) and action.get("task_type") == "neutral"
     expected_binding = _owner_abandonment_successor_binding(record)
+    expected_attestation = _owner_abandonment_successor_attestation(record, action)
     return (
         _owner_abandonment_record_valid(record)
         and isinstance(action, dict)
@@ -1635,7 +1667,12 @@ def _owner_abandonment_successor_candidate_matches(record, action):
         }
         and action.get("head") == record["head_sha"]
         and (
-            action.get("owner_abandonment_binding") == expected_binding
+            (
+                action.get("owner_abandonment_binding") == expected_binding
+                and expected_attestation is not None
+                and action.get("owner_abandonment_attestation")
+                    == expected_attestation
+            )
             or action.get("owner_abandonment_intent") == expected_binding
         )
         and (
@@ -8022,6 +8059,7 @@ class StateStore:
     def claim_action(self, key, action):
         def claim(data):
             claimed = dict(action)
+            owner_abandonment_record = None
             existing = data["actions"].get(key)
             tombstone = data["retired"].get(str(claimed.get("issue")), {})
             if not existing and (
@@ -8090,7 +8128,6 @@ class StateStore:
                 owner_abandonment_intent = claimed.pop(
                     "owner_abandonment_intent", None,
                 )
-                owner_abandonment_record = None
                 if owner_abandonment_intent is not None:
                     matching_owner_abandonments = [
                         record for key, record in _valid_owner_abandonment_claims(
@@ -8167,8 +8204,15 @@ class StateStore:
                     neutral=neutral,
                 )
                 claimed["body"] = f"{claimed.get('body', '')}\n\n{instruction}"
-            data["actions"][key] = {**claimed, "status": "sending",
-                                    "created_at": time.time()}
+            created_at = time.time()
+            claimed["created_at"] = created_at
+            if owner_abandonment_record is not None:
+                claimed["owner_abandonment_attestation"] = (
+                _owner_abandonment_successor_attestation(
+                    owner_abandonment_record, claimed,
+                )
+                )
+            data["actions"][key] = {**claimed, "status": "sending"}
             return True
         return self._mutate(claim)
 
@@ -8261,13 +8305,14 @@ class StateStore:
                 # Persist the validated proof in the same write as completion,
                 # independently of the action that lifecycle compaction retires.
                 proof_fields = {
-                    "issue", "kind", "status", "head", "task_id", "dispatch_nonce",
+                    "key", "issue", "kind", "status", "head", "task_id",
+                    "dispatch_nonce", "created_at",
                     "receipt_result", "receipt_comment_id", "receipt_created_at",
                     "receipt_body", "receipt_task_id", "receipt_session_id",
                     "receipt_completed_at", "receipt_session_completed_at",
                     "receipt_nonce", "receipt_start_head", "receipt_head", "receipt_base",
                     "receipt_legacy_neutral",
-                    "owner_abandonment_binding",
+                    "owner_abandonment_binding", "owner_abandonment_attestation",
                     "attempt", "owner_id", "repository_id", "pull_id", "pull_node_id",
                     "repair_policy_version", "repair_fingerprints",
                     "repair_fingerprints_complete", "repair_fingerprint_version",

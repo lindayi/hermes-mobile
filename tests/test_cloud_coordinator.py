@@ -2932,6 +2932,19 @@ def _owner_abandonment_historical_neutral_case(tmp_path):
     return api, store, neutral
 
 
+def _advance_owner_abandonment_main(api):
+    api.current_main_sha = FINAL_RESULT_HEAD
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    api.compare_results = {
+        f"{CURRENT_MAIN}...{FINAL_RESULT_HEAD}": _compare_result(
+            CURRENT_MAIN, ahead_by=1,
+        ),
+        f"{CURRENT_MAIN}...{NEXT_RESULT_HEAD}": _compare_result(
+            CURRENT_MAIN, ahead_by=3,
+        ),
+    }
+
+
 def _store_precovery_owner_abandonment_successor(
         api, store, *, created_at, receipt_head, receipt_base):
     action = {
@@ -3230,6 +3243,93 @@ def test_owner_abandonment_same_second_precovery_completion_cannot_grant_provena
     StateStore(store.path)._mutate(
         lambda state: state["actions"].pop(sent_after_recovery[0]["key"], None),
     )
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.unresolved = False
+    api.review_state = None
+    api.review_sha = None
+    api.head_sha = FINAL_RESULT_HEAD
+    api.pull["head"]["sha"] = FINAL_RESULT_HEAD
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="clean")
+
+    replay = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856661,
+    ).run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+    _, authorized, blocked = _authorized_result_heads(
+        16, state["enrollments"]["16"], state["actions"], api.comments, CURRENT_MAIN,
+    )
+
+    assert FINAL_RESULT_HEAD not in authorized
+    assert FINAL_RESULT_HEAD not in blocked
+    assert replay["reasons"] == ["unauthorized-continuation"]
+    assert api.requested_reviewers == []
+
+
+def test_owner_abandonment_claim_action_does_not_retroactively_stamp_existing_key(
+        tmp_path):
+    api, store, _ = _owner_abandonment_case(tmp_path)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    recovery = StateStore(store.path).snapshot()["enrollments"]["16"][
+        "owner_abandonments"
+    ][0]
+    key = "retroactive-owner-abandonment-key"
+    action = {
+        "kind": "fix",
+        "issue": 16,
+        "head": NEXT_RESULT_HEAD,
+        "head_ref": api.pull["head"]["ref"],
+        "main_sha": CURRENT_MAIN,
+        "body": "Synthetic retry candidate without durable recovery claim.",
+        "progress_fingerprints": [],
+        "progress_fingerprints_complete": False,
+        "repair_target_map": {},
+    }
+    assert store.claim_action(key, action)
+    claimed = StateStore(store.path).action(key)
+
+    assert not store.claim_action(key, action | {
+        "owner_abandonment_intent": (
+            cloud_coordinator._owner_abandonment_successor_binding(recovery)
+        ),
+    })
+    assert StateStore(store.path).action(key) == claimed
+    assert "owner_abandonment_binding" not in claimed
+
+
+def test_copied_owner_abandonment_binding_does_not_grant_provenance(tmp_path):
+    from copy import deepcopy
+
+    api, store, _ = _owner_abandonment_case(tmp_path)
+    preexisting = _store_precovery_owner_abandonment_successor(
+        api, store, created_at=1790856660.1,
+        receipt_head=FINAL_RESULT_HEAD, receipt_base=CURRENT_MAIN,
+    )
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660.9,
+    ).run(apply=True)
+    successor = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "fix"
+        and action.get("status") == "sent"
+        and action.get("head") == NEXT_RESULT_HEAD
+        and action.get("key") != preexisting["key"]
+    )
+    copied_binding = deepcopy(successor["owner_abandonment_binding"])
+
+    def copy_binding(state):
+        state["actions"].pop(successor["key"], None)
+        preexisting_action = state["actions"][preexisting["key"]]
+        preexisting_action["owner_abandonment_binding"] = deepcopy(copied_binding)
+        for proof in state["enrollments"]["16"]["receipt_proofs"]:
+            if proof.get("task_id") == preexisting["task_id"]:
+                proof["owner_abandonment_binding"] = deepcopy(copied_binding)
+
+    StateStore(store.path)._mutate(copy_binding)
     api.source_failure = False
     api.source_failure_sha = None
     api.unresolved = False
@@ -3619,6 +3719,167 @@ def test_owner_abandonment_fences_reject_incomplete_evidence(tmp_path, hazard):
     ] == task_writes
 
 
+@pytest.mark.parametrize("recovery_mode", ["source", "historical-neutral"])
+@pytest.mark.parametrize("hazard", [
+    None,
+    "edited-command", "deleted-command", "active-task", "reactivated-task",
+    "malformed-task", "missing-task", "changed-head", "changed-base",
+    "changed-main", "changed-reservation", "incomplete-inventory", "api-error",
+])
+def test_owner_abandonment_final_fence_matrix(tmp_path, monkeypatch, recovery_mode,
+                                              hazard):
+    from copy import deepcopy
+
+    if recovery_mode == "source":
+        api, store, neutral = _owner_abandonment_case(tmp_path)
+    else:
+        api, store, neutral = _owner_abandonment_historical_neutral_case(tmp_path)
+        _advance_owner_abandonment_main(api)
+    before_state = StateStore(store.path).snapshot()
+    expected_state = deepcopy(before_state)
+    before_writes = list(api.writes)
+    before_graphql = list(api.graphql_writes)
+    original_get = api.get
+    original_get_all = api.get_all
+    probe = {"plan": None, "fence_calls": 0}
+    task_id = neutral["task_id"]
+    original_task = deepcopy(api.tasks[task_id])
+
+    def inject_hazard():
+        if hazard in {None, "edited-command", "deleted-command"}:
+            command = next(
+                item for item in api.comments if item.get("id") == 7771
+            )
+            if hazard == "edited-command":
+                command["body"] += " edited"
+                command["updated_at"] = "2026-10-01T12:12:00Z"
+            elif hazard == "deleted-command":
+                api.comments.remove(command)
+            return
+        if hazard == "active-task":
+            api.tasks[task_id]["state"] = "in_progress"
+            return
+        if hazard == "reactivated-task":
+            def stale_inventory(route, *, collection=None):
+                if route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
+                    inventory = []
+                    for item in original_get_all(route, collection=collection):
+                        current = deepcopy(item)
+                        if current.get("id") == task_id:
+                            current["state"] = "completed"
+                        inventory.append(current)
+                    return inventory
+                return original_get_all(route, collection=collection)
+
+            def reactivated_detail(route):
+                if route.endswith(f"/tasks/{task_id}"):
+                    api.tasks[task_id]["state"] = "in_progress"
+                return original_get(route)
+
+            api.get_all = stale_inventory
+            api.get = reactivated_detail
+            return
+        if hazard == "malformed-task":
+            api.tasks[task_id]["sessions"] = {}
+            return
+        if hazard == "missing-task":
+            del api.tasks[task_id]
+            return
+        if hazard == "changed-head":
+            api.head_sha = api.pull["head"]["sha"] = FINAL_RESULT_HEAD
+            return
+        if hazard == "changed-base":
+            api.pull["base"]["sha"] = FINAL_RESULT_HEAD
+            return
+        if hazard == "changed-main":
+            api.current_main_sha = RESULT_HEAD
+            return
+        if hazard == "changed-reservation":
+            store.update_action(
+                neutral["key"], "uncertain",
+                receipt_waits=MAX_RECEIPT_POLLS - 1,
+            )
+            expected_state["actions"][neutral["key"]]["receipt_waits"] = (
+                MAX_RECEIPT_POLLS - 1
+            )
+            return
+        if hazard == "incomplete-inventory":
+            def omit_task_inventory(route, *, collection=None):
+                if route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
+                    return []
+                return original_get_all(route, collection=collection)
+
+            api.get_all = omit_task_inventory
+            return
+        if hazard == "api-error":
+            def fail_task_detail(route):
+                if route.endswith(f"/tasks/{task_id}"):
+                    raise ApiError("task detail unavailable", status=503)
+                return original_get(route)
+
+            api.get = fail_task_detail
+            return
+        raise AssertionError(f"unexpected hazard: {hazard}")
+
+    original_build = CloudCoordinator._build_plan
+    original_fence = CloudCoordinator._fence_owner_abandonment
+
+    def tracked_build(self, *, apply=False):
+        plan = original_build(self, apply=apply)
+        if apply:
+            probe["plan"] = deepcopy(plan)
+        return plan
+
+    def tracked_fence(self, recovery, main_sha):
+        probe["fence_calls"] += 1
+        assert probe["plan"] is not None
+        assert probe["plan"]["owner_recoveries"] == [recovery]
+        inject_hazard()
+        return original_fence(self, recovery, main_sha)
+
+    monkeypatch.setattr(CloudCoordinator, "_build_plan", tracked_build)
+    monkeypatch.setattr(CloudCoordinator, "_fence_owner_abandonment", tracked_fence)
+
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+
+    if hazard is None:
+        result = coordinator.run(apply=True)["pull_requests"][0]
+        assert probe["fence_calls"] == 1
+        assert probe["plan"]["owner_recoveries"]
+        recovery = StateStore(store.path).snapshot()["enrollments"]["16"][
+            "owner_abandonments"
+        ][0]
+        assert recovery["action_key"] == neutral["key"]
+        assert StateStore(store.path).action(neutral["key"]) == (
+            before_state["actions"][neutral["key"]]
+        )
+        if recovery_mode == "source":
+            assert result["repair_requested"]
+            assert api.writes != before_writes
+        else:
+            assert result["repair_requested"] is True
+            assert recovery["base_sha"] != probe["plan"]["main_sha"]
+            assert probe["plan"]["owner_recoveries"][0]["record"]["base_sha"] != (
+                probe["plan"]["main_sha"]
+            )
+            assert api.writes != before_writes
+        return
+
+    with pytest.raises(CoordinatorError):
+        coordinator.run(apply=True)
+
+    assert probe["fence_calls"] == 1
+    assert probe["plan"]["owner_recoveries"]
+    assert api.writes == before_writes
+    assert api.graphql_writes == before_graphql
+    assert StateStore(store.path).snapshot() == expected_state
+    assert not StateStore(store.path).snapshot()["enrollments"]["16"].get(
+        "owner_abandonments",
+    )
+
+
 def test_owner_reactivated_task_blocks_dispatch_after_recovery_commit(tmp_path):
     api, store, neutral = _owner_abandonment_case(tmp_path)
     original_get = api.get
@@ -3661,6 +3922,46 @@ def test_owner_abandonment_persistence_failure_has_no_network_write(tmp_path):
     assert not StateStore(store.path).snapshot()["enrollments"]["16"].get(
         "owner_abandonments",
     )
+
+
+def test_owner_abandonment_atomic_replace_failure_preserves_durable_state(
+        tmp_path, monkeypatch):
+    api, store, _ = _owner_abandonment_case(tmp_path)
+    before_state = StateStore(store.path).snapshot()
+    before_writes = list(api.writes)
+    before_graphql = list(api.graphql_writes)
+    probe = {"fence_calls": 0}
+    original_fence = CloudCoordinator._fence_owner_abandonment
+    original_replace = cloud_coordinator.os.replace
+
+    def tracked_fence(self, recovery, main_sha):
+        probe["fence_calls"] += 1
+        return original_fence(self, recovery, main_sha)
+
+    def fail_state_replace(source, target):
+        if probe["fence_calls"] and Path(target) == store.path:
+            raise OSError("synthetic atomic replace failure")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(CloudCoordinator, "_fence_owner_abandonment", tracked_fence)
+    monkeypatch.setattr(cloud_coordinator.os, "replace", fail_state_replace)
+
+    with pytest.raises(OSError, match="atomic replace failure"):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+
+    state = StateStore(store.path).snapshot()
+    _, authorized, blocked = _authorized_result_heads(
+        16, state["enrollments"]["16"], state["actions"], api.comments, CURRENT_MAIN,
+    )
+
+    assert probe["fence_calls"] == 1
+    assert api.writes == before_writes
+    assert api.graphql_writes == before_graphql
+    assert state == before_state
+    assert NEXT_RESULT_HEAD not in authorized
+    assert NEXT_RESULT_HEAD not in blocked
 
 
 def test_stale_owner_abandonment_command_is_consumed_once_without_blocking_unrelated_prs(
