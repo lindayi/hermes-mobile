@@ -3304,6 +3304,131 @@ def test_owner_abandonment_persistence_failure_has_no_network_write(tmp_path):
     )
 
 
+def test_stale_owner_abandonment_command_is_consumed_once_without_blocking_unrelated_prs(
+        tmp_path):
+    from copy import deepcopy
+
+    stale_head = "1" * 40
+    other_head = "2" * 40
+    api, store, neutral = _owner_abandonment_case(tmp_path)
+    command = next(comment for comment in api.comments if comment.get("id") == 7771)
+    command["body"] = (
+        f"/hermes abandon-unverified {neutral['task_id']} {stale_head}"
+    )
+    issue16_enrollment = deepcopy(store.snapshot()["enrollments"]["16"])
+    original_reservation = deepcopy(store.action(neutral["key"]))
+    task_writes = [
+        item for item in api.writes
+        if item[0] == "agents/repos/lindayi/hermes-mobile/tasks"
+    ]
+    issue17_enrollment = enrolled_record(
+        issue=17,
+        comment=223,
+        head=other_head,
+        base=CURRENT_MAIN,
+        pull_id=170000017,
+        pull_node_id="PR_node_17",
+    ) | {
+        "attempts": 0,
+        "neutral_attempts": 0,
+        "neutral_attempts_unknown": False,
+        "repair_progress": cloud_coordinator._new_repair_progress(),
+        "sensitive_authorization": None,
+        "sensitive_sha": None,
+        "targeted_review": None,
+        "last_open_seen": True,
+        "last_open_head": other_head,
+        "active": True,
+    }
+    store._mutate(
+        lambda state: state["enrollments"].__setitem__("17", issue17_enrollment),
+    )
+    pull17 = valid_pr(
+        number=17,
+        id=170000017,
+        node_id="PR_node_17",
+        head={"sha": other_head, "ref": "topic-17", "repo": {"id": 1399942965}},
+        base={"sha": CURRENT_MAIN, "ref": "main", "repo": {"id": 1399942965}},
+    )
+    original_get = api.get
+    original_get_all = api.get_all
+
+    def get_with_unrelated_pull(route):
+        if route == "repos/lindayi/hermes-mobile/pulls/17":
+            return pull17
+        if route == "repos/lindayi/hermes-mobile/pulls/17/requested_reviewers":
+            return {"users": [], "teams": []}
+        return original_get(route)
+
+    def list_with_unrelated_pull(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments?per_page=100"):
+            return []
+        if route.endswith("/pulls/17/files?per_page=100"):
+            return list(api.review_pull_files())
+        if route.endswith("/pulls/17/reviews?per_page=100"):
+            return []
+        if f"/commits/{other_head}/check-runs?" in route:
+            return [
+                {
+                    "name": name,
+                    "head_sha": other_head,
+                    "app": {"id": app_id} if app_id is not None else {},
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+                for name, app_id in (
+                    ("source-ci", 15368),
+                    ("integration-tests", None),
+                    ("issue-link", 15368),
+                )
+            ]
+        if f"/commits/{other_head}/statuses?per_page=100" in route:
+            return []
+        if "/actions/runs?" in route and f"head_sha={other_head}" in route:
+            return [source_run(
+                id=568, head_sha=other_head, head_branch="topic-17",
+                pull_requests=[{"number": 17}],
+            )]
+        return original_get_all(route, collection=collection)
+
+    api.get = get_with_unrelated_pull
+    api.get_all = list_with_unrelated_pull
+
+    first = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    first_issue17 = next(
+        item for item in first["pull_requests"] if item["issue"] == 17
+    )
+    second = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    second_issue17 = next(
+        item for item in second["pull_requests"] if item["issue"] == 17
+    )
+
+    state = StateStore(store.path).snapshot()
+    assert first_issue17["repair_requested"]
+    assert not second_issue17["repair_requested"]
+    assert state["actions"][neutral["key"]] == original_reservation
+    assert state["enrollments"]["16"]["attempts"] == issue16_enrollment["attempts"]
+    assert state["enrollments"]["16"]["neutral_attempts"] == (
+        issue16_enrollment["neutral_attempts"]
+    )
+    assert state["enrollments"]["16"]["receipt_proofs"] == (
+        issue16_enrollment["receipt_proofs"]
+    )
+    assert not state["enrollments"]["16"].get("owner_abandonments")
+    assert state["events"].count("7771") == 1
+    assert len([
+        action for action in state["actions"].values()
+        if action.get("issue") == 17 and action.get("kind") == "fix"
+    ]) == 1
+    assert len([
+        item for item in api.writes
+        if item[0] == "agents/repos/lindayi/hermes-mobile/tasks"
+    ]) == len(task_writes) + 1
+
 @pytest.mark.parametrize(
     "base_sha,tip_sha,status,ahead_by",
     [

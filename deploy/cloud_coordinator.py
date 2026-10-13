@@ -6013,6 +6013,10 @@ class Coordinator:
                 for field in ("sensitive_sha", "sensitive_authorization", "targeted_review"):
                     enrollment[field] = None
             scans.append(snapshot)
+        accepted_commands = [
+            (command, item) for command, item in commands
+            if command != "abandon-unverified"
+        ]
         owner_recoveries = []
         for command, item in commands:
             if command != "abandon-unverified":
@@ -6022,7 +6026,7 @@ class Coordinator:
             )
             if (snapshot is None or snapshot.get("terminal")
                     or snapshot["head"] != item["head_sha"]):
-                raise CoordinatorError("Owner abandonment command did not bind the current pull head")
+                continue
             actions = [
                 action for action in state["actions"].values()
                 if isinstance(action, dict)
@@ -6058,6 +6062,7 @@ class Coordinator:
                     or not _owner_abandonment_matches_action(record, action)):
                 raise CoordinatorError("Owner abandonment reservation metadata was invalid")
             item["recovery_record"] = record
+            accepted_commands.append((command, item))
             owner_recoveries.append({
                 "issue": item["issue"], "action_key": action["key"],
                 "record": record,
@@ -6081,7 +6086,7 @@ class Coordinator:
         ]
         return {
             "cursor": cursor, "main_sha": main_sha,
-            "processed": processed, "commands": commands,
+            "processed": processed, "commands": accepted_commands,
             "starter_admissions": admission_checks,
             "starter_sources": starter_sources,
             "owner_recoveries": owner_recoveries,
