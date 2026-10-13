@@ -28,6 +28,7 @@ class SensitiveCopilotApi(FakeApi):
         self.copilot_state = "COMMENTED"
         self.copilot_head = HEAD
         self.copilot_author = COPILOT_REVIEWER
+        self.graphql_copilot_author = COPILOT_REVIEWER
         self.updated_at = SUBMITTED
         self.last_edited_at = None
         self.includes_created_edit = False
@@ -66,7 +67,9 @@ class SensitiveCopilotApi(FakeApi):
             "body": self.copilot_body,
             "user": {
                 "id": self.copilot_author,
-                "login": "copilot-pull-request-reviewer",
+                "node_id": "BOT_kgDOCnlnWA",
+                "type": "Bot",
+                "login": "copilot-pull-request-reviewer[bot]",
             },
         }
 
@@ -94,7 +97,12 @@ class SensitiveCopilotApi(FakeApi):
                 "body": self.copilot_body,
                 "bodyHTML": self.body_html,
                 "commit": {"oid": self.copilot_head},
-                "author": {"login": "copilot-pull-request-reviewer"},
+                "author": {
+                    "login": "copilot-pull-request-reviewer",
+                    "databaseId": self.graphql_copilot_author,
+                    "id": "BOT_kgDOCnlnWA",
+                    "__typename": "Bot",
+                },
                 "pullRequest": {
                     "number": 16,
                     "repository": {

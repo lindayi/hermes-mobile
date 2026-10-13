@@ -123,6 +123,41 @@ are not exact-head review acceptance, hosted CI evidence, merge authorization, o
 permission to deploy. Both behavioral contracts remain specified in
 [the coordinator specification](cloud-coordinator-spec.md).
 
+### PR #105 owner-authorized task-abandonment and anchor-retention candidate
+
+PR #105 adds bounded recovery for owner-authorized abandonment of terminal tasks
+with unverified receipts. The current candidate pins identify the exact proposed
+source bytes; prior issue-specific hashes remain historical. Refreshing these pins
+does not clear the `coordinator-review-contract` blocker, satisfy exact-head review,
+or authorize operational activation. The coordinator durably reserves and verifies
+one short owner-authored anchor before neutral task dispatch. The prompt binds its
+returned comment ID and exact body. The neutral producer keeps the complete
+per-hunk audit in the pushed merge commit message. It sends only the eight canonical
+receipt lines as the tool message in one reply to that anchor. Prevalidation covers
+all 54 supported complete carriers: an optional empty leading line, one exact
+anchor quote, optional single quoted blanks on either side, and one empty/space/tab
+ASCII separator. Unknown shapes and semantic quote text remain rejected. Synthetic
+tests prove finite support, not a provider serializer guarantee or live acceptance.
+Exact historical constructors preserve saved prompts, including anchored v1.
+Strict carrier binding, byte/line limits, immutable
+receipt checks, retained proof validation, and the existing attempt budget remain.
+Inactive retirement retains complete sent neutral-anchor bindings within the
+existing lifetime bound, so same-scope re-enrollment can recover the exact anchor;
+changed scope and incomplete or mismatched readback still block reuse.
+
+Bootstrap17 additionally binds REST/GraphQL review actors by matching strict
+numeric, node and type identities. Copilot actor logins must use the exact
+supported REST and GraphQL presentations, while owner logins must match exactly.
+It does not change the prose parser or confer review acceptance. The prior
+coordinator digest
+`40b88943f50d7c44d1f74d86f8e72b17b4c4b5ee2339850657821936b37ad40b`
+remains historical bootstrap15/16 evidence, not the current candidate pin.
+
+| Candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `97bdfddcb2453fc95ee5ec7e09a746ee79566f8cff72d6416a494b163365392f` |
+| `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
+
 ### Retained merged source and deliberate native refreshes
 
 The release controller imports `deploy/native_notification_release.py`, which
@@ -455,12 +490,14 @@ These changes retain the progress fingerprint bounds, canonical target maps,
 `budget-v2:` identities, occupancy fences, stable lifecycle identities and distinct
 source/merge/deployment authority. The current delta validates raw GraphQL thread
 identities before writes and leaves incomplete retained history in recoverable
-waiting without an exhaustion notice. The neutral receipt continuation separates
-conflict-decision commentary from one dedicated receipt-only comment and asks the
-task to validate that exact payload with the unchanged strict v2 parser before
-posting it. A narrowly gated compatibility reader recognizes only the original
-saved neutral prompt and its exact bound decision envelope; ordinary v1/v2 grammar
-remains strict. A known-ID uncertain neutral task receives at most one read-only
+waiting without an exhaustion notice. Historical issue #87 producer wording
+separated conflict-decision commentary from one receipt-only comment; that wording
+is superseded for PR #105. The current PR #105 producer keeps the full audit in the
+audit-bearing merge commit and validates one receipt-only reply with the unchanged
+strict v2 parser before publication. A narrowly gated compatibility reader
+recognizes only the original saved neutral prompt and its exact bound decision
+envelope; ordinary v1/v2 grammar remains strict. A known-ID uncertain neutral task
+receives at most one read-only
 reconciliation attempt, with no new POST, wait, event, or budget change; unknown-ID
 uncertainty remains locked. Synthetic cold-state tests do not establish that the
 live task recovered, source4 occurred, or CI/review/merge/deployment gates passed.

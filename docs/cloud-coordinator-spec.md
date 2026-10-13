@@ -149,6 +149,18 @@ and digest are persisted with the owner authorization. Coding bot ID `198982749`
 the PR author, owner-authored reviews, historical independent-review reports, and
 the previous head-only command do not authorize a sensitive head.
 
+Review edit metadata enrichment binds the authenticated REST actor to GraphQL by
+strict positive integer numeric ID, identical nonempty node ID, and actor type:
+the owner is a User and reviewer `175728472` is a Bot. Both API identities and
+logins must be present. The owner's logins must match exactly. For reviewer
+`175728472`, REST login must be exactly `copilot-pull-request-reviewer` or
+`copilot-pull-request-reviewer[bot]`, and GraphQL login must be exactly
+`copilot-pull-request-reviewer`; equality between any other pair is not identity.
+A suffix alone never establishes identity. Missing, malformed or mismatched actor
+identity cannot supply edit metadata.
+This binding does not change the prose disposition or make an ambiguous overview
+automatic review acceptance, even when the separate sensitive command binds.
+
 This owner command is a separate, explicit authorization, not an automatic approval
 from enrollment or review prose. Planning and fresh status/merge fences re-read and
 revalidate the command and selected Copilot review, including author, state,
@@ -414,34 +426,104 @@ attempt budget as ordinary repair tasks. Its bounded prompt identifies both exac
 branch SHAs and the PR's sanitized title/description as untrusted intent; the task
 must preserve both sides, merge main into the PR branch (never rebase or force-push),
 and test the combined behavior. Before returning a `ready` receipt, the prompt
-requires a PR comment recording each conflict hunk's file/hunk identity,
-classification, decision, and rationale explaining preservation of both branch
-intents (or genuine incompatibility). This is a deliverable under the existing
-task receipt and independent-review contract, not a new receipt schema or an
-automatic semantic approval. A current-main fence is rechecked before dispatch.
-The decision commentary and receipt are separate comments: first post the
-conflict decisions as a PR comment, then construct and validate the exact
-receipt-only payload before posting one dedicated receipt comment. That comment
-contains only the canonical v2 header and its seven bound fields, in the
-documented order, with no quote, fence, prose, or extra fields. Do not combine
-the decision commentary and receipt in one comment. The receipt comment is
-completion evidence only; it is not CI, review, merge, or deployment approval.
+requires the immutable merge commit's message to retain the complete audit for
+every conflict hunk: file/hunk identity, classification, decision, rationale, and
+how the resolution preserves both branch intents. The pushed result receipt binds
+that audit-bearing merge commit by its exact head SHA. A ready receipt requires
+this merge commit; a truthful `conflict_incompatible` or `policy_broken` receipt
+does not require or claim one. The audit is not a new receipt field or an automatic
+semantic approval. A current-main fence is rechecked before dispatch. Before a new neutral task is
+claimed, the coordinator durably reserves one short owner-authored receipt anchor
+in the outbox. Its marker binds the exact task key, PR, head, main/base, attempt,
+and nonce. A pending-to-sending compare-and-set is required before the comment
+POST, so a second writer cannot post the same anchor. The returned ID and exact
+body must match; complete comment inventory and direct ID readback must confirm
+the owner, PR, unchanged body, and chronology. An uncertain POST is never
+repeated. Recovery accepts only one exact authenticated match; incomplete
+inventory, edits, deletion, or ambiguity block task dispatch. A final pull,
+writer, anchor, and saved-prompt fence runs before the task POST. The prompt
+binds the explicit comment ID and anchor body. Only after that verified anchor
+does the neutral attempt consume its existing budget.
+
+Preclaim publication has a separate lifetime bound of three neutral receipt-anchor
+reservations per enrollment, charged atomically when a new outbox entry is added.
+The durable `neutral_anchor_reservations` count survives restart, main/head changes,
+retirement, renewal, and re-enrollment. It never resets the source or neutral task
+attempt counts. Older state initializes it conservatively from the greater of the
+known neutral attempt count and retained neutral receipt-anchor count; this is
+not a reconstruction or deletion of historical publication evidence. Sent and
+uncertain anchors remain unchanged. Recovery of the same anchor consumes no new
+reservation and never repeats its POST. Once the bound is reached, no new anchor
+entry or public comment is admitted, even if main changes before every action
+claim. Acceptance exercises successive main/base changes with a fixed PR head
+across cold restart, finite entries/comments, retained evidence and counters, plus
+normal dispatch and lost-POST readback without duplicates.
+
+Inactive retirement preserves the complete binding for each sent neutral
+receipt-anchor within that same three-reservation bound, including its nonce,
+body, comment ID and exact task/PR/head/main/base scope. It does not tombstone a
+preserved anchor key. After a cold restart and a fresh owner enrollment at the
+same scope, the coordinator must authenticate and reuse that exact public anchor,
+then dispatch at most one neutral task with its original causal binding. It must
+not repost or infer missing binding data. A changed scope, altered/deleted/
+ambiguous anchor or incomplete remote read cannot reuse the old binding. Source
+and neutral attempt counts, claims, receipts and uncertainty history remain
+unchanged by retirement and re-enrollment. Active main churn retains complete
+sent neutral receipt-anchor bindings on the current PR head within the same
+lifetime reservation bound; a main change does not make those bindings eligible
+for compaction. Obsolete unclaimed review-correction anchors retain their separate
+existing compaction behavior.
+
+Publish exactly one receipt-only PR reply. Its payload contains only the canonical
+v2 header and seven bound fields, with no decision, report, URL, prose, or extra
+fields. The finite anchored envelope has zero or one empty leading line, exactly
+one `> ` line containing the complete short reserved anchor body, zero or one
+quoted blank line before and after that anchor (each either `>` or `> `), then
+exactly one ASCII separator line (empty, one space, or one tab). These 54 shapes
+support blank formatting differences, not arbitrary excerpts or semantic quote
+text. The anchor cannot be missing, changed, truncated, or duplicated. Extra
+quoted prose, headers or receipts, missing separators, other whitespace, CR,
+fences, extra fields and tails fail closed. The unchanged whole comment still
+must fit 8192 UTF-8 bytes and 64 LF-delimited lines.
+
+Before its sole publication, the producer prevalidates all 54 complete carriers
+with actual bound values and the strict parser, including worst-case overhead.
+This finite support is not a guarantee of provider serialization: public immutable
+comment 6134321641 establishes an observed quoted excerpt plus separator, not a
+universal prefix bound or live acceptance of these synthetic shapes. Unknown
+shapes remain rejected. The tool receives only the eight-line payload. Never
+send and retry, edit the reply, or post a
+second comment. The receipt is completion evidence only; it is not CI, review,
+merge, or deployment approval.
+
+Acceptance must demonstrate managed RED then GREEN at initial
+`validate_task_receipt`, retained-proof validation, cold budget reconstruction,
+and real synthetic Coordinator acceptance/handoff for alternate blank envelopes
+at the same exact anchor. Verify payload-only tool input, one publication per
+anchor, immutable comment readback, durable completion and restart without replay.
+Keep identity, session/prompt/body, nonce/PR/head/base/task, chronology,
+edit/duplicate and byte/line rejection gates. Preserve all existing historical
+producer prompts, including the superseded anchored exact-prefix prompt, through
+explicit byte-exact constructors; do not rewrite reservations or the frozen
+`coordinator-budget-v1-requests.json` fixture.
 The prompt directs genuinely incompatible requirements or broken required policy
 to a fixed typed result; these stop further repair for that exact head. Waiting or
 uncertain tasks retain the shared lock. Ordinary technical conflicts are repaired
 within the shared budget; exhaustion or ambiguous execution becomes a meaningful
 owner blocker rather than an unbounded retry.
 
-One bounded compatibility rule covers the already-dispatched legacy neutral
-reservation whose original prompt asked for the conflict decisions in a PR
-comment while requiring a prose-free receipt in that same comment. Only the
-saved neutral reservation and its byte-identical authenticated task-session
-prompt can enable recognition; comment labels or body text cannot opt in. The
-comment must be from the immutable Copilot bot author, unchanged, within the
-ordinary v2 byte and line limits, and contain exactly one final canonical v2
-receipt. Before it, the parser accepts only the observed legacy decision-envelope
-shape: its provider quote is inert and must match the saved starting head. The
-quoted outcome marker may be either complete or exactly provider-truncated as
+Cold compatibility reconstruction recognizes only exact saved neutral prompts
+from known released producers, including the previous two-comment instruction,
+the later combined-comment instructions, and the anchored exact-prefix v1
+instruction. Each historical prompt must
+reconstruct byte-for-byte from its saved reservation; no broad suffix or
+comment-based opt-in is allowed. For the already-dispatched legacy reservation
+that asked for conflict decisions in a PR comment, the comment must be from the
+immutable Copilot bot author, unchanged, within the ordinary v2 byte and line
+limits, and contain exactly one final canonical v2 receipt. Before it, the
+parser accepts only the observed legacy decision-envelope shape: its provider
+quote is inert and must match the saved starting head. The quoted outcome marker
+may be either complete or exactly provider-truncated as
 `<20 lowercase hex characters> -...`; neither marker form is authority. It is
 followed by one unquoted reconciliation assertion matching the reserved PR,
 starting head, dispatch base, and receipt result head, the conflict-decision
@@ -520,7 +602,10 @@ no predecessor wait is charged and neither claim nor predecessor can trigger a
 duplicate POST or a false `execution_exhausted` lifecycle event. Superseded completed
 handoffs are terminal for retirement,
 while their validated receipt proofs remain in the enrollment across compaction and
-re-enrollment. Replay does not dispatch an accepted task twice. Historical-base
+re-enrollment. Validated owner-abandonment records also survive inactive
+re-enrollment as deep-copied audit bindings; this does not preserve sensitive
+authorization or reset the existing counters, progress, receipt proofs, or claims.
+Replay does not dispatch an accepted task twice. Historical-base
 scope is not current-main eligibility: stale PRs receive no status action or merge
 eligibility, and exact current-main, fresh review/check, status, and merge fences
 remain mandatory after reconciliation.
@@ -557,6 +642,90 @@ planning without repeating reconciliation; newly derived lifecycle events are
 canonicalized against active/retained history and the same verified ACK snapshot,
 then durably recorded before their outcomes are published. Acknowledged incidents
 remain retired rather than being reinserted with conflicting replay payloads.
+
+An owner may explicitly abandon receipt acceptance for one known-ID task with the
+immutable issue comment `/hermes abandon-unverified <task-id> <current-head-sha>`.
+The command is valid only for the enrolled PR's exact current head and the exact
+uncertain source or neutral reservation named by its persisted task ID. Apply must
+revalidate the unchanged command, pull/node/branch/base/main identity, reservation,
+and a complete fresh remote task inventory immediately before commit. A fresh task
+detail must authenticate the original creator, owner, repository, task creation,
+PR and branch artifacts, unique session identity, exact saved prompt, chronology,
+and positive completed task/session state. Any missing, malformed, active,
+reactivated, unknown, or API-error evidence blocks recovery. A lost-create claim
+without a known task ID is never eligible.
+
+Recovery means only that the owner abandons acceptance of this result. It is not a
+receipt, source-progress credit, successful handoff, review, merge approval, or
+deployment authorization. Persist a bounded, schema-validated supersession record
+bound to the immutable command and a digest of the original reservation. Keep the
+original reservation, authorized head, receipt history, attempt counts, progress
+state, uncertainty and lifecycle history unchanged. The command's exact current
+head may authorize only a distinct bounded source, review-followup, or neutral fix
+reserved after recovery commits. It is not result provenance or merge authority.
+Only that later task's valid ready receipt may add its result head to general
+provenance; an older task or the abandoned task cannot do so. Normal current-main
+and sensitive-review fences still apply. Before every later dispatch, collect
+complete fresh remote task occupancy and recheck the recovered task's exact identity
+and terminal state. A neutral continuation that reconciles after `main` advances
+must keep the recovery record's historical base in `recorded_base_sha` while its
+v2 receipt base and current pull base continue to match that continuation's
+current `main_sha`. After a valid continuation receipt, bind the recovered task's
+terminal check to that exact receipt lineage even when the PR head has advanced.
+The terminal check uses both live actions and the enrollment's authenticated
+`receipt_proofs`; compaction must retain the neutral continuation's
+`recorded_base_sha` as well as its receipt and owner-abandonment bindings. A
+different current head is accepted only when that retained or live proof validates
+for the exact current pull identity, head, and applicable source or neutral base.
+The recovery head remains continuation-only only while it lacks general receipt
+provenance. A distinct, bound ready receipt that returns the same head releases this
+restriction, including after a cold restart; recovery alone never does.
+Reactivation, duplicate commands, restart, or uncertain persistence must not cause
+a repeated POST, notice, or accepted result.
+
+Neutral task publication uses one immutable receipt-only PR reply, not a decision
+comment followed by a receipt comment. The complete per-hunk decision audit stays
+in the merge commit message. The existing strict v2 parser accepts only supported
+quoted context before the exact final receipt block; the producer validates the
+whole carrier before publication and the consumer parser remains unchanged. An
+edited comment remains invalid; there is no retry or edited-receipt fallback.
+
+Finite acceptance for this recovery:
+
+- After the last neutral-anchor readback (or source action claim), the actual
+  dispatch fence refreshes complete task occupancy, comments, and each exact
+  recovered task and immutable owner command. Completed tasks with changed
+  creator, artifacts, session, or prompt, reactivation, missing detail, API errors,
+  incomplete inventory, and command edits/deletion must block the successor POST.
+  The original reservation and recovery record must still match at this fence.
+- A synthetic completed known-ID uncertain task with an unusable receipt can be
+  abandoned by one exact immutable owner command, then the coordinator can plan and
+  dispatch a distinct bounded task without reposting the old task.
+- A valid distinct continuation may return a different result head; that head is
+  accepted only from its immutable ready receipt after a genuinely new durable
+  reservation records an explicit attested binding to the committed recovery;
+  same-second older reservations or copied/malformed bindings fail closed.
+  Copilot review handoff then proceeds across cold restart without duplicate work.
+- Source and review-followup fix reservations are eligible; independent review and
+  report-correction reservations are not.
+- A current-head owner command that names a fully observed local nonmatch (for
+  example an ineligible review/report-correction reservation, pull/ref mismatch,
+  or unsupported local receipt/identity metadata) is consumed once through the
+  ordinary durable scan path, grants no recovery or continuation, preserves the
+  original reservation bytes/history, and cannot block unrelated PR work. Remote
+  ambiguity, malformed snapshots, pagination gaps, API errors, or post-admission
+  changes still fail closed with no recovery and no network write.
+- Duplicate command delivery, process restart, and a second poll preserve the same
+  recovery record, source/neutral counters, uncertainty and lifecycle history, and
+  produce no duplicate POST or notice.
+- Reject active, reactivated, absent, unknown, malformed, or API-error tasks; task
+  or command ID mismatch; wrong creator/owner/repository/PR/node/branch artifacts;
+  mismatched prompt/session/timestamps; edited/deleted commands; changed head,
+  main, or reservation; incomplete task pagination; and persistence failure.
+- Prove that a failed or incomplete final fence makes no durable recovery change or
+  network write, and that neutral instructions, serialized synthetic carrier, and
+  strict immutable receipt validation use the same one-comment contract.
+
 Live REST pull numbers, pull IDs, and head/base repository IDs must be positive
 integers at collection and every dispatch, ready/review handoff, and merge fence;
 booleans, floats, strings, and missing values are not identity proof.
@@ -1251,12 +1420,18 @@ are accepted. Quoted or code-formatted content is never receipt evidence.
 
 The entire unchanged v2 comment is limited to **8192 UTF-8 bytes and 64 LF-delimited
 lines**, inclusive of the quoted prefix, blank lines, header and seven fields.
-These finite limits leave room for a short quoted report and the eight-line receipt
-without admitting arbitrarily large stored proofs. Reject character lengths over
-8192 before encoding, reject malformed Unicode, then enforce the byte limit before
-counting or splitting; enforce the line limit before splitting. The same limits
-apply at first acceptance and persisted-proof revalidation. Plain v2 remains valid
-within these limits; the exact-body v1 contract is unchanged.
+These finite limits leave room for a short quoted anchor and the eight-line receipt
+without admitting arbitrarily large stored proofs. For the neutral producer this
+is the unchanged reply anchor, not decision audit or report text. Reject character
+lengths over 8192 before encoding, reject malformed Unicode, then enforce the byte
+limit before counting or splitting; enforce the line limit before splitting. The same limits
+apply at first acceptance and persisted-proof revalidation. Newly anchored neutral
+producers prevalidate the 54 complete carriers specified above, with actual bound
+values, before their sole publication. The largest supported prefix is 92 bytes
+and five LF characters at the 80-byte anchor bound; it yields at most 13 total lines.
+This is a finite contract bound, not a universal provider bound. If any supported
+carrier fails validation or exceeds these limits, stop before publication. Plain v2 remains
+valid within these limits; the exact-body v1 contract is unchanged.
 
 ```text
 Hermes-Task-Receipt: v2

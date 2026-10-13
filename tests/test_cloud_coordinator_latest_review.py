@@ -1,16 +1,328 @@
 """Direct seam regressions for PR33 review 5388069795."""
 import base64
+from copy import deepcopy
 import json
+import subprocess
 
 import pytest
 
-from deploy.cloud_coordinator import _blob_bytes, neutral_reconciliation_request, review_task_request
+from deploy.cloud_coordinator import (
+    ApiError, _blob_bytes, _rest_list, _review_actor_matches, copilot_review_valid,
+    neutral_reconciliation_request, review_task_request,
+)
+from deploy.review_evidence import selected_copilot_sensitive_review
 from deploy.task_receipts import ReceiptError
 from deploy.workflow_lifecycle import pull_event
 from test_cloud_coordinator import (
     APP_OWNER_ID, BASE, HEAD, Coordinator, CoordinatorError, FakeApi, StateStore,
     enrolled_record,
 )
+
+
+class ActorIdentityApi(FakeApi):
+    """Synthetic authenticated actor payloads across both API transports."""
+
+    def __init__(self, *, rest_change=None, graphql_change=None):
+        super().__init__(sensitive=True, authorize=True)
+        self.rest_change = rest_change or {}
+        self.graphql_change = graphql_change or {}
+        self.metadata_queries = []
+        self.review_state = "COMMENTED"
+        self.copilot_review_body = (
+            "<!-- ccr-overview-v2 -->\n\n"
+            "### 🔵 Needs a closer look\n\n"
+            "The sensitive coordinator authorization and dispatch changes require "
+            "final human review, with current-head checks and Copilot evidence "
+            "still pending.\n\n**0 open findings**"
+        )
+        self.copilot_review_html = (
+            "<h3>🔵 Needs a closer look</h3><p>"
+            "The sensitive coordinator authorization and dispatch changes require "
+            "final human review, with current-head checks and Copilot evidence "
+            "still pending.</p><p><strong>0 open findings</strong></p>"
+        )
+        self.comments[-1]["body"] = (
+            f"/hermes authorize-sensitive {HEAD} review "
+            f"{self.copilot_review_id} {self.copilot_review_digest}"
+        )
+
+    def _current_copilot_review_record(self, *, graphql=False):
+        review = super()._current_copilot_review_record(graphql=graphql)
+        review["user"]["login"] = "copilot-pull-request-reviewer[bot]"
+        review["user"].update(self.rest_change)
+        return json.loads(json.dumps(review))
+
+    def graphql(self, query, variables):
+        response = deepcopy(super().graphql(query, variables))
+        if "PullRequestReview" in query:
+            self.metadata_queries.append((query, variables))
+            if variables["id"] == self.copilot_review_node_id:
+                response["data"]["node"]["author"].update(self.graphql_change)
+        return json.loads(json.dumps(response))
+
+
+def _actor_reviews(api):
+    return _rest_list(api, "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100")
+
+
+def _actor_selected(api, reviews):
+    return selected_copilot_sensitive_review(
+        reviews, HEAD, api.copilot_review_id, api.copilot_review_digest,
+        pull_author_id=api.pull["user"]["id"],
+    )
+
+
+@pytest.mark.parametrize("login", [
+    "copilot-pull-request-reviewer", "copilot-pull-request-reviewer[bot]",
+])
+def test_actor_identity_collector_binds_bot_presentation_without_prose_acceptance(login):
+    api = ActorIdentityApi(rest_change={"login": login})
+    reviews = _actor_reviews(api)
+    review = reviews[0]
+    assert review["updatedAt"] == api.review_submitted_at
+    assert review["lastEditedAt"] is None
+    assert review["includesCreatedEdit"] is False
+    assert review["body"] == api.copilot_review_body
+    assert review["body_html"] == api.copilot_review_html
+    assert _actor_selected(api, reviews) == {
+        "review_id": api.copilot_review_id, "reviewer_id": 175728472,
+        "head_sha": HEAD, "state": "COMMENTED",
+        "body_sha256": api.copilot_review_digest,
+    }
+    assert not copilot_review_valid(HEAD, reviews, [])
+    query = api.metadata_queries[0][0]
+    assert "__typename" in query and "... on Bot" in query and "... on User" in query
+    assert not api.writes and not api.graphql_writes and api.task_posts == 0
+
+
+@pytest.mark.parametrize(("rest_login", "graphql_login"), [
+    ("arbitrary", "arbitrary"),
+    ("arbitrary", "copilot-pull-request-reviewer"),
+    ("copilot-pull-request-reviewer", "arbitrary"),
+    ("", ""),
+    ("", "copilot-pull-request-reviewer"),
+    ("copilot-pull-request-reviewer", ""),
+    (None, None),
+    (None, "copilot-pull-request-reviewer"),
+    (" ", "copilot-pull-request-reviewer"),
+    ("copilot-pull-request-reviewer", " "),
+    (" copilot-pull-request-reviewer ", " copilot-pull-request-reviewer "),
+    ("Copilot-pull-request-reviewer", "Copilot-pull-request-reviewer"),
+    ("copilot-pull-request-reviewer", "Copilot-pull-request-reviewer"),
+    ("Copilot-pull-request-reviewer", "copilot-pull-request-reviewer"),
+    ("copilot-pull-request-reviewer[bot]", "copilot-pull-request-reviewer[bot]"),
+    ("copilot-pull-request-reviewer", "copilot-pull-request-reviewer[bot]"),
+])
+def test_unsupported_copilot_logins_block_collector_and_sensitive_command(
+        tmp_path, rest_login, graphql_login):
+    api = ActorIdentityApi(
+        rest_change={"login": rest_login},
+        graphql_change={"login": graphql_login},
+    )
+    reviews = _actor_reviews(api)
+    assert "updatedAt" not in reviews[0]
+    assert _actor_selected(api, reviews) is None
+
+    store = StateStore(tmp_path / "state.json")
+    result = Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
+    assert not result["pull_requests"][0]["auto_merge_eligible"]
+    assert not api.graphql_writes and api.task_posts == 0
+
+
+def test_owner_actor_login_requires_exact_equality():
+    user = {
+        "id": 5164171, "node_id": "MDQ6VXNlcjUxNjQxNzE=",
+        "type": "User", "login": "lindayi",
+    }
+    author = {
+        "databaseId": 5164171, "id": "MDQ6VXNlcjUxNjQxNzE=",
+        "__typename": "User", "login": "lindayi",
+    }
+    assert _review_actor_matches(user, author)
+    assert not _review_actor_matches(user | {"login": "Lindayi"}, author)
+    assert not _review_actor_matches(user | {"login": "other"}, author)
+
+
+@pytest.mark.parametrize("login", [
+    "copilot-pull-request-reviewer", "copilot-pull-request-reviewer[bot]",
+])
+def test_actor_identity_sensitive_command_and_cold_read_only_collector(tmp_path, login):
+    api = ActorIdentityApi(rest_change={"login": login})
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    result = coordinator.run(apply=True)
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["sensitive_sha"] == HEAD
+    assert enrollment["targeted_review"] == _actor_selected(api, _actor_reviews(api))
+    assert store.event_seen("124")
+    assert not result["pull_requests"][0]["review_valid"]
+    assert not result["pull_requests"][0]["auto_merge_eligible"]
+    assert not api.graphql_writes and api.task_posts == 0
+    before, writes = path.read_bytes(), deepcopy(api.writes)
+    restarted = Coordinator(api, StateStore(path), clock=lambda: 1790856661)
+    result = restarted.run(apply=False)
+    assert not result["pull_requests"][0]["review_valid"]
+    assert path.read_bytes() == before
+    assert api.writes == writes and not api.graphql_writes and api.task_posts == 0
+    restarted.run(apply=True)
+    assert StateStore(path).snapshot()["enrollments"]["16"]["targeted_review"] == (
+        enrollment["targeted_review"]
+    )
+    assert not api.graphql_writes and api.task_posts == 0
+
+
+@pytest.mark.parametrize("login", [
+    "copilot-pull-request-reviewer", "copilot-pull-request-reviewer[bot]",
+])
+@pytest.mark.parametrize(("rest_change", "graphql_change"), [
+    ({"id": value}, {}) for value in [None, True, 175728472.0, "175728472", 198982749]
+] + [
+    ({}, {"databaseId": value})
+    for value in [None, True, 175728472.0, "175728472", 198982749]
+] + [
+    ({"node_id": value}, {}) for value in [None, "", True, 1, "BOT_other"]
+] + [
+    ({}, {"id": value}) for value in [None, "", True, 1, "BOT_other"]
+] + [
+    ({"type": value}, {}) for value in [None, "", True, "User", "Organization"]
+] + [
+    ({}, {"__typename": value}) for value in [None, "", True, "User", "Organization"]
+] + [
+    ({"login": value}, {}) for value in [None, "", True, "arbitrary[bot]"]
+] + [
+    ({}, {"login": value}) for value in [None, "", True, "arbitrary"]
+] + [
+    ({"type": "User"}, {"__typename": "User"}),
+    ({"id": 198982749}, {"databaseId": 198982749}),
+])
+def test_actor_identity_mismatch_blocks_collector_and_sensitive_command(
+        tmp_path, login, rest_change, graphql_change):
+    api = ActorIdentityApi(
+        rest_change={"login": login} | rest_change, graphql_change=graphql_change,
+    )
+    reviews = _actor_reviews(api)
+    assert "updatedAt" not in reviews[0]
+    assert _actor_selected(api, reviews) is None
+    store = StateStore(tmp_path / "state.json")
+    result = Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
+    assert not result["pull_requests"][0]["auto_merge_eligible"]
+    assert not api.graphql_writes and api.task_posts == 0
+
+
+@pytest.mark.parametrize("side", ["rest", "graphql"])
+@pytest.mark.parametrize("field", ["numeric", "node", "type", "login"])
+def test_actor_identity_missing_fields_fail_closed(side, field):
+    class MissingActor(ActorIdentityApi):
+        def _current_copilot_review_record(self, *, graphql=False):
+            review = super()._current_copilot_review_record(graphql=graphql)
+            if side == "rest":
+                review["user"].pop({
+                    "numeric": "id", "node": "node_id", "type": "type", "login": "login",
+                }[field])
+            return review
+
+        def graphql(self, query, variables):
+            response = super().graphql(query, variables)
+            if side == "graphql" and variables.get("id") == self.copilot_review_node_id:
+                response["data"]["node"]["author"].pop({
+                    "numeric": "databaseId", "node": "id",
+                    "type": "__typename", "login": "login",
+                }[field])
+            return response
+
+    api = MissingActor(rest_change={"login": "copilot-pull-request-reviewer"})
+    assert _actor_selected(api, _actor_reviews(api)) is None
+    assert not api.writes and not api.graphql_writes
+
+
+@pytest.mark.parametrize("field", [
+    "body", "head", "state", "repository-id", "repository-name", "pull",
+    "submitted", "updated", "edited", "created-edit", "missing-node",
+    "review-id", "review-node", "missing-html",
+])
+def test_actor_identity_does_not_bypass_review_metadata_binding(tmp_path, field):
+    class MismatchedReview(ActorIdentityApi):
+        def graphql(self, query, variables):
+            response = super().graphql(query, variables)
+            if variables.get("id") != self.copilot_review_node_id:
+                return response
+            node = response["data"]["node"]
+            if field == "body":
+                node["body"] += " "
+            elif field == "head":
+                node["commit"]["oid"] = BASE
+            elif field == "state":
+                node["state"] = "CHANGES_REQUESTED"
+            elif field == "repository-id":
+                node["pullRequest"]["repository"]["databaseId"] = 1
+            elif field == "repository-name":
+                node["pullRequest"]["repository"]["nameWithOwner"] = "other/repo"
+            elif field == "pull":
+                node["pullRequest"]["number"] = 17
+            elif field == "submitted":
+                node["submittedAt"] = "2026-10-01T12:00:01Z"
+            elif field == "updated":
+                node["updatedAt"] = "2026-10-01T12:00:01Z"
+            elif field == "edited":
+                node["lastEditedAt"] = "2026-10-01T12:00:01Z"
+            elif field == "created-edit":
+                node["includesCreatedEdit"] = True
+            elif field == "missing-node":
+                response["data"]["node"] = None
+            elif field == "review-id":
+                node["databaseId"] += 1
+            elif field == "review-node":
+                node["id"] = "PRR_other"
+            else:
+                node.pop("bodyHTML")
+            return response
+
+    api = MismatchedReview()
+    assert _actor_selected(api, _actor_reviews(api)) is None
+    store = StateStore(tmp_path / "state.json")
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
+    assert not api.graphql_writes and api.task_posts == 0
+
+
+@pytest.mark.parametrize("malformed", [
+    None, [], {"data": None}, {"data": []}, {"errors": [{"message": "synthetic"}]},
+])
+def test_actor_identity_malformed_api_preserves_state_without_writes(tmp_path, malformed):
+    class MalformedActor(ActorIdentityApi):
+        def graphql(self, query, variables):
+            if "PullRequestReview" in query:
+                return malformed
+            return super().graphql(query, variables)
+
+    api = MalformedActor()
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    before = store.path.read_bytes()
+    with pytest.raises(ApiError):
+        Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    assert store.path.read_bytes() == before
+    assert not api.writes and not api.graphql_writes and api.task_posts == 0
+
+
+@pytest.mark.parametrize("status", [404, 429, 503])
+def test_actor_identity_api_failure_never_grants_sensitive_authority(status):
+    class FailedActor(ActorIdentityApi):
+        def graphql(self, query, variables):
+            if "PullRequestReview" in query:
+                raise ApiError("Synthetic metadata failure", status=status)
+            return super().graphql(query, variables)
+
+    api = FailedActor()
+    if status == 404:
+        assert _actor_selected(api, _actor_reviews(api)) is None
+    else:
+        with pytest.raises(ApiError, match="Synthetic metadata failure"):
+            _actor_reviews(api)
+    assert not api.writes and not api.graphql_writes
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
@@ -80,17 +392,132 @@ def test_legacy_enrollment_reports_unsupported_upgrade_without_changing_state(tm
     assert not api.writes and not api.graphql_writes
 
 
-def test_neutral_prompt_requires_per_hunk_decisions_before_ready_receipt():
+def test_neutral_prompt_keeps_hunk_audit_out_of_the_receipt_carrier():
+    from deploy.task_receipts import receipt_instruction
+
     api = FakeApi()
     request = neutral_reconciliation_request({
         "issue": 16, "head": HEAD, "main_sha": BASE, "pull": api.pull,
     }, 0)
-    prompt = request["body"]
-    assert "each conflict hunk" in prompt
-    assert "classification, decision, and rationale" in prompt
+    prompt = request["body"] + "\n\n" + receipt_instruction(
+        "N" * 42, pull_number=16, start_head=HEAD, base_sha=BASE, neutral=True,
+    )
+    assert "every conflict hunk" in prompt
+    assert "file/hunk identity, classification, decision, and rationale" in prompt
+    assert "complete audit, including file/hunk identity" in prompt
     assert "preserves both branch intents" in prompt
-    assert "PR comment" in prompt and "before returning a `ready` receipt" in prompt
+    assert "a `ready` receipt requires its exact commit SHA as the pushed result head" in prompt
+    assert "receipt-only PR reply" in prompt
+    assert "complete serialized carrier" in prompt
+    assert "provider's unchanged quoted anchor" in prompt
+    assert "before the single publication" in prompt
+    assert "stop with a transport blocker before publishing" in prompt
+    assert "one `reply_to_comment` call" in prompt
     assert "fresh review and checks" in prompt
+    assert "separate PR comment with conflict decisions" not in prompt
+
+
+@pytest.mark.parametrize(("hunks", "rationale"), [
+    (0, ""),
+    (2, ""),
+    (56, ""),
+    (1, "保存双方分支意图。" * 1500),
+])
+def test_neutral_merge_commit_retains_complete_audit_at_receipt_head(
+        tmp_path, hunks, rationale):
+    repository = tmp_path / f"merge-{hunks}-{len(rationale)}"
+    repository.mkdir()
+
+    def git(*args, check=True):
+        return subprocess.run(
+            ["git", "-C", str(repository), *args], check=check,
+            capture_output=True, text=True,
+        )
+
+    git("init", "--quiet", "--initial-branch=main")
+    git("config", "user.name", "Synthetic test")
+    git("config", "user.email", "synthetic@example.invalid")
+    if hunks:
+        for index in range(hunks):
+            path = repository / "shared" / f"hunk-{index:02}.txt"
+            path.parent.mkdir(exist_ok=True)
+            path.write_text("base behavior\n")
+    else:
+        (repository / "base.txt").write_text("base behavior\n")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "base")
+    git("switch", "--quiet", "-c", "pull")
+    if hunks:
+        for index in range(hunks):
+            (repository / "shared" / f"hunk-{index:02}.txt").write_text(
+                "PR behavior\n",
+            )
+    else:
+        (repository / "pr-only.txt").write_text("PR behavior\n")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "PR intent")
+    git("switch", "--quiet", "main")
+    if hunks:
+        for index in range(hunks):
+            (repository / "shared" / f"hunk-{index:02}.txt").write_text(
+                "main behavior\n",
+            )
+    else:
+        (repository / "main-only.txt").write_text("main behavior\n")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "main intent")
+    git("switch", "--quiet", "pull")
+
+    merge = git("merge", "--no-commit", "main", check=False)
+    audit = []
+    if hunks:
+        assert merge.returncode != 0
+        for index in range(hunks):
+            path = f"shared/hunk-{index:02}.txt"
+            (repository / path).write_text("main behavior\nPR behavior\n")
+            audit.append(
+                f"{index + 1}. {path} (hunk {index + 1}): "
+                "classification=technical; decision=retain both branch intents; "
+                f"rationale={rationale or 'Preserve main behavior and PR behavior.'}"
+            )
+        git("add", ".")
+        audit_body = "\n".join(audit)
+    else:
+        assert merge.returncode == 0
+        audit_body = (
+            "No conflict hunks. Preserve both main behavior and PR behavior."
+        )
+    message = (
+        "Reconcile current main with PR intent\n\n"
+        "Complete conflict hunk audit:\n" + audit_body
+    )
+    git("commit", "--quiet", "-m", message)
+
+    receipt_head = git("rev-parse", "HEAD").stdout.strip()
+    commit = git("show", "-s", "--format=%B", receipt_head).stdout
+    parents = git("rev-list", "--parents", "-n", "1", receipt_head).stdout.split()
+    assert len(parents) == 3
+    assert commit.startswith("Reconcile current main with PR intent\n\n")
+    assert audit_body in commit
+    if hunks == 56 or rationale:
+        assert len(commit.encode("utf-8")) > 8192
+    for item in audit:
+        assert item in commit
+
+    from deploy.task_receipts import _v2_fields
+
+    payload = (
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={'N' * 42}\n"
+        "pr=16\n"
+        f"start_head={HEAD}\n"
+        f"base={BASE}\n"
+        "session=synthetic-session\n"
+        f"head={receipt_head}\n"
+        "result=ready"
+    )
+    carrier = "\n> Hermes coordinator: reserved anchor\n> \n\n" + payload
+    assert _v2_fields(carrier)["head"] == receipt_head
 
 
 @pytest.mark.parametrize("correction", [False, True])
