@@ -657,7 +657,17 @@ successful CI result; all three CI checks must be observed before scoring. A
 complete exact-head Copilot COMMENTED review may also admit evaluation only when
 its rendered full-media body proves a complete, unambiguous actionable finding
 inventory. It is negative evaluation evidence, not review approval, and cannot
-enable merge. This admission is distinct from the owner-published proof required
+enable merge. For a linked `N open finding(s)` inventory, every live overview
+target must match an unresolved thread comment
+from that exact review and head in the authenticated, fully paginated thread
+collection. The numeric comment/review/author identities, nonempty finding text,
+and ordered comment/submission timestamps must agree. Absolute targets must
+name this pull request. Duplicate, missing, extra current-review, resolved,
+malformed, or mismatched targets do not admit evaluation. An `inline` label or
+an unrelated unresolved thread alone is not proof. Positive open targets also
+prevent a generic COMMENTED review state from supplying successful progress
+or merge evidence. Unknown summary prose remains ambiguous.
+This admission is distinct from the owner-published proof required
 to consume `progress_disposition.resolved`; a rejected, edited, superseded, or
 otherwise unproven owner follow-up cannot earn resolution credit. Findings present
 in the COMMENTED inventory remain current repair targets; COMMENTED state without

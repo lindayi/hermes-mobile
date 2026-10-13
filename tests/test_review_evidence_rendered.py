@@ -7,7 +7,7 @@ import pytest
 from deploy.cloud_coordinator import ApiError, GhApi, StateStore, copilot_review_valid, repair_request
 from deploy.review_evidence import OVERVIEW_MARKER, parse_body, review_body_disposition
 from test_cloud_coordinator import (
-    HEAD, ProgressApi, _managed_cycle, refresh_owner_review,
+    COPILOT_REVIEWER, HEAD, ProgressApi, _managed_cycle, refresh_owner_review,
 )
 from test_review_evidence import ReviewApi, copilot_review, _evidence
 
@@ -527,14 +527,31 @@ def test_current_review_resumes_completed_repair_without_replaying_or_losing_thr
     api.complete_task(source_action["task_id"], source_action, head_sha=result_head)
     refresh_owner_review(api, result_head, submitted_at="2026-10-01T12:06:00Z")
     api.progress_review = review_pair(
-        CURRENT_COPILOT_RAW,
-        CURRENT_COPILOT_HTML.replace("4250499422", "445"),
+        CURRENT_COPILOT_RAW.replace("/pull/99#", "/pull/16#").replace("4250499422", "445"),
+        CURRENT_COPILOT_HTML.replace("/pull/99#", "/pull/16#").replace("4250499422", "445"),
         state="COMMENTED",
     ) | {
         "id": api.progress_review["id"] + 1,
         "commit_id": result_head,
         "submitted_at": "2026-10-01T12:10:00Z",
     }
+    original_graphql = api.graphql
+
+    def authenticated_threads(query, variables):
+        response = original_graphql(query, variables)
+        if "reviewThreads" in query:
+            [thread] = response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            thread["comments"]["nodes"][0].update({
+                "author": {"databaseId": COPILOT_REVIEWER},
+                "createdAt": "2026-10-01T12:09:00Z",
+                "pullRequestReview": {
+                    "databaseId": api.progress_review["id"],
+                    "commit": {"oid": result_head},
+                },
+            })
+        return response
+
+    api.graphql = authenticated_threads
 
     second = _managed_cycle(api, path)["pull_requests"][0]
     saved = StateStore(path).snapshot()

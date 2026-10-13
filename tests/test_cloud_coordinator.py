@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -3557,6 +3558,229 @@ class ProgressApi(FakeApi):
                   if review.get("user", {}).get("id") != COPILOT_REVIEWER],
             ]
         return result
+
+
+class InlineProgressApi(ProgressApi):
+    def set_inline_review(self, head, review_id, submitted_at):
+        self.inline_comment_id = 445 if review_id == 63002 else 446
+        self.inline_thread_id = "PRRT_kw1" if review_id == 63002 else "PRRT_kw2"
+        rendered = (
+            "<h3>🟡 Changes recommended</h3>"
+            "<p>It changes synthetic coordination paths, while "
+            "exact-head verification remains pending.</p>"
+            "<details open><summary><strong>1 open finding</strong></summary>"
+            "<ul><li><a href=\"https://github.com/lindayi/hermes-mobile/pull/16"
+            f"#discussion_r{self.inline_comment_id}\">Correct the synthetic blocker</a> · New</li></ul>"
+            "</details><p>🧠 <strong>Review effort:</strong> Balanced</p>"
+        )
+        self.progress_review = {
+            "id": review_id, "state": "COMMENTED", "commit_id": head,
+            "submitted_at": submitted_at, "user": {"id": COPILOT_REVIEWER},
+            "body": "<!-- ccr-overview-v2 -->\n" + rendered,
+            "body_html": rendered,
+        }
+
+    def graphql(self, query, variables):
+        response = super().graphql(query, variables)
+        if "reviewThreads" in query:
+            response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] = [{
+                "id": self.inline_thread_id, "isResolved": False, "comments": {
+                    "nodes": [{
+                        "databaseId": self.inline_comment_id,
+                        "body": "Please correct the synthetic blocker.",
+                        "createdAt": "2026-10-01T12:09:00Z",
+                        "author": {"databaseId": COPILOT_REVIEWER},
+                        "pullRequestReview": {
+                            "databaseId": self.progress_review["id"],
+                            "commit": {"oid": self.progress_review["commit_id"]},
+                        },
+                    }],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+            }]
+        return response
+
+
+@pytest.mark.parametrize("retired", [False, True])
+def test_inline_only_commented_inventory_evaluates_receipt_once(tmp_path, retired):
+    api = InlineProgressApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.set_inline_review(HEAD, 63002, "2026-10-01T12:10:00Z")
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    assert source["repair_fingerprints"] == [
+        cloud_coordinator._repair_fingerprint("thread", "PRRT_kw1"),
+    ]
+    result_head = RESULT_HEAD if retired else HEAD
+    api.head_sha = api.pull["head"]["sha"] = result_head
+    api.complete_task(source["task_id"], source, head_sha=result_head)
+    api.set_inline_review(result_head, 63003, "2026-10-01T12:11:00Z")
+    api.pending_required = True
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    [proof] = enrollment["receipt_proofs"]
+    assert proof["receipt_result"] == "ready"
+    assert enrollment["repair_progress"]["evaluated_task_ids"] == []
+    if retired:
+        StateStore(path).retire(16, result_head, BASE)
+        assert StateStore(path).action(source["key"]) is None
+    else:
+        assert StateStore(path).action(source["key"])["status"] == "completed"
+    disposition = cloud_coordinator.review_body_disposition(
+        [api.progress_review], result_head, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert disposition["inventory_complete"] and not disposition["ambiguous"]
+    assert disposition["findings"] == []
+    assert "inline" in disposition["classifications"]
+    api.pending_required = False
+    for _ in range(3):
+        summary = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+        assert enrollment["repair_progress"]["evaluated_task_ids"] == [source["task_id"]]
+        assert enrollment["repair_progress"]["consecutive_no_progress"] == 1
+        assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+        assert enrollment["attempts"] == 2
+        assert api.fix_attempts == 2
+        assert summary["required_checks_green"]
+        assert not summary["review_valid"] and not summary["auto_merge_eligible"]
+    followup = next(
+        a for a in StateStore(path).actions().values()
+        if a["kind"] == "fix" and a["attempt"] == 2
+    )
+    assert followup["status"] == "sent"
+    assert "Please correct the synthetic blocker." in followup["body"]
+    assert followup["repair_fingerprints"] == [
+        cloud_coordinator._repair_fingerprint("thread", "PRRT_kw2"),
+    ]
+    persisted = StateStore(path).snapshot()["enrollments"]["16"]["receipt_proofs"][0]
+    for field in ("task_id", "dispatch_nonce", "receipt_result", "receipt_comment_id",
+                  "receipt_body", "receipt_head", "receipt_base", "attempt"):
+        assert persisted[field] == proof[field]
+
+
+@pytest.mark.parametrize("retired", [False, True])
+@pytest.mark.parametrize("hazard", [
+    "wrong-author", "wrong-head", "pending", "dismissed", "approved", "timestamp",
+    "missing-full-media", "reviews-pagination", "threads-pagination", "comments-pagination",
+    "mismatched-target", "wrong-pull-link", "malformed-count", "zero-open", "legacy-open",
+    "legacy-open-empty", "legacy-open-resolved", "thread-author-float", "thread-review-float",
+    "unknown-summary", "thread-author", "thread-review", "thread-head", "thread-timestamp",
+    "empty-comment", "missing-thread", "resolved-thread", "duplicate-thread",
+    "extra-current-finding",
+])
+def test_inline_only_commented_inventory_denies_unproved_progress(tmp_path, retired, hazard):
+    api = InlineProgressApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.set_inline_review(HEAD, 63002, "2026-10-01T12:10:00Z")
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    result_head = RESULT_HEAD if retired else HEAD
+    api.head_sha = api.pull["head"]["sha"] = result_head
+    api.complete_task(source["task_id"], source, head_sha=result_head)
+    api.set_inline_review(result_head, 63003, "2026-10-01T12:11:00Z")
+    api.pending_required = True
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    if retired:
+        StateStore(path).retire(16, result_head, BASE)
+        assert StateStore(path).action(source["key"]) is None
+    else:
+        assert StateStore(path).action(source["key"])["status"] == "completed"
+    review = api.progress_review
+    if hazard == "wrong-author":
+        review["user"]["id"] = 198982749
+    elif hazard == "wrong-head":
+        review["commit_id"] = "f" * 40
+    elif hazard in {"pending", "dismissed", "approved"}:
+        review["state"] = hazard.upper()
+    elif hazard == "timestamp":
+        review["submitted_at"] = None
+    elif hazard == "missing-full-media":
+        review.pop("body_html")
+    elif hazard == "mismatched-target":
+        review["body_html"] = review["body_html"].replace("discussion_r446", "discussion_r999")
+    elif hazard == "wrong-pull-link":
+        review["body_html"] = review["body_html"].replace("/pull/16#", "/pull/17#")
+    elif hazard == "malformed-count":
+        review["body_html"] = review["body_html"].replace("1 open finding", "2 open findings")
+    elif hazard == "zero-open":
+        review["body_html"] = (
+            "<h3>🟡 Changes recommended</h3><p>No findings were found.</p>"
+            "<p><strong>0 open findings</strong></p>"
+        )
+    elif hazard.startswith("legacy-open"):
+        review["body_html"] = review["body_html"].replace("1 open finding", "Open (1)")
+    elif hazard == "unknown-summary":
+        review["body_html"] = review["body_html"].replace(
+            "It changes synthetic coordination paths, while exact-head verification remains pending.",
+            "Unclassified provider prose.",
+        )
+    original_get_all = api.get_all
+    original_graphql = api.graphql
+
+    def inventory(route, *, collection=None):
+        if hazard == "reviews-pagination" and "/reviews?" in route:
+            raise ApiError("Synthetic incomplete review pagination")
+        return original_get_all(route, collection=collection)
+
+    def threads(query, variables):
+        response = original_graphql(query, variables)
+        if "reviewThreads" not in query:
+            return response
+        page = response["data"]["repository"]["pullRequest"]["reviewThreads"]
+        thread = page["nodes"][0]
+        comment = thread["comments"]["nodes"][0]
+        if hazard == "threads-pagination":
+            page["pageInfo"] = {"hasNextPage": True, "endCursor": None}
+        elif hazard == "comments-pagination":
+            thread["comments"]["pageInfo"]["hasNextPage"] = True
+        elif hazard == "thread-author":
+            comment["author"]["databaseId"] = 198982749
+        elif hazard == "thread-author-float":
+            comment["author"]["databaseId"] = float(COPILOT_REVIEWER)
+        elif hazard == "thread-review":
+            comment["pullRequestReview"]["databaseId"] = 63002
+        elif hazard == "thread-review-float":
+            comment["pullRequestReview"]["databaseId"] = float(review["id"])
+        elif hazard == "thread-head":
+            comment["pullRequestReview"]["commit"]["oid"] = "f" * 40
+        elif hazard == "thread-timestamp":
+            comment["createdAt"] = "2026-10-01T12:12:00Z"
+        elif hazard == "empty-comment":
+            comment["body"] = ""
+        elif hazard in {"missing-thread", "legacy-open-empty"}:
+            page["nodes"] = []
+        elif hazard in {"resolved-thread", "legacy-open-resolved"}:
+            thread["isResolved"] = True
+        elif hazard == "duplicate-thread":
+            page["nodes"].append(deepcopy(thread))
+        elif hazard == "extra-current-finding":
+            extra = deepcopy(thread)
+            extra["id"] = "PRRT_extra"
+            extra["comments"]["nodes"][0]["databaseId"] = 999
+            page["nodes"].append(extra)
+        return response
+
+    api.get_all = inventory
+    api.graphql = threads
+    api.pending_required = False
+    for _ in range(2):
+        coordinator = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
+        if hazard == "reviews-pagination":
+            with pytest.raises(ApiError, match="incomplete review pagination"):
+                coordinator.run(apply=True)
+        else:
+            summary = coordinator.run(apply=True)["pull_requests"][0]
+            assert not summary["repair_requested"] and not summary["auto_merge_eligible"]
+        enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+        assert enrollment["repair_progress"]["evaluated_task_ids"] == []
+        assert enrollment["repair_progress"]["consecutive_no_progress"] == 0
+        assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+        assert enrollment["attempts"] == 1
+        assert api.fix_attempts == 1
 
 
 def _publish_resolution_followup(api, store, source, head, resolved, *, mutation=None):

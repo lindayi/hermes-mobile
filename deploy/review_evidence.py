@@ -452,7 +452,7 @@ _DISCUSSION_HREF_RE = re.compile(
 )
 
 
-def _discussion_targets(node):
+def _discussion_targets(node, *, links=None):
     targets = set()
     pending = list(reversed(node.children))
     while pending:
@@ -471,7 +471,10 @@ def _discussion_targets(node):
                 ):
                     return set()
                 # Fragment and absolute links identify the same review comment.
-                targets.add(child.href.rsplit("#", 1)[1].lower())
+                target = child.href.rsplit("#", 1)[1].lower()
+                targets.add(target)
+                if links is not None:
+                    links[target] = child.href
             pending.extend(reversed(child.children))
     return targets
 
@@ -489,7 +492,7 @@ def _has_inert_disclosure(root):
     return False
 
 
-def _counted_section_targets(node, expected):
+def _counted_section_targets(node, expected, *, links=None):
     """Return validated normalized targets, or None for an incomplete section."""
     # Counted links cannot stand in for nested, unclassified live findings.
     if next(_disclosures(node), None) is not None:
@@ -509,7 +512,7 @@ def _counted_section_targets(node, expected):
         if not isinstance(child, _Element) or child.tag != "li":
             return None
         items.append(child)
-    targets = [_discussion_targets(item) for item in items]
+    targets = [_discussion_targets(item, links=links) for item in items]
     unique_targets = set().union(*targets)
     if (len(items) != expected
             or any(len(item_targets) != 1 for item_targets in targets)
@@ -733,7 +736,8 @@ def parse_body(body, state, *, body_html=None):
     dispositions, including non-actionable sections, for callers/diagnostics.
     """
     result = {"classifications": [], "findings": [], "ambiguous": False, "reason": None,
-              "findings_total": 0, "truncated": False, "inventory_complete": True}
+              "findings_total": 0, "truncated": False, "inventory_complete": True,
+              "inline_targets": [], "inline_count": 0}
     parser = _DisclosureParser()
     try:
         if not isinstance(body, str) or len(body) > MAX_BODY_CHARS:
@@ -797,7 +801,8 @@ def parse_body(body, state, *, body_html=None):
             duplicate = category in counted_sections or (
                 open_section_count > 0 if category == "open" else resolved_section_seen
             )
-            targets = _counted_section_targets(node, count)
+            links = {}
+            targets = _counted_section_targets(node, count, links=links)
             if duplicate or targets is None or counted_targets.intersection(targets):
                 result["classifications"][-1] = "ambiguous"
                 result["ambiguous"] = True
@@ -810,6 +815,8 @@ def parse_body(body, state, *, body_html=None):
                 )
                 if category == "open":
                     open_section_count += 1
+                    result["inline_count"] = count
+                    result["inline_targets"] = [links[target] for target in sorted(targets)]
                     if count:
                         positive_open = True
                 else:
@@ -821,6 +828,7 @@ def parse_body(body, state, *, body_html=None):
                 result["inventory_complete"] = False
             open_section_count += 1
             count = int(re.search(r"\((\d+)\)$", label)[1])
+            result["inline_count"] = count
             if count:
                 positive_open = True
             elif any(_text(child).strip() for child in node.children if child is not _summary(node)):
@@ -935,7 +943,8 @@ def parse_body(body, state, *, body_html=None):
 def review_body_disposition(reviews, head_sha, *, reviewer_id):
     """Select exactly one authenticated current-head review, then classify it."""
     empty = {"classifications": [], "findings": [], "ambiguous": False, "reason": None,
-             "findings_total": 0, "truncated": False, "inventory_complete": True}
+             "findings_total": 0, "truncated": False, "inventory_complete": True,
+             "inline_targets": [], "inline_count": 0}
     latest = latest_reviews(reviews, reviewer_id)
     if latest is None:
         if (not isinstance(reviews, list)

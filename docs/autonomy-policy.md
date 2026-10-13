@@ -138,7 +138,7 @@ authority; the earlier issue #100 pin remains retained as historical provenance.
 
 | Current candidate path | SHA-256 |
 | --- | --- |
-| `deploy/review_evidence.py` | `41025e4dae30207b0ea15beb0b7899d1b8779811ba4ed089f89cfeb10572f3de` |
+| `deploy/review_evidence.py` | `c1742ecb600b8372aa4382b5ab4e3647a3aa494b736dd6dd510d23fe5514a781` |
 
 This candidate still requires fresh exact-head review and all required checks.
 Sensitive owner authorization remains a separate gate.
@@ -552,8 +552,11 @@ These pins identify candidate bytes only. Both files retain the
 review, clear the source-contract hold, or authorize operational activation.
 
 Issue #106 updates only the current coordinator candidate pin for bounded evaluation
-of complete exact-head COMMENTED findings. The body must provide a complete,
-unambiguous actionable inventory; this evidence does not grant review approval,
+of complete exact-head COMMENTED findings. The full-media body must provide a
+complete, unambiguous actionable inventory. Linked open targets must match the
+authenticated current-review/head thread inventory; body-only findings remain
+supported. Generic COMMENTED state and unrelated unresolved threads do not
+prove negative admission. This evidence does not grant review approval,
 merge authority, or deployment authority. COMMENTED admission is separate from the
 owner-published proof needed to consume a follow-up resolution disposition. The
 independent fixture preserves the historical issue #100 pin, and the source-contract
@@ -561,7 +564,7 @@ blocker remains active:
 
 | Issue #106 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `a38e50843d12975e852ae493f41f97bdfa2ac9934eea5a15a38f176f6f2c0d38` |
+| `deploy/cloud_coordinator.py` | `1f3d179d38ea1d322a6492c8e0ba023c91ea06186d3f2263a9de53edca45ed75` |
 
 Before the Issue #50 overlay, this assembly integrated final PR40 main
 `5316f7c75dced1bffafdb545cdd7677e98e855a6`, preserving its parser and previously

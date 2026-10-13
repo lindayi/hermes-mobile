@@ -199,11 +199,11 @@ _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE = {
 }
 
 _ISSUE106_COMMENTED_PROGRESS_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'a38e50843d12975e852ae493f41f97bdfa2ac9934eea5a15a38f176f6f2c0d38',
+    'deploy/cloud_coordinator.py': '1f3d179d38ea1d322a6492c8e0ba023c91ea06186d3f2263a9de53edca45ed75',
 }
 
 _ISSUE107_REVIEW_SUMMARY_FIXTURE = {
-    'deploy/review_evidence.py': '41025e4dae30207b0ea15beb0b7899d1b8779811ba4ed089f89cfeb10572f3de',
+    'deploy/review_evidence.py': 'c1742ecb600b8372aa4382b5ab4e3647a3aa494b736dd6dd510d23fe5514a781',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {

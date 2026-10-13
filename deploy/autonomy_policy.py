@@ -188,7 +188,7 @@ SOURCE_FINGERPRINTS = {
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
     # Issue #106 Copilot-only candidate; historical bounded-repair pins are retained.
-    'deploy/cloud_coordinator.py': 'a38e50843d12975e852ae493f41f97bdfa2ac9934eea5a15a38f176f6f2c0d38',
+    'deploy/cloud_coordinator.py': '1f3d179d38ea1d322a6492c8e0ba023c91ea06186d3f2263a9de53edca45ed75',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
@@ -255,7 +255,7 @@ SOURCE_FINGERPRINTS = {
 }
 # Issue #107 verification-status parser overlay; preserve the earlier review pin above.
 ISSUE107_REVIEW_EVIDENCE_OVERLAY = {
-    'deploy/review_evidence.py': '41025e4dae30207b0ea15beb0b7899d1b8779811ba4ed089f89cfeb10572f3de',
+    'deploy/review_evidence.py': 'c1742ecb600b8372aa4382b5ab4e3647a3aa494b736dd6dd510d23fe5514a781',
 }
 SOURCE_FINGERPRINTS.update(ISSUE107_REVIEW_EVIDENCE_OVERLAY)
 SOURCE_BLOCKERS = {
