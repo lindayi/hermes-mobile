@@ -2932,6 +2932,56 @@ def _owner_abandonment_historical_neutral_case(tmp_path):
     return api, store, neutral
 
 
+def _store_precovery_owner_abandonment_successor(
+        api, store, *, created_at, receipt_head, receipt_base):
+    action = {
+        "key": "precovery-owner-abandonment-successor",
+        "issue": 16,
+        "kind": "fix",
+        "head": NEXT_RESULT_HEAD,
+        "head_ref": api.pull["head"]["ref"],
+        "main_sha": CURRENT_MAIN,
+        "pull_id": api.pull["id"],
+        "pull_node_id": api.pull["node_id"],
+        "body": "Synthetic pre-recovery continuation candidate.",
+        "progress_fingerprints": [],
+        "progress_fingerprints_complete": False,
+        "repair_target_map": {},
+    }
+    original_time = cloud_coordinator.time.time
+    cloud_coordinator.time.time = lambda: created_at
+    try:
+        assert store.claim_action(action["key"], action)
+    finally:
+        cloud_coordinator.time.time = original_time
+    claimed = store.action(action["key"])
+    task = api.write(
+        "agents/repos/lindayi/hermes-mobile/tasks",
+        {"prompt": claimed["body"], "base_ref": "main", "head_ref": claimed["head_ref"]},
+    )
+    store.accept_task(action["key"], task["id"], task["created_at"])
+    claimed = store.action(action["key"])
+    api.complete_task(task["id"], claimed, head_sha=receipt_head, base_sha=receipt_base)
+    api.comments[-1]["id"] = 9901
+    store.update_action_with_lifecycle(
+        action["key"], "completed", None, now=created_at,
+        receipt_version="v1",
+        receipt_result="ready",
+        receipt_comment_id=9901,
+        receipt_created_at="2026-10-01T12:05:00Z",
+        receipt_body=api.comments[-1]["body"],
+        receipt_task_id=task["id"],
+        receipt_session_id=f"session-{task['id']}",
+        receipt_nonce=claimed["dispatch_nonce"],
+        receipt_start_head=claimed["head"],
+        receipt_head=receipt_head,
+        receipt_base=receipt_base,
+        receipt_completed_at="2026-10-01T12:05:30Z",
+        receipt_session_completed_at="2026-10-01T12:05:30Z",
+    )
+    return store.action(action["key"])
+
+
 def test_owner_abandons_unverified_terminal_task_without_rewriting_history(tmp_path):
     from copy import deepcopy
 
@@ -3026,6 +3076,9 @@ def test_owner_abandonment_neutral_successor_survives_main_advance_and_reopens(
     assert resumed["reasons"] == ["conflict"]
     assert successor["main_sha"] == advanced_main
     assert successor["recorded_base_sha"] == CURRENT_MAIN
+    assert successor["owner_abandonment_binding"] == (
+        cloud_coordinator._owner_abandonment_successor_binding(recovery)
+    )
 
     api.complete_task(
         successor["task_id"], successor,
@@ -3071,6 +3124,8 @@ def test_owner_abandonment_neutral_successor_survives_main_advance_and_reopens(
 
 
 def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_path):
+    from copy import deepcopy
+
     api, store, abandoned = _owner_abandonment_case(tmp_path)
     Coordinator(
         api, StateStore(store.path), clock=lambda: 1790856660,
@@ -3107,14 +3162,29 @@ def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_pat
 
     assert result["head"] == FINAL_RESULT_HEAD
     assert StateStore(store.path).action(successor["key"])["receipt_result"] == "ready"
+    assert StateStore(store.path).action(successor["key"])[
+        "owner_abandonment_binding"
+    ] == cloud_coordinator._owner_abandonment_successor_binding(
+        state["enrollments"]["16"]["owner_abandonments"][0],
+    )
     assert FINAL_RESULT_HEAD in authorized
     assert FINAL_RESULT_HEAD not in blocked
     preexisting_actions = dict(state["actions"])
     preexisting_actions[successor["key"]] = dict(
-        preexisting_actions[successor["key"]], created_at=0.0,
+        preexisting_actions[successor["key"]],
     )
+    preexisting_actions[successor["key"]].pop("owner_abandonment_binding")
+    preexisting_enrollment = deepcopy(state["enrollments"]["16"])
+    preexisting_enrollment["receipt_proofs"] = [
+        dict(proof) for proof in preexisting_enrollment.get("receipt_proofs", [])
+    ]
+    bound_proof = next(
+        proof for proof in preexisting_enrollment["receipt_proofs"]
+        if proof.get("task_id") == successor["task_id"]
+    )
+    bound_proof.pop("owner_abandonment_binding")
     _, preexisting_authorized, _ = _authorized_result_heads(
-        16, state["enrollments"]["16"], preexisting_actions, api.comments,
+        16, preexisting_enrollment, preexisting_actions, api.comments,
         CURRENT_MAIN,
     )
     assert FINAL_RESULT_HEAD not in preexisting_authorized
@@ -3136,6 +3206,111 @@ def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_pat
         write for write in api.writes
         if write[0].endswith("/requested_reviewers")
     ] == review_writes
+
+
+def test_owner_abandonment_same_second_precovery_completion_cannot_grant_provenance(
+        tmp_path):
+    api, store, _ = _owner_abandonment_case(tmp_path)
+    preexisting = _store_precovery_owner_abandonment_successor(
+        api, store, created_at=1790856660.1,
+        receipt_head=FINAL_RESULT_HEAD, receipt_base=CURRENT_MAIN,
+    )
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660.9,
+    ).run(apply=True)
+    sent_after_recovery = [
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "fix"
+        and action.get("status") == "sent"
+        and action.get("head") == NEXT_RESULT_HEAD
+        and action.get("key") != preexisting["key"]
+    ]
+    assert sent_after_recovery
+    StateStore(store.path)._mutate(
+        lambda state: state["actions"].pop(sent_after_recovery[0]["key"], None),
+    )
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.unresolved = False
+    api.review_state = None
+    api.review_sha = None
+    api.head_sha = FINAL_RESULT_HEAD
+    api.pull["head"]["sha"] = FINAL_RESULT_HEAD
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="clean")
+
+    replay = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856661,
+    ).run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+    _, authorized, blocked = _authorized_result_heads(
+        16, state["enrollments"]["16"], state["actions"], api.comments, CURRENT_MAIN,
+    )
+
+    assert FINAL_RESULT_HEAD not in authorized
+    assert FINAL_RESULT_HEAD not in blocked
+    assert replay["reasons"] == ["unauthorized-continuation"]
+    assert api.requested_reviewers == []
+
+
+@pytest.mark.parametrize(
+    "hazard",
+    ["missing-binding", "wrong-action-key", "wrong-command", "wrong-head"],
+)
+def test_owner_abandonment_successor_binding_fails_closed(tmp_path, hazard):
+    api, store, abandoned = _owner_abandonment_case(tmp_path)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    successor = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "fix"
+        and action.get("key") != abandoned["key"]
+        and action.get("head") == NEXT_RESULT_HEAD
+    )
+    if hazard == "missing-binding":
+        store.update_action(
+            successor["key"], successor["status"], owner_abandonment_binding=None,
+        )
+    else:
+        binding = dict(successor["owner_abandonment_binding"])
+        field, value = {
+            "wrong-action-key": ("action_key", "other-action"),
+            "wrong-command": ("command_comment_id", 9999),
+            "wrong-head": ("head_sha", "8" * 40),
+        }[hazard]
+        binding[field] = value
+        store.update_action(
+            successor["key"], successor["status"], owner_abandonment_binding=binding,
+        )
+    successor = StateStore(store.path).action(successor["key"])
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=FINAL_RESULT_HEAD, base_sha=CURRENT_MAIN,
+    )
+    api.head_sha = FINAL_RESULT_HEAD
+    api.pull["head"]["sha"] = FINAL_RESULT_HEAD
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    before_review_writes = [
+        write for write in api.writes if write[0].endswith("/requested_reviewers")
+    ]
+
+    replay = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+    _, authorized, blocked = _authorized_result_heads(
+        16, state["enrollments"]["16"], state["actions"], api.comments, CURRENT_MAIN,
+    )
+
+    assert FINAL_RESULT_HEAD not in authorized
+    assert FINAL_RESULT_HEAD not in blocked
+    assert replay["reasons"] == ["unauthorized-continuation"]
+    assert [
+        write for write in api.writes if write[0].endswith("/requested_reviewers")
+    ] == before_review_writes
 
 
 @pytest.mark.parametrize(

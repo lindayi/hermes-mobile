@@ -1600,7 +1600,48 @@ def _owner_abandonments_valid(records, *, issue=None):
             and (issue is None or record["issue"] == issue)
             for record in records
         )
-        and len({record["action_key"] for record in records}) == len(records)
+        and len({record["action_key"] for record in records}) == len(records        )
+    )
+
+
+def _owner_abandonment_successor_binding(record):
+    return {
+        "version": 1,
+        "action_key": record["action_key"],
+        "task_id": record["task_id"],
+        "task_created_at": record["task_created_at"],
+        "reservation_sha256": record["reservation_sha256"],
+        "head_sha": record["head_sha"],
+        "base_sha": record["base_sha"],
+        "command_comment_id": record["command_comment_id"],
+        "command_created_at": record["command_created_at"],
+        "accepted_at": record["accepted_at"],
+    } if _owner_abandonment_record_valid(record) else None
+
+
+def _owner_abandonment_successor_candidate_matches(record, action):
+    neutral = isinstance(action, dict) and action.get("task_type") == "neutral"
+    expected_binding = _owner_abandonment_successor_binding(record)
+    return (
+        _owner_abandonment_record_valid(record)
+        and isinstance(action, dict)
+        and expected_binding is not None
+        and action.get("key") != record["action_key"]
+        and action.get("task_id") != record["task_id"]
+        and action.get("issue") == record["issue"]
+        and action.get("kind") == "fix"
+        and action.get("task_type") in {
+            None, "source", "review-followup", "neutral",
+        }
+        and action.get("head") == record["head_sha"]
+        and (
+            action.get("owner_abandonment_binding") == expected_binding
+            or action.get("owner_abandonment_intent") == expected_binding
+        )
+        and (
+            neutral and action.get("recorded_base_sha") == record["base_sha"]
+            or not neutral and action.get("main_sha") == record["base_sha"]
+        )
     )
 
 
@@ -3063,48 +3104,52 @@ def _valid_owner_abandonment_claims(enrollment, actions):
 
 def _owner_abandonment_continuation(
         enrollment, actions, head, base_sha, *, action_key=None):
-    del base_sha
     return next((
         record for key, record in _valid_owner_abandonment_claims(enrollment, actions)
         if key != action_key and record["head_sha"] == head
+        and any(
+            isinstance(candidate, dict)
+            and candidate.get("key") not in {action_key, key}
+            and candidate.get("issue") == record["issue"]
+            and candidate.get("head") == head
+            and _owner_abandonment_successor_matches(record, candidate)
+            and (
+                base_sha is None
+                or candidate.get("task_type") == "neutral"
+                or candidate.get("main_sha") == base_sha
+            )
+            for candidate in actions.values()
+        )
     ), None)
 
 
-def _owner_abandonment_successor_matches(record, action):
-    created_at = action.get("created_at") if isinstance(action, dict) else None
+def _owner_abandonment_available(enrollment, actions, head, *, action_key=None):
+    return any(
+        key != action_key and record["head_sha"] == head
+        for key, record in _valid_owner_abandonment_claims(enrollment, actions)
+    )
+
+
+def _owner_abandonment_successor_matches(record, action, *, allow_intent=False):
     neutral = isinstance(action, dict) and action.get("task_type") == "neutral"
-    if (not _owner_abandonment_record_valid(record)
-            or not isinstance(action, dict)
-            or action.get("key") == record["action_key"]
-            or action.get("task_id") == record["task_id"]
-            or action.get("issue") != record["issue"]
-            or action.get("kind") != "fix"
-            or action.get("task_type") not in {
-                None, "source", "review-followup", "neutral",
-            }
+    if (
+            not _owner_abandonment_successor_candidate_matches(record, action)
             or action.get("status") != "completed"
             or action.get("receipt_start_head") != record["head_sha"]
             or (
-                neutral and (
-                    action.get("recorded_base_sha") != record["base_sha"]
-                    or action.get("receipt_base") != action.get("main_sha")
-                )
+                neutral and action.get("receipt_base") != action.get("main_sha")
             )
             or (
                 not neutral and action.get("receipt_base") != record["base_sha"]
             )
-            or type(created_at) not in (int, float)):
+            or (
+                not allow_intent
+                and action.get("owner_abandonment_binding")
+                    != _owner_abandonment_successor_binding(record)
+            )
+    ):
         return False
-    try:
-        if not math.isfinite(created_at):
-            return False
-        return datetime.fromtimestamp(
-            created_at, timezone.utc,
-        ) >= datetime.fromisoformat(
-            record["accepted_at"].replace("Z", "+00:00"),
-        )
-    except (OverflowError, OSError, TypeError, ValueError):
-        return False
+    return True
 
 
 def _owner_abandonment_for_action(enrollment, key, action):
@@ -3987,9 +4032,9 @@ class Coordinator:
             and action.get("recorded_base_sha") == base.get("sha")
             for action in actions.values()
         )
-        has_owner_continuation = _owner_abandonment_continuation(
-            enrollment, actions, sha, base.get("sha"),
-        ) is not None
+        has_owner_continuation = _owner_abandonment_available(
+            enrollment, actions, sha,
+        )
         historical_base = (
             not scoped and (
                 has_ready_handoff or has_neutral_claim or has_owner_continuation
@@ -4627,12 +4672,15 @@ class Coordinator:
                                 snapshot["comments"],
                                 snapshot["pull"].get("base", {}).get("sha"),
                             )
-                            continuation_start = _owner_abandonment_continuation(
-                                snapshot["enrollment"], self.store.actions(),
-                                action.get("head"),
-                                snapshot["pull"].get("base", {}).get("sha"),
-                                action_key=key,
-                            ) is not None
+                            continuation_start = any(
+                                prior_key != key
+                                and _owner_abandonment_successor_candidate_matches(
+                                    record, action,
+                                )
+                                for prior_key, record in _valid_owner_abandonment_claims(
+                                    snapshot["enrollment"], self.store.actions(),
+                                )
+                            )
                             if (action.get("head") not in authorized_heads
                                     and not continuation_start):
                                 if apply and not receipt_recovery:
@@ -5410,10 +5458,9 @@ class Coordinator:
             number, enrollment, self.store.actions(),
             snapshot["comments"], snapshot["pull"].get("base", {}).get("sha"),
         )
-        continuation_only_head = _owner_abandonment_continuation(
+        continuation_only_head = _owner_abandonment_available(
             enrollment, self.store.actions(), head,
-            snapshot["pull"].get("base", {}).get("sha"),
-        ) is not None
+        )
         if head in blocked_heads:
             # A proved typed blocker is meaningful evidence, not an unrelated push.
             outcome = self._outcome(
@@ -5668,6 +5715,25 @@ class Coordinator:
                     pull_number=number, source_failure=snapshot["source_failure"],
                     reviews=snapshot["reviews"],
                 )
+        owner_abandonment_recovery = next((
+            record for key, record in _valid_owner_abandonment_claims(
+                snapshot["enrollment"], actions,
+            )
+            if record["head_sha"] == head
+            and (
+                repair.get("task_type") == "neutral"
+                and repair.get("recorded_base_sha") == record["base_sha"]
+                or repair.get("task_type") != "neutral"
+                and repair.get("main_sha") == record["base_sha"]
+            )
+        ), None) if repair is not None else None
+        if owner_abandonment_recovery is not None:
+            repair = {
+                **repair,
+                "owner_abandonment_intent": _owner_abandonment_successor_binding(
+                    owner_abandonment_recovery,
+                ),
+            }
         latest_copilot = latest_reviews(snapshot["reviews"], COPILOT_REVIEWER_ID)
         neutral_rejection_ready = (
             snapshot["reviews_complete"] is True
@@ -5714,6 +5780,24 @@ class Coordinator:
             repair.setdefault("main_sha", snapshot["main_sha"])
             repair.setdefault("pull_id", snapshot["pull"].get("id"))
             repair.setdefault("pull_node_id", snapshot["pull"].get("node_id"))
+            owner_abandonment_recovery = next((
+                record for key, record in _valid_owner_abandonment_claims(
+                    snapshot["enrollment"], actions,
+                )
+                if record["head_sha"] == head
+                and (
+                    repair.get("task_type") == "neutral"
+                    and repair.get("recorded_base_sha") == record["base_sha"]
+                    or repair.get("task_type") != "neutral"
+                    and repair.get("main_sha") == record["base_sha"]
+                )
+            ), None)
+            if owner_abandonment_recovery is not None:
+                repair["owner_abandonment_intent"] = (
+                    _owner_abandonment_successor_binding(
+                        owner_abandonment_recovery,
+                    )
+                )
         else:
             repair = None
         reasons = []
@@ -6102,6 +6186,23 @@ class Coordinator:
             pull_plan = next(
                 item for item in plans if item["issue"] == recovery["issue"]
             )
+            repair = pull_plan.get("repair")
+            record = recovery["record"]
+            if (
+                    isinstance(repair, dict)
+                    and record["head_sha"] == pull_plan.get("head")
+                    and (
+                        repair.get("task_type") == "neutral"
+                        and repair.get("recorded_base_sha") == record["base_sha"]
+                        or repair.get("task_type") != "neutral"
+                        and repair.get("main_sha") == record["base_sha"]
+                    )):
+                pull_plan["repair"] = {
+                    **repair,
+                    "owner_abandonment_intent": _owner_abandonment_successor_binding(
+                        record,
+                    ),
+                }
             pull_plan.setdefault("owner_recoveries", []).append(recovery)
             pull_plan["receipt_recoveries"] = [
                 key for key in pull_plan.get("receipt_recoveries", ())
@@ -6304,6 +6405,9 @@ class Coordinator:
             return False
         return any(
             key != continuation_action.get("key")
+            and _owner_abandonment_successor_candidate_matches(
+                record, continuation_action,
+            )
             and record["head_sha"] == head
             and record["base_sha"] == base
             for key, record in _valid_owner_abandonment_claims(
@@ -6383,11 +6487,7 @@ class Coordinator:
                 enrollment, self.store.actions(),
             )
             if key != action.get("key")
-            and record["head_sha"] == action.get("head")
-            and action.get("kind") == "fix"
-            and action.get("task_type") in {
-                None, "source", "review-followup", "neutral",
-            }
+            and _owner_abandonment_successor_candidate_matches(record, action)
         ), None)
         current = self._fence_pull(
             action["issue"], action["head"], action["main_sha"],
@@ -7946,6 +8046,46 @@ class StateStore:
                 enrollment = data["enrollments"].get(str(claimed.get("issue")))
                 if not enrollment or not enrollment.get("active"):
                     return False
+                if "owner_abandonment_binding" in claimed:
+                    return False
+                owner_abandonment_intent = claimed.pop(
+                    "owner_abandonment_intent", None,
+                )
+                owner_abandonment_record = None
+                if owner_abandonment_intent is not None:
+                    matching_owner_abandonments = [
+                        record for key, record in _valid_owner_abandonment_claims(
+                            enrollment, data["actions"],
+                        )
+                        if key != claimed.get("key")
+                        and owner_abandonment_intent
+                            == _owner_abandonment_successor_binding(record)
+                    ]
+                    if len(matching_owner_abandonments) != 1:
+                        return False
+                    owner_abandonment_record = matching_owner_abandonments[0]
+                if owner_abandonment_record is not None:
+                    neutral_successor = claimed.get("task_type") == "neutral"
+                    if (
+                            claimed.get("task_type") not in {
+                                None, "source", "review-followup", "neutral",
+                            }
+                            or (
+                                neutral_successor
+                                and claimed.get("recorded_base_sha")
+                                    != owner_abandonment_record["base_sha"]
+                            )
+                            or (
+                                not neutral_successor
+                                and claimed.get("main_sha")
+                                    != owner_abandonment_record["base_sha"]
+                            )):
+                        return False
+                    claimed["owner_abandonment_binding"] = (
+                        _owner_abandonment_successor_binding(
+                            owner_abandonment_record,
+                        )
+                    )
                 neutral = claimed.get("task_type") == "neutral"
                 counter = "neutral_attempts" if neutral else "attempts"
                 limit = NEUTRAL_LIMIT if neutral else REPAIR_LIMIT
@@ -8088,6 +8228,7 @@ class StateStore:
                     "receipt_completed_at", "receipt_session_completed_at",
                     "receipt_nonce", "receipt_start_head", "receipt_head", "receipt_base",
                     "receipt_legacy_neutral",
+                    "owner_abandonment_binding",
                     "attempt", "owner_id", "repository_id", "pull_id", "pull_node_id",
                     "repair_policy_version", "repair_fingerprints",
                     "repair_fingerprints_complete", "repair_fingerprint_version",

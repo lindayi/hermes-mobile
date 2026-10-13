@@ -603,8 +603,10 @@ Finite acceptance for this recovery:
   abandoned by one exact immutable owner command, then the coordinator can plan and
   dispatch a distinct bounded task without reposting the old task.
 - A valid distinct continuation may return a different result head; that head is
-  accepted only from its immutable ready receipt, after which Copilot review handoff
-  proceeds across cold restart without duplicate work.
+  accepted only from its immutable ready receipt after a genuinely new durable
+  reservation records an explicit binding to the committed recovery; same-second
+  older reservations or copied/malformed bindings fail closed. Copilot review
+  handoff then proceeds across cold restart without duplicate work.
 - Source and review-followup fix reservations are eligible; independent review and
   report-correction reservations are not.
 - Duplicate command delivery, process restart, and a second poll preserve the same

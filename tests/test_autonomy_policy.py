@@ -136,7 +136,7 @@ _PENDING_PR40_LIFECYCLE_FIXTURE = {
 }
 
 _PENDING_ISSUE43_LAUNCH_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'cbf3b8ee8ed27f834d3e5dabf8a518406bfefab18b448e1b4820631cc66c46ca',
+    'deploy/cloud_coordinator.py': '5a5873aaa7e52f9b3f36ffc359469ce71c3e04de76cce357c9e1f81113a32cc3',
     # PR57 paired proof plus issue #63 fail-closed boundary, independently literal.
     'deploy/issue_starter.py': '20603a350aa4c3972563010035a9faed8fcf086b251af847dbed7e4b32e900ca',
     'deploy/pull_handoff_binding.py': '3e279674d80426c017bd39b9ebf7777af4f92b0f6ec03fc5d8b8398c0f98898b',
@@ -199,7 +199,7 @@ _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE = {
 }
 
 _PR105_OWNER_ABANDONMENT_FIXTURE = {
-    'deploy/cloud_coordinator.py': '5db9dbca461390f59f7143adf76fa226542c31c15a7f148fbc8fd4eb3e328478',
+    'deploy/cloud_coordinator.py': '5a5873aaa7e52f9b3f36ffc359469ce71c3e04de76cce357c9e1f81113a32cc3',
     'deploy/task_receipts.py': 'a97ef169d4515229d9e139fedc668772dffad74198ea2f58c51ab6d5dbf9e433',
 }
 
