@@ -418,6 +418,8 @@ def _validate_documented_graph(example, private_proofs):
                 'task_id', 'session_id', 'receipt_comment_id', 'prompt_sha256',
             }
             visit(entry['verifier']['delegation'], depth + 1)
+            assert by_key[entry['verifier']['delegation']]['type'] == 'public-response', \
+                'delegation must reference a public response'
             refs = entry['correlation']
             assert 1 <= len(refs) <= 20 and len(set(refs)) == len(refs)
             for ref in refs:
@@ -435,8 +437,16 @@ def _validate_documented_graph(example, private_proofs):
         visiting.remove(key)
         visited.add(key)
 
-    for root in example['roots'].values():
+    root_purposes = {
+        'review_inventory': 'review-inventory',
+        'source_proof': 'source',
+        'occupancy_proof': 'occupancy',
+        'machine': 'machine',
+    }
+    assert set(example['roots']) == set(root_purposes), 'wrong root names'
+    for name, root in example['roots'].items():
         assert by_key[root]['type'] == 'manifest'
+        assert by_key[root]['purpose'] == root_purposes[name], 'wrong root purpose'
         visit(root)
     assert visited == set(by_key), 'unreferenced evidence'
 
@@ -470,6 +480,45 @@ def test_compound_example_represents_rest_graphql_and_separate_private_proof():
     rows = re.findall(r'^\| `([^`]+)` \| ([^|]+) \|', table, re.MULTILINE)
     assert {purpose: set(re.findall(r'`([^`]+)`', roles))
             for purpose, roles in rows} == MANIFEST_ROLES
+
+
+@pytest.mark.parametrize('target', ('metadata', 'publication'))
+def test_compound_example_rejects_nonpublic_delegation(target):
+    example = deepcopy(_compound_example())
+    proofs = _synthetic_private_proofs(example)
+    reservation = next(entry for entry in example['evidence'] if entry['key'] == 'reservation')
+    reservation['verifier']['delegation'] = target
+    with pytest.raises(AssertionError, match='delegation must reference a public response'):
+        _validate_documented_graph(example, proofs)
+
+
+@pytest.mark.parametrize('root', ('review_inventory', 'source_proof', 'occupancy_proof', 'machine'))
+def test_compound_example_rejects_wrong_root_purpose(root):
+    example = deepcopy(_compound_example())
+    by_key = {entry['key']: entry for entry in example['evidence']}
+    target = by_key[example['roots'][root]]
+    other = by_key[example['roots']['occupancy_proof' if root == 'source_proof' else 'source_proof']]
+    target['purpose'], other['purpose'] = other['purpose'], target['purpose']
+    target['members'], other['members'] = other['members'], target['members']
+    with pytest.raises(AssertionError, match='wrong root purpose'):
+        _validate_documented_graph(example, _synthetic_private_proofs(example))
+
+
+@pytest.mark.parametrize('defect', ('swapped-roots', 'wrong-root-name', 'extra-root'))
+def test_compound_example_rejects_wrong_root_bindings(defect):
+    example = deepcopy(_compound_example())
+    roots = example['roots']
+    if defect == 'swapped-roots':
+        roots['source_proof'], roots['occupancy_proof'] = roots['occupancy_proof'], roots['source_proof']
+        message = 'wrong root purpose'
+    elif defect == 'wrong-root-name':
+        roots['source'] = roots.pop('source_proof')
+        message = 'wrong root names'
+    else:
+        roots['extra'] = roots['source_proof']
+        message = 'wrong root names'
+    with pytest.raises(AssertionError, match=message):
+        _validate_documented_graph(example, _synthetic_private_proofs(example))
 
 
 @pytest.mark.parametrize('defect', (
