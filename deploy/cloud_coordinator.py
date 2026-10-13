@@ -2034,7 +2034,8 @@ def _owner_abandonment_inventory_valid(tasks, action, snapshot, record):
 
 
 def _owner_abandonment_task_valid(
-        task, action, pull, record, *, now, continued_head=False):
+        task, action, pull, record, *, now, continued_head=False,
+        historical_base=False):
     head = pull.get("head") if isinstance(pull, dict) else None
     base = pull.get("base") if isinstance(pull, dict) else None
     if (
@@ -2048,7 +2049,10 @@ def _owner_abandonment_task_valid(
                 record.get("head_sha") != head.get("sha")
                 and not continued_head
             )
-            or record.get("base_sha") != base.get("sha")
+            or (
+                record.get("base_sha") != base.get("sha")
+                and not (continued_head or historical_base)
+            )
             or pull.get("draft") is not False
             or head.get("ref") != action.get("head_ref")
             or base.get("ref") != MAIN_BRANCH
@@ -3049,15 +3053,16 @@ def _valid_owner_abandonment_claims(enrollment, actions):
 
 def _owner_abandonment_continuation(
         enrollment, actions, head, base_sha, *, action_key=None):
+    del base_sha
     return next((
         record for key, record in _valid_owner_abandonment_claims(enrollment, actions)
         if key != action_key and record["head_sha"] == head
-        and record["base_sha"] == base_sha
     ), None)
 
 
 def _owner_abandonment_successor_matches(record, action):
     created_at = action.get("created_at") if isinstance(action, dict) else None
+    neutral = isinstance(action, dict) and action.get("task_type") == "neutral"
     if (not _owner_abandonment_record_valid(record)
             or not isinstance(action, dict)
             or action.get("key") == record["action_key"]
@@ -3069,7 +3074,15 @@ def _owner_abandonment_successor_matches(record, action):
             }
             or action.get("status") != "completed"
             or action.get("receipt_start_head") != record["head_sha"]
-            or action.get("receipt_base") != record["base_sha"]
+            or (
+                neutral and (
+                    action.get("recorded_base_sha") != record["base_sha"]
+                    or action.get("receipt_base") != action.get("main_sha")
+                )
+            )
+            or (
+                not neutral and action.get("receipt_base") != record["base_sha"]
+            )
             or type(created_at) not in (int, float)):
         return False
     try:
@@ -6152,7 +6165,11 @@ class Coordinator:
                 head.get("sha") if isinstance(head, dict) else None
             )
             and isinstance(base, dict)
-            and base.get("sha") == record["base_sha"]
+            and base.get("sha") == (
+                successor.get("main_sha")
+                if successor.get("task_type") == "neutral"
+                else record["base_sha"]
+            )
             and _pull_identity(pull, successor)
             and _valid_receipt_proof(successor, snapshot.get("comments"))
             for successor in actions.values()
@@ -6167,12 +6184,24 @@ class Coordinator:
             )
         except CoordinatorError:
             return False
+        pull = snapshot.get("pull")
+        base = pull.get("base") if isinstance(pull, dict) else None
+        head = pull.get("head") if isinstance(pull, dict) else None
+        continued_head = self._owner_abandonment_successor_proven(snapshot, record)
+        historical_base = (
+            isinstance(base, dict)
+            and isinstance(head, dict)
+            and _is_sha(record.get("base_sha"))
+            and base.get("sha") != record["base_sha"]
+            and head.get("sha") == record.get("head_sha")
+            and self._compare_proves_ancestry(record["base_sha"], base.get("sha"))
+            and self._compare_proves_ancestry(record["base_sha"], head.get("sha"))
+        )
         if not _owner_abandonment_task_valid(
-            task, action, snapshot["pull"], record,
+            task, action, pull, record,
             now=datetime.fromtimestamp(self.clock(), timezone.utc),
-            continued_head=self._owner_abandonment_successor_proven(
-                snapshot, record,
-            ),
+            continued_head=continued_head,
+            historical_base=historical_base,
         ):
             return False
         comments = snapshot.get("comments")

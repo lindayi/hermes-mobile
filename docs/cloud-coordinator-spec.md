@@ -582,7 +582,10 @@ Only that later task's valid ready receipt may add its result head to general
 provenance; an older task or the abandoned task cannot do so. Normal current-main
 and sensitive-review fences still apply. Before every later dispatch, collect
 complete fresh remote task occupancy and recheck the recovered task's exact identity
-and terminal state. After a valid continuation receipt, bind the recovered task's
+and terminal state. A neutral continuation that reconciles after `main` advances
+must keep the recovery record's historical base in `recorded_base_sha` while its
+v2 receipt base and current pull base continue to match that continuation's
+current `main_sha`. After a valid continuation receipt, bind the recovered task's
 terminal check to that exact receipt lineage even when the PR head has advanced.
 Reactivation, duplicate commands, restart, or uncertain persistence must not cause
 a repeated POST, notice, or accepted result.
