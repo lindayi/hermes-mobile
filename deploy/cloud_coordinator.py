@@ -5110,7 +5110,7 @@ class Coordinator:
             snapshot["threads_complete"] is True
             and current_evidence.get("progress_fingerprints_complete") is True
         )
-        negative_review_fingerprints, negative_review_complete = (
+        owner_review_fingerprints, owner_review_complete = (
             _negative_review_progress_fingerprints(
                 actions, number, head, snapshot["reviews"],
                 reviews_complete=snapshot["reviews_complete"],
@@ -5124,11 +5124,12 @@ class Coordinator:
             )
             if not review_ok else False
         )
-        if not negative_review_complete and not review_ok:
-            negative_review_complete = current_copilot_negative_progress
-        if negative_review_complete:
+        negative_review_complete = (
+            owner_review_complete or current_copilot_negative_progress
+        )
+        if owner_review_complete:
             current_fingerprints = sorted(
-                set(current_fingerprints) | set(negative_review_fingerprints),
+                set(current_fingerprints) | set(owner_review_fingerprints),
             )
         progress_actions = dict(actions)
         for key, action in actions.items():
@@ -5195,7 +5196,7 @@ class Coordinator:
             checks_terminal=checks_terminal,
             independently_resolved=(
                 followup_disposition.get("resolved", [])
-                if negative_review_complete and isinstance(followup_disposition, dict) else []
+                if owner_review_complete and isinstance(followup_disposition, dict) else []
             ),
         )
         if progress is None:

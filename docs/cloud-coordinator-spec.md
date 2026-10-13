@@ -644,9 +644,12 @@ successful CI result; all three CI checks must be observed before scoring. A
 complete exact-head Copilot COMMENTED review may also admit evaluation only when
 its rendered full-media body proves a complete, unambiguous actionable finding
 inventory. It is negative evaluation evidence, not review approval, and cannot
-enable merge. Findings present in that inventory remain current repair targets;
-COMMENTED state without proved actionable findings has no negative authority.
-The existing verified-resolution rules still govern progress credit.
+enable merge. This admission is distinct from the owner-published proof required
+to consume `progress_disposition.resolved`; a rejected, edited, superseded, or
+otherwise unproven owner follow-up cannot earn resolution credit. Findings present
+in the COMMENTED inventory remain current repair targets; COMMENTED state without
+proved actionable findings has no negative authority. The existing
+verified-resolution rules still govern progress credit.
 An incomplete or older-encoding reservation baseline receives an explicitly
 unknown decision only after fresh complete review/check evidence; it cannot clear
 targets or alter the streak. Neutral advancement can leave an older source result

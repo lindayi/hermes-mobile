@@ -534,12 +534,14 @@ review, clear the source-contract hold, or authorize operational activation.
 Issue #106 updates only the current coordinator candidate pin for bounded evaluation
 of complete exact-head COMMENTED findings. The body must provide a complete,
 unambiguous actionable inventory; this evidence does not grant review approval,
-merge authority, or deployment authority. The independent fixture preserves the
-historical issue #100 pin, and the source-contract blocker remains active:
+merge authority, or deployment authority. COMMENTED admission is separate from the
+owner-published proof needed to consume a follow-up resolution disposition. The
+independent fixture preserves the historical issue #100 pin, and the source-contract
+blocker remains active:
 
 | Issue #106 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `c054860bbb9834343148b7dc295ff17cf17a93a9969f918bcc79895b348f0e0f` |
+| `deploy/cloud_coordinator.py` | `a38e50843d12975e852ae493f41f97bdfa2ac9934eea5a15a38f176f6f2c0d38` |
 
 Before the Issue #50 overlay, this assembly integrated final PR40 main
 `5316f7c75dced1bffafdb545cdd7677e98e855a6`, preserving its parser and previously

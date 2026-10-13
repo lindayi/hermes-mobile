@@ -3559,6 +3559,67 @@ class ProgressApi(FakeApi):
         return result
 
 
+def _publish_resolution_followup(api, store, source, head, resolved, *, mutation=None):
+    source = store.action(source["key"]) or source
+    proof = next(
+        item for item in store.snapshot()["enrollments"]["16"]["receipt_proofs"]
+        if item["task_id"] == source["task_id"]
+    )
+    report = {
+        "schema": "hermes-independent-review-report-v1",
+        "nonce": f"nonce-{source['task_id']}",
+        "session_id": f"review-session-{source['task_id']}",
+        "repository": "lindayi/hermes-mobile",
+        "repository_id": 1399942965,
+        "pr": 16,
+        "anchor_comment_id": 999,
+        "role": "independent-reviewer",
+        "head": head,
+        "base": source["main_sha"],
+        "source_start_head": source["head"],
+        "source_session_id": proof["receipt_session_id"],
+        "source_comment_id": proof["receipt_comment_id"],
+        "verdict": "changes_requested",
+        "summary": "Synthetic resolved-target evidence.",
+        "findings": [{
+            "path": "frontend/styles.css",
+            "comment": "A synthetic follow-up finding remains.",
+        }],
+        "files": api.review_file_digests(),
+        "progress_disposition": {"version": 1, "resolved": list(resolved)},
+    }
+    if mutation == "wrong-head":
+        report["head"] = "d" * 40
+    body = cloud_coordinator._published_review_body(report, head)
+    review_id = 65010
+    if mutation != "unproven":
+        api.set_owner_review(
+            review_id=review_id, head_sha=head, body=body,
+            submitted_at="2026-10-01T13:00:00Z",
+        )
+        if mutation == "edited":
+            api.set_owner_review(
+                review_id=review_id, head_sha=head, body=body + " edited",
+                submitted_at="2026-10-01T13:01:00Z",
+            )
+        elif mutation == "superseded":
+            api.set_owner_review(
+                review_id=review_id + 1, head_sha=head,
+                body="A later unrelated owner review.",
+                submitted_at="2026-10-01T13:01:00Z",
+            )
+    key = f"review:16:{head}:synthetic-{source['task_id']}"
+    action = {
+        "kind": "review", "issue": 16, "head": head, "main_sha": source["main_sha"],
+        "status": "completed", "task_type": "review", "created_at": 1790856660,
+        "publication_state": "done", "published_review_id": review_id,
+        "published_review_body": body, "review_report": report,
+        "report_verdict": "changes_requested",
+        "review_session_completed_at": "2026-10-01T12:30:00Z",
+    }
+    store._mutate(lambda state: state["actions"].update({key: action}))
+
+
 def test_commented_finding_changes_reach_no_progress_ceiling(tmp_path):
     api = ProgressApi(unresolved=False)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
@@ -3604,6 +3665,91 @@ def test_commented_finding_changes_reach_no_progress_ceiling(tmp_path):
     assert api.fix_attempts == NO_PROGRESS_LIMIT
     assert enrollment["attempts"] == NO_PROGRESS_LIMIT
     assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+
+
+@pytest.mark.parametrize("repairs", [4, 15, REPAIR_LIMIT])
+def test_progressing_source_repairs_continue_to_the_twenty_attempt_ceiling(
+        tmp_path, repairs):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "The first synthetic blocker remains.", "2026-10-01T12:10:00Z",
+    )
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    first = Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)["pull_requests"][0]
+    assert first["repair_requested"]
+    for attempt in range(1, repairs):
+        action = max(
+            (item for item in StateStore(path).actions().values()
+             if item["kind"] == "fix"),
+            key=lambda item: item["attempt"],
+        )
+        result_head = f"{attempt + 1:040x}"
+        api.head_sha = api.pull["head"]["sha"] = result_head
+        api.complete_task(action["task_id"], action, head_sha=result_head)
+        refresh_owner_review(
+            api, result_head, submitted_at=f"2026-10-01T12:{5 + attempt:02d}:00Z",
+        )
+        api.progress_review = _progress_review(
+            result_head, 63002 + attempt,
+            f"The next synthetic blocker {attempt} remains.",
+            f"2026-10-01T12:{10 + attempt:02d}:00Z",
+        )
+        api.pending_required = True
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        _publish_resolution_followup(
+            api, StateStore(path), action, result_head,
+            action["repair_fingerprints"],
+        )
+        api.pending_required = False
+        result = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        if attempt < repairs - 1:
+            assert result["repair_requested"]
+
+    assert api.fix_attempts == repairs
+    assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == repairs
+    if repairs == REPAIR_LIMIT:
+        action = max(
+            (item for item in StateStore(path).actions().values()
+             if item["kind"] == "fix"),
+            key=lambda item: item["attempt"],
+        )
+        result_head = f"{repairs + 1:040x}"
+        api.head_sha = api.pull["head"]["sha"] = result_head
+        api.complete_task(action["task_id"], action, head_sha=result_head)
+        refresh_owner_review(api, result_head, submitted_at="2026-10-01T12:45:00Z")
+        api.progress_review = _progress_review(
+            result_head, 63030, "A new synthetic blocker remains.",
+            "2026-10-01T12:46:00Z",
+        )
+        api.pending_required = True
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        _publish_resolution_followup(
+            api, StateStore(path), action, result_head,
+            action["repair_fingerprints"],
+        )
+        api.pending_required = False
+        result = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        assert not result["repair_requested"]
+        assert "budget" in result["reasons"]
+        stopped = next(
+            event for event in StateStore(path).snapshot()["lifecycle_events"]
+            if event["reason"] == "execution_exhausted"
+        )
+        assert stopped["issue_number"] == 16 and stopped["pr_number"] == 16
+        assert stopped["stop_detail"] == {
+            "cause": "source-ceiling", "used": REPAIR_LIMIT, "remaining": 0,
+            "limit": REPAIR_LIMIT, "source_used": REPAIR_LIMIT,
+            "source_ceiling": REPAIR_LIMIT, "stagnation_count": 0,
+        }
+        attempts = api.fix_attempts
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        assert api.fix_attempts == attempts == REPAIR_LIMIT
 
 
 @pytest.mark.parametrize("non_review_status", ["success", "in_progress", "failure"])
@@ -5445,7 +5591,7 @@ def test_failed_and_noop_repairs_cannot_credit_dropped_findings(
     assert api.fix_attempts == 3
 
 
-def test_a_b_a_finding_cycle_does_not_earn_progress_credit(tmp_path):
+def test_a_b_a_finding_cycle_never_reearns_progress_credit(tmp_path):
     api = ProgressApi(unresolved=False)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     api.progress_review = _progress_review(
@@ -5455,7 +5601,7 @@ def test_a_b_a_finding_cycle_does_not_earn_progress_credit(tmp_path):
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     observed_streaks = []
     findings = ("Finding B remains.", "Finding A remains.",
-                "Finding B remains.")
+                "Finding B remains.", "Finding B remains.")
 
     for attempt, finding in enumerate(findings, 1):
         action = max(
@@ -5474,22 +5620,29 @@ def test_a_b_a_finding_cycle_does_not_earn_progress_credit(tmp_path):
             result_head, 63002 + attempt, finding,
             f"2026-10-01T12:{10 + attempt}:00Z",
         )
+        api.pending_required = True
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        _publish_resolution_followup(
+            api, StateStore(path), action, result_head,
+            action["repair_fingerprints"],
+        )
+        api.pending_required = False
 
         result = Coordinator(
             api, StateStore(path), clock=lambda: 1790856660,
         ).run(apply=True)["pull_requests"][0]
         progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
         observed_streaks.append(progress["consecutive_no_progress"])
-        if attempt < NO_PROGRESS_LIMIT:
+        if attempt < len(findings):
             assert result["repair_requested"]
 
-    assert observed_streaks == [1, 2, NO_PROGRESS_LIMIT]
-    assert api.fix_attempts == NO_PROGRESS_LIMIT
+    assert observed_streaks == [0, 1, 2, NO_PROGRESS_LIMIT]
+    assert api.fix_attempts == 4
     assert not result["repair_requested"]
     assert "budget" in result["reasons"]
 
 
-def test_a_b_a_c_comments_cannot_clear_prior_targets(tmp_path):
+def test_a_b_a_c_b_retains_every_cleared_target(tmp_path):
     api = ProgressApi(unresolved=False)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     api.progress_review = _progress_review(
@@ -5498,7 +5651,7 @@ def test_a_b_a_c_comments_cannot_clear_prior_targets(tmp_path):
     path = tmp_path / "state.json"
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     streaks = []
-    for attempt, finding in enumerate(("B", "A", "C"), 1):
+    for attempt, finding in enumerate(("B", "A", "C", "B"), 1):
         source = max(
             (a for a in StateStore(path).actions().values() if a["kind"] == "fix"),
             key=lambda a: a["attempt"],
@@ -5511,12 +5664,18 @@ def test_a_b_a_c_comments_cannot_clear_prior_targets(tmp_path):
             head, 63002 + attempt, f"Finding {finding} remains.",
             f"2026-10-01T12:{10 + attempt}:00Z",
         )
+        api.pending_required = True
+        Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        _publish_resolution_followup(
+            api, StateStore(path), source, head, source["repair_fingerprints"],
+        )
+        api.pending_required = False
         Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
         progress = StateStore(path).snapshot()["enrollments"]["16"]["repair_progress"]
         streaks.append(progress["consecutive_no_progress"])
-    assert streaks == [1, 2, NO_PROGRESS_LIMIT]
-    assert progress["resolved_fingerprints"] == []
-    assert api.fix_attempts == NO_PROGRESS_LIMIT
+    assert streaks == [0, 1, 2, 3]
+    assert _repair_target("Synthetic finding Finding B remains.") in progress["resolved_fingerprints"]
+    assert api.fix_attempts == 4
 
 
 def _repair_target(text):
@@ -6110,6 +6269,52 @@ def _legacy_resolution_disposition_is_bound_to_real_report_envelope(tmp_path, co
         assert progress["evaluated_task_ids"] == []
         assert progress["resolved_fingerprints"] == []
         assert enrollment["attempts"] == 1
+
+
+@pytest.mark.parametrize(
+    "rejected_proof", ["edited", "superseded", "wrong-head", "unproven"],
+)
+def test_commented_admission_cannot_credit_rejected_followup_resolution(
+        tmp_path, rejected_proof):
+    api = ProgressApi(unresolved=False)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.progress_review = _progress_review(
+        HEAD, 63002, "Original blocker remains.", "2026-10-01T12:10:00Z",
+    )
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    Coordinator(api, store, clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in store.actions().values() if a["kind"] == "fix")
+    result_head = "c" * 40
+    api.head_sha = api.pull["head"]["sha"] = result_head
+    api.complete_task(source["task_id"], source, head_sha=result_head)
+    if rejected_proof != "unproven":
+        refresh_owner_review(api, result_head, submitted_at="2026-10-01T12:11:00Z")
+    api.progress_review = _progress_review(
+        result_head, 63003, "New blocker remains.", "2026-10-01T12:12:00Z",
+    )
+    api.pending_required = True
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    _publish_resolution_followup(
+        api, store, source, result_head, source["repair_fingerprints"],
+        mutation=rejected_proof,
+    )
+    api.pending_required = False
+
+    for _ in range(2):
+        result = Coordinator(
+            api, StateStore(path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
+    progress = enrollment["repair_progress"]
+
+    assert result["review_valid"] is False
+    assert result["auto_merge_eligible"] is False
+    assert progress["evaluated_task_ids"] == [source["task_id"]]
+    assert progress["consecutive_no_progress"] == 1
+    assert progress["resolved_fingerprints"] == []
+    assert enrollment["attempts"] == 2
+    assert api.fix_attempts == 2
 
 
 @pytest.mark.parametrize("pending", ["checks", "review"])
