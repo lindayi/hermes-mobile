@@ -1,4 +1,6 @@
 from pathlib import Path
+from copy import deepcopy
+import json
 import os
 import re
 import shutil
@@ -320,6 +322,188 @@ def test_manual_qualification_artifact_has_an_exact_typed_field_inventory():
         'evidence': 'Array of 1–128 Evidence objects',
     }
     assert len(fields) == len(dict(fields)), 'Duplicate fields are not a contract'
+
+
+MANIFEST_ROLES = {
+    'review-inventory': {'reviews', 'threads', 'metadata'},
+    'review-metadata': {'full-media', 'edit-history'},
+    'source': {'tasks', 'sessions', 'receipts', 'prompts', 'commands', 'ancestry',
+               'diff', 'reservations'},
+    'occupancy': {'tasks', 'sessions', 'workflows', 'comments', 'state',
+                  'publication-reservation'},
+    'check': {'check-runs', 'binding'},
+    'source-run': {'run', 'jobs', 'binding'},
+    'sensitive': {'command', 'edit-history', 'review'},
+    'machine': {'observation', 'source'},
+}
+
+
+def _compound_example():
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    section = spec.split('### SYNTHETIC compound proof example', 1)[1]
+    return json.loads(section.split('```json\n', 1)[1].split('\n```', 1)[0])
+
+
+def _validate_documented_graph(example, private_proofs):
+    """Test-only documentation/example validation, not a runtime validator."""
+    assert set(example) == {'roots', 'evidence'}
+    entries = example['evidence']
+    assert 1 <= len(entries) <= 128
+    by_key = {entry['key']: entry for entry in entries}
+    assert len(by_key) == len(entries)
+    visiting, visited = set(), set()
+
+    def visit(key, depth=0):
+        assert key in by_key, 'dangling reference'
+        assert key not in visiting, 'cyclic reference'
+        assert depth <= 8
+        if key in visited:
+            return
+        visiting.add(key)
+        entry = by_key[key]
+        kind = entry['type']
+        if kind == 'manifest':
+            assert set(entry) == {'key', 'type', 'purpose', 'members'}
+            roles = {member['role'] for member in entry['members']}
+            assert len(roles) == len(entry['members'])
+            assert roles == MANIFEST_ROLES[entry['purpose']], 'missing members'
+            for member in entry['members']:
+                assert set(member) == {'role', 'refs'}
+                refs = member['refs']
+                assert 1 <= len(refs) <= 20 and len(set(refs)) == len(refs)
+                for ref in refs:
+                    visit(ref, depth + 1)
+                    target = by_key[ref]
+                    private_role = member['role'] in {
+                        'reservations', 'state', 'publication-reservation', 'observation',
+                    }
+                    if private_role:
+                        assert target['type'] == 'private-attestation'
+                        allowed = {
+                            'reservations': {'coordinator-reservation', 'supervisor-reservation'},
+                            'state': {'coordinator-reservation', 'supervisor-reservation'},
+                            'publication-reservation': {'publication-reservation'},
+                            'observation': {'machine-observation'},
+                        }
+                        assert target['kind'] in allowed[member['role']]
+                    elif member['role'] in {'metadata', 'review'}:
+                        assert target['type'] == 'manifest'
+                        assert target['purpose'] == 'review-metadata'
+                    else:
+                        assert target['type'] == 'public-response'
+        elif kind == 'public-response':
+            assert set(entry) == {
+                'key', 'type', 'path', 'sha256', 'bytes', 'url', 'retrieved_at',
+                'method', 'request_sha256', 'identity', 'pagination',
+            }
+            assert entry['method'] in {'GET', 'POST-read-only'}
+            assert entry['url'].startswith('https://api.github.com/')
+            assert set(entry['identity']) == {'repository_id', 'pull_number', 'head_sha', 'base_sha'}
+            for page in entry['pagination']:
+                assert set(page) == {'connection', 'page', 'cursor', 'next', 'total', 'count'}
+                assert page['page'] == 1 and page['next'] is None  # One-page synthetic collections.
+                assert page['total'] == page['count'] <= 100
+        elif kind == 'private-attestation':
+            assert set(entry) == {
+                'key', 'type', 'kind', 'reference', 'snapshot_id', 'observed_at',
+                'verifier', 'bindings', 'correlation', 'result', 'reason',
+            }
+            assert set(entry['verifier']) == {'login', 'id', 'delegation'}
+            assert set(entry['bindings']) == {
+                'repository_id', 'pull_number', 'head_sha', 'base_sha',
+                'task_id', 'session_id', 'receipt_comment_id', 'prompt_sha256',
+            }
+            visit(entry['verifier']['delegation'], depth + 1)
+            visit(entry['correlation'], depth + 1)
+            assert by_key[entry['correlation']]['type'] == 'public-response'
+            assert entry['reference'] in private_proofs, 'absent private proof'
+            proof = private_proofs[entry['reference']]
+            assert proof['snapshot_id'] == entry['snapshot_id']
+            assert proof['bindings'] == entry['bindings']
+            assert proof['original_bytes'] and proof['origin_verified']
+            assert entry['result'] == 'verified'
+        else:
+            raise AssertionError('unknown evidence type')
+        visiting.remove(key)
+        visited.add(key)
+
+    for root in example['roots'].values():
+        assert by_key[root]['type'] == 'manifest'
+        visit(root)
+    assert visited == set(by_key), 'unreferenced evidence'
+
+
+def _synthetic_private_proofs(example):
+    return {
+        entry['reference']: {
+            'snapshot_id': entry['snapshot_id'], 'bindings': entry['bindings'],
+            'original_bytes': b'SYNTHETIC original private observation',
+            'origin_verified': True,
+        }
+        for entry in example['evidence'] if entry['type'] == 'private-attestation'
+    }
+
+
+def test_compound_example_represents_rest_graphql_and_separate_private_proof():
+    example = _compound_example()
+    _validate_documented_graph(example, _synthetic_private_proofs(example))
+    assert {'review_inventory', 'source_proof', 'occupancy_proof', 'machine'} == set(example['roots'])
+    assert {'GET', 'POST-read-only'} == {
+        entry['method'] for entry in example['evidence'] if entry['type'] == 'public-response'
+    }
+    assert {'supervisor-reservation', 'publication-reservation', 'machine-observation'} == {
+        entry['kind'] for entry in example['evidence'] if entry['type'] == 'private-attestation'
+    }
+    assert all('path' not in entry and 'sha256' not in entry
+               for entry in example['evidence'] if entry['type'] == 'private-attestation')
+
+
+@pytest.mark.parametrize('defect', (
+    'missing-member', 'dangling', 'cycle', 'duplicate', 'wrong-type', 'absent-private',
+    'unknown-origin', 'changed-binding',
+))
+def test_compound_example_rejects_incomplete_or_uncertain_proof(defect):
+    example = deepcopy(_compound_example())
+    proofs = _synthetic_private_proofs(example)
+    manifest = next(entry for entry in example['evidence'] if entry['type'] == 'manifest')
+    if defect == 'missing-member':
+        manifest['members'].pop()
+    elif defect in {'dangling', 'cycle', 'wrong-type'}:
+        manifest['members'][0]['refs'] = [{
+            'dangling': 'missing', 'cycle': manifest['key'], 'wrong-type': 'observation',
+        }[defect]]
+    elif defect == 'duplicate':
+        example['evidence'].append(deepcopy(example['evidence'][0]))
+    elif defect == 'absent-private':
+        proofs.clear()
+    elif defect == 'unknown-origin':
+        next(iter(proofs.values()))['origin_verified'] = False
+    else:
+        next(iter(proofs.values()))['bindings'] = {}
+    with pytest.raises(AssertionError):
+        _validate_documented_graph(example, proofs)
+
+
+@pytest.mark.parametrize('clause', (
+    'Evidence is a discriminated union',
+    'acyclic',
+    'maximum reference depth of 8',
+    'StateStore.snapshot() alone does not lock',
+    'O_RDONLY',
+    'LOCK_SH',
+    'original supervisor',
+    'not cryptographic remote proof of a local pre-POST write',
+    'No local paths or private hashes',
+    'explicitly delegated operator',
+    'not a second person',
+    'does not call the prose parser',
+))
+def test_compound_private_contract_has_realizable_boundaries(clause):
+    spec = ' '.join((ROOT / 'docs/git-development-spec.md').read_text().split())
+    assert clause in spec
+    assert 'not a bot or a delegated writer' not in spec
+    assert 'Another manual operator must' not in spec
+    assert 'If necessary proof cannot be reproduced from public authenticated evidence' not in spec
 
 
 @pytest.mark.parametrize('clause', (
