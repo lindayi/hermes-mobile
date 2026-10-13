@@ -142,10 +142,13 @@ The exact top-level keys for a `blocked` qualification or revalidation are
 `schema`, `kind`, `record_key`, `prior_comment_id`, `repository`, `pull`, `operator`,
 `head_sha`, `base_sha`, `reserved_at`, `observed_at`, `status`, `reason`,
 `gate_evidence`, and `evidence`. Here `kind` is `qualification` or `revalidation`,
-`status` is the literal `blocked`, head/base SHA may be null only when not actually
-observed, `gate_evidence` has 1–32 typed observations, and `evidence` retains 1–128
-bounded evidence entries. A missing head/base needs an evidence reference proving
-the failed or incomplete read and a reason; do not infer either binding.
+`status` is the literal `blocked`, `head_sha` and `base_sha` are always SHAs (never
+null), `gate_evidence` has 1–32 typed observations, and `evidence` retains 1–128
+bounded evidence entries. If the actual head or base cannot be read, there is no
+public blocked record: preserve the failed or incomplete read privately, block before
+qualification publication, and do not infer either binding. A published blocked record
+exists only once both bindings are known; it then records every missing, failing,
+pending, rejected, stale, unknown, or uncertain gate truthfully.
 
 Gate observations are discriminated objects with exact keys:
 
@@ -280,8 +283,8 @@ Named object types, with all keys mandatory:
   (SHA). In `supervised-only` qualification/revalidation, all equal the root
   bindings. Invalidation and blocked variants retain each observed binding alongside the frozen root
   binding; label chronology and mismatches, and never treat old proof as current.
-  A missing root head/base is permitted only in a blocked record with evidence and
-  a reason. Evidence retains the actual SHA values when they were observed.
+  Every root head/base, including a blocked record's, is a known SHA; an unread
+  binding blocks before publication (see the blocked keys above).
   Check actual endpoint identities, numeric
   authors, PR node IDs, source SHAs, and command/review identities; a self-declared
   Binding or request URL is not identity proof.
@@ -386,32 +389,62 @@ validator.
 
 ### SYNTHETIC gate outcome examples
 
-These fragments use fictional values and exercise only the blocked/invalidation
-variants; they are not complete root comments or live evidence. `fixture` and
-`evidence_refs` are test labels, not artifact fields. The referenced evidence names
-stand in for entries in each full record's `evidence` array.
+These complete blocked records use fictional values and known synthetic head/base
+bindings; they are not live evidence. `fixture` is a test label, not an artifact field.
+Each record carries every top-level key, typed gate observations, and the complete
+`evidence` entries that its operator delegation and gate observations reference,
+with no unused entries. The invalidation fragment is not a complete root
+comment; its referenced evidence names stand in for entries in a full record's
+`evidence` array and its `evidence_refs` is also a test label.
 
 ```json
 {
   "fixture": "blocked-checks",
+  "schema": "hermes-supervised-qualification/v1",
   "kind": "qualification",
+  "record_key": "synthetic-blocked-checks",
+  "prior_comment_id": null,
+  "repository": {"name": "lindayi/hermes-mobile", "id": 1},
+  "pull": {"number": 1, "node_id": "SYNTHETIC_PR_NODE", "url": "https://api.github.com/repos/lindayi/hermes-mobile/pulls/1"},
+  "operator": {"login": "synthetic-operator", "id": 2, "delegation": "authority"},
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "reserved_at": "2026-01-01T00:00:00Z",
+  "observed_at": "2026-01-01T00:00:05Z",
   "status": "blocked",
+  "reason": "SYNTHETIC known bindings; a check is missing or failing, Source is pending, and the owner command is missing",
   "gate_evidence": [
     {"gate": "check", "name": "source-ci", "outcome": "missing", "id": null, "app_id": null, "head_sha": null, "check_status": null, "conclusion": null, "completed_at": null, "proof": "checks", "reason": "SYNTHETIC complete inventory has no check"},
     {"gate": "check", "name": "integration-tests", "outcome": "failure", "id": 71, "app_id": null, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "failure", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC failed check"},
-    {"gate": "check", "name": "issue-link", "outcome": "success", "id": 72, "app_id": 15368, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC successful check retained with the failures"},
+    {"gate": "check", "name": "issue-link", "outcome": "success", "id": 72, "app_id": 15368, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC successful check"},
     {"gate": "source-run", "outcome": "pending", "id": 73, "attempt": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "run_status": "in_progress", "conclusion": null, "completed_at": null, "proof": "source-run", "reason": "SYNTHETIC Source run is still pending"},
     {"gate": "sensitive", "outcome": "missing", "command": null, "proof": "owner-comments", "reason": "SYNTHETIC complete inventory has no owner command"}
   ],
-  "evidence_refs": ["checks", "source-run", "owner-comments"]
+  "evidence": [
+    {"key": "authority", "type": "public-response", "path": "authority.json", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "bytes": 101, "url": "https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/1", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "9999999999999999999999999999999999999999999999999999999999999999", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []},
+    {"key": "checks", "type": "public-response", "path": "checks.json", "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "bytes": 102, "url": "https://api.github.com/repos/lindayi/hermes-mobile/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "check-runs", "page": 1, "cursor": null, "next": null, "total": 2, "count": 2}]},
+    {"key": "source-run", "type": "public-response", "path": "source-run.json", "sha256": "3333333333333333333333333333333333333333333333333333333333333333", "bytes": 103, "url": "https://api.github.com/repos/lindayi/hermes-mobile/actions/runs/73", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []},
+    {"key": "owner-comments", "type": "public-response", "path": "owner-comments.json", "sha256": "4444444444444444444444444444444444444444444444444444444444444444", "bytes": 104, "url": "https://api.github.com/repos/lindayi/hermes-mobile/issues/1/comments", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "comments", "page": 1, "cursor": null, "next": null, "total": 0, "count": 0}]}
+  ]
 }
 ```
 
 ```json
 {
   "fixture": "blocked-sensitive",
+  "schema": "hermes-supervised-qualification/v1",
   "kind": "qualification",
+  "record_key": "synthetic-blocked-sensitive",
+  "prior_comment_id": null,
+  "repository": {"name": "lindayi/hermes-mobile", "id": 1},
+  "pull": {"number": 1, "node_id": "SYNTHETIC_PR_NODE", "url": "https://api.github.com/repos/lindayi/hermes-mobile/pulls/1"},
+  "operator": {"login": "synthetic-operator", "id": 2, "delegation": "authority"},
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "reserved_at": "2026-01-01T00:00:00Z",
+  "observed_at": "2026-01-01T00:00:05Z",
   "status": "blocked",
+  "reason": "SYNTHETIC known bindings; checks and Source succeeded, the owner command was rejected, and the latest review is unknown",
   "gate_evidence": [
     {"gate": "check", "name": "source-ci", "outcome": "success", "id": 81, "app_id": 15368, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC successful check"},
     {"gate": "check", "name": "integration-tests", "outcome": "success", "id": 82, "app_id": null, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC successful check"},
@@ -420,7 +453,48 @@ stand in for entries in each full record's `evidence` array.
     {"gate": "sensitive", "outcome": "rejected", "command": "rejected-command", "proof": "command-readback", "reason": "SYNTHETIC observed owner command was rejected"},
     {"gate": "review", "outcome": "unknown", "observation": null, "proof": "review-pages", "reason": "SYNTHETIC complete inventory did not establish a usable latest review"}
   ],
-  "evidence_refs": ["checks", "source-run", "rejected-command", "command-readback", "review-pages"]
+  "evidence": [
+    {"key": "authority", "type": "public-response", "path": "authority.json", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "bytes": 101, "url": "https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/1", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "9999999999999999999999999999999999999999999999999999999999999999", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []},
+    {"key": "checks", "type": "public-response", "path": "checks.json", "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "bytes": 102, "url": "https://api.github.com/repos/lindayi/hermes-mobile/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "check-runs", "page": 1, "cursor": null, "next": null, "total": 3, "count": 3}]},
+    {"key": "source-run", "type": "public-response", "path": "source-run.json", "sha256": "3333333333333333333333333333333333333333333333333333333333333333", "bytes": 103, "url": "https://api.github.com/repos/lindayi/hermes-mobile/actions/runs/84", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []},
+    {"key": "rejected-command", "type": "public-response", "path": "rejected-command.json", "sha256": "5555555555555555555555555555555555555555555555555555555555555555", "bytes": 105, "url": "https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/85", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []},
+    {"key": "command-readback", "type": "public-response", "path": "command-readback.json", "sha256": "6666666666666666666666666666666666666666666666666666666666666666", "bytes": 106, "url": "https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/85", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []},
+    {"key": "review-pages", "type": "public-response", "path": "review-pages.json", "sha256": "7777777777777777777777777777777777777777777777777777777777777777", "bytes": 107, "url": "https://api.github.com/repos/lindayi/hermes-mobile/pulls/1/reviews", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "reviews", "page": 1, "cursor": null, "next": null, "total": 0, "count": 0}]}
+  ]
+}
+```
+
+```json
+{
+  "fixture": "blocked-unknown-gate",
+  "schema": "hermes-supervised-qualification/v1",
+  "kind": "qualification",
+  "record_key": "synthetic-blocked-unknown-gate",
+  "prior_comment_id": null,
+  "repository": {"name": "lindayi/hermes-mobile", "id": 1},
+  "pull": {"number": 1, "node_id": "SYNTHETIC_PR_NODE", "url": "https://api.github.com/repos/lindayi/hermes-mobile/pulls/1"},
+  "operator": {"login": "synthetic-operator", "id": 2, "delegation": "authority"},
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "reserved_at": "2026-01-01T00:00:00Z",
+  "observed_at": "2026-01-01T00:00:05Z",
+  "status": "blocked",
+  "reason": "SYNTHETIC known bindings; the only blocker is the unknown latest review",
+  "gate_evidence": [
+    {"gate": "check", "name": "source-ci", "outcome": "success", "id": 81, "app_id": 15368, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC successful check"},
+    {"gate": "check", "name": "integration-tests", "outcome": "success", "id": 82, "app_id": null, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC successful check"},
+    {"gate": "check", "name": "issue-link", "outcome": "success", "id": 83, "app_id": 15368, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "check_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "checks", "reason": "SYNTHETIC successful check"},
+    {"gate": "source-run", "outcome": "success", "id": 84, "attempt": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "run_status": "completed", "conclusion": "success", "completed_at": "2026-01-01T00:00:01Z", "proof": "source-run", "reason": "SYNTHETIC complete Source run succeeded"},
+    {"gate": "sensitive", "outcome": "not-required", "command": null, "proof": "diff", "reason": "SYNTHETIC complete diff is nonsensitive"},
+    {"gate": "review", "outcome": "unknown", "observation": null, "proof": "review-pages", "reason": "SYNTHETIC complete inventory did not establish a usable latest review"}
+  ],
+  "evidence": [
+    {"key": "authority", "type": "public-response", "path": "authority.json", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "bytes": 101, "url": "https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/1", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "9999999999999999999999999999999999999999999999999999999999999999", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []},
+    {"key": "checks", "type": "public-response", "path": "checks.json", "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "bytes": 102, "url": "https://api.github.com/repos/lindayi/hermes-mobile/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "check-runs", "page": 1, "cursor": null, "next": null, "total": 3, "count": 3}]},
+    {"key": "source-run", "type": "public-response", "path": "source-run.json", "sha256": "3333333333333333333333333333333333333333333333333333333333333333", "bytes": 103, "url": "https://api.github.com/repos/lindayi/hermes-mobile/actions/runs/84", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": []},
+    {"key": "diff", "type": "public-response", "path": "diff.json", "sha256": "8888888888888888888888888888888888888888888888888888888888888888", "bytes": 108, "url": "https://api.github.com/repos/lindayi/hermes-mobile/pulls/1/files", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "1010101010101010101010101010101010101010101010101010101010101010", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "files", "page": 1, "cursor": null, "next": null, "total": 1, "count": 1}]},
+    {"key": "review-pages", "type": "public-response", "path": "review-pages.json", "sha256": "7777777777777777777777777777777777777777777777777777777777777777", "bytes": 107, "url": "https://api.github.com/repos/lindayi/hermes-mobile/pulls/1/reviews", "retrieved_at": "2026-01-01T00:00:02Z", "method": "GET", "request_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "identity": {"repository_id": 1, "pull_number": 1, "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, "pagination": [{"connection": "reviews", "page": 1, "cursor": null, "next": null, "total": 0, "count": 0}]}
+  ]
 }
 ```
 
@@ -442,9 +516,11 @@ stand in for entries in each full record's `evidence` array.
 
 The examples contain no usable owner command, review, private proof, or live
 observation. Their positive IDs and results exist only where the synthetic evidence
-shows them. A blocked fragment cannot be changed to `status=supervised-only`: all
+shows them. A blocked record cannot be changed to `status=supervised-only`: all
 three successful checks, a successful complete Source run, and the valid sensitive
 command or nonsensitive proof remain mandatory under the strict qualification schema.
+A blocked record with only successful gates, or a record with a head/base missing,
+null, or different from its evidence bindings, is invalid; never publish one.
 
 ### Publication and independent manual validation
 

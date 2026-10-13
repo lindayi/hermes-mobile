@@ -328,128 +328,212 @@ def test_manual_qualification_artifact_has_an_exact_typed_field_inventory():
     assert '`supervised-only` qualification or revalidation' in spec
 
 
-def _validate_gate_outcome_fixture(fixture):
-    """Validate the documented gate fragments without implementing a runtime validator."""
-    if fixture['fixture'] in {'blocked-checks', 'blocked-sensitive'}:
-        assert set(fixture) == {'fixture', 'kind', 'status', 'gate_evidence', 'evidence_refs'}
-        assert fixture['kind'] in {'qualification', 'revalidation'}
-        assert fixture['status'] in {'blocked', 'supervised-only'}
-        refs = set(fixture['evidence_refs'])
-        observations = fixture['gate_evidence']
-        assert all(item['gate'] in {
-            'check', 'source-run', 'sensitive', 'review', 'source',
-            'occupancy', 'machine', 'authorization',
+def _validate_gate_observations(observations, refs, status):
+    assert all(item['gate'] in {
+        'check', 'source-run', 'sensitive', 'review', 'source',
+        'occupancy', 'machine', 'authorization',
+    }
+               for item in observations)
+    checks = [item for item in observations if item['gate'] == 'check']
+    assert len(checks) == 3
+    assert {item['name'] for item in checks} == {
+        'source-ci', 'integration-tests', 'issue-link',
+    }
+    for check in checks:
+        assert set(check) == {
+            'gate', 'name', 'outcome', 'id', 'app_id', 'head_sha',
+            'check_status', 'conclusion', 'completed_at', 'proof', 'reason',
         }
-                   for item in observations)
-        checks = [item for item in observations if item['gate'] == 'check']
-        assert len(checks) == 3
-        assert {item['name'] for item in checks} == {
-            'source-ci', 'integration-tests', 'issue-link',
+        assert check['outcome'] in {
+            'success', 'failure', 'pending', 'missing', 'unknown',
         }
-        for check in checks:
-            assert set(check) == {
-                'gate', 'name', 'outcome', 'id', 'app_id', 'head_sha',
-                'check_status', 'conclusion', 'completed_at', 'proof', 'reason',
-            }
-            assert check['outcome'] in {
-                'success', 'failure', 'pending', 'missing', 'unknown',
-            }
-            assert check['proof'] in refs
-            assert check['reason']
-            if check['outcome'] == 'missing':
-                assert all(check[key] is None for key in (
-                    'id', 'app_id', 'head_sha', 'check_status', 'conclusion',
-                    'completed_at',
-                ))
-            elif check['outcome'] == 'pending':
-                assert type(check['id']) is int and check['id'] > 0
-                assert re.fullmatch(r'[a-f0-9]{40}', check['head_sha'])
-                assert check['check_status'] and check['conclusion'] is None
-                assert check['completed_at'] is None
-            elif check['outcome'] in {'success', 'failure'}:
-                assert type(check['id']) is int and check['id'] > 0
-                assert re.fullmatch(r'[a-f0-9]{40}', check['head_sha'])
-                assert check['check_status']
-                assert check['conclusion'] is not None
-                assert (check['conclusion'] == 'success') == \
-                    (check['outcome'] == 'success')
-                assert check['completed_at']
-            else:
-                assert check['id'] is None or check['id'] > 0
-                assert check['head_sha'] is None or \
-                    re.fullmatch(r'[a-f0-9]{40}', check['head_sha'])
-            if check['name'] in {'source-ci', 'issue-link'} and check['id'] is not None:
-                assert check['app_id'] == 15368
-
-        source = next(item for item in observations if item['gate'] == 'source-run')
-        assert set(source) == {
-            'gate', 'outcome', 'id', 'attempt', 'head_sha', 'run_status', 'conclusion',
-            'completed_at', 'proof', 'reason',
-        }
-        assert source['outcome'] in {'success', 'failure', 'pending', 'missing', 'unknown'}
-        assert source['proof'] in refs
-        assert source['reason']
-        if source['outcome'] == 'missing':
-            assert all(source[key] is None for key in (
-                'id', 'attempt', 'head_sha', 'run_status', 'conclusion', 'completed_at',
+        assert check['proof'] in refs
+        assert check['reason']
+        if check['outcome'] == 'missing':
+            assert all(check[key] is None for key in (
+                'id', 'app_id', 'head_sha', 'check_status', 'conclusion',
+                'completed_at',
             ))
-        elif source['outcome'] == 'pending':
-            assert type(source['id']) is int and source['id'] > 0
-            assert type(source['attempt']) is int and 1 <= source['attempt'] <= 100
-            assert re.fullmatch(r'[a-f0-9]{40}', source['head_sha'])
-            assert source['run_status'] and source['conclusion'] is None
-            assert source['completed_at'] is None
-        elif source['outcome'] in {'success', 'failure'}:
-            assert type(source['id']) is int and source['id'] > 0
-            assert type(source['attempt']) is int and 1 <= source['attempt'] <= 100
-            assert re.fullmatch(r'[a-f0-9]{40}', source['head_sha'])
-            assert source['run_status']
-            assert source['completed_at']
-            assert source['conclusion'] is not None
-            assert (source['conclusion'] == 'success') == \
-                (source['outcome'] == 'success')
+        elif check['outcome'] == 'pending':
+            assert type(check['id']) is int and check['id'] > 0
+            assert re.fullmatch(r'[a-f0-9]{40}', check['head_sha'])
+            assert check['check_status'] and check['conclusion'] is None
+            assert check['completed_at'] is None
+        elif check['outcome'] in {'success', 'failure'}:
+            assert type(check['id']) is int and check['id'] > 0
+            assert re.fullmatch(r'[a-f0-9]{40}', check['head_sha'])
+            assert check['check_status']
+            assert check['conclusion'] is not None
+            assert (check['conclusion'] == 'success') == \
+                (check['outcome'] == 'success')
+            assert check['completed_at']
         else:
-            assert source['id'] is None or source['id'] > 0
-            assert source['attempt'] is None or 1 <= source['attempt'] <= 100
-            assert source['head_sha'] is None or \
-                re.fullmatch(r'[a-f0-9]{40}', source['head_sha'])
+            assert check['id'] is None or check['id'] > 0
+            assert check['head_sha'] is None or \
+                re.fullmatch(r'[a-f0-9]{40}', check['head_sha'])
+        if check['name'] in {'source-ci', 'issue-link'} and check['id'] is not None:
+            assert check['app_id'] == 15368
 
-        sensitive = next(item for item in observations if item['gate'] == 'sensitive')
-        assert set(sensitive) == {'gate', 'outcome', 'command', 'proof', 'reason'}
-        assert sensitive['outcome'] in {
-            'authorized', 'not-required', 'missing', 'rejected', 'unknown',
+    source = next(item for item in observations if item['gate'] == 'source-run')
+    assert set(source) == {
+        'gate', 'outcome', 'id', 'attempt', 'head_sha', 'run_status', 'conclusion',
+        'completed_at', 'proof', 'reason',
+    }
+    assert source['outcome'] in {'success', 'failure', 'pending', 'missing', 'unknown'}
+    assert source['proof'] in refs
+    assert source['reason']
+    if source['outcome'] == 'missing':
+        assert all(source[key] is None for key in (
+            'id', 'attempt', 'head_sha', 'run_status', 'conclusion', 'completed_at',
+        ))
+    elif source['outcome'] == 'pending':
+        assert type(source['id']) is int and source['id'] > 0
+        assert type(source['attempt']) is int and 1 <= source['attempt'] <= 100
+        assert re.fullmatch(r'[a-f0-9]{40}', source['head_sha'])
+        assert source['run_status'] and source['conclusion'] is None
+        assert source['completed_at'] is None
+    elif source['outcome'] in {'success', 'failure'}:
+        assert type(source['id']) is int and source['id'] > 0
+        assert type(source['attempt']) is int and 1 <= source['attempt'] <= 100
+        assert re.fullmatch(r'[a-f0-9]{40}', source['head_sha'])
+        assert source['run_status']
+        assert source['completed_at']
+        assert source['conclusion'] is not None
+        assert (source['conclusion'] == 'success') == \
+            (source['outcome'] == 'success')
+    else:
+        assert source['id'] is None or source['id'] > 0
+        assert source['attempt'] is None or 1 <= source['attempt'] <= 100
+        assert source['head_sha'] is None or \
+            re.fullmatch(r'[a-f0-9]{40}', source['head_sha'])
+
+    sensitive = next(item for item in observations if item['gate'] == 'sensitive')
+    assert set(sensitive) == {'gate', 'outcome', 'command', 'proof', 'reason'}
+    assert sensitive['outcome'] in {
+        'authorized', 'not-required', 'missing', 'rejected', 'unknown',
+    }
+    assert sensitive['proof'] in refs and sensitive['reason']
+    if sensitive['outcome'] in {'missing', 'not-required'}:
+        assert sensitive['command'] is None
+    elif sensitive['outcome'] in {'authorized', 'rejected'}:
+        if sensitive['outcome'] == 'rejected':
+            assert sensitive['command'] in refs
+        else:
+            assert isinstance(sensitive['command'], dict)
+    else:
+        assert sensitive['command'] is None or sensitive['command'] in refs
+
+    other = [item for item in observations if item['gate'] not in {
+        'check', 'source-run', 'sensitive',
+    }]
+    for item in other:
+        assert set(item) == {'gate', 'outcome', 'observation', 'proof', 'reason'}
+        assert item['outcome'] in {
+            'missing', 'pending', 'failure', 'rejected', 'stale', 'unknown', 'uncertain',
         }
-        assert sensitive['proof'] in refs and sensitive['reason']
-        if sensitive['outcome'] in {'missing', 'not-required'}:
-            assert sensitive['command'] is None
-        elif sensitive['outcome'] in {'authorized', 'rejected'}:
-            if sensitive['outcome'] == 'rejected':
-                assert sensitive['command'] in refs
-            else:
-                assert isinstance(sensitive['command'], dict)
-        else:
-            assert sensitive['command'] is None or sensitive['command'] in refs
+        assert item['observation'] is None or item['observation'] in refs
+        assert item['proof'] in refs and item['reason']
 
-        other = [item for item in observations if item['gate'] not in {
-            'check', 'source-run', 'sensitive',
-        }]
-        for item in other:
-            assert set(item) == {'gate', 'outcome', 'observation', 'proof', 'reason'}
-            assert item['outcome'] in {
-                'missing', 'pending', 'failure', 'rejected', 'stale', 'unknown', 'uncertain',
-            }
-            assert item['observation'] is None or item['observation'] in refs
-            assert item['proof'] in refs and item['reason']
+    if status == 'supervised-only':
+        assert not other
+        assert all(check['outcome'] == 'success' for check in checks)
+        assert source['outcome'] == 'success'
+        assert sensitive['outcome'] in {'authorized', 'not-required'}
+    else:
+        assert any(check['outcome'] != 'success' for check in checks) or \
+            source['outcome'] != 'success' or \
+            sensitive['outcome'] not in {'authorized', 'not-required'} or bool(other)
 
-        if fixture['status'] == 'supervised-only':
-            assert not other
-            assert all(check['outcome'] == 'success' for check in checks)
-            assert source['outcome'] == 'success'
-            assert sensitive['outcome'] in {'authorized', 'not-required'}
-        else:
-            assert any(check['outcome'] != 'success' for check in checks) or \
-                source['outcome'] != 'success' or \
-                sensitive['outcome'] not in {'authorized', 'not-required'}
+
+BLOCKED_FIXTURES = {'blocked-checks', 'blocked-sensitive', 'blocked-unknown-gate'}
+BLOCKED_KEYS = {
+    'schema', 'kind', 'record_key', 'prior_comment_id', 'repository', 'pull', 'operator',
+    'head_sha', 'base_sha', 'reserved_at', 'observed_at', 'status', 'reason',
+    'gate_evidence', 'evidence',
+}
+SHA = r'[a-f0-9]{40}'
+TIME = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'
+
+
+def _validate_blocked_record(fixture):
+    """Validate a complete synthetic blocked record, its root bindings and evidence graph."""
+    record = {key: value for key, value in fixture.items() if key != 'fixture'}
+    assert set(record) == BLOCKED_KEYS
+    assert record['schema'] == 'hermes-supervised-qualification/v1'
+    assert record['kind'] in {'qualification', 'revalidation'}
+    assert record['status'] in {'blocked', 'supervised-only'}
+    assert re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', record['record_key'])
+    prior = record['prior_comment_id']
+    assert (prior is None) == (record['kind'] == 'qualification')
+    assert prior is None or (type(prior) is int and prior > 0)
+    assert record['repository'] == {'name': 'lindayi/hermes-mobile', 'id': 1}
+    assert set(record['pull']) == {'number', 'node_id', 'url'}
+    assert record['reason']
+    for root in ('head_sha', 'base_sha'):
+        assert type(record[root]) is str and re.fullmatch(SHA, record[root]), \
+            'blocked root bindings must be known SHAs'
+    assert re.fullmatch(TIME, record['reserved_at'])
+    assert re.fullmatch(TIME, record['observed_at'])
+    assert record['reserved_at'] <= record['observed_at']
+    binding = {
+        'repository_id': record['repository']['id'],
+        'pull_number': record['pull']['number'],
+        'head_sha': record['head_sha'],
+        'base_sha': record['base_sha'],
+    }
+
+    entries = record['evidence']
+    assert 1 <= len(entries) <= 128
+    by_key = {entry['key']: entry for entry in entries}
+    assert len(by_key) == len(entries)
+    assert len({entry['path'] for entry in entries}) == len(entries)
+    for entry in entries:
+        assert set(entry) == {
+            'key', 'type', 'path', 'sha256', 'bytes', 'url', 'retrieved_at',
+            'method', 'request_sha256', 'identity', 'pagination',
+        }
+        assert entry['type'] == 'public-response'
+        assert re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', entry['key'])
+        path = entry['path']
+        assert 0 < len(path.encode()) <= 256 and not path.startswith('/')
+        assert all(part not in {'', '.', '..'} for part in path.split('/'))
+        assert re.fullmatch(r'[a-f0-9]{64}', entry['sha256'])
+        assert re.fullmatch(r'[a-f0-9]{64}', entry['request_sha256'])
+        assert type(entry['bytes']) is int and 1 <= entry['bytes'] <= 2097152
+        assert entry['url'].startswith('https://api.github.com/')
+        assert entry['method'] in {'GET', 'POST-read-only'}
+        assert re.fullmatch(TIME, entry['retrieved_at'])
+        assert entry['retrieved_at'] <= record['observed_at']
+        assert entry['identity'] == binding, 'evidence binding differs from the root'
+        for page in entry['pagination']:
+            assert set(page) == {'connection', 'page', 'cursor', 'next', 'total', 'count'}
+            assert page['page'] == 1 and page['next'] is None
+            assert page['total'] == page['count'] <= 100
+
+    observations = record['gate_evidence']
+    assert 1 <= len(observations) <= 32
+    _validate_gate_observations(observations, set(by_key), record['status'])
+
+    referenced = {record['operator']['delegation']}
+    assert set(record['operator']) == {'login', 'id', 'delegation'}
+    for item in observations:
+        referenced.add(item['proof'])
+        if item['gate'] == 'sensitive' and isinstance(item['command'], str):
+            referenced.add(item['command'])
+        if item['gate'] not in {'check', 'source-run', 'sensitive'} and item['observation']:
+            referenced.add(item['observation'])
+        if item.get('head_sha') is not None:
+            assert item['head_sha'] == record['head_sha'], 'gate binding differs from the root'
+        if item.get('completed_at') is not None:
+            assert item['completed_at'] <= record['observed_at']
+    assert referenced <= set(by_key), 'dangling reference'
+    assert set(by_key) <= referenced, 'unreferenced evidence'
+
+
+def _validate_gate_outcome_fixture(fixture):
+    """Validate the documented gate fixtures without implementing a runtime validator."""
+    if fixture['fixture'] in BLOCKED_FIXTURES:
+        _validate_blocked_record(fixture)
     else:
         assert set(fixture) == {
             'fixture', 'kind', 'status', 'prior_comment_id', 'head_sha', 'base_sha',
@@ -472,23 +556,114 @@ def _validate_gate_outcome_fixture(fixture):
         assert fixture['changed_binding']['head_sha'] != fixture['head_sha']
 
 
-def test_manual_qualification_documents_truthful_blocked_and_invalidation_variants():
+def _gate_fixtures():
     spec = (ROOT / 'docs/git-development-spec.md').read_text()
     section = spec.split('### SYNTHETIC gate outcome examples', 1)[1].split(
         '### Publication and independent manual validation', 1)[0]
     fixtures = [json.loads(value) for value in re.findall(
         r'```json\n(.*?)\n```', section, re.DOTALL)]
-    assert {fixture['fixture'] for fixture in fixtures} == {
-        'blocked-checks', 'blocked-sensitive', 'invalidation',
-    }
-    for fixture in fixtures:
+    return {fixture['fixture']: fixture for fixture in fixtures}
+
+
+def test_manual_qualification_documents_truthful_blocked_and_invalidation_variants():
+    fixtures = _gate_fixtures()
+    assert set(fixtures) == BLOCKED_FIXTURES | {'invalidation'}
+    for fixture in fixtures.values():
         _validate_gate_outcome_fixture(fixture)
 
-    for fixture in fixtures[:2]:
-        promoted = deepcopy(fixture)
+    for name in BLOCKED_FIXTURES:
+        promoted = deepcopy(fixtures[name])
         promoted['status'] = 'supervised-only'
         with pytest.raises(AssertionError):
             _validate_gate_outcome_fixture(promoted)
+
+    blocked = fixtures['blocked-checks']['gate_evidence']
+    assert {item['outcome'] for item in blocked if item['gate'] == 'check'} == {
+        'missing', 'failure', 'success',
+    }
+    assert next(item for item in blocked if item['gate'] == 'source-run')['outcome'] == 'pending'
+    assert next(item for item in blocked if item['gate'] == 'sensitive')['outcome'] == 'missing'
+    assert next(item for item in fixtures['blocked-sensitive']['gate_evidence']
+                if item['gate'] == 'sensitive')['outcome'] == 'rejected'
+    solely_unknown = fixtures['blocked-unknown-gate']['gate_evidence']
+    assert [item['outcome'] for item in solely_unknown if item['gate'] in {
+        'check', 'source-run'}] == ['success'] * 4
+    assert [(item['gate'], item['outcome']) for item in solely_unknown
+            if item['gate'] not in {'check', 'source-run'}] == [
+        ('sensitive', 'not-required'), ('review', 'unknown')]
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES))
+@pytest.mark.parametrize('root', ('head_sha', 'base_sha'))
+@pytest.mark.parametrize('value', (None, 'missing', 'A' * 40, 'a' * 39))
+def test_blocked_record_rejects_unknown_or_malformed_root_bindings(name, root, value):
+    record = deepcopy(_gate_fixtures()[name])
+    if value == 'missing':
+        del record[root]
+    else:
+        record[root] = value
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(record)
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES))
+@pytest.mark.parametrize('defect', (
+    'evidence-head', 'evidence-base', 'evidence-repository', 'evidence-pull', 'gate-head',
+    'dangling-proof', 'unused-evidence', 'duplicate-key', 'duplicate-path', 'unsafe-path',
+    'absolute-path', 'future-gate', 'extra-key', 'missing-key', 'bad-delegation',
+    'revalidation-without-prior', 'only-successes',
+))
+def test_blocked_record_rejects_inconsistent_roots_evidence_and_references(name, defect):
+    record = deepcopy(_gate_fixtures()[name])
+    evidence = record['evidence']
+    gates = record['gate_evidence']
+    if defect.startswith('evidence-'):
+        field = {'head': 'head_sha', 'base': 'base_sha', 'repository': 'repository_id',
+                 'pull': 'pull_number'}[defect.split('-', 1)[1]]
+        evidence[1]['identity'][field] = 'c' * 40 if field.endswith('sha') else 99
+    elif defect == 'gate-head':
+        next(item for item in gates if item['gate'] == 'source-run')['head_sha'] = 'c' * 40
+    elif defect == 'dangling-proof':
+        gates[0]['proof'] = 'absent'
+    elif defect == 'unused-evidence':
+        extra = deepcopy(evidence[1])
+        extra['key'], extra['path'] = 'extra', 'extra.json'
+        evidence.append(extra)
+    elif defect == 'duplicate-key':
+        evidence[2]['key'] = evidence[1]['key']
+    elif defect == 'duplicate-path':
+        evidence[2]['path'] = evidence[1]['path']
+    elif defect == 'unsafe-path':
+        evidence[1]['path'] = 'safe/../outside.json'
+    elif defect == 'absolute-path':
+        evidence[1]['path'] = '/outside.json'
+    elif defect == 'future-gate':
+        gates[1]['completed_at'] = '2026-01-01T00:00:06Z'
+    elif defect == 'extra-key':
+        record['evidence_refs'] = []
+    elif defect == 'missing-key':
+        del record['reason']
+    elif defect == 'bad-delegation':
+        record['operator']['delegation'] = 'absent'
+    elif defect == 'revalidation-without-prior':
+        record['kind'] = 'revalidation'
+    else:
+        for item in gates:
+            if item['gate'] == 'check':
+                item.update(outcome='success', id=item['id'] or 90, app_id=15368,
+                            head_sha=record['head_sha'], check_status='completed',
+                            conclusion='success', completed_at='2026-01-01T00:00:01Z')
+            elif item['gate'] == 'source-run':
+                item.update(outcome='success', id=84, attempt=1, head_sha=record['head_sha'],
+                            run_status='completed', conclusion='success',
+                            completed_at='2026-01-01T00:00:01Z')
+            elif item['gate'] == 'sensitive':
+                item.update(outcome='not-required', command=None)
+            else:
+                item['outcome'] = 'unknown'
+        gates[:] = [item for item in gates if item['gate'] in {'check', 'source-run', 'sensitive'}]
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(record)
 
 
 MANIFEST_ROLES = {
