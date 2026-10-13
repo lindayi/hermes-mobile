@@ -5525,7 +5525,8 @@ class InlineProgressApi(ProgressApi):
 
 
 @pytest.mark.parametrize("retired", [False, True])
-def test_inline_only_commented_inventory_evaluates_receipt_once(tmp_path, retired):
+@pytest.mark.parametrize("fragment", [False, True])
+def test_inline_only_commented_inventory_evaluates_receipt_once(tmp_path, retired, fragment):
     api = InlineProgressApi(unresolved=True)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     api.set_inline_review(HEAD, 63002, "2026-10-01T12:10:00Z")
@@ -5539,6 +5540,10 @@ def test_inline_only_commented_inventory_evaluates_receipt_once(tmp_path, retire
     api.head_sha = api.pull["head"]["sha"] = result_head
     api.complete_task(source["task_id"], source, head_sha=result_head)
     api.set_inline_review(result_head, 63003, "2026-10-01T12:11:00Z")
+    if fragment:
+        api.progress_review["body_html"] = api.progress_review["body_html"].replace(
+            "https://github.com/lindayi/hermes-mobile/pull/16#", "#",
+        )
     api.pending_required = True
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     enrollment = StateStore(path).snapshot()["enrollments"]["16"]
@@ -5582,6 +5587,110 @@ def test_inline_only_commented_inventory_evaluates_receipt_once(tmp_path, retire
     for field in ("task_id", "dispatch_nonce", "receipt_result", "receipt_comment_id",
                   "receipt_body", "receipt_head", "receipt_base", "attempt"):
         assert persisted[field] == proof[field]
+
+
+@pytest.mark.parametrize("retired", [False, True])
+@pytest.mark.parametrize("target_id", [
+    pytest.param("9" * 4301, id="oversized"),
+    pytest.param("44\u0666", id="arabic-trailing-digit"),
+    pytest.param("44\uff16", id="fullwidth-trailing-digit"),
+    pytest.param("0", id="zero"),
+    pytest.param("0446", id="leading-zero"),
+    pytest.param("+446", id="sign"),
+    pytest.param("446 ", id="whitespace"),
+    pytest.param("446suffix", id="suffix"),
+])
+def test_malformed_inline_discussion_id_preserves_independent_pr(
+        tmp_path, monkeypatch, retired, target_id):
+    api = InlineProgressApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    api.set_inline_review(HEAD, 63002, "2026-10-01T12:10:00Z")
+    path = tmp_path / "state.json"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    result_head = RESULT_HEAD if retired else HEAD
+    api.head_sha = api.pull["head"]["sha"] = result_head
+    api.complete_task(source["task_id"], source, head_sha=result_head)
+    api.set_inline_review(result_head, 63003, "2026-10-01T12:11:00Z")
+    api.pending_required = True
+    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+    proof = deepcopy(StateStore(path).snapshot()["enrollments"]["16"]["receipt_proofs"][0])
+    if retired:
+        StateStore(path).retire(16, result_head, BASE)
+        assert StateStore(path).action(source["key"]) is None
+    else:
+        assert StateStore(path).action(source["key"])["status"] == "completed"
+    api.progress_review["body_html"] = api.progress_review["body_html"].replace(
+        "https://github.com/lindayi/hermes-mobile/pull/16#discussion_r446",
+        f"#discussion_r{target_id}",
+    )
+    assert len(api.progress_review["body_html"]) < cloud_coordinator.MAX_BODY_CHARS
+    # Unicode targets still have their matching numeric comment inventory.
+    assert api.inline_comment_id == 446
+    api.pending_required = False
+
+    pull17 = valid_pr(
+        number=17, id=170000017, node_id="PR_node_17",
+        head={"sha": result_head, "ref": "topic-17", "repo": {"id": 1399942965}},
+    )
+    StateStore(path).enroll(enrolled_record(
+        issue=17, comment=223, head=result_head,
+        pull_id=170000017, pull_node_id="PR_node_17",
+    ))
+    original_get, original_get_all, original_write = api.get, api.get_all, api.write
+
+    def get(route):
+        if route == "repos/lindayi/hermes-mobile/pulls/17":
+            return pull17
+        if route.endswith("/pulls/17/requested_reviewers"):
+            return {"users": [], "teams": []}
+        return original_get(route)
+
+    def get_all(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments?"):
+            return []
+        if route.endswith("/pulls/17/files?per_page=100"):
+            return list(api.review_pull_files())
+        if route.endswith("/pulls/17/reviews?per_page=100"):
+            return []
+        return original_get_all(route, collection=collection)
+
+    def write(route, body):
+        response = original_write(route, body)
+        if route == "agents/repos/lindayi/hermes-mobile/tasks" and "PR #17 " in body["prompt"]:
+            response["artifacts"] = [
+                {"provider": "github", "type": "branch",
+                 "data": {"head_ref": "topic-17", "base_ref": "main"}},
+                {"provider": "github", "type": "pull",
+                 "data": {"id": 170000017, "global_id": "PR_node_17"}},
+            ]
+        return response
+
+    monkeypatch.setattr(api, "get", get)
+    monkeypatch.setattr(api, "get_all", get_all)
+    monkeypatch.setattr(api, "write", write)
+    independent_claim = None
+    for cycle in range(2):
+        result = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
+        summaries = {item["issue"]: item for item in result["pull_requests"]}
+        assert not summaries[16]["repair_requested"], "Malformed discussion ID admitted repair"
+        assert not summaries[16]["auto_merge_eligible"]
+        assert summaries[17]["repair_requested"] is (cycle == 0)
+        state = StateStore(path).snapshot()
+        enrollment = state["enrollments"]["16"]
+        assert enrollment["receipt_proofs"][0] == proof
+        assert enrollment["repair_progress"]["evaluated_task_ids"] == []
+        assert enrollment["repair_progress"]["consecutive_no_progress"] == 0
+        assert enrollment["repair_progress"]["resolved_fingerprints"] == []
+        assert enrollment["attempts"] == 1
+        assert state["enrollments"]["17"]["attempts"] == 1
+        assert api.fix_attempts == 2
+        [claim] = [a for a in state["actions"].values()
+                   if a["kind"] == "fix" and a["issue"] == 17]
+        assert claim["status"] == "sent"
+        if independent_claim is None:
+            independent_claim = deepcopy(claim)
+        assert claim == independent_claim
 
 
 @pytest.mark.parametrize("retired", [False, True])

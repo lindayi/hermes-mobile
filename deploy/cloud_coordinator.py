@@ -2614,15 +2614,21 @@ def _matched_inline_inventory(targets, review, threads, *, pull_number,
     submitted = datetime.fromisoformat(review["submitted_at"].replace("Z", "+00:00"))
     expected = set()
     for target in targets:
-        if not isinstance(target, str):
+        if not isinstance(target, str) or len(target) > MAX_BODY_CHARS:
             return False
         match = re.fullmatch(
             rf"(?:https://github\.com/lindayi/hermes-mobile/pull/{pull_number})?"
-            r"#discussion_r([1-9]\d*)", target, re.IGNORECASE,
+            r"#discussion_r([1-9][0-9]*)", target, re.IGNORECASE,
         )
-        if match is None or int(match[1]) in expected:
+        if match is None:
             return False
-        expected.add(int(match[1]))
+        try:
+            comment_id = int(match[1])
+        except ValueError:
+            return False
+        if comment_id in expected:
+            return False
+        expected.add(comment_id)
     observed = set()
     for thread in threads:
         for comment in thread["comments"]:

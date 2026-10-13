@@ -181,7 +181,7 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `58e123eb6537dfdc6df6251c69c40418c940101d705ae9c377137d848071503c` |
+| `deploy/cloud_coordinator.py` | `165260a6ed9abe83edfdac21c58f2478e09288727ec2221247ebc427524fac22` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
 
 ### Retained merged source and deliberate native refreshes
@@ -600,7 +600,9 @@ complete, unambiguous actionable inventory. Every COMMENTED admission also requi
 a complete, structurally valid thread inventory with unique bounded thread and
 comment IDs; a complete empty inventory remains valid for body-only findings.
 Linked open targets must additionally match the authenticated current-review/head
-thread inventory. Generic COMMENTED state and unrelated unresolved threads do not
+thread inventory. Discussion IDs must use canonical positive ASCII digits within
+the body budget; integer conversion failure denies admission without aborting
+other pull requests. Generic COMMENTED state and unrelated unresolved threads do not
 prove negative admission. This evidence does not grant review approval,
 merge authority, or deployment authority. COMMENTED admission is separate from the
 owner-published proof needed to consume a follow-up resolution disposition. The
@@ -609,7 +611,7 @@ blocker remains active:
 
 | Issue #106 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `58e123eb6537dfdc6df6251c69c40418c940101d705ae9c377137d848071503c` |
+| `deploy/cloud_coordinator.py` | `165260a6ed9abe83edfdac21c58f2478e09288727ec2221247ebc427524fac22` |
 
 The reconciled issue #106 and PR #105 candidate also binds REST and GraphQL review
 authors by matching positive numeric IDs, node IDs, and User/Bot types. Reviewer

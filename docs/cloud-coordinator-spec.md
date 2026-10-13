@@ -844,7 +844,9 @@ target must match an unresolved thread comment
 from that exact review and head in the authenticated, fully paginated thread
 collection. The numeric comment/review/author identities, nonempty finding text,
 and ordered comment/submission timestamps must agree. Absolute targets must
-name this pull request. Duplicate, missing, extra current-review, resolved,
+name this pull request. Discussion IDs require canonical positive ASCII digits
+within the body budget; failed integer conversion denies admission without
+aborting other pull requests. Duplicate, missing, extra current-review, resolved,
 malformed, or mismatched targets do not admit evaluation. An `inline` label or
 an unrelated unresolved thread alone is not proof. Positive open targets also
 prevent a generic COMMENTED review state from supplying successful progress
