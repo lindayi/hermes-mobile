@@ -8779,6 +8779,155 @@ def test_neutral_preclaim_anchor_admission_is_finite_across_restart(
     assert api.writes == writes
 
 
+def test_neutral_preclaim_anchor_survives_inactive_retirement_and_reenrollment(
+        tmp_path, monkeypatch):
+    api = FakeApi()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    path = tmp_path / "state.json"
+    original_claim = StateStore.claim_action
+
+    def defer_neutral_claim(store, key, action):
+        if action.get("task_type") == "neutral":
+            return False
+        return original_claim(store, key, action)
+
+    monkeypatch.setattr(StateStore, "claim_action", defer_neutral_claim)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+    preclaim = StateStore(path).snapshot()
+    anchor_key, anchor = next(iter(preclaim["outbox"].items()))
+    assert anchor["kind"] == "neutral-receipt-anchor"
+    assert anchor["status"] == "sent"
+    assert not preclaim["actions"]
+    assert preclaim["enrollments"]["16"]["attempts"] == 0
+    assert preclaim["enrollments"]["16"]["neutral_attempts"] == 0
+    assert preclaim["enrollments"]["16"]["neutral_anchor_reservations"] == 1
+    assert not preclaim["enrollments"]["16"].get("receipt_proofs")
+    monkeypatch.setattr(StateStore, "claim_action", original_claim)
+
+    api.pull["state"] = "closed"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+    retired = StateStore(path).snapshot()
+    assert retired["enrollments"]["16"]["active"] is False
+    assert retired["outbox"].get(anchor_key) == anchor
+    assert cloud_coordinator._tombstone_digest(anchor_key) not in (
+        retired["retired"].get("16", {}).get("outbox", [])
+    )
+    assert retired["enrollments"]["16"]["attempts"] == 0
+    assert retired["enrollments"]["16"]["neutral_attempts"] == 0
+    assert retired["enrollments"]["16"]["neutral_anchor_reservations"] == 1
+    assert not retired["actions"]
+    assert not retired["enrollments"]["16"].get("receipt_proofs")
+
+    api.pull["state"] = "open"
+    api.comments.append({
+        "id": 126, "user": {"id": OWNER}, "body": "/hermes enroll",
+        "created_at": "2026-10-01T12:10:00Z",
+        "updated_at": "2026-10-01T12:10:00Z",
+    })
+    Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+    recovered = StateStore(path).snapshot()
+    action = recovered["actions"][anchor["task_key"]]
+    assert recovered["outbox"][anchor_key] == anchor
+    assert action["dispatch_nonce"] == anchor["nonce"]
+    assert action["receipt_anchor_comment_id"] == anchor["comment_id"]
+    assert action["receipt_anchor_body"] == anchor["body"]
+    assert action["head"] == anchor["head"] == HEAD
+    assert action["main_sha"] == anchor["main_sha"] == BASE
+    assert action["recorded_base_sha"] == anchor["recorded_base_sha"] == BASE
+    assert action["attempt"] == anchor["attempt"] == 1
+    prompt = next(body["prompt"] for route, body in api.writes if route.endswith("/tasks"))
+    assert f"nonce={anchor['nonce']}" in prompt
+    assert f"commentId={anchor['comment_id']}" in prompt
+    assert anchor["body"] in prompt
+    assert len([
+        body for route, body in api.writes
+        if route.endswith("/issues/16/comments")
+        and body["body"] == anchor["body"]
+    ]) == 1
+    assert len([1 for route, _ in api.writes if route.endswith("/tasks")]) == 1
+    assert recovered["enrollments"]["16"]["attempts"] == 0
+    assert recovered["enrollments"]["16"]["neutral_attempts"] == 1
+    assert recovered["enrollments"]["16"]["neutral_anchor_reservations"] == 1
+    assert not recovered["enrollments"]["16"].get("receipt_proofs")
+
+
+@pytest.mark.parametrize(
+    "hazard", ["changed-head", "edited", "deleted", "ambiguous", "api-uncertain"],
+)
+def test_retired_neutral_anchor_is_not_reused_outside_its_authenticated_binding(
+        tmp_path, monkeypatch, hazard):
+    api = FakeApi()
+    api.pull.update(mergeable=False, mergeable_state="dirty")
+    path = tmp_path / "state.json"
+    original_claim = StateStore.claim_action
+
+    def defer_neutral_claim(store, key, action):
+        if action.get("task_type") == "neutral":
+            return False
+        return original_claim(store, key, action)
+
+    monkeypatch.setattr(StateStore, "claim_action", defer_neutral_claim)
+    Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+    anchor_key, anchor = next(iter(StateStore(path).snapshot()["outbox"].items()))
+    anchor_comment = next(comment for comment in api.comments
+                          if comment.get("id") == anchor["comment_id"])
+    monkeypatch.setattr(StateStore, "claim_action", original_claim)
+
+    api.pull["state"] = "closed"
+    Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+    api.pull["state"] = "open"
+    api.comments.append({
+        "id": 126, "user": {"id": OWNER}, "body": "/hermes enroll",
+        "created_at": "2026-10-01T12:10:00Z",
+        "updated_at": "2026-10-01T12:10:00Z",
+    })
+
+    if hazard == "changed-head":
+        api.head_sha = RESULT_HEAD
+        api.pull["head"]["sha"] = RESULT_HEAD
+    elif hazard == "edited":
+        anchor_comment["body"] += " edited"
+    elif hazard == "deleted":
+        api.comments.remove(anchor_comment)
+    elif hazard == "ambiguous":
+        api.comments.append({
+            **anchor_comment, "id": api.next_issue_comment_id,
+        })
+    elif hazard == "api-uncertain":
+        original_get = api.get
+
+        def uncertain_anchor_readback(route):
+            if route.endswith(f"/issues/comments/{anchor['comment_id']}"):
+                raise ApiError("anchor readback unavailable", status=503)
+            return original_get(route)
+
+        monkeypatch.setattr(api, "get", uncertain_anchor_readback)
+
+    Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+    state = StateStore(path).snapshot()
+    task_posts = [body for route, body in api.writes if route.endswith("/tasks")]
+    anchor_posts = [
+        body["body"] for route, body in api.writes
+        if route.endswith("/issues/16/comments")
+        and body["body"].startswith("hermes-coordinator-neutral-receipt:")
+    ]
+    if hazard == "changed-head":
+        action = next(item for item in state["actions"].values()
+                      if item.get("task_type") == "neutral")
+        new_anchor = state["outbox"][action["receipt_anchor_key"]]
+        assert action["head"] == RESULT_HEAD
+        assert action["receipt_anchor_key"] != anchor_key
+        assert new_anchor["nonce"] != anchor["nonce"]
+        assert new_anchor["body"] != anchor["body"]
+        assert new_anchor["comment_id"] != anchor["comment_id"]
+        assert new_anchor["head"] == RESULT_HEAD
+        assert len(task_posts) == 1
+        assert len(anchor_posts) == 2
+    else:
+        assert not task_posts
+        assert anchor_posts == [anchor["body"]]
+
+
 @pytest.mark.parametrize("stored_count", [None, 2, True, -1, "1", 2**31])
 def test_neutral_anchor_budget_migration_and_validation(tmp_path, stored_count):
     api = FakeApi()

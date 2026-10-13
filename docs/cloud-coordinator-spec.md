@@ -447,6 +447,18 @@ claim. Acceptance exercises successive main/base changes with a fixed PR head
 across cold restart, finite entries/comments, retained evidence and counters, plus
 normal dispatch and lost-POST readback without duplicates.
 
+Inactive retirement preserves the complete binding for each sent neutral
+receipt-anchor within that same three-reservation bound, including its nonce,
+body, comment ID and exact task/PR/head/main/base scope. It does not tombstone a
+preserved anchor key. After a cold restart and a fresh owner enrollment at the
+same scope, the coordinator must authenticate and reuse that exact public anchor,
+then dispatch at most one neutral task with its original causal binding. It must
+not repost or infer missing binding data. A changed scope, altered/deleted/
+ambiguous anchor or incomplete remote read cannot reuse the old binding. Source
+and neutral attempt counts, claims, receipts and uncertainty history remain
+unchanged by retirement and re-enrollment; ordinary active main churn still
+compacts obsolete anchors under the existing lifetime bound.
+
 Publish exactly one receipt-only PR reply. Its payload contains only the canonical
 v2 header and seven bound fields, with no decision, report, URL, prose, or extra
 fields. Before publication, the producer validates the complete supported

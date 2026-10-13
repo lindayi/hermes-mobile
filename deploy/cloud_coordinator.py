@@ -8974,8 +8974,14 @@ class StateStore:
                     and anchor_main_sha != current_main_sha
                     and not claimed_anchor
                 )
+                preserved_inactive_neutral_anchor = (
+                    inactive
+                    and entry.get("status") == "sent"
+                    and entry.get("kind") == "neutral-receipt-anchor"
+                )
                 if (entry.get("issue") != issue
                         or entry.get("status") not in {"sent", "superseded"}
+                        or preserved_inactive_neutral_anchor
                         or (not inactive and entry.get("head") == current_head
                             and not obsolete_preclaim_anchor)):
                     continue

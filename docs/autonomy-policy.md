@@ -123,7 +123,7 @@ are not exact-head review acceptance, hosted CI evidence, merge authorization, o
 permission to deploy. Both behavioral contracts remain specified in
 [the coordinator specification](cloud-coordinator-spec.md).
 
-### PR #105 owner-authorized task-abandonment candidate
+### PR #105 owner-authorized task-abandonment and anchor-retention candidate
 
 PR #105 adds bounded recovery for owner-authorized abandonment of terminal tasks
 with unverified receipts. The current candidate pins identify the exact proposed
@@ -138,10 +138,13 @@ the supported leading blank, bound quote line, and blank separator. Prevalidatio
 covers the complete serialized carrier. Synthetic tests prove this bounded known
 shape, not a live provider call. Strict carrier binding, byte/line limits, immutable
 receipt checks, retained proof validation, and the existing attempt budget remain.
+Inactive retirement retains complete sent neutral-anchor bindings within the
+existing lifetime bound, so same-scope re-enrollment can recover the exact anchor;
+changed scope and incomplete or mismatched readback still block reuse.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `20a660ee48ae3246c69b2cd4fb206fa57cf17b1685ad6e27b924770b4186b172` |
+| `deploy/cloud_coordinator.py` | `1dc88cd26b9de3b43832c1c87b63bbc21a9fee1d8877222f8bd4f703ffe6ae33` |
 | `deploy/task_receipts.py` | `bc7bd054c18d65e9713d435b46709ee20abddb9eda1f61cb7ba08b514b0db618` |
 
 ### Retained merged source and deliberate native refreshes
