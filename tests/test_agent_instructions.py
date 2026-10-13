@@ -1020,7 +1020,7 @@ def test_manual_qualification_shell_outputs_and_reservation_are_private(tmp_path
 def _run_manual_qualification_publication(
         tmp_path, *, inherited_comment_id=None, post_response='{"id":731}',
         post_fails=False, bundle_path=None, private_path=None, setup_only=False,
-        fake_parent_uid=None):
+        fake_parent_uid=None, track_fsync=False, fsync_failure_at=None):
     spec = (ROOT / 'docs/git-development-spec.md').read_text()
     section = spec.split('Use supported `gh api` commands', 1)[1]
     blocks = re.findall(r'```sh\n(.*?)\n```', section, re.DOTALL)
@@ -1042,6 +1042,12 @@ def _run_manual_qualification_publication(
         '    calls.write(" ".join(args) + "\\n")\n'
         'route = next((arg for arg in args if arg == "user" or arg.startswith("repos/")), "")\n'
         'if "--method" in args and "POST" in args:\n'
+        '    if os.environ.get("FSYNC_LOG"):\n'
+        '        with open(os.environ["FSYNC_LOG"]) as log:\n'
+        '            synced = log.read().splitlines()\n'
+        '        expected = os.environ["FSYNC_EXPECTED"].split(os.pathsep)\n'
+        '        if not all(path in synced for path in expected):\n'
+        '            sys.exit(24)\n'
         '    if os.environ["POST_FAIL"] == "1":\n'
         '        sys.exit(22)\n'
         '    print(os.environ["POST_RESPONSE"])\n'
@@ -1082,6 +1088,37 @@ def _run_manual_qualification_publication(
         'POST_RESPONSE': post_response,
         'POST_FAIL': '1' if post_fails else '0',
     })
+    if track_fsync or fsync_failure_at is not None:
+        fsync_support = tmp_path / 'fsync-support'
+        fsync_support.mkdir()
+        (fsync_support / 'sitecustomize.py').write_text(
+            'import os\n'
+            '_real_fsync = os.fsync\n'
+            'def _record_fsync(fd):\n'
+            '    path = os.readlink(f"/proc/self/fd/{fd}")\n'
+            '    log_path = os.environ["FSYNC_LOG"]\n'
+            '    with open(log_path, "a+") as log:\n'
+            '        log.seek(0)\n'
+            '        count = sum(1 for _ in log) + 1\n'
+            '        log.seek(0, 2)\n'
+            '        log.write(path + "\\n")\n'
+            '        log.flush()\n'
+            '    if count == int(os.environ.get("FSYNC_FAILURE_AT", "0")):\n'
+            '        raise OSError("synthetic fsync failure")\n'
+            '    return _real_fsync(fd)\n'
+            'os.fsync = _record_fsync\n')
+        expected = (
+            private / 'reservation', private, bundle / 'comment.txt',
+            bundle / 'request.json', bundle,
+        )
+        env.update({
+            'FSYNC_LOG': str(tmp_path / 'fsync.log'),
+            'FSYNC_EXPECTED': os.pathsep.join(map(str, expected)),
+            'FSYNC_FAILURE_AT': str(fsync_failure_at or 0),
+            'PYTHONPATH': os.pathsep.join(filter(None, (
+                str(fsync_support), env.get('PYTHONPATH'),
+            ))),
+        })
     if inherited_comment_id is not None:
         env['COMMENT_ID'] = inherited_comment_id
     result = subprocess.run(
@@ -1157,6 +1194,33 @@ def test_manual_qualification_shell_reads_the_id_returned_by_post(
                for call in calls)
     assert not any('repos/lindayi/hermes-mobile/issues/comments/999' in call
                    for call in calls)
+    assert (private / 'reservation').read_text() == 'synthetic-record\n'
+
+
+def test_manual_qualification_shell_flushes_frozen_artifacts_before_post(tmp_path):
+    result, calls, _ = _run_manual_qualification_publication(
+        tmp_path, track_fsync=True)
+
+    assert result.returncode == 0, result.stderr
+    assert sum('--method POST' in call for call in calls) == 1
+    synced = (tmp_path / 'fsync.log').read_text().splitlines()
+    assert all(path in synced for path in (
+        str(tmp_path / 'private' / 'reservation'),
+        str(tmp_path / 'private'),
+        str(tmp_path / 'bundle' / 'comment.txt'),
+        str(tmp_path / 'bundle' / 'request.json'),
+        str(tmp_path / 'bundle'),
+    ))
+
+
+@pytest.mark.parametrize('failure_at', range(1, 9))
+def test_manual_qualification_shell_does_not_post_after_any_sync_failure(
+        tmp_path, failure_at):
+    result, calls, private = _run_manual_qualification_publication(
+        tmp_path, fsync_failure_at=failure_at)
+
+    assert result.returncode != 0
+    assert not any('--method POST' in call for call in calls)
     assert (private / 'reservation').read_text() == 'synthetic-record\n'
 
 

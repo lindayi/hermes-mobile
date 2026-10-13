@@ -654,9 +654,11 @@ Before POST, prepare `comment.txt` in the exact format and persist a create-once
 reservation using exclusive creation, for example
 `( set -C; printf '%s\n' "$RECORD_KEY" > "$PRIVATE/reservation" )`.
 Retain the frozen request digest, owner/repo/PR/head/base/review/command identities,
-reserved time, and pre-send comment high-water ID with that reservation. Flush the
-files durably before sending. Complete the final evidence reads after reservation,
-then freeze the final comment/request bytes and digest before POST.
+reserved time, and pre-send comment high-water ID with that reservation. Complete
+the final evidence reads after reservation, then freeze the final comment/request
+bytes and digest before POST. The publication commands below fsync the reservation,
+comment, and request files and their parent directories before POST. Any open or
+fsync failure stops the procedure before sending.
 A reservation is for one POST only; never reuse its
 key or reset it after failure. The event's `observed_at` must be no earlier than
 `reserved_at` and review/command/check completion, and no later than GitHub's
@@ -665,7 +667,31 @@ GitHub edit history proving no edits. Server author/time/repo/issue URL and ID,
 not self-declared JSON, supply the immutable publication binding.
 
 ```sh
+sync_files_and_parent_directories() {
+  python3 - "$@" <<'PY'
+import os
+import sys
+
+for path in sys.argv[1:]:
+    fd = os.open(path, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    parent_fd = os.open(
+        os.path.dirname(path),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+PY
+}
+sync_files_and_parent_directories "$PRIVATE/reservation" || exit 1
 jq -Rs '{body: .}' "$BUNDLE/comment.txt" > "$BUNDLE/request.json"
+sync_files_and_parent_directories \
+  "$BUNDLE/comment.txt" "$BUNDLE/request.json" "$PRIVATE/reservation" || exit 1
 gh api --method POST -H 'Accept: application/vnd.github.full+json' \
   "repos/$REPO/issues/$PR/comments" --input "$BUNDLE/request.json" \
   > "$BUNDLE/create-response.json"
