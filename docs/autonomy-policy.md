@@ -123,6 +123,19 @@ are not exact-head review acceptance, hosted CI evidence, merge authorization, o
 permission to deploy. Both behavioral contracts remain specified in
 [the coordinator specification](cloud-coordinator-spec.md).
 
+### Issue #106 verification-status parser overlay
+
+The current PR107 review-evidence overlay recognizes one exact `COMMENTED`
+overview sentence as verification status. It does not confer review, CI, or owner
+authority; the earlier issue #100 pin remains retained as historical provenance.
+
+| Current candidate path | SHA-256 |
+| --- | --- |
+| `deploy/review_evidence.py` | `4c15df55731c6acd2df0167c4097730751f2b53b2d72e81a87eff1c4d8fe5c7f` |
+
+This candidate still requires fresh exact-head review and all required checks.
+Sensitive owner authorization remains a separate gate.
+
 ### Retained merged source and deliberate native refreshes
 
 The release controller imports `deploy/native_notification_release.py`, which

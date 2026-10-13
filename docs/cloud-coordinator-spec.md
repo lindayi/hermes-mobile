@@ -277,6 +277,12 @@ Neutral-only content cannot supply a finding; genuine corrections, independent
 siblings and their literal context remain eligible.
 Unsupported top-level disclosures remain ambiguous, not implicitly resolved.
 
+For a canonically marked `COMMENTED` overview only, the exact sentence
+`The operationally sensitive coordinator gate lacks verified latest-head CI and
+required review evidence.` is recognized as verification status. It classifies
+prose only; it does not prove review, CI, or owner authorization. Added or changed
+prose in the same or another sentence remains ambiguous, as does quoted-only text.
+
 Validation-only requires complete recognized status prose (optionally accompanied
 by no-code-issues sentences), not the presence of `pending` anywhere. Examples
 include `The exact-head verification remains pending.` and `Exact-head verification

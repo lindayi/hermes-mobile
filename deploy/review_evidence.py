@@ -672,11 +672,15 @@ def _summary_disposition(summary, *, overview, state, context=None):
     prose = summary.strip()
     context = (context if context is not None else summary).strip()
     if not prose:
-        return "no-findings", ""
+        return ("ambiguous", context) if context else ("no-findings", "")
     sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", prose) if part.strip()]
     validation = re.compile(
         r"(?:the )?(?:exact-head )?(?:verification|validation) "
         r"(?:remains|is)(?: still)? pending[.!]?", re.IGNORECASE)
+    # This exact provider sentence reports gate-verification status, not gate authority.
+    verification_status = re.compile(
+        r"The operationally sensitive coordinator gate lacks verified latest-head CI "
+        r"and required review evidence[.!]?", re.IGNORECASE)
     # Recognize whole negative verdicts, never arbitrary prose containing 'no'.
     # Scope suffixes are deliberately finite: an unrestricted 'in ...' would
     # swallow a same-sentence defect/correction after an otherwise neutral prefix.
@@ -686,11 +690,15 @@ def _summary_disposition(summary, *, overview, state, context=None):
         r"(?: in (?:(?:the|this|these) )?(?:(?:reviewed|synthetic|current|proposed|latest) )?"
         r"(?:code|changes?|diff|patch|implementation))?[.!]?", re.IGNORECASE)
     negatives = [bool(no_findings.fullmatch(sentence)) for sentence in sentences]
-    waits = []
-    for sentence in sentences:
+    def is_validation_status(sentence):
         # A neutral template clause is status, not a general 'pending' keyword.
         clause = re.sub(r"^It changes [^.!?]+, while\s+", "", sentence, flags=re.IGNORECASE)
-        waits.append(bool(validation.fullmatch(clause)))
+        return bool(
+            validation.fullmatch(clause)
+            or overview and state == "COMMENTED" and verification_status.fullmatch(sentence)
+        )
+
+    waits = [is_validation_status(sentence) for sentence in sentences]
     if any(waits) and all(wait or negative for wait, negative in zip(waits, negatives)):
         return "validation-only", prose
     if all(negatives):
@@ -699,10 +707,10 @@ def _summary_disposition(summary, *, overview, state, context=None):
         # Remove only whole validation sentences; retain every other sentence,
         # including domain findings and uncertain prose, for disposition below.
         prose = "\n".join(sentence for wait, sentence in zip(waits, sentences) if not wait)
-        context = "\n".join(sentence for sentence in re.split(r"(?<=[.!?])\s+|\n+", context)
-                            if sentence.strip() and not validation.fullmatch(re.sub(
-                                r"^It changes [^.!?]+, while\s+", "", sentence.strip(),
-                                flags=re.IGNORECASE)))
+        context = "\n".join(
+            sentence for sentence in re.split(r"(?<=[.!?])\s+|\n+", context)
+            if sentence.strip() and not is_validation_status(sentence.strip())
+        )
     # Summary prose needs an explicit correction clause, not a modal/bug keyword.
     affirmative = "\n".join(sentence for sentence, wait, negative in zip(sentences, waits, negatives)
                             if not wait and not negative)

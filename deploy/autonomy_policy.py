@@ -253,6 +253,11 @@ SOURCE_FINGERPRINTS = {
     # Issue #96 bounded rollback observation; historical PR25 pins remain retained.
     'deploy/native_notification_release.py': '165622c962554f19263567e7c1bd60ee17cf8e73a9967cc39be995c3d8071ff1',
 }
+# Issue #107 verification-status parser overlay; preserve the earlier review pin above.
+ISSUE107_REVIEW_EVIDENCE_OVERLAY = {
+    'deploy/review_evidence.py': '4c15df55731c6acd2df0167c4097730751f2b53b2d72e81a87eff1c4d8fe5c7f',
+}
+SOURCE_FINGERPRINTS.update(ISSUE107_REVIEW_EVIDENCE_OVERLAY)
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',
     '.github/workflows/issue-link.yml': 'hosted-workflow-contract',

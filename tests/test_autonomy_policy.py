@@ -202,6 +202,10 @@ _ISSUE106_COMMENTED_PROGRESS_FIXTURE = {
     'deploy/cloud_coordinator.py': 'a38e50843d12975e852ae493f41f97bdfa2ac9934eea5a15a38f176f6f2c0d38',
 }
 
+_ISSUE107_REVIEW_SUMMARY_FIXTURE = {
+    'deploy/review_evidence.py': '4c15df55731c6acd2df0167c4097730751f2b53b2d72e81a87eff1c4d8fe5c7f',
+}
+
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
 }
@@ -264,7 +268,8 @@ def _source_files():
             | _ISSUE85_PHOTO_FIXTURE | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
             | _ISSUE92_COPILOT_REVIEW_FIXTURE | _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE
             | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
-            | _ISSUE106_COMMENTED_PROGRESS_FIXTURE)
+            | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
+            | _ISSUE107_REVIEW_SUMMARY_FIXTURE)
 
 
 def _source_ci():
@@ -687,7 +692,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         'deploy/issue_starter.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
             'deploy/issue_starter.py'
         ],
-        'deploy/review_evidence.py': _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE[
+        'deploy/review_evidence.py': _ISSUE107_REVIEW_SUMMARY_FIXTURE[
             'deploy/review_evidence.py'
         ],
     }
@@ -719,6 +724,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
             | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
             | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
             | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
+            | _ISSUE107_REVIEW_SUMMARY_FIXTURE
         ).items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
     }
@@ -761,11 +767,13 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         for path in _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
     } == (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
           | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
-          | _ISSUE106_COMMENTED_PROGRESS_FIXTURE)
+          | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
+          | _ISSUE107_REVIEW_SUMMARY_FIXTURE)
     for path, digest in (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
                          | _ISSUE92_COPILOT_REVIEW_FIXTURE
                          | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
-                         | _ISSUE106_COMMENTED_PROGRESS_FIXTURE).items():
+                         | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
+                         | _ISSUE107_REVIEW_SUMMARY_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
@@ -843,7 +851,8 @@ def test_issue83_initial_review_pin_matches_actual_candidate_bytes(path, pins):
 
 @pytest.mark.parametrize('pins', [
     SOURCE_FINGERPRINTS, _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
-    | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE | _ISSUE106_COMMENTED_PROGRESS_FIXTURE,
+    | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
+    | _ISSUE107_REVIEW_SUMMARY_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE))
 def test_issue87_bounded_repair_pin_matches_actual_candidate_bytes(path, pins):

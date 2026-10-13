@@ -19,7 +19,9 @@ from deploy.cloud_coordinator import (
 from deploy.review_evidence import (
     INDEPENDENT_REVIEW_SCHEMA,
     latest_reviews,
+    parse_body,
     parse_independent_review_body,
+    review_body_disposition,
     sensitive_review_authorized,
 )
 from test_cloud_coordinator import (
@@ -32,6 +34,15 @@ PICTURE = (
     'srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/'
     'medium-v2-dark.svg"><img alt="Medium" src="https://github.githubassets.com/static/'
     'images/icons/copilot-code-review/medium-v2-light.svg"></picture>'
+)
+PUBLIC_PICTURE = (
+    '<picture><source media="(prefers-color-scheme: dark)" '
+    'srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/'
+    'high-v2-dark.svg"><source media="(prefers-color-scheme: light)" '
+    'srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/'
+    'high-v2-light.svg"><img src="https://github.githubassets.com/static/images/icons/'
+    'copilot-code-review/high-v2-light.png" alt="High severity" width="62" height="18" '
+    'align="texttop"></picture>'
 )
 FOOTER = (
     "\n<hr>\n<p>💡 <a href=\"/lindayi/hermes-mobile/new/main?filename=.github/skills/"
@@ -93,6 +104,33 @@ RESOLVED_ONLY = overview(
 OPEN_ONLY = overview(
     "🟡 Changes recommended", "One synthetic inline finding remains.", f"1 {PICTURE}", OPEN,
 )
+PUBLIC_REVIEW_SUMMARY = (
+    "The operationally sensitive coordinator gate lacks verified latest-head CI "
+    "and required review evidence."
+)
+PUBLIC_REVIEW_BODY = f"""<!-- ccr-overview-v2 -->
+
+### 🔵 Needs a closer look
+
+{PUBLIC_REVIEW_SUMMARY}
+
+**0 open findings**
+
+<details>
+<summary><strong>1 resolved since last review</strong></summary>
+
+- {PUBLIC_PICTURE} [Separate Copilot COMMENTED admission from owner review proof](https://github.com/lindayi/hermes-mobile/pull/107#discussion_r1001)
+</details>
+
+🧠 **Review effort:** Balanced"""
+PUBLIC_REVIEW_HTML = f"""<h3>🔵 Needs a closer look</h3>
+<p>{PUBLIC_REVIEW_SUMMARY}</p>
+<p><strong>0 open findings</strong></p>
+<details><summary><strong>1 resolved since last review</strong></summary>
+<ul><li>{PUBLIC_PICTURE} <a href="https://github.com/lindayi/hermes-mobile/pull/107#discussion_r1001">Separate Copilot COMMENTED admission from owner review proof</a></li></ul>
+</details>
+<p>🧠 <strong>Review effort:</strong> Balanced</p>
+<hr>"""
 REVIEW_ID = 5300000001
 SUBMITTED = "2026-10-01T12:30:00Z"
 
@@ -105,6 +143,11 @@ def copilot_review(body, *, state="COMMENTED", review_id=REVIEW_ID, commit_id=HE
             "commit_id": commit_id,
             "submitted_at": submitted_at, "user": {"id": user_id},
             "author_association": "CONTRIBUTOR"}
+
+
+def public_overview_review(**changes):
+    review = copilot_review(PUBLIC_REVIEW_BODY) | {"body_html": PUBLIC_REVIEW_HTML}
+    return review | changes
 
 
 class ReviewApi(FakeApi):
@@ -143,6 +186,134 @@ def test_latest_review_requires_present_unique_positive_ids():
     malformed.pop("id")
     assert latest_reviews([malformed], COPILOT_REVIEWER) is None
     assert latest_reviews([valid, dict(valid)], COPILOT_REVIEWER) is None
+
+
+def test_public_verification_overview_is_narrow_validation_status():
+    parsed = parse_body(
+        PUBLIC_REVIEW_BODY, "COMMENTED", body_html=PUBLIC_REVIEW_HTML,
+    )
+    assert parsed["classifications"] == ["resolved", "validation-only"]
+    assert parsed["findings"] == []
+    assert not parsed["ambiguous"] and parsed["inventory_complete"]
+
+    review = public_overview_review()
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert disposition["classifications"] == ["resolved", "validation-only"]
+    assert disposition["findings"] == []
+    assert not disposition["ambiguous"] and disposition["inventory_complete"]
+
+
+def test_public_verification_overview_does_not_grant_merge_authority(tmp_path):
+    review = public_overview_review()
+    api = ReviewApi([review], sensitive=True)
+    result = _managed_cycle(api, tmp_path / "state.json")
+    [plan] = result["pull_requests"]
+    assert plan["review_valid"]
+    assert plan["required_checks_green"]
+    assert plan["sensitive"]
+    assert not plan["auto_merge_eligible"]
+    assert "sensitive" in plan["reasons"] and "review" not in plan["reasons"]
+    assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("ci_state", ["pending", "failed"])
+def test_public_verification_overview_does_not_override_required_ci(tmp_path, ci_state):
+    class FailedCheckReviewApi(ReviewApi):
+        def get_all(self, route, *, collection=None):
+            values = super().get_all(route, collection=collection)
+            if "/check-runs?" in route:
+                return [
+                    value | {"conclusion": "failure"}
+                    if value.get("name") == "integration-tests" else value
+                    for value in values
+                ]
+            return values
+
+    api_type = FailedCheckReviewApi if ci_state == "failed" else ReviewApi
+    api = api_type([public_overview_review()], sensitive=True)
+    api.pending_required = ci_state == "pending"
+    result = _managed_cycle(api, tmp_path / f"{ci_state}.json")
+    [plan] = result["pull_requests"]
+    assert plan["review_valid"]
+    assert not plan["required_checks_green"]
+    assert not plan["auto_merge_eligible"]
+    assert "sensitive" in plan["reasons"]
+
+
+@pytest.mark.parametrize("summary", [
+    PUBLIC_REVIEW_SUMMARY + " The current source is unsafe to merge.",
+    PUBLIC_REVIEW_SUMMARY[:-1] + ", but the source is unsafe to merge.",
+])
+def test_public_verification_overview_does_not_swallow_concerns(tmp_path, summary):
+    review = public_overview_review(
+        body=PUBLIC_REVIEW_BODY.replace(PUBLIC_REVIEW_SUMMARY, summary),
+        body_html=PUBLIC_REVIEW_HTML.replace(PUBLIC_REVIEW_SUMMARY, summary),
+    )
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert disposition["ambiguous"] and not disposition["inventory_complete"]
+    assert disposition["reason"] == "unclassified-content"
+
+    api = ReviewApi([review], sensitive=True)
+    result = _managed_cycle(api, tmp_path / "state.json")
+    [plan] = result["pull_requests"]
+    assert not plan["review_valid"] and not plan["auto_merge_eligible"]
+
+
+def test_quoted_only_verification_overview_remains_ambiguous():
+    review = public_overview_review(
+        body=PUBLIC_REVIEW_BODY.replace(
+            PUBLIC_REVIEW_SUMMARY, f"> {PUBLIC_REVIEW_SUMMARY}",
+        ),
+        body_html=PUBLIC_REVIEW_HTML.replace(
+            f"<p>{PUBLIC_REVIEW_SUMMARY}</p>",
+            f"<blockquote><p>{PUBLIC_REVIEW_SUMMARY}</p></blockquote>",
+        ),
+    )
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert disposition["ambiguous"] and not disposition["inventory_complete"]
+    assert disposition["reason"] == "unclassified-content"
+
+
+def test_public_verification_overview_requires_complete_rendered_inventory():
+    review = public_overview_review(body_html=None)
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert disposition["ambiguous"] and not disposition["inventory_complete"]
+
+    malformed = public_overview_review(
+        body=PUBLIC_REVIEW_BODY.replace("1 resolved since", "2 resolved since"),
+        body_html=PUBLIC_REVIEW_HTML.replace("1 resolved since", "2 resolved since"),
+    )
+    disposition = review_body_disposition(
+        [malformed], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert disposition["ambiguous"] and not disposition["inventory_complete"]
+
+
+@pytest.mark.parametrize("changes", [
+    {"commit_id": BASE},
+    {"user": {"id": OWNER}},
+    {"state": "PENDING", "submitted_at": None},
+    {"state": "DISMISSED"},
+])
+def test_public_verification_overview_does_not_override_review_identity_or_state(changes):
+    review = public_overview_review(**changes)
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+    assert not disposition["findings"]
+    assert not (
+        disposition["inventory_complete"]
+        and not disposition["ambiguous"]
+        and disposition["classifications"]
+    )
 
 
 def _independent_review_evidence():
