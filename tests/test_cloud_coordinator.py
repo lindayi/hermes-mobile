@@ -3608,6 +3608,143 @@ def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_pat
     )
 
 
+def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
+        tmp_path):
+    neutral_head = "9" * 40
+    source_head = "8" * 40
+    api, store, abandoned = _owner_abandonment_historical_neutral_case(tmp_path)
+    abandoned_reservation = deepcopy(store.action(abandoned["key"]))
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    recovery = StateStore(store.path).snapshot()["enrollments"]["16"][
+        "owner_abandonments"
+    ][0]
+    _advance_owner_abandonment_main(api)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    neutral = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "fix"
+        and action.get("task_type") == "neutral"
+        and action.get("status") == "sent"
+    )
+
+    api.complete_task(
+        neutral["task_id"], neutral, head_sha=neutral_head,
+        base_sha=FINAL_RESULT_HEAD,
+    )
+    api.head_sha = api.pull["head"]["sha"] = neutral_head
+    api.pull["base"]["sha"] = FINAL_RESULT_HEAD
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.review_state = "APPROVED"
+    api.review_sha = neutral_head
+    api.strict_protection = False
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert any(
+        proof.get("task_id") == neutral["task_id"]
+        and proof.get("receipt_result") == "ready"
+        for proof in StateStore(store.path).snapshot()["enrollments"]["16"][
+            "receipt_proofs"
+        ]
+    )
+
+    api.unresolved = True
+    dispatch = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    assert dispatch["repair_requested"], (
+        dispatch["reasons"], api.task_posts, api.workflow_routes,
+    )
+    actions_after_dispatch = StateStore(store.path).actions()
+    source = next((
+        action for action in actions_after_dispatch.values()
+        if action.get("kind") == "fix"
+        and action.get("head") == neutral_head
+        and action.get("status") == "sent"
+        and action["key"] != neutral["key"]
+    ), None)
+    assert source is not None, (
+        dispatch["reasons"], api.task_posts,
+        [(key, item.get("kind"), item.get("task_type"), item.get("status"),
+          item.get("head")) for key, item in actions_after_dispatch.items()],
+        [(route, body.get("head_ref"), body.get("prompt", "")[:60])
+         for route, body in api.writes if route.endswith("/tasks")],
+    )
+    api.complete_task(
+        source["task_id"], source, head_sha=source_head,
+        base_sha=FINAL_RESULT_HEAD,
+    )
+    api.head_sha = api.pull["head"]["sha"] = source_head
+    api.unresolved = False
+    api.review_state = None
+    api.review_sha = None
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert any(
+        proof.get("task_id") == source["task_id"]
+        and proof.get("receipt_result") == "ready"
+        for proof in StateStore(store.path).snapshot()["enrollments"]["16"][
+            "receipt_proofs"
+        ]
+    )
+
+    enrollment_before_repair = StateStore(store.path).snapshot()["enrollments"]["16"]
+    original_proofs = deepcopy(enrollment_before_repair["receipt_proofs"])
+    StateStore(store.path).retire(
+        16, source_head, current_main_sha=FINAL_RESULT_HEAD,
+    )
+    restarted = StateStore(store.path)
+    assert restarted.action(abandoned["key"]) == abandoned_reservation
+    assert restarted.action(neutral["key"]) is None
+    assert any(
+        proof.get("task_id") == neutral["task_id"]
+        for proof in restarted.snapshot()["enrollments"]["16"]["receipt_proofs"]
+    )
+    assert restarted.snapshot()["enrollments"]["16"]["receipt_proofs"] == original_proofs
+    assert restarted.snapshot()["enrollments"]["16"]["owner_abandonments"] == [
+        recovery,
+    ]
+
+    reviewer_writes_before = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    attempts_before_repair = restarted.snapshot()["enrollments"]["16"]["attempts"]
+    neutral_attempts = restarted.snapshot()["enrollments"]["16"]["neutral_attempts"]
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert result["head"] == source_head
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+    state = StateStore(store.path).snapshot()
+    assert state["actions"][abandoned["key"]] == abandoned_reservation
+    assert state["enrollments"]["16"]["attempts"] == attempts_before_repair
+    assert state["enrollments"]["16"]["neutral_attempts"] == neutral_attempts
+    assert state["enrollments"]["16"]["owner_abandonments"] == [recovery]
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == reviewer_writes_before + [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+        and write not in reviewer_writes_before
+    ]
+    writes = list(api.writes)
+    task_posts = api.task_posts
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert api.task_posts == task_posts
+    assert api.writes == writes
+
+
 @pytest.mark.parametrize("proof_hazard", [None, "missing", "substituted"])
 def test_owner_abandonment_retained_neutral_proof_survives_compaction_for_later_repair(
         tmp_path, proof_hazard):
