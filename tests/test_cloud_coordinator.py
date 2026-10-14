@@ -4156,8 +4156,9 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
 
 
 @pytest.mark.parametrize("duplicate_by", ["key", "task-id"])
+@pytest.mark.parametrize("alias_copy", ["action", "proof"])
 def test_owner_abandonment_duplicate_projection_rejects_nested_numeric_alias(
-        tmp_path, duplicate_by):
+        tmp_path, duplicate_by, alias_copy):
     api, store, _, _, recovery, neutral, _, _, source_head, _ = (
         _owner_abandonment_transitive_case(tmp_path)
     )
@@ -4174,7 +4175,9 @@ def test_owner_abandonment_duplicate_projection_rejects_nested_numeric_alias(
         action = deepcopy(proof)
         if duplicate_by == "task-id":
             action["key"] = "duplicate-task-id-alias"
-        action["owner_abandonment_binding"]["version"] = 1.0
+        (action if alias_copy == "action" else proof)[
+            "owner_abandonment_binding"
+        ]["version"] = 1.0
         state["actions"][action["key"]] = action
 
     restarted._mutate(add_alias)
@@ -4183,6 +4186,63 @@ def test_owner_abandonment_duplicate_projection_rejects_nested_numeric_alias(
     )._owner_abandonment_successor_proven(
         {"pull": api.pull, "comments": api.comments}, recovery,
     )
+
+
+def test_owner_abandonment_apply_rejects_lone_float_binding_after_compaction(
+        tmp_path):
+    (
+        api, store, abandoned, reservation, recovery, neutral, source,
+        _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path, bare=True)
+    api.review_state = "APPROVED"
+    api.review_sha = source_head
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    StateStore(store.path).retire(
+        16, source_head, current_main_sha=FINAL_RESULT_HEAD,
+    )
+    assert StateStore(store.path).action(neutral["key"]) is None
+    assert StateStore(store.path).action(source["key"]) is None
+    api.review_state = api.review_sha = None
+
+    def alias_only_retained_proof(state):
+        proof = next(
+            proof for proof in state["enrollments"]["16"]["receipt_proofs"]
+            if proof.get("task_id") == neutral["task_id"]
+        )
+        proof["owner_abandonment_binding"]["version"] = 1.0
+
+    StateStore(store.path)._mutate(alias_only_retained_proof)
+    before = StateStore(store.path).snapshot()
+    writes = deepcopy(api.writes)
+    task_posts = api.task_posts
+    assert StateStore(store.path).action(neutral["key"]) is None
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+    assert result["head"] == source_head
+    assert api.writes == writes
+    assert api.task_posts == task_posts
+    after = StateStore(store.path).snapshot()
+    assert after["actions"][abandoned["key"]] == reservation
+    assert after["enrollments"]["16"]["owner_abandonments"] == [recovery]
+    assert after["enrollments"]["16"]["attempts"] == before["enrollments"]["16"][
+        "attempts"
+    ]
+    assert after["enrollments"]["16"]["neutral_attempts"] == before[
+        "enrollments"
+    ]["16"]["neutral_attempts"]
+    assert after["enrollments"]["16"]["receipt_proofs"] == before[
+        "enrollments"
+    ]["16"]["receipt_proofs"]
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert api.writes == writes
+    assert api.task_posts == task_posts
 
 
 def _previous_receipt_projection(action):
@@ -5477,7 +5537,9 @@ def test_new_lineage_rechecks_late_reviewer_reads_before_claim(tmp_path, race):
 
 
 @pytest.mark.parametrize("path", ["source", "reviewer"])
-@pytest.mark.parametrize("race", ["unchanged", "head", "identity", "base"])
+@pytest.mark.parametrize(
+    "race", ["unchanged", "head", "identity", "base", "binding-float"],
+)
 def test_final_publication_fence_follows_last_legacy_task_read(
         tmp_path, monkeypatch, path, race):
     api, store, abandoned, _, _, _, _, _, source_head, _ = (
@@ -5512,7 +5574,8 @@ def test_final_publication_fence_follows_last_legacy_task_read(
 
     def get(route):
         response = original_get(route)
-        if (race != "unchanged" and not injected and in_final_authority[0]
+        if (race in {"head", "identity", "base"} and not injected
+                and in_final_authority[0]
                 and route == (
                     f"agents/repos/lindayi/hermes-mobile/tasks/{target_task_id}"
                 )):
@@ -5532,7 +5595,23 @@ def test_final_publication_fence_follows_last_legacy_task_read(
         if final:
             in_final_authority[0] = True
         try:
-            return original_authority(self, issue, head, base_sha, **kwargs)
+            authorized = original_authority(
+                self, issue, head, base_sha, **kwargs,
+            )
+            if (final and race == "binding-float" and not injected
+                    and authorized):
+                def alias_retained_proof(state):
+                    proof = next(
+                        proof for proof in state["enrollments"]["16"][
+                            "receipt_proofs"
+                        ]
+                        if "owner_abandonment_binding" in proof
+                    )
+                    proof["owner_abandonment_binding"]["version"] = 1.0
+
+                StateStore(store.path)._mutate(alias_retained_proof)
+                injected.append(race)
+            return authorized
         finally:
             if final:
                 in_final_authority[0] = False
@@ -5585,6 +5664,15 @@ def test_final_publication_fence_follows_last_legacy_task_read(
             assert StateStore(store.path).action(key) is None
 
     if race == "unchanged":
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        assert api.task_posts == first_dispatch
+        assert [
+            write for write in api.writes
+            if write[0].endswith("/requested_reviewers")
+        ] == first_reviewer_writes
+    elif race == "binding-float":
         Coordinator(
             api, StateStore(store.path), clock=lambda: 1790856660,
         ).run(apply=True)

@@ -3260,21 +3260,26 @@ def _legacy_task_detail_matches_list(listed, detailed):
     )
 
 
-def _projected_fields_match(left, right, fields):
-    if any((field in left) != (field in right) for field in fields):
-        return False
+def _canonical_json_match(left, right):
     try:
         left_json = json.dumps(
-            {field: left[field] for field in fields if field in left},
-            sort_keys=True, separators=(",", ":"), allow_nan=False,
+            left, sort_keys=True, separators=(",", ":"), allow_nan=False,
         )
         right_json = json.dumps(
-            {field: right[field] for field in fields if field in right},
-            sort_keys=True, separators=(",", ":"), allow_nan=False,
+            right, sort_keys=True, separators=(",", ":"), allow_nan=False,
         )
     except (TypeError, ValueError):
         return False
     return left_json == right_json
+
+
+def _projected_fields_match(left, right, fields):
+    if any((field in left) != (field in right) for field in fields):
+        return False
+    return _canonical_json_match(
+        {field: left[field] for field in fields if field in left},
+        {field: right[field] for field in fields if field in right},
+    )
 
 
 def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
@@ -3647,8 +3652,10 @@ def _owner_abandonment_successor_matches(record, action, *, allow_intent=False):
             )
             or (
                 not allow_intent
-                and action.get("owner_abandonment_binding")
-                    != _owner_abandonment_successor_binding(record)
+                and not _canonical_json_match(
+                    action.get("owner_abandonment_binding"),
+                    _owner_abandonment_successor_binding(record),
+                )
             )
     ):
         return False
@@ -7457,9 +7464,12 @@ class Coordinator:
             return "superseded"
         final_state = StateStore(self.store.path).snapshot()
         final_inputs = _dispatch_authorization_inputs(final_state, action["issue"])
-        if (final_authorization.get("projection")
-                != authorization_fence.get("projection")
-                or final_inputs != final_authorization.get("projection")):
+        if (not _canonical_json_match(
+                final_authorization.get("projection"),
+                authorization_fence.get("projection"),
+        ) or not _canonical_json_match(
+                final_inputs, final_authorization.get("projection"),
+        )):
             return "superseded"
         try:
             publication_pull = self._fence_pull(
@@ -7477,9 +7487,11 @@ class Coordinator:
         ):
             return "superseded"
         publication_state = StateStore(self.store.path).snapshot()
-        if (_dispatch_authorization_inputs(
-                publication_state, action["issue"],
-            ) != final_authorization.get("projection")
+        if (not _canonical_json_match(
+                _dispatch_authorization_inputs(
+                    publication_state, action["issue"],
+                ), final_authorization.get("projection"),
+            )
                 or publication_state["actions"].get(key) is not None):
             return "superseded"
         if not self.store.claim_action(key, action):
@@ -7989,11 +8001,15 @@ class Coordinator:
                     str(claimed_action["issue"]), {},
                 )
                 if (final_state["actions"].get(key) != claimed_action
-                        or final_authorization.get("projection")
-                            != authorization_fence.get("projection")
-                        or _dispatch_authorization_inputs(
-                            final_state, claimed_action["issue"],
-                        ) != final_authorization.get("projection")
+                        or not _canonical_json_match(
+                            final_authorization.get("projection"),
+                            authorization_fence.get("projection"),
+                        )
+                        or not _canonical_json_match(
+                            _dispatch_authorization_inputs(
+                                final_state, claimed_action["issue"],
+                            ), final_authorization.get("projection"),
+                        )
                         or any(
                             final_state["actions"].get(prior["key"]) != prior
                             or _owner_abandonment_for_action(
@@ -8029,9 +8045,11 @@ class Coordinator:
                 )
                 if (
                         publication_state["actions"].get(key) != claimed_action
-                        or _dispatch_authorization_inputs(
-                            publication_state, claimed_action["issue"],
-                        ) != final_authorization.get("projection")
+                        or not _canonical_json_match(
+                            _dispatch_authorization_inputs(
+                                publication_state, claimed_action["issue"],
+                            ), final_authorization.get("projection"),
+                        )
                         or any(
                             publication_state["actions"].get(prior["key"]) != prior
                             or _owner_abandonment_for_action(

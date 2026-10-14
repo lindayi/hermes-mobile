@@ -774,6 +774,9 @@ Missing, mismatched, or duplicate root claims block the affected enrollment. The
 immutable abandonment command is revalidated for both current and pre-upgrade
 receipt proofs at every applicable successor and final write fence; a current
 `head_ref` never replaces that check.
+Each candidate root binding is checked against the expected binding with canonical
+JSON equality before lineage traversal; numeric aliases such as `1.0` for version
+`1` fail closed even when only one retained proof exists.
 A source-task publication fence repeats exact pull/head and source-authority checks
 after its final task, workflow, comment and root reads. It binds the enrollment's
 retained receipt proofs, abandonment records and related actions to the fresh final
@@ -784,12 +787,14 @@ PRs continue. Direct snapshots and terminal pulls remain strict.
 
 For source and reviewer publication, the coordinator re-fetches the exact pull after
 final authorization and projection checks, then rechecks the local proof projection
-before publication. This finite ordering closes changes observed during legacy
-root/task reads; it is not a remote compare-and-swap and does not claim network
-atomicity. Task occupancy and workflow reads are completed before this final pull;
-no later remote read is treated as part of that fence. A changed head, identity, or
-base blocks publication. The source reservation remains truthful and is superseded;
-a reviewer request is not claimed. Repeated polls do not replay either write.
+with canonical JSON equality before publication, so numeric aliases in the retained
+proof projection cannot pass ordinary Python dictionary equality. This finite
+ordering closes changes observed during legacy root/task reads; it is not a remote
+compare-and-swap and does not claim network atomicity. Task occupancy and workflow
+reads are completed before this final pull; no later remote read is treated as part
+of that fence. A changed head, identity, or base blocks publication. The source
+reservation remains truthful and is superseded; a reviewer request is not claimed.
+Repeated polls do not replay either write.
 Malformed retained `receipt_proofs` that are not lists deny owner-abandonment head
 authority for that PR without aborting unrelated PR work. An empty list and valid
 legacy proofs retain their existing meanings.

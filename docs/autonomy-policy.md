@@ -184,9 +184,9 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 | `deploy/cloud_coordinator.py` | `4c8ce668d216035eb79af4adfa48946159d75419d726a43faec661c402b21dbe` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
 
-### PR #109 supervised correction10 current candidate
+### PR #109 supervised correction11 current candidate
 
-Issue #108's bounded correction requires agreement between legacy summary and
+Issue #108's bounded correction10 retains agreement between legacy summary and
 detail task artifacts, reconciles every live action sharing a retained task ID
 before issue-identity filtering, and binds lineage to the retained abandoned-task
 pull identity. It revalidates the immutable root command for current and legacy
@@ -199,12 +199,14 @@ prepared records, skips its recovery and publication inputs, and retains the pre
 cursor when an owner command must be re-read.
 Unrelated PRs can still commit; the existing state compare-and-swap remains active.
 Malformed non-list retained `receipt_proofs` fail closed for that PR without blocking
-unrelated work. Correction8 and correction7 remain historical; their exact source
-digests are retained below. The current source fingerprint is:
+unrelated work. Correction11 checks every candidate root binding with canonical JSON
+equality before traversal and applies the same type-exact equality to final source and
+reviewer authorization projections. Correction8 and correction7 remain historical;
+their exact source digests are retained below. The current source fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `f4bb6b55e353e1e151125ef6e580364e0725fcdebe54745ed7f94dcaa5d5a8d9` |
+| `deploy/cloud_coordinator.py` | `c8c7e8ef85c7a9c9dd60347c8745d5f003252649b668b6d921c7e7f42a16ec77` |
 
 | Historical candidate | SHA-256 |
 | --- | --- |
