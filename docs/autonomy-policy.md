@@ -184,7 +184,7 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 | `deploy/cloud_coordinator.py` | `4c8ce668d216035eb79af4adfa48946159d75419d726a43faec661c402b21dbe` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
 
-### PR #109 supervised correction14 current candidate
+### PR #109 supervised correction15 current candidate
 
 Issue #108's bounded correction10 retains agreement between legacy summary and
 detail task artifacts, reconciles every live action sharing a retained task ID
@@ -207,14 +207,21 @@ IDs; and the enrolled repository ID in direct and isolated pull snapshots. Canon
 projections still reject identity changes between reads, but cannot replace these
 initial type checks. Correction14 also validates every individual successor proof's
 issue as an exact positive integer before comparison, even when no duplicate exists.
+Correction15 applies exact positive integer issue checks to retained proofs across
+the general source and review authorization callers. It reconciles proofs by durable
+key and task ID with canonical JSON before traversal, compares retained and live
+representations, and denies conflicting identities without discarding their claims.
+Reordered identical duplicates remain idempotent, and legacy proofs without a durable
+key retain task-bound compatibility.
 The coordinator's final fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `f624f325af72bf481c201d4d1ffe76a50f8752206bcf8811b013b32674a8b0cf` |
+| `deploy/cloud_coordinator.py` | `9b8d89a38047f3b64329a9c4c6c466fe2f90654eb9b8268ce80b997a5b5140a8` |
 
 | Historical candidate | SHA-256 |
 | --- | --- |
+| Correction14 historical pin | `f624f325af72bf481c201d4d1ffe76a50f8752206bcf8811b013b32674a8b0cf` |
 | Correction13 historical pin | `3e129cc0a17c90f876dd3a4c2b4923669988ff03b67b35e4d9be1b1c78d0d9fd` |
 | Correction12 historical pin | `fdeead9ef44de544cf7df733ae96b3be2471cf4fd0d47c62a9ad4a3cac9ef2d4` |
 | Correction11 historical pin | `c8c7e8ef85c7a9c9dd60347c8745d5f003252649b668b6d921c7e7f42a16ec77` |

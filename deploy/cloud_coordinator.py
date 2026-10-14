@@ -3087,6 +3087,45 @@ def _valid_receipt_proof(action, comments):
     )
 
 
+_RECEIPT_PROOF_FIELDS = frozenset({
+    "key", "issue", "kind", "status", "head", "task_id", "dispatch_nonce",
+    "created_at", "receipt_result", "receipt_comment_id", "receipt_created_at",
+    "receipt_body", "receipt_task_id", "receipt_session_id",
+    "receipt_completed_at", "receipt_session_completed_at", "receipt_nonce",
+    "receipt_start_head", "receipt_head", "receipt_base", "receipt_legacy_neutral",
+    "head_ref", "recorded_base_sha", "owner_abandonment_binding",
+    "owner_abandonment_attestation", "attempt", "owner_id", "repository_id",
+    "pull_id", "pull_node_id", "repair_policy_version", "repair_fingerprints",
+    "repair_fingerprints_complete", "repair_fingerprint_version",
+    "repair_target_map", "receipt_version", "main_sha", "task_type",
+})
+
+
+def _canonical_receipt_json(value):
+    try:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError):
+        return None
+
+
+def _receipt_projection(action):
+    return {
+        field: action[field] for field in _RECEIPT_PROOF_FIELDS if field in action
+    }
+
+
+def _receipt_proof_matches_live(proof, action):
+    if not isinstance(proof, dict) or not isinstance(action, dict):
+        return False
+    if any(field not in action for field in proof):
+        return False
+    return _canonical_receipt_json(proof) == _canonical_receipt_json({
+        field: action[field] for field in proof
+    })
+
+
 def _legacy_task_reservation_type(record, tasks, snapshot):
     if (not isinstance(snapshot, dict)
             or not isinstance(snapshot.get("pull"), dict)
@@ -3460,6 +3499,8 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     authorized = {initial}
     if _is_sha(enrollment.get("owner_authorized_head")):
         authorized.add(enrollment["owner_authorized_head"])
+    if type(issue) is not int or issue <= 0:
+        return initial, authorized, set()
     continuation_records = [
         recovery for _, recovery in _valid_owner_abandonment_claims(
             enrollment, actions,
@@ -3475,54 +3516,171 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     proofs = enrollment.get("receipt_proofs", [])
     if not isinstance(proofs, list):
         proofs = []
+    proof_records = []
+    for proof in proofs:
+        if not isinstance(proof, dict):
+            return initial, authorized, set()
+        proof_issue = proof.get("issue")
+        if type(proof_issue) is not int or proof_issue <= 0:
+            return initial, authorized, set()
+        if proof_issue != issue:
+            continue
+        if (("key" in proof
+             and (not isinstance(proof.get("key"), str) or not proof["key"]))
+                or not isinstance(proof.get("task_id"), str)
+                or not proof["task_id"]):
+            return initial, authorized, set()
+        proof_records.append(proof)
+
     proof_keys = {
-        proof["key"]: proof for proof in proofs
-        if isinstance(proof, dict) and proof.get("issue") == issue
-        and isinstance(proof.get("key"), str)
+        proof["key"] for proof in proof_records
+        if isinstance(proof.get("key"), str)
     }
-    proof_task_ids = {
-        proof.get("task_id") for proof in proof_keys.values()
-        if isinstance(proof.get("task_id"), str)
-    }
-    invalid_proof_keys, invalid_action_keys = set(), set()
+    proof_task_ids = {proof["task_id"] for proof in proof_records}
+    invalid_proof_keys, invalid_task_ids = set(), set()
+    proofs_by_key, proofs_by_task = {}, {}
+    for proof in proof_records:
+        if isinstance(proof.get("key"), str):
+            proofs_by_key.setdefault(proof["key"], []).append(proof)
+        proofs_by_task.setdefault(proof["task_id"], []).append(proof)
+
+    for key, records in proofs_by_key.items():
+        canonical = _canonical_receipt_json(records[0])
+        if canonical is None or any(
+                _canonical_receipt_json(record) != canonical for record in records[1:]):
+            invalid_proof_keys.add(key)
+            invalid_task_ids.update(record["task_id"] for record in records)
+    for task_id, records in proofs_by_task.items():
+        canonical = _canonical_receipt_json(records[0])
+        if (len({record.get("key") for record in records}) != 1
+                or canonical is None or any(
+                    _canonical_receipt_json(record) != canonical
+                    for record in records[1:]
+                )):
+            invalid_task_ids.add(task_id)
+            invalid_proof_keys.update(
+                record["key"] for record in records
+                if isinstance(record.get("key"), str)
+            )
+
+    for proof in proofs:
+        if type(proof["issue"]) is int and proof["issue"] != issue:
+            proof_key = proof.get("key")
+            task_id = proof.get("task_id")
+            if isinstance(proof_key, str) and proof_key in proof_keys:
+                invalid_proof_keys.add(proof_key)
+                invalid_task_ids.update(
+                    item["task_id"] for item in proofs_by_key[proof_key]
+                )
+            if isinstance(task_id, str) and task_id in proof_task_ids:
+                invalid_task_ids.add(task_id)
+                invalid_proof_keys.update(
+                    item["key"] for item in proofs_by_task[task_id]
+                )
+
+    live_records = []
     for key, candidate in actions.items():
         if not isinstance(candidate, dict):
-            invalid_action_keys.add(key)
             if key in proof_keys:
                 invalid_proof_keys.add(key)
+                invalid_task_ids.update(
+                    proof["task_id"] for proof in proofs_by_key[key]
+                )
             continue
-        related = (
-            candidate.get("issue") == issue or key in proof_keys
-            or (isinstance(candidate.get("task_id"), str)
-                and candidate["task_id"] in proof_task_ids)
+        candidate_key = candidate.get("key")
+        task_id = candidate.get("task_id")
+        receipt_like = any(
+            field in candidate
+            for field in ("receipt_result", "receipt_head", "receipt_body")
         )
-        if not related:
+        linked_keys = {
+            value for value in (key, candidate_key)
+            if isinstance(value, str) and value in proof_keys
+        }
+        linked_tasks = (
+            {task_id} if isinstance(task_id, str) and task_id in proof_task_ids
+            else set()
+        )
+        exact_issue = type(candidate.get("issue")) is int and candidate["issue"] == issue
+        aliases_issue = candidate.get("issue") == issue
+        if not linked_keys and not linked_tasks and not (
+                receipt_like and (exact_issue or aliases_issue)):
             continue
-        if candidate.get("key") != key:
-            invalid_action_keys.add(key)
-            candidate_key = candidate.get("key")
-            if isinstance(candidate_key, str) and candidate_key in proof_keys:
-                invalid_proof_keys.add(candidate_key)
-        if key in proof_keys and candidate.get("task_id") != proof_keys[key].get("task_id"):
+        if (not exact_issue or not isinstance(candidate_key, str)
+                or candidate_key != key or not isinstance(task_id, str) or not task_id):
+            invalid_proof_keys.update(linked_keys)
+            invalid_task_ids.update(linked_tasks)
+            continue
+        matching_proofs = {
+            id(proof): proof for proof in [
+                *(
+                    record for proof_key in linked_keys
+                    for record in proofs_by_key[proof_key]
+                ),
+                *(
+                    record for linked_task in linked_tasks
+                    for record in proofs_by_task[linked_task]
+                ),
+            ]
+        }.values()
+        if any(
+                (proof.get("key") is not None
+                 and proof["key"] != candidate_key)
+                or proof["task_id"] != task_id
+                or not _receipt_proof_matches_live(proof, candidate)
+                for proof in matching_proofs):
+            invalid_proof_keys.update(linked_keys)
+            invalid_proof_keys.update(
+                proof["key"] for proof in matching_proofs
+                if isinstance(proof.get("key"), str)
+            )
+            invalid_task_ids.update(linked_tasks)
+            invalid_task_ids.update(
+                proof["task_id"] for proof in matching_proofs
+            )
+            continue
+        if receipt_like and _valid_receipt_proof(candidate, comments):
+            live_records.append(candidate)
+
+    live_by_key, live_by_task = {}, {}
+    for candidate in live_records:
+        live_by_key.setdefault(candidate["key"], []).append(candidate)
+        live_by_task.setdefault(candidate["task_id"], []).append(candidate)
+    for key, records in live_by_key.items():
+        canonical = _canonical_receipt_json(_receipt_projection(records[0]))
+        if canonical is None or any(
+                _canonical_receipt_json(_receipt_projection(record)) != canonical
+                for record in records[1:]):
             invalid_proof_keys.add(key)
+            invalid_task_ids.update(record["task_id"] for record in records)
+    for task_id, records in live_by_task.items():
+        canonical = _canonical_receipt_json(_receipt_projection(records[0]))
+        if (len({record["key"] for record in records}) != 1
+                or canonical is None or any(
+                    _canonical_receipt_json(_receipt_projection(record)) != canonical
+                    for record in records[1:]
+                )):
+            invalid_task_ids.add(task_id)
+            invalid_proof_keys.update(record["key"] for record in records)
+
+    candidates_by_key = {
+        key: records[0] for key, records in proofs_by_key.items()
+        if key not in invalid_proof_keys
+    }
+    for task_id, records in proofs_by_task.items():
+        if (not isinstance(records[0].get("key"), str)
+                and task_id not in invalid_task_ids):
+            candidates_by_key[("legacy-task", task_id)] = records[0]
+    for key, records in live_by_key.items():
+        if key in invalid_proof_keys or records[0]["task_id"] in invalid_task_ids:
+            continue
+        if key in candidates_by_key:
+            continue
+        candidates_by_key[key] = records[0]
     candidates = [
-        action for action in [
-            *proofs,
-            *(
-                candidate for key, candidate in actions.items()
-                if key not in invalid_action_keys
-                and isinstance(candidate, dict)
-                and candidate.get("key") == key
-            ),
-        ]
-        if isinstance(action, dict) and action.get("issue") == issue
-        and action.get("key") not in invalid_proof_keys
-        and not any(
-            action.get("task_id") == proof.get("task_id")
-            and proof.get("key") in invalid_proof_keys
-            for proof in proof_keys.values()
-        )
-        and _valid_receipt_proof(action, comments)
+        candidate for key, candidate in candidates_by_key.items()
+        if candidate.get("task_id") not in invalid_task_ids
+        and _valid_receipt_proof(candidate, comments)
     ]
     while True:
         changed = False
@@ -9918,31 +10076,17 @@ class StateStore:
                     and status == "completed" and fields.get("receipt_result")):
                 # Persist the validated proof in the same write as completion,
                 # independently of the action that lifecycle compaction retires.
-                proof_fields = {
-                    "key", "issue", "kind", "status", "head", "task_id",
-                    "dispatch_nonce", "created_at",
-                    "receipt_result", "receipt_comment_id", "receipt_created_at",
-                    "receipt_body", "receipt_task_id", "receipt_session_id",
-                    "receipt_completed_at", "receipt_session_completed_at",
-                    "receipt_nonce", "receipt_start_head", "receipt_head", "receipt_base",
-                    "receipt_legacy_neutral", "head_ref",
-                    "recorded_base_sha",
-                    "owner_abandonment_binding", "owner_abandonment_attestation",
-                    "attempt", "owner_id", "repository_id", "pull_id", "pull_node_id",
-                    "repair_policy_version", "repair_fingerprints",
-                    "repair_fingerprints_complete", "repair_fingerprint_version",
-                    "repair_target_map",
-                }
                 proof = {
-                    field: action[field] for field in proof_fields if field in action
+                    field: action[field]
+                    for field in _RECEIPT_PROOF_FIELDS if field in action
                 }
-                # Old v1 proofs have no dispatch-main/version projection; do not
-                # invent historical bindings while preserving new v2 provenance.
-                for field in ("receipt_version", "main_sha", "task_type"):
-                    if field in action:
-                        proof[field] = action[field]
                 proofs = enrollment.setdefault("receipt_proofs", [])
-                if proof not in proofs:
+                canonical = _canonical_receipt_json(proof)
+                if (isinstance(proofs, list) and canonical is not None
+                        and not any(
+                            _canonical_receipt_json(existing) == canonical
+                            for existing in proofs if isinstance(existing, dict)
+                        )):
                     proofs.append(proof)
             if event is not None:
                 action["lifecycle_event_id"] = event["event_id"]
@@ -10044,8 +10188,27 @@ class StateStore:
             }
             changed = False
             for key, action in list(data["actions"].items()):
-                if (action.get("issue") != issue
+                if (type(action.get("issue")) is not int
+                        or action["issue"] != issue
                         or not _retirable_action(action, current_head, inactive)):
+                    continue
+                retained = enrollment.get("receipt_proofs", [])
+                related_proofs = [
+                    proof for proof in retained if isinstance(proof, dict)
+                    and (
+                        proof.get("key") == key
+                        or proof.get("key") == action.get("key")
+                        or proof.get("task_id") == action.get("task_id")
+                    )
+                ] if isinstance(retained, list) else []
+                if any(
+                        type(proof.get("issue")) is not int
+                        or proof["issue"] != issue
+                        or ("key" in proof
+                            and proof.get("key") != action.get("key"))
+                        or proof.get("task_id") != action.get("task_id")
+                        or not _receipt_proof_matches_live(proof, action)
+                        for proof in related_proofs):
                     continue
                 del data["actions"][key]
                 changed = True

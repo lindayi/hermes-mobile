@@ -311,6 +311,398 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
     assert api.fix_attempts == 1
 
 
+def _accepted_compacted_receipt_case(tmp_path, issue=16):
+    api = FakeApi(unresolved=True)
+    if issue != 16:
+        api.pull["number"] = issue
+        api.issue["number"] = issue
+        api.issue["pull_request"]["url"] = f"pull/{issue}"
+        api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+        for name in ("get", "get_all", "write"):
+            original = getattr(api, name)
+
+            def route_issue_one(route, *args, _original=original, **kwargs):
+                route = route.replace(f"/pulls/{issue}", "/pulls/16")
+                route = route.replace(f"/issues/{issue}/comments", "/issues/16/comments")
+                return _original(route, *args, **kwargs)
+
+            setattr(api, name, route_issue_one)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    path = tmp_path / "coordinator-state.json"
+    store = StateStore(path)
+    Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+    action = next(item for item in store.actions().values() if item["kind"] == "fix")
+    result_head = RESULT_HEAD
+    api.complete_task(action["task_id"], action, head_sha=result_head)
+    receipt_comment = api.comments[-1]
+    receipt_comment["body"] = receipt_comment["body"].replace(
+        "\npr=16\n", f"\npr={issue}\n",
+    )
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.unresolved = False
+    api.review_state = "APPROVED"
+    api.review_sha = result_head
+    Coordinator(api, StateStore(path), clock=lambda: 1790856540).run(apply=True)
+    enrollment_key = str(issue)
+    proof = StateStore(path).snapshot()["enrollments"][enrollment_key][
+        "receipt_proofs"
+    ][0]
+    assert cloud_coordinator._valid_receipt_proof(proof, api.comments)
+    StateStore(path).retire(
+        issue, result_head, current_main_sha=CURRENT_MAIN,
+    )
+    restarted = StateStore(path)
+    assert restarted.action(proof["key"]) is None
+    assert restarted.snapshot()["enrollments"][enrollment_key].get(
+        "owner_abandonments", [],
+    ) == []
+    assert list(restarted.snapshot()["enrollments"]) == [enrollment_key]
+    return api, restarted, proof, result_head
+
+
+def _set_receipt_issue_identity(record, value):
+    if value == "missing":
+        record.pop("issue", None)
+        receipt_issue = "None"
+    else:
+        record["issue"] = value
+        receipt_issue = str(value)
+    body = record["receipt_body"].replace(
+        next(line for line in record["receipt_body"].splitlines()
+             if line.startswith("pr=")),
+        f"pr={receipt_issue}",
+    )
+    record["receipt_body"] = body
+    return body
+
+
+@pytest.mark.parametrize(
+    ("issue", "issue_value"),
+    [
+        (16, 16.0),
+        (16, "16"),
+        (16, "missing"),
+        (16, 0),
+        (16, -1),
+        (1, True),
+    ],
+    ids=["float", "string", "missing", "zero", "negative", "bool-equals-one"],
+)
+@pytest.mark.parametrize("form", ["retained", "live", "live-and-retained"])
+def test_apply_rejects_malformed_receipt_issue_identity_in_all_forms(
+        tmp_path, issue, issue_value, form):
+    api, store, proof, result_head = _accepted_compacted_receipt_case(
+        tmp_path, issue,
+    )
+    proof = deepcopy(proof)
+    proof_body = _set_receipt_issue_identity(proof, issue_value)
+    for comment in api.comments:
+        if comment.get("id") == proof["receipt_comment_id"]:
+            comment["body"] = proof_body
+    assert cloud_coordinator._valid_receipt_proof(proof, api.comments)
+
+    def install_representation(state):
+        enrollment = state["enrollments"][str(issue)]
+        enrollment["unrelated_progress"] = {"retained": True}
+        enrollment["receipt_proofs"] = (
+            [deepcopy(proof)] if form != "live" else []
+        )
+        if form != "retained":
+            live = deepcopy(proof)
+            live["receipt_body"] = proof_body
+            state["actions"][live["key"]] = live
+
+    store._mutate(install_representation)
+    before = store.snapshot()
+    api.review_state = api.review_sha = None
+    reviewer_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    task_posts = api.task_posts
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856540,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert result["head"] == result_head
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == reviewer_writes
+    assert api.task_posts == task_posts
+    after = StateStore(store.path).snapshot()
+    if form != "retained":
+        assert after["actions"].get(proof["key"]) == before["actions"].get(
+            proof["key"],
+        )
+    assert after["enrollments"][str(issue)]["attempts"] == before[
+        "enrollments"
+    ][str(issue)]["attempts"]
+    assert after["enrollments"][str(issue)].get("receipt_proofs", []) == before[
+        "enrollments"
+    ][str(issue)].get("receipt_proofs", [])
+    assert after["enrollments"][str(issue)].get(
+        "owner_abandonments", [],
+    ) == before["enrollments"][str(issue)].get("owner_abandonments", [])
+    assert after["enrollments"][str(issue)]["unrelated_progress"] == before[
+        "enrollments"
+    ][str(issue)]["unrelated_progress"]
+    writes_after = deepcopy(api.writes)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856540).run(apply=True)
+    assert api.writes == writes_after
+    assert api.task_posts == task_posts
+
+
+@pytest.mark.parametrize("issue", [1, 16])
+def test_apply_exact_positive_receipt_identity_still_publishes_reviewer_request(
+        tmp_path, issue):
+    api, store, proof, result_head = _accepted_compacted_receipt_case(
+        tmp_path, issue,
+    )
+    api.review_state = api.review_sha = None
+    writes = deepcopy(api.writes)
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856540,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert result["head"] == result_head
+    reviewer_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    assert len(reviewer_writes) == 1
+    assert reviewer_writes[0][1]["reviewers"] == [
+        "copilot-pull-request-reviewer[bot]",
+    ]
+    assert len(api.writes) > len(writes)
+    assert StateStore(store.path).snapshot()["enrollments"][str(issue)][
+        "receipt_proofs"
+    ][0] == proof
+
+
+@pytest.mark.parametrize("conflict", ["same-key", "same-task"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_apply_rejects_conflicting_retained_receipts_in_both_orders(
+        tmp_path, conflict, reverse):
+    api, store, proof, _ = _accepted_compacted_receipt_case(tmp_path)
+    duplicate = deepcopy(proof)
+    receipt = next(
+        comment for comment in api.comments
+        if comment.get("id") == proof["receipt_comment_id"]
+    )
+    if conflict == "same-key":
+        duplicate_task = "conflicting-task"
+        duplicate_key = proof["key"]
+    else:
+        duplicate_task = proof["task_id"]
+        duplicate_key = "conflicting-key"
+    nonce = "conflicting-nonce"
+    session = f"session-{duplicate_task}"
+    duplicate_head = NEXT_RESULT_HEAD
+    duplicate.update(
+        key=duplicate_key,
+        task_id=duplicate_task,
+        receipt_task_id=duplicate_task,
+        dispatch_nonce=nonce,
+        receipt_nonce=nonce,
+        receipt_session_id=session,
+        receipt_head=duplicate_head,
+        receipt_comment_id=receipt["id"] + 1,
+        receipt_created_at="2026-10-01T12:05:00Z",
+        receipt_completed_at="2026-10-01T12:05:30Z",
+        receipt_session_completed_at="2026-10-01T12:05:30Z",
+    )
+    duplicate["receipt_body"] = (
+        "Hermes-Task-Receipt: v1\n"
+        f"nonce={nonce}\n"
+        f"task={duplicate_task}\n"
+        f"session={session}\n"
+        "pr=16\n"
+        f"start_head={duplicate['head']}\n"
+        f"head={duplicate_head}\n"
+        f"base={duplicate['receipt_base']}\n"
+        f"result={duplicate['receipt_result']}"
+    )
+    api.comments.append({
+        **deepcopy(receipt),
+        "id": duplicate["receipt_comment_id"],
+        "body": duplicate["receipt_body"],
+        "created_at": duplicate["receipt_created_at"],
+        "updated_at": duplicate["receipt_created_at"],
+    })
+    assert cloud_coordinator._valid_receipt_proof(proof, api.comments)
+    assert cloud_coordinator._valid_receipt_proof(duplicate, api.comments)
+    proofs = [proof, duplicate]
+    if reverse:
+        proofs.reverse()
+
+    def install_conflict(state):
+        state["enrollments"]["16"]["receipt_proofs"] = deepcopy(proofs)
+        state["enrollments"]["16"]["unrelated_progress"] = {
+            "retained": "unchanged",
+        }
+
+    store._mutate(install_conflict)
+    api.pull["head"]["sha"] = duplicate_head
+    api.head_sha = duplicate_head
+    api.review_state = api.review_sha = None
+    before = store.snapshot()
+    reviewer_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    task_posts = api.task_posts
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856540,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert result["head"] == duplicate_head
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == reviewer_writes
+    assert api.task_posts == task_posts
+    after = StateStore(store.path).snapshot()
+    assert after["enrollments"]["16"]["receipt_proofs"] == before[
+        "enrollments"
+    ]["16"]["receipt_proofs"]
+    assert after["enrollments"]["16"]["unrelated_progress"] == before[
+        "enrollments"
+    ]["16"]["unrelated_progress"]
+    writes_after = deepcopy(api.writes)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856540).run(apply=True)
+    assert api.writes == writes_after
+    assert api.task_posts == task_posts
+
+
+def test_apply_accepts_canonical_reordered_receipt_duplicates(tmp_path):
+    api, store, proof, result_head = _accepted_compacted_receipt_case(tmp_path)
+    reordered = dict(reversed(list(proof.items())))
+    assert reordered == proof
+
+    def install_duplicate(state):
+        state["enrollments"]["16"]["receipt_proofs"] = [
+            deepcopy(proof), reordered,
+        ]
+
+    store._mutate(install_duplicate)
+    api.review_state = api.review_sha = None
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856540,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert result["head"] == result_head
+    assert len([
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]) == 1
+
+
+def test_apply_rejects_receipt_proof_with_unknown_durable_key(tmp_path):
+    api, store, proof, result_head = _accepted_compacted_receipt_case(tmp_path)
+    malformed = deepcopy(proof)
+    malformed["key"] = None
+    assert cloud_coordinator._valid_receipt_proof(malformed, api.comments)
+    store._mutate(
+        lambda state: state["enrollments"]["16"].update(
+            receipt_proofs=[deepcopy(malformed)],
+        ),
+    )
+    api.review_state = api.review_sha = None
+    reviewer_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    task_posts = api.task_posts
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856540,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert result["head"] == result_head
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == reviewer_writes
+    assert api.task_posts == task_posts
+    after = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert after["receipt_proofs"] == [malformed]
+    assert after["attempts"] == store.snapshot()["enrollments"]["16"]["attempts"]
+
+
+@pytest.mark.parametrize("current_head", [RESULT_HEAD, NEXT_RESULT_HEAD])
+def test_apply_rejects_conflicting_live_projection_of_retained_receipt(
+        tmp_path, current_head):
+    api, store, proof, _ = _accepted_compacted_receipt_case(tmp_path)
+    live = deepcopy(proof)
+    live_task = "conflicting-live-task"
+    live_nonce = "conflicting-live-nonce"
+    live_session = f"session-{live_task}"
+    live_comment_id = proof["receipt_comment_id"] + 1
+    live_body = (
+        "Hermes-Task-Receipt: v1\n"
+        f"nonce={live_nonce}\n"
+        f"task={live_task}\n"
+        f"session={live_session}\n"
+        "pr=16\n"
+        f"start_head={live['head']}\n"
+        f"head={NEXT_RESULT_HEAD}\n"
+        f"base={live['receipt_base']}\n"
+        f"result={live['receipt_result']}"
+    )
+    live.update(
+        task_id=live_task,
+        receipt_task_id=live_task,
+        dispatch_nonce=live_nonce,
+        receipt_nonce=live_nonce,
+        receipt_session_id=live_session,
+        receipt_head=NEXT_RESULT_HEAD,
+        receipt_comment_id=live_comment_id,
+        receipt_body=live_body,
+        receipt_created_at="2026-10-01T12:05:00Z",
+        receipt_completed_at="2026-10-01T12:05:30Z",
+        receipt_session_completed_at="2026-10-01T12:05:30Z",
+    )
+    api.comments.append({
+        "id": live_comment_id, "user": {"id": COPILOT_AGENT},
+        "body": live_body, "created_at": live["receipt_created_at"],
+        "updated_at": live["receipt_created_at"],
+    })
+    assert cloud_coordinator._valid_receipt_proof(proof, api.comments)
+    assert cloud_coordinator._valid_receipt_proof(live, api.comments)
+    store._mutate(
+        lambda state: state["actions"].__setitem__(live["key"], deepcopy(live)),
+    )
+    api.pull["head"]["sha"] = current_head
+    api.head_sha = current_head
+    api.review_state = api.review_sha = None
+    before = store.snapshot()
+    task_posts = api.task_posts
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856540,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert result["head"] == current_head
+    assert not [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    assert api.task_posts == task_posts
+    after = StateStore(store.path).snapshot()
+    assert after["actions"][live["key"]] == before["actions"][live["key"]]
+    assert after["enrollments"]["16"]["receipt_proofs"] == before[
+        "enrollments"
+    ]["16"]["receipt_proofs"]
+    assert after["enrollments"]["16"]["attempts"] == before[
+        "enrollments"
+    ]["16"]["attempts"]
+
+
 def test_sha_bound_enrollment_rejects_unproven_or_unrelated_result_heads(tmp_path):
     api = FakeApi(unresolved=True)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
