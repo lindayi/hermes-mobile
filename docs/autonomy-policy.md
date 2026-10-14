@@ -184,7 +184,7 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 | `deploy/cloud_coordinator.py` | `4c8ce668d216035eb79af4adfa48946159d75419d726a43faec661c402b21dbe` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
 
-### PR #109 supervised correction15 current candidate
+### PR #109 supervised correction16 current candidate
 
 Issue #108's bounded correction10 retains agreement between legacy summary and
 detail task artifacts, reconciles every live action sharing a retained task ID
@@ -213,14 +213,21 @@ key and task ID with canonical JSON before traversal, compares retained and live
 representations, and denies conflicting identities without discarding their claims.
 Reordered identical duplicates remain idempotent, and legacy proofs without a durable
 key retain task-bound compatibility.
+Correction16 adds a final identity recheck for every planned enrolled pull before
+the scan commit, even when no optional starter-source proof exists. A valid open
+replacement identity isolates only that pull's prepared records and writes, while
+malformed identities remain strict and unrelated pulls continue. Owner commands for
+the isolated pull remain unconsumed until identity is restored and the command is
+revalidated.
 The coordinator's final fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `9b8d89a38047f3b64329a9c4c6c466fe2f90654eb9b8268ce80b997a5b5140a8` |
+| `deploy/cloud_coordinator.py` | `6a8506a7160acdf3f8611aa8c08bcd744bd5e283b87d00ba7798b5d6533678f7` |
 
 | Historical candidate | SHA-256 |
 | --- | --- |
+| Correction15 historical pin | `9b8d89a38047f3b64329a9c4c6c466fe2f90654eb9b8268ce80b997a5b5140a8` |
 | Correction14 historical pin | `f624f325af72bf481c201d4d1ffe76a50f8752206bcf8811b013b32674a8b0cf` |
 | Correction13 historical pin | `3e129cc0a17c90f876dd3a4c2b4923669988ff03b67b35e4d9be1b1c78d0d9fd` |
 | Correction12 historical pin | `fdeead9ef44de544cf7df733ae96b3be2471cf4fd0d47c62a9ad4a3cac9ef2d4` |

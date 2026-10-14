@@ -83,7 +83,11 @@ def test_accepted_receipt_handoff_uses_fresh_scanned_main(tmp_path, monkeypatch,
         return value
     monkeypatch.setattr(api, "get", get)
     graphql = list(api.graphql_writes)
-    coordinator.run(apply=True)
+    if hazard == "repo":
+        with pytest.raises(CoordinatorError, match="Pull request identity"):
+            coordinator.run(apply=True)
+    else:
+        coordinator.run(apply=True)
     action = store.action(fix["key"])
     if hazard is None:
         assert action["handoff_state"] == "done"
@@ -5792,6 +5796,118 @@ def test_prepared_action_transition_isolated_after_identity_swap(tmp_path):
     assert "PR #17" in new_writes[0][1]["prompt"]
 
 
+@pytest.mark.parametrize("identity_swap", [False, True], ids=["unchanged", "replacement"])
+def test_prepared_action_transition_isolated_after_plan_without_initial_source(
+        tmp_path, monkeypatch, identity_swap):
+    from copy import deepcopy
+
+    api, store, neutral = _owner_abandonment_case(tmp_path)
+    api.comments[:] = [
+        comment for comment in api.comments if comment.get("id") != 7771
+    ]
+    store._mutate(
+        lambda state: state["actions"][neutral["key"]].update(status="sending"),
+    )
+    unrelated_pull = _add_unrelated_enrolled_pull(api, store)
+    unrelated_pull["head"]["ref"] = "topic-17"
+    _bind_unrelated_task_artifacts(api)
+    before = StateStore(store.path).snapshot()
+    before_issue = _pull_issue_state(before, 16)
+    before_action = deepcopy(before["actions"][neutral["key"]])
+    before_writes = len(api.writes)
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+        owner_user_id=str(OWNER),
+    )
+    original_build = coordinator._build_plan
+    planned = {}
+
+    def build_plan(*, apply):
+        plan = original_build(apply=apply)
+        assert plan["owner_recoveries"] == []
+        planned["initial_sources"] = [
+            snapshot.get("initial_source") for snapshot in plan["snapshots"]
+        ]
+        planned["action_status"] = coordinator.store._prepared["actions"][
+            neutral["key"]
+        ]["status"]
+        if identity_swap:
+            api.pull = deepcopy(api.pull)
+            api.pull["id"] += 1
+        return plan
+
+    monkeypatch.setattr(coordinator, "_build_plan", build_plan)
+    result = coordinator.run(apply=True)
+    plans = {item["issue"]: item for item in result["pull_requests"]}
+    state = StateStore(store.path).snapshot()
+
+    assert planned["initial_sources"] == [None, None]
+    assert planned["action_status"] == "uncertain"
+    if identity_swap:
+        assert _pull_issue_state(state, 16) == before_issue
+        assert state["actions"][neutral["key"]] == before_action
+        assert plans[16]["reasons"] == ["pull-identity"]
+    else:
+        assert _pull_issue_state(state, 16) != before_issue
+        assert state["actions"][neutral["key"]]["status"] == "uncertain"
+    assert plans[17]["repair_requested"] is True
+    assert any(
+        route == "agents/repos/lindayi/hermes-mobile/tasks"
+        and "PR #17" in body.get("prompt", "")
+        for route, body in api.writes[before_writes:]
+    )
+
+
+def test_prepared_receipt_isolated_after_plan_without_initial_source(
+        tmp_path, monkeypatch):
+    from copy import deepcopy
+
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+    fix = next(action for action in store.actions().values()
+               if action["kind"] == "fix")
+    api.complete_task(fix["task_id"], fix, head_sha=RESULT_HEAD)
+    api.head_sha = RESULT_HEAD
+    api.pull["head"]["sha"] = RESULT_HEAD
+    api.unresolved = False
+    api.review_state = "APPROVED"
+    api.review_sha = RESULT_HEAD
+    api.review_submitted_at = "2026-10-01T12:04:01Z"
+    before = StateStore(store.path).snapshot()
+    before_issue = _pull_issue_state(before, 16)
+    before_writes = deepcopy(api.writes)
+    before_posts = api.task_posts
+    coordinator = Coordinator(api, StateStore(store.path), clock=lambda: 1790856540)
+    original_build = coordinator._build_plan
+    planned = {}
+
+    def build_plan(*, apply):
+        plan = original_build(apply=apply)
+        assert plan["owner_recoveries"] == []
+        planned["initial_source"] = plan["snapshots"][0].get("initial_source")
+        planned["receipt_result"] = coordinator.store._prepared["actions"][
+            fix["key"]
+        ].get("receipt_result")
+        api.pull = deepcopy(api.pull)
+        api.pull["id"] += 1
+        return plan
+
+    monkeypatch.setattr(coordinator, "_build_plan", build_plan)
+    result = coordinator.run(apply=True)
+    state = StateStore(store.path).snapshot()
+
+    assert planned["initial_source"] is None
+    assert planned["receipt_result"] == "ready"
+    assert result["pull_requests"][0]["reasons"] == ["pull-identity"]
+    assert _pull_issue_state(state, 16) == before_issue
+    assert not any(
+        route.endswith("/requested_reviewers")
+        for route, _ in api.writes[len(before_writes):]
+    )
+    assert api.task_posts == before_posts
+
+
 def test_identity_blocked_commands_do_not_defer_other_pr_consumption(
         tmp_path, monkeypatch):
     api, store, _ = _owner_abandonment_case(tmp_path)
@@ -5862,6 +5978,135 @@ def test_identity_blocked_commands_do_not_defer_other_pr_consumption(
     assert StateStore(store.path).snapshot()["cursor"] == before["cursor"]
     assert api.writes == writes
     assert api.task_posts == task_posts
+
+
+def test_no_source_identity_fence_defers_owner_recovery_and_consumes_other_pr_commands(
+        tmp_path, monkeypatch):
+    from copy import deepcopy
+
+    api, store, _ = _owner_abandonment_case(tmp_path)
+    unrelated_pull = _add_unrelated_enrolled_pull(api, store)
+    unrelated_pull["head"]["ref"] = "topic-17"
+    _bind_unrelated_task_artifacts(api)
+    original_get_all = api.get_all
+    commands = [
+        {
+            "id": 8881 + index, "user": {"id": OWNER},
+            "body": f"/hermes enroll {api.head_sha}",
+            "created_at": "2026-10-01T12:10:00Z",
+            "updated_at": updated_at,
+        }
+        for index, updated_at in enumerate([
+            "2026-10-01T12:10:00Z",
+            "2026-10-01T12:11:00Z",
+        ])
+    ]
+
+    def get_all(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments"):
+            return deepcopy(commands)
+        return original_get_all(route, collection=collection)
+
+    api.get_all = get_all
+    before = StateStore(store.path).snapshot()
+    before_issue = _pull_issue_state(before, 16)
+    before_writes = len(api.writes)
+    before_graphql_writes = len(api.graphql_writes)
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+        owner_user_id=str(OWNER),
+    )
+    original_build = coordinator._build_plan
+    planned = {}
+
+    def build_plan(*, apply):
+        plan = original_build(apply=apply)
+        planned["initial_sources"] = [
+            snapshot.get("initial_source") for snapshot in plan["snapshots"]
+        ]
+        planned["owner_recoveries"] = deepcopy(plan["owner_recoveries"])
+        api.pull = deepcopy(api.pull)
+        api.pull["id"] += 1
+        return plan
+
+    monkeypatch.setattr(coordinator, "_build_plan", build_plan)
+    result = coordinator.run(apply=True)
+    plans = {item["issue"]: item for item in result["pull_requests"]}
+    state = StateStore(store.path).snapshot()
+
+    assert planned["initial_sources"] == [None, None]
+    assert planned["owner_recoveries"]
+    assert plans[16]["reasons"] == ["pull-identity"]
+    assert plans[16]["repair_requested"] is False
+    assert plans[17]["repair_requested"] is True
+    assert _pull_issue_state(state, 16) == before_issue
+    assert state["cursor"] == before["cursor"]
+    assert not StateStore(store.path).event_seen(7771)
+    assert all(StateStore(store.path).event_seen(item["id"]) for item in commands)
+    new_writes = api.writes[before_writes:]
+    assert len(new_writes) == 1
+    assert new_writes[0][0] == "agents/repos/lindayi/hermes-mobile/tasks"
+    assert "PR #17" in new_writes[0][1]["prompt"]
+    assert len(api.graphql_writes) == before_graphql_writes
+
+    retry_writes = len(api.writes)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+        owner_user_id=str(OWNER),
+    ).run(apply=True)
+    assert not StateStore(store.path).event_seen(7771)
+    assert StateStore(store.path).snapshot()["cursor"] == before["cursor"]
+    assert len(api.writes) == retry_writes
+
+    api.pull["id"] = before["enrollments"]["16"]["pull_id"]
+    recovered = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+        owner_user_id=str(OWNER),
+    ).run(apply=True)
+    assert {item["issue"]: item for item in recovered["pull_requests"]}[
+        16
+    ]["repair_requested"] is True
+    assert StateStore(store.path).event_seen(7771)
+
+
+@pytest.mark.parametrize("identity", ["boolean-id", "missing-node"])
+def test_no_source_identity_fence_keeps_malformed_live_identity_strict(
+        tmp_path, monkeypatch, identity):
+    from copy import deepcopy
+
+    api, store, neutral = _owner_abandonment_case(tmp_path)
+    api.comments[:] = [
+        comment for comment in api.comments if comment.get("id") != 7771
+    ]
+    store._mutate(
+        lambda state: state["actions"][neutral["key"]].update(status="sending"),
+    )
+    before = StateStore(store.path).snapshot()
+    writes = deepcopy(api.writes)
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+        owner_user_id=str(OWNER),
+    )
+    original_build = coordinator._build_plan
+
+    def build_plan(*, apply):
+        plan = original_build(apply=apply)
+        assert all(
+            snapshot.get("initial_source") is None
+            for snapshot in plan["snapshots"]
+        )
+        api.pull = deepcopy(api.pull)
+        if identity == "boolean-id":
+            api.pull["id"] = True
+        else:
+            api.pull["node_id"] = None
+        return plan
+
+    monkeypatch.setattr(coordinator, "_build_plan", build_plan)
+    with pytest.raises(CoordinatorError, match="Pull request identity"):
+        coordinator.run(apply=True)
+    assert StateStore(store.path).snapshot() == before
+    assert api.writes == writes
 
 
 def test_pull_isolation_keeps_concurrent_state_compare_and_swap(tmp_path):

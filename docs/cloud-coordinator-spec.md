@@ -39,16 +39,19 @@ valid identity mismatch on an open pull is isolated as unscoped so other enrolle
 pulls can progress; that pull receives no writes. Malformed IDs and repository or
 base mismatches are not isolated.
 
-The final starter-source fence applies the same per-pull isolation. If identity
-changes after planning, discard only that pull's prepared enrollment, actions,
-outbox, retirement and lifecycle changes, and omit its commands, recoveries,
-observations, source proof, revocations and lifecycle events from the commit.
-Keep the state-store preparation baseline unchanged so the ordinary compare-and-
-swap still rejects concurrent durable changes. If an owner command for that pull
-was read in the scan, retain the old global cursor and do not consume that pull's
-command event IDs; the next cold scan must reread and revalidate the command rather
-than silently losing its authority. Consume other pulls' processed command IDs
-once, including stale or invalid commands. Other eligible pulls may still commit and advance.
+The final pre-commit pull-identity fence applies to every planned enrolled pull,
+including manual enrollments without starter-source evidence. If a structurally
+valid, open pull's identity changes after planning, discard only that pull's
+prepared enrollment, actions, outbox, retirement and lifecycle changes, and omit
+its commands, recoveries, observations, source proof, revocations and lifecycle
+events from the commit. The additional starter-source fence still validates its
+head and source proof. Keep the state-store preparation baseline unchanged so the
+ordinary compare-and-swap still rejects concurrent durable changes. If an owner
+command for that pull was read in the scan, retain the old global cursor and do
+not consume that pull's command event IDs; the next cold scan must reread and
+revalidate the command rather than silently losing its authority. Consume other
+pulls' processed command IDs once, including stale or invalid commands. Other
+eligible pulls may still commit and advance.
 Direct snapshots and terminal identity mismatches remain strict.
 
 Extended starter admission additionally requires a strict positive integer comment
@@ -787,9 +790,10 @@ A source-task publication fence repeats exact pull/head and source-authority che
 after its final task, workflow, comment and root reads. It binds the enrollment's
 retained receipt proofs, abandonment records and related actions to the fresh final
 state before posting; unrelated PR state does not widen that fence. The commit-time
-starter-source fence permits isolation only for a structurally valid, open PR with
+pull-identity fence permits isolation only for a structurally valid, open PR with
 a changed pull identity, so that PR receives no state or writes while other enrolled
-PRs continue. Direct snapshots and terminal pulls remain strict.
+PRs continue. It applies regardless of optional starter-source proof. Direct
+snapshots, malformed identities and terminal pulls remain strict.
 
 For source and reviewer publication, the coordinator re-fetches the exact pull after
 final authorization and projection checks, then rechecks the local proof projection

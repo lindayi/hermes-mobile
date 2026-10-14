@@ -4059,6 +4059,20 @@ def _pull_identity(pull, binding):
             and pull.get("node_id") == binding["pull_node_id"])
 
 
+def _pull_identity_change_isolatable(pull, enrollment):
+    return (
+        isinstance(pull, dict)
+        and pull.get("state") == "open"
+        and pull.get("merged") is False
+        and type(pull.get("number")) is int and pull["number"] > 0
+        and type(pull.get("id")) is int and pull["id"] > 0
+        and isinstance(pull.get("node_id"), str) and bool(pull["node_id"])
+        and type(enrollment.get("pull_id")) is int and enrollment["pull_id"] > 0
+        and isinstance(enrollment.get("pull_node_id"), str)
+        and bool(enrollment["pull_node_id"])
+    )
+
+
 def _legacy_neutral_receipt_recovery_binding(action, pull, number, expected_base_sha):
     base = pull.get("base") if isinstance(pull, dict) else None
     return (
@@ -4652,20 +4666,8 @@ class Coordinator:
         ):
             raise CoordinatorError("Pull request identity did not match enrollment")
         if not _pull_identity(pull, enrollment):
-            unrelated_active = (
-                allow_unrelated_active
-                and pull.get("state") == "open"
-                and pull.get("merged") is False
-                and type(pull.get("number")) is int and pull["number"] > 0
-                and type(pull.get("id")) is int and pull["id"] > 0
-                and isinstance(pull.get("node_id"), str)
-                and bool(pull["node_id"])
-                and type(enrollment.get("pull_id")) is int
-                and enrollment["pull_id"] > 0
-                and isinstance(enrollment.get("pull_node_id"), str)
-                and bool(enrollment["pull_node_id"])
-            )
-            if not unrelated_active:
+            if not (allow_unrelated_active
+                    and _pull_identity_change_isolatable(pull, enrollment)):
                 raise CoordinatorError("Pull request identity did not match enrollment")
             return {
                 "issue": number, "enrollment": enrollment, "pull": pull,
@@ -8586,12 +8588,53 @@ class Coordinator:
                 raise CoordinatorError("Initial starter source evidence changed before state commit")
         return identity_blocked
 
+    def _fence_pull_identities(self, plan):
+        identity_blocked = set()
+        for item in plan["pull_requests"]:
+            number = item["issue"]
+            if item.get("identity_invalid"):
+                identity_blocked.add(number)
+                continue
+            enrollment = plan["enrollments"].get(str(number))
+            if not isinstance(enrollment, dict):
+                raise CoordinatorError("Pull enrollment was unavailable before state commit")
+            if not {"pull_id", "pull_node_id", "repository_id"}.issubset(enrollment):
+                raise CoordinatorError(
+                    "Unsupported legacy enrollment: missing pull/repository identity; "
+                    "automatic migration is not supported; preserve state and stop activation"
+                )
+            current = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
+            head = current.get("head") if isinstance(current, dict) else None
+            base = current.get("base") if isinstance(current, dict) else None
+            if not isinstance(head, dict) or not isinstance(base, dict):
+                raise CoordinatorError("Pull request data was incomplete")
+            if not _is_sha(head.get("sha")):
+                raise CoordinatorError("Pull request head was not a commit SHA")
+            if (
+                    type(number) is not int or type(enrollment.get("issue")) is not int
+                    or enrollment["issue"] != number
+                    or type(enrollment.get("repository_id")) is not int
+                    or enrollment["repository_id"] != REPOSITORY_ID
+                    or not _github_identity(head.get("repo"), REPOSITORY_ID)
+                    or not _github_identity(base.get("repo"), REPOSITORY_ID)
+                    or base.get("ref") != MAIN_BRANCH
+                    or not _is_sha(base.get("sha"))):
+                raise CoordinatorError("Pull request identity did not match enrollment")
+            if _pull_identity(current, enrollment):
+                continue
+            if _pull_identity_change_isolatable(current, enrollment):
+                identity_blocked.add(number)
+                continue
+            raise CoordinatorError("Pull request identity did not match enrollment")
+        return identity_blocked
+
     def _apply(self, plan, *, after_commit=None, acknowledgements=None):
         self._fence_starter_admissions(plan.get("starter_admissions", ()))
         identity_blocked = {
             item["issue"] for item in plan["pull_requests"]
             if item.get("identity_invalid")
         }
+        identity_blocked.update(self._fence_pull_identities(plan))
         identity_blocked.update(self._fence_starter_sources(
             plan.get("starter_sources", ()), plan["enrollments"], plan["main_sha"],
         ))
