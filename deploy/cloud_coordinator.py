@@ -3515,6 +3515,61 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
             return initial, authorized, blocked
 
 
+def _dispatch_authorization_inputs(state, issue):
+    if not isinstance(state, dict):
+        return None
+    enrollments = state.get("enrollments")
+    enrollment = enrollments.get(str(issue)) if isinstance(enrollments, dict) else None
+    actions = state.get("actions")
+    if not isinstance(enrollment, dict) or not isinstance(actions, dict):
+        return None
+    proofs = enrollment.get("receipt_proofs")
+    proof_records = proofs if isinstance(proofs, list) else []
+    proof_keys = {
+        proof["key"] for proof in proof_records
+        if isinstance(proof, dict) and isinstance(proof.get("key"), str)
+    }
+    proof_task_ids = {
+        proof["task_id"] for proof in proof_records
+        if isinstance(proof, dict) and isinstance(proof.get("task_id"), str)
+    }
+    abandonments = enrollment.get("owner_abandonments")
+    abandonment_records = abandonments if isinstance(abandonments, list) else []
+    abandonment_keys = {
+        record["action_key"] for record in abandonment_records
+        if isinstance(record, dict) and isinstance(record.get("action_key"), str)
+    }
+    relevant_actions = {
+        key: deepcopy(action)
+        for key, action in actions.items()
+        if key in proof_keys | abandonment_keys
+        or (
+            isinstance(action, dict)
+            and (
+                (
+                    isinstance(action.get("task_id"), str)
+                    and action["task_id"] in proof_task_ids
+                )
+                or (
+                    action.get("issue") == issue
+                    and ("receipt_result" in action or "receipt_head" in action)
+                )
+            )
+        )
+    }
+    return {
+        "enrollment": {
+            field: deepcopy(enrollment.get(field))
+            for field in (
+                "active", "issue", "repository_id", "pull_id", "pull_node_id",
+                "base", "authorized_head", "owner_authorized_head",
+                "owner_abandonments", "receipt_proofs",
+            )
+        },
+        "actions": relevant_actions,
+    }
+
+
 def _valid_owner_abandonment_claims(enrollment, actions):
     records = enrollment.get("owner_abandonments", []) if isinstance(
         enrollment, dict,
@@ -7228,10 +7283,14 @@ class Coordinator:
             raise CoordinatorError("Owner abandonment reservation changed before commit")
 
     def _authorized_dispatch_head(self, issue, head, base_sha=None, *,
-                                  receipt_action=None, continuation_action=None):
-        enrollment = self.store.snapshot()["enrollments"].get(str(issue))
+                                  receipt_action=None, continuation_action=None,
+                                  proof_fence=None, require_base_match=False):
+        state = self.store.snapshot()
+        enrollment = state["enrollments"].get(str(issue))
         if not enrollment or not enrollment.get("active"):
             return False
+        if proof_fence is not None:
+            proof_fence["projection"] = _dispatch_authorization_inputs(state, issue)
         if enrollment.get("authorized_head") is None:
             return True
         try:
@@ -7245,9 +7304,13 @@ class Coordinator:
         if not isinstance(pull, dict):
             return False
         pull_head = pull.get("head")
+        pull_base = pull.get("base")
         if (not isinstance(pull_head, dict)
                 or not _pull_identity(pull, enrollment)
                 or pull_head.get("sha") != head
+                or not isinstance(pull_base, dict)
+                or (require_base_match and base_sha is not None
+                    and pull_base.get("sha") != base_sha)
                 or not self._owner_abandonment_head_proven({
                     "issue": issue, "pull": pull, "comments": comments,
                 })):
@@ -7287,9 +7350,12 @@ class Coordinator:
         if self.store.action(key) is not None:
             return "reserved"
         pull = self._fence_pull(action["issue"], action["head"], action["main_sha"])
+        authorization_fence = {}
         if (not _pull_identity(pull, action) or pull.get("draft") is not False
                 or not self._authorized_dispatch_head(
-                    action["issue"], action["head"], pull["base"]["sha"])):
+                    action["issue"], action["head"], pull["base"]["sha"],
+                    proof_fence=authorization_fence,
+                )):
             return "superseded"
         reviews = _rest_list(
             self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
@@ -7334,6 +7400,23 @@ class Coordinator:
                         return "agent-running"
             except CoordinatorError:
                 return "incomplete"
+        current = self._fence_pull(
+            action["issue"], action["head"], action["main_sha"],
+        )
+        final_authorization = {}
+        if (not _pull_identity(current, action) or current.get("draft") is not False
+                or not self._authorized_dispatch_head(
+                    action["issue"], action["head"], current["base"]["sha"],
+                    proof_fence=final_authorization,
+                    require_base_match=True,
+                )):
+            return "superseded"
+        final_state = StateStore(self.store.path).snapshot()
+        final_inputs = _dispatch_authorization_inputs(final_state, action["issue"])
+        if (final_authorization.get("projection")
+                != authorization_fence.get("projection")
+                or final_inputs != final_authorization.get("projection")):
+            return "superseded"
         if not self.store.claim_action(key, action):
             return "reserved"
         try:
@@ -7595,10 +7678,12 @@ class Coordinator:
             return "draft"
         if not _pull_identity(current, action):
             return "superseded"
+        authorization_fence = {}
         if (not self._authorized_dispatch_head(
                     action["issue"], action["head"],
                     current.get("base", {}).get("sha"),
                     continuation_action=action,
+                    proof_fence=authorization_fence,
                 )
                 or (self.store.snapshot()["enrollments"].get(
                     str(action["issue"]), {},
@@ -7811,11 +7896,39 @@ class Coordinator:
                                 }, prior, abandonment, final_tasks)):
                         self.store.update_action(key, "superseded")
                         return "agent-running"
+                final_pull = self._fence_pull(
+                    claimed_action["issue"], claimed_action["head"],
+                    claimed_action["main_sha"],
+                    allow_historical_reconciliation=True,
+                    allow_historical_dirty=neutral,
+                    expected_base_sha=(
+                        claimed_action.get("recorded_base_sha") if neutral
+                        else continuation_record.get("base_sha")
+                        if continuation_record is not None else None
+                    ),
+                )
+                final_authorization = {}
+                if (not _pull_identity(final_pull, claimed_action)
+                        or final_pull.get("head", {}).get("ref") != branch
+                        or not self._authorized_dispatch_head(
+                            claimed_action["issue"], claimed_action["head"],
+                            final_pull.get("base", {}).get("sha"),
+                            continuation_action=claimed_action,
+                            proof_fence=final_authorization,
+                            require_base_match=True,
+                        )):
+                    self.store.update_action(key, "superseded")
+                    return "superseded"
                 final_state = StateStore(self.store.path).snapshot()
                 final_enrollment = final_state["enrollments"].get(
                     str(claimed_action["issue"]), {},
                 )
                 if (final_state["actions"].get(key) != claimed_action
+                        or final_authorization.get("projection")
+                            != authorization_fence.get("projection")
+                        or _dispatch_authorization_inputs(
+                            final_state, claimed_action["issue"],
+                        ) != final_authorization.get("projection")
                         or any(
                             final_state["actions"].get(prior["key"]) != prior
                             or _owner_abandonment_for_action(

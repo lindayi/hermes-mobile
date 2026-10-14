@@ -758,6 +758,12 @@ Missing, mismatched, or duplicate root claims block the affected enrollment. The
 immutable abandonment command is revalidated for both current and pre-upgrade
 receipt proofs at every applicable successor and final write fence; a current
 `head_ref` never replaces that check.
+A source-task publication fence repeats exact pull/head and source-authority checks
+after its final task, workflow, comment and root reads. It binds the enrollment's
+retained receipt proofs, abandonment records and related actions to the fresh final
+state before posting; unrelated PR state does not widen that fence. Reviewer
+requests repeat pull identity and source authority after their late task/comment
+reads and before reserving the non-SHA-bound reviewer request.
 A same-head
 ready receipt is still a valid direct continuation, but it cannot hide a cycle in a
 later edge. This only proves terminal occupancy; ordinary source authorization,

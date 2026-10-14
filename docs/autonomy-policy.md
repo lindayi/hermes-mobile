@@ -184,7 +184,7 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 | `deploy/cloud_coordinator.py` | `4c8ce668d216035eb79af4adfa48946159d75419d726a43faec661c402b21dbe` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
 
-### PR #109 supervised correction6 current candidate
+### PR #109 supervised correction7 current candidate
 
 Issue #108's bounded correction requires agreement between legacy summary and
 detail task artifacts, reconciles every live action sharing a retained task ID
@@ -192,11 +192,13 @@ before issue-identity filtering, and binds lineage to the retained abandoned-tas
 pull identity. It revalidates the immutable root command for current and legacy
 proofs, rejects incomplete retained abandonment history, and isolates a structurally
 valid identity mismatch on an open pull during multi-PR scan while keeping direct
-snapshot and terminal identity checks strict. The current source fingerprint is:
+snapshot and terminal identity checks strict. Final task and reviewer publication
+fences revalidate pull/source authority after late reads and bind retained proof
+inputs to the fresh final state. The current source fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `afe557ff43e1d8cbfeb3586f7e0822627c6c5f79e00d444538766abc58f00fbe` |
+| `deploy/cloud_coordinator.py` | `8235a894bdb48663ddd673e4c78dca75cd09fd8ee94f7f74b3dd45c0e4b1903e` |
 
 This exact-source pin does not establish review acceptance, merge readiness,
 authorization beyond the standing delegation, or operational activation.

@@ -4857,6 +4857,46 @@ def test_new_lineage_rechecks_root_at_reviewer_write_fence(tmp_path, mutation):
     )
 
 
+@pytest.mark.parametrize("race", ["head", "authority"])
+def test_new_lineage_rechecks_late_reviewer_reads_before_claim(tmp_path, race):
+    api, store, _, _, _, _, _, _, source_head, _ = (
+        _owner_abandonment_transitive_case(tmp_path)
+    )
+    api.review_state = api.review_sha = None
+    key = f"copilot-review-request:16:{source_head}"
+    writes_before = list(api.writes)
+    original_get = api.get
+    injected = []
+
+    def get(route):
+        if not injected and route.endswith("/requested_reviewers"):
+            if race == "head":
+                api.head_sha = api.pull["head"]["sha"] = "7" * 40
+            else:
+                StateStore(store.path)._mutate(
+                    lambda state: state["enrollments"]["16"].update(
+                        authorized_head="7" * 40,
+                    ),
+                )
+            injected.append(race)
+        return original_get(route)
+
+    api.get = get
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert injected == [race]
+    assert StateStore(store.path).action(key) is None
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == [
+        write for write in writes_before
+        if write[0].endswith("/requested_reviewers")
+    ]
+
+
 @pytest.mark.parametrize("mutation", ["edited", "deleted", "substituted"])
 def test_new_lineage_rechecks_root_before_source_post(tmp_path, mutation, monkeypatch):
     api, store, abandoned, _, recovery, _, _, _, source_head, _ = (
@@ -4896,6 +4936,68 @@ def test_new_lineage_rechecks_root_before_source_post(tmp_path, mutation, monkey
     assert injected == [mutation]
     assert api.task_posts == task_posts
     assert StateStore(store.path).action(abandoned["key"]) is not None
+
+
+@pytest.mark.parametrize("compacted", [False, True], ids=["live-copy", "compacted"])
+def test_new_lineage_rechecks_proofs_after_late_reads_before_source_post(
+        tmp_path, compacted, monkeypatch):
+    if compacted:
+        api, store, abandoned, _, source, source_head = (
+            _owner_abandonment_previous_case(tmp_path, True)
+        )
+        recovery = StateStore(store.path).snapshot()["enrollments"]["16"][
+            "owner_abandonments"
+        ][0]
+    else:
+        (
+            api, store, abandoned, _, recovery, _, _, _, source_head, _,
+        ) = _owner_abandonment_transitive_case(tmp_path)
+    api.source_failure = True
+    api.source_failure_sha = source_head
+    api.review_state = "APPROVED"
+    api.review_sha = source_head
+    original_authority = CloudCoordinator._authorized_dispatch_head
+    task_posts = api.task_posts
+    injected = []
+
+    def authority(coordinator, issue, head, base_sha=None, **kwargs):
+        valid = original_authority(
+            coordinator, issue, head, base_sha, **kwargs,
+        )
+        claimed = any(
+            candidate.get("kind") == "fix"
+            and candidate.get("issue") == 16
+            and candidate.get("head") == source_head
+            and candidate.get("status") == "sending"
+            and candidate.get("key") != abandoned["key"]
+            for candidate in StateStore(store.path).actions().values()
+        )
+        if valid and claimed and not injected:
+            def alter_proof(state):
+                proof = next(
+                    item for item in state["enrollments"]["16"]["receipt_proofs"]
+                    if item.get("receipt_start_head") == recovery["head_sha"]
+                )
+                proof["receipt_head"] = "7" * 40
+
+            StateStore(store.path)._mutate(alter_proof)
+            injected.append("proof")
+        return valid
+
+    monkeypatch.setattr(CloudCoordinator, "_authorized_dispatch_head", authority)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert injected == ["proof"]
+    assert api.task_posts == task_posts
+    assert StateStore(store.path).action(abandoned["key"]) is not None
+    assert any(
+        item.get("receipt_head") == "7" * 40
+        for item in StateStore(store.path).snapshot()["enrollments"]["16"][
+            "receipt_proofs"
+        ]
+    )
 
 
 @pytest.mark.parametrize("proof_hazard", [None, "missing", "substituted"])
