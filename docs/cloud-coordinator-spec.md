@@ -708,9 +708,13 @@ Pre-upgrade retained proofs omit `head_ref`. A read-only compatibility view may
 obtain it only from the original authenticated task session. It requires a fresh
 complete task inventory, positive task and session completion, the same owner,
 creator, repository, pull artifact and branch artifact, and exact task/session
-IDs. The original summary and exact detail must agree, including their complete
-type-exact artifact lists; each must contain one valid GitHub pull and branch
-artifact. The original prompt must match
+IDs. Summary rows and rows that retain `sessions` use the same strict artifact
+validation before task detail is used. The original summary and exact detail must
+agree, including their complete type-exact artifact lists; each must contain
+exactly one valid GitHub pull and branch artifact. The pull artifact's numeric ID
+and node ID must both match the identities stored in the proof. Missing, foreign,
+malformed, duplicate, or contradictory artifacts deny the view. The original
+prompt must match
 the supported reservation type, exact pull/start head and reservation marker, and
 end with a supported canonical receipt instruction bound to the stored nonce and
 base. If a live action remains, its original prompt must also agree. Anchored
@@ -754,7 +758,9 @@ or terminal task state alone grants no result authority. Any separate support af
 a neutral main merge must require an unchanged exact-head owner enrollment and
 positive authenticated ancestry from the abandonment-rooted ready result, with the
 same repository, pull request and branch. Until that contract is implemented and
-verified, this separate supervised-descendant case remains unsupported.
+verified, this separate supervised-descendant case remains unsupported and is
+tracked separately in issue #110. PR #109 closes only issue #108's receipt-lineage
+slice; it does not recover PR #99 or implement the issue #110 contract.
 
 Neutral task publication uses one immutable receipt-only PR reply, not a decision
 comment followed by a receipt comment. The complete per-hunk decision audit stays

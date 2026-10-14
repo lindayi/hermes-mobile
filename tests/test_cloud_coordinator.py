@@ -4098,14 +4098,53 @@ def test_owner_abandonment_reconciles_live_copy_by_durable_key(
 
 
 def _mutate_legacy_artifacts(task, hazard):
+    hazard = hazard.removeprefix("artifact-")
     artifacts = task.get("artifacts")
     if hazard.endswith("-number-bool"):
         artifact = next(item for item in artifacts if item.get("type") == "branch")
         artifact["data"]["metadata"] = True
-    elif hazard.endswith("-branch"):
+    elif hazard == "pull-node-missing":
+        artifact = next(item for item in artifacts if item.get("type") == "pull")
+        artifact["data"].pop("global_id")
+    elif hazard == "pull-node-foreign":
+        artifact = next(item for item in artifacts if item.get("type") == "pull")
+        artifact["data"]["global_id"] = "PR_node_foreign"
+    elif hazard == "pull-node-malformed":
+        artifact = next(item for item in artifacts if item.get("type") == "pull")
+        artifact["data"]["global_id"] = []
+    elif hazard == "missing-pull":
+        task["artifacts"] = [
+            item for item in artifacts if item.get("type") != "pull"
+        ]
+    elif hazard == "duplicate-pull":
+        pull = next(item for item in artifacts if item.get("type") == "pull")
+        artifacts.append(deepcopy(pull))
+    elif hazard == "malformed-pull":
+        pull = next(item for item in artifacts if item.get("type") == "pull")
+        pull["data"] = []
+    elif hazard == "missing-branch":
+        task["artifacts"] = [
+            item for item in artifacts if item.get("type") != "branch"
+        ]
+    elif hazard == "duplicate-branch":
+        branch = next(item for item in artifacts if item.get("type") == "branch")
+        artifacts.append(deepcopy(branch))
+    elif hazard == "malformed-branch":
+        branch = next(item for item in artifacts if item.get("type") == "branch")
+        branch["data"] = []
+    elif hazard == "missing":
+        task["artifacts"] = [
+            item for item in artifacts if item.get("type") != "branch"
+        ]
+    elif hazard == "duplicate":
+        branch = next(item for item in artifacts if item.get("type") == "branch")
+        artifacts.append(deepcopy(branch))
+    elif hazard == "malformed":
+        task["artifacts"] = "not-an-artifact-list"
+    elif hazard == "branch" or hazard.endswith("-branch"):
         artifact = next(item for item in artifacts if item.get("type") == "branch")
         artifact["data"]["head_ref"] = "other-branch"
-    elif hazard.endswith("-pull"):
+    elif hazard == "pull" or hazard.endswith("-pull"):
         artifact = next(item for item in artifacts if item.get("type") == "pull")
         artifact["data"]["id"] = 160000099
     elif hazard.endswith("-missing"):
@@ -4133,13 +4172,22 @@ def _mutate_legacy_artifacts(task, hazard):
     "summary-artifact-missing", "detail-artifact-missing",
     "summary-artifact-duplicate", "detail-artifact-duplicate",
     "summary-artifact-malformed", "detail-artifact-malformed",
+    *[
+        f"{shape}-inventory-{artifact_hazard}"
+        for shape in ("summary", "sessions")
+        for artifact_hazard in (
+            "pull-node-missing", "pull-node-foreign", "pull-node-malformed",
+            "missing-pull", "duplicate-pull", "malformed-pull",
+            "missing-branch", "duplicate-branch", "malformed-branch",
+        )
+    ],
     "edited-receipt", "substituted-receipt", "explicit-wrong-branch",
     "duplicate-status", "duplicate-issue", "duplicate-start", "duplicate-head",
     "duplicate-nonce", "ambiguous-root", "ambiguous-intermediate",
     "edited-root", "deleted-root", "proof-status", "proof-issue", "proof-start",
     "proof-head", "proof-nonce", "proof-kind", "proof-task-type",
     "alternate-key-missing-issue", "alternate-key-wrong-issue",
-    "alternate-key-invalid-issue",
+    "alternate-key-invalid-issue", "alternate-key-original-embedded",
 ])
 def test_owner_abandonment_upgrade_fresh_fences(
         tmp_path, monkeypatch, compacted, stage, hazard):
@@ -4165,6 +4213,8 @@ def test_owner_abandonment_upgrade_fresh_fences(
         if isinstance(hazard, str) and hazard.startswith("detail-artifact-"):
             api.legacy_summary_artifacts = deepcopy(task["artifacts"])
             _mutate_legacy_artifacts(task, hazard.removeprefix("detail-"))
+        elif isinstance(hazard, str) and "-inventory-" in hazard:
+            _mutate_legacy_artifacts(task, hazard.split("-inventory-", 1)[1])
         elif hazard == "summary-artifact-number-bool":
             api.legacy_summary_artifacts = deepcopy(task["artifacts"])
             branch = next(
@@ -4299,10 +4349,11 @@ def test_owner_abandonment_upgrade_fresh_fences(
                     "fix:16:hermes-coordinator-fix:" + "f" * 20
                 )
                 assert duplicate_key != source["key"]
-                duplicate["key"] = duplicate_key
+                if hazard != "alternate-key-original-embedded":
+                    duplicate["key"] = duplicate_key
                 if hazard.endswith("missing-issue"):
                     duplicate.pop("issue", None)
-                else:
+                elif hazard != "alternate-key-original-embedded":
                     duplicate["issue"] = {
                         "alternate-key-wrong-issue": 99,
                         "alternate-key-invalid-issue": [],
@@ -4328,25 +4379,30 @@ def test_owner_abandonment_upgrade_fresh_fences(
             if hazard == "inventory-error":
                 raise ApiError("original inventory unavailable", status=503)
             inventory = deepcopy(original_get_all(route, collection=collection))
-            if isinstance(hazard, str) and hazard.split("-", 1)[0] in {
-                    "summary", "detail"} and "-artifact-" in hazard:
+            if isinstance(hazard, str) and (
+                    (hazard.split("-", 1)[0] in {"summary", "detail"}
+                     and "-artifact-" in hazard)
+                    or "-inventory-" in hazard):
                 for item in inventory:
                     if item.get("id") == source["task_id"]:
-                        if hazard.startswith("summary-"):
+                        if hazard.startswith(("summary-artifact-", "summary-inventory-")):
                             summary = {"artifacts": deepcopy(
                                 api.legacy_summary_artifacts
                                 if hazard == "summary-artifact-number-bool"
                                 else item["artifacts"]
                             )}
-                            _mutate_legacy_artifacts(
-                                summary, hazard.removeprefix("summary-"),
-                            )
+                            if "-inventory-" not in hazard:
+                                _mutate_legacy_artifacts(
+                                    summary, hazard.removeprefix("summary-"),
+                                )
                             item["artifacts"] = summary["artifacts"]
-                        elif hasattr(api, "legacy_summary_artifacts"):
+                        elif (hazard.startswith("detail-artifact-")
+                              and hasattr(api, "legacy_summary_artifacts")):
                             item["artifacts"] = deepcopy(
                                 api.legacy_summary_artifacts,
                             )
-                        item["session_count"] = len(item.pop("sessions"))
+                        if hazard.startswith(("summary-artifact-", "summary-inventory-")):
+                            item["session_count"] = len(item.pop("sessions"))
             if hazard == "incomplete-inventory":
                 return [item for item in inventory if item["id"] != source["task_id"]]
             if hazard == "duplicate-inventory":
@@ -4412,6 +4468,17 @@ def test_owner_abandonment_upgrade_fresh_fences(
     )
     writes = list(api.writes)
     task_posts = api.task_posts
+    if hazard == "alternate-key-original-embedded":
+        duplicate_key = "fix:16:hermes-coordinator-fix:" + "f" * 20
+
+        def restore_alternate_key(state):
+            original = next(
+                proof for proof in injected_proofs
+                if proof.get("task_id") == source["task_id"]
+            )
+            state["actions"][duplicate_key] = deepcopy(original)
+
+        StateStore(store.path)._mutate(restore_alternate_key)
     if hazard == "inventory-error":
         with pytest.raises(ApiError, match="original inventory unavailable"):
             Coordinator(

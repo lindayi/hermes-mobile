@@ -3164,7 +3164,7 @@ def _legacy_task_reservation_type(record, tasks, snapshot):
     return reservation_type
 
 
-def _legacy_task_artifacts_match(listed, detailed):
+def _legacy_task_artifacts_match(listed, detailed, *, expected_pull=None):
     listed_artifacts = listed.get("artifacts")
     detailed_artifacts = detailed.get("artifacts")
     if (not isinstance(listed_artifacts, list)
@@ -3185,6 +3185,12 @@ def _legacy_task_artifacts_match(listed, detailed):
         return False
     if listed_json != detailed_json:
         return False
+    if expected_pull is not None:
+        expected_pull_id, expected_pull_node_id = expected_pull
+        if (type(expected_pull_id) is not int or expected_pull_id <= 0
+                or not isinstance(expected_pull_node_id, str)
+                or not expected_pull_node_id):
+            return False
     branches, pulls = [], []
     for artifact in listed_artifacts:
         if (not isinstance(artifact, dict)
@@ -3203,6 +3209,10 @@ def _legacy_task_artifacts_match(listed, detailed):
                     or (data.get("global_id") is not None
                         and (not isinstance(data["global_id"], str)
                              or not data["global_id"]))):
+                return False
+            if expected_pull is not None and (
+                    data["id"] != expected_pull_id
+                    or data.get("global_id") != expected_pull_node_id):
                 return False
             pulls.append(data)
         else:
@@ -3425,9 +3435,56 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
         )
     ]
     blocked = set()
+    proofs = enrollment.get("receipt_proofs", [])
+    if not isinstance(proofs, list):
+        proofs = []
+    proof_keys = {
+        proof["key"]: proof for proof in proofs
+        if isinstance(proof, dict) and proof.get("issue") == issue
+        and isinstance(proof.get("key"), str)
+    }
+    proof_task_ids = {
+        proof.get("task_id") for proof in proof_keys.values()
+        if isinstance(proof.get("task_id"), str)
+    }
+    invalid_proof_keys, invalid_action_keys = set(), set()
+    for key, candidate in actions.items():
+        if not isinstance(candidate, dict):
+            invalid_action_keys.add(key)
+            if key in proof_keys:
+                invalid_proof_keys.add(key)
+            continue
+        related = (
+            candidate.get("issue") == issue or key in proof_keys
+            or (isinstance(candidate.get("task_id"), str)
+                and candidate["task_id"] in proof_task_ids)
+        )
+        if not related:
+            continue
+        if candidate.get("key") != key:
+            invalid_action_keys.add(key)
+            candidate_key = candidate.get("key")
+            if isinstance(candidate_key, str) and candidate_key in proof_keys:
+                invalid_proof_keys.add(candidate_key)
+        if key in proof_keys and candidate.get("task_id") != proof_keys[key].get("task_id"):
+            invalid_proof_keys.add(key)
     candidates = [
-        action for action in [*enrollment.get("receipt_proofs", []), *actions.values()]
+        action for action in [
+            *proofs,
+            *(
+                candidate for key, candidate in actions.items()
+                if key not in invalid_action_keys
+                and isinstance(candidate, dict)
+                and candidate.get("key") == key
+            ),
+        ]
         if isinstance(action, dict) and action.get("issue") == issue
+        and action.get("key") not in invalid_proof_keys
+        and not any(
+            action.get("task_id") == proof.get("task_id")
+            and proof.get("key") in invalid_proof_keys
+            for proof in proof_keys.values()
+        )
         and _valid_receipt_proof(action, comments)
     ]
     while True:
@@ -5822,6 +5879,15 @@ class Coordinator:
             number, enrollment, self.store.actions(),
             snapshot["comments"], snapshot["pull"].get("base", {}).get("sha"),
         )
+        if not self._owner_abandonment_head_proven(snapshot):
+            return {
+                "issue": number, "head": head, "sensitive": sensitive,
+                "terminal": False, "review_valid": review_ok,
+                "required_checks_green": checks_ok, "auto_merge_eligible": False,
+                "reasons": ["unauthorized-continuation"], "repair": None,
+                "status_action": None, "merge_action": None, "outcomes": [],
+                "receipt_recoveries": receipt_recoveries, "handoffs": handoffs,
+            }
         continuation_only_head = (
             _owner_abandonment_available(enrollment, self.store.actions(), head)
             and head not in authorized_heads
@@ -6660,6 +6726,10 @@ class Coordinator:
         except CoordinatorError:
             return None
         listed = listed[0]
+        if not _legacy_task_artifacts_match(
+                listed, task,
+                expected_pull=(proof.get("pull_id"), proof.get("pull_node_id"))):
+            return None
         if "sessions" not in listed:
             if not _legacy_task_detail_matches_list(listed, task):
                 return None
@@ -6877,7 +6947,8 @@ class Coordinator:
         for key, candidate in keyed_representations:
             if key not in relevant_keys:
                 continue
-            if not isinstance(candidate, dict):
+            if (not isinstance(key, str) or not isinstance(candidate, dict)
+                    or candidate.get("key") != key):
                 return False
             candidate = legacy_views.get(id(candidate), candidate)
             duplicate = reconciled_by_key.get(key)
@@ -7017,6 +7088,8 @@ class Coordinator:
         comments = snapshot.get("comments")
         if not isinstance(comments, list):
             return False
+        if not self._owner_abandonment_head_proven(snapshot):
+            return False
         try:
             receipt = validate_task_receipt(
                 task, action, snapshot["pull"], comments,
@@ -7025,6 +7098,40 @@ class Coordinator:
         except (ReceiptError, TypeError, ValueError):
             return True
         return receipt is None
+
+    def _owner_abandonment_head_proven(self, snapshot):
+        pull = snapshot.get("pull") if isinstance(snapshot, dict) else None
+        head = pull.get("head") if isinstance(pull, dict) else None
+        issue = snapshot.get("issue") if isinstance(snapshot, dict) else None
+        if type(issue) is not int and isinstance(pull, dict):
+            issue = pull.get("number")
+        comments = snapshot.get("comments") if isinstance(snapshot, dict) else None
+        if (type(issue) is not int or not isinstance(head, dict)
+                or not isinstance(comments, list)):
+            return False
+        state = self.store.snapshot()
+        enrollment = state.get("enrollments", {}).get(str(issue), {})
+        current_proof = any(
+            isinstance(proof, dict) and proof.get("issue") == issue
+            and proof.get("receipt_head") == head.get("sha")
+            for proof in enrollment.get("receipt_proofs", [])
+        )
+        if not current_proof:
+            return True
+        recoveries = [
+            record for _, record in _valid_owner_abandonment_claims(
+                enrollment, state.get("actions", {}),
+            )
+            if record.get("issue") == issue
+        ]
+        if not recoveries:
+            return True
+        return any(
+            self._owner_abandonment_successor_proven(
+                {"pull": pull, "comments": comments}, record,
+            )
+            for record in recoveries
+        )
 
     def _fence_owner_abandonment(self, recovery, main_sha):
         if not isinstance(recovery, dict) or not _owner_abandonment_record_valid(
@@ -7081,6 +7188,16 @@ class Coordinator:
         try:
             comments = _all_review_comments(self.api, issue, None)
         except CoordinatorError:
+            return False
+        try:
+            pull = self.api.get(f"repos/{REPOSITORY}/pulls/{issue}")
+        except CoordinatorError:
+            return False
+        if (not _pull_identity(pull, enrollment)
+                or pull.get("head", {}).get("sha") != head
+                or not self._legacy_owner_abandonment_head_proven({
+                    "issue": issue, "pull": pull, "comments": comments,
+                })):
             return False
         if receipt_action is not None and not _valid_receipt_proof(receipt_action, comments):
             return False
