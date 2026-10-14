@@ -4275,12 +4275,6 @@ def test_owner_abandonment_upgrade_fresh_fences(
             StateStore(store.path)._mutate(bind_alternate)
             injected_posts.append(alternate["task_id"])
         elif isinstance(hazard, str) and hazard.startswith("alternate-key-"):
-            invalid_issue = {
-                "alternate-key-missing-issue": None,
-                "alternate-key-wrong-issue": 99,
-                "alternate-key-invalid-issue": [],
-            }[hazard]
-
             def add_alternate_key(state):
                 duplicate = deepcopy(
                     state["actions"].get(source["key"])
@@ -4296,7 +4290,13 @@ def test_owner_abandonment_upgrade_fresh_fences(
                 )
                 assert duplicate_key != source["key"]
                 duplicate["key"] = duplicate_key
-                duplicate["issue"] = invalid_issue
+                if hazard == "alternate-key-missing-issue":
+                    duplicate.pop("issue", None)
+                else:
+                    duplicate["issue"] = {
+                        "alternate-key-wrong-issue": 99,
+                        "alternate-key-invalid-issue": [],
+                    }[hazard]
                 state["actions"][duplicate_key] = duplicate
 
             StateStore(store.path)._mutate(add_alternate_key)
