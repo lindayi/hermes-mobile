@@ -89,6 +89,73 @@ def test_photo_operator_status_is_read_only_and_changes_require_confirmation(tmp
     assert missing_confirmation.returncode == 2
     assert policy.enabled() is True
 
+    disabled = _photo_cli('disable', config, '--confirm')
+    assert disabled.returncode == 0, disabled.stderr
+    assert json.loads(disabled.stdout)['photos_enabled'] is False
+    enabled = _photo_cli('enable', config, '--confirm')
+    assert enabled.returncode == 0, enabled.stderr
+    assert json.loads(enabled.stdout)['photos_enabled'] is True
+
+
+def test_photo_operator_rejects_hardlinked_config_without_side_effects(tmp_path):
+    state, policy, config, _ = _photo_operator_state(tmp_path)
+    alias = state/'config-alias.json'
+    os.link(config, alias)
+    assert config.stat().st_nlink == 2
+    before_config = config.read_bytes()
+    before_config_mtime = config.stat().st_mtime_ns
+    before_database = policy.database.read_bytes()
+    before_database_mtime = policy.database.stat().st_mtime_ns
+
+    results = [
+        _photo_cli(command, config, *options)
+        for command, options in (
+            ('status', ()),
+            ('disable', ('--confirm',)),
+            ('enable', ('--confirm',)),
+        )
+    ]
+
+    assert all(result.returncode == 1 for result in results), [
+        (result.returncode, result.stderr) for result in results
+    ]
+    assert all('hard-linked' in result.stderr for result in results)
+    assert config.read_bytes() == before_config
+    assert config.stat().st_mtime_ns == before_config_mtime
+    assert policy.database.read_bytes() == before_database
+    assert policy.database.stat().st_mtime_ns == before_database_mtime
+    assert policy.enabled() is True
+
+
+def test_photo_operator_rejects_hardlinked_journal_without_side_effects(tmp_path):
+    state, policy, config, _ = _photo_operator_state(tmp_path)
+    alias = state/'runs-alias.sqlite'
+    os.link(policy.database, alias)
+    assert policy.database.stat().st_nlink == 2
+    before_files = {
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in state.iterdir() if path.is_file()
+    }
+
+    results = [
+        _photo_cli(command, config, *options)
+        for command, options in (
+            ('status', ()),
+            ('disable', ('--confirm',)),
+            ('enable', ('--confirm',)),
+        )
+    ]
+
+    assert all(result.returncode == 1 for result in results), [
+        (result.returncode, result.stderr) for result in results
+    ]
+    assert all('hard-linked' in result.stderr for result in results)
+    assert {
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in state.iterdir() if path.is_file()
+    } == before_files
+    assert policy.enabled() is True
+
 
 def test_photo_operator_rejects_symlinks_wrong_owner_and_malformed_policy(
         tmp_path, monkeypatch):

@@ -69,6 +69,8 @@ def _private_operator_path(path, label, *, directory=False):
         raise ValueError(f'{label} has the wrong owner.')
     if info.st_mode & 0o077:
         raise ValueError(f'{label} must be private (mode 700 for directories, 600 for files).')
+    if not directory and info.st_nlink != 1:
+        raise ValueError(f'{label} must not be hard-linked.')
     return path
 
 

@@ -312,9 +312,10 @@ mutation requires `--confirm` and reports a database readback. If a command
 reports an uncertain write or cannot read back its result, run status before
 deciding whether to retry; never repeat an unconfirmed mutation blindly.
 
-The operator rejects symlinked or non-private config, state, and database paths,
-wrong ownership, and malformed policy data. It does not edit configuration,
-change native services, restart the bridge, or touch photo files. A pre-photo
+The operator rejects symlinked paths, multiply hard-linked regular config or
+database files, non-private paths, wrong ownership, and malformed policy data.
+It does not edit configuration, change native services, restart the bridge, or
+touch photo files. A pre-photo
 code rollback still does not preserve photo reads or cleanup and is not
 retention-safe. This source procedure does not activate photos or complete the
 operational acceptance under issue #85. Production, real accounts, private
