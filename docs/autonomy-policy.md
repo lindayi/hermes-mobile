@@ -190,12 +190,13 @@ Issue #108's bounded correction requires agreement between legacy summary and
 detail task artifacts, reconciles every live action sharing a retained task ID
 before issue-identity filtering, and binds lineage to the retained abandoned-task
 pull identity. It revalidates the immutable root command for current and legacy
-proofs, rejects incomplete retained abandonment history, and isolates malformed
-live pull identity to the affected pull. The current source fingerprint is:
+proofs, rejects incomplete retained abandonment history, and isolates a structurally
+valid identity mismatch on an open pull during multi-PR scan while keeping direct
+snapshot and terminal identity checks strict. The current source fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `60a0bae7830acbe37fe64b2ca8a9460fcaccfbe3e5ba5a4f069719b3b0301e99` |
+| `deploy/cloud_coordinator.py` | `afe557ff43e1d8cbfeb3586f7e0822627c6c5f79e00d444538766abc58f00fbe` |
 
 This exact-source pin does not establish review acceptance, merge readiness,
 authorization beyond the standing delegation, or operational activation.

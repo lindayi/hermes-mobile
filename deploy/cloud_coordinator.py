@@ -4376,7 +4376,8 @@ class Coordinator:
                 except (ApiError, CoordinatorError, KeyError, TypeError, ValueError, UnicodeError):
                     return None, "unverified"
 
-    def _snapshot_pull(self, number, enrollment, main_sha, actions=None):
+    def _snapshot_pull(self, number, enrollment, main_sha, actions=None, *,
+                       allow_unrelated_active=False):
         if not {"pull_id", "pull_node_id", "repository_id"}.issubset(enrollment):
             raise CoordinatorError(
                 "Unsupported legacy enrollment: missing pull/repository identity; "
@@ -4389,12 +4390,6 @@ class Coordinator:
             raise CoordinatorError("Pull request data was incomplete")
         if not _is_sha(head.get("sha")):
             raise CoordinatorError("Pull request head was not a commit SHA")
-        if not _pull_identity(pull, enrollment):
-            return {
-                "issue": number, "enrollment": enrollment, "pull": pull,
-                "head": head["sha"], "main_sha": main_sha, "scoped": False,
-                "terminal": False, "identity_invalid": True,
-            }
         head_repo, base_repo = head.get("repo"), base.get("repo")
         if (
             type(number) is not int or enrollment.get("issue") != number
@@ -4405,6 +4400,23 @@ class Coordinator:
             or not _is_sha(base.get("sha"))
         ):
             raise CoordinatorError("Pull request identity did not match enrollment")
+        if not _pull_identity(pull, enrollment):
+            unrelated_active = (
+                allow_unrelated_active
+                and pull.get("state") == "open"
+                and pull.get("merged") is False
+                and type(pull.get("number")) is int and pull["number"] > 0
+                and type(pull.get("id")) is int and pull["id"] > 0
+                and isinstance(pull.get("node_id"), str)
+                and bool(pull["node_id"])
+            )
+            if not unrelated_active:
+                raise CoordinatorError("Pull request identity did not match enrollment")
+            return {
+                "issue": number, "enrollment": enrollment, "pull": pull,
+                "head": head["sha"], "main_sha": main_sha, "scoped": False,
+                "terminal": False, "identity_invalid": True,
+            }
         if pull.get("state") != "open" or pull.get("merged") is not False:
             return {
                 "issue": number, "enrollment": enrollment, "pull": pull,
@@ -6558,6 +6570,7 @@ class Coordinator:
         for key, enrollment in enrollments.items():
             snapshot = self._snapshot_pull(
                 int(key), enrollment, main_sha, actions=state["actions"],
+                allow_unrelated_active=True,
             )
             if snapshot.get("identity_invalid"):
                 scans.append(snapshot)

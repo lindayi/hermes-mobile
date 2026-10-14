@@ -32,6 +32,13 @@ head. Only a genuinely new immutable command can authorize that head. The legacy
 bare command retains its historical timestamp compatibility.
 A stale or mismatched command is consumed without enrollment.
 
+Every pull snapshot strictly validates the enrolled numeric ID, number and node
+identity, plus repository and base identity. A direct snapshot or a terminal pull
+with a changed identity fails closed. During multi-PR scan only, a structurally
+valid identity mismatch on an open pull is isolated as unscoped so other enrolled
+pulls can progress; that pull receives no writes. Malformed IDs and repository or
+base mismatches are not isolated.
+
 Extended starter admission additionally requires a strict positive integer comment
 ID and owner ID, an explicitly non-draft open same-repository PR, matching current
 head/body, and exactly one canonical originating-issue closing edge. The shared
