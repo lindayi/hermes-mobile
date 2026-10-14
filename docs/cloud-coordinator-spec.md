@@ -728,8 +728,10 @@ the source and neutral lifetime ceilings combined. Every edge must pass immutabl
 receipt validation and match the current repository, pull request and branch; the
 current base must match the accepted receipts. Missing, ambiguous, disconnected,
 malformed, non-ready, wrong-identity or cyclic history fails closed.
-Before eligibility filtering, reconcile every live and retained representation of
-each task relevant to this pull. All receipt, reservation, identity, starting
+Before eligibility filtering, correlate live and retained representations by the
+durable action key, then reconcile each task relevant to this pull. A missing,
+non-string or substituted task ID cannot hide a duplicate. All receipt,
+reservation, identity, starting
 `head` and `dispatch_nonce` fields must agree. An ineligible malformed duplicate
 cannot disappear from this check. Identical copies count once; distinct tasks on
 unrelated pulls do not block this lineage.

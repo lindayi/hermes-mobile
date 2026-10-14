@@ -4063,6 +4063,40 @@ def _owner_abandonment_previous_case(tmp_path, compacted):
     return api, store, abandoned, abandoned_reservation, source, source_head
 
 
+@pytest.mark.parametrize("field,value", [
+    ("task_id", None), ("task_id", []), ("task_id", "other-task"),
+    ("receipt_task_id", "other-task"), ("receipt_start_head", "invalid"),
+    ("issue", 99), ("head", "7" * 40), ("dispatch_nonce", "other-nonce"),
+])
+def test_owner_abandonment_reconciles_live_copy_by_durable_key(
+        tmp_path, field, value):
+    api, store, abandoned, reservation, source, _ = (
+        _owner_abandonment_previous_case(tmp_path, False)
+    )
+    def corrupt_live_copy(state):
+        state["actions"][source["key"]][field] = value
+
+    StateStore(store.path)._mutate(corrupt_live_copy)
+    writes = list(api.writes)
+    task_posts = api.task_posts
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert api.task_posts == task_posts
+    assert [
+        write for write in api.writes if write[0].endswith("/requested_reviewers")
+    ] == [write for write in writes if write[0].endswith("/requested_reviewers")]
+    assert StateStore(store.path).action(abandoned["key"]) == reservation
+    recovery = StateStore(store.path).snapshot()["enrollments"]["16"][
+        "owner_abandonments"
+    ][0]
+    assert not Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )._owner_abandonment_successor_proven(
+        {"pull": api.pull, "comments": api.comments}, recovery,
+    )
+
+
 @pytest.mark.parametrize("compacted", [False, True], ids=["live-copy", "proof-only"])
 @pytest.mark.parametrize("stage", ["planning", "review-fence", "source-fence"])
 @pytest.mark.parametrize("hazard", [

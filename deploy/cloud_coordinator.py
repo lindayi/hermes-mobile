@@ -6761,7 +6761,7 @@ class Coordinator:
             return False
         candidates = []
         proof_fields = (
-            "task_id", "issue", "kind", "task_type", "status", "head",
+            "key", "task_id", "issue", "kind", "task_type", "status", "head",
             "dispatch_nonce",
             "receipt_result", "receipt_comment_id", "receipt_created_at",
             "receipt_body", "receipt_task_id", "receipt_session_id",
@@ -6776,11 +6776,17 @@ class Coordinator:
         representations = [*actions.values(), *proofs]
         if any(
                 not isinstance(proof, dict)
+                or not isinstance(proof.get("key"), str) or not proof["key"]
                 or not isinstance(proof.get("task_id"), str)
                 or not proof["task_id"]
                 for proof in proofs):
             return False
         retained_task_ids = {proof["task_id"] for proof in proofs}
+        relevant_keys = {proof["key"] for proof in proofs} | {
+            key for key, candidate in actions.items()
+            if isinstance(candidate, dict)
+            and candidate.get("issue") == record["issue"]
+        }
         relevant_task_ids = {
             candidate.get("task_id") for candidate in representations
             if isinstance(candidate, dict)
@@ -6813,9 +6819,24 @@ class Coordinator:
                     legacy_views[id(proof)] = view
             except (CoordinatorError, OverflowError, TypeError, ValueError):
                 return False
-        reconciled = {}
-        for candidate in representations:
+        keyed_representations = [
+            *actions.items(), *((proof["key"], proof) for proof in proofs),
+        ]
+        reconciled_by_key = {}
+        for key, candidate in keyed_representations:
+            if key not in relevant_keys:
+                continue
+            if not isinstance(candidate, dict):
+                return False
             candidate = legacy_views.get(id(candidate), candidate)
+            duplicate = reconciled_by_key.get(key)
+            if duplicate is not None and any(
+                    duplicate.get(field) != candidate.get(field)
+                    for field in proof_fields):
+                return False
+            reconciled_by_key[key] = candidate
+        reconciled = {}
+        for candidate in reconciled_by_key.values():
             if (not isinstance(candidate, dict)
                     or not isinstance(candidate.get("task_id"), str)
                     or candidate["task_id"] not in relevant_task_ids):
