@@ -32,6 +32,41 @@ def setup(tmp_path, *, repair=True):
     return api, store, coordinator
 
 
+@pytest.mark.parametrize(("field", "kind", "value"), [
+    pytest.param("pull_id", "missing", None, id="missing-pull-id"),
+    pytest.param("pull_id", "null", None, id="null-pull-id"),
+    pytest.param("pull_id", "bool", True, id="bool-pull-id"),
+    pytest.param("pull_id", "float", 160000016.0, id="float-pull-id"),
+    pytest.param("pull_id", "string", "160000016", id="string-pull-id"),
+    pytest.param("pull_id", "zero", 0, id="zero-pull-id"),
+    pytest.param("pull_id", "negative", -1, id="negative-pull-id"),
+    pytest.param("pull_node_id", "missing", None, id="missing-pull-node-id"),
+    pytest.param("pull_node_id", "null", None, id="null-pull-node-id"),
+    pytest.param("pull_node_id", "empty", "", id="empty-pull-node-id"),
+    pytest.param("pull_node_id", "nonstring", 160000016, id="nonstring-pull-node-id"),
+])
+def test_opt_in_identity_isolation_rejects_malformed_stored_identity(
+        tmp_path, field, kind, value):
+    from deploy.cloud_coordinator import CoordinatorError
+
+    api, store, coordinator = setup(tmp_path)
+    enrollment = store.snapshot()["enrollments"]["16"]
+    if kind == "missing":
+        enrollment.pop(field)
+    else:
+        enrollment[field] = value
+    store._mutate(lambda state: state["enrollments"].update({"16": enrollment}))
+
+    api.pull["id"] += 1
+    api.pull["node_id"] += "_replacement"
+    stored = store.snapshot()["enrollments"]["16"]
+    with pytest.raises(CoordinatorError, match="identity|missing"):
+        coordinator._snapshot_pull(16, stored, BASE)
+
+    with pytest.raises(CoordinatorError, match="identity|missing"):
+        coordinator.run(apply=True)
+
+
 @pytest.mark.parametrize("state", ["failed", "timed_out", "cancelled"])
 @pytest.mark.parametrize("field", ["creator", "owner", "repository", "pull_artifact"])
 @pytest.mark.parametrize("kind", KINDS)

@@ -4469,6 +4469,10 @@ class Coordinator:
                 and type(pull.get("id")) is int and pull["id"] > 0
                 and isinstance(pull.get("node_id"), str)
                 and bool(pull["node_id"])
+                and type(enrollment.get("pull_id")) is int
+                and enrollment["pull_id"] > 0
+                and isinstance(enrollment.get("pull_node_id"), str)
+                and bool(enrollment["pull_node_id"])
             )
             if not unrelated_active:
                 raise CoordinatorError("Pull request identity did not match enrollment")

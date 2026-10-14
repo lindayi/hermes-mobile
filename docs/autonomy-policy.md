@@ -184,14 +184,15 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 | `deploy/cloud_coordinator.py` | `4c8ce668d216035eb79af4adfa48946159d75419d726a43faec661c402b21dbe` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
 
-### PR #109 supervised correction9 current candidate
+### PR #109 supervised correction10 current candidate
 
 Issue #108's bounded correction requires agreement between legacy summary and
 detail task artifacts, reconciles every live action sharing a retained task ID
 before issue-identity filtering, and binds lineage to the retained abandoned-task
 pull identity. It revalidates the immutable root command for current and legacy
-proofs, isolates a structurally valid identity mismatch at the source commit fence,
-and keeps direct snapshot and terminal identity checks strict. A late identity
+proofs, isolates a structurally valid identity mismatch only when both stored pull
+identity fields are valid, and keeps direct snapshot and terminal identity checks
+strict. A late identity
 mismatch restores only that PR's prepared records, skips its recovery and publication
 inputs, and retains the previous cursor when an owner command must be re-read.
 Unrelated PRs can still commit; the existing state compare-and-swap remains active.
@@ -201,7 +202,7 @@ digests are retained below. The current source fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `287f55c530a350e847c1358b783f9bf77d9457962de4f8d0afb237cb21a3b96b` |
+| `deploy/cloud_coordinator.py` | `8ed96c582aa08cf64306b43682b72aef2c1a6042513caa60ce2d6cc2bb3f6c28` |
 
 | Historical candidate | SHA-256 |
 | --- | --- |
