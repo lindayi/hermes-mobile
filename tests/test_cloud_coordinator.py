@@ -3642,6 +3642,158 @@ def test_owner_continuation_disposition_records_missing_root_before_successor_di
         for proof in compacted.get("receipt_proofs", [])
     )
 
+    historical_action = deepcopy(
+        StateStore(store.path).action(abandonment["action_key"]),
+    )
+    historical_continuations = deepcopy(compacted["owner_continuations"])
+    historical_proofs = deepcopy(compacted["receipt_proofs"])
+    historical_attempts = compacted["attempts"]
+    historical_neutral_attempts = compacted["neutral_attempts"]
+    historical_anchor_reservations = compacted["neutral_anchor_reservations"]
+    original_task_posts = api.task_posts
+
+    api.pull.update(state="closed", merged=False, closed_at="2026-10-01T12:13:00Z")
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    StateStore(store.path).retire(16, successor_head, continued_main)
+    closed = StateStore(store.path).snapshot()
+    assert closed["enrollments"]["16"]["active"] is False
+    assert StateStore(store.path).action(abandonment["action_key"]) == historical_action
+    assert closed["enrollments"]["16"]["owner_continuations"] == historical_continuations
+    assert closed["enrollments"]["16"]["receipt_proofs"] == historical_proofs
+
+    api.pull.update(state="open", closed_at=None)
+    api.comments.append({
+        "id": 7774, "user": {"id": OWNER},
+        "body": f"/hermes enroll {successor_head}",
+        "created_at": "2026-10-01T12:14:00Z",
+        "updated_at": "2026-10-01T12:14:00Z",
+    })
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    reenrolled = StateStore(store.path).snapshot()
+    reenrollment = reenrolled["enrollments"]["16"]
+    assert reenrollment["active"] is True
+    assert reenrollment["owner_continuations"] == historical_continuations
+    assert reenrollment["owner_abandonments"] == prior
+    assert reenrollment["receipt_proofs"] == historical_proofs
+    assert reenrollment["attempts"] == historical_attempts
+    assert reenrollment["neutral_attempts"] == historical_neutral_attempts
+    assert reenrollment["neutral_anchor_reservations"] == historical_anchor_reservations
+    assert len(reenrollment["owner_continuations"]) == 1
+    assert api.task_posts == original_task_posts
+    assert sum(comment["id"] == 7773 for comment in api.comments) == 1
+    api.set_copilot_review(
+        review_id=63002, head_sha=successor_head, body="",
+        submitted_at="2026-10-01T12:15:00Z", state="APPROVED",
+    )
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    api.review_state = "CHANGES_REQUESTED"
+    api.review_sha = successor_head
+    api.review_submitted_at = "2026-10-01T12:15:00Z"
+    api.unresolved = False
+    api.progress_review = _progress_review(
+        successor_head, 63002, "The synthetic source failure remains.",
+        "2026-10-01T12:15:00Z",
+    ) | {"state": "CHANGES_REQUESTED"}
+    original_get_all = api.get_all
+
+    def include_progress_review(route, *, collection=None):
+        values = original_get_all(route, collection=collection)
+        if route.endswith("/pulls/16/reviews?per_page=100"):
+            return [
+                api.progress_review,
+                *[review for review in values
+                  if review.get("user", {}).get("id") != COPILOT_REVIEWER],
+            ]
+        return values
+
+    api.get_all = include_progress_review
+    api.source_failure = True
+    api.source_failure_sha = successor_head
+    api.workflow_runs = [
+        source_run(id=568, run_number=50, head_sha=successor_head),
+    ]
+    assert cloud_coordinator._latest_source_failure(
+        api.workflow_runs, successor_head, api.pull["head"]["ref"], 16,
+    )
+    later_repair = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    later_actions = [
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "fix"
+        and action.get("head") == successor_head
+        and action.get("key") != successor["key"]
+    ]
+    assert later_repair["repair_requested"] is True, (
+        later_repair["reasons"],
+        [
+            (key, action.get("kind"), action.get("status"), action.get("task_id"),
+             action.get("handoff_state"), action.get("review_requirement"))
+            for key, action in StateStore(store.path).snapshot()["actions"].items()
+        ],
+        [(task_id, task.get("state")) for task_id, task in api.tasks.items()],
+    )
+    assert len(later_actions) == 1
+    later = later_actions[0]
+    assert later["key"] != abandonment["action_key"]
+    assert later.get("task_type") != "neutral"
+    assert later.get("owner_continuation_binding") is None
+    later_enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert later_enrollment["attempts"] == historical_attempts + 1
+    assert later_enrollment["neutral_attempts"] == historical_neutral_attempts
+    assert later_enrollment["neutral_anchor_reservations"] == (
+        historical_anchor_reservations
+    )
+
+    descendant_head = "7" * 40
+    api.complete_task(
+        later["task_id"], later, head_sha=descendant_head, base_sha=continued_main,
+    )
+    api.head_sha = descendant_head
+    api.pull["head"]["sha"] = descendant_head
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.review_state = None
+    api.review_sha = None
+    api.unresolved = False
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.workflow_runs = None
+    api.requested_reviewers = []
+    advanced = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    advanced_state = StateStore(store.path).snapshot()
+    assert advanced["head"] == descendant_head
+    assert StateStore(store.path).action(later["key"])["receipt_result"] == "ready"
+    assert any(
+        proof.get("task_id") == later["task_id"]
+        and proof.get("receipt_head") == descendant_head
+        for proof in advanced_state["enrollments"]["16"]["receipt_proofs"]
+    )
+    assert api.tasks[later["task_id"]]["state"] == "completed"
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+
+    task_posts = api.task_posts
+    review_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    restarted = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    assert restarted["head"] == descendant_head
+    assert api.task_posts == task_posts
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == review_writes
+
 
 def test_reenrollment_cannot_bypass_missing_abandonment_root(tmp_path):
     api, store, abandonment, continued_head, continued_main = (
