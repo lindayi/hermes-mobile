@@ -790,9 +790,16 @@ Then read the final pull and main. The final pull must have `draft` exactly
 The fence compares the complete affected enrollment, historical reservation,
 continuation list, same-PR action claims, and outbox claims using canonical
 type-preserving JSON. SOURCE anchor inventory and direct readback remain mandatory.
-A failed comparison rejects only the affected PR's continuation; if canonical state
-changed during a prepared scan, the scan is rebased on that durable state before
-committing unrelated eligible work.
+A failed comparison rejects the affected PR's continuation. If durable state
+changed during preparation, discard both the prepared mutations and all dependent
+scan plans, then rebuild the complete scan once from fresh durable state.
+Quarantine the failed continuation's PR for the rest of that poll: do not consume
+its commands, reconcile its claims, publish, or apply stale observations to it.
+Reauthenticate receipts, source authority, commands, and lifecycle evidence during
+that rebuild. Compare the durable preparation baseline using type-exact canonical
+JSON again under the commit lock. A second conflict stops the run without
+committing stale prepared state. This retry is allowed only before scan commit
+and external publication; it never replays an unknown external write.
 
 Immediately before a continuation task POST, the coordinator acquires the existing
 StateStore write lock, reloads and compares the fenced affected-state projection,

@@ -207,6 +207,14 @@ class _ContinuationPublicationFenceError(CoordinatorError):
     """The durable continuation claim changed before its task request began."""
 
 
+class _PreparedScanChanged(CoordinatorError):
+    """Durable state invalidated preparation before any scan publication."""
+
+    def __init__(self, message, *, issue=None):
+        super().__init__(message)
+        self.issue = issue
+
+
 class ApiError(CoordinatorError):
     """An authenticated GitHub API operation failed."""
 
@@ -7246,7 +7254,7 @@ class Coordinator:
             return None
         return record
 
-    def _build_plan(self, *, apply):
+    def _build_plan(self, *, apply, blocked_continuations=()):
         state = self.store.snapshot()
         cursor = datetime.fromtimestamp(self.clock(), timezone.utc).isoformat().replace("+00:00", "Z")
         self._identity()
@@ -7258,8 +7266,27 @@ class Coordinator:
         issues, commands, processed, enrollments = self._scan_enrollments(
             state, admission_checks=admission_checks,
         )
+        blocked_commands = [
+            item for _, item in commands
+            if item.get("issue") in blocked_continuations
+        ]
+        blocked_ids = {
+            str(item.get("command_comment_id", item.get("comment")))
+            for item in blocked_commands
+        }
+        commands = [
+            (command, item) for command, item in commands
+            if item.get("issue") not in blocked_continuations
+        ]
+        processed = [item for item in processed if str(item) not in blocked_ids]
+        admission_checks = [
+            item for item in admission_checks
+            if item.get("issue") not in blocked_continuations
+        ]
         scans, sensitive_revocations, starter_sources = [], [], []
         for key, enrollment in enrollments.items():
+            if int(key) in blocked_continuations:
+                continue
             snapshot = self._snapshot_pull(
                 int(key), enrollment, main_sha, actions=state["actions"],
             )
@@ -8906,12 +8933,12 @@ class Coordinator:
             except CoordinatorError:
                 if self.store._prepared is not None:
                     current_state = StateStore(self.store.path).snapshot()
-                    if current_state != self.store._preparation_base:
-                        # Rebase the scan on concurrent durable state. Its
-                        # affected continuation is removed below; commit_scan
-                        # must not replace the concurrent state with this plan.
-                        self.store.discard_preparation()
-                        self.store.begin_preparation()
+                    if (_canonical_sha256(current_state)
+                            != _canonical_sha256(self.store._preparation_base)):
+                        raise _PreparedScanChanged(
+                            "Coordinator state changed during continuation preparation",
+                            issue=recovery["record"]["issue"],
+                        )
                 record = recovery["record"]
                 plan["commands"] = [
                     (command, item) for command, item in plan["commands"]
@@ -9236,6 +9263,23 @@ class Coordinator:
     def run(self, *, apply=False):
         lock_fd = self.store.execution_lock() if apply else None
         try:
+            blocked_continuations = set()
+            for attempt in range(2):
+                try:
+                    return self._run_scan(
+                        apply=apply, blocked_continuations=blocked_continuations,
+                    )
+                except _PreparedScanChanged as error:
+                    if attempt or not apply:
+                        raise
+                    if error.issue is not None:
+                        blocked_continuations.add(error.issue)
+        finally:
+            if lock_fd is not None:
+                os.close(lock_fd)
+
+    def _run_scan(self, *, apply, blocked_continuations):
+        try:
             owner_user_id = self.owner_user_id
             export_directory = None
             acknowledgements = {}
@@ -9268,7 +9312,12 @@ class Coordinator:
                         raise CoordinatorError(
                             "Lifecycle ACK or owner evidence is unavailable"
                         ) from error
-            plan = self._build_plan(apply=apply)
+            if blocked_continuations:
+                plan = self._build_plan(
+                    apply=apply, blocked_continuations=blocked_continuations,
+                )
+            else:
+                plan = self._build_plan(apply=apply)
             if apply:
                 if self.lifecycle_source_paths is not None:
                     from deploy.workflow_lifecycle_sources import (
@@ -9335,6 +9384,16 @@ class Coordinator:
                 )
             else:
                 pull_requests = [self._summary(item) for item in plan["pull_requests"]]
+            for issue in sorted(blocked_continuations):
+                enrollment = self.store.snapshot()["enrollments"].get(str(issue), {})
+                pull_requests.append({
+                    "issue": issue, "head": enrollment.get("head"),
+                    "terminal": False, "sensitive": True, "review_valid": False,
+                    "required_checks_green": False, "auto_merge_eligible": False,
+                    "repair_requested": False, "status_action": None,
+                    "auto_merge_requested": False,
+                    "reasons": ["unauthorized-continuation"], "outcomes": 0,
+                })
             return {
                 "repository": REPOSITORY,
                 "mode": "apply" if apply else "plan",
@@ -9345,8 +9404,6 @@ class Coordinator:
         finally:
             if apply:
                 self.store.discard_preparation()
-            if lock_fd is not None:
-                os.close(lock_fd)
 
     @staticmethod
     def _summary(item):
@@ -9783,8 +9840,11 @@ class StateStore:
 
         def commit(data):
             if prepared is not None:
-                if data != baseline:
-                    raise CoordinatorError("Coordinator state changed during preparation")
+                if (_canonical_sha256(data) is None
+                        or _canonical_sha256(data) != _canonical_sha256(baseline)):
+                    raise _PreparedScanChanged(
+                        "Coordinator state changed during preparation"
+                    )
                 data.clear()
                 data.update(prepared)
             seen = set(data["events"])

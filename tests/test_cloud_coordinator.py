@@ -4443,7 +4443,7 @@ def test_owner_continuation_ignores_nonowner_and_unrelated_command_chatter(
     ]) == 1
 
 
-def test_invalid_owner_continuation_does_not_block_unrelated_pr_progress(tmp_path):
+def _owner_continuation_two_pull_case(tmp_path):
     from copy import deepcopy
 
     api, store, abandonment, head, main = _owner_continuation_advanced_case(
@@ -4524,6 +4524,11 @@ def test_invalid_owner_continuation_does_not_block_unrelated_pr_progress(tmp_pat
 
     api.get = get_with_unrelated_pull
     api.get_all = list_with_unrelated_pull
+    return api, store, abandonment, head, main, pull17
+
+
+def test_invalid_owner_continuation_does_not_block_unrelated_pr_progress(tmp_path):
+    api, store, _, _, _, _ = _owner_continuation_two_pull_case(tmp_path)
     original_task_writes = len([
         item for item in api.writes
         if item[0] == "agents/repos/lindayi/hermes-mobile/tasks"
@@ -4544,6 +4549,221 @@ def test_invalid_owner_continuation_does_not_block_unrelated_pr_progress(tmp_pat
         item for item in api.writes
         if item[0] == "agents/repos/lindayi/hermes-mobile/tasks"
     ]) == original_task_writes + 1
+
+
+@pytest.mark.parametrize("mutation", ["enrollment", "historical", "type-alias"])
+def test_owner_continuation_rebuild_retains_unrelated_ready_receipt(
+        tmp_path, monkeypatch, mutation):
+    api, store, abandonment, head, main, pull17 = (
+        _owner_continuation_two_pull_case(tmp_path)
+    )
+    store._mutate(lambda data: data["enrollments"]["17"].update(
+        authorized_head=pull17["head"]["sha"],
+        owner_authorized_head=pull17["head"]["sha"],
+    ))
+    # First reserve a real unrelated repair, without a valid disposition on PR 16.
+    original_write = api.write
+
+    def write(route, body, **kwargs):
+        response = original_write(route, body, **kwargs)
+        if route.endswith("/tasks") and body.get("head_ref") == "topic-17":
+            response["artifacts"] = [
+                {"provider": "github", "type": "branch",
+                 "data": {"head_ref": "topic-17", "base_ref": "main"}},
+                {"provider": "github", "type": "pull",
+                 "data": {"id": pull17["id"], "global_id": pull17["node_id"]}},
+            ]
+        return response
+
+    monkeypatch.setattr(api, "write", write)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    other = next(
+        item for item in StateStore(store.path).actions().values()
+        if item.get("issue") == 17 and item.get("kind") == "fix"
+    )
+    result_head = "3" * 40
+    api.complete_task(
+        other["task_id"], other, head_sha=result_head, base_sha=main,
+    )
+    pull17["head"]["sha"] = result_head
+    receipt = next(
+        item for item in reversed(api.comments)
+        if other["dispatch_nonce"] in item.get("body", "")
+        and item.get("user", {}).get("id") == COPILOT_AGENT
+    )
+    receipt["body"] = receipt["body"].replace("pr=16\n", "pr=17\n")
+    receipt["issue_url"] = (
+        "https://api.github.com/repos/lindayi/hermes-mobile/issues/17"
+    )
+    original_get_all = api.get_all
+
+    def get_all(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments?"):
+            return [receipt]
+        if f"/commits/{result_head}/check-runs?" in route:
+            return [
+                {"name": name, "head_sha": result_head,
+                 "app": {"id": app_id} if app_id is not None else {},
+                 "status": "completed", "conclusion": "success"}
+                for name, app_id in (
+                    ("source-ci", 15368), ("integration-tests", None),
+                    ("issue-link", 15368),
+                )
+            ]
+        if "/actions/runs?" in route and f"head_sha={result_head}" in route:
+            return [source_run(
+                id=569, head_sha=result_head, head_branch="topic-17",
+                pull_requests=[{"number": 17}],
+            )]
+        return original_get_all(route, collection=collection)
+
+    monkeypatch.setattr(api, "get_all", get_all)
+    api.comments.append({
+        "id": 7774, "user": {"id": OWNER},
+        "body": (
+            f"/hermes continue-unverified {abandonment['command_comment_id']} "
+            f"{abandonment['task_id']} {abandonment['reservation_sha256']} "
+            f"{head} {main}"
+        ),
+        "created_at": "2026-10-01T12:14:00Z",
+        "updated_at": "2026-10-01T12:14:00Z",
+    })
+    before = StateStore(store.path).snapshot()
+    original_fence = CloudCoordinator._fence_owner_continuation
+    original_get = api.get
+    injected = []
+    staged = []
+    active = []
+
+    def fence(self, *args, **kwargs):
+        active.append(kwargs.get("successor_action") is None)
+        try:
+            return original_fence(self, *args, **kwargs)
+        finally:
+            active.pop()
+
+    def get(route):
+        response = original_get(route)
+        if (active and active[-1] and not injected
+                and route.endswith(f"/tasks/{abandonment['task_id']}")):
+            prepared = coordinator.store.snapshot()
+            staged.append(deepcopy(prepared))
+            assert prepared["actions"][other["key"]]["status"] == "completed"
+            assert prepared["enrollments"]["17"]["receipt_proofs"]
+            injected.append(True)
+            if mutation == "enrollment":
+                store._mutate(lambda data: data["enrollments"]["16"].update(
+                    active=False,
+                ))
+            elif mutation == "type-alias":
+                store._mutate(lambda data: data["enrollments"]["16"].update(
+                    pull_id=float(data["enrollments"]["16"]["pull_id"]),
+                ))
+            else:
+                historical = store.action(abandonment["action_key"])
+                store.update_action(
+                    abandonment["action_key"], historical["status"],
+                    body=historical["body"] + " changed",
+                )
+        return response
+
+    monkeypatch.setattr(CloudCoordinator, "_fence_owner_continuation", fence)
+    monkeypatch.setattr(api, "get", get)
+    posts = api.task_posts
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856900,
+    )
+    result = coordinator.run(apply=True)
+    after = StateStore(store.path).snapshot()
+    assert injected == [True]
+    assert after["actions"][other["key"]]["status"] == "completed"
+    assert after["enrollments"]["17"]["receipt_proofs"] == (
+        staged[0]["enrollments"]["17"]["receipt_proofs"]
+    )
+    assert after["actions"][other["key"]]["handoff_state"] == "waiting_review"
+    assert any(
+        route.endswith("/pulls/17/requested_reviewers")
+        for route, _ in api.writes
+    )
+    assert api.task_posts == posts
+    assert after["enrollments"]["17"]["attempts"] == 1
+    assert after["enrollments"]["16"]["attempts"] == (
+        before["enrollments"]["16"]["attempts"]
+    )
+    assert after["enrollments"]["16"]["owner_abandonments"] == (
+        before["enrollments"]["16"]["owner_abandonments"]
+    )
+    if mutation == "enrollment":
+        assert after["enrollments"]["16"]["active"] is False
+    elif mutation == "type-alias":
+        assert type(after["enrollments"]["16"]["pull_id"]) is float
+    else:
+        assert after["actions"][abandonment["action_key"]]["body"].endswith(
+            " changed",
+        )
+    assert after["cursor"] == "2026-10-01T12:15:00Z"
+    assert "7773" in after["events"]
+    assert "7774" not in after["events"]
+    assert 17 in [item["issue"] for item in result["pull_requests"]]
+    writes = deepcopy(api.writes)
+    proofs = deepcopy(after["enrollments"]["17"]["receipt_proofs"])
+    without_action = {
+        key: value for key, value in after["actions"].items()
+        if key != other["key"]
+    }
+    _, authorized, _ = _authorized_result_heads(
+        17, after["enrollments"]["17"], without_action, [receipt], main,
+    )
+    assert result_head in authorized
+    without_proofs = deepcopy(after["enrollments"]["17"])
+    without_proofs["receipt_proofs"] = []
+    _, unauthorized, _ = _authorized_result_heads(
+        17, without_proofs, without_action, [receipt], main,
+    )
+    assert result_head not in unauthorized
+    lifecycle = deepcopy(after["lifecycle_events"])
+    for _ in range(3):
+        StateStore(store.path).retire(17, pull17["head"]["sha"], main)
+        coordinator = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856900,
+        )
+        if mutation == "type-alias":
+            with pytest.raises(CoordinatorError, match="identity"):
+                coordinator.run(apply=True)
+        else:
+            coordinator.run(apply=True)
+    repeated = StateStore(store.path).snapshot()
+    assert api.writes == writes
+    assert repeated["enrollments"]["17"]["receipt_proofs"] == proofs
+    assert repeated["enrollments"]["17"]["attempts"] == 1
+    assert repeated["lifecycle_events"] == lifecycle
+    assert repeated["outbox"] == after["outbox"]
+
+
+def test_prepared_scan_rebuild_stops_after_second_type_exact_conflict(
+        tmp_path, monkeypatch):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    original_commit = StateStore.commit_scan
+    conflicts = []
+
+    def commit(self, *args, **kwargs):
+        conflicts.append(True)
+        StateStore(self.path).record_event(8000000 + len(conflicts))
+        return original_commit(self, *args, **kwargs)
+
+    monkeypatch.setattr(StateStore, "commit_scan", commit)
+    with pytest.raises(CoordinatorError, match="state changed during preparation"):
+        Coordinator(api, store, clock=lambda: 1790856900).run(apply=True)
+    assert conflicts == [True, True]
+    assert api.writes == []
+    state = StateStore(store.path).snapshot()
+    assert state["events"] == ["8000001", "8000002"]
+    assert state["actions"] == {}
+    assert state["enrollments"] == {}
+    assert store._prepared is None
 
 
 @pytest.mark.parametrize("hazard", [
@@ -4666,13 +4886,14 @@ def test_owner_continuation_requires_original_terminal_task_and_complete_occupan
     assert "owner_continuations" not in current
 
 
-@pytest.mark.parametrize("stage", ["admission", "publication"])
-@pytest.mark.parametrize("boundary", ["planning", "historical-task", "anchor"])
+@pytest.mark.parametrize(("stage", "boundary"), [
+    ("admission", "planning"), ("admission", "historical-task"),
+    ("publication", "planning"), ("publication", "historical-task"),
+    ("publication", "anchor"),
+])
 @pytest.mark.parametrize("mutation", ["edited", "deleted", "unchanged"])
 def test_owner_continuation_original_command_final_authentication(
         tmp_path, monkeypatch, stage, boundary, mutation):
-    if stage == "admission" and boundary == "anchor":
-        pytest.skip("Admission has no successor anchor read")
     api, store, abandonment, _, _ = _owner_continuation_advanced_case(tmp_path)
     original_get = api.get
     original_fence = CloudCoordinator._fence_owner_continuation
