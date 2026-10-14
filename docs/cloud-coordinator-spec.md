@@ -819,6 +819,27 @@ receipt instruction at both the outer fence and locked publisher. SOURCE
 continuations keep their distinct SOURCE contract. Neither path renews an
 anchor publication allowance or the source/neutral lifetime counters.
 
+The multiple-root contract is a direct, frozen cohort, not transitive acceptance.
+Each distinct historical action retains its original reservation, task, command,
+uncertainty, and separately authenticated disposition. A single successor may
+serve those dispositions only when its reservation explicitly binds each one at
+the same exact enrolled head, main, PR, and branch. Authenticate every member's
+own original command and latest task detail before publication, including
+non-selected roots whose inventory rows still report completion. Missing,
+ambiguous, changed, or active roots block the cohort. Never substitute one root's
+authority for another or consume a disposition outside that frozen cohort.
+Do not commit or journal new dispositions while a required historical root lacks
+its own valid disposition. Read the complete bounded comment inventory for
+retained abandoned claims, so a deferred immutable command does not fall outside
+the ordinary polling cursor before the other disposition arrives.
+One task and one receipt anchor spend one source or neutral lifetime attempt;
+each included disposition permanently spends its one-successor allowance.
+Only that task's authentic immutable ready receipt can directly satisfy the
+included roots. Restart, compaction, and inactive close/reopen must preserve
+all per-root bindings and spent allowances. A retained authenticated same-head
+successor proof prevents later ordinary work from rebinding a spent disposition.
+Malformed retained evidence remains blocked, not a fresh allowance.
+
 An existing owner-abandonment record whose recovery head no longer equals the
 current PR head cannot be rebound by replaying its original command or by ordinary
 re-enrollment. The only supported exception is this finite, append-only owner

@@ -198,7 +198,7 @@ operational authorization, or activation.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `e5b9f8e1fefd6aca599b8a11f1de5f556bbcf33f9cce0ea2e359b12f28c83fd7` |
+| `deploy/cloud_coordinator.py` | `70ec4186beaab41c3bda569963ab5443395e16375c2adffac73dfc5605289310` |
 | `deploy/task_receipts.py` | `7979a9df432d4a108cad727ba395917060b053fee46b7998d74ae331f5972008` |
 
 ### Retained merged source and deliberate native refreshes

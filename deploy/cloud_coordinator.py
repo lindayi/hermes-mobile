@@ -1008,6 +1008,11 @@ def _source_receipt_anchor_request(action, nonce):
             action.get("task_request_body", action.get("body")),
         ),
     }
+    cohort = _owner_continuation_bindings(action, allow_intent=True)
+    if cohort is None:
+        return None
+    if len(cohort) > 1:
+        request["owner_continuation_companion_bindings"] = cohort[1:]
     marker = "hermes-coordinator-source-receipt:" + _canonical_sha256(request)[:20]
     return request | {"marker": marker, "body": marker}
 
@@ -1988,6 +1993,7 @@ def _owner_abandonment_record_valid(record):
             or not _is_sha(record.get("head_sha"))
             or not _is_sha(record.get("base_sha"))
             or not positive_id(record.get("command_comment_id"))
+            or type(record.get("actor_id")) is not int
             or record.get("actor_id") != OWNER_ID
             or record.get("command_body") != (
                 f"/hermes abandon-unverified {record.get('task_id')} "
@@ -3391,6 +3397,19 @@ def _valid_receipt_proof(action, comments):
                     != action["receipt_session_completed_at"])
             or not isinstance(comments, list)):
         return False
+    if "owner_continuation_binding" in action:
+        bindings = _owner_continuation_bindings(action)
+        witnesses = [
+            action.get("owner_continuation_attestation"),
+            *(item.get("attestation") for item in action.get(
+                "owner_continuation_companions", [],
+            ) if isinstance(item, dict)),
+        ] if bindings is not None else []
+        if (not bindings or len(witnesses) != len(bindings)
+                or any(witness is None
+                       or witness != _owner_continuation_binding_attestation(binding, action)
+                       for binding, witness in zip(bindings, witnesses))):
+            return False
     version = action.get("receipt_version", "v1")
     legacy_neutral = action.get("receipt_legacy_neutral", False)
     if (version not in {"v1", "v2"}
@@ -3842,6 +3861,10 @@ def _valid_owner_continuation_claims(enrollment, actions):
 
 def _owner_continuation_successor_attestation(record, action):
     binding = _owner_continuation_binding(record)
+    return _owner_continuation_binding_attestation(binding, action)
+
+
+def _owner_continuation_binding_attestation(binding, action):
     if (
             binding is None
             or not isinstance(action, dict)
@@ -3861,13 +3884,60 @@ def _owner_continuation_successor_attestation(record, action):
     })
 
 
+def _owner_continuation_bindings(action, *, allow_intent=False):
+    if not isinstance(action, dict):
+        return None
+    primary = action.get("owner_continuation_binding")
+    companions = action.get("owner_continuation_companions", [])
+    if primary is None and allow_intent:
+        primary = action.get("owner_continuation_intent")
+        companions = [
+            {"binding": binding}
+            for binding in action.get("owner_continuation_companion_intents", [])
+        ] if isinstance(action.get("owner_continuation_companion_intents", []), list) else None
+    if (not isinstance(primary, dict) or not isinstance(companions, list)
+            or len(companions) >= REPAIR_LIMIT + NEUTRAL_LIMIT
+            or any(not isinstance(item, dict)
+                   or set(item) not in ({"binding"}, {"binding", "attestation"})
+                   or not isinstance(item.get("binding"), dict)
+                   for item in companions)):
+        return None
+    bindings = [primary, *(item["binding"] for item in companions)]
+    shared = (
+        "version", "current_head_sha", "current_main_sha",
+        "pull_id", "pull_node_id", "head_ref",
+    )
+    if (any(set(binding) != set(primary)
+            or any(_canonical_sha256(binding.get(field))
+                   != _canonical_sha256(primary.get(field)) for field in shared)
+            for binding in bindings)
+            or any(len({_canonical_sha256(binding.get(field)) for binding in bindings})
+                   != len(bindings) for field in (
+                       "historical_action_key", "historical_task_id",
+                       "historical_command_comment_id", "disposition_comment_id",
+                   ))):
+        return None
+    return bindings
+
+
 def _owner_continuation_successor_candidate_matches(
         record, action, *, allow_intent=False):
     neutral = isinstance(action, dict) and action.get("task_type") == "neutral"
     binding = _owner_continuation_binding(record)
     attestation = _owner_continuation_successor_attestation(record, action)
+    cohort = _owner_continuation_bindings(action, allow_intent=allow_intent)
+    if cohort is None:
+        return False
+    bound = (
+        action.get("owner_continuation_binding") == binding
+        and action.get("owner_continuation_attestation") == attestation
+        or any(item.get("binding") == binding
+               and item.get("attestation") == attestation
+               for item in action.get("owner_continuation_companions", []))
+    )
     return (
         binding is not None
+        and binding in cohort
         and isinstance(action, dict)
         and action.get("key") != record["historical_action_key"]
         and action.get("task_id") != record["historical_task_id"]
@@ -3879,12 +3949,11 @@ def _owner_continuation_successor_candidate_matches(
         and action.get("head") == record["current_head_sha"]
         and (
             (
-                action.get("owner_continuation_binding") == binding
+                bound
                 and attestation is not None
-                and action.get("owner_continuation_attestation") == attestation
             )
             or allow_intent
-            and action.get("owner_continuation_intent") == binding
+            and action.get("owner_continuation_binding") is None
         )
         and (
             neutral and action.get("recorded_base_sha") == record["current_main_sha"]
@@ -3906,12 +3975,35 @@ def _owner_continuation_successor_matches(record, action):
     )
 
 
-def _owner_continuation_has_successor(record, actions):
+def _owner_continuation_cohort(action, enrollment, actions):
+    bindings = _owner_continuation_bindings(action)
+    if bindings is None:
+        return []
+    records = [
+        record for _, record in _valid_owner_continuation_claims(enrollment, actions)
+        if _owner_continuation_binding(record) in bindings
+        and _owner_continuation_successor_candidate_matches(record, action)
+    ]
+    return records if len(records) == len(bindings) else []
+
+
+def _owner_continuation_has_successor(record, actions, enrollment=None):
+    # A retained binding spends the allowance even if its proof is later revoked.
+    # Progress authority still requires _owner_continuation_successor_proven.
+    proofs = enrollment.get("receipt_proofs", []) if isinstance(enrollment, dict) else []
     return any(
         isinstance(action, dict)
-        and action.get("owner_continuation_binding")
-            == _owner_continuation_binding(record)
-        for action in actions.values()
+        and (
+            action.get("owner_continuation_binding") == _owner_continuation_binding(record)
+            or any(isinstance(item, dict)
+                   and item.get("binding") == _owner_continuation_binding(record)
+                   for item in (
+                       action.get("owner_continuation_companions", [])
+                       if isinstance(action.get("owner_continuation_companions", []), list)
+                       else []
+                   ))
+        )
+        for action in [*actions.values(), *proofs]
     )
 
 
@@ -4416,7 +4508,12 @@ class Coordinator:
                 raise CoordinatorError("GitHub issue row identity was malformed")
             if issue["number"] in blocked_continuations:
                 continue
-            comments = _all_review_comments(self.api, issue["number"], cursor)
+            enrollment = state["enrollments"].get(str(issue["number"]), {})
+            comment_cursor = (
+                None if _valid_owner_abandonment_claims(enrollment, state["actions"])
+                else cursor
+            )
+            comments = _all_review_comments(self.api, issue["number"], comment_cursor)
             if not isinstance(comments, list):
                 raise CoordinatorError("GitHub issue comment inventory was malformed")
             for comment in comments:
@@ -6787,7 +6884,7 @@ class Coordinator:
             )
             if record["current_head_sha"] == head
             and record["current_main_sha"] == snapshot["main_sha"]
-            and not _owner_continuation_has_successor(record, actions)
+            and not _owner_continuation_has_successor(record, actions, enrollment)
         ), None) if repair is not None else None
         if owner_continuation_recovery is not None:
             repair = {
@@ -6795,6 +6892,14 @@ class Coordinator:
                 "owner_continuation_intent": _owner_continuation_binding(
                     owner_continuation_recovery,
                 ),
+                "owner_continuation_companion_intents": [
+                    _owner_continuation_binding(record)
+                    for _, record in _valid_owner_continuation_claims(enrollment, actions)
+                    if record != owner_continuation_recovery
+                    and record["current_head_sha"] == head
+                    and record["current_main_sha"] == snapshot["main_sha"]
+                    and not _owner_continuation_has_successor(record, actions, enrollment)
+                ],
             }
         latest_copilot = latest_reviews(snapshot["reviews"], COPILOT_REVIEWER_ID)
         neutral_rejection_ready = (
@@ -6866,12 +6971,20 @@ class Coordinator:
                 )
                 if record["current_head_sha"] == head
                 and record["current_main_sha"] == snapshot["main_sha"]
-                and not _owner_continuation_has_successor(record, actions)
+                and not _owner_continuation_has_successor(record, actions, enrollment)
             ), None)
             if owner_continuation_recovery is not None:
                 repair["owner_continuation_intent"] = (
                     _owner_continuation_binding(owner_continuation_recovery)
                 )
+                repair["owner_continuation_companion_intents"] = [
+                    _owner_continuation_binding(record)
+                    for _, record in _valid_owner_continuation_claims(enrollment, actions)
+                    if record != owner_continuation_recovery
+                    and record["current_head_sha"] == head
+                    and record["current_main_sha"] == snapshot["main_sha"]
+                    and not _owner_continuation_has_successor(record, actions, enrollment)
+                ]
         else:
             repair = None
         reasons = []
@@ -7422,6 +7535,64 @@ class Coordinator:
                 "record": record,
                 "enrollment": enrollment,
             })
+        for snapshot in scans:
+            issue = snapshot["issue"]
+            new_records = [
+                recovery["record"] for recovery in owner_continuations
+                if recovery["issue"] == issue
+            ]
+            enrollment = enrollments[str(issue)]
+            roots = enrollment.get("owner_abandonments", [])
+            if not new_records and not (
+                    len(roots) > 1 and any(
+                        command == "continue-unverified" and item["issue"] == issue
+                        for command, item in commands)):
+                continue
+            receipt_enrollment = dict(enrollment)
+            receipt_enrollment.pop("owner_authorized_head", None)
+            _, receipt_heads, _ = _authorized_result_heads(
+                issue, receipt_enrollment, state["actions"], snapshot["comments"], None,
+            )
+            records = [
+                record for _, record in _valid_owner_continuation_claims(
+                    enrollment, state["actions"],
+                )
+            ]
+            incomplete = any(
+                not _owner_abandonment_record_valid(root)
+                or (root["head_sha"] != snapshot["head"]
+                    and snapshot["head"] not in receipt_heads
+                    and not any(
+                        record["historical_action_key"] == root["action_key"]
+                        and record["current_head_sha"] == snapshot["head"]
+                        and record["current_main_sha"] == snapshot["main_sha"]
+                        for record in records))
+                for root in roots
+            )
+            if not incomplete:
+                continue
+            rejected_ids = {record["disposition_comment_id"] for record in new_records}
+            deferred_keys = {
+                str(item["command_comment_id"]) for command, item in commands
+                if command == "continue-unverified" and item["issue"] == issue
+            }
+            processed = [key for key in processed if key not in deferred_keys]
+            retained = [
+                record for record in enrollment.get("owner_continuations", [])
+                if record["disposition_comment_id"] not in rejected_ids
+            ]
+            if retained:
+                enrollment["owner_continuations"] = retained
+            else:
+                enrollment.pop("owner_continuations", None)
+            accepted_commands = [
+                (command, item) for command, item in accepted_commands
+                if command != "continue-unverified"
+                or item["command_comment_id"] not in rejected_ids
+            ]
+            owner_continuations = [
+                recovery for recovery in owner_continuations if recovery["issue"] != issue
+            ]
         plans = [
             self._plan_pull(snapshot, state["actions"], apply=apply)
             for snapshot in scans
@@ -7700,14 +7871,21 @@ class Coordinator:
                 )
                 or any(
                     isinstance(item, dict)
-                    and item.get("owner_continuation_binding")
-                        == _owner_continuation_binding(record)
+                    and _owner_continuation_binding(record) in (
+                        _owner_continuation_bindings(item) or []
+                    )
                     and item.get("key") != successor_action.get("key")
                     for item in state["actions"].values()
                 )):
             raise CoordinatorError(
                 "Owner continuation successor changed before publication"
             )
+        cohort = (
+            _owner_continuation_cohort(successor_action, enrollment, state["actions"])
+            if isinstance(successor_action, dict) else [record]
+        )
+        if not cohort or record not in cohort:
+            raise CoordinatorError("Owner continuation cohort changed before publication")
         current = self._fence_pull(
             record["issue"], record["current_head_sha"], main_sha,
         )
@@ -7726,8 +7904,15 @@ class Coordinator:
         if not isinstance(latest_main, dict) or latest_main.get("sha") != main_sha:
             raise CoordinatorError("Owner continuation main changed before commit")
         comments = _all_review_comments(self.api, record["issue"], None)
-        if not _owner_continuation_inventory_has_unique_disposition(
-                self.api, record, comments):
+        if any(
+                not _owner_continuation_inventory_has_unique_disposition(
+                    self.api, member, comments)
+                or not self._compare_proves_ancestry(
+                    member["historical_head_sha"], member["current_head_sha"])
+                or not self._compare_proves_ancestry(
+                    member["historical_base_sha"], member["current_main_sha"],
+                    allow_identical=True)
+                for member in cohort):
             raise CoordinatorError(
                 "Owner continuation disposition inventory was ambiguous"
             )
@@ -7797,13 +7982,37 @@ class Coordinator:
                 raise CoordinatorError(
                     "Owner continuation receipt anchor changed before publication"
                 )
-        if (
-                _current_owner_unverified_abandonment_command(
-                    self.api, historical[0]) is None
-                or _current_owner_unverified_continuation_command(
-                    self.api, record) is None
-                or _current_owner_continuation_enrollment(
-                    self.api, record, current) is None):
+        retained_claims = [
+            (state["actions"][key], abandonment)
+            for key, abandonment in _valid_owner_abandonment_claims(
+                enrollment, state["actions"],
+            )
+            if abandonment["issue"] == record["issue"]
+        ]
+        for prior, abandonment in retained_claims:
+            own_disposition = any(
+                member["historical_action_key"] == prior["key"] for member in cohort
+            )
+            if (isinstance(successor_action, dict) and not own_disposition
+                    and not self._owner_continuation_advances_abandonment(
+                        prior, enrollment, state["actions"], comments,
+                        record["current_head_sha"],
+                    )
+                    and abandonment["head_sha"] != record["current_head_sha"]):
+                raise CoordinatorError("Owner continuation retained root lacks authority")
+            if not self._owner_abandonment_task_terminal(
+                    {"issue": record["issue"], "pull": current, "comments": comments},
+                    prior, abandonment, tasks, supervised_head_advance=True):
+                raise CoordinatorError("Owner continuation retained task changed")
+        if (any(_current_owner_unverified_abandonment_command(
+                    self.api, abandonment) is None
+                for _, abandonment in retained_claims)
+                or any(
+                    _current_owner_unverified_continuation_command(
+                        self.api, member) is None
+                    or _current_owner_continuation_enrollment(
+                        self.api, member, current) is None
+                    for member in cohort)):
             raise CoordinatorError(
                 "Owner continuation immutable owner authority changed"
             )
@@ -8197,12 +8406,18 @@ class Coordinator:
             if key != action.get("key")
             and _owner_abandonment_successor_candidate_matches(record, action)
         ), None)
-        owner_continuation_record = next((
+        owner_continuation_records = [
             record for _, record in _valid_owner_continuation_claims(
                 enrollment, self.store.actions(),
             )
             if _owner_continuation_successor_candidate_matches(
                 record, action, allow_intent=True,
+            )
+        ]
+        owner_continuation_record = next((
+            record for record in owner_continuation_records
+            if _owner_continuation_binding(record) == action.get(
+                "owner_continuation_binding", action.get("owner_continuation_intent"),
             )
         ), None)
         source_anchor = not neutral and owner_continuation_record is not None
@@ -8280,29 +8495,18 @@ class Coordinator:
             return "superseded"
         recovered_claims = []
         enrollment = self.store.snapshot()["enrollments"].get(str(action["issue"]), {})
-        if owner_continuation_record is not None:
-            prior = self.store.action(
-                owner_continuation_record["historical_action_key"],
-            )
+        for prior_key, prior in self.store.actions().items():
+            if (prior_key == action.get("key")
+                    or prior.get("kind") not in {"fix", "review"}
+                    or prior.get("issue") != action["issue"]
+                    or prior.get("status") not in {"sending", "uncertain", "sent"}):
+                continue
             abandonment = _owner_abandonment_for_action(
-                enrollment, owner_continuation_record["historical_action_key"],
-                prior,
+                enrollment, prior_key, prior,
             )
-            if prior is None or abandonment is None:
+            if abandonment is None:
                 return "agent-running"
             recovered_claims.append((prior, abandonment))
-        else:
-            for prior_key, prior in self.store.actions().items():
-                if (prior.get("kind") not in {"fix", "review"}
-                        or prior.get("issue") != action["issue"]
-                        or prior.get("status") not in {"sending", "uncertain", "sent"}):
-                    continue
-                abandonment = _owner_abandonment_for_action(
-                    enrollment, prior_key, prior,
-                )
-                if abandonment is None:
-                    return "agent-running"
-                recovered_claims.append((prior, abandonment))
         workflows, _ = _workflow_runs(self.api, branch, action["issue"])
         if not review_task:
             threads, complete = collect_review_threads(self.api, action["issue"])
@@ -8364,9 +8568,8 @@ class Coordinator:
                         "comments": recovery_comments,
                     }, prior, abandonment, tasks,
                     supervised_head_advance=(
-                        owner_continuation_record is not None
-                        and prior.get("key")
-                            == owner_continuation_record["historical_action_key"]
+                        any(prior.get("key") == record["historical_action_key"]
+                            for record in owner_continuation_records)
                         or self._owner_continuation_advances_abandonment(
                             prior, enrollment, self.store.actions(),
                             recovery_comments,
@@ -8500,11 +8703,8 @@ class Coordinator:
                                     "comments": final_comments,
                                 }, prior, abandonment, final_tasks,
                                 supervised_head_advance=(
-                                    owner_continuation_record is not None
-                                    and prior.get("key")
-                                        == owner_continuation_record[
-                                            "historical_action_key"
-                                        ]
+                                    any(prior.get("key") == record["historical_action_key"]
+                                        for record in owner_continuation_records)
                                     or self._owner_continuation_advances_abandonment(
                                         prior,
                                         StateStore(self.store.path).snapshot()[
@@ -10094,6 +10294,7 @@ class StateStore:
             claimed = dict(action)
             owner_abandonment_record = None
             owner_continuation_record = None
+            companion_records = []
             existing = data["actions"].get(key)
             tombstone = data["retired"].get(str(claimed.get("issue")), {})
             if not existing and (
@@ -10165,6 +10366,13 @@ class StateStore:
                 owner_continuation_intent = claimed.pop(
                     "owner_continuation_intent", None,
                 )
+                companion_intents = claimed.pop(
+                    "owner_continuation_companion_intents", [],
+                )
+                if (not isinstance(companion_intents, list)
+                        or "owner_continuation_companions" in claimed
+                        or companion_intents and owner_continuation_intent is None):
+                    return False
                 if owner_abandonment_intent is not None:
                     matching_owner_abandonments = [
                         record for key, record in _valid_owner_abandonment_claims(
@@ -10210,6 +10418,25 @@ class StateStore:
                     if len(matching_continuations) != 1:
                         return False
                     owner_continuation_record = matching_continuations[0]
+                    intended = [owner_continuation_intent, *companion_intents]
+                    cohort = [
+                        record for _, record in _valid_owner_continuation_claims(
+                            enrollment, data["actions"],
+                        )
+                        if _owner_continuation_binding(record) in intended
+                    ]
+                    if (len(cohort) != len(intended)
+                            or len({_canonical_sha256(item) for item in intended})
+                                != len(intended)
+                            or any(_owner_continuation_has_successor(
+                                record, data["actions"], enrollment,
+                            ) for record in cohort)):
+                        return False
+                    companion_records = [
+                        next(record for record in cohort
+                             if _owner_continuation_binding(record) == binding)
+                        for binding in companion_intents
+                    ]
                     binding = _owner_continuation_binding(
                         owner_continuation_record,
                     )
@@ -10242,6 +10469,13 @@ class StateStore:
                             )):
                         return False
                     claimed["owner_continuation_binding"] = binding
+                    if companion_records:
+                        claimed["owner_continuation_companions"] = [
+                            {"binding": _owner_continuation_binding(record)}
+                            for record in companion_records
+                        ]
+                    if _owner_continuation_bindings(claimed) is None:
+                        return False
                 neutral = claimed.get("task_type") == "neutral"
                 source_anchor = (
                     not neutral and owner_continuation_record is not None
@@ -10353,6 +10587,12 @@ class StateStore:
                         owner_continuation_record, claimed,
                     )
                 )
+                for companion, record in zip(
+                        claimed.get("owner_continuation_companions", []),
+                        companion_records):
+                    companion["attestation"] = _owner_continuation_successor_attestation(
+                        record, claimed,
+                    )
             data["actions"][key] = {**claimed, "status": "sending"}
             return True
         return self._mutate(claim)
@@ -10453,6 +10693,7 @@ class StateStore:
             request = anchor_request(
                 expected, expected.get("dispatch_nonce"),
             )
+            cohort = _owner_continuation_cohort(action, enrollment, data["actions"])
             if (
                     _canonical_sha256(current_projection)
                         != expected_projection_sha
@@ -10460,6 +10701,10 @@ class StateStore:
                     or action.get("status") != "sending"
                     or action.get("task_dispatch_started") is not True
                     or action.get("task_id") is not None
+                    or not cohort
+                    or record not in cohort
+                    or any(not _owner_continuation_enrollment_active(member, enrollment)
+                           for member in cohort)
                     or not _owner_continuation_enrollment_active(
                         record, enrollment,
                     )
@@ -10602,6 +10847,7 @@ class StateStore:
                     "recorded_base_sha",
                     "owner_abandonment_binding", "owner_abandonment_attestation",
                     "owner_continuation_binding", "owner_continuation_attestation",
+                    "owner_continuation_companions",
                     "attempt", "owner_id", "repository_id", "pull_id", "pull_node_id",
                     "repair_policy_version", "repair_fingerprints",
                     "repair_fingerprints_complete", "repair_fingerprint_version",
@@ -10658,7 +10904,9 @@ class StateStore:
                         or not any(
                             _owner_continuation_binding(record)
                                 == entry.get("owner_continuation_binding")
-                            and not _owner_continuation_has_successor(record, data["actions"])
+                            and not _owner_continuation_has_successor(
+                                record, data["actions"], enrollment,
+                            )
                             for _, record in records
                         )):
                     return False
