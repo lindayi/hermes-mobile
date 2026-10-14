@@ -7775,12 +7775,18 @@ class Coordinator:
                 raise CoordinatorError(
                     "Owner continuation receipt anchor changed before publication"
                 )
+        if _current_owner_unverified_abandonment_command(
+                self.api, historical[0]) is None:
+            raise CoordinatorError(
+                "Owner continuation original abandonment command changed"
+            )
         final_pull = self._fence_pull(
             record["issue"], record["current_head_sha"], main_sha,
         )
         final_main = self.api.get(f"repos/{REPOSITORY}/commits/{MAIN_BRANCH}")
         if (
                 not final_pull
+                or final_pull.get("draft") is not False
                 or not _pull_identity(final_pull, action)
                 or final_pull.get("id") != record["pull_id"]
                 or final_pull.get("node_id") != record["pull_node_id"]

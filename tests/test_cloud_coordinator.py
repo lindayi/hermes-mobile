@@ -4666,6 +4666,141 @@ def test_owner_continuation_requires_original_terminal_task_and_complete_occupan
     assert "owner_continuations" not in current
 
 
+@pytest.mark.parametrize("stage", ["admission", "publication"])
+@pytest.mark.parametrize("boundary", ["planning", "historical-task", "anchor"])
+@pytest.mark.parametrize("mutation", ["edited", "deleted", "unchanged"])
+def test_owner_continuation_original_command_final_authentication(
+        tmp_path, monkeypatch, stage, boundary, mutation):
+    if stage == "admission" and boundary == "anchor":
+        pytest.skip("Admission has no successor anchor read")
+    api, store, abandonment, _, _ = _owner_continuation_advanced_case(tmp_path)
+    original_get = api.get
+    original_fence = CloudCoordinator._fence_owner_continuation
+    active = []
+    injected = []
+
+    def mutate():
+        if injected:
+            return
+        injected.append(True)
+        command = next(
+            item for item in api.comments
+            if item["id"] == abandonment["command_comment_id"]
+        )
+        if mutation == "deleted":
+            api.comments.remove(command)
+        elif mutation == "edited":
+            command["body"] += " edited"
+            command["updated_at"] = "2026-10-01T12:13:00Z"
+
+    def fence(self, recovery, main_sha, *, successor_action=None):
+        selected = (
+            successor_action is None if stage == "admission" else
+            isinstance(successor_action, dict)
+            and successor_action.get("task_dispatch_started") is True
+        )
+        active.append(selected)
+        try:
+            if selected and boundary == "planning":
+                mutate()
+            return original_fence(
+                self, recovery, main_sha, successor_action=successor_action,
+            )
+        finally:
+            active.pop()
+
+    def get(route):
+        response = original_get(route)
+        if active and active[-1]:
+            if (boundary == "historical-task"
+                    and route.endswith(f"/tasks/{abandonment['task_id']}")):
+                mutate()
+            elif boundary == "anchor":
+                successor = next((
+                    item for item in StateStore(store.path).actions().values()
+                    if item.get("owner_continuation_binding")
+                ), {})
+                if route.endswith(
+                        f"/issues/comments/{successor.get('receipt_anchor_comment_id')}"
+                ):
+                    mutate()
+        return response
+
+    monkeypatch.setattr(api, "get", get)
+    monkeypatch.setattr(CloudCoordinator, "_fence_owner_continuation", fence)
+    before = StateStore(store.path).snapshot()
+    writes = len(api.writes)
+    posts = api.task_posts
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    after = StateStore(store.path).snapshot()
+    assert injected == [True]
+    assert api.task_posts == posts + (mutation == "unchanged")
+    assert after["actions"][abandonment["action_key"]] == (
+        before["actions"][abandonment["action_key"]]
+    )
+    assert after["enrollments"]["16"]["owner_abandonments"] == (
+        before["enrollments"]["16"]["owner_abandonments"]
+    )
+    if mutation != "unchanged":
+        if stage == "admission":
+            assert not after["enrollments"]["16"].get("owner_continuations")
+        assert not any(
+            route.endswith(("/requested_reviewers", "/merge", "/tasks"))
+            for route, _ in api.writes[writes:]
+        )
+
+
+@pytest.mark.parametrize("stage", ["admission", "publication"])
+@pytest.mark.parametrize("draft", [True, None, "false", 0, False])
+def test_owner_continuation_final_pull_requires_exact_nondraft(
+        tmp_path, monkeypatch, stage, draft):
+    api, store, _, _, _ = _owner_continuation_advanced_case(tmp_path)
+    original_pull_fence = CloudCoordinator._fence_pull
+    original_fence = CloudCoordinator._fence_owner_continuation
+    active = []
+    injected = []
+    pull_reads = []
+
+    def fence(self, recovery, main_sha, *, successor_action=None):
+        active.append(
+            successor_action is None if stage == "admission" else
+            isinstance(successor_action, dict)
+            and successor_action.get("task_dispatch_started") is True
+        )
+        try:
+            return original_fence(
+                self, recovery, main_sha, successor_action=successor_action,
+            )
+        finally:
+            active.pop()
+
+    def pull_fence(self, *args, **kwargs):
+        if active and active[-1] and not injected:
+            pull_reads.append(True)
+            if len(pull_reads) == 2:
+                injected.append(True)
+                if draft is None:
+                    api.pull.pop("draft", None)
+                else:
+                    api.pull["draft"] = draft
+        return original_pull_fence(self, *args, **kwargs)
+
+    monkeypatch.setattr(CloudCoordinator, "_fence_pull", pull_fence)
+    monkeypatch.setattr(CloudCoordinator, "_fence_owner_continuation", fence)
+    posts = api.task_posts
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    assert injected == [True]
+    assert api.task_posts == posts + (draft is False)
+    if draft is not False and stage == "admission":
+        assert not StateStore(store.path).snapshot()["enrollments"]["16"].get(
+            "owner_continuations",
+        )
+
+
 def test_owner_continuation_final_plan_fence_rejects_edited_command(
         tmp_path, monkeypatch):
     api, store, _, _, _ = _owner_continuation_advanced_case(tmp_path)

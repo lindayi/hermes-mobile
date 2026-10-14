@@ -781,6 +781,12 @@ continuation. Non-owner commands and unrelated owner chatter are not authority a
 do not count as competing dispositions. This inventory check runs at admission and
 again at publication, so commands consumed on an earlier poll are included.
 
+After the last historical-task and successor-anchor reads, independently
+reauthenticate the original immutable abandonment command against its retained
+historical binding, without filling missing fields from the new enrollment.
+Then read the final pull and main. The final pull must have `draft` exactly
+`false`; absent or malformed values reject admission and publication.
+
 The fence compares the complete affected enrollment, historical reservation,
 continuation list, same-PR action claims, and outbox claims using canonical
 type-preserving JSON. SOURCE anchor inventory and direct readback remain mandatory.
