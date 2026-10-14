@@ -752,6 +752,59 @@ Finite acceptance for this recovery:
   network write, and that neutral instructions, serialized synthetic carrier, and
   strict immutable receipt validation use the same one-comment contract.
 
+#### Append-only continuation disposition after supervised advancement
+
+An existing owner-abandonment record whose recovery head no longer equals the
+current PR head cannot be rebound by replaying its original command or by ordinary
+re-enrollment. The only supported exception is this finite, append-only owner
+disposition, consumed after the owner has disclosed and supervised the source
+advancement:
+
+```
+/hermes continue-unverified <abandonment-comment-id> <task-id> <reservation-sha256> <current-head-sha> <current-main-sha>
+```
+
+The command is one immutable owner comment on the same PR issue. Its positive
+decimal comment ID, task ID, and lowercase digests are exact values, not aliases.
+It refers to exactly one already-persisted abandonment by that record's original
+command-comment ID, task ID, and digest of the complete original reservation.
+Those historical values must be verified from the original command, reservation,
+and task evidence; later enrollment or task evidence must never fill a missing
+historical identity.
+
+Accept the disposition only for the same numeric issue and repository, pull request
+REST and node IDs, head repository and branch, and a fresh active exact-head owner
+enrollment. The command's head and main must match the live PR head and base, the
+fresh enrollment, and the freshly observed main. Complete task inventory and task
+detail, session and artifact identity, original prompt and reservation, immutable
+original command, and positive latest terminality must all be revalidated. Require
+complete pagination and writer occupancy, no other active writer for the PR, and
+positive ancestry from the historical recovery head to the current head and from
+the historical base to the current main. Any uncertain publication, incomplete
+read, identity mismatch, ambiguous or competing disposition, or post-plan change
+rejects the affected write.
+
+Persist a bounded record separately from the historical abandonment records. The
+record binds the exact historical action and abandonment, immutable disposition
+comment, current enrollment comment, current head and main, pull identity, and
+acceptance time. It is append-only, unique for both the abandoned action and
+disposition comment, and may authorize at most one distinct successor reservation.
+The successor uses existing per-PR execution locks and lifetime accounting. This
+authorization does not accept either task's result, create a ready receipt, grant
+source provenance, qualify review, or authorize merge. A source or review-followup
+successor must provide the ordinary authenticated immutable ready receipt; a
+neutral successor must use the existing single-publication owner receipt anchor.
+Only that ready receipt can authorize later source or review advancement. The
+disposition command is not itself a receipt or anchor. Preserve the original
+abandonment, command, receipt bytes or absence, uncertainty, action reservation,
+attempts, and spent budgets.
+
+The disposition command is not accepted by the automatic enrollment or abandonment
+anchors. A repeat, edit, deletion, competing command, close/reopen, or cold restart
+must not create another disposition, successor task, anchor, command, reservation,
+or budget renewal. It does not change the legacy parser, manual qualification,
+review protection, production ledger, or deployment contract.
+
 Live REST pull numbers, pull IDs, and head/base repository IDs must be positive
 integers at collection and every dispatch, ready/review handoff, and merge fence;
 booleans, floats, strings, and missing values are not identity proof.

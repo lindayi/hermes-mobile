@@ -3155,6 +3155,54 @@ def _owner_abandonment_historical_neutral_case(tmp_path):
     return api, store, neutral
 
 
+def _owner_continuation_advanced_case(
+        tmp_path, *, disposition=True, command_body=None):
+    api, store, _ = _owner_abandonment_historical_neutral_case(tmp_path)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    abandonment = StateStore(store.path).snapshot()["enrollments"]["16"][
+        "owner_abandonments"
+    ][0]
+    continued_head = "9" * 40
+    continued_main = FINAL_RESULT_HEAD
+    api.head_sha = continued_head
+    api.pull["head"]["sha"] = continued_head
+    api.pull["base"]["sha"] = continued_main
+    api.current_main_sha = continued_main
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.compare_results = {
+        f"{abandonment['head_sha']}...{continued_head}": _compare_result(
+            abandonment["head_sha"], ahead_by=1,
+        ),
+        f"{abandonment['base_sha']}...{continued_main}": _compare_result(
+            abandonment["base_sha"], ahead_by=1,
+        ),
+    }
+    api.source_failure = True
+    api.source_failure_sha = continued_head
+    api.unresolved = True
+    api.comments.append({
+        "id": 7772, "user": {"id": OWNER},
+        "body": f"/hermes enroll {continued_head}",
+        "created_at": "2026-10-01T12:11:30Z",
+        "updated_at": "2026-10-01T12:11:30Z",
+    })
+    if disposition:
+        api.comments.append({
+            "id": 7773, "user": {"id": OWNER},
+            "body": command_body or (
+                f"/hermes continue-unverified "
+                f"{abandonment['command_comment_id']} "
+                f"{abandonment['task_id']} {abandonment['reservation_sha256']} "
+                f"{continued_head} {continued_main}"
+            ),
+            "created_at": "2026-10-01T12:12:00Z",
+            "updated_at": "2026-10-01T12:12:00Z",
+        })
+    return api, store, abandonment, continued_head, continued_main
+
+
 def _advance_owner_abandonment_main(api):
     api.current_main_sha = FINAL_RESULT_HEAD
     api.pull.update(mergeable=False, mergeable_state="dirty")
@@ -3485,7 +3533,6 @@ def test_owner_abandonment_neutral_successor_survives_main_advance_and_reopens(
     assert accepted["head"] == successor_head
     assert StateStore(store.path).action(successor["key"])["receipt_result"] == "ready"
     assert successor_head in authorized
-    assert successor_head not in blocked
 
     task_posts = api.task_posts
     reopened = Coordinator(
@@ -3507,6 +3554,492 @@ def test_owner_abandonment_neutral_successor_survives_main_advance_and_reopens(
         write for write in api.writes
         if write[0].endswith("/requested_reviewers")
     ] == review_writes
+
+
+def test_owner_continuation_disposition_records_missing_root_before_successor_dispatch(
+        tmp_path):
+    from copy import deepcopy
+
+    api, store, abandonment, continued_head, continued_main = (
+        _owner_continuation_advanced_case(tmp_path)
+    )
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    prior = deepcopy(enrollment["owner_abandonments"])
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+    continuation = state["enrollments"]["16"]["owner_continuations"][0]
+    successors = [
+        action for action in state["actions"].values()
+        if action.get("owner_continuation_binding")
+    ]
+
+    assert result["repair_requested"], result["reasons"]
+    assert len(successors) == 1, (result, api.writes, state["actions"])
+    successor = successors[0]
+    assert continuation["historical_action_key"] == abandonment["action_key"]
+    assert continuation["disposition_comment_id"] == 7773
+    assert continuation["current_head_sha"] == continued_head
+    assert continuation["current_main_sha"] == continued_main
+    assert state["enrollments"]["16"]["owner_abandonments"] == prior
+    assert successor["key"] != abandonment["action_key"]
+    assert successor["head"] == continued_head
+    assert successor["status"] == "sent"
+
+    task_posts = api.task_posts
+    attempts = state["enrollments"]["16"]["attempts"]
+    writes = list(api.writes)
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856780,
+        ).run(apply=True)
+    state = StateStore(store.path).snapshot()
+    assert api.task_posts == task_posts
+    assert state["enrollments"]["16"]["attempts"] == attempts
+    assert api.writes == writes
+
+    successor_head = "8" * 40
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=successor_head, base_sha=continued_main,
+    )
+    api.head_sha = successor_head
+    api.pull["head"]["sha"] = successor_head
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.unresolved = False
+    api.review_state = None
+    api.review_sha = None
+    accepted = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+    _, authorized, blocked = _authorized_result_heads(
+        16, state["enrollments"]["16"], state["actions"], api.comments,
+        continued_main,
+    )
+    ready = state["actions"][successor["key"]]
+    assert ready["receipt_result"] == "ready"
+    assert ready["owner_continuation_binding"]
+    assert successor_head in authorized and successor_head not in blocked
+    assert accepted["head"] == successor_head
+
+    reopened = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    assert reopened["head"] == successor_head
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+
+    StateStore(store.path).retire(16, successor_head, continued_main)
+    compacted = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert compacted["owner_continuations"] == [continuation]
+    assert any(
+        proof.get("owner_continuation_binding")
+            == ready["owner_continuation_binding"]
+        for proof in compacted.get("receipt_proofs", [])
+    )
+
+
+def test_reenrollment_cannot_bypass_missing_abandonment_root(tmp_path):
+    api, store, abandonment, continued_head, continued_main = (
+        _owner_continuation_advanced_case(tmp_path, disposition=False)
+    )
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    posts = api.task_posts
+    attempts = enrollment["attempts"]
+    original_action = StateStore(store.path).action(abandonment["action_key"])
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    current = StateStore(store.path).snapshot()["enrollments"]["16"]
+
+    assert result["reasons"] == ["unauthorized-continuation"]
+    assert api.task_posts == posts
+    assert "owner_continuations" not in current
+    assert current["owner_abandonments"] == enrollment["owner_abandonments"]
+    assert current["attempts"] == attempts
+    assert StateStore(store.path).action(abandonment["action_key"]) == original_action
+
+
+@pytest.mark.parametrize("hazard", [
+    "wrong-command-id", "float-command-id", "boolean-command-id",
+    "wrong-task", "wrong-reservation", "wrong-head", "wrong-main",
+    "edited-command", "wrong-owner",
+])
+def test_owner_continuation_command_mismatches_cannot_authorize_dispatch(
+        tmp_path, hazard):
+    api, store, abandonment, head, main = _owner_continuation_advanced_case(
+        tmp_path, disposition=False,
+    )
+    command_id = abandonment["command_comment_id"]
+    task_id = abandonment["task_id"]
+    reservation = abandonment["reservation_sha256"]
+    command_head, command_main = head, main
+    if hazard == "wrong-command-id":
+        command_id = 7770
+    elif hazard == "float-command-id":
+        command_id = "7771.0"
+    elif hazard == "boolean-command-id":
+        command_id = "True"
+    elif hazard == "wrong-task":
+        task_id = "other-task"
+    elif hazard == "wrong-reservation":
+        reservation = "0" * 64
+    elif hazard == "wrong-head":
+        command_head = "8" * 40
+    elif hazard == "wrong-main":
+        command_main = "7" * 40
+    body = (
+        f"/hermes continue-unverified {command_id} {task_id} {reservation} "
+        f"{command_head} {command_main}"
+    )
+    command = {
+        "id": 7773, "user": {"id": OWNER}, "body": body,
+        "created_at": "2026-10-01T12:12:00Z",
+        "updated_at": "2026-10-01T12:12:00Z",
+    }
+    if hazard == "edited-command":
+        command["updated_at"] = "2026-10-01T12:12:01Z"
+    elif hazard == "wrong-owner":
+        command["user"] = {"id": COPILOT_AGENT}
+    api.comments.append(command)
+    posts = api.task_posts
+    attempts = StateStore(store.path).snapshot()["enrollments"]["16"]["attempts"]
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    current = StateStore(store.path).snapshot()["enrollments"]["16"]
+
+    assert result["reasons"] == ["unauthorized-continuation"]
+    assert api.task_posts == posts
+    assert "owner_continuations" not in current
+    assert current["attempts"] == attempts
+
+
+def test_competing_owner_continuation_dispositions_are_not_consumed(
+        tmp_path):
+    api, store, abandonment, head, main = _owner_continuation_advanced_case(
+        tmp_path, disposition=False,
+    )
+    body = (
+        f"/hermes continue-unverified {abandonment['command_comment_id']} "
+        f"{abandonment['task_id']} {abandonment['reservation_sha256']} "
+        f"{head} {main}"
+    )
+    api.comments.extend([
+        {
+            "id": comment_id, "user": {"id": OWNER}, "body": body,
+            "created_at": f"2026-10-01T12:12:{second:02d}Z",
+            "updated_at": f"2026-10-01T12:12:{second:02d}Z",
+        }
+        for comment_id, second in ((7773, 0), (7774, 1))
+    ])
+    posts = api.task_posts
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+
+    assert result["reasons"] == ["unauthorized-continuation"]
+    assert api.task_posts == posts
+    assert "owner_continuations" not in enrollment
+
+
+def test_invalid_owner_continuation_does_not_block_unrelated_pr_progress(tmp_path):
+    from copy import deepcopy
+
+    api, store, abandonment, head, main = _owner_continuation_advanced_case(
+        tmp_path, disposition=False,
+    )
+    api.comments.append({
+        "id": 7773, "user": {"id": OWNER},
+        "body": (
+            f"/hermes continue-unverified {abandonment['command_comment_id']} "
+            f"{abandonment['task_id']} {'0' * 64} {head} {main}"
+        ),
+        "created_at": "2026-10-01T12:12:00Z",
+        "updated_at": "2026-10-01T12:12:00Z",
+    })
+    other_head = "2" * 40
+    other_enrollment = enrolled_record(
+        issue=17, comment=223, head=other_head, base=main,
+        pull_id=170000017, pull_node_id="PR_node_17",
+    ) | {
+        "attempts": 0,
+        "neutral_attempts": 0,
+        "neutral_attempts_unknown": False,
+        "repair_progress": cloud_coordinator._new_repair_progress(),
+        "sensitive_authorization": None,
+        "sensitive_sha": None,
+        "targeted_review": None,
+        "last_open_seen": True,
+        "last_open_head": other_head,
+        "active": True,
+    }
+    store._mutate(
+        lambda state: state["enrollments"].__setitem__(
+            "17", deepcopy(other_enrollment),
+        ),
+    )
+    pull17 = valid_pr(
+        number=17, id=170000017, node_id="PR_node_17",
+        head={"sha": other_head, "ref": "topic-17", "repo": {"id": 1399942965}},
+        base={"sha": main, "ref": "main", "repo": {"id": 1399942965}},
+    )
+    original_get = api.get
+    original_get_all = api.get_all
+
+    def get_with_unrelated_pull(route):
+        if route == "repos/lindayi/hermes-mobile/pulls/17":
+            return pull17
+        if route == "repos/lindayi/hermes-mobile/pulls/17/requested_reviewers":
+            return {"users": [], "teams": []}
+        return original_get(route)
+
+    def list_with_unrelated_pull(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments?"):
+            return []
+        if route.endswith("/pulls/17/files?per_page=100"):
+            return list(api.review_pull_files())
+        if route.endswith("/pulls/17/reviews?per_page=100"):
+            return []
+        if f"/commits/{other_head}/check-runs?" in route:
+            return [
+                {
+                    "name": name, "head_sha": other_head,
+                    "app": {"id": app_id} if app_id is not None else {},
+                    "status": "completed", "conclusion": "success",
+                }
+                for name, app_id in (
+                    ("source-ci", 15368), ("integration-tests", None),
+                    ("issue-link", 15368),
+                )
+            ]
+        if f"/commits/{other_head}/statuses?per_page=100" in route:
+            return []
+        if "/actions/runs?" in route and f"head_sha={other_head}" in route:
+            return [source_run(
+                id=568, head_sha=other_head, head_branch="topic-17",
+                pull_requests=[{"number": 17}],
+            )]
+        return original_get_all(route, collection=collection)
+
+    api.get = get_with_unrelated_pull
+    api.get_all = list_with_unrelated_pull
+    original_task_writes = len([
+        item for item in api.writes
+        if item[0] == "agents/repos/lindayi/hermes-mobile/tasks"
+    ])
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    issue16 = next(item for item in result["pull_requests"] if item["issue"] == 16)
+    issue17 = next(item for item in result["pull_requests"] if item["issue"] == 17)
+    state = StateStore(store.path).snapshot()
+
+    assert issue16["reasons"] == ["unauthorized-continuation"]
+    assert issue17["repair_requested"]
+    assert "owner_continuations" not in state["enrollments"]["16"]
+    assert state["enrollments"]["17"]["attempts"] == 1
+    assert len([
+        item for item in api.writes
+        if item[0] == "agents/repos/lindayi/hermes-mobile/tasks"
+    ]) == original_task_writes + 1
+
+
+@pytest.mark.parametrize("hazard", [
+    "missing-reservation", "changed-prompt", "changed-session",
+    "changed-artifact", "waiting-task", "incomplete-inventory",
+    "active-other-writer", "disconnected-head", "wrong-pull-id",
+    "wrong-pull-node", "wrong-repository", "wrong-branch",
+    "float-pull-id", "boolean-pull-id", "ambiguous-root",
+    "missing-task", "detail-error", "reactivated-task",
+])
+def test_owner_continuation_requires_original_terminal_task_and_complete_occupancy(
+        tmp_path, hazard):
+    api, store, abandonment, head, _ = _owner_continuation_advanced_case(tmp_path)
+    task_id = abandonment["task_id"]
+    if hazard == "missing-reservation":
+        StateStore(store.path)._mutate(
+            lambda state: state["actions"].pop(abandonment["action_key"]),
+        )
+    elif hazard == "changed-prompt":
+        api.tasks[task_id]["sessions"][0]["prompt"] += " changed"
+    elif hazard == "changed-session":
+        api.tasks[task_id]["sessions"][0]["task_id"] = "other-task"
+    elif hazard == "changed-artifact":
+        api.tasks[task_id]["artifacts"] = []
+    elif hazard == "waiting-task":
+        api.tasks[task_id]["state"] = "waiting_for_user"
+    elif hazard == "incomplete-inventory":
+        original_get_all = api.get_all
+
+        def omit_tasks(route, *, collection=None):
+            if route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
+                raise ApiError("task pagination was incomplete")
+            return original_get_all(route, collection=collection)
+
+        api.get_all = omit_tasks
+    elif hazard == "active-other-writer":
+        api.active_agent = True
+    elif hazard == "disconnected-head":
+        api.compare_results[
+            f"{abandonment['head_sha']}...{head}"
+        ] = _compare_result("6" * 40, ahead_by=1)
+    elif hazard == "wrong-pull-id":
+        api.pull["id"] = 160000017
+    elif hazard == "float-pull-id":
+        api.pull["id"] = 160000016.0
+    elif hazard == "boolean-pull-id":
+        api.pull["id"] = True
+    elif hazard == "wrong-pull-node":
+        api.pull["node_id"] = "PR_node_17"
+    elif hazard == "wrong-repository":
+        api.pull["head"]["repo"]["id"] = 1
+    elif hazard == "wrong-branch":
+        api.pull["head"]["ref"] = "other-branch"
+    elif hazard == "ambiguous-root":
+        StateStore(store.path)._mutate(
+            lambda state: state["enrollments"]["16"][
+                "owner_abandonments"
+            ].append({
+                **state["enrollments"]["16"]["owner_abandonments"][0],
+                "action_key": "ambiguous-historical-action",
+            }),
+        )
+    elif hazard == "missing-task":
+        del api.tasks[task_id]
+    elif hazard == "detail-error":
+        original_get = api.get
+
+        def fail_task_detail(route):
+            if route.endswith(f"/tasks/{task_id}"):
+                raise ApiError("task detail unavailable", status=503)
+            return original_get(route)
+
+        api.get = fail_task_detail
+    elif hazard == "reactivated-task":
+        api.tasks[task_id]["state"] = "in_progress"
+        original_get_all = api.get_all
+
+        def stale_completed_inventory(route, *, collection=None):
+            values = original_get_all(route, collection=collection)
+            if route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
+                return [
+                    {**item, "state": "completed"}
+                    if isinstance(item, dict) and item.get("id") == task_id
+                    else item
+                    for item in values
+                ]
+            return values
+
+        api.get_all = stale_completed_inventory
+    posts = api.task_posts
+    before = StateStore(store.path).snapshot()
+
+    if hazard == "incomplete-inventory":
+        with pytest.raises(ApiError, match="pagination was incomplete"):
+            Coordinator(
+                api, StateStore(store.path), clock=lambda: 1790856780,
+            ).run(apply=True)
+        assert StateStore(store.path).snapshot() == before
+        assert api.task_posts == posts
+        return
+    if hazard in {
+        "wrong-pull-id", "wrong-pull-node", "wrong-repository",
+        "float-pull-id", "boolean-pull-id",
+    }:
+        with pytest.raises(CoordinatorError, match="identity did not match enrollment"):
+            Coordinator(
+                api, StateStore(store.path), clock=lambda: 1790856780,
+            ).run(apply=True)
+        assert StateStore(store.path).snapshot() == before
+        assert api.task_posts == posts
+        return
+
+    result = Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(
+        apply=True,
+    )["pull_requests"][0]
+    current = StateStore(store.path).snapshot()["enrollments"]["16"]
+
+    assert result["reasons"] == ["unauthorized-continuation"]
+    assert api.task_posts == posts
+    assert "owner_continuations" not in current
+
+
+def test_owner_continuation_final_plan_fence_rejects_edited_command(
+        tmp_path, monkeypatch):
+    api, store, _, _, _ = _owner_continuation_advanced_case(tmp_path)
+    original_fence = CloudCoordinator._fence_owner_continuation
+    calls = []
+
+    def edit_before_final_fence(self, recovery, main_sha, *, successor_action=None):
+        if not calls:
+            calls.append(True)
+            command = next(item for item in api.comments if item["id"] == 7773)
+            command["body"] += " edited"
+            command["updated_at"] = "2026-10-01T12:13:00Z"
+        return original_fence(
+            self, recovery, main_sha, successor_action=successor_action,
+        )
+
+    monkeypatch.setattr(
+        CloudCoordinator, "_fence_owner_continuation", edit_before_final_fence,
+    )
+    posts = api.task_posts
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    current = StateStore(store.path).snapshot()["enrollments"]["16"]
+
+    assert calls == [True]
+    assert result["reasons"] == ["unauthorized-continuation"]
+    assert api.task_posts == posts
+    assert "owner_continuations" not in current
+
+
+def test_owner_continuation_rechecks_authority_before_successor_post(
+        tmp_path, monkeypatch):
+    api, store, _, _, _ = _owner_continuation_advanced_case(tmp_path)
+    original_fence = CloudCoordinator._fence_owner_continuation
+    calls = []
+
+    def edit_after_authority_read(self, recovery, main_sha, *, successor_action=None):
+        result = original_fence(
+            self, recovery, main_sha, successor_action=successor_action,
+        )
+        calls.append(successor_action is not None)
+        if len(calls) == 2:
+            command = next(item for item in api.comments if item["id"] == 7773)
+            command["body"] += " edited"
+            command["updated_at"] = "2026-10-01T12:13:00Z"
+        return result
+
+    monkeypatch.setattr(
+        CloudCoordinator, "_fence_owner_continuation", edit_after_authority_read,
+    )
+    posts = api.task_posts
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    state = StateStore(store.path).snapshot()
+    successors = [
+        action for action in state["actions"].values()
+        if action.get("owner_continuation_binding")
+    ]
+
+    assert calls == [False, True]
+    assert api.task_posts == posts
+    assert len(successors) == 1
+    assert successors[0]["status"] == "superseded"
 
 
 def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_path):
