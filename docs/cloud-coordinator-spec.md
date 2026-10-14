@@ -866,6 +866,12 @@ cannot release the abandoned reservation or advance progress. Recheck this chain
 after compaction and restart before releasing historical occupancy or requesting
 review.
 
+Prove this reachability from the matching direct successor receipt results. Global
+authorization from a later owner enrollment, another continuation, or another
+receipt root does not connect a head to this successor. Every traversed receipt must
+be valid and `ready`; do not traverse a blocked intermediate. Accept any valid ready
+path rooted at the matching successor, without requiring a single linear history.
+
 Evidence collection is independent of dispatch caps and usable repair prose.
 An unresolved thread with missing comments is not an empty inventory. Historical
 main advancement does not invalidate a bound source receipt or its exact-head

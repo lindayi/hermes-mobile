@@ -191,12 +191,14 @@ abandonment and reservation and requires a fresh current-head enrollment. A
 successful receipt is still required before later source advancement. The valid
 continuation result may advance only through an exact ready-receipt chain; a
 disconnected or blocked descendant cannot release historical occupancy or advance
-progress. These candidate pins identify the exact proposed source bytes only; they
-do not establish review, merge, operational authorization, or activation.
+progress. Global authorization from a later enrollment or another root cannot
+replace a ready-receipt path from the bound successor. These candidate pins identify
+the exact proposed source bytes only; they do not establish review, merge,
+operational authorization, or activation.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `97da1716032056f661060557ba69fc0f56ee69d3deefa7e1ddb2c12f9a913747` |
+| `deploy/cloud_coordinator.py` | `a914d61319cc406fd968c04bf2c6cfd706b6ac81f179331f7fa6cd4d6cf442cf` |
 
 ### Retained merged source and deliberate native refreshes
 

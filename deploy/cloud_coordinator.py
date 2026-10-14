@@ -3813,19 +3813,42 @@ def _owner_continuation_successor_proven(record, enrollment, actions, comments,
         *actions.values(),
         *enrollment.get("receipt_proofs", []),
     ]
-    direct_successor = any(
-        isinstance(action, dict)
+    direct_successors = [
+        action for action in candidates
+        if isinstance(action, dict)
         and _owner_continuation_successor_matches(record, action)
         and _valid_receipt_proof(action, comments)
-        for action in candidates
-    )
-    if not direct_successor:
+    ]
+    if not direct_successors:
         return False
     _, authorized, blocked = _authorized_result_heads(
         record["issue"], enrollment, actions, comments,
         record["current_main_sha"],
     )
-    return current_head in authorized and current_head not in blocked
+    if authorized is None or current_head not in authorized or current_head in blocked:
+        return False
+    reachable = {
+        action["receipt_head"] for action in direct_successors
+        if action["receipt_head"] not in blocked
+    }
+    if not reachable:
+        return False
+    ready_receipts = [
+        action for action in candidates
+        if isinstance(action, dict)
+        and action.get("issue") == record["issue"]
+        and action.get("receipt_result") == "ready"
+        and _valid_receipt_proof(action, comments)
+    ]
+    while True:
+        descendants = {
+            action["receipt_head"] for action in ready_receipts
+            if action["receipt_start_head"] in reachable
+            and action["receipt_head"] not in blocked
+        }
+        if descendants <= reachable:
+            return current_head in reachable
+        reachable.update(descendants)
 
 
 def _owner_continuation_progress_receipt_proven(
@@ -3835,6 +3858,9 @@ def _owner_continuation_progress_receipt_proven(
         and _owner_continuation_successor_matches(record, action)
         and action.get("receipt_head") == current_head
         and _valid_receipt_proof(action, comments)
+        and _owner_continuation_successor_proven(
+            record, enrollment, actions, comments, current_head,
+        )
     )
 
 

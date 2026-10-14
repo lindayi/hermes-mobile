@@ -3217,12 +3217,15 @@ def _advance_owner_abandonment_main(api):
 
 
 def _store_precovery_owner_abandonment_successor(
-        api, store, *, created_at, receipt_head, receipt_base):
+        api, store, *, created_at, receipt_head, receipt_base,
+        start_head=NEXT_RESULT_HEAD,
+        receipt_result="ready",
+        action_key="precovery-owner-abandonment-successor"):
     action = {
-        "key": "precovery-owner-abandonment-successor",
+        "key": action_key,
         "issue": 16,
         "kind": "fix",
-        "head": NEXT_RESULT_HEAD,
+        "head": start_head,
         "head_ref": api.pull["head"]["ref"],
         "main_sha": CURRENT_MAIN,
         "pull_id": api.pull["id"],
@@ -3245,12 +3248,15 @@ def _store_precovery_owner_abandonment_successor(
     )
     store.accept_task(action["key"], task["id"], task["created_at"])
     claimed = store.action(action["key"])
-    api.complete_task(task["id"], claimed, head_sha=receipt_head, base_sha=receipt_base)
+    api.complete_task(
+        task["id"], claimed, result=receipt_result,
+        head_sha=receipt_head, base_sha=receipt_base,
+    )
     api.comments[-1]["id"] = 9901
     store.update_action_with_lifecycle(
         action["key"], "completed", None, now=created_at,
         receipt_version="v1",
-        receipt_result="ready",
+        receipt_result=receipt_result,
         receipt_comment_id=9901,
         receipt_created_at="2026-10-01T12:05:00Z",
         receipt_body=api.comments[-1]["body"],
@@ -3835,6 +3841,161 @@ def test_owner_continuation_disposition_records_missing_root_before_successor_di
         write for write in api.writes
         if write[0].endswith("/requested_reviewers")
     ] == review_writes
+
+
+def test_owner_continuation_rejects_disconnected_owner_authorized_head_after_restart(
+        tmp_path):
+    from copy import deepcopy
+
+    api, store, _, _, continued_main = (
+        _owner_continuation_advanced_case(tmp_path)
+    )
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    successor = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("owner_continuation_binding")
+    )
+    successor_head = "8" * 40
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=successor_head, base_sha=continued_main,
+    )
+    api.head_sha = successor_head
+    api.pull["head"]["sha"] = successor_head
+    api.unresolved = False
+    api.source_failure = False
+    api.source_failure_sha = None
+    accepted = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    assert accepted["head"] == successor_head
+
+    before_compaction = StateStore(store.path).snapshot()
+    enrollment_before = before_compaction["enrollments"]["16"]
+    abandonment = enrollment_before["owner_abandonments"][0]
+    historical_action = deepcopy(
+        before_compaction["actions"][abandonment["action_key"]],
+    )
+    attempts = enrollment_before["attempts"]
+    task_posts = api.task_posts
+    writes = list(api.writes)
+    StateStore(store.path).retire(16, successor_head, continued_main)
+    disconnected_head = "5" * 40
+    api.head_sha = disconnected_head
+    api.pull["head"]["sha"] = disconnected_head
+    api.comments.append({
+        "id": 7774, "user": {"id": OWNER},
+        "body": f"/hermes enroll {disconnected_head}",
+        "created_at": "2026-10-01T12:14:00Z",
+        "updated_at": "2026-10-01T12:14:00Z",
+    })
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+    enrollment = state["enrollments"]["16"]
+    _, authorized, blocked = _authorized_result_heads(
+        16, enrollment, state["actions"], api.comments, continued_main,
+    )
+    continuation = enrollment["owner_continuations"][0]
+
+    assert disconnected_head in authorized
+    assert disconnected_head not in blocked
+    assert any(
+        cloud_coordinator._owner_continuation_successor_matches(
+            continuation, action,
+        )
+        and cloud_coordinator._valid_receipt_proof(action, api.comments)
+        for action in [
+            *state["actions"].values(),
+            *enrollment.get("receipt_proofs", []),
+        ]
+    )
+    assert result["reasons"] == ["unauthorized-continuation"]
+    assert result["repair_requested"] is False
+    assert api.requested_reviewers == []
+    assert state["actions"][abandonment["action_key"]] == historical_action
+    assert enrollment["owner_abandonments"] == (
+        enrollment_before["owner_abandonments"]
+    )
+    assert enrollment["attempts"] == attempts
+    assert api.task_posts == task_posts
+    assert api.writes == writes
+    assert not cloud_coordinator._owner_continuation_successor_proven(
+        continuation, enrollment, state["actions"], api.comments,
+        disconnected_head,
+    )
+
+
+def test_owner_continuation_rejects_a_blocked_intermediate_receipt(tmp_path):
+    api, store, _, _, continued_main = _owner_continuation_advanced_case(tmp_path)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    successor = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("owner_continuation_binding")
+    )
+    root_head = "8" * 40
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=root_head, base_sha=continued_main,
+    )
+    api.head_sha = root_head
+    api.pull["head"]["sha"] = root_head
+    api.unresolved = False
+    api.source_failure = False
+    api.source_failure_sha = None
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+
+    blocked_head = "6" * 40
+    blocked = _store_precovery_owner_abandonment_successor(
+        api, StateStore(store.path), created_at=1790856781,
+        start_head=root_head, receipt_head=blocked_head,
+        receipt_base=continued_main, receipt_result="policy_broken",
+        action_key="blocked-owner-continuation-intermediate",
+    )
+    descendant_head = "7" * 40
+    descendant = _store_precovery_owner_abandonment_successor(
+        api, StateStore(store.path), created_at=1790856782,
+        start_head=blocked_head, receipt_head=descendant_head,
+        receipt_base=continued_main,
+        action_key="ready-owner-continuation-after-block",
+    )
+    api.head_sha = descendant_head
+    api.pull["head"]["sha"] = descendant_head
+    api.comments.append({
+        "id": 7774, "user": {"id": OWNER},
+        "body": f"/hermes enroll {descendant_head}",
+        "created_at": "2026-10-01T12:14:00Z",
+        "updated_at": "2026-10-01T12:14:00Z",
+    })
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    continuation = enrollment["owner_continuations"][0]
+    actions = StateStore(store.path).actions()
+    _, authorized, blocked_heads = _authorized_result_heads(
+        16, enrollment, actions, api.comments, continued_main,
+    )
+
+    assert cloud_coordinator._valid_receipt_proof(blocked, api.comments)
+    assert cloud_coordinator._valid_receipt_proof(descendant, api.comments)
+    assert descendant["receipt_start_head"] == blocked_head
+    assert blocked_head in blocked_heads
+    assert descendant_head in authorized
+    assert descendant_head not in blocked_heads
+    assert result["reasons"] == ["unauthorized-continuation"]
+    assert result["repair_requested"] is False
+    assert api.requested_reviewers == []
+    assert not cloud_coordinator._owner_continuation_successor_proven(
+        continuation, enrollment, actions, api.comments, descendant_head,
+    )
 
 
 def test_reenrollment_cannot_bypass_missing_abandonment_root(tmp_path):
