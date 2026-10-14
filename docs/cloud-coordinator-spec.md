@@ -708,7 +708,9 @@ Pre-upgrade retained proofs omit `head_ref`. A read-only compatibility view may
 obtain it only from the original authenticated task session. It requires a fresh
 complete task inventory, positive task and session completion, the same owner,
 creator, repository, pull artifact and branch artifact, and exact task/session
-IDs. Original list and detail evidence must agree. The original prompt must match
+IDs. The original summary and exact detail must agree, including their complete
+artifact lists; each must contain one valid GitHub pull and branch artifact. The
+original prompt must match
 the supported reservation type, exact pull/start head and reservation marker, and
 end with a supported canonical receipt instruction bound to the stored nonce and
 base. If a live action remains, its original prompt must also agree. Anchored
@@ -733,7 +735,9 @@ durable action key, then reconcile each task relevant to this pull. A missing,
 non-string or substituted task ID cannot hide a duplicate. All receipt,
 reservation, identity, starting
 `head` and `dispatch_nonce` fields must agree. An ineligible malformed duplicate
-cannot disappear from this check. Identical copies count once; distinct tasks on
+cannot disappear from this check. Include any live action sharing a retained task
+ID before filtering by its issue identity, so a missing, malformed or mismatched
+issue cannot hide the duplicate. Identical copies count once; distinct tasks on
 unrelated pulls do not block this lineage.
 A same-head
 ready receipt is still a valid direct continuation, but it cannot hide a cycle in a

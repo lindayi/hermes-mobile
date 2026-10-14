@@ -179,10 +179,23 @@ coordinator digest
 `40b88943f50d7c44d1f74d86f8e72b17b4c4b5ee2339850657821936b37ad40b`
 remains historical bootstrap15/16 evidence, not the current candidate pin.
 
-| Candidate path | SHA-256 |
+| Historical PR #105 candidate path | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `4c8ce668d216035eb79af4adfa48946159d75419d726a43faec661c402b21dbe` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
+
+### PR #109 supervised correction3 current candidate
+
+Issue #108's bounded correction requires agreement between legacy summary and
+detail task artifacts and reconciles every live action sharing a retained task ID
+before issue-identity filtering. The current source fingerprint is:
+
+| Candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `43aab1ab83f081d2518729730f66a5fc19d942e984cca2d57aaaf07331bc365b` |
+
+This exact-source pin does not establish review acceptance, merge readiness,
+authorization beyond the standing delegation, or operational activation.
 
 ### Retained merged source and deliberate native refreshes
 

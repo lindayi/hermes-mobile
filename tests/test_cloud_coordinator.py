@@ -4097,6 +4097,25 @@ def test_owner_abandonment_reconciles_live_copy_by_durable_key(
     )
 
 
+def _mutate_legacy_artifacts(task, hazard):
+    artifacts = task.get("artifacts")
+    if hazard.endswith("-branch"):
+        artifact = next(item for item in artifacts if item.get("type") == "branch")
+        artifact["data"]["head_ref"] = "other-branch"
+    elif hazard.endswith("-pull"):
+        artifact = next(item for item in artifacts if item.get("type") == "pull")
+        artifact["data"]["id"] = 160000099
+    elif hazard.endswith("-missing"):
+        task["artifacts"] = [
+            item for item in artifacts if item.get("type") != "branch"
+        ]
+    elif hazard.endswith("-duplicate"):
+        branch = next(item for item in artifacts if item.get("type") == "branch")
+        artifacts.append(deepcopy(branch))
+    elif hazard.endswith("-malformed"):
+        task["artifacts"] = "not-an-artifact-list"
+
+
 @pytest.mark.parametrize("compacted", [False, True], ids=["live-copy", "proof-only"])
 @pytest.mark.parametrize("stage", ["planning", "review-fence", "source-fence"])
 @pytest.mark.parametrize("hazard", [
@@ -4105,11 +4124,18 @@ def test_owner_abandonment_reconciles_live_copy_by_durable_key(
     "detail-error", "creator", "owner", "repository", "pull", "branch",
     "session", "session-task", "session-owner", "session-repository", "prompt",
     "prompt-prefix", "prompt-marker", "prompt-template",
+    "summary-artifact-branch", "detail-artifact-branch",
+    "summary-artifact-pull", "detail-artifact-pull",
+    "summary-artifact-missing", "detail-artifact-missing",
+    "summary-artifact-duplicate", "detail-artifact-duplicate",
+    "summary-artifact-malformed", "detail-artifact-malformed",
     "edited-receipt", "substituted-receipt", "explicit-wrong-branch",
     "duplicate-status", "duplicate-issue", "duplicate-start", "duplicate-head",
     "duplicate-nonce", "ambiguous-root", "ambiguous-intermediate",
     "edited-root", "deleted-root", "proof-status", "proof-issue", "proof-start",
     "proof-head", "proof-nonce", "proof-kind", "proof-task-type",
+    "alternate-key-missing-issue", "alternate-key-wrong-issue",
+    "alternate-key-invalid-issue",
 ])
 def test_owner_abandonment_upgrade_fresh_fences(
         tmp_path, monkeypatch, compacted, stage, hazard):
@@ -4132,6 +4158,9 @@ def test_owner_abandonment_upgrade_fresh_fences(
         injected.append(hazard)
         task = api.tasks[source["task_id"]]
         session = task["sessions"][0]
+        if isinstance(hazard, str) and hazard.startswith("detail-artifact-"):
+            api.legacy_summary_artifacts = deepcopy(task["artifacts"])
+            _mutate_legacy_artifacts(task, hazard.removeprefix("detail-"))
         if hazard == "unknown":
             del api.tasks[source["task_id"]]
         elif hazard in {"active-writer", "unrelated-writer"}:
@@ -4245,6 +4274,32 @@ def test_owner_abandonment_upgrade_fresh_fences(
 
             StateStore(store.path)._mutate(bind_alternate)
             injected_posts.append(alternate["task_id"])
+        elif isinstance(hazard, str) and hazard.startswith("alternate-key-"):
+            invalid_issue = {
+                "alternate-key-missing-issue": None,
+                "alternate-key-wrong-issue": 99,
+                "alternate-key-invalid-issue": [],
+            }[hazard]
+
+            def add_alternate_key(state):
+                duplicate = deepcopy(
+                    state["actions"].get(source["key"])
+                    or next(
+                        proof for proof in state["enrollments"]["16"][
+                            "receipt_proofs"
+                        ]
+                        if proof.get("task_id") == source["task_id"]
+                    )
+                )
+                duplicate_key = (
+                    "fix:16:hermes-coordinator-fix:" + "f" * 20
+                )
+                assert duplicate_key != source["key"]
+                duplicate["key"] = duplicate_key
+                duplicate["issue"] = invalid_issue
+                state["actions"][duplicate_key] = duplicate
+
+            StateStore(store.path)._mutate(add_alternate_key)
         injected_proofs[:] = deepcopy(
             StateStore(store.path).snapshot()["enrollments"]["16"]["receipt_proofs"],
         )
@@ -4263,6 +4318,21 @@ def test_owner_abandonment_upgrade_fresh_fences(
             if hazard == "inventory-error":
                 raise ApiError("original inventory unavailable", status=503)
             inventory = deepcopy(original_get_all(route, collection=collection))
+            if isinstance(hazard, str) and hazard.split("-", 1)[0] in {
+                    "summary", "detail"} and "-artifact-" in hazard:
+                for item in inventory:
+                    if item.get("id") == source["task_id"]:
+                        if hazard.startswith("summary-"):
+                            summary = {"artifacts": deepcopy(item["artifacts"])}
+                            _mutate_legacy_artifacts(
+                                summary, hazard.removeprefix("summary-"),
+                            )
+                            item["artifacts"] = summary["artifacts"]
+                        elif hasattr(api, "legacy_summary_artifacts"):
+                            item["artifacts"] = deepcopy(
+                                api.legacy_summary_artifacts,
+                            )
+                        item["session_count"] = len(item.pop("sessions"))
             if hazard == "incomplete-inventory":
                 return [item for item in inventory if item["id"] != source["task_id"]]
             if hazard == "duplicate-inventory":

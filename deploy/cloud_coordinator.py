@@ -3164,6 +3164,38 @@ def _legacy_task_reservation_type(record, tasks, snapshot):
     return reservation_type
 
 
+def _legacy_task_artifacts_match(listed, detailed):
+    listed_artifacts = listed.get("artifacts")
+    detailed_artifacts = detailed.get("artifacts")
+    if (not isinstance(listed_artifacts, list)
+            or len(listed_artifacts) > 20
+            or listed_artifacts != detailed_artifacts):
+        return False
+    branches, pulls = [], []
+    for artifact in listed_artifacts:
+        if (not isinstance(artifact, dict)
+                or artifact.get("provider") != "github"
+                or not isinstance(artifact.get("data"), dict)):
+            return False
+        data = artifact["data"]
+        if artifact.get("type") == "branch":
+            if (not isinstance(data.get("head_ref"), str)
+                    or not data["head_ref"]
+                    or data.get("base_ref") != MAIN_BRANCH):
+                return False
+            branches.append(data)
+        elif artifact.get("type") == "pull":
+            if (type(data.get("id")) is not int or data["id"] <= 0
+                    or (data.get("global_id") is not None
+                        and (not isinstance(data["global_id"], str)
+                             or not data["global_id"]))):
+                return False
+            pulls.append(data)
+        else:
+            return False
+    return len(branches) == 1 and len(pulls) == 1
+
+
 def _legacy_task_detail_matches_list(listed, detailed):
     terminal_states = {"completed", "failed", "timed_out", "cancelled"}
     if (
@@ -3180,6 +3212,7 @@ def _legacy_task_detail_matches_list(listed, detailed):
             or detailed.get("state") != listed.get("state")
             or detailed.get("state") not in terminal_states
             or detailed.get("created_at") != listed.get("created_at")
+            or not _legacy_task_artifacts_match(listed, detailed)
             or not isinstance(listed.get("updated_at"), str)
             or not isinstance(detailed.get("updated_at"), str)
             or detailed.get("updated_at") != listed.get("updated_at")
@@ -6785,7 +6818,11 @@ class Coordinator:
         relevant_keys = {proof["key"] for proof in proofs} | {
             key for key, candidate in actions.items()
             if isinstance(candidate, dict)
-            and candidate.get("issue") == record["issue"]
+            and (
+                candidate.get("issue") == record["issue"]
+                or (isinstance(candidate.get("task_id"), str)
+                    and candidate["task_id"] in retained_task_ids)
+            )
         }
         relevant_task_ids = {
             candidate.get("task_id") for candidate in representations
