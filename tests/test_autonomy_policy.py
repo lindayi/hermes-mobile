@@ -667,7 +667,7 @@ def test_current_pr109_candidate_table_matches_source_bytes():
     root = Path(__file__).resolve().parents[1]
     docs = (root / 'docs/autonomy-policy.md').read_text()
     section = docs.split(
-        '### PR #109 supervised correction6 current candidate', 1,
+        '### PR #109 supervised correction7 current candidate', 1,
     )[1].split('### Retained merged source and deliberate native refreshes', 1)[0]
     rows = [
         line for line in section.splitlines()
