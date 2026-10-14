@@ -686,6 +686,12 @@ comment `created_at`. Comment `updated_at` must equal `created_at`, with complet
 GitHub edit history proving no edits. Server author/time/repo/issue URL and ID,
 not self-declared JSON, supply the immutable publication binding.
 
+Decode the single POST response with Python's standard JSON parser. JSON integers
+remain exact (including values beyond the signed 64-bit range), and only a JSON
+integer from 1 through 2^63−1 is accepted; booleans, strings, null, and fractional
+numbers are not IDs. Reject duplicate object keys and any trailing or second JSON
+document. Do not use jq numeric comparisons or conversion for this ID.
+
 ```sh
 sync_files_and_parent_directories() {
   python3 - "$@" <<'PY'
@@ -715,14 +721,28 @@ sync_files_and_parent_directories \
 gh api --method POST -H 'Accept: application/vnd.github.full+json' \
   "repos/$REPO/issues/$PR/comments" --input "$BUNDLE/request.json" \
   > "$BUNDLE/create-response.json"
-COMMENT_ID="$(jq -ser '
-  if length == 1 and (.[0] | type == "object") then .[0].id
-  else error("expected one response object")
-  end
-  | if type == "number" then . else error("id must be a number") end
-  | select(. > 0 and floor == .)
-  | tostring
-' "$BUNDLE/create-response.json")"
+COMMENT_ID="$(python3 - "$BUNDLE/create-response.json" <<'PY'
+import json
+import sys
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+with open(sys.argv[1], encoding="utf-8") as response:
+    payload = json.load(response, object_pairs_hook=unique_object)
+if type(payload) is not dict:
+    raise SystemExit("expected one response object")
+comment_id = payload.get("id")
+if type(comment_id) is not int or not 1 <= comment_id <= 9223372036854775807:
+    raise SystemExit("id must be a positive signed 64-bit integer")
+print(comment_id)
+PY
+)"
 gh api -H 'Accept: application/vnd.github.full+json' \
   "repos/$REPO/issues/comments/$COMMENT_ID" > "$BUNDLE/readback.json"
 gh api --paginate --slurp -H 'Accept: application/vnd.github.full+json' \

@@ -471,6 +471,23 @@ def _audit_datetime(value, now):
     return parsed
 
 
+def _validate_operator(operator, evidence_by_key):
+    assert type(operator) is dict
+    assert set(operator) == {'login', 'id', 'delegation'}
+    login = operator['login']
+    assert type(login) is str
+    try:
+        login_bytes = login.encode('utf-8')
+    except UnicodeEncodeError as error:
+        raise AssertionError('operator login must be valid UTF-8') from error
+    assert 0 < len(login_bytes) <= 8192
+    assert type(operator['id']) is int and 1 <= operator['id'] < 2**63
+    delegation = operator['delegation']
+    assert type(delegation) is str and delegation in evidence_by_key and \
+        evidence_by_key[delegation].get('type') == 'public-response', \
+        'delegation must reference a public response'
+
+
 def _validate_blocked_record(fixture, *, now=AUDIT_REFERENCE_NOW):
     """Validate a complete synthetic blocked record, its root bindings and evidence graph."""
     record = {key: value for key, value in fixture.items() if key != 'fixture'}
@@ -503,6 +520,7 @@ def _validate_blocked_record(fixture, *, now=AUDIT_REFERENCE_NOW):
     by_key = {entry['key']: entry for entry in entries}
     assert len(by_key) == len(entries)
     assert len({entry['path'] for entry in entries}) == len(entries)
+    _validate_operator(record['operator'], by_key)
     for entry in entries:
         assert set(entry) == {
             'key', 'type', 'path', 'sha256', 'bytes', 'url', 'retrieved_at',
@@ -530,7 +548,6 @@ def _validate_blocked_record(fixture, *, now=AUDIT_REFERENCE_NOW):
     _validate_gate_observations(observations, set(by_key), record['status'])
 
     referenced = {record['operator']['delegation']}
-    assert set(record['operator']) == {'login', 'id', 'delegation'}
     for item in observations:
         referenced.add(item['proof'])
         if item['gate'] == 'sensitive' and isinstance(item['command'], str):
@@ -553,6 +570,52 @@ def _validate_gate_outcome_fixture(fixture, *, now=AUDIT_REFERENCE_NOW):
         _validate_invalidation_record(fixture, now=now)
 
 
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES | {'invalidation'}))
+@pytest.mark.parametrize('field,value', (
+    ('id', True), ('id', 0), ('id', -1), ('id', 2**63), ('id', '1'),
+    ('id', None), ('id', 1.0), ('login', ''), ('login', None),
+    ('login', 'x' * 8193), ('login', 'é' * 4097),
+))
+def test_audit_records_reject_invalid_operator_fields(name, field, value):
+    record = deepcopy(_gate_fixtures()[name])
+    record['operator'][field] = value
+
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(record)
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES | {'invalidation'}))
+@pytest.mark.parametrize('operator_id', (1, 2**63 - 1))
+@pytest.mark.parametrize('login', ('synthetic-operator', 'é' * 4096))
+def test_audit_records_accept_operator_boundaries(name, operator_id, login):
+    record = deepcopy(_gate_fixtures()[name])
+    record['operator'].update(id=operator_id, login=login)
+
+    _validate_gate_outcome_fixture(record)
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES | {'invalidation'}))
+@pytest.mark.parametrize('delegation', ('missing', None, 1))
+def test_audit_records_reject_dangling_operator_delegation(name, delegation):
+    record = deepcopy(_gate_fixtures()[name])
+    record['operator']['delegation'] = delegation
+
+    with pytest.raises(AssertionError, match='delegation must reference a public response'):
+        _validate_gate_outcome_fixture(record)
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES | {'invalidation'}))
+def test_audit_records_require_operator_delegation_to_be_public_response(name):
+    record = deepcopy(_gate_fixtures()[name])
+    delegated = record['operator']['delegation']
+    next(entry for entry in record['evidence'] if entry['key'] == delegated)[
+        'type'
+    ] = 'private-attestation'
+
+    with pytest.raises(AssertionError, match='delegation must reference a public response'):
+        _validate_gate_outcome_fixture(record)
+
+
 def _validate_invalidation_record(fixture, *, prior_readback=None, now=AUDIT_REFERENCE_NOW):
     """Check this complete synthetic event, not runtime qualification or live proof."""
     record = {key: value for key, value in fixture.items() if key != 'fixture'}
@@ -571,9 +634,6 @@ def _validate_invalidation_record(fixture, *, prior_readback=None, now=AUDIT_REF
         'number': 1, 'node_id': 'SYNTHETIC_PR_NODE',
         'url': 'https://api.github.com/repos/lindayi/hermes-mobile/pulls/1',
     }
-    assert set(record['operator']) == {'login', 'id', 'delegation'}
-    assert record['operator']['login']
-    assert type(record['operator']['id']) is int and 1 <= record['operator']['id'] < 2**63
     assert type(record['reason']) is str and 0 < len(record['reason'].encode()) <= 8192
     changed = record['changed_binding']
     assert set(changed) == {'head_sha', 'base_sha', 'observed_at', 'proof'}
@@ -595,6 +655,7 @@ def _validate_invalidation_record(fixture, *, prior_readback=None, now=AUDIT_REF
     by_key = {entry['key']: entry for entry in entries}
     assert len(by_key) == len(entries), 'duplicate evidence key'
     assert len({entry['path'] for entry in entries}) == len(entries), 'duplicate evidence path'
+    _validate_operator(record['operator'], by_key)
     refs = {record['operator']['delegation'], 'prior-record', changed['proof']}
     assert refs <= set(by_key), 'dangling reference'
     assert set(by_key) <= refs, 'unreferenced evidence'
@@ -1682,6 +1743,10 @@ def test_manual_qualification_shell_does_not_post_after_any_sync_failure(
     '{"id":731.5}',
     '{"id":0}',
     '{"id":-1}',
+    '{"id":9223372036854775808}',
+    '{"id":92233720368547758080000000000000000000}',
+    '{"id":1,"id":2}',
+    '{"id":1}\n{"id":2}',
     'not-json',
 ))
 def test_manual_qualification_shell_rejects_invalid_post_ids_before_readback(
@@ -1693,6 +1758,23 @@ def test_manual_qualification_shell_rejects_invalid_post_ids_before_readback(
     assert sum('--method POST' in call for call in calls) == 1
     assert not any('repos/lindayi/hermes-mobile/issues/comments/' in call
                    for call in calls)
+    assert (private / 'reservation').read_text() == 'synthetic-record\n'
+
+
+@pytest.mark.parametrize(('comment_id', 'inherited_comment_id'), (
+    (1, None), (9223372036854775807, '999'),
+))
+def test_manual_qualification_shell_accepts_exact_post_id_boundaries(
+        tmp_path, comment_id, inherited_comment_id):
+    result, calls, private = _run_manual_qualification_publication(
+        tmp_path, inherited_comment_id=inherited_comment_id,
+        post_response=f'{{"id":{comment_id}}}')
+
+    assert result.returncode == 0, result.stderr
+    assert sum('--method POST' in call for call in calls) == 1
+    readback = f'repos/lindayi/hermes-mobile/issues/comments/{comment_id}'
+    assert sum(readback in call for call in calls) == 1
+    assert not any('issues/comments/999' in call for call in calls)
     assert (private / 'reservation').read_text() == 'synthetic-record\n'
 
 
