@@ -6845,13 +6845,24 @@ class Coordinator:
         if "sessions" not in listed:
             if not _legacy_task_detail_matches_list(listed, task):
                 return None
-        elif (not isinstance(task, dict) or any(
-                listed.get(field) != task.get(field)
-                for field in (
-                    "id", "state", "created_at", "updated_at", "creator",
-                    "owner", "repository", "artifacts", "sessions",
-                ))):
-            return None
+        else:
+            fields = (
+                "id", "state", "created_at", "updated_at", "creator",
+                "owner", "repository", "artifacts", "sessions",
+            )
+            try:
+                listed_json = json.dumps(
+                    {field: listed.get(field) for field in fields},
+                    sort_keys=True, separators=(",", ":"), allow_nan=False,
+                )
+                detailed_json = json.dumps(
+                    {field: task.get(field) for field in fields},
+                    sort_keys=True, separators=(",", ":"), allow_nan=False,
+                )
+            except (TypeError, ValueError):
+                return None
+            if listed_json != detailed_json:
+                return None
         original_snapshot = {**snapshot, "issue": proof.get("issue")}
         reservation_type = _legacy_task_reservation_type(
             proof, {task_id: task}, original_snapshot,

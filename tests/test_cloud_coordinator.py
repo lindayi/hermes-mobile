@@ -4437,6 +4437,15 @@ def _mutate_legacy_artifacts(task, hazard):
     "live-pull-id", "live-pull-node-id",
     "creator", "owner", "repository", "pull", "branch",
     "session", "session-task", "session-owner", "session-repository", "prompt",
+    *[
+        f"sessions-identity-{scope}-{field}-float"
+        for scope, fields in (
+            ("task", ("creator", "owner", "repository")),
+            ("session", ("owner", "repository")),
+        )
+        for field in fields
+    ],
+    "sessions-identity-reordered",
     "prompt-prefix", "prompt-marker", "prompt-template",
     "summary-artifact-branch", "detail-artifact-branch",
     "summary-artifact-pull", "detail-artifact-pull",
@@ -4685,6 +4694,21 @@ def test_owner_abandonment_upgrade_fresh_fences(
             if hazard == "inventory-error":
                 raise ApiError("original inventory unavailable", status=503)
             inventory = deepcopy(original_get_all(route, collection=collection))
+            if isinstance(hazard, str) and hazard.startswith("sessions-identity-"):
+                for item in inventory:
+                    if item.get("id") != source["task_id"]:
+                        continue
+                    if hazard == "sessions-identity-reordered":
+                        item["sessions"][0] = dict(
+                            reversed(list(item["sessions"][0].items())),
+                        )
+                        item["owner"] = dict(reversed(list(item["owner"].items())))
+                    else:
+                        scope, field, _ = hazard.removeprefix(
+                            "sessions-identity-",
+                        ).split("-")
+                        identity = item if scope == "task" else item["sessions"][0]
+                        identity[field]["id"] = float(identity[field]["id"])
             if isinstance(hazard, str) and hazard.startswith(
                     "summary-detail-response-"):
                 for item in inventory:
@@ -4754,7 +4778,7 @@ def test_owner_abandonment_upgrade_fresh_fences(
             api, StateStore(store.path), clock=lambda: 1790856660,
         ).run(apply=True)
     assert injected == [hazard]
-    if hazard in {None, "unrelated-writer"}:
+    if hazard in {None, "unrelated-writer", "sessions-identity-reordered"}:
         if stage == "source-fence":
             assert api.task_posts == posts + 1
         else:
