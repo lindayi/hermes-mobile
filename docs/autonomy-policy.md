@@ -184,21 +184,27 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 | `deploy/cloud_coordinator.py` | `4c8ce668d216035eb79af4adfa48946159d75419d726a43faec661c402b21dbe` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
 
-### PR #109 supervised correction7 current candidate
+### PR #109 supervised correction8 current candidate
 
 Issue #108's bounded correction requires agreement between legacy summary and
 detail task artifacts, reconciles every live action sharing a retained task ID
 before issue-identity filtering, and binds lineage to the retained abandoned-task
 pull identity. It revalidates the immutable root command for current and legacy
-proofs, rejects incomplete retained abandonment history, and isolates a structurally
-valid identity mismatch on an open pull during multi-PR scan while keeping direct
-snapshot and terminal identity checks strict. Final task and reviewer publication
-fences revalidate pull/source authority after late reads and bind retained proof
-inputs to the fresh final state. The current source fingerprint is:
+proofs, isolates a structurally valid identity mismatch at the source commit fence,
+and keeps direct snapshot and terminal identity checks strict. Source and reviewer
+publication now re-fence the exact pull after final authorization/projection checks
+and recheck local proof inputs before writing. Malformed non-list retained
+`receipt_proofs` fail closed for that PR without blocking unrelated work. Correction7
+remains historical; its exact source digest is retained below. The current source
+fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `8235a894bdb48663ddd673e4c78dca75cd09fd8ee94f7f74b3dd45c0e4b1903e` |
+| `deploy/cloud_coordinator.py` | `198cea06e3cd03046751167fe167438a4880cf7a052e2455480a4f4de736775e` |
+
+| Historical candidate | SHA-256 |
+| --- | --- |
+| Correction7 historical pin | `8235a894bdb48663ddd673e4c78dca75cd09fd8ee94f7f74b3dd45c0e4b1903e` |
 
 This exact-source pin does not establish review acceptance, merge readiness,
 authorization beyond the standing delegation, or operational activation.

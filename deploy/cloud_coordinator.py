@@ -7218,10 +7218,13 @@ class Coordinator:
         if (not isinstance(records, list) or len(recoveries) != len(records)
                 or any(record.get("issue") != issue for _, record in recoveries)):
             return False
+        receipt_proofs = enrollment.get("receipt_proofs", [])
+        if not isinstance(receipt_proofs, list):
+            return False
         current_proof = any(
             isinstance(proof, dict) and proof.get("issue") == issue
             and proof.get("receipt_head") == head.get("sha")
-            for proof in enrollment.get("receipt_proofs", [])
+            for proof in receipt_proofs
         )
         if not current_proof:
             return True
@@ -7416,6 +7419,27 @@ class Coordinator:
         if (final_authorization.get("projection")
                 != authorization_fence.get("projection")
                 or final_inputs != final_authorization.get("projection")):
+            return "superseded"
+        try:
+            publication_pull = self._fence_pull(
+                action["issue"], action["head"], action["main_sha"],
+            )
+        except CoordinatorError:
+            return "superseded"
+        if (
+                not _pull_identity(publication_pull, action)
+                or publication_pull.get("draft") is not False
+                or publication_pull.get("head", {}).get("ref")
+                    != current.get("head", {}).get("ref")
+                or publication_pull.get("base", {}).get("sha")
+                    != current.get("base", {}).get("sha")
+        ):
+            return "superseded"
+        publication_state = StateStore(self.store.path).snapshot()
+        if (_dispatch_authorization_inputs(
+                publication_state, action["issue"],
+            ) != final_authorization.get("projection")
+                or publication_state["actions"].get(key) is not None):
             return "superseded"
         if not self.store.claim_action(key, action):
             return "reserved"
@@ -7938,6 +7962,45 @@ class Coordinator:
                         )):
                     self.store.update_action(key, "superseded")
                     return "superseded"
+                publication_pull = self._fence_pull(
+                    claimed_action["issue"], claimed_action["head"],
+                    claimed_action["main_sha"],
+                    allow_historical_reconciliation=True,
+                    allow_historical_dirty=neutral,
+                    expected_base_sha=(
+                        claimed_action.get("recorded_base_sha") if neutral
+                        else continuation_record.get("base_sha")
+                        if continuation_record is not None else None
+                    ),
+                )
+                if (
+                        not _pull_identity(publication_pull, claimed_action)
+                        or publication_pull.get("draft") is not False
+                        or publication_pull.get("head", {}).get("ref") != branch
+                        or publication_pull.get("base", {}).get("sha")
+                            != final_pull.get("base", {}).get("sha")
+                ):
+                    self.store.update_action(key, "superseded")
+                    return "superseded"
+                publication_state = StateStore(self.store.path).snapshot()
+                publication_enrollment = publication_state["enrollments"].get(
+                    str(claimed_action["issue"]), {},
+                )
+                if (
+                        publication_state["actions"].get(key) != claimed_action
+                        or _dispatch_authorization_inputs(
+                            publication_state, claimed_action["issue"],
+                        ) != final_authorization.get("projection")
+                        or any(
+                            publication_state["actions"].get(prior["key"]) != prior
+                            or _owner_abandonment_for_action(
+                                publication_enrollment, prior["key"], prior,
+                            ) != abandonment
+                            for prior, abandonment in recovered_claims
+                        )
+                ):
+                    self.store.update_action(key, "superseded")
+                    return "superseded"
             except CoordinatorError:
                 self.store.update_action(key, "superseded")
                 return "superseded"
@@ -8279,6 +8342,7 @@ class Coordinator:
                 raise CoordinatorError("Initial starter source evidence was invalid before state commit")
             current = self._snapshot_pull(
                 number, enrollment, main_sha, actions=self.store.actions(),
+                allow_unrelated_active=True,
             )
             if current.get("identity_invalid"):
                 identity_blocked.add(number)

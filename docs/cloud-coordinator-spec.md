@@ -761,9 +761,23 @@ receipt proofs at every applicable successor and final write fence; a current
 A source-task publication fence repeats exact pull/head and source-authority checks
 after its final task, workflow, comment and root reads. It binds the enrollment's
 retained receipt proofs, abandonment records and related actions to the fresh final
-state before posting; unrelated PR state does not widen that fence. Reviewer
-requests repeat pull identity and source authority after their late task/comment
-reads and before reserving the non-SHA-bound reviewer request.
+state before posting; unrelated PR state does not widen that fence. The commit-time
+starter-source fence permits isolation only for a structurally valid, open PR with
+a changed pull identity, so that PR receives no state or writes while other enrolled
+PRs continue. Direct snapshots and terminal pulls remain strict.
+
+For source and reviewer publication, the coordinator re-fetches the exact pull after
+final authorization and projection checks, then rechecks the local proof projection
+before publication. This finite ordering closes changes observed during legacy
+root/task reads; it is not a remote compare-and-swap and does not claim network
+atomicity. Task occupancy and workflow reads are completed before this final pull;
+no later remote read is treated as part of that fence. A changed head, identity, or
+base blocks publication. The source reservation remains truthful and is superseded;
+a reviewer request is not claimed. Repeated polls do not replay either write.
+Malformed retained `receipt_proofs` that are not lists deny owner-abandonment head
+authority for that PR without aborting unrelated PR work. An empty list and valid
+legacy proofs retain their existing meanings.
+
 A same-head
 ready receipt is still a valid direct continuation, but it cannot hide a cycle in a
 later edge. This only proves terminal occupancy; ordinary source authorization,

@@ -4729,6 +4729,138 @@ def test_owner_abandonment_upgrade_fresh_fences(
     assert api.writes == writes
 
 
+def _add_unrelated_enrolled_pull(api, store):
+    from copy import deepcopy
+
+    pull = deepcopy(api.pull)
+    pull.update(number=17, id=170017, node_id="PR_node_17")
+    issue = {"number": 17, "pull_request": {"url": "pull/17"}}
+    store.enroll(enrolled_record(
+        issue=17, head=pull["head"]["sha"], base=pull["base"]["sha"],
+        pull_id=170017, pull_node_id="PR_node_17",
+    ))
+    original_get = api.get
+    original_get_all = api.get_all
+
+    def get(route):
+        if route == "repos/lindayi/hermes-mobile/pulls/17":
+            return deepcopy(pull)
+        return original_get(route.replace("/pulls/17/", "/pulls/16/"))
+
+    def get_all(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues?"):
+            return [api.issue, issue]
+        route = route.replace("/pulls/17/", "/pulls/16/")
+        route = route.replace("/issues/17/comments", "/issues/16/comments")
+        return original_get_all(route, collection=collection)
+
+    api.get = get
+    api.get_all = get_all
+    return pull
+
+
+def _synthetic_initial_source(issue=16):
+    return {
+        "version": 1, "issue_number": issue, "start_comment_id": 101,
+        "start_comment_created_at": "2026-10-01T10:00:00Z",
+        "task_id": f"source-task-{issue}", "session_id": f"session-{issue}",
+        "task_created_at": "2026-10-01T10:01:00Z",
+        "session_created_at": "2026-10-01T10:02:00Z",
+        "session_completed_at": "2026-10-01T10:03:00Z",
+        "head_sha": HEAD, "head_ref": "topic", "pull_id": 160000016,
+        "pull_node_id": "PR_node_16", "repository_id": 1399942965,
+        "pull_body_sha256": "a" * 64, "issue_body_sha256": "b" * 64,
+        "admission_comment_id": 102,
+        "admission_comment_created_at": "2026-10-01T10:04:00Z",
+    }
+
+
+def test_starter_source_commit_fence_isolates_identity_mismatch_and_progresses_other_pr(
+        tmp_path, monkeypatch):
+    from copy import deepcopy
+
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    _add_unrelated_enrolled_pull(api, store)
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    original_snapshot = coordinator._snapshot_pull
+    source = _synthetic_initial_source()
+    snapshot_calls = {}
+
+    def snapshot_pull(number, enrollment, main_sha, actions=None, **kwargs):
+        snapshot_calls[number] = snapshot_calls.get(number, 0) + 1
+        if number == 16 and snapshot_calls[number] == 2:
+            api.pull = deepcopy(api.pull)
+            api.pull["id"] += 1
+        snapshot = original_snapshot(
+            number, enrollment, main_sha, actions=actions, **kwargs,
+        )
+        if number == 16:
+            snapshot["initial_source"] = source
+        return snapshot
+
+    monkeypatch.setattr(coordinator, "_snapshot_pull", snapshot_pull)
+    result = coordinator.run(apply=True)
+    plans = {item["issue"]: item for item in result["pull_requests"]}
+
+    assert snapshot_calls == {16: 2, 17: 1}
+    assert plans[16]["reasons"] == ["pull-identity"]
+    assert plans[16]["repair_requested"] is False
+    assert plans[17]["repair_requested"] is True
+    assert any(
+        route == "agents/repos/lindayi/hermes-mobile/tasks"
+        and "PR #17" in body.get("prompt", "")
+        for route, body in api.writes
+    )
+
+
+@pytest.mark.parametrize("receipt_proofs", [None, {"malformed": True}])
+def test_malformed_retained_receipt_proofs_fail_closed_without_blocking_other_prs(
+        tmp_path, receipt_proofs):
+    api, store, abandoned, _, _, source_head = _owner_abandonment_previous_case(
+        tmp_path, False,
+    )
+    _add_unrelated_enrolled_pull(api, store)
+    api.unresolved = True
+    before = StateStore(store.path).snapshot()
+    root_action = before["actions"][abandoned["key"]]
+
+    def corrupt_proofs(state):
+        state["enrollments"]["16"]["receipt_proofs"] = receipt_proofs
+
+    StateStore(store.path)._mutate(corrupt_proofs)
+    before_posts = api.task_posts
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    plans = {item["issue"]: item for item in result["pull_requests"]}
+    after = StateStore(store.path).snapshot()
+    assert not Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )._owner_abandonment_head_proven({
+        "issue": 16, "pull": api.pull, "comments": api.comments,
+    })
+
+    assert plans[16]["repair_requested"] is False
+    assert plans[17]["repair_requested"] is True
+    assert api.task_posts == before_posts + 1
+    assert any(
+        route == "agents/repos/lindayi/hermes-mobile/tasks"
+        and "PR #17" in body.get("prompt", "")
+        for route, body in api.writes
+    )
+    assert after["actions"][abandoned["key"]] == root_action
+    assert after["enrollments"]["16"]["receipt_proofs"] == receipt_proofs
+    assert after["enrollments"]["16"]["attempts"] == (
+        before["enrollments"]["16"]["attempts"]
+    )
+    assert after["enrollments"]["16"]["owner_abandonments"] == (
+        before["enrollments"]["16"]["owner_abandonments"]
+    )
+    assert source_head == api.pull["head"]["sha"]
+
+
 def test_malformed_pull_identity_does_not_stop_another_enrolled_pull(tmp_path):
     from copy import deepcopy
 
@@ -4895,6 +5027,125 @@ def test_new_lineage_rechecks_late_reviewer_reads_before_claim(tmp_path, race):
         write for write in writes_before
         if write[0].endswith("/requested_reviewers")
     ]
+
+
+@pytest.mark.parametrize("path", ["source", "reviewer"])
+@pytest.mark.parametrize("race", ["unchanged", "head", "identity", "base"])
+def test_final_publication_fence_follows_last_legacy_task_read(
+        tmp_path, monkeypatch, path, race):
+    api, store, abandoned, _, _, _, _, _, source_head, _ = (
+        _owner_abandonment_transitive_case(tmp_path)
+    )
+    if path == "source":
+        api.source_failure = True
+        api.source_failure_sha = source_head
+        api.review_state = "APPROVED"
+        api.review_sha = source_head
+    else:
+        api.review_state = api.review_sha = None
+    StateStore(store.path)._mutate(
+        lambda state: [
+            proof.pop("head_ref", None)
+            for proof in state["enrollments"]["16"]["receipt_proofs"]
+        ],
+    )
+    legacy_proofs = StateStore(store.path).snapshot()["enrollments"]["16"][
+        "receipt_proofs"
+    ]
+    assert legacy_proofs and all("head_ref" not in proof for proof in legacy_proofs)
+    target_task_id = legacy_proofs[-1]["task_id"]
+    key = f"copilot-review-request:16:{source_head}"
+    writes_before = list(api.writes)
+    task_posts_before = api.task_posts
+    attempts_before = StateStore(store.path).snapshot()["enrollments"]["16"]["attempts"]
+    original_get = api.get
+    original_authority = CloudCoordinator._authorized_dispatch_head
+    in_final_authority = [False]
+    injected = []
+
+    def get(route):
+        response = original_get(route)
+        if (race != "unchanged" and not injected and in_final_authority[0]
+                and route == (
+                    f"agents/repos/lindayi/hermes-mobile/tasks/{target_task_id}"
+                )):
+            api.pull = deepcopy(api.pull)
+            if race == "head":
+                api.pull["head"]["sha"] = "7" * 40
+            elif race == "identity":
+                api.pull["id"] += 1
+                api.pull["node_id"] = "PR_node_changed"
+            else:
+                api.pull["base"]["sha"] = "8" * 40
+            injected.append(race)
+        return response
+
+    def authority(self, issue, head, base_sha=None, **kwargs):
+        final = kwargs.get("require_base_match") is True
+        if final:
+            in_final_authority[0] = True
+        try:
+            return original_authority(self, issue, head, base_sha, **kwargs)
+        finally:
+            if final:
+                in_final_authority[0] = False
+
+    api.get = get
+    monkeypatch.setattr(
+        CloudCoordinator, "_authorized_dispatch_head", authority,
+    )
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert injected == ([] if race == "unchanged" else [race])
+    first_dispatch = api.task_posts
+    first_reviewer_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    if race == "unchanged":
+        if path == "source":
+            assert api.task_posts == task_posts_before + 1
+        else:
+            assert first_reviewer_writes == [
+                *[write for write in writes_before
+                  if write[0].endswith("/requested_reviewers")],
+                (
+                    "repos/lindayi/hermes-mobile/pulls/16/requested_reviewers",
+                    {"reviewers": ["copilot-pull-request-reviewer[bot]"]},
+                ),
+            ]
+    else:
+        assert api.task_posts == task_posts_before
+        assert first_reviewer_writes == [
+            write for write in writes_before
+            if write[0].endswith("/requested_reviewers")
+        ]
+        if path == "source":
+            reservations = [
+                action for action in StateStore(store.path).actions().values()
+                if action.get("kind") == "fix"
+                and action.get("issue") == 16
+                and action.get("head") == source_head
+                and action.get("key") != abandoned["key"]
+            ]
+            assert reservations and reservations[-1]["status"] == "superseded"
+            assert StateStore(store.path).snapshot()["enrollments"]["16"][
+                "attempts"
+            ] == attempts_before + 1
+        else:
+            assert StateStore(store.path).action(key) is None
+
+    if race == "unchanged":
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        assert api.task_posts == first_dispatch
+        assert [
+            write for write in api.writes
+            if write[0].endswith("/requested_reviewers")
+        ] == first_reviewer_writes
 
 
 @pytest.mark.parametrize("mutation", ["edited", "deleted", "substituted"])
