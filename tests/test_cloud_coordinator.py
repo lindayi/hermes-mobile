@@ -4155,6 +4155,36 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
     assert api.writes == writes
 
 
+@pytest.mark.parametrize("duplicate_by", ["key", "task-id"])
+def test_owner_abandonment_duplicate_projection_rejects_nested_numeric_alias(
+        tmp_path, duplicate_by):
+    api, store, _, _, recovery, neutral, _, _, source_head, _ = (
+        _owner_abandonment_transitive_case(tmp_path)
+    )
+    StateStore(store.path).retire(
+        16, source_head, current_main_sha=FINAL_RESULT_HEAD,
+    )
+    restarted = StateStore(store.path)
+
+    def add_alias(state):
+        proof = next(
+            proof for proof in state["enrollments"]["16"]["receipt_proofs"]
+            if proof.get("task_id") == neutral["task_id"]
+        )
+        action = deepcopy(proof)
+        if duplicate_by == "task-id":
+            action["key"] = "duplicate-task-id-alias"
+        action["owner_abandonment_binding"]["version"] = 1.0
+        state["actions"][action["key"]] = action
+
+    restarted._mutate(add_alias)
+    assert not Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )._owner_abandonment_successor_proven(
+        {"pull": api.pull, "comments": api.comments}, recovery,
+    )
+
+
 def _previous_receipt_projection(action):
     fields = {
         "key", "issue", "kind", "status", "head", "task_id",

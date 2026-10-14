@@ -3260,6 +3260,23 @@ def _legacy_task_detail_matches_list(listed, detailed):
     )
 
 
+def _projected_fields_match(left, right, fields):
+    if any((field in left) != (field in right) for field in fields):
+        return False
+    try:
+        left_json = json.dumps(
+            {field: left[field] for field in fields if field in left},
+            sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+        right_json = json.dumps(
+            {field: right[field] for field in fields if field in right},
+            sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return False
+    return left_json == right_json
+
+
 def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
                                   tasks=None, snapshot=None, task_details=None,
                                   now=None):
@@ -7074,9 +7091,10 @@ class Coordinator:
                 return False
             candidate = legacy_views.get(id(candidate), candidate)
             duplicate = reconciled_by_key.get(key)
-            if duplicate is not None and any(
-                    duplicate.get(field) != candidate.get(field)
-                    for field in proof_fields):
+            if (duplicate is not None
+                    and not _projected_fields_match(
+                        duplicate, candidate, proof_fields,
+                    )):
                 return False
             reconciled_by_key[key] = candidate
         reconciled = {}
@@ -7086,9 +7104,10 @@ class Coordinator:
                     or candidate["task_id"] not in relevant_task_ids):
                 continue
             duplicate = reconciled.get(candidate["task_id"])
-            if duplicate is not None and any(
-                    duplicate.get(field) != candidate.get(field)
-                    for field in proof_fields):
+            if (duplicate is not None
+                    and not _projected_fields_match(
+                        duplicate, candidate, proof_fields,
+                    )):
                 return False
             reconciled[candidate["task_id"]] = candidate
         for candidate in reconciled.values():

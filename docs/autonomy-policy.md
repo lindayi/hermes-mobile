@@ -192,9 +192,11 @@ before issue-identity filtering, and binds lineage to the retained abandoned-tas
 pull identity. It revalidates the immutable root command for current and legacy
 proofs, isolates a structurally valid identity mismatch only when both stored pull
 identity fields are valid, and keeps direct snapshot and terminal identity checks
-strict. A late identity
-mismatch restores only that PR's prepared records, skips its recovery and publication
-inputs, and retains the previous cursor when an owner command must be re-read.
+strict. Duplicate action/proof records are compared with canonical JSON projections,
+including nested values, and fail closed on serialization errors. This distinguishes
+integer and floating-point aliases. A late identity mismatch restores only that PR's
+prepared records, skips its recovery and publication inputs, and retains the previous
+cursor when an owner command must be re-read.
 Unrelated PRs can still commit; the existing state compare-and-swap remains active.
 Malformed non-list retained `receipt_proofs` fail closed for that PR without blocking
 unrelated work. Correction8 and correction7 remain historical; their exact source
@@ -202,7 +204,7 @@ digests are retained below. The current source fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `8ed96c582aa08cf64306b43682b72aef2c1a6042513caa60ce2d6cc2bb3f6c28` |
+| `deploy/cloud_coordinator.py` | `f4bb6b55e353e1e151125ef6e580364e0725fcdebe54745ed7f94dcaa5d5a8d9` |
 
 | Historical candidate | SHA-256 |
 | --- | --- |
