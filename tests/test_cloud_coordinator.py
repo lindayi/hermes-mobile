@@ -4332,6 +4332,117 @@ def test_competing_owner_continuation_dispositions_are_not_consumed(
     assert "owner_continuations" not in enrollment
 
 
+@pytest.mark.parametrize("stage", ["before-admission-fence", "after-commit"])
+def test_owner_continuation_complete_inventory_rejects_late_competition(
+        tmp_path, monkeypatch, stage):
+    api, store, abandonment, head, main = _owner_continuation_advanced_case(
+        tmp_path,
+    )
+    command = (
+        f"/hermes continue-unverified {abandonment['command_comment_id']} "
+        f"{abandonment['task_id']} {abandonment['reservation_sha256']} "
+        f"{head} {main}"
+    )
+    competitor = {
+        "id": 7774, "user": {"id": OWNER}, "body": command,
+        "created_at": "2026-10-01T12:12:01Z",
+        "updated_at": "2026-10-01T12:12:01Z",
+    }
+    injected = []
+    if stage == "before-admission-fence":
+        original_fence = CloudCoordinator._fence_owner_continuation
+
+        def add_after_planning(self, *args, **kwargs):
+            if not injected:
+                injected.append(True)
+                api.comments.append(competitor)
+            return original_fence(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            CloudCoordinator, "_fence_owner_continuation", add_after_planning,
+        )
+    else:
+        original_commit = StateStore.commit_scan
+
+        def add_after_commit(self, *args, **kwargs):
+            result = original_commit(self, *args, **kwargs)
+            if not injected:
+                injected.append(True)
+                api.comments.append(competitor)
+            return result
+
+        monkeypatch.setattr(StateStore, "commit_scan", add_after_commit)
+    prior_posts = api.task_posts
+    before_attempts = store.snapshot()["enrollments"]["16"]["attempts"]
+    prior_reviewers = list(api.requested_reviewers)
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+
+    state = StateStore(store.path).snapshot()
+    assert injected == [True]
+    assert api.task_posts == prior_posts
+    assert api.requested_reviewers == prior_reviewers
+    if stage == "before-admission-fence":
+        assert "unauthorized-continuation" in result["reasons"]
+        assert "owner_continuations" not in state["enrollments"]["16"]
+        assert state["enrollments"]["16"]["attempts"] == before_attempts
+    else:
+        assert len(state["enrollments"]["16"]["owner_continuations"]) == 1
+        assert state["enrollments"]["16"]["owner_continuations"][0][
+            "disposition_comment_id"
+        ] == 7773
+        assert state["enrollments"]["16"]["attempts"] == before_attempts + 1
+        successor = next(
+            action for action in state["actions"].values()
+            if action.get("owner_continuation_binding")
+        )
+        assert successor["status"] == "superseded"
+        assert successor.get("task_id") is None
+
+
+def test_owner_continuation_ignores_nonowner_and_unrelated_command_chatter(
+        tmp_path):
+    api, store, abandonment, head, main = _owner_continuation_advanced_case(
+        tmp_path,
+    )
+    command = (
+        f"/hermes continue-unverified {abandonment['command_comment_id']} "
+        f"{abandonment['task_id']} {abandonment['reservation_sha256']} "
+        f"{head} {main}"
+    )
+    api.comments.extend([
+        {
+            "id": 7774, "user": {"id": COPILOT_AGENT}, "body": command,
+            "created_at": "2026-10-01T12:12:01Z",
+            "updated_at": "2026-10-01T12:12:01Z",
+        },
+        {
+            "id": 7775, "user": {"id": OWNER},
+            "body": (
+                f"/hermes continue-unverified 9999 {abandonment['task_id']} "
+                f"{abandonment['reservation_sha256']} {head} {main}"
+            ),
+            "created_at": "2026-10-01T12:12:02Z",
+            "updated_at": "2026-10-01T12:12:02Z",
+        },
+    ])
+    prior_posts = api.task_posts
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+
+    state = StateStore(store.path).snapshot()
+    assert api.task_posts == prior_posts + 1
+    assert len(state["enrollments"]["16"]["owner_continuations"]) == 1
+    assert len([
+        action for action in state["actions"].values()
+        if action.get("owner_continuation_binding")
+    ]) == 1
+
+
 def test_invalid_owner_continuation_does_not_block_unrelated_pr_progress(tmp_path):
     from copy import deepcopy
 
@@ -4691,11 +4802,15 @@ def test_owner_continuation_publication_lock_rejects_changed_claim(
     original_publish = StateStore.publish_continuation_task
     injected = []
 
-    def change_before_locked_publication(self, key, expected, record, publish):
+    def change_before_locked_publication(
+            self, key, expected, record, publish, *, expected_projection):
         if not injected:
             injected.append(True)
             self.update_action(key, "sending", body=expected["body"] + " changed")
-        return original_publish(self, key, expected, record, publish)
+        return original_publish(
+            self, key, expected, record, publish,
+            expected_projection=expected_projection,
+        )
 
     monkeypatch.setattr(
         StateStore, "publish_continuation_task", change_before_locked_publication,
@@ -4720,6 +4835,135 @@ def test_owner_continuation_publication_lock_rejects_changed_claim(
         and event.get("status") == "uncertain"
         for event in state["lifecycle_events"]
     )
+
+
+@pytest.mark.parametrize("mutation", [
+    "deactivate", "rebind-enrollment", "writer", "outbox", "numeric-alias",
+])
+def test_owner_continuation_locked_publication_rejects_changed_affected_state(
+        tmp_path, monkeypatch, mutation):
+    api, store, _, _, _ = _owner_continuation_advanced_case(tmp_path)
+    original_flock = cloud_coordinator.fcntl.flock
+    original_publish = StateStore.publish_continuation_task
+    armed = []
+    injected = []
+    injecting = []
+
+    def mutate(state):
+        enrollment = state["enrollments"]["16"]
+        if mutation == "deactivate":
+            enrollment["active"] = False
+        elif mutation == "rebind-enrollment":
+            enrollment["authorized_head"] = "c" * 40
+        elif mutation == "writer":
+            state["actions"]["racing-writer"] = {
+                "issue": 16, "status": "sending",
+            }
+        elif mutation == "outbox":
+            state["outbox"]["racing-claim"] = {
+                "issue": 16, "status": "sending",
+            }
+        else:
+            enrollment["pull_id"] = float(enrollment["pull_id"])
+
+    def acquire_with_mutation(fd, operation):
+        if (armed and not injected and not injecting
+                and operation == cloud_coordinator.fcntl.LOCK_EX):
+            injecting.append(True)
+            injected.append(True)
+            try:
+                StateStore(store.path)._mutate(mutate)
+            finally:
+                injecting.pop()
+        return original_flock(fd, operation)
+
+    def arm_at_publication(self, key, expected, record, *args, **kwargs):
+        armed.append(True)
+        return original_publish(
+            self, key, expected, record, *args, **kwargs,
+        )
+
+    monkeypatch.setattr(cloud_coordinator.fcntl, "flock", acquire_with_mutation)
+    monkeypatch.setattr(
+        StateStore, "publish_continuation_task", arm_at_publication,
+    )
+    prior_posts = api.task_posts
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+
+    state = StateStore(store.path).snapshot()
+    successor = next(
+        action for action in state["actions"].values()
+        if action.get("owner_continuation_binding")
+    )
+    assert injected == [True]
+    assert api.task_posts == prior_posts
+    assert successor["status"] == "superseded"
+    if mutation == "deactivate":
+        assert state["enrollments"]["16"]["active"] is False
+    elif mutation == "rebind-enrollment":
+        assert state["enrollments"]["16"]["authorized_head"] == "c" * 40
+    elif mutation == "writer":
+        assert state["actions"]["racing-writer"]["status"] == "sending"
+    elif mutation == "outbox":
+        assert state["outbox"]["racing-claim"]["status"] == "sending"
+    else:
+        assert type(state["enrollments"]["16"]["pull_id"]) is float
+
+
+def test_owner_continuation_locked_publication_allows_unrelated_state_change(
+        tmp_path, monkeypatch):
+    api, store, _, _, _ = _owner_continuation_advanced_case(tmp_path)
+    original_flock = cloud_coordinator.fcntl.flock
+    original_publish = StateStore.publish_continuation_task
+    armed = []
+    injected = []
+    injecting = []
+
+    def acquire_with_unrelated_change(fd, operation):
+        if (armed and not injected and not injecting
+                and operation == cloud_coordinator.fcntl.LOCK_EX):
+            injecting.append(True)
+            injected.append(True)
+            try:
+                StateStore(store.path)._mutate(
+                    lambda state: state["actions"].__setitem__(
+                        "unrelated-writer", {"issue": 17, "status": "sending"},
+                    ),
+                )
+            finally:
+                injecting.pop()
+        return original_flock(fd, operation)
+
+    def arm_at_publication(self, key, expected, record, *args, **kwargs):
+        armed.append(True)
+        return original_publish(
+            self, key, expected, record, *args, **kwargs,
+        )
+
+    monkeypatch.setattr(
+        cloud_coordinator.fcntl, "flock", acquire_with_unrelated_change,
+    )
+    monkeypatch.setattr(
+        StateStore, "publish_continuation_task", arm_at_publication,
+    )
+    prior_posts = api.task_posts
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+
+    state = StateStore(store.path).snapshot()
+    successor = next(
+        action for action in state["actions"].values()
+        if action.get("owner_continuation_binding")
+    )
+    assert injected == [True]
+    assert api.task_posts == prior_posts + 1
+    assert successor["status"] == "sent"
+    assert state["actions"]["unrelated-writer"]["status"] == "sending"
 
 
 @pytest.mark.parametrize("mutation", ["final-pull-head", "final-pull-identity", "final-main"])

@@ -1712,6 +1712,80 @@ def _current_owner_unverified_continuation_command(api, record):
     ) else None
 
 
+def _owner_continuation_inventory_has_unique_disposition(api, record, comments):
+    if (not _owner_continuation_record_valid(record)
+            or not isinstance(comments, list)):
+        return False
+    issue_url = (
+        f"https://api.github.com/repos/{REPOSITORY}/issues/{record['issue']}"
+    )
+    matching = []
+    for comment in comments:
+        parsed = _is_owner_unverified_continuation_command(comment)
+        if (parsed is None
+                or parsed["historical_command_comment_id"]
+                    != record["historical_command_comment_id"]
+                or parsed["task_id"] != record["historical_task_id"]
+                or parsed["reservation_sha256"]
+                    != record["historical_reservation_sha256"]):
+            continue
+        listed = {
+            field: comment.get(field) for field in (
+                "id", "body", "created_at", "updated_at",
+            )
+        }
+        listed["actor_id"] = comment["user"]["id"]
+        if (comment.get("issue_url") not in (None, issue_url)
+                or type(listed["id"]) is not int
+                or not positive_id(listed["id"])):
+            return False
+        try:
+            current = api.get(
+                f"repos/{REPOSITORY}/issues/comments/{listed['id']}",
+            )
+        except ApiError as error:
+            if error.status == 404:
+                return False
+            raise
+        if (not isinstance(current, dict)
+                or not isinstance(current.get("user"), dict)
+                or type(current["user"].get("id")) is not int
+                or current["user"]["id"] != OWNER_ID
+                or type(current.get("id")) is not int
+                or current.get("id") != listed["id"]
+                or current.get("issue_url") != issue_url
+                or _canonical_sha256({
+                    "id": current.get("id"),
+                    "body": current.get("body"),
+                    "created_at": current.get("created_at"),
+                    "updated_at": current.get("updated_at"),
+                    "actor_id": current["user"]["id"],
+                }) != _canonical_sha256(listed)):
+            return False
+        try:
+            chronology = (
+                datetime.fromisoformat(
+                    record["enrollment_created_at"].replace("Z", "+00:00"),
+                )
+                < datetime.fromisoformat(
+                    parsed["command_created_at"].replace("Z", "+00:00"),
+                )
+            )
+        except (TypeError, ValueError):
+            return False
+        if not chronology:
+            return False
+        matching.append(parsed)
+    return (
+        len(matching) == 1
+        and matching[0]["command_comment_id"] == record["disposition_comment_id"]
+        and matching[0]["current_head_sha"] == record["current_head_sha"]
+        and matching[0]["current_main_sha"] == record["current_main_sha"]
+        and matching[0]["command_body"] == record["disposition_body"]
+        and matching[0]["command_created_at"] == record["disposition_created_at"]
+    )
+
+
 def _current_owner_continuation_enrollment(api, record, pull):
     if not _owner_continuation_record_valid(record):
         return None
@@ -3852,6 +3926,41 @@ def _owner_continuation_writers_clear(
         and entry.get("issue") == issue
         and entry.get("status") in {"sending", "uncertain"}
         for entry in outbox.values()
+    )
+
+
+def _owner_continuation_publication_projection(state, issue):
+    return {
+        "enrollment": state.get("enrollments", {}).get(str(issue)),
+        "actions": {
+            key: action for key, action in state.get("actions", {}).items()
+            if isinstance(action, dict) and action.get("issue") == issue
+        },
+        "outbox": {
+            key: entry for key, entry in state.get("outbox", {}).items()
+            if isinstance(entry, dict) and entry.get("issue") == issue
+        },
+    }
+
+
+def _owner_continuation_enrollment_active(record, enrollment):
+    continuations = (
+        enrollment.get("owner_continuations")
+        if isinstance(enrollment, dict) else None
+    )
+    return (
+        isinstance(enrollment, dict)
+        and enrollment.get("active") is True
+        and type(enrollment.get("pull_id")) is int
+        and enrollment["pull_id"] == record["pull_id"]
+        and enrollment.get("pull_node_id") == record["pull_node_id"]
+        and type(enrollment.get("repository_id")) is int
+        and enrollment["repository_id"] == record["repository_id"]
+        and isinstance(continuations, list)
+        and any(
+            _canonical_sha256(item) == _canonical_sha256(record)
+            for item in continuations
+        )
     )
 
 
@@ -7600,6 +7709,11 @@ class Coordinator:
         if not isinstance(latest_main, dict) or latest_main.get("sha") != main_sha:
             raise CoordinatorError("Owner continuation main changed before commit")
         comments = _all_review_comments(self.api, record["issue"], None)
+        if not _owner_continuation_inventory_has_unique_disposition(
+                self.api, record, comments):
+            raise CoordinatorError(
+                "Owner continuation disposition inventory was ambiguous"
+            )
         tasks = _rest_list(
             self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
             collection="tasks",
@@ -7701,11 +7815,24 @@ class Coordinator:
             key: value for key, value in state.get("actions", {}).items()
             if isinstance(value, dict) and value.get("issue") == record["issue"]
         }
+        latest_projection = _owner_continuation_publication_projection(
+            latest_state, record["issue"],
+        )
+        initial_projection = _owner_continuation_publication_projection(
+            state, record["issue"],
+        )
         if (
-                latest_enrollment != enrollment
-                or latest_issue_actions != initial_issue_actions
-                or latest_historical != historical
-                or latest_continuations != continuations
+                _canonical_sha256(latest_projection) is None
+                or _canonical_sha256(latest_projection)
+                    != _canonical_sha256(initial_projection)
+                or _canonical_sha256(latest_enrollment)
+                    != _canonical_sha256(enrollment)
+                or _canonical_sha256(latest_issue_actions)
+                    != _canonical_sha256(initial_issue_actions)
+                or _canonical_sha256(latest_historical)
+                    != _canonical_sha256(historical)
+                or _canonical_sha256(latest_continuations)
+                    != _canonical_sha256(continuations)
         ):
             raise CoordinatorError(
                 "Owner continuation canonical state changed at the final fence"
@@ -7729,7 +7856,12 @@ class Coordinator:
                 raise CoordinatorError(
                     "Owner continuation successor claim changed at the final fence"
                 )
-        return successor_action
+        return (
+            _owner_continuation_publication_projection(
+                latest_state, record["issue"],
+            )
+            if isinstance(successor_action, dict) else None
+        )
 
     def _authorized_dispatch_head(self, issue, head, base_sha=None, *,
                                   receipt_action=None, continuation_action=None):
@@ -8391,7 +8523,7 @@ class Coordinator:
             claimed_action = self.store.action(key)
         if owner_continuation_record is not None:
             try:
-                claimed_action = self._fence_owner_continuation(
+                fenced_projection = self._fence_owner_continuation(
                     {
                         "issue": action["issue"],
                         "action_key": owner_continuation_record[
@@ -8405,6 +8537,7 @@ class Coordinator:
             except CoordinatorError:
                 self.store.update_action(key, "superseded")
                 return "superseded"
+            claimed_action = self.store.action(key)
         try:
             task_request = {
                 "prompt": claimed_action["body"],
@@ -8417,6 +8550,7 @@ class Coordinator:
                     lambda: self.api.write(
                         f"agents/repos/{REPOSITORY}/tasks", task_request,
                     ),
+                    expected_projection=fenced_projection,
                 )
             else:
                 response = self.api.write(
@@ -10215,9 +10349,15 @@ class StateStore:
             return True
         return self._mutate(mark)
 
-    def publish_continuation_task(self, key, expected, record, publish):
+    def publish_continuation_task(
+            self, key, expected, record, publish, *, expected_projection):
         if self._prepared is not None:
             raise CoordinatorError("Task publication requires committed state")
+        expected_projection_sha = _canonical_sha256(expected_projection)
+        if expected_projection_sha is None:
+            raise _ContinuationPublicationFenceError(
+                "Owner continuation state projection was invalid"
+            )
         self._ensure_directory()
         lock_path = self.directory / f".{self.path.name}.lock"
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
@@ -10236,20 +10376,35 @@ class StateStore:
                 data["outbox"].get(action.get("receipt_anchor_key"))
                 if isinstance(action, dict) else None
             )
+            current_projection = _owner_continuation_publication_projection(
+                data, record.get("issue"),
+            )
             request = _source_receipt_anchor_request(
                 expected, expected.get("dispatch_nonce"),
             )
             if (
-                    action != expected
+                    _canonical_sha256(current_projection)
+                        != expected_projection_sha
+                    or _canonical_sha256(action) != _canonical_sha256(expected)
                     or action.get("status") != "sending"
                     or action.get("task_dispatch_started") is not True
                     or action.get("task_id") is not None
-                    or record not in enrollment.get("owner_continuations", [])
+                    or not _owner_continuation_enrollment_active(
+                        record, enrollment,
+                    )
+                    or not any(
+                        _canonical_sha256(item) == _canonical_sha256(record)
+                        for item in enrollment.get("owner_continuations", [])
+                    )
                     or not _owner_continuation_matches_history(
                         record, enrollment, data["actions"],
                     )
                     or not _owner_continuation_successor_candidate_matches(
                         record, action,
+                    )
+                    or not _owner_continuation_writers_clear(
+                        enrollment, data["actions"], data["outbox"],
+                        record["issue"], record["historical_action_key"], key,
                     )
                     or request is None
                     or not isinstance(anchor, dict)

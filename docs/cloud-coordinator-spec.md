@@ -773,17 +773,28 @@ historical SOURCE and all neutral transport semantics remain unchanged.
 
 After the final ordinary authority reads, the disposition fence authenticates the
 immutable command and enrollment, then re-reads the exact PR and main and reloads
-canonical StateStore data from disk. It compares the complete affected enrollment,
-historical reservation, continuation list, same-PR action claims, and (for a SOURCE
-successor) the current claim and sent anchor. SOURCE anchor inventory and direct
-readback remain mandatory. A failed comparison rejects only the affected PR's
-continuation; if canonical state changed during a prepared scan, the scan is rebased
-on that durable state before committing unrelated eligible work.
+canonical StateStore data from disk. It validates exactly one immutable owner
+disposition for the same historical action, task, and reservation from the complete
+PR comment inventory. The reserved command must match the exact head, main, PR,
+owner, and chronology; competing owner commands for that reservation reject the
+continuation. Non-owner commands and unrelated owner chatter are not authority and
+do not count as competing dispositions. This inventory check runs at admission and
+again at publication, so commands consumed on an earlier poll are included.
+
+The fence compares the complete affected enrollment, historical reservation,
+continuation list, same-PR action claims, and outbox claims using canonical
+type-preserving JSON. SOURCE anchor inventory and direct readback remain mandatory.
+A failed comparison rejects only the affected PR's continuation; if canonical state
+changed during a prepared scan, the scan is rebased on that durable state before
+committing unrelated eligible work.
 
 Immediately before a continuation task POST, the coordinator acquires the existing
-StateStore write lock, reloads and validates the exact successor claim, continuation,
-and anchor, and holds that lock through the POST. This prevents a stale local claim
-from being published or overwritten while the request is in flight. GitHub offers no
+StateStore write lock, reloads and compares the fenced affected-state projection,
+revalidates active exact-enrollment identity and writer occupancy, and validates
+the exact successor claim, continuation, and anchor. The projection is scoped to
+the affected PR, so unrelated PR state changes do not block publication. The lock
+is held through the POST. This prevents stale affected local authority from being
+published or overwritten while the request is in flight. GitHub offers no
 transaction spanning the final pull/main reads and task POST, so a remote change
 after those reads remains an unavoidable race; these checks do not claim remote
 atomicity.
