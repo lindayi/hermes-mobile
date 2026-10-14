@@ -192,13 +192,16 @@ successful receipt is still required before later source advancement. The valid
 continuation result may advance only through an exact ready-receipt chain; a
 disconnected or blocked descendant cannot release historical occupancy or advance
 progress. Global authorization from a later enrollment or another root cannot
-replace a ready-receipt path from the bound successor. These candidate pins identify
-the exact proposed source bytes only; they do not establish review, merge,
-operational authorization, or activation.
+replace a ready-receipt path from the bound successor. SOURCE continuation proofs
+require their immutable owner anchor even if retained state omits optional anchor
+fields. Every cohort member must bind the same frozen enrollment comment, head, main,
+and immutable pull identity; a later enrollment cannot mix or renew a spent epoch.
+These candidate pins identify the exact proposed source bytes only; they do not
+establish review, merge, operational authorization, or activation.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `70ec4186beaab41c3bda569963ab5443395e16375c2adffac73dfc5605289310` |
+| `deploy/cloud_coordinator.py` | `56a2eb920201ca1a1c99983200d23e9a560a1d778d1af0f77df5291663d651c4` |
 | `deploy/task_receipts.py` | `7979a9df432d4a108cad727ba395917060b053fee46b7998d74ae331f5972008` |
 
 ### Retained merged source and deliberate native refreshes

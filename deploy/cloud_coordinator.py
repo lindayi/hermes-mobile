@@ -3397,7 +3397,8 @@ def _valid_receipt_proof(action, comments):
                     != action["receipt_session_completed_at"])
             or not isinstance(comments, list)):
         return False
-    if "owner_continuation_binding" in action:
+    if ("owner_continuation_binding" in action
+            or "owner_continuation_companions" in action):
         bindings = _owner_continuation_bindings(action)
         witnesses = [
             action.get("owner_continuation_attestation"),
@@ -3427,7 +3428,16 @@ def _valid_receipt_proof(action, comments):
                 legacy_neutral=legacy_neutral,
             )):
         return False
-    if ("receipt_anchor_comment_id" in action or "receipt_anchor_body" in action):
+    source_continuation = (
+        action.get("task_type") != "neutral"
+        and (
+            "owner_continuation_binding" in action
+            or "owner_continuation_companions" in action
+        )
+    )
+    if (source_continuation
+            or "receipt_anchor_comment_id" in action
+            or "receipt_anchor_body" in action):
         anchor_id = action.get("receipt_anchor_comment_id")
         if ((action.get("task_type") != "neutral"
              and not source_receipt_anchor_valid(action, comments)) or version != "v2"
@@ -3904,7 +3914,7 @@ def _owner_continuation_bindings(action, *, allow_intent=False):
         return None
     bindings = [primary, *(item["binding"] for item in companions)]
     shared = (
-        "version", "current_head_sha", "current_main_sha",
+        "version", "enrollment_comment_id", "current_head_sha", "current_main_sha",
         "pull_id", "pull_node_id", "head_ref",
     )
     if (any(set(binding) != set(primary)
@@ -4051,6 +4061,13 @@ def _owner_continuation_enrollment_active(record, enrollment):
     return (
         isinstance(enrollment, dict)
         and enrollment.get("active") is True
+        and type(enrollment.get("issue")) is int
+        and enrollment["issue"] == record["issue"]
+        and type(enrollment.get("comment")) is int
+        and enrollment["comment"] == record["enrollment_comment_id"]
+        and enrollment.get("head") == record["current_head_sha"]
+        and enrollment.get("base") == record["current_main_sha"]
+        and enrollment.get("owner_authorized_head") == record["current_head_sha"]
         and type(enrollment.get("pull_id")) is int
         and enrollment["pull_id"] == record["pull_id"]
         and enrollment.get("pull_node_id") == record["pull_node_id"]
@@ -7829,6 +7846,11 @@ class Coordinator:
             raise CoordinatorError("Owner continuation main changed before commit")
         state = StateStore(self.store.path).snapshot()
         enrollment = state.get("enrollments", {}).get(str(record["issue"]), {})
+        if (successor_action is not None
+                and not _owner_continuation_enrollment_active(record, enrollment)):
+            raise CoordinatorError(
+                "Owner continuation frozen enrollment epoch changed before publication"
+            )
         historical = [
             item for item in enrollment.get("owner_abandonments", [])
             if isinstance(item, dict)

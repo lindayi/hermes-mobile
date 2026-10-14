@@ -4216,6 +4216,42 @@ def test_owner_continuation_source_retained_anchor_proof_is_revalidated(
     assert not cloud_coordinator._valid_receipt_proof(proof, api.comments)
 
 
+@pytest.mark.parametrize("retained", [False, True])
+@pytest.mark.parametrize("anchor_change", ["edited", "deleted"])
+def test_owner_continuation_source_proof_requires_omitted_anchor_fields(
+        tmp_path, retained, anchor_change):
+    api, store, _, _, main = _owner_continuation_advanced_case(tmp_path)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    successor = next(a for a in store.actions().values()
+                     if a.get("owner_continuation_binding"))
+    result_head = "8" * 40
+    api.complete_task(successor["task_id"], successor, head_sha=result_head, base_sha=main)
+    api.head_sha = api.pull["head"]["sha"] = result_head
+    api.unresolved = api.source_failure = False
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    if retained:
+        StateStore(store.path).retire(16, result_head, main)
+        proof = next(
+            item for item in StateStore(store.path).snapshot()["enrollments"]["16"][
+                "receipt_proofs"
+            ] if item.get("owner_continuation_binding")
+        )
+    else:
+        proof = StateStore(store.path).action(successor["key"])
+    assert cloud_coordinator._valid_receipt_proof(proof, api.comments)
+    anchor = next(
+        comment for comment in api.comments
+        if comment["id"] == proof["receipt_anchor_comment_id"]
+    )
+    proof.pop("receipt_anchor_comment_id")
+    proof.pop("receipt_anchor_body")
+    if anchor_change == "edited":
+        anchor["body"] += " changed"
+    else:
+        api.comments.remove(anchor)
+    assert not cloud_coordinator._valid_receipt_proof(proof, api.comments)
+
+
 def test_owner_continuation_rejects_a_blocked_intermediate_receipt(tmp_path):
     api, store, _, _, continued_main = _owner_continuation_advanced_case(tmp_path)
     Coordinator(
@@ -5838,6 +5874,70 @@ def test_owner_continuation_locked_publication_allows_unrelated_state_change(
     assert api.task_posts == prior_posts + 1
     assert successor["status"] == "sent"
     assert state["actions"]["unrelated-writer"]["status"] == "sending"
+
+
+@pytest.mark.parametrize("call_number", [1, 2])
+@pytest.mark.parametrize("field", [
+    "comment", "head", "base", "owner_authorized_head", "pull_id",
+    "pull_node_id", "repository_id",
+])
+def test_owner_continuation_rejects_rebound_enrollment_before_fence_snapshot(
+        tmp_path, monkeypatch, call_number, field):
+    api, store, _, _, _ = _owner_continuation_advanced_case(tmp_path)
+    original_fence = CloudCoordinator._fence_owner_continuation
+    calls = []
+    injected = []
+
+    def rebound(self, recovery, main_sha, *, successor_action=None):
+        if isinstance(successor_action, dict):
+            calls.append(successor_action)
+            if len(calls) == call_number:
+                injected.append(True)
+                value = {
+                    "comment": 8888,
+                    "head": "c" * 40,
+                    "base": "d" * 40,
+                    "owner_authorized_head": "c" * 40,
+                    "pull_id": float(160000016),
+                    "pull_node_id": "PR_rebound",
+                    "repository_id": 1,
+                }[field]
+                StateStore(store.path)._mutate(
+                    lambda state: state["enrollments"]["16"].update({field: value}),
+                )
+        return original_fence(
+            self, recovery, main_sha, successor_action=successor_action,
+        )
+
+    monkeypatch.setattr(CloudCoordinator, "_fence_owner_continuation", rebound)
+    prior_posts = api.task_posts
+    prior_writes = len(api.writes)
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+
+    state = StateStore(store.path).snapshot()
+    successor = next(
+        action for action in state["actions"].values()
+        if action.get("owner_continuation_binding")
+    )
+    assert injected == [True]
+    assert api.task_posts == prior_posts
+    assert successor["status"] == "superseded"
+    assert state["enrollments"]["16"][field] == {
+        "comment": 8888,
+        "head": "c" * 40,
+        "base": "d" * 40,
+        "owner_authorized_head": "c" * 40,
+        "pull_id": float(160000016),
+        "pull_node_id": "PR_rebound",
+        "repository_id": 1,
+    }[field]
+    assert not any(
+        route.endswith(("/tasks", "/requested_reviewers", "/merge"))
+        for route, _ in api.writes[prior_writes:]
+    )
 
 
 @pytest.mark.parametrize("mutation", ["final-pull-head", "final-pull-identity", "final-main"])

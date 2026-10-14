@@ -768,8 +768,10 @@ eight canonical v2 receipt lines, never an edit, retry, or second reply. Validat
 the existing complete bounded quote carriers before task publication and bind the
 returned task session to that exact prompt. SOURCE `ready` means the actual pushed
 result, not a neutral audit-bearing merge commit. Acceptance and retained proof
-require the same immutable owner anchor and exact bot reply envelope. Ordinary
-historical SOURCE and all neutral transport semantics remain unchanged.
+require the same immutable owner anchor and exact bot reply envelope. For a
+SOURCE continuation proof, anchor validation is mandatory even if retained state
+omits both optional anchor fields; generic v2 receipt parsing cannot replace it.
+Ordinary historical SOURCE and all neutral transport semantics remain unchanged.
 
 After the final ordinary authority reads, the disposition fence authenticates the
 immutable command and enrollment, then re-reads the exact PR and main and reloads
@@ -792,6 +794,10 @@ Then read the final pull and main. The final pull must have `draft` exactly
 The fence compares the complete affected enrollment, historical reservation,
 continuation list, same-PR action claims, and outbox claims using canonical
 type-preserving JSON. SOURCE anchor inventory and direct readback remain mandatory.
+A continuation record must match the active enrollment's frozen comment ID, head,
+base, owner-authorized head, and immutable pull/repository identity. Every member
+of a multi-root cohort must carry that same enrollment-comment ID; close/reopen
+cannot combine records from different enrollment epochs or renew a spent allowance.
 A failed comparison rejects the affected PR's continuation. If durable state
 changed during preparation, discard both the prepared mutations and all dependent
 scan plans, then rebuild the complete scan once from fresh durable state.

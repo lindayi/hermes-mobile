@@ -212,7 +212,7 @@ _PR105_OWNER_ABANDONMENT_FIXTURE = {
 }
 
 _ISSUE111_OWNER_CONTINUATION_FIXTURE = {
-    'deploy/cloud_coordinator.py': '70ec4186beaab41c3bda569963ab5443395e16375c2adffac73dfc5605289310',
+    'deploy/cloud_coordinator.py': '56a2eb920201ca1a1c99983200d23e9a560a1d778d1af0f77df5291663d651c4',
     'deploy/task_receipts.py': '7979a9df432d4a108cad727ba395917060b053fee46b7998d74ae331f5972008',
 }
 
