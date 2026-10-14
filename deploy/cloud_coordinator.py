@@ -67,6 +67,7 @@ from deploy.task_receipts import (
     find_receipt,
     receipt_body_matches,
     receipt_instruction,
+    source_receipt_anchor_valid,
     validate_task_receipt,
 )
 
@@ -963,6 +964,40 @@ def _neutral_receipt_anchor_request(action, nonce):
         "marker": marker,
         "body": marker,
     }
+
+
+def _source_receipt_anchor_request(action, nonce):
+    binding = action.get(
+        "owner_continuation_binding", action.get("owner_continuation_intent"),
+    )
+    if (action.get("kind") != "fix"
+            or action.get("task_type") not in {None, "source", "review-followup"}
+            or not isinstance(binding, dict)
+            or binding.get("version") != 1
+            or not isinstance(action.get("key"), str)
+            or type(action.get("issue")) is not int
+            or type(action.get("attempt")) is not int
+            or not _is_sha(action.get("head"))
+            or not _is_sha(action.get("main_sha"))
+            or type(action.get("pull_id")) is not int
+            or not isinstance(action.get("pull_node_id"), str)
+            or not isinstance(action.get("head_ref"), str)
+            or not isinstance(nonce, str) or not 1 <= len(nonce) <= 128):
+        return None
+    request = {
+        "kind": "continuation-source-receipt-anchor",
+        "key": f"continuation-source-receipt-anchor:{_canonical_sha256(binding)}",
+        "task_key": action["key"], "issue": action["issue"],
+        "head": action["head"], "main_sha": action["main_sha"],
+        "head_ref": action["head_ref"], "attempt": action["attempt"],
+        "pull_id": action["pull_id"], "pull_node_id": action["pull_node_id"],
+        "owner_continuation_binding": binding, "nonce": nonce,
+        "request_sha256": _canonical_sha256(
+            action.get("task_request_body", action.get("body")),
+        ),
+    }
+    marker = "hermes-coordinator-source-receipt:" + _canonical_sha256(request)[:20]
+    return request | {"marker": marker, "body": marker}
 
 
 def review_anchor_request(snapshot, source_action, *, retry_of=None):
@@ -3289,13 +3324,22 @@ def _valid_receipt_proof(action, comments):
         return False
     if ("receipt_anchor_comment_id" in action or "receipt_anchor_body" in action):
         anchor_id = action.get("receipt_anchor_comment_id")
-        if (action.get("task_type") != "neutral" or version != "v2"
+        if ((action.get("task_type") != "neutral"
+             and not source_receipt_anchor_valid(action, comments)) or version != "v2"
                 or type(anchor_id) is not int or not 0 < anchor_id <= 2**63 - 1
                 or action["receipt_comment_id"] == anchor_id
                 or not _neutral_receipt_body_matches(
                     action["receipt_body"], action.get("receipt_anchor_body"),
                 )):
             return False
+        if action.get("receipt_anchor_role") == "continuation-source":
+            expected_anchor = _source_receipt_anchor_request(
+                action, action.get("dispatch_nonce"),
+            )
+            if (expected_anchor is None
+                    or action.get("receipt_anchor_body") != expected_anchor["body"]
+                    or action.get("receipt_anchor_key") != expected_anchor["key"]):
+                return False
     candidates = [
         comment for comment in comments
         if isinstance(comment, dict)
@@ -7718,6 +7762,7 @@ class Coordinator:
         )
 
     def _neutral_writer_free(self, action):
+        source = action.get("receipt_anchor_role") == "continuation-source"
         current = self._fence_pull(
             action["issue"], action["head"], action["main_sha"],
             allow_historical_reconciliation=True,
@@ -7731,7 +7776,7 @@ class Coordinator:
                     current.get("base", {}).get("sha"),
                     continuation_action=action,
                 )
-                or not _reconciliation_reasons(current)):
+                or (bool(_reconciliation_reasons(current)) == source)):
             return False
         try:
             tasks = _rest_list(
@@ -7749,11 +7794,18 @@ class Coordinator:
         )
 
     def _ensure_neutral_receipt_anchor(self, action):
-        anchor_key = f"neutral-receipt-anchor:{action['key']}"
+        return self._ensure_receipt_anchor(action, source=False)
+
+    def _ensure_receipt_anchor(self, action, *, source):
+        request = _source_receipt_anchor_request if source else _neutral_receipt_anchor_request
+        reserved = request(action, "reservation")
+        if reserved is None:
+            return None
+        anchor_key = reserved["key"]
         stored = self.store.snapshot()["outbox"].get(anchor_key)
         if stored is None:
             nonce = secrets.token_urlsafe(32)
-            reserved = _neutral_receipt_anchor_request(action, nonce)
+            reserved = request(action, nonce)
             if reserved is None:
                 return None
             reserved.update(status="pending", created_at=self._now_string())
@@ -7763,13 +7815,10 @@ class Coordinator:
                 stored = self.store.snapshot()["outbox"].get(anchor_key)
         if not isinstance(stored, dict):
             return None
-        expected = _neutral_receipt_anchor_request(action, stored.get("nonce"))
+        expected = request(action, stored.get("nonce"))
         if (
                 expected is None
-                or any(stored.get(field) != expected.get(field) for field in (
-                    "kind", "key", "task_key", "issue", "head", "main_sha",
-                    "recorded_base_sha", "head_ref", "attempt", "marker", "body",
-                ))
+                or any(stored.get(field) != value for field, value in expected.items())
                 or stored.get("status") not in {"pending", "sending", "uncertain", "sent"}
                 or not _valid_timestamp(stored.get("created_at"))
                 or ("receipt_anchor_comment_id" in action
@@ -7898,6 +7947,9 @@ class Coordinator:
                 record, action, allow_intent=True,
             )
         ), None)
+        source_anchor = not neutral and owner_continuation_record is not None
+        if source_anchor:
+            action = action | {"receipt_anchor_role": "continuation-source"}
         current = self._fence_pull(
             action["issue"], action["head"], action["main_sha"],
             allow_historical_reconciliation=(
@@ -8083,8 +8135,11 @@ class Coordinator:
         if (_other_task_active(tasks, {"pull": current})
                 or _cloud_agent_active(workflows, branch)):
             return "agent-running"
-        if neutral:
-            anchor = self._ensure_neutral_receipt_anchor(action)
+        if neutral or source_anchor:
+            anchor = (
+                self._ensure_receipt_anchor(action, source=True) if source_anchor
+                else self._ensure_neutral_receipt_anchor(action)
+            )
             if not isinstance(anchor, dict) or anchor.get("status") != "sent":
                 return "receipt-anchor-uncertain"
             action = action | {
@@ -8093,6 +8148,8 @@ class Coordinator:
                 "receipt_anchor_comment_id": anchor["comment_id"],
                 "receipt_anchor_body": anchor["body"],
             }
+            if source_anchor:
+                action["receipt_anchor_created_at"] = anchor["anchor_created_at"]
             if not self._neutral_writer_free(action):
                 return "agent-running"
         claimed = self.store.claim_action(key, action)
@@ -8100,12 +8157,12 @@ class Coordinator:
             existing = self.store.action(key)
             return existing.get("status") if existing else "not-claimed"
         claimed_action = self.store.action(key)
-        if neutral:
+        if neutral or source_anchor:
             current = self._fence_pull(
                 claimed_action["issue"], claimed_action["head"],
                 claimed_action["main_sha"],
                 allow_historical_reconciliation=True,
-                allow_historical_dirty=True,
+                allow_historical_dirty=neutral,
                 expected_base_sha=claimed_action.get("recorded_base_sha"),
             )
             if (
@@ -8116,10 +8173,13 @@ class Coordinator:
                         current.get("base", {}).get("sha"),
                         continuation_action=claimed_action,
                     )
-                    or not _reconciliation_reasons(current)):
+                    or (bool(_reconciliation_reasons(current)) != neutral)):
                 self.store.update_action(key, "superseded")
                 return "superseded"
-            final_anchor = self._ensure_neutral_receipt_anchor(claimed_action)
+            final_anchor = (
+                self._ensure_receipt_anchor(claimed_action, source=True) if source_anchor
+                else self._ensure_neutral_receipt_anchor(claimed_action)
+            )
             if (not isinstance(final_anchor, dict)
                     or final_anchor.get("status") != "sent"
                     or final_anchor.get("comment_id")
@@ -8131,7 +8191,7 @@ class Coordinator:
                 pull_number=claimed_action["issue"],
                 start_head=claimed_action["head"],
                 base_sha=claimed_action["main_sha"],
-                neutral=True,
+                neutral=neutral,
                 anchor_comment_id=claimed_action["receipt_anchor_comment_id"],
                 anchor_body=claimed_action["receipt_anchor_body"],
             )
@@ -8231,7 +8291,7 @@ class Coordinator:
                     or _cloud_agent_active(final_workflows, branch)):
                 self.store.update_action(key, "superseded")
                 return "agent-running"
-        if neutral:
+        if neutral or source_anchor:
             if not self.store.mark_neutral_task_dispatch_started(key):
                 self.store.update_action(key, "superseded")
                 return "superseded"
@@ -8783,7 +8843,7 @@ class Coordinator:
                 if (entry.get("issue") != snapshot["issue"]
                         or entry.get("status") not in {"sending", "uncertain"}):
                     continue
-                if (key.startswith("neutral-receipt-anchor:")
+                if (key.startswith(("neutral-receipt-anchor:", "continuation-source-receipt-anchor:"))
                         or self._legacy_review_report_kind(key, entry) == "observation"):
                     continue
                 found = _matching_owner_comment(
@@ -8806,6 +8866,7 @@ class Coordinator:
                 if (key.startswith((
                             "review-anchor:", "review-correction-anchor:",
                             "neutral-receipt-anchor:",
+                            "continuation-source-receipt-anchor:",
                         ))
                         or str(entry.get("marker", "")).startswith(REVIEW_ANCHOR_MARKER_PREFIX)):
                     continue
@@ -9866,6 +9927,18 @@ class StateStore:
                         return False
                     claimed["owner_continuation_binding"] = binding
                 neutral = claimed.get("task_type") == "neutral"
+                source_anchor = (
+                    not neutral and owner_continuation_record is not None
+                )
+                anchored = neutral or source_anchor
+                if (not anchored and any(
+                        field in claimed for field in (
+                            "receipt_anchor_role", "receipt_anchor_key",
+                            "receipt_anchor_comment_id", "receipt_anchor_body",
+                        ))):
+                    return False
+                if source_anchor and claimed.get("receipt_anchor_role") != "continuation-source":
+                    return False
                 counter = "neutral_attempts" if neutral else "attempts"
                 limit = NEUTRAL_LIMIT if neutral else REPAIR_LIMIT
                 attempts = enrollment.get(counter)
@@ -9895,7 +9968,7 @@ class StateStore:
                             claimed.get("repair_target_map", {}),
                             claimed["repair_fingerprints"]):
                         return False
-                if neutral:
+                if anchored:
                     anchor_key = claimed.get("receipt_anchor_key")
                     anchor = data["outbox"].get(anchor_key)
                     comment_id = claimed.get("receipt_anchor_comment_id")
@@ -9918,16 +9991,26 @@ class StateStore:
                             or type(comment_id) is not int
                             or not 0 < comment_id <= 2**63 - 1):
                         return False
+                    if source_anchor:
+                        expected_anchor = _source_receipt_anchor_request(
+                            claimed, claimed.get("dispatch_nonce"),
+                        )
+                        if (expected_anchor is None
+                                or any(anchor.get(field) != value
+                                       for field, value in expected_anchor.items())
+                                or claimed.get("receipt_anchor_created_at")
+                                    != anchor.get("anchor_created_at")):
+                            return False
                 enrollment[counter] += 1
                 claimed["attempt"] = enrollment[counter]
                 nonce = (
                     claimed.get("dispatch_nonce")
-                    if neutral else secrets.token_urlsafe(32)
+                    if anchored else secrets.token_urlsafe(32)
                 )
                 claimed["dispatch_nonce"] = nonce
                 claimed["owner_id"] = OWNER_ID
                 claimed["repository_id"] = REPOSITORY_ID
-                if neutral:
+                if anchored:
                     claimed["task_request_body"] = claimed.get("body", "")
                     claimed["task_dispatch_started"] = False
                 instruction = receipt_instruction(
@@ -9937,7 +10020,7 @@ class StateStore:
                     **({
                         "anchor_comment_id": claimed["receipt_anchor_comment_id"],
                         "anchor_body": claimed["receipt_anchor_body"],
-                    } if neutral else {}),
+                    } if anchored else {}),
                 )
                 claimed["body"] = f"{claimed.get('body', '')}\n\n{instruction}"
             created_at = time.time()
@@ -9982,7 +10065,8 @@ class StateStore:
             if (
                     not isinstance(action, dict)
                     or action.get("kind") != "fix"
-                    or action.get("task_type") != "neutral"
+                    or (action.get("task_type") != "neutral"
+                        and action.get("receipt_anchor_role") != "continuation-source")
                     or action.get("status") != "sending"
                     or action.get("task_dispatch_started") is not False
                     or action.get("task_id") is not None
@@ -9999,7 +10083,7 @@ class StateStore:
                 instruction = receipt_instruction(
                     action["dispatch_nonce"], pull_number=action["issue"],
                     start_head=action["head"], base_sha=action["main_sha"],
-                    neutral=True,
+                    neutral=action.get("task_type") == "neutral",
                     anchor_comment_id=action["receipt_anchor_comment_id"],
                     anchor_body=action["receipt_anchor_body"],
                 )
@@ -10113,6 +10197,14 @@ class StateStore:
                 for field in ("receipt_version", "main_sha", "task_type"):
                     if field in action:
                         proof[field] = action[field]
+                if action.get("receipt_anchor_role") == "continuation-source":
+                    for field in (
+                        "receipt_anchor_role", "receipt_anchor_key",
+                        "receipt_anchor_comment_id", "receipt_anchor_body",
+                        "receipt_anchor_created_at", "body", "task_request_body", "head_ref",
+                    ):
+                        if field in action:
+                            proof[field] = action[field]
                 proofs = enrollment.setdefault("receipt_proofs", [])
                 if proof not in proofs:
                     proofs.append(proof)
@@ -10141,6 +10233,17 @@ class StateStore:
                         or enrollment["neutral_anchor_reservations"] >= NEUTRAL_LIMIT):
                     return False
                 enrollment["neutral_anchor_reservations"] += 1
+            if entry.get("kind") == "continuation-source-receipt-anchor":
+                enrollment = data["enrollments"].get(str(entry.get("issue")), {})
+                records = _valid_owner_continuation_claims(enrollment, data["actions"])
+                if (not enrollment.get("active")
+                        or not any(
+                            _owner_continuation_binding(record)
+                                == entry.get("owner_continuation_binding")
+                            and not _owner_continuation_has_successor(record, data["actions"])
+                            for _, record in records
+                        )):
+                    return False
             data["outbox"][key] = {**entry, "status": "pending"}
             return True
         return self._mutate(add)
@@ -10286,6 +10389,8 @@ class StateStore:
                     and entry.get("status") == "sent"
                     and entry.get("kind") == "neutral-receipt-anchor"
                 )
+                if entry.get("kind") == "continuation-source-receipt-anchor":
+                    continue
                 if (entry.get("issue") != issue
                         or entry.get("status") not in {"sent", "superseded"}
                         or preserved_inactive_neutral_anchor

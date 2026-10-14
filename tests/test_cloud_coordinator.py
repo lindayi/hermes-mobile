@@ -2222,7 +2222,8 @@ class FakeApi:
             response.update(state=body["state"], creator={"id": OWNER})
         if route.endswith("/comments"):
             anchor_comment = body["body"].startswith(
-                "hermes-coordinator-neutral-receipt:",
+                ("hermes-coordinator-neutral-receipt:",
+                 "hermes-coordinator-source-receipt:"),
             )
             created_at = (
                 datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -3594,6 +3595,21 @@ def test_owner_continuation_disposition_records_missing_root_before_successor_di
     assert successor["key"] != abandonment["action_key"]
     assert successor["head"] == continued_head
     assert successor["status"] == "sent"
+    anchor = state["outbox"][successor["receipt_anchor_key"]]
+    assert anchor["kind"] == "continuation-source-receipt-anchor"
+    assert anchor["comment_id"] == successor["receipt_anchor_comment_id"]
+    assert anchor["body"] == successor["receipt_anchor_body"]
+    owner_anchor = next(c for c in api.comments if c["id"] == anchor["comment_id"])
+    assert owner_anchor["user"]["id"] == OWNER
+    assert owner_anchor["created_at"] == owner_anchor["updated_at"]
+    assert owner_anchor["body"] == anchor["body"]
+    prompt = next(body["prompt"] for route, body in api.writes
+                  if route.endswith("/tasks") and body["prompt"] == successor["body"])
+    assert "`engine-tools-reply_to_comment` exactly once" in prompt
+    assert f"`commentId={anchor['comment_id']}`" in prompt
+    assert "the pushed PR head SHA" in prompt
+    assert "audit-bearing merge" not in prompt
+    assert successor["task_dispatch_started"] is True
 
     task_posts = api.task_posts
     attempts = state["enrollments"]["16"]["attempts"]
@@ -3611,6 +3627,16 @@ def test_owner_continuation_disposition_records_missing_root_before_successor_di
     api.complete_task(
         successor["task_id"], successor,
         head_sha=successor_head, base_sha=continued_main,
+    )
+    assert api.reply_calls[-1]["commentId"] == anchor["comment_id"]
+    assert api.reply_calls[-1]["message"].startswith("Hermes-Task-Receipt: v2\n")
+    receipt_comment = next(
+        comment for comment in api.comments
+        if comment["user"]["id"] == COPILOT_AGENT
+        and successor["dispatch_nonce"] in comment["body"]
+    )
+    assert receipt_comment["body"] == (
+        f"\n> {anchor['body']}\n\n{api.reply_calls[-1]['message']}"
     )
     api.head_sha = successor_head
     api.pull["head"]["sha"] = successor_head
@@ -3927,6 +3953,206 @@ def test_owner_continuation_rejects_disconnected_owner_authorized_head_after_res
         continuation, enrollment, state["actions"], api.comments,
         disconnected_head,
     )
+
+
+@pytest.mark.parametrize("hazard", [
+    "missing", "edited", "duplicate", "malformed", "wrong-owner", "wrong-pr",
+    "post-uncertain", "readback-uncertain", "nonce", "head", "base", "action",
+])
+def test_owner_continuation_source_anchor_failure_is_not_replayed(
+        tmp_path, monkeypatch, hazard):
+    api, store, abandonment, head, main = _owner_continuation_advanced_case(tmp_path)
+    before = store.snapshot()
+    historical = deepcopy(before["actions"][abandonment["action_key"]])
+    posts = api.task_posts
+    original_write, original_get = api.write, api.get
+    source_anchor_ids = []
+
+    def write(route, body):
+        response = original_write(route, body)
+        if (route.endswith("/issues/16/comments")
+                and body["body"].startswith("hermes-coordinator-source-receipt:")):
+            comment = api.comments[-1]
+            source_anchor_ids.append(comment["id"])
+            if hazard == "missing":
+                api.comments.pop()
+            elif hazard == "edited":
+                comment["updated_at"] = "2026-10-15T00:00:00Z"
+            elif hazard == "duplicate":
+                api.comments.append(comment | {"id": comment["id"] + 10000})
+            elif hazard == "malformed":
+                comment["body"] += " malformed"
+            elif hazard == "wrong-owner":
+                comment["user"] = {"id": 123}
+            elif hazard == "wrong-pr":
+                comment["issue_url"] = comment["issue_url"].replace("/16", "/17")
+            elif hazard == "post-uncertain":
+                raise ApiError("Synthetic lost anchor response")
+            elif hazard in {"nonce", "head", "base", "action"}:
+                field = {
+                    "nonce": "nonce", "head": "head", "base": "main_sha",
+                    "action": "task_key",
+                }[hazard]
+                key = next(
+                    key for key, entry in store.snapshot()["outbox"].items()
+                    if entry.get("kind") == "continuation-source-receipt-anchor"
+                )
+                store._mutate(lambda state: state["outbox"][key].__setitem__(
+                    field, "changed" if hazard in {"nonce", "action"} else "0" * 40,
+                ))
+        return response
+
+    def get(route):
+        if (hazard in {"post-uncertain", "readback-uncertain"} and source_anchor_ids
+                and route.endswith(f"/issues/comments/{source_anchor_ids[0]}")):
+            raise ApiError("Synthetic unavailable anchor readback")
+        return original_get(route)
+
+    monkeypatch.setattr(api, "write", write)
+    monkeypatch.setattr(api, "get", get)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    assert len(source_anchor_ids) == 1
+    assert api.task_posts == posts
+    reserved = store.snapshot()
+    assert reserved["actions"][abandonment["action_key"]] == historical
+    assert reserved["enrollments"]["16"]["attempts"] == before["enrollments"]["16"]["attempts"]
+    assert reserved["enrollments"]["16"]["neutral_anchor_reservations"] == (
+        before["enrollments"]["16"]["neutral_anchor_reservations"]
+    )
+    writes = list(api.writes)
+    for state in ("open", "closed", "open", "open"):
+        api.pull_state = state
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+        StateStore(store.path).retire(16, head, main)
+    after = store.snapshot()
+    assert api.writes == writes
+    assert api.task_posts == posts
+    assert after["actions"][abandonment["action_key"]] == historical
+    assert after["enrollments"]["16"]["attempts"] == before["enrollments"]["16"]["attempts"]
+    assert len([
+        entry for entry in after["outbox"].values()
+        if entry.get("kind") == "continuation-source-receipt-anchor"
+    ]) == 1
+
+
+@pytest.mark.parametrize("hazard", [
+    "prompt", "anchor-missing", "anchor-edited", "anchor-duplicate", "anchor-malformed",
+    "nonce", "head", "base", "action", "duplicate-reply", "malformed-carrier",
+])
+def test_owner_continuation_source_receipt_requires_bound_anchor_and_prompt(
+        tmp_path, hazard):
+    api, store, abandonment, _, main = _owner_continuation_advanced_case(tmp_path)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    successor = next(
+        action for action in store.actions().values()
+        if action.get("owner_continuation_binding")
+    )
+    historical = deepcopy(store.action(abandonment["action_key"]))
+    result_head = "8" * 40
+    api.complete_task(successor["task_id"], successor, head_sha=result_head, base_sha=main)
+    anchor = next(
+        comment for comment in api.comments
+        if comment["id"] == successor["receipt_anchor_comment_id"]
+    )
+    receipt = next(
+        comment for comment in api.comments
+        if comment["user"]["id"] == COPILOT_AGENT
+        and successor["dispatch_nonce"] in comment["body"]
+    )
+    if hazard == "prompt":
+        api.tasks[successor["task_id"]]["sessions"][0]["prompt"] += " changed"
+    elif hazard == "anchor-missing":
+        api.comments.remove(anchor)
+    elif hazard == "anchor-edited":
+        anchor["updated_at"] = "2026-10-15T00:00:00Z"
+    elif hazard == "anchor-duplicate":
+        api.comments.append(anchor | {"id": anchor["id"] + 10000})
+    elif hazard == "anchor-malformed":
+        anchor["body"] += " changed"
+    elif hazard == "duplicate-reply":
+        api.comments.append(receipt | {"id": receipt["id"] + 10000})
+    elif hazard == "malformed-carrier":
+        receipt["body"] = receipt["body"].replace("\n\nHermes-", "\nHermes-")
+    elif hazard == "action":
+        store.update_action(successor["key"], "sent", owner_continuation_binding={})
+    else:
+        old = {"nonce": successor["dispatch_nonce"], "head": result_head, "base": main}[hazard]
+        receipt["body"] = receipt["body"].replace(old, "0" * 40)
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.unresolved = False
+    api.source_failure = False
+    posts = api.task_posts
+    for _ in range(3):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    assert "receipt_result" not in store.action(successor["key"])
+    assert api.task_posts == posts
+    assert api.requested_reviewers == []
+    assert store.action(abandonment["action_key"]) == historical
+
+
+def test_owner_continuation_source_prompt_change_blocks_publication(tmp_path, monkeypatch):
+    api, store, abandonment, _, _ = _owner_continuation_advanced_case(tmp_path)
+    before = store.snapshot()
+    original_claim = StateStore.claim_action
+
+    def claim(self, key, action):
+        result = original_claim(self, key, action)
+        if result and self.action(key).get("receipt_anchor_role") == "continuation-source":
+            self.update_action(key, "sending", body=self.action(key)["body"] + " changed")
+        return result
+
+    monkeypatch.setattr(StateStore, "claim_action", claim)
+    posts = api.task_posts
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    after = store.snapshot()
+    successor = next(a for a in after["actions"].values()
+                     if a.get("owner_continuation_binding"))
+    assert successor["status"] == "superseded"
+    assert successor["task_dispatch_started"] is False
+    assert api.task_posts == posts
+    assert after["actions"][abandonment["action_key"]] == (
+        before["actions"][abandonment["action_key"]]
+    )
+    writes = list(api.writes)
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    assert api.writes == writes
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == (
+        before["enrollments"]["16"]["attempts"] + 1
+    )
+
+
+@pytest.mark.parametrize("hazard", ["missing", "edited", "duplicate", "prompt", "nonce"])
+def test_owner_continuation_source_retained_anchor_proof_is_revalidated(
+        tmp_path, hazard):
+    api, store, _, _, main = _owner_continuation_advanced_case(tmp_path)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    successor = next(a for a in store.actions().values()
+                     if a.get("owner_continuation_binding"))
+    result_head = "8" * 40
+    api.complete_task(successor["task_id"], successor, head_sha=result_head, base_sha=main)
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.unresolved = api.source_failure = False
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    StateStore(store.path).retire(16, result_head, main)
+    enrollment = store.snapshot()["enrollments"]["16"]
+    proof = next(p for p in enrollment["receipt_proofs"]
+                 if p.get("owner_continuation_binding"))
+    assert cloud_coordinator._valid_receipt_proof(proof, api.comments)
+    anchor = next(c for c in api.comments if c["id"] == proof["receipt_anchor_comment_id"])
+    if hazard == "missing":
+        api.comments.remove(anchor)
+    elif hazard == "edited":
+        anchor["updated_at"] = "2026-10-15T00:00:00Z"
+    elif hazard == "duplicate":
+        api.comments.append(anchor | {"id": anchor["id"] + 10000})
+    elif hazard == "prompt":
+        proof["body"] += " changed"
+    else:
+        proof["dispatch_nonce"] = "changed"
+    assert not cloud_coordinator._valid_receipt_proof(proof, api.comments)
 
 
 def test_owner_continuation_rejects_a_blocked_intermediate_receipt(tmp_path):

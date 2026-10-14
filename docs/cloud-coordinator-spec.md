@@ -754,6 +754,27 @@ Finite acceptance for this recovery:
 
 #### Append-only continuation disposition after supervised advancement
 
+New SOURCE successors positively bound to an `owner_continuation` disposition
+reserve one create-once owner receipt anchor before task publication. Its durable
+identity binds the disposition, action, PR identity, branch, exact head/main/base,
+attempt, nonce, and original request. Authenticate the immutable owner comment by
+complete inventory and direct readback. Uncertain POSTs are never retried; only
+authenticated readback of the original reservation can recover them. Retirement,
+restart, and re-enrollment must not renew this publication allowance.
+
+The exact outgoing task prompt names `engine-tools-reply_to_comment`, the reserved
+`commentId`, and the exact anchor body. It requires exactly one call with only the
+eight canonical v2 receipt lines, never an edit, retry, or second reply. Validate
+the existing complete bounded quote carriers before task publication and bind the
+returned task session to that exact prompt. SOURCE `ready` means the actual pushed
+result, not a neutral audit-bearing merge commit. Acceptance and retained proof
+require the same immutable owner anchor and exact bot reply envelope. Ordinary
+historical SOURCE and all neutral transport semantics remain unchanged.
+
+This transport slice does not complete issue #111. Finite final pull/main/canonical
+StateStore/claim comparisons after the actual last external authority or anchor
+read, including injected last-read mutations, remain a separate required fence.
+
 An existing owner-abandonment record whose recovery head no longer equals the
 current PR head cannot be rebound by replaying its original command or by ordinary
 re-enrollment. The only supported exception is this finite, append-only owner
@@ -792,8 +813,9 @@ disposition comment, and may authorize at most one distinct successor reservatio
 The successor uses existing per-PR execution locks and lifetime accounting. This
 authorization does not accept either task's result, create a ready receipt, grant
 source provenance, qualify review, or authorize merge. A source or review-followup
-successor must provide the ordinary authenticated immutable ready receipt; a
-neutral successor must use the existing single-publication owner receipt anchor.
+successor must provide an authenticated immutable ready receipt through the new
+single-publication SOURCE owner anchor; a neutral successor must use the existing
+single-publication neutral owner receipt anchor.
 Only that ready receipt can authorize later source or review advancement. The
 disposition command is not itself a receipt or anchor. Preserve the original
 abandonment, command, receipt bytes or absence, uncertainty, action reservation,

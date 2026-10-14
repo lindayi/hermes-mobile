@@ -212,7 +212,8 @@ _PR105_OWNER_ABANDONMENT_FIXTURE = {
 }
 
 _ISSUE111_OWNER_CONTINUATION_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'a914d61319cc406fd968c04bf2c6cfd706b6ac81f179331f7fa6cd4d6cf442cf',
+    'deploy/cloud_coordinator.py': 'abf1006dba73052551ce081a3778f3a7d8df3b21d0de6d12fa4ca2f97098ad93',
+    'deploy/task_receipts.py': '7979a9df432d4a108cad727ba395917060b053fee46b7998d74ae331f5972008',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
@@ -693,6 +694,11 @@ def test_issue111_candidate_table_matches_source_bytes():
 
     actual = hashlib.sha256((root / 'deploy/cloud_coordinator.py').read_bytes()).hexdigest()
     assert rows == [f'| `deploy/cloud_coordinator.py` | `{actual}` |']
+    receipt_actual = hashlib.sha256((root / 'deploy/task_receipts.py').read_bytes()).hexdigest()
+    assert [line for line in section.splitlines()
+            if line.startswith('| `deploy/task_receipts.py` |')] == [
+        f'| `deploy/task_receipts.py` | `{receipt_actual}` |',
+    ]
 
 
 def test_reviewed_source_fixture_matches_complete_required_contract():
