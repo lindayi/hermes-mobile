@@ -4815,6 +4815,245 @@ def test_starter_source_commit_fence_isolates_identity_mismatch_and_progresses_o
     )
 
 
+def _pull_issue_state(state, issue):
+    key = str(issue)
+    context = state.get("lifecycle_context") or {}
+    return {
+        "enrollment": deepcopy(state["enrollments"].get(key)),
+        "actions": {
+            action_key: deepcopy(action)
+            for action_key, action in state["actions"].items()
+            if action.get("issue") == issue
+        },
+        "outbox": {
+            outbox_key: deepcopy(entry)
+            for outbox_key, entry in state["outbox"].items()
+            if entry.get("issue") == issue
+        },
+        "retired": deepcopy(state["retired"].get(key)),
+        "lifecycle_events": deepcopy([
+            event for event in state["lifecycle_events"]
+            if event.get("issue_number") == issue or event.get("pr_number") == issue
+        ]),
+        "lifecycle_context_events": deepcopy([
+            event for event in context.get("events", [])
+            if event.get("issue_number") == issue or event.get("pr_number") == issue
+        ]),
+    }
+
+
+def _inject_identity_swap_at_last_source_fence(
+        api, coordinator, source, before_fence=None):
+    from copy import deepcopy
+
+    original_snapshot = coordinator._snapshot_pull
+    calls = {}
+
+    def snapshot_pull(number, enrollment, main_sha, actions=None, **kwargs):
+        calls[number] = calls.get(number, 0) + 1
+        if number == 16 and calls[number] == 2:
+            if before_fence is not None:
+                before_fence()
+            api.pull = deepcopy(api.pull)
+            api.pull["id"] += 1
+        snapshot = original_snapshot(
+            number, enrollment, main_sha, actions=actions, **kwargs,
+        )
+        if number == 16:
+            snapshot["initial_source"] = source
+        return snapshot
+
+    coordinator._snapshot_pull = snapshot_pull
+    return calls
+
+
+def _bind_unrelated_task_artifacts(api):
+    original_write = api.write
+
+    def write(route, body):
+        response = original_write(route, body)
+        if (route == "agents/repos/lindayi/hermes-mobile/tasks"
+                and "PR #17" in body.get("prompt", "")):
+            response["artifacts"][0]["data"]["head_ref"] = "topic-17"
+            response["artifacts"][1]["data"].update(
+                id=170017, global_id="PR_node_17",
+            )
+        return response
+
+    api.write = write
+
+
+def test_owner_recovery_identity_swap_isolated_and_command_rechecked(
+        tmp_path, monkeypatch):
+    from copy import deepcopy
+
+    api, store, neutral = _owner_abandonment_case(tmp_path)
+    unrelated_pull = _add_unrelated_enrolled_pull(api, store)
+    unrelated_pull["head"]["ref"] = "topic-17"
+    _bind_unrelated_task_artifacts(api)
+    source = _synthetic_initial_source()
+    source.update(
+        head_sha=api.pull["head"]["sha"],
+        head_ref=api.pull["head"]["ref"],
+        pull_id=api.pull["id"],
+        pull_node_id=api.pull["node_id"],
+    )
+    before = StateStore(store.path).snapshot()
+    before_issue = _pull_issue_state(before, 16)
+    before_writes = len(api.writes)
+    before_graphql_writes = len(api.graphql_writes)
+    before_posts = api.task_posts
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+        owner_user_id=str(OWNER),
+    )
+    calls = _inject_identity_swap_at_last_source_fence(
+        api, coordinator, source,
+    )
+    original_build = coordinator._build_plan
+    planned = {}
+
+    def build_plan(*, apply):
+        plan = original_build(apply=apply)
+        planned["owner_recoveries"] = deepcopy(plan["owner_recoveries"])
+        return plan
+
+    monkeypatch.setattr(coordinator, "_build_plan", build_plan)
+    result = coordinator.run(apply=True)
+    plans = {item["issue"]: item for item in result["pull_requests"]}
+    state = StateStore(store.path).snapshot()
+
+    assert calls == {16: 2, 17: 1}
+    assert planned["owner_recoveries"]
+    assert plans[16]["reasons"] == ["pull-identity"]
+    assert plans[16]["repair_requested"] is False
+    assert plans[17]["repair_requested"] is True
+    assert _pull_issue_state(state, 16) == before_issue
+    assert state["cursor"] == before["cursor"]
+    assert state["events"] == before["events"]
+    assert state["event_watermark"] == before["event_watermark"]
+    assert not StateStore(store.path).event_seen(7771)
+    assert api.task_posts == before_posts + 1
+    new_writes = api.writes[before_writes:]
+    assert len(new_writes) == 1
+    assert new_writes[0][0] == "agents/repos/lindayi/hermes-mobile/tasks"
+    assert "PR #17" in new_writes[0][1]["prompt"]
+    assert api.graphql_writes[before_graphql_writes:] == []
+
+    retry_writes = len(api.writes)
+    retry_posts = api.task_posts
+    retry = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+        owner_user_id=str(OWNER),
+    ).run(apply=True)
+    assert {item["issue"]: item for item in retry["pull_requests"]}[16][
+        "reasons"
+    ] == ["pull-identity"]
+    assert _pull_issue_state(StateStore(store.path).snapshot(), 16) == before_issue
+    assert StateStore(store.path).snapshot()["cursor"] == before["cursor"]
+    assert not StateStore(store.path).event_seen(7771)
+    assert len(api.writes) == retry_writes
+    assert api.task_posts == retry_posts
+
+    api.pull["id"] = before["enrollments"]["16"]["pull_id"]
+    api.pull["node_id"] = before["enrollments"]["16"]["pull_node_id"]
+    recovered = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+        owner_user_id=str(OWNER),
+    ).run(apply=True)
+    recovered_pr = {item["issue"]: item for item in recovered["pull_requests"]}[16]
+    final_state = StateStore(store.path).snapshot()
+    assert recovered_pr["repair_requested"] is True
+    assert final_state["enrollments"]["16"]["owner_abandonments"][0][
+        "action_key"
+    ] == neutral["key"]
+    assert StateStore(store.path).event_seen(7771)
+
+
+def test_prepared_action_transition_isolated_after_identity_swap(tmp_path):
+    from copy import deepcopy
+
+    api, store, neutral = _owner_abandonment_case(tmp_path)
+    api.comments[:] = [comment for comment in api.comments if comment.get("id") != 7771]
+    store._mutate(
+        lambda state: state["actions"][neutral["key"]].update(status="sending"),
+    )
+    unrelated_pull = _add_unrelated_enrolled_pull(api, store)
+    unrelated_pull["head"]["ref"] = "topic-17"
+    _bind_unrelated_task_artifacts(api)
+    source = _synthetic_initial_source()
+    source.update(
+        head_sha=api.pull["head"]["sha"],
+        head_ref=api.pull["head"]["ref"],
+        pull_id=api.pull["id"],
+        pull_node_id=api.pull["node_id"],
+    )
+    before = StateStore(store.path).snapshot()
+    before_issue = _pull_issue_state(before, 16)
+    before_action = deepcopy(before["actions"][neutral["key"]])
+    before_writes = len(api.writes)
+    before_posts = api.task_posts
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+        owner_user_id=str(OWNER),
+    )
+    staged = {}
+
+    def assert_transition_before_fence():
+        staged["action_status"] = coordinator.store._prepared["actions"][
+            neutral["key"]
+        ]["status"]
+
+    calls = _inject_identity_swap_at_last_source_fence(
+        api, coordinator, source, before_fence=assert_transition_before_fence,
+    )
+    result = coordinator.run(apply=True)
+    plans = {item["issue"]: item for item in result["pull_requests"]}
+    state = StateStore(store.path).snapshot()
+
+    assert calls == {16: 2, 17: 1}
+    assert before_action["status"] == "sending"
+    assert staged["action_status"] == "uncertain"
+    assert plans[16]["reasons"] == ["pull-identity"]
+    assert plans[17]["repair_requested"] is True
+    assert _pull_issue_state(state, 16) == before_issue
+    assert state["actions"][neutral["key"]] == before_action
+    assert api.task_posts == before_posts + 1
+    new_writes = api.writes[before_writes:]
+    assert len(new_writes) == 1
+    assert new_writes[0][0] == "agents/repos/lindayi/hermes-mobile/tasks"
+    assert "PR #17" in new_writes[0][1]["prompt"]
+
+
+def test_pull_isolation_keeps_concurrent_state_compare_and_swap(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    store.enroll(enrolled_record(
+        issue=17, pull_id=170017, pull_node_id="PR_node_17",
+    ))
+    baseline = StateStore(store.path).snapshot()
+
+    store.begin_preparation()
+    store._mutate(
+        lambda state: state["enrollments"]["16"].update(last_open_seen=True),
+    )
+    store.restore_prepared_pull_state({16})
+    assert _pull_issue_state(store.snapshot(), 16) == _pull_issue_state(
+        baseline, 16,
+    )
+
+    concurrent = StateStore(store.path)
+    concurrent._mutate(
+        lambda state: state["enrollments"]["17"].update(
+            last_open_seen=True, last_open_head=HEAD,
+        ),
+    )
+    concurrent_state = concurrent.snapshot()
+    with pytest.raises(CoordinatorError, match="changed during preparation"):
+        store.commit_scan("2026-10-01T12:00:00Z", [])
+    assert StateStore(store.path).snapshot() == concurrent_state
+
+
 @pytest.mark.parametrize("receipt_proofs", [None, {"malformed": True}])
 def test_malformed_retained_receipt_proofs_fail_closed_without_blocking_other_prs(
         tmp_path, receipt_proofs):

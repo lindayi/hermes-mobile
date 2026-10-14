@@ -3935,6 +3935,7 @@ class Coordinator:
         self.owner_user_id = owner_user_id
         self.lifecycle_source_paths = lifecycle_source_paths
         self.starter_state_path = starter_state_path
+        self._processed_by_issue = []
 
     def _identity(self):
         repository = self.api.get(f"repos/{REPOSITORY}")
@@ -3952,7 +3953,7 @@ class Coordinator:
         return _rest_list(self.api, route)
 
     def _scan_enrollments(self, state, *, admission_checks=None):
-        commands, processed = [], []
+        commands, processed, processed_by_issue = [], [], []
         cursor = state.get("cursor")
         issues = self._issues(cursor)
         if not isinstance(issues, list):
@@ -3980,6 +3981,7 @@ class Coordinator:
                             r"/hermes enroll [0-9a-f]{40}(?: issue [^\n]*)?", body,
                         )):
                     processed.append(key)
+                    processed_by_issue.append((issue["number"], key))
                     if not issue.get("pull_request"):
                         continue
                     pull = self.api.get(f"repos/{REPOSITORY}/pulls/{issue['number']}")
@@ -3995,6 +3997,7 @@ class Coordinator:
                             "issue": issue["number"], **abandonment,
                         }))
                         processed.append(key)
+                        processed_by_issue.append((issue["number"], key))
                         continue
                     authorization = _is_owner_sensitive_command(comment)
                     if authorization:
@@ -4007,6 +4010,7 @@ class Coordinator:
                             },
                         }))
                         processed.append(key)
+                        processed_by_issue.append((issue["number"], key))
         candidates = {key: dict(value) for key, value in state["enrollments"].items()
                       if value.get("active")}
         for action, enrollment in commands:
@@ -4073,6 +4077,7 @@ class Coordinator:
                 item["owner_authorization"] = owner_authorization
                 item["targeted_review"] = targeted_review
                 item["validated"] = True
+        self._processed_by_issue = processed_by_issue
         return issues, commands, processed, candidates
 
     def _compare_proves_ancestry(self, base_sha, tip_sha, *, allow_identical=False):
@@ -6618,9 +6623,11 @@ class Coordinator:
         if not _is_sha(main_sha):
             raise CoordinatorError("Current main commit was unavailable")
         admission_checks = []
+        self._processed_by_issue = []
         issues, commands, processed, enrollments = self._scan_enrollments(
             state, admission_checks=admission_checks,
         )
+        processed_by_issue = self._processed_by_issue
         scans, sensitive_revocations, starter_sources = [], [], []
         for key, enrollment in enrollments.items():
             snapshot = self._snapshot_pull(
@@ -6755,7 +6762,8 @@ class Coordinator:
         ]
         return {
             "cursor": cursor, "main_sha": main_sha,
-            "processed": processed, "commands": accepted_commands,
+            "processed": processed, "processed_by_issue": processed_by_issue,
+            "commands": accepted_commands,
             "starter_admissions": admission_checks,
             "starter_sources": starter_sources,
             "owner_recoveries": owner_recoveries,
@@ -8354,9 +8362,13 @@ class Coordinator:
 
     def _apply(self, plan, *, after_commit=None, acknowledgements=None):
         self._fence_starter_admissions(plan.get("starter_admissions", ()))
-        identity_blocked = self._fence_starter_sources(
+        identity_blocked = {
+            item["issue"] for item in plan["pull_requests"]
+            if item.get("identity_invalid")
+        }
+        identity_blocked.update(self._fence_starter_sources(
             plan.get("starter_sources", ()), plan["enrollments"], plan["main_sha"],
-        )
+        ))
         for item in plan["pull_requests"]:
             if item["issue"] in identity_blocked:
                 item.update(
@@ -8365,22 +8377,50 @@ class Coordinator:
                     auto_merge_eligible=False, reasons=["pull-identity"],
                 )
         for recovery in plan.get("owner_recoveries", ()):
-            self._fence_owner_abandonment(recovery, plan["main_sha"])
+            if recovery["issue"] not in identity_blocked:
+                self._fence_owner_abandonment(recovery, plan["main_sha"])
+        deferred_command_events = any(
+            issue in identity_blocked
+            for issue, _ in plan.get("processed_by_issue", ())
+        )
+        if identity_blocked:
+            self.store.restore_prepared_pull_state(identity_blocked)
+        lifecycle_events = plan.get("lifecycle_events", [
+            event for item in plan["pull_requests"]
+            for event in item.get("lifecycle_events", [])
+        ] + plan.get("source_lifecycle_events", []))
+        lifecycle_events = [
+            event for event in lifecycle_events
+            if event.get("issue_number") not in identity_blocked
+            and event.get("pr_number") not in identity_blocked
+        ]
+        preparation_base = self.store._preparation_base
+        commit_cursor = (
+            preparation_base.get("cursor")
+            if deferred_command_events and isinstance(preparation_base, dict)
+            else plan["cursor"]
+        )
         self.store.commit_scan(
-            plan["cursor"], plan["processed"], commands=plan["commands"],
+            commit_cursor,
+            [] if deferred_command_events else plan["processed"],
+            commands=[
+                (command, item) for command, item in plan["commands"]
+                if item.get("issue") not in identity_blocked
+            ],
             retirements=[
-                item["issue"] for item in plan["pull_requests"] if item.get("terminal")
+                item["issue"] for item in plan["pull_requests"]
+                if item.get("terminal") and item["issue"] not in identity_blocked
             ],
             # Keep causal pull events ahead of their derived deployment outcomes.
-            lifecycle_events=plan.get("lifecycle_events", [
-                event for item in plan["pull_requests"]
-                for event in item.get("lifecycle_events", [])
-            ] + plan.get("source_lifecycle_events", [])),
+            lifecycle_events=lifecycle_events,
             observations=[
                 item for item in plan.get("observations", [])
                 if item[0] not in identity_blocked
             ],
-            sensitive_revocations=plan.get("sensitive_revocations", []),
+            sensitive_revocations=[
+                item for item in plan.get("sensitive_revocations", [])
+                if item[0] not in identity_blocked
+            ],
             starter_sources=[
                 source for source in plan.get("starter_sources", ())
                 if source[0] not in identity_blocked
@@ -8877,6 +8917,100 @@ class StateStore:
     def discard_preparation(self):
         self._prepared = None
         self._preparation_base = None
+
+    def restore_prepared_pull_state(self, issues):
+        if (self._prepared is None or not isinstance(self._preparation_base, dict)
+                or not isinstance(issues, (set, frozenset, list, tuple))
+                or any(type(issue) is not int or issue <= 0 for issue in issues)):
+            raise CoordinatorError("Pull isolation requires an active prepared scan")
+        blocked = set(issues)
+        if not blocked:
+            return
+        baseline = self._preparation_base
+        prepared = deepcopy(self._prepared)
+        blocked_keys = {str(issue) for issue in blocked}
+        for section in ("enrollments", "actions", "outbox", "retired"):
+            base_items = baseline.get(section)
+            prepared_items = prepared.get(section)
+            if not isinstance(base_items, dict) or not isinstance(prepared_items, dict):
+                raise CoordinatorError("Prepared pull state has an unsupported shape")
+            for key in set(base_items) | set(prepared_items):
+                before = base_items.get(key)
+                after = prepared_items.get(key)
+                scoped = key in blocked_keys if section in {
+                    "enrollments", "retired",
+                } else any(
+                    isinstance(item, dict)
+                    and (
+                        type(item.get("issue")) is int
+                        and item["issue"] in blocked
+                        or isinstance(item.get("issue"), str)
+                        and item["issue"] in blocked_keys
+                    )
+                    for item in (before, after)
+                )
+                if not scoped:
+                    continue
+                if key in base_items:
+                    prepared_items[key] = deepcopy(before)
+                else:
+                    prepared_items.pop(key, None)
+
+        def restore_events(base_events, prepared_events):
+            if (not isinstance(base_events, list) or not isinstance(prepared_events, list)
+                    or any(not _lifecycle_event_valid(event)
+                           for event in (*base_events, *prepared_events))):
+                raise CoordinatorError("Prepared pull lifecycle state was invalid")
+            blocked_event_ids = {
+                event["event_id"]
+                for event in (*base_events, *prepared_events)
+                if event.get("issue_number") in blocked
+                or event.get("pr_number") in blocked
+            }
+            prepared_by_id = {
+                event["event_id"]: event for event in prepared_events
+            }
+            restored, seen = [], set()
+            for event in base_events:
+                event_id = event["event_id"]
+                candidate = (
+                    event if event_id in blocked_event_ids
+                    else prepared_by_id.get(event_id)
+                )
+                if candidate is not None and event_id not in seen:
+                    restored.append(deepcopy(candidate))
+                    seen.add(event_id)
+            for event in prepared_events:
+                event_id = event["event_id"]
+                if event_id not in seen and event_id not in blocked_event_ids:
+                    restored.append(deepcopy(event))
+                    seen.add(event_id)
+            return restored
+
+        baseline_events = baseline.get("lifecycle_events", [])
+        prepared_events = prepared.get("lifecycle_events", [])
+        prepared["lifecycle_events"] = restore_events(
+            baseline_events, prepared_events,
+        )
+        base_context = baseline.get("lifecycle_context")
+        prepared_context = prepared.get("lifecycle_context")
+        if base_context is not None or prepared_context is not None:
+            for context in (base_context, prepared_context):
+                if context is not None and not _lifecycle_context_valid(context):
+                    raise CoordinatorError("Prepared lifecycle context was invalid")
+            restored_context_events = restore_events(
+                [] if base_context is None else base_context["events"],
+                [] if prepared_context is None else prepared_context["events"],
+            )
+            context = deepcopy(
+                prepared_context if prepared_context is not None else base_context,
+            )
+            context["events"] = restored_context_events
+            if not restored_context_events and base_context is None:
+                prepared.pop("lifecycle_context", None)
+            else:
+                prepared["lifecycle_context"] = context
+        self._prepared = prepared
 
     @staticmethod
     def _empty():

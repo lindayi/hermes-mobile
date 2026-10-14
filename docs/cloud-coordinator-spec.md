@@ -39,6 +39,17 @@ valid identity mismatch on an open pull is isolated as unscoped so other enrolle
 pulls can progress; that pull receives no writes. Malformed IDs and repository or
 base mismatches are not isolated.
 
+The final starter-source fence applies the same per-pull isolation. If identity
+changes after planning, discard only that pull's prepared enrollment, actions,
+outbox, retirement and lifecycle changes, and omit its commands, recoveries,
+observations, source proof, revocations and lifecycle events from the commit.
+Keep the state-store preparation baseline unchanged so the ordinary compare-and-
+swap still rejects concurrent durable changes. If an owner command for that pull
+was read in the scan, retain the old global cursor and do not consume command
+event IDs; the next cold scan must reread and revalidate the command rather than
+silently losing its authority. Other eligible pulls may still commit and advance.
+Direct snapshots and terminal identity mismatches remain strict.
+
 Extended starter admission additionally requires a strict positive integer comment
 ID and owner ID, an explicitly non-draft open same-repository PR, matching current
 head/body, and exactly one canonical originating-issue closing edge. The shared
