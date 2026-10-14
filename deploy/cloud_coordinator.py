@@ -4476,7 +4476,8 @@ class Coordinator:
             raise CoordinatorError("Pull request head was not a commit SHA")
         head_repo, base_repo = head.get("repo"), base.get("repo")
         if (
-            type(number) is not int or enrollment.get("issue") != number
+            type(number) is not int or type(enrollment.get("issue")) is not int
+            or enrollment["issue"] != number
             or enrollment.get("repository_id") != REPOSITORY_ID
             or not _github_identity(head_repo, REPOSITORY_ID)
             or not _github_identity(base_repo, REPOSITORY_ID)

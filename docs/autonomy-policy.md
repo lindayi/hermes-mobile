@@ -184,7 +184,7 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 | `deploy/cloud_coordinator.py` | `4c8ce668d216035eb79af4adfa48946159d75419d726a43faec661c402b21dbe` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
 
-### PR #109 supervised correction11 current candidate
+### PR #109 supervised correction12 current candidate
 
 Issue #108's bounded correction10 retains agreement between legacy summary and
 detail task artifacts, reconciles every live action sharing a retained task ID
@@ -199,17 +199,17 @@ prepared records, skips its recovery and publication inputs, and retains the pre
 cursor when an owner command must be re-read.
 Unrelated PRs can still commit; the existing state compare-and-swap remains active.
 Malformed non-list retained `receipt_proofs` fail closed for that PR without blocking
-unrelated work. Correction11 checks every candidate root binding with canonical JSON
-equality before traversal and applies the same type-exact equality to final source and
-reviewer authorization projections. Correction8 and correction7 remain historical;
-their exact source digests are retained below. The current source fingerprint is:
+unrelated work. Correction11's root-binding and authorization-projection checks remain
+unchanged. Correction12 rejects non-integer stored issue aliases before per-PR identity
+isolation. Its final coordinator fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `c8c7e8ef85c7a9c9dd60347c8745d5f003252649b668b6d921c7e7f42a16ec77` |
+| `deploy/cloud_coordinator.py` | `cc8c9f20cfd14f58848fc78b6f9e55640cf30177a8fecf7bbc394523d949b6fd` |
 
 | Historical candidate | SHA-256 |
 | --- | --- |
+| Correction11 historical pin | `c8c7e8ef85c7a9c9dd60347c8745d5f003252649b668b6d921c7e7f42a16ec77` |
 | Correction8 historical pin | `198cea06e3cd03046751167fe167438a4880cf7a052e2455480a4f4de736775e` |
 | Correction7 historical pin | `8235a894bdb48663ddd673e4c78dca75cd09fd8ee94f7f74b3dd45c0e4b1903e` |
 

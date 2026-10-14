@@ -33,6 +33,7 @@ def setup(tmp_path, *, repair=True):
 
 
 @pytest.mark.parametrize(("field", "kind", "value"), [
+    pytest.param("issue", "float", 16.0, id="float-stored-issue"),
     pytest.param("pull_id", "missing", None, id="missing-pull-id"),
     pytest.param("pull_id", "null", None, id="null-pull-id"),
     pytest.param("pull_id", "bool", True, id="bool-pull-id"),
@@ -64,7 +65,9 @@ def test_opt_in_identity_isolation_rejects_malformed_stored_identity(
         coordinator._snapshot_pull(16, stored, BASE)
 
     with pytest.raises(CoordinatorError, match="identity|missing"):
-        coordinator.run(apply=True)
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(
+            apply=True,
+        )
 
 
 @pytest.mark.parametrize("state", ["failed", "timed_out", "cancelled"])
