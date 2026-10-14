@@ -1720,6 +1720,8 @@ def _owner_abandonment_successor_candidate_matches(record, action):
         and expected_binding is not None
         and action.get("key") != record["action_key"]
         and action.get("task_id") != record["task_id"]
+        and type(action.get("issue")) is int
+        and action["issue"] > 0
         and action.get("issue") == record["issue"]
         and action.get("kind") == "fix"
         and action.get("task_type") in {
@@ -7126,7 +7128,9 @@ class Coordinator:
             reconciled[candidate["task_id"]] = candidate
         for candidate in reconciled.values():
             if (not isinstance(candidate, dict)
-                    or candidate.get("issue") != record["issue"]
+                    or type(candidate.get("issue")) is not int
+                    or candidate["issue"] <= 0
+                    or candidate["issue"] != record["issue"]
                     or candidate.get("kind") != "fix"
                     or candidate.get("task_type") not in (
                         None, "source", "review-followup", "neutral",

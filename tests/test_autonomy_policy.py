@@ -211,7 +211,11 @@ _PR105_OWNER_ABANDONMENT_FIXTURE = {
     'deploy/task_receipts.py': '1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231',
 }
 
-_PR109_SUPERVISED_CORRECTION_FIXTURE = {
+_PR109_SUPERVISED_CORRECTION14_FIXTURE = {
+    'deploy/cloud_coordinator.py': 'f624f325af72bf481c201d4d1ffe76a50f8752206bcf8811b013b32674a8b0cf',
+}
+
+_PR109_SUPERVISED_CORRECTION13_HISTORICAL_FIXTURE = {
     'deploy/cloud_coordinator.py': '3e129cc0a17c90f876dd3a4c2b4923669988ff03b67b35e4d9be1b1c78d0d9fd',
 }
 
@@ -296,7 +300,7 @@ def _source_files():
             | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
             | _ISSUE106_REVIEW_SUMMARY_FIXTURE
             | _PR105_OWNER_ABANDONMENT_FIXTURE
-            | _PR109_SUPERVISED_CORRECTION_FIXTURE)
+            | _PR109_SUPERVISED_CORRECTION14_FIXTURE)
 
 
 def _source_ci():
@@ -683,7 +687,7 @@ def test_current_pr109_candidate_table_matches_source_bytes():
     root = Path(__file__).resolve().parents[1]
     docs = (root / 'docs/autonomy-policy.md').read_text()
     section = docs.split(
-        '### PR #109 supervised correction13 current candidate', 1,
+        '### PR #109 supervised correction14 current candidate', 1,
     )[1].split('### Retained merged source and deliberate native refreshes', 1)[0]
     rows = [
         line for line in section.splitlines()
@@ -692,6 +696,10 @@ def test_current_pr109_candidate_table_matches_source_bytes():
 
     actual = hashlib.sha256((root / 'deploy/cloud_coordinator.py').read_bytes()).hexdigest()
     assert rows == [f'| `deploy/cloud_coordinator.py` | `{actual}` |']
+    assert (
+        f'| Correction13 historical pin | '
+        f'`{_PR109_SUPERVISED_CORRECTION13_HISTORICAL_FIXTURE["deploy/cloud_coordinator.py"]}` |'
+    ) in section
     assert (
         f'| Correction12 historical pin | '
         f'`{_PR109_SUPERVISED_CORRECTION12_HISTORICAL_FIXTURE["deploy/cloud_coordinator.py"]}` |'
@@ -744,7 +752,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         if path in {'deploy/cloud_coordinator.py', 'deploy/issue_starter.py',
                     'deploy/review_evidence.py'}
     } == {
-        'deploy/cloud_coordinator.py': _PR109_SUPERVISED_CORRECTION_FIXTURE[
+        'deploy/cloud_coordinator.py': _PR109_SUPERVISED_CORRECTION14_FIXTURE[
             'deploy/cloud_coordinator.py'
         ],
         'deploy/issue_starter.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
@@ -784,7 +792,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
             | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
             | _ISSUE106_REVIEW_SUMMARY_FIXTURE
             | _PR105_OWNER_ABANDONMENT_FIXTURE
-            | _PR109_SUPERVISED_CORRECTION_FIXTURE
+            | _PR109_SUPERVISED_CORRECTION14_FIXTURE
         ).items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
     }
@@ -830,14 +838,14 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
           | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
           | _ISSUE106_REVIEW_SUMMARY_FIXTURE
           | _PR105_OWNER_ABANDONMENT_FIXTURE
-          | _PR109_SUPERVISED_CORRECTION_FIXTURE)
+          | _PR109_SUPERVISED_CORRECTION14_FIXTURE)
     for path, digest in (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
                          | _ISSUE92_COPILOT_REVIEW_FIXTURE
                          | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
                          | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
                          | _ISSUE106_REVIEW_SUMMARY_FIXTURE
                          | _PR105_OWNER_ABANDONMENT_FIXTURE
-                         | _PR109_SUPERVISED_CORRECTION_FIXTURE).items():
+                         | _PR109_SUPERVISED_CORRECTION14_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
@@ -894,7 +902,7 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
     | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
     | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
     | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
-    | _PR105_OWNER_ABANDONMENT_FIXTURE | _PR109_SUPERVISED_CORRECTION_FIXTURE,
+    | _PR105_OWNER_ABANDONMENT_FIXTURE | _PR109_SUPERVISED_CORRECTION14_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
 def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
@@ -918,7 +926,7 @@ def test_issue83_initial_review_pin_matches_actual_candidate_bytes(path, pins):
     SOURCE_FINGERPRINTS, _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
     | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
     | _ISSUE106_REVIEW_SUMMARY_FIXTURE | _PR105_OWNER_ABANDONMENT_FIXTURE
-    | _PR109_SUPERVISED_CORRECTION_FIXTURE,
+    | _PR109_SUPERVISED_CORRECTION14_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE))
 def test_issue87_bounded_repair_pin_matches_actual_candidate_bytes(path, pins):

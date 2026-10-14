@@ -774,6 +774,9 @@ Missing, mismatched, or duplicate root claims block the affected enrollment. The
 record's issue, command-comment and actor IDs, and the root action's issue, owner,
 repository and pull IDs must be exact positive integers; the enrolled repository ID
 is validated the same way at pull snapshot admission.
+Each individual successor proof's issue must also be an exact positive integer
+before identity comparison; matching duplicates and receipt bindings do not replace
+this per-proof validation.
 The immutable abandonment command is revalidated for both current and pre-upgrade
 receipt proofs at every applicable successor and final write fence; a current
 `head_ref` never replaces that check.

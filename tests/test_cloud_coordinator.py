@@ -4245,6 +4245,129 @@ def test_owner_abandonment_apply_rejects_lone_float_binding_after_compaction(
     assert api.task_posts == task_posts
 
 
+@pytest.mark.parametrize("proof_form", ["proof-only", "live-only", "duplicate"])
+@pytest.mark.parametrize("edge", ["root", "intermediate"])
+@pytest.mark.parametrize(
+    "issue_value",
+    [
+        pytest.param(16, id="integer"),
+        pytest.param(16.0, id="float"),
+        pytest.param(True, id="bool"),
+        pytest.param("16", id="string"),
+        pytest.param("missing", id="missing"),
+    ],
+)
+def test_owner_abandonment_apply_requires_exact_retained_proof_issue(
+        tmp_path, monkeypatch, proof_form, edge, issue_value):
+    (
+        api, store, abandoned, reservation, recovery, neutral, source,
+        _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path, bare=True)
+    api.review_state = "APPROVED"
+    api.review_sha = source_head
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    StateStore(store.path).retire(
+        16, source_head, current_main_sha=FINAL_RESULT_HEAD,
+    )
+    restarted = StateStore(store.path)
+    assert restarted.action(neutral["key"]) is None
+    assert restarted.action(source["key"]) is None
+    api.review_state = api.review_sha = None
+
+    proof_task_id = neutral["task_id"] if edge == "root" else source["task_id"]
+    candidate_proof = {}
+
+    def configure_candidate(state):
+        proofs = state["enrollments"]["16"]["receipt_proofs"]
+        proof = next(item for item in proofs if item.get("task_id") == proof_task_id)
+        action = deepcopy(proof)
+        if issue_value == "missing":
+            proof.pop("issue", None)
+            action.pop("issue", None)
+        else:
+            proof["issue"] = issue_value
+            action["issue"] = issue_value
+        receipt_number = proof.get("issue")
+        receipt_body = proof["receipt_body"].replace(
+            "\npr=16\n", f"\npr={receipt_number}\n",
+        )
+        proof["receipt_body"] = action["receipt_body"] = receipt_body
+        candidate_proof["proof"] = deepcopy(proof)
+        receipt_comment = next(
+            comment for comment in api.comments
+            if comment.get("id") == proof["receipt_comment_id"]
+        )
+        receipt_comment["body"] = receipt_body
+        assert cloud_coordinator._valid_receipt_proof(proof, api.comments)
+        if proof_form == "live-only":
+            state["enrollments"]["16"]["receipt_proofs"] = [
+                item for item in proofs if item.get("task_id") != proof_task_id
+            ]
+            state["actions"][action["key"]] = action
+        elif proof_form == "duplicate":
+            state["actions"][action["key"]] = action
+
+    restarted._mutate(configure_candidate)
+    before = restarted.snapshot()
+    writes = deepcopy(api.writes)
+    task_posts = api.task_posts
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert result["head"] == source_head
+    if proof_form != "live-only":
+        with monkeypatch.context() as patch_pull_identity:
+            patch_pull_identity.setattr(
+                cloud_coordinator, "_pull_identity",
+                lambda _pull, _binding: True,
+            )
+            assert Coordinator(
+                api, StateStore(store.path), clock=lambda: 1790856660,
+            )._owner_abandonment_successor_proven(
+                {"pull": api.pull, "comments": api.comments}, recovery,
+            ) is (type(issue_value) is int)
+    if edge == "root":
+        assert cloud_coordinator._owner_abandonment_successor_candidate_matches(
+            recovery, candidate_proof["proof"],
+        ) is (type(issue_value) is int)
+    if type(issue_value) is int and proof_form != "live-only":
+        reviewer_writes = [
+            write for write in api.writes
+            if write[0].endswith("/requested_reviewers")
+        ]
+        assert len(reviewer_writes) == 1
+        assert reviewer_writes[0][1]["reviewers"] == [
+            "copilot-pull-request-reviewer[bot]",
+        ]
+    else:
+        assert api.writes == writes
+        assert api.task_posts == task_posts
+    after = StateStore(store.path).snapshot()
+    assert after["actions"][abandoned["key"]] == reservation
+    assert after["enrollments"]["16"]["owner_abandonments"] == [recovery]
+    assert after["enrollments"]["16"]["attempts"] == before["enrollments"]["16"][
+        "attempts"
+    ]
+    assert after["enrollments"]["16"]["neutral_attempts"] == before[
+        "enrollments"
+    ]["16"]["neutral_attempts"]
+    assert after["enrollments"]["16"]["receipt_proofs"] == before[
+        "enrollments"
+    ]["16"]["receipt_proofs"]
+
+    writes_after = deepcopy(api.writes)
+    task_posts_after = api.task_posts
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert api.writes == writes_after
+    assert api.task_posts == task_posts_after
+
+
 @pytest.mark.parametrize("field", ["owner_id", "repository_id"])
 def test_owner_abandonment_rejects_numeric_identity_alias_in_retained_proof(
         tmp_path, field):
