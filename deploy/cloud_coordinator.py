@@ -4403,7 +4403,8 @@ class Coordinator:
             route += "&" + urlencode({"since": since.isoformat().replace("+00:00", "Z")})
         return _rest_list(self.api, route)
 
-    def _scan_enrollments(self, state, *, admission_checks=None):
+    def _scan_enrollments(self, state, *, admission_checks=None,
+                          blocked_continuations=()):
         commands, processed = [], []
         cursor = state.get("cursor")
         issues = self._issues(cursor)
@@ -4413,6 +4414,8 @@ class Coordinator:
             if (not isinstance(issue, dict) or type(issue.get("number")) is not int
                     or not 1 <= issue["number"] <= 2**31 - 1):
                 raise CoordinatorError("GitHub issue row identity was malformed")
+            if issue["number"] in blocked_continuations:
+                continue
             comments = _all_review_comments(self.api, issue["number"], cursor)
             if not isinstance(comments, list):
                 raise CoordinatorError("GitHub issue comment inventory was malformed")
@@ -7263,26 +7266,13 @@ class Coordinator:
         if not _is_sha(main_sha):
             raise CoordinatorError("Current main commit was unavailable")
         admission_checks = []
-        issues, commands, processed, enrollments = self._scan_enrollments(
-            state, admission_checks=admission_checks,
+        scan_options = (
+            {"blocked_continuations": blocked_continuations}
+            if blocked_continuations else {}
         )
-        blocked_commands = [
-            item for _, item in commands
-            if item.get("issue") in blocked_continuations
-        ]
-        blocked_ids = {
-            str(item.get("command_comment_id", item.get("comment")))
-            for item in blocked_commands
-        }
-        commands = [
-            (command, item) for command, item in commands
-            if item.get("issue") not in blocked_continuations
-        ]
-        processed = [item for item in processed if str(item) not in blocked_ids]
-        admission_checks = [
-            item for item in admission_checks
-            if item.get("issue") not in blocked_continuations
-        ]
+        issues, commands, processed, enrollments = self._scan_enrollments(
+            state, admission_checks=admission_checks, **scan_options,
+        )
         scans, sensitive_revocations, starter_sources = [], [], []
         for key, enrollment in enrollments.items():
             if int(key) in blocked_continuations:
