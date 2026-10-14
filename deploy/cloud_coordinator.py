@@ -7575,25 +7575,42 @@ class Coordinator:
                         command == "continue-unverified" and item["issue"] == issue
                         for command, item in commands)):
                 continue
-            receipt_enrollment = dict(enrollment)
-            receipt_enrollment.pop("owner_authorized_head", None)
-            _, receipt_heads, _ = _authorized_result_heads(
-                issue, receipt_enrollment, state["actions"], snapshot["comments"], None,
-            )
             records = [
                 record for _, record in _valid_owner_continuation_claims(
                     enrollment, state["actions"],
                 )
             ]
+            active_records = [
+                record for record in records
+                if (type(record["enrollment_comment_id"])
+                        is type(enrollment.get("comment"))
+                    and record["enrollment_comment_id"] == enrollment.get("comment"))
+            ]
             incomplete = any(
                 not _owner_abandonment_record_valid(root)
+                or any(
+                    record["historical_action_key"] == root["action_key"]
+                    and record not in active_records
+                    and not _owner_continuation_successor_proven(
+                        record, enrollment, state["actions"], snapshot["comments"],
+                        snapshot["head"],
+                    )
+                    for record in records
+                )
                 or (root["head_sha"] != snapshot["head"]
-                    and snapshot["head"] not in receipt_heads
+                    and not any(
+                        record["historical_action_key"] == root["action_key"]
+                        and _owner_continuation_successor_proven(
+                            record, enrollment, state["actions"], snapshot["comments"],
+                            snapshot["head"],
+                        )
+                        for record in records
+                    )
                     and not any(
                         record["historical_action_key"] == root["action_key"]
                         and record["current_head_sha"] == snapshot["head"]
                         and record["current_main_sha"] == snapshot["main_sha"]
-                        for record in records))
+                        for record in active_records))
                 for root in roots
             )
             if not incomplete:

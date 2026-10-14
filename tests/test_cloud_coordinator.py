@@ -4262,6 +4262,10 @@ def test_owner_continuation_live_receipt_requires_anchor_fields(
     assert api.task_posts == posts
     assert api.requested_reviewers == []
     assert state["actions"][abandonment["action_key"]] == historical
+    _, authorized, _ = _authorized_result_heads(
+        16, state["enrollments"]["16"], state["actions"], api.comments, main,
+    )
+    assert result_head not in authorized
 
 
 @pytest.mark.parametrize("retained", [False, True])
@@ -5456,6 +5460,120 @@ def test_owner_continuation_incomplete_cohort_does_not_consume_dispositions(
     assert api.task_posts == posts
     assert not any(route.endswith(("/tasks", "/requested_reviewers", "/merge"))
                    for route, _ in api.writes[writes:])
+
+
+@pytest.mark.parametrize("reverse_roots", [False, True])
+def test_owner_continuation_admission_defers_cross_enrollment_cohort(
+        tmp_path, reverse_roots):
+    api, store, first_root, head, main = _owner_continuation_advanced_case(
+        tmp_path, disposition=False,
+    )
+    api.comments.append({
+        "id": 7781, "user": {"id": OWNER},
+        "body": (
+            f"/hermes continue-unverified {first_root['command_comment_id']} "
+            f"{first_root['task_id']} {first_root['reservation_sha256']} {head} {main}"
+        ),
+        "created_at": "2026-10-01T12:12:00Z",
+        "updated_at": "2026-10-01T12:12:00Z",
+    })
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    first_state = StateStore(store.path).snapshot()
+    first_continuation = first_state["enrollments"]["16"]["owner_continuations"][0]
+    successor = next(
+        action for action in first_state["actions"].values()
+        if action.get("owner_continuation_binding")
+    )
+    assert first_continuation["enrollment_comment_id"] == 7772
+
+    api.complete_task(successor["task_id"], successor, head_sha=head, base_sha=main)
+    receipt = next(
+        comment for comment in api.comments
+        if comment["user"]["id"] == COPILOT_AGENT
+        and successor["dispatch_nonce"] in comment["body"]
+    )
+    receipt["body"] += "\nedited"
+    receipt["updated_at"] = "2026-10-01T12:13:00Z"
+    coordinator = Coordinator(api, StateStore(store.path), clock=lambda: 1790856900)
+    coordinator.store.update_action_with_lifecycle(
+        successor["key"], "uncertain", coordinator._record_uncertain_task(successor),
+        now=1790856900, blocker="execution_uncertain",
+        receipt_waits=MAX_RECEIPT_POLLS, receipt_recovery_attempted=True,
+        receipt_recovery_revision=(
+            cloud_coordinator.LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION
+        ),
+    )
+    api.comments.append({
+        "id": 7782, "user": {"id": OWNER},
+        "body": f"/hermes abandon-unverified {successor['task_id']} {head}",
+        "created_at": "2026-10-01T12:14:00Z",
+        "updated_at": "2026-10-01T12:14:00Z",
+    })
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856960).run(apply=True)
+    roots = StateStore(store.path).snapshot()["enrollments"]["16"]["owner_abandonments"]
+    second_root = next(root for root in roots if root["task_id"] == successor["task_id"])
+    if reverse_roots:
+        store._mutate(
+            lambda state: state["enrollments"]["16"]["owner_abandonments"].reverse(),
+        )
+
+    api.pull.update(state="closed", merged=False, closed_at="2026-10-01T12:15:00Z")
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856960).run(apply=True)
+    StateStore(store.path).retire(16, head, main)
+    api.pull.update(state="open", closed_at=None)
+    api.comments.append({
+        "id": 7783, "user": {"id": OWNER},
+        "body": f"/hermes enroll {head}",
+        "created_at": "2026-10-01T12:16:00Z",
+        "updated_at": "2026-10-01T12:16:00Z",
+    })
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790857200).run(apply=True)
+    api.comments.append({
+        "id": 7784, "user": {"id": OWNER},
+        "body": (
+            f"/hermes continue-unverified {second_root['command_comment_id']} "
+            f"{second_root['task_id']} {second_root['reservation_sha256']} {head} {main}"
+        ),
+        "created_at": "2026-10-01T12:17:00Z",
+        "updated_at": "2026-10-01T12:17:00Z",
+    })
+    before = StateStore(store.path).snapshot()
+    posts = api.task_posts
+    writes = len(api.writes)
+
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790857200).run(apply=True)
+
+    after = StateStore(store.path).snapshot()
+    assert after["enrollments"]["16"]["comment"] == 7783
+    assert after["enrollments"]["16"]["owner_continuations"] == (
+        before["enrollments"]["16"]["owner_continuations"]
+    )
+    assert after["enrollments"]["16"]["attempts"] == (
+        before["enrollments"]["16"]["attempts"]
+    )
+    assert after["enrollments"]["16"]["neutral_attempts"] == (
+        before["enrollments"]["16"]["neutral_attempts"]
+    )
+    assert not cloud_coordinator._event_consumed(after, "7784"), (
+        before["enrollments"]["16"]["owner_continuations"],
+        after["enrollments"]["16"]["owner_continuations"],
+        after["events"],
+    )
+    assert api.task_posts == posts
+    assert not any(route.endswith(("/tasks", "/requested_reviewers", "/merge"))
+                   for route, _ in api.writes[writes:])
+    assert after["actions"] == before["actions"]
+    assert after["outbox"] == before["outbox"]
+    assert after["enrollments"]["16"]["owner_abandonments"] == (
+        before["enrollments"]["16"]["owner_abandonments"]
+    )
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790857200).run(apply=True)
+    repeated = StateStore(store.path).snapshot()
+    assert repeated["enrollments"]["16"]["owner_continuations"] == (
+        before["enrollments"]["16"]["owner_continuations"]
+    )
+    assert not cloud_coordinator._event_consumed(repeated, "7784")
+    assert api.writes[writes:] == []
 
 
 @pytest.mark.parametrize("disposition_id", [7781, 7782])
