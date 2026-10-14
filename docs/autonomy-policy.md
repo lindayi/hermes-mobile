@@ -192,7 +192,7 @@ before issue-identity filtering. The current source fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `43aab1ab83f081d2518729730f66a5fc19d942e984cca2d57aaaf07331bc365b` |
+| `deploy/cloud_coordinator.py` | `b542074a23e21bb6af4508424fa8914a9407a3ddfdb390e3403e35b119b6b3a3` |
 
 This exact-source pin does not establish review acceptance, merge readiness,
 authorization beyond the standing delegation, or operational activation.

@@ -709,8 +709,8 @@ obtain it only from the original authenticated task session. It requires a fresh
 complete task inventory, positive task and session completion, the same owner,
 creator, repository, pull artifact and branch artifact, and exact task/session
 IDs. The original summary and exact detail must agree, including their complete
-artifact lists; each must contain one valid GitHub pull and branch artifact. The
-original prompt must match
+type-exact artifact lists; each must contain one valid GitHub pull and branch
+artifact. The original prompt must match
 the supported reservation type, exact pull/start head and reservation marker, and
 end with a supported canonical receipt instruction bound to the stored nonce and
 base. If a live action remains, its original prompt must also agree. Anchored

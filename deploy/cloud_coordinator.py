@@ -3168,8 +3168,22 @@ def _legacy_task_artifacts_match(listed, detailed):
     listed_artifacts = listed.get("artifacts")
     detailed_artifacts = detailed.get("artifacts")
     if (not isinstance(listed_artifacts, list)
+            or not isinstance(detailed_artifacts, list)
             or len(listed_artifacts) > 20
-            or listed_artifacts != detailed_artifacts):
+            or len(detailed_artifacts) > 20):
+        return False
+    try:
+        listed_json = json.dumps(
+            listed_artifacts, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        )
+        detailed_json = json.dumps(
+            detailed_artifacts, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return False
+    if listed_json != detailed_json:
         return False
     branches, pulls = [], []
     for artifact in listed_artifacts:

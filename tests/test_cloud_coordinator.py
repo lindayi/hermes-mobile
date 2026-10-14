@@ -4099,7 +4099,10 @@ def test_owner_abandonment_reconciles_live_copy_by_durable_key(
 
 def _mutate_legacy_artifacts(task, hazard):
     artifacts = task.get("artifacts")
-    if hazard.endswith("-branch"):
+    if hazard.endswith("-number-bool"):
+        artifact = next(item for item in artifacts if item.get("type") == "branch")
+        artifact["data"]["metadata"] = True
+    elif hazard.endswith("-branch"):
         artifact = next(item for item in artifacts if item.get("type") == "branch")
         artifact["data"]["head_ref"] = "other-branch"
     elif hazard.endswith("-pull"):
@@ -4126,6 +4129,7 @@ def _mutate_legacy_artifacts(task, hazard):
     "prompt-prefix", "prompt-marker", "prompt-template",
     "summary-artifact-branch", "detail-artifact-branch",
     "summary-artifact-pull", "detail-artifact-pull",
+    "summary-artifact-number-bool",
     "summary-artifact-missing", "detail-artifact-missing",
     "summary-artifact-duplicate", "detail-artifact-duplicate",
     "summary-artifact-malformed", "detail-artifact-malformed",
@@ -4161,6 +4165,12 @@ def test_owner_abandonment_upgrade_fresh_fences(
         if isinstance(hazard, str) and hazard.startswith("detail-artifact-"):
             api.legacy_summary_artifacts = deepcopy(task["artifacts"])
             _mutate_legacy_artifacts(task, hazard.removeprefix("detail-"))
+        elif hazard == "summary-artifact-number-bool":
+            api.legacy_summary_artifacts = deepcopy(task["artifacts"])
+            branch = next(
+                item for item in task["artifacts"] if item.get("type") == "branch"
+            )
+            branch["data"]["metadata"] = 1
         if hazard == "unknown":
             del api.tasks[source["task_id"]]
         elif hazard in {"active-writer", "unrelated-writer"}:
@@ -4290,7 +4300,7 @@ def test_owner_abandonment_upgrade_fresh_fences(
                 )
                 assert duplicate_key != source["key"]
                 duplicate["key"] = duplicate_key
-                if hazard == "alternate-key-missing-issue":
+                if hazard.endswith("missing-issue"):
                     duplicate.pop("issue", None)
                 else:
                     duplicate["issue"] = {
@@ -4323,7 +4333,11 @@ def test_owner_abandonment_upgrade_fresh_fences(
                 for item in inventory:
                     if item.get("id") == source["task_id"]:
                         if hazard.startswith("summary-"):
-                            summary = {"artifacts": deepcopy(item["artifacts"])}
+                            summary = {"artifacts": deepcopy(
+                                api.legacy_summary_artifacts
+                                if hazard == "summary-artifact-number-bool"
+                                else item["artifacts"]
+                            )}
                             _mutate_legacy_artifacts(
                                 summary, hazard.removeprefix("summary-"),
                             )
