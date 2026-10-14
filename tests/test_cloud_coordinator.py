@@ -3649,6 +3649,9 @@ def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_pat
         None, "missing", "disconnected", "wrong-pull", "non-ready", "cycle",
         "missing-branch", "wrong-branch", "live-proof-branch-mismatch",
         "ambiguous-root", "ambiguous-intermediate",
+        "duplicate-status", "duplicate-issue", "duplicate-start",
+        "duplicate-head", "duplicate-nonce", "duplicate-kind",
+        "duplicate-task-type", "unrelated-action",
     ],
 )
 def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
@@ -3854,10 +3857,37 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
                         )
 
             restarted._mutate(bind_alternate_root_identity)
+    elif isinstance(lineage_hazard, str) and lineage_hazard.startswith("duplicate-"):
+        def corrupt_duplicate(state):
+            proof = next(
+                proof for proof in state["enrollments"]["16"]["receipt_proofs"]
+                if proof.get("task_id") == source["task_id"]
+            )
+            field, value = {
+                "duplicate-status": ("status", "sent"),
+                "duplicate-issue": ("issue", 99),
+                "duplicate-start": ("receipt_start_head", "invalid"),
+                "duplicate-head": ("head", "7" * 40),
+                "duplicate-nonce": ("dispatch_nonce", "other-nonce"),
+                "duplicate-kind": ("kind", "review"),
+                "duplicate-task-type": ("task_type", "unsupported"),
+            }[lineage_hazard]
+            proof[field] = value
+
+        restarted._mutate(corrupt_duplicate)
+    elif lineage_hazard == "unrelated-action":
+        def add_unrelated_action(state):
+            state["actions"]["unrelated-action"] = {
+                "issue": 99, "kind": "fix", "task_id": "unrelated-task",
+                "status": "completed", "receipt_start_head": "invalid",
+            }
+
+        restarted._mutate(add_unrelated_action)
 
     attempts_before_review = restarted.snapshot()["enrollments"]["16"]["attempts"]
     neutral_attempts = restarted.snapshot()["enrollments"]["16"]["neutral_attempts"]
-    if lineage_hazard is not None:
+    valid_lineage = lineage_hazard in {None, "unrelated-action"}
+    if not valid_lineage and not lineage_hazard.startswith("duplicate-"):
         assert not Coordinator(
             api, restarted, clock=lambda: 1790856660,
         )._owner_abandonment_successor_proven(
@@ -3876,7 +3906,7 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
     ).run(apply=True)["pull_requests"][0]
 
     assert result["head"] == source_head
-    if lineage_hazard is None:
+    if valid_lineage:
         assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
     else:
         assert api.task_posts == task_posts_before_reconcile
@@ -3886,6 +3916,13 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
         ] == reviewer_writes_at_restart
         if lineage_hazard in {"ambiguous-root", "ambiguous-intermediate"}:
             assert "agent" in result["reasons"]
+        if lineage_hazard.startswith("duplicate-"):
+            assert "agent" in result["reasons"]
+            assert not Coordinator(
+                api, StateStore(store.path), clock=lambda: 1790856660,
+            )._owner_abandonment_successor_proven(
+                {"pull": api.pull, "comments": api.comments}, recovery,
+            )
     state = StateStore(store.path).snapshot()
     assert state["actions"][abandoned["key"]] == abandoned_reservation
     assert state["enrollments"]["16"]["attempts"] == attempts_before_review
@@ -3895,7 +3932,7 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
         write for write in api.writes
         if write[0].endswith("/requested_reviewers")
     ]
-    if lineage_hazard is None:
+    if valid_lineage:
         assert len(reviewer_writes_after) == len(reviewer_writes_before) + 1
         assert reviewer_writes_after[:-1] == reviewer_writes_before
     else:

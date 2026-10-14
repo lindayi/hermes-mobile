@@ -6629,7 +6629,8 @@ class Coordinator:
             return False
         candidates = []
         proof_fields = (
-            "task_id", "issue", "kind", "task_type", "status",
+            "task_id", "issue", "kind", "task_type", "status", "head",
+            "dispatch_nonce",
             "receipt_result", "receipt_comment_id", "receipt_created_at",
             "receipt_body", "receipt_task_id", "receipt_session_id",
             "receipt_completed_at", "receipt_session_completed_at",
@@ -6640,7 +6641,26 @@ class Coordinator:
             "repository_id", "pull_id", "pull_node_id",
             "owner_abandonment_binding", "owner_abandonment_attestation",
         )
-        for candidate in [*actions.values(), *proofs]:
+        representations = [*actions.values(), *proofs]
+        relevant_task_ids = {
+            candidate.get("task_id") for candidate in representations
+            if isinstance(candidate, dict)
+            and candidate.get("issue") == record["issue"]
+            and isinstance(candidate.get("task_id"), str)
+        }
+        reconciled = {}
+        for candidate in representations:
+            if (not isinstance(candidate, dict)
+                    or not isinstance(candidate.get("task_id"), str)
+                    or candidate["task_id"] not in relevant_task_ids):
+                continue
+            duplicate = reconciled.get(candidate["task_id"])
+            if duplicate is not None and any(
+                    duplicate.get(field) != candidate.get(field)
+                    for field in proof_fields):
+                return False
+            reconciled[candidate["task_id"]] = candidate
+        for candidate in reconciled.values():
             if (not isinstance(candidate, dict)
                     or candidate.get("issue") != record["issue"]
                     or candidate.get("kind") != "fix"
@@ -6649,17 +6669,6 @@ class Coordinator:
                     }
                     or candidate.get("status") != "completed"
                     or not _is_sha(candidate.get("receipt_start_head"))):
-                continue
-            duplicate = next((
-                existing for existing in candidates
-                if existing.get("task_id") == candidate.get("task_id")
-            ), None)
-            if duplicate is not None:
-                if any(
-                    duplicate.get(field) != candidate.get(field)
-                    for field in proof_fields
-                ):
-                    return False
                 continue
             candidates.append(candidate)
         if len(candidates) > REPAIR_LIMIT + NEUTRAL_LIMIT:

@@ -709,7 +709,13 @@ exact `receipt_start_head` to the preceding `receipt_head`. The chain is bounded
 the source and neutral lifetime ceilings combined. Every edge must pass immutable
 receipt validation and match the current repository, pull request and branch; the
 current base must match the accepted receipts. Missing, ambiguous, disconnected,
-malformed, non-ready, wrong-identity or cyclic history fails closed. A same-head
+malformed, non-ready, wrong-identity or cyclic history fails closed.
+Before eligibility filtering, reconcile every live and retained representation of
+each task relevant to this pull. All receipt, reservation, identity, starting
+`head` and `dispatch_nonce` fields must agree. An ineligible malformed duplicate
+cannot disappear from this check. Identical copies count once; distinct tasks on
+unrelated pulls do not block this lineage.
+A same-head
 ready receipt is still a valid direct continuation, but it cannot hide a cycle in a
 later edge. This only proves terminal occupancy; ordinary source authorization,
 fresh review/check, current-main and sensitive-head fences remain separate. The
