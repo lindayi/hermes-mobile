@@ -189,8 +189,8 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    # PR #105 abandonment, bounded anchors, and authenticated review-actor candidate.
-    'deploy/cloud_coordinator.py': '97bdfddcb2453fc95ee5ec7e09a746ee79566f8cff72d6416a494b163365392f',
+    # Issue #106 evaluation and PR #105 abandonment/anchor/review-actor candidate.
+    'deploy/cloud_coordinator.py': '165260a6ed9abe83edfdac21c58f2478e09288727ec2221247ebc427524fac22',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
@@ -256,6 +256,11 @@ SOURCE_FINGERPRINTS = {
     # Issue #96 bounded rollback observation; historical PR25 pins remain retained.
     'deploy/native_notification_release.py': '165622c962554f19263567e7c1bd60ee17cf8e73a9967cc39be995c3d8071ff1',
 }
+# Issue #106 verification-status parser overlay; preserve the earlier review pin above.
+ISSUE106_REVIEW_EVIDENCE_OVERLAY = {
+    'deploy/review_evidence.py': '7a30ae1ea17916f415aee7d4967aec5995df783bca3d36c2c2f8d958a53d7a69',
+}
+SOURCE_FINGERPRINTS.update(ISSUE106_REVIEW_EVIDENCE_OVERLAY)
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',
     '.github/workflows/issue-link.yml': 'hosted-workflow-contract',

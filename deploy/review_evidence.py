@@ -13,6 +13,12 @@ import json
 import re
 
 OVERVIEW_MARKER = "<!-- ccr-overview-v2 -->"
+_COMMENTED_GATE_STATUS_SUMMARIES = frozenset({
+    "The operationally sensitive coordinator gate lacks verified latest-head CI "
+    "and required review evidence.",
+    "The coordinator’s authorization and progress seam is security-sensitive, "
+    "and exact-head owner authorization remains absent.",
+})
 MAX_BODY_CHARS = 64 * 1024
 MAX_INDEPENDENT_REVIEW_CHARS = 4096
 MAX_BODY_FINDINGS = 8
@@ -446,7 +452,7 @@ _DISCUSSION_HREF_RE = re.compile(
 )
 
 
-def _discussion_targets(node):
+def _discussion_targets(node, *, links=None):
     targets = set()
     pending = list(reversed(node.children))
     while pending:
@@ -465,7 +471,10 @@ def _discussion_targets(node):
                 ):
                     return set()
                 # Fragment and absolute links identify the same review comment.
-                targets.add(child.href.rsplit("#", 1)[1].lower())
+                target = child.href.rsplit("#", 1)[1].lower()
+                targets.add(target)
+                if links is not None:
+                    links[target] = child.href
             pending.extend(reversed(child.children))
     return targets
 
@@ -483,7 +492,7 @@ def _has_inert_disclosure(root):
     return False
 
 
-def _counted_section_targets(node, expected):
+def _counted_section_targets(node, expected, *, links=None):
     """Return validated normalized targets, or None for an incomplete section."""
     # Counted links cannot stand in for nested, unclassified live findings.
     if next(_disclosures(node), None) is not None:
@@ -503,7 +512,7 @@ def _counted_section_targets(node, expected):
         if not isinstance(child, _Element) or child.tag != "li":
             return None
         items.append(child)
-    targets = [_discussion_targets(item) for item in items]
+    targets = [_discussion_targets(item, links=links) for item in items]
     unique_targets = set().union(*targets)
     if (len(items) != expected
             or any(len(item_targets) != 1 for item_targets in targets)
@@ -644,16 +653,53 @@ def _zero_open_metadata(node):
     return " ".join(_text(children[0]).split()) == "0 open findings"
 
 
+def _provider_footer(node):
+    if not isinstance(node, _Element) or node.tag != "p":
+        return False
+    children = [child for child in node.children if not isinstance(child, str) or child.strip()]
+    if (len(children) != 2 or children[0] != "💡 "
+            or not isinstance(children[1], _Element) or children[1].tag != "a"
+            or children[1].href != (
+                "/lindayi/hermes-mobile/new/main?filename=.github/skills/code-review/SKILL.md"
+            )):
+        return False
+    link_children = [
+        child for child in children[1].children
+        if not isinstance(child, str) or child.strip()
+    ]
+    return (
+        len(link_children) == 3
+        and link_children[0] == "Add a "
+        and isinstance(link_children[1], _Element)
+        and link_children[1].tag == "code"
+        and link_children[1].children == ["code-review"]
+        and link_children[2] == " agent skill"
+    )
+
+
 def _summary_content(root, overview, *, exclude=None, exclude_zero_open=False):
     children = []
+    after_separator = footer_seen = tail_ambiguous = False
     for child in root.children:
+        if overview and isinstance(child, _Element) and child.tag == "hr":
+            if after_separator:
+                tail_ambiguous = True
+            else:
+                after_separator = True
+            continue
+        if overview and after_separator:
+            if isinstance(child, str) and not child.strip():
+                continue
+            if not footer_seen and _provider_footer(child):
+                footer_seen = True
+                continue
+            tail_ambiguous = True
+            continue
         if child is exclude:
             continue
         if exclude_zero_open and _zero_open_metadata(child):
             continue
         if overview and isinstance(child, _Element):
-            if child.tag == "hr":
-                break
             if child.tag == "p":
                 child = _without_metadata(child)
             label = " ".join(_text(child, quoted=False).split())
@@ -663,7 +709,7 @@ def _summary_content(root, overview, *, exclude=None, exclude_zero_open=False):
                     ):
                 continue
         children.append(child)
-    return _Element("root", children)
+    return _Element("root", children), tail_ambiguous
 
 
 def _summary_disposition(summary, *, overview, state, context=None):
@@ -671,12 +717,18 @@ def _summary_disposition(summary, *, overview, state, context=None):
     # and can be forwarded only after live prose independently proves a finding.
     prose = summary.strip()
     context = (context if context is not None else summary).strip()
+    if (overview and state == "COMMENTED" and prose in _COMMENTED_GATE_STATUS_SUMMARIES
+            and context == prose):
+        return "validation-only", prose
     if not prose:
-        return "no-findings", ""
+        return ("ambiguous", context) if context else ("no-findings", "")
     sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", prose) if part.strip()]
     validation = re.compile(
         r"(?:the )?(?:exact-head )?(?:verification|validation) "
         r"(?:remains|is)(?: still)? pending[.!]?", re.IGNORECASE)
+    neutral_prefix = re.compile(
+        r"^It changes [^.!?]+, while\s+",
+        re.IGNORECASE)
     # Recognize whole negative verdicts, never arbitrary prose containing 'no'.
     # Scope suffixes are deliberately finite: an unrestricted 'in ...' would
     # swallow a same-sentence defect/correction after an otherwise neutral prefix.
@@ -686,11 +738,12 @@ def _summary_disposition(summary, *, overview, state, context=None):
         r"(?: in (?:(?:the|this|these) )?(?:(?:reviewed|synthetic|current|proposed|latest) )?"
         r"(?:code|changes?|diff|patch|implementation))?[.!]?", re.IGNORECASE)
     negatives = [bool(no_findings.fullmatch(sentence)) for sentence in sentences]
-    waits = []
-    for sentence in sentences:
+    def is_validation_status(sentence):
         # A neutral template clause is status, not a general 'pending' keyword.
-        clause = re.sub(r"^It changes [^.!?]+, while\s+", "", sentence, flags=re.IGNORECASE)
-        waits.append(bool(validation.fullmatch(clause)))
+        clause = neutral_prefix.sub("", sentence)
+        return bool(validation.fullmatch(clause))
+
+    waits = [is_validation_status(sentence) for sentence in sentences]
     if any(waits) and all(wait or negative for wait, negative in zip(waits, negatives)):
         return "validation-only", prose
     if all(negatives):
@@ -699,10 +752,10 @@ def _summary_disposition(summary, *, overview, state, context=None):
         # Remove only whole validation sentences; retain every other sentence,
         # including domain findings and uncertain prose, for disposition below.
         prose = "\n".join(sentence for wait, sentence in zip(waits, sentences) if not wait)
-        context = "\n".join(sentence for sentence in re.split(r"(?<=[.!?])\s+|\n+", context)
-                            if sentence.strip() and not validation.fullmatch(re.sub(
-                                r"^It changes [^.!?]+, while\s+", "", sentence.strip(),
-                                flags=re.IGNORECASE)))
+        context = "\n".join(
+            sentence for sentence in re.split(r"(?<=[.!?])\s+|\n+", context)
+            if sentence.strip() and not is_validation_status(sentence.strip())
+        )
     # Summary prose needs an explicit correction clause, not a modal/bug keyword.
     affirmative = "\n".join(sentence for sentence, wait, negative in zip(sentences, waits, negatives)
                             if not wait and not negative)
@@ -721,7 +774,8 @@ def parse_body(body, state, *, body_html=None):
     dispositions, including non-actionable sections, for callers/diagnostics.
     """
     result = {"classifications": [], "findings": [], "ambiguous": False, "reason": None,
-              "findings_total": 0, "truncated": False, "inventory_complete": True}
+              "findings_total": 0, "truncated": False, "inventory_complete": True,
+              "inline_targets": [], "inline_count": 0}
     parser = _DisclosureParser()
     try:
         if not isinstance(body, str) or len(body) > MAX_BODY_CHARS:
@@ -785,7 +839,8 @@ def parse_body(body, state, *, body_html=None):
             duplicate = category in counted_sections or (
                 open_section_count > 0 if category == "open" else resolved_section_seen
             )
-            targets = _counted_section_targets(node, count)
+            links = {}
+            targets = _counted_section_targets(node, count, links=links)
             if duplicate or targets is None or counted_targets.intersection(targets):
                 result["classifications"][-1] = "ambiguous"
                 result["ambiguous"] = True
@@ -798,6 +853,8 @@ def parse_body(body, state, *, body_html=None):
                 )
                 if category == "open":
                     open_section_count += 1
+                    result["inline_count"] = count
+                    result["inline_targets"] = [links[target] for target in sorted(targets)]
                     if count:
                         positive_open = True
                 else:
@@ -809,6 +866,7 @@ def parse_body(body, state, *, body_html=None):
                 result["inventory_complete"] = False
             open_section_count += 1
             count = int(re.search(r"\((\d+)\)$", label)[1])
+            result["inline_count"] = count
             if count:
                 positive_open = True
             elif any(_text(child).strip() for child in node.children if child is not _summary(node)):
@@ -874,7 +932,7 @@ def parse_body(body, state, *, body_html=None):
         and len(result["findings"]) == 1
         and result["findings"][0][0] == "previously-missed"
     )
-    summary_root = _summary_content(
+    summary_root, summary_tail_ambiguous = _summary_content(
         parser.root, overview, exclude=provider_summary if attach_provider_summary else None,
         exclude_zero_open=zero_open_count == 1 and not result["ambiguous"],
     )
@@ -907,6 +965,8 @@ def parse_body(body, state, *, body_html=None):
         result["findings"].append(("changes-requested", prose))
     elif kind == "ambiguous":
         result["ambiguous"] = True
+    if summary_tail_ambiguous:
+        result["ambiguous"] = True
     # Ambiguity is local: never quote the unknown section, but never erase
     # independently bounded active sections because an unrelated footer changed.
     if result["ambiguous"]:
@@ -923,7 +983,8 @@ def parse_body(body, state, *, body_html=None):
 def review_body_disposition(reviews, head_sha, *, reviewer_id):
     """Select exactly one authenticated current-head review, then classify it."""
     empty = {"classifications": [], "findings": [], "ambiguous": False, "reason": None,
-             "findings_total": 0, "truncated": False, "inventory_complete": True}
+             "findings_total": 0, "truncated": False, "inventory_complete": True,
+             "inline_targets": [], "inline_count": 0}
     latest = latest_reviews(reviews, reviewer_id)
     if latest is None:
         if (not isinstance(reviews, list)
