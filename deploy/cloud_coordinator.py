@@ -6635,6 +6635,7 @@ class Coordinator:
             "receipt_completed_at", "receipt_session_completed_at",
             "receipt_nonce", "receipt_start_head", "receipt_head",
             "receipt_base", "receipt_version", "receipt_legacy_neutral",
+            "head_ref",
             "main_sha", "recorded_base_sha", "owner_id",
             "repository_id", "pull_id", "pull_node_id",
             "owner_abandonment_binding", "owner_abandonment_attestation",
@@ -6668,7 +6669,7 @@ class Coordinator:
             return (
                 candidate.get("owner_id") == OWNER_ID
                 and candidate.get("repository_id") == REPOSITORY_ID
-                and candidate.get("head_ref", head.get("ref")) == head.get("ref")
+                and candidate.get("head_ref") == head.get("ref")
                 and _pull_identity(pull, candidate)
                 and _valid_receipt_proof(candidate, snapshot["comments"])
             )
@@ -9079,7 +9080,7 @@ class StateStore:
                     "receipt_body", "receipt_task_id", "receipt_session_id",
                     "receipt_completed_at", "receipt_session_completed_at",
                     "receipt_nonce", "receipt_start_head", "receipt_head", "receipt_base",
-                    "receipt_legacy_neutral",
+                    "receipt_legacy_neutral", "head_ref",
                     "recorded_base_sha",
                     "owner_abandonment_binding", "owner_abandonment_attestation",
                     "attempt", "owner_id", "repository_id", "pull_id", "pull_node_id",

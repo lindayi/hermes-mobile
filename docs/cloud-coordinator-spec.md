@@ -700,7 +700,9 @@ current `main_sha`. After a valid continuation receipt, bind the recovered task'
 terminal check to that exact receipt lineage even when the PR head has advanced.
 The terminal check uses both live actions and the enrollment's authenticated
 `receipt_proofs`; compaction must retain the neutral continuation's
-`recorded_base_sha` as well as its receipt and owner-abandonment bindings. A
+`recorded_base_sha` and exact `head_ref` as well as its receipt and
+owner-abandonment bindings. Missing or mismatched branch identity is never inferred
+from the current pull. A
 different current head is accepted only through a connected chain that starts with
 one distinct, abandonment-bound ready receipt and follows each later ready receipt's
 exact `receipt_start_head` to the preceding `receipt_head`. The chain is bounded by
