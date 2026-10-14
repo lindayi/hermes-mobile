@@ -151,10 +151,9 @@ Sensitive owner authorization remains a separate gate.
 
 ### PR #105 owner-authorized task-abandonment and anchor-retention candidate
 
-PR #105 adds bounded recovery for owner-authorized abandonment of terminal tasks
-with unverified receipts. The current candidate pins identify the exact proposed
-source bytes; prior issue-specific hashes remain historical. Refreshing these pins
-does not clear the `coordinator-review-contract` blocker, satisfy exact-head review,
+PR #105 added bounded recovery for owner-authorized abandonment of terminal tasks
+with unverified receipts. Its pins below are historical and remain unchanged.
+They do not clear the `coordinator-review-contract` blocker, satisfy exact-head review,
 or authorize operational activation. The coordinator durably reserves and verifies
 one short owner-authored anchor before neutral task dispatch. The prompt binds its
 returned comment ID and exact body. The neutral producer keeps the complete
@@ -183,6 +182,19 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `165260a6ed9abe83edfdac21c58f2478e09288727ec2221247ebc427524fac22` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
+
+### Issue #111 bounded owner continuation disposition candidate
+
+Issue #111 adds a finite owner-bound disposition for one exact historical
+abandonment, followed by one distinct bounded successor. It preserves the old
+abandonment and reservation and requires a fresh current-head enrollment. A
+successful receipt is still required before later source advancement. These
+candidate pins identify the exact proposed source bytes only; they do not establish
+review, merge, operational authorization, or activation.
+
+| Candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `9556165ac4c991ed1205ea980bc24302771420be3721f0751dc79b65fed99afb` |
 
 ### Retained merged source and deliberate native refreshes
 
