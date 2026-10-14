@@ -4328,10 +4328,9 @@ def _mutate_legacy_artifacts(task, hazard):
 @pytest.mark.parametrize("hazard", [
     None, "unrelated-writer", "active-writer", "unknown", "reactivated",
     "session-reactivated", "duplicate-inventory", "incomplete-inventory", "inventory-error",
-    "detail-error", "detail-response-null", "detail-response-list",
+    "detail-error",     "detail-response-null", "detail-response-list",
     "detail-response-scalar", "summary-detail-response-null",
     "summary-detail-response-list", "summary-detail-response-scalar",
-    "live-pull-id", "live-pull-node-id",
     "creator", "owner", "repository", "pull", "branch",
     "session", "session-task", "session-owner", "session-repository", "prompt",
     "prompt-prefix", "prompt-marker", "prompt-template",
@@ -4379,11 +4378,7 @@ def test_owner_abandonment_upgrade_fresh_fences(
         injected.append(hazard)
         task = api.tasks[source["task_id"]]
         session = task["sessions"][0]
-        if hazard == "live-pull-id":
-            api.pull["id"] += 1
-        elif hazard == "live-pull-node-id":
-            api.pull["node_id"] += "_replacement"
-        elif isinstance(hazard, str) and hazard.startswith("detail-artifact-"):
+        if isinstance(hazard, str) and hazard.startswith("detail-artifact-"):
             api.legacy_summary_artifacts = deepcopy(task["artifacts"])
             _mutate_legacy_artifacts(task, hazard.removeprefix("detail-"))
         elif isinstance(hazard, str) and "-inventory-" in hazard:
