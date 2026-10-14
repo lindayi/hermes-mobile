@@ -5530,6 +5530,55 @@ def _add_unrelated_enrolled_pull(api, store):
     return pull
 
 
+def _add_new_starter_admission(api):
+    from test_issue_starter import (
+        FakeApi as StarterApi, enrollment_command, issue_comment, issue_reference,
+        pull_request,
+    )
+
+    body = "Closes #18"
+    pull = pull_request(
+        pull_id=180018, node_id="PR_kwDOStarter18",
+        head_ref="copilot/issue-18", head_sha=HEAD, body=body, draft=False,
+    )
+    pull.update(number=18, user={"id": COPILOT_AGENT})
+    starter_api = StarterApi(pulls=[pull])
+    starter_api.issue_node_id = "I_kwDOIssue18"
+    starter_api.closing_issues = [issue_reference(18)]
+    comment = issue_comment(
+        body=enrollment_command(head=HEAD, body=body, issue_number=18),
+        comment_id=18818,
+    )
+    issue = {"number": 18, "pull_request": {"url": "pull/18"}}
+    original_get = api.get
+    original_get_all = api.get_all
+    original_graphql = api.graphql
+
+    def get(route):
+        if route == "repos/lindayi/hermes-mobile/pulls/18":
+            return pull
+        return original_get(route)
+
+    def get_all(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues?"):
+            return [api.issue, issue]
+        if route.startswith("repos/lindayi/hermes-mobile/issues/18/comments?"):
+            return [comment]
+        return original_get_all(
+            route.replace("/pulls/18/", "/pulls/16/"), collection=collection,
+        )
+
+    def graphql(query, variables):
+        if "closingIssuesReferences" in query:
+            return starter_api.graphql(query, variables)
+        return original_graphql(query, variables)
+
+    api.get = get
+    api.get_all = get_all
+    api.graphql = graphql
+    return pull, starter_api, comment
+
+
 def _synthetic_initial_source(issue=16):
     return {
         "version": 1, "issue_number": issue, "start_comment_id": 101,
@@ -5584,6 +5633,167 @@ def test_starter_source_commit_fence_isolates_identity_mismatch_and_progresses_o
         and "PR #17" in body.get("prompt", "")
         for route, body in api.writes
     )
+
+
+@pytest.mark.parametrize("race_stage", ["after-planning", "admission-fetch"])
+def test_new_starter_identity_race_isolates_only_that_pr_and_rechecks_after_restart(
+        tmp_path, monkeypatch, race_stage):
+    from copy import deepcopy
+
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    pull, _, _ = _add_new_starter_admission(api)
+    before = store.snapshot()
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    original_get = api.get
+    planned = False
+    injected = False
+    admission_fence = False
+
+    def replace_identity():
+        pull["id"] += 1
+        pull["node_id"] += "_replacement"
+
+    def get(route):
+        nonlocal injected
+        if (race_stage == "admission-fetch" and admission_fence and not injected
+                and route == "repos/lindayi/hermes-mobile/pulls/18"):
+            replace_identity()
+            injected = True
+        return deepcopy(original_get(route))
+
+    api.get = get
+    original_build = coordinator._build_plan
+
+    def build_plan(*, apply):
+        nonlocal injected, planned
+        plan = original_build(apply=apply)
+        if apply:
+            planned = True
+            if race_stage == "after-planning":
+                replace_identity()
+                injected = True
+        return plan
+
+    monkeypatch.setattr(coordinator, "_build_plan", build_plan)
+    original_admission_fence = coordinator._fence_starter_admissions
+
+    def fence_admissions(admissions):
+        nonlocal admission_fence
+        admission_fence = True
+        try:
+            return original_admission_fence(admissions)
+        finally:
+            admission_fence = False
+
+    monkeypatch.setattr(coordinator, "_fence_starter_admissions", fence_admissions)
+    result = coordinator.run(apply=True)
+    plans = {item["issue"]: item for item in result["pull_requests"]}
+    state = StateStore(store.path).snapshot()
+
+    assert planned and injected
+    assert plans[18]["reasons"] == ["pull-identity"]
+    assert plans[18]["repair_requested"] is False
+    assert plans[16]["repair_requested"] is True
+    assert state["enrollments"].get("18") is None
+    assert not StateStore(store.path).event_seen(18818)
+    assert StateStore(store.path).event_seen(123)
+    assert state["cursor"] == before["cursor"]
+    assert len([
+        body for route, body in api.writes
+        if route == "agents/repos/lindayi/hermes-mobile/tasks"
+        and "PR #16" in body.get("prompt", "")
+    ]) == 1
+
+    restarted = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+    restarted.run(apply=True)
+    state = StateStore(store.path).snapshot()
+    assert state["enrollments"]["18"]["pull_id"] == pull["id"]
+    assert state["enrollments"]["18"]["pull_node_id"] == pull["node_id"]
+    assert StateStore(store.path).event_seen(18818)
+    assert len([
+        body for route, body in api.writes
+        if route == "agents/repos/lindayi/hermes-mobile/tasks"
+        and "PR #16" in body.get("prompt", "")
+    ]) == 1
+
+
+def test_new_starter_admission_with_unchanged_identity_is_committed(tmp_path):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    pull, _, _ = _add_new_starter_admission(api)
+
+    result = Coordinator(
+        api, store, clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert any(item["issue"] == 18 for item in result["pull_requests"])
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["18"]
+    assert enrollment["pull_id"] == pull["id"]
+    assert enrollment["pull_node_id"] == pull["node_id"]
+    assert enrollment["starter_admission"]["start_comment_id"] == 9001
+    assert StateStore(store.path).event_seen(18818)
+
+
+@pytest.mark.parametrize("tamper", [
+    "malformed-identity", "body", "linkage", "command", "repository", "base",
+])
+def test_new_starter_admission_rejects_non_identity_races(
+        tmp_path, monkeypatch, tamper):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    pull, starter_api, comment = _add_new_starter_admission(api)
+    before = store.snapshot()
+    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    admission_fence = False
+    injected = False
+    original_get = api.get
+
+    def tamper_admission():
+        nonlocal injected
+        injected = True
+        if tamper == "malformed-identity":
+            pull["id"] = True
+        elif tamper == "body":
+            pull["body"] += " changed"
+        elif tamper == "linkage":
+            starter_api.closing_issues.clear()
+        elif tamper == "command":
+            comment["updated_at"] = "2026-10-01T21:00:01Z"
+        elif tamper == "repository":
+            pull["base"]["repo"]["id"] = 1
+        else:
+            pull["base"]["ref"] = "other"
+
+    def get(route):
+        if (admission_fence and not injected
+                and route == "repos/lindayi/hermes-mobile/pulls/18"):
+            tamper_admission()
+        return original_get(route)
+
+    api.get = get
+    original_fence = coordinator._fence_starter_admissions
+
+    def fence_admissions(admissions):
+        nonlocal admission_fence
+        admission_fence = True
+        try:
+            return original_fence(admissions)
+        finally:
+            admission_fence = False
+
+    monkeypatch.setattr(coordinator, "_fence_starter_admissions", fence_admissions)
+    with pytest.raises(CoordinatorError, match="Starter admission"):
+        coordinator.run(apply=True)
+
+    assert injected
+    assert StateStore(store.path).snapshot() == before
+    assert not api.writes and not api.graphql_writes
 
 
 def _pull_issue_state(state, issue):

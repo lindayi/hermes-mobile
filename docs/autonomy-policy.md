@@ -184,7 +184,7 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 | `deploy/cloud_coordinator.py` | `4c8ce668d216035eb79af4adfa48946159d75419d726a43faec661c402b21dbe` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
 
-### PR #109 supervised correction16 current candidate
+### PR #109 supervised correction17 current candidate
 
 Issue #108's bounded correction10 retains agreement between legacy summary and
 detail task artifacts, reconciles every live action sharing a retained task ID
@@ -219,14 +219,19 @@ replacement identity isolates only that pull's prepared records and writes, whil
 malformed identities remain strict and unrelated pulls continue. Owner commands for
 the isolated pull remain unconsumed until identity is restored and the command is
 revalidated.
+Correction17 checks planned pull identity before revalidating new starter admissions.
+A valid open numeric/node replacement at either fence isolates only that pull,
+restores its prepared state, and defers its command. Changed command, body/linkage,
+malformed identity, and repository/base mismatches remain strict.
 The coordinator's final fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `6a8506a7160acdf3f8611aa8c08bcd744bd5e283b87d00ba7798b5d6533678f7` |
+| `deploy/cloud_coordinator.py` | `5f0be2550298974827ddee6552b0da1f9686c23b7a4561a4cb8a0a573120780b` |
 
 | Historical candidate | SHA-256 |
 | --- | --- |
+| Correction16 historical pin | `6a8506a7160acdf3f8611aa8c08bcd744bd5e283b87d00ba7798b5d6533678f7` |
 | Correction15 historical pin | `9b8d89a38047f3b64329a9c4c6c466fe2f90654eb9b8268ce80b997a5b5140a8` |
 | Correction14 historical pin | `f624f325af72bf481c201d4d1ffe76a50f8752206bcf8811b013b32674a8b0cf` |
 | Correction13 historical pin | `3e129cc0a17c90f876dd3a4c2b4923669988ff03b67b35e4d9be1b1c78d0d9fd` |

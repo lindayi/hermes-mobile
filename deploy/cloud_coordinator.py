@@ -8552,8 +8552,10 @@ class Coordinator:
         """Reprove effective new admissions after all preparation, before any commit.
 
         This is admission-only provenance, not a lifetime body/linkage pin.
-        A failure discards the whole prepared scan via run's finally block.
+        A changed valid open pull identity is isolated; other proof changes fail
+        closed and discard the prepared scan via run's finally block.
         """
+        identity_blocked = set()
         for expected in admissions:
             number = expected["issue"]
             comments = _all_review_comments(self.api, number, None)
@@ -8565,10 +8567,19 @@ class Coordinator:
             current = enrollment_from_comment(
                 {"number": number, "pull_request": True}, pull, matches[0], api=self.api,
             )
-            if (current is None or any(current.get(key) != value
-                                       for key, value in expected.items()
-                                       if key not in {"last_open_seen", "last_open_head"})):
+            if current is None or any(
+                    current.get(key) != value
+                    for key, value in expected.items()
+                    if key not in {
+                        "last_open_seen", "last_open_head", "pull_id", "pull_node_id",
+                    }):
                 raise CoordinatorError("Starter admission binding changed before state commit")
+            if (current["pull_id"] != expected["pull_id"]
+                    or current["pull_node_id"] != expected["pull_node_id"]):
+                if not _pull_identity_change_isolatable(pull, expected):
+                    raise CoordinatorError("Starter admission binding changed before state commit")
+                identity_blocked.add(number)
+        return identity_blocked
 
     def _fence_starter_sources(self, sources, enrollments, main_sha):
         identity_blocked = set()
@@ -8629,12 +8640,14 @@ class Coordinator:
         return identity_blocked
 
     def _apply(self, plan, *, after_commit=None, acknowledgements=None):
-        self._fence_starter_admissions(plan.get("starter_admissions", ()))
         identity_blocked = {
             item["issue"] for item in plan["pull_requests"]
             if item.get("identity_invalid")
         }
         identity_blocked.update(self._fence_pull_identities(plan))
+        identity_blocked.update(
+            self._fence_starter_admissions(plan.get("starter_admissions", ())),
+        )
         identity_blocked.update(self._fence_starter_sources(
             plan.get("starter_sources", ()), plan["enrollments"], plan["main_sha"],
         ))

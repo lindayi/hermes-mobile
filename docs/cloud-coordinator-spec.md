@@ -65,10 +65,13 @@ authenticated API verifier, the extended parser cannot admit a PR.
 
 After all prepared planning and lifecycle source reads, immediately before
 `commit_scan`, every effective new extended admission/renewal repeats the unchanged
-command identity/body/timestamp and live binding proof. A late mismatch or
-incomplete read aborts the entire preparation: no cursor/events, enrollment,
-receipts, retirement/export, or external write commits. Compact optional
-`starter_admission` metadata is strictly validated on state load. Version 1
+command identity/body/timestamp and live binding proof, after the fresh pull-identity
+fence. A structurally valid, open replacement pull identity isolates only that pull
+and defers its command as above. Changed commands, body/linkage proof, malformed
+identity, repository/base mismatch, or incomplete reads still abort the entire
+preparation: no cursor/events, enrollment, receipts, retirement/export, or external
+write commits. Compact optional `starter_admission` metadata is strictly validated
+on state load. Version 1
 contains exactly `version`, `issue_number`, `head_sha`, `body_sha256`, `comment_id`,
 and `comment_created_at`; version 2 adds the explicitly recorded
 `source_task_id`/`source_session_id`; the current version 3 also records the exact
