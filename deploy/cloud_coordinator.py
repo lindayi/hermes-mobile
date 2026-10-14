@@ -6688,6 +6688,8 @@ class Coordinator:
             if step == max_steps:
                 return False
             if current == record["head_sha"]:
+                if len(outgoing) != 1:
+                    return False
                 rooted_successors = [
                     candidate for candidate in outgoing
                     if _owner_abandonment_successor_matches(record, candidate)

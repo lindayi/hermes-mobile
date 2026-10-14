@@ -3835,14 +3835,25 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
             recovery["base_sha"] if lineage_hazard == "ambiguous-root"
             else FINAL_RESULT_HEAD
         )
-        _store_precovery_owner_abandonment_successor(
+        alternate = _store_precovery_owner_abandonment_successor(
             api, restarted, created_at=1790856660,
             start_head=extra_start, receipt_head="6" * 40,
             receipt_base=extra_base, main_sha=extra_base,
-            owner_abandonment_record=(
-                recovery if lineage_hazard == "ambiguous-root" else None
-            ),
         )
+        if lineage_hazard == "ambiguous-root":
+            def bind_alternate_root_identity(state):
+                candidates = [
+                    state["actions"]["precovery-owner-abandonment-successor"],
+                    *state["enrollments"]["16"]["receipt_proofs"],
+                ]
+                for candidate in candidates:
+                    if candidate.get("task_id") == alternate["task_id"]:
+                        candidate.update(
+                            owner_id=OWNER,
+                            repository_id=cloud_coordinator.REPOSITORY_ID,
+                        )
+
+            restarted._mutate(bind_alternate_root_identity)
 
     attempts_before_review = restarted.snapshot()["enrollments"]["16"]["attempts"]
     neutral_attempts = restarted.snapshot()["enrollments"]["16"]["neutral_attempts"]
