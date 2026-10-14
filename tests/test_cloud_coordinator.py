@@ -3643,19 +3643,7 @@ def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_pat
     )
 
 
-@pytest.mark.parametrize(
-    "lineage_hazard",
-    [
-        None, "missing", "disconnected", "wrong-pull", "non-ready", "cycle",
-        "missing-branch", "wrong-branch", "live-proof-branch-mismatch",
-        "ambiguous-root", "ambiguous-intermediate",
-        "duplicate-status", "duplicate-issue", "duplicate-start",
-        "duplicate-head", "duplicate-nonce", "duplicate-kind",
-        "duplicate-task-type", "unrelated-action",
-    ],
-)
-def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
-        tmp_path, lineage_hazard):
+def _owner_abandonment_transitive_case(tmp_path, lineage_hazard=None):
     neutral_head = "9" * 40
     source_head = neutral_head if lineage_hazard == "cycle" else "8" * 40
     api, store, abandoned = _owner_abandonment_historical_neutral_case(tmp_path)
@@ -3742,6 +3730,29 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
             "receipt_proofs"
         ]
     )
+    return (
+        api, store, abandoned, abandoned_reservation, recovery, neutral, source,
+        neutral_head, source_head, reviewer_writes_before,
+    )
+
+
+@pytest.mark.parametrize(
+    "lineage_hazard",
+    [
+        None, "missing", "disconnected", "wrong-pull", "non-ready", "cycle",
+        "missing-branch-unproved", "wrong-branch", "live-proof-branch-mismatch",
+        "ambiguous-root", "ambiguous-intermediate",
+        "duplicate-status", "duplicate-issue", "duplicate-start",
+        "duplicate-head", "duplicate-nonce", "duplicate-kind",
+        "duplicate-task-type", "unrelated-action",
+    ],
+)
+def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
+        tmp_path, lineage_hazard):
+    (
+        api, store, abandoned, abandoned_reservation, recovery, neutral, source,
+        neutral_head, source_head, reviewer_writes_before,
+    ) = _owner_abandonment_transitive_case(tmp_path, lineage_hazard)
 
     enrollment_before_repair = StateStore(store.path).snapshot()["enrollments"]["16"]
     original_proofs = deepcopy(enrollment_before_repair["receipt_proofs"])
@@ -3817,18 +3828,20 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
                 action["pull_node_id"] = proof["pull_node_id"] = "other-pull"
 
         restarted._mutate(corrupt_intermediate)
-    elif lineage_hazard in {"missing-branch", "wrong-branch"}:
+    elif lineage_hazard in {"missing-branch-unproved", "wrong-branch"}:
         def corrupt_intermediate_branch(state):
             proof = next(
                 proof for proof in state["enrollments"]["16"]["receipt_proofs"]
                 if proof.get("task_id") == source["task_id"]
             )
-            if lineage_hazard == "missing-branch":
+            if lineage_hazard == "missing-branch-unproved":
                 proof.pop("head_ref", None)
             else:
                 proof["head_ref"] = "other-branch"
 
         restarted._mutate(corrupt_intermediate_branch)
+        if lineage_hazard == "missing-branch-unproved":
+            del api.tasks[source["task_id"]]
     elif lineage_hazard in {"ambiguous-root", "ambiguous-intermediate"}:
         extra_start = (
             recovery["head_sha"] if lineage_hazard == "ambiguous-root"
@@ -3942,6 +3955,354 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
     Coordinator(
         api, StateStore(store.path), clock=lambda: 1790856660,
     ).run(apply=True)
+    assert api.task_posts == task_posts
+    assert api.writes == writes
+
+
+def _previous_receipt_projection(action):
+    fields = {
+        "key", "issue", "kind", "status", "head", "task_id",
+        "dispatch_nonce", "created_at", "receipt_result", "receipt_comment_id",
+        "receipt_created_at", "receipt_body", "receipt_task_id",
+        "receipt_session_id", "receipt_completed_at",
+        "receipt_session_completed_at", "receipt_nonce", "receipt_start_head",
+        "receipt_head", "receipt_base", "receipt_legacy_neutral",
+        "recorded_base_sha", "owner_abandonment_binding",
+        "owner_abandonment_attestation", "attempt", "owner_id", "repository_id",
+        "pull_id", "pull_node_id", "repair_policy_version", "repair_fingerprints",
+        "repair_fingerprints_complete", "repair_fingerprint_version",
+        "repair_target_map", "receipt_version", "main_sha", "task_type",
+    }
+    return {field: action[field] for field in fields if field in action}
+
+
+@pytest.mark.parametrize("compacted", [False, True], ids=["live-copy", "proof-only"])
+@pytest.mark.parametrize("identical_duplicate", [False, True])
+@pytest.mark.parametrize("summary_inventory", [False, True])
+def test_owner_abandonment_previous_projection_advances_after_reopen(
+        tmp_path, compacted, identical_duplicate, summary_inventory):
+    api, store, abandoned, abandoned_reservation, source, source_head = (
+        _owner_abandonment_previous_case(tmp_path, compacted)
+    )
+    if identical_duplicate:
+        def duplicate_proof(state):
+            proofs = state["enrollments"]["16"]["receipt_proofs"]
+            proofs.append(deepcopy(proofs[-1]))
+
+        StateStore(store.path)._mutate(duplicate_proof)
+    if summary_inventory:
+        original_get_all = api.get_all
+
+        def get_all(route, *, collection=None):
+            inventory = original_get_all(route, collection=collection)
+            if route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
+                inventory = deepcopy(inventory)
+                for task in inventory:
+                    if "sessions" in task:
+                        task["session_count"] = len(task.pop("sessions"))
+            return inventory
+
+        api.get_all = get_all
+    before = StateStore(store.path).snapshot()
+    task_posts = api.task_posts
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert result["head"] == source_head
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+    after = StateStore(store.path).snapshot()
+    assert after["actions"][abandoned["key"]] == abandoned_reservation
+    for field in ("receipt_proofs", "owner_abandonments", "attempts",
+                  "neutral_attempts", "repair_progress"):
+        assert after["enrollments"]["16"][field] == before["enrollments"]["16"][field]
+    writes = list(api.writes)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert api.task_posts == task_posts
+    assert api.writes == writes
+
+
+def _owner_abandonment_previous_case(tmp_path, compacted):
+    (
+        api, store, abandoned, abandoned_reservation, recovery, neutral, source,
+        _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+    source = StateStore(store.path).action(source["key"])
+    if compacted:
+        api.review_state = "APPROVED"
+        api.review_sha = source_head
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+    current = StateStore(store.path)
+    original = current.snapshot()
+
+    def previous_projection(state):
+        state["enrollments"]["16"]["receipt_proofs"] = [
+            _previous_receipt_projection(proof)
+            for proof in state["enrollments"]["16"]["receipt_proofs"]
+        ]
+
+    current._mutate(previous_projection)
+    if compacted:
+        current.retire(16, source_head, current_main_sha=FINAL_RESULT_HEAD)
+        assert StateStore(store.path).action(source["key"]) is None
+    else:
+        assert StateStore(store.path).action(source["key"]) is not None
+    before = StateStore(store.path).snapshot()
+    assert all(
+        "head_ref" not in proof
+        for proof in before["enrollments"]["16"]["receipt_proofs"]
+    )
+    api.review_state = api.review_sha = None
+    assert before["enrollments"]["16"]["owner_abandonments"] == (
+        original["enrollments"]["16"]["owner_abandonments"]
+    )
+    return api, store, abandoned, abandoned_reservation, source, source_head
+
+
+@pytest.mark.parametrize("compacted", [False, True], ids=["live-copy", "proof-only"])
+@pytest.mark.parametrize("stage", ["planning", "review-fence", "source-fence"])
+@pytest.mark.parametrize("hazard", [
+    None, "unrelated-writer", "active-writer", "unknown", "reactivated",
+    "session-reactivated", "duplicate-inventory", "incomplete-inventory", "inventory-error",
+    "detail-error", "creator", "owner", "repository", "pull", "branch",
+    "session", "session-task", "session-owner", "session-repository", "prompt",
+    "prompt-prefix", "prompt-marker", "prompt-template",
+    "edited-receipt", "substituted-receipt", "explicit-wrong-branch",
+    "duplicate-status", "duplicate-issue", "duplicate-start", "duplicate-head",
+    "duplicate-nonce", "ambiguous-root", "ambiguous-intermediate",
+    "edited-root", "deleted-root", "proof-status", "proof-issue", "proof-start",
+    "proof-head", "proof-nonce", "proof-kind", "proof-task-type",
+])
+def test_owner_abandonment_upgrade_fresh_fences(
+        tmp_path, monkeypatch, compacted, stage, hazard):
+    api, store, abandoned, reservation, source, source_head = (
+        _owner_abandonment_previous_case(tmp_path, compacted)
+    )
+    if stage == "source-fence":
+        api.source_failure = True
+        api.source_failure_sha = source_head
+        api.review_state = "APPROVED"
+        api.review_sha = source_head
+    original_get = api.get
+    original_get_all = api.get_all
+    original_claim = StateStore.claim_action
+    injected = []
+    injected_posts = []
+    injected_proofs = []
+
+    def mutate():
+        injected.append(hazard)
+        task = api.tasks[source["task_id"]]
+        session = task["sessions"][0]
+        if hazard == "unknown":
+            del api.tasks[source["task_id"]]
+        elif hazard in {"active-writer", "unrelated-writer"}:
+            writer = deepcopy(task)
+            writer.update(id="other-writer", state="in_progress")
+            writer.pop("sessions")
+            if hazard == "unrelated-writer":
+                writer["artifacts"] = [
+                    {"provider": "github", "type": "branch",
+                     "data": {"head_ref": "unrelated-topic", "base_ref": "main"}},
+                    {"provider": "github", "type": "pull",
+                     "data": {"id": 160000099, "global_id": "PR_node_99"}},
+                ]
+            api.tasks[writer["id"]] = writer
+        elif hazard == "reactivated":
+            task["state"] = "in_progress"
+        elif hazard == "session-reactivated":
+            session["state"] = "in_progress"
+        elif hazard in {"creator", "owner", "repository"}:
+            task[hazard]["id"] = 42
+        elif hazard in {"pull", "branch"}:
+            artifact = next(
+                item for item in task["artifacts"] if item["type"] == hazard
+            )
+            artifact["data"]["id" if hazard == "pull" else "head_ref"] = (
+                42 if hazard == "pull" else "other-branch"
+            )
+        elif hazard == "session":
+            session["id"] = "other-session"
+        elif hazard == "session-task":
+            session["task_id"] = "other-task"
+        elif hazard in {"session-owner", "session-repository"}:
+            session[hazard.removeprefix("session-")]["id"] = 42
+        elif hazard == "prompt":
+            session["prompt"] += " changed"
+        elif hazard == "prompt-prefix":
+            session["prompt"] = session["prompt"].replace("PR #16", "PR #99", 1)
+        elif hazard == "prompt-marker":
+            session["prompt"] = session["prompt"].replace(
+                source["key"].split("fix:16:", 1)[1],
+                "hermes-coordinator-fix:" + "0" * 20,
+            )
+        elif hazard == "prompt-template":
+            session["prompt"] = session["prompt"].replace(
+                f"nonce={source['dispatch_nonce']}", "nonce=other-nonce",
+            )
+        elif hazard in {"edited-receipt", "substituted-receipt"}:
+            comment = next(
+                item for item in api.comments
+                if item["id"] == source["receipt_comment_id"]
+            )
+            if hazard == "edited-receipt":
+                comment["updated_at"] = "2026-10-01T12:06:00Z"
+            else:
+                comment["id"] += 100000
+        elif hazard in {"edited-root", "deleted-root"}:
+            command = next(item for item in api.comments if item["id"] == 7771)
+            if hazard == "edited-root":
+                command["updated_at"] = "2026-10-01T12:12:00Z"
+            else:
+                api.comments.remove(command)
+        elif hazard == "explicit-wrong-branch" or (
+                isinstance(hazard, str)
+                and hazard != "duplicate-inventory"
+                and hazard.startswith(("duplicate-", "proof-"))):
+            def corrupt_proof(state):
+                proof = next(
+                    item for item in state["enrollments"]["16"]["receipt_proofs"]
+                    if item["task_id"] == source["task_id"]
+                )
+                if hazard == "explicit-wrong-branch":
+                    proof["head_ref"] = "other-branch"
+                    return
+                duplicate = deepcopy(proof) if hazard.startswith("duplicate-") else proof
+                field, value = {
+                    "duplicate-status": ("status", "sent"),
+                    "duplicate-issue": ("issue", 99),
+                    "duplicate-start": ("receipt_start_head", "invalid"),
+                    "duplicate-head": ("head", "7" * 40),
+                    "duplicate-nonce": ("dispatch_nonce", "other-nonce"),
+                    "duplicate-kind": ("kind", "review"),
+                    "duplicate-task-type": ("task_type", "unsupported"),
+                }[hazard.replace("proof-", "duplicate-")]
+                duplicate[field] = value
+                if hazard.startswith("duplicate-"):
+                    state["enrollments"]["16"]["receipt_proofs"].append(duplicate)
+
+            StateStore(store.path)._mutate(corrupt_proof)
+        elif hazard in {"ambiguous-root", "ambiguous-intermediate"}:
+            state = StateStore(store.path).snapshot()
+            recovery = state["enrollments"]["16"]["owner_abandonments"][0]
+            start = (
+                recovery["head_sha"] if hazard == "ambiguous-root"
+                else source["head"]
+            )
+            alternate = _store_precovery_owner_abandonment_successor(
+                api, StateStore(store.path), created_at=1790856660,
+                start_head=start, receipt_head="6" * 40,
+                receipt_base=FINAL_RESULT_HEAD, main_sha=FINAL_RESULT_HEAD,
+            )
+            def bind_alternate(state):
+                for item in [
+                    *state["actions"].values(),
+                    *state["enrollments"]["16"]["receipt_proofs"],
+                ]:
+                    if item.get("task_id") == alternate["task_id"]:
+                        item.update(
+                            owner_id=OWNER,
+                            repository_id=cloud_coordinator.REPOSITORY_ID,
+                        )
+
+            StateStore(store.path)._mutate(bind_alternate)
+            injected_posts.append(alternate["task_id"])
+        injected_proofs[:] = deepcopy(
+            StateStore(store.path).snapshot()["enrollments"]["16"]["receipt_proofs"],
+        )
+
+    def get(route):
+        if (stage == "review-fence" and not injected
+                and route.endswith("/requested_reviewers")):
+            mutate()
+        if (injected and hazard == "detail-error"
+                and route.endswith(f"/tasks/{source['task_id']}")):
+            raise ApiError("original task detail unavailable", status=503)
+        return original_get(route)
+
+    def get_all(route, *, collection=None):
+        if injected and route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
+            if hazard == "inventory-error":
+                raise ApiError("original inventory unavailable", status=503)
+            inventory = deepcopy(original_get_all(route, collection=collection))
+            if hazard == "incomplete-inventory":
+                return [item for item in inventory if item["id"] != source["task_id"]]
+            if hazard == "duplicate-inventory":
+                return inventory + [
+                    deepcopy(item) for item in inventory
+                    if item["id"] == source["task_id"]
+                ]
+            if hazard == "reactivated":
+                for item in inventory:
+                    if item["id"] == source["task_id"]:
+                        item["state"] = "completed"
+            return inventory
+        return original_get_all(route, collection=collection)
+
+    def claim(self, key, action):
+        result = original_claim(self, key, action)
+        if (result and stage == "source-fence" and not injected
+                and action.get("kind") == "fix"
+                and action.get("head") == source_head):
+            mutate()
+        return result
+
+    api.get = get
+    api.get_all = get_all
+    monkeypatch.setattr(StateStore, "claim_action", claim)
+    if stage == "planning":
+        mutate()
+    before = StateStore(store.path).snapshot()
+    writes = list(api.writes)
+    posts = api.task_posts
+    if stage == "planning" and hazard == "inventory-error":
+        with pytest.raises(ApiError, match="original inventory unavailable"):
+            Coordinator(
+                api, StateStore(store.path), clock=lambda: 1790856660,
+            ).run(apply=True)
+    else:
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+    assert injected == [hazard]
+    if hazard in {None, "unrelated-writer"}:
+        if stage == "source-fence":
+            assert api.task_posts == posts + 1
+        else:
+            assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+    else:
+        assert api.task_posts == posts + (
+            len(injected_posts) if stage != "planning" else 0
+        )
+        assert [
+            write for write in api.writes
+            if write[0].endswith("/requested_reviewers")
+        ] == [write for write in writes if write[0].endswith("/requested_reviewers")]
+    after = StateStore(store.path).snapshot()
+    assert after["actions"][abandoned["key"]] == reservation
+    assert after["enrollments"]["16"]["receipt_proofs"] == injected_proofs
+    for field in ("owner_abandonments", "neutral_attempts"):
+        assert after["enrollments"]["16"][field] == before["enrollments"]["16"][field]
+    assert after["enrollments"]["16"]["attempts"] == (
+        before["enrollments"]["16"]["attempts"]
+        + (stage == "source-fence")
+        + (len(injected_posts) if stage != "planning" else 0)
+    )
+    writes = list(api.writes)
+    task_posts = api.task_posts
+    if hazard == "inventory-error":
+        with pytest.raises(ApiError, match="original inventory unavailable"):
+            Coordinator(
+                api, StateStore(store.path), clock=lambda: 1790856660,
+            ).run(apply=True)
+    else:
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
     assert api.task_posts == task_posts
     assert api.writes == writes
 

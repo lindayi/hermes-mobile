@@ -6596,6 +6596,138 @@ class Coordinator:
                 return False
         return pull
 
+    def _legacy_receipt_branch_view(self, proof, snapshot, tasks, actions):
+        if not _valid_receipt_proof(proof, snapshot["comments"]):
+            return None
+        task_id = proof["task_id"]
+        listed = [
+            task for task in tasks
+            if isinstance(task, dict) and task.get("id") == task_id
+        ]
+        if len(listed) != 1:
+            return None
+        try:
+            task = self.api.get(
+                f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}",
+            )
+        except CoordinatorError:
+            return None
+        listed = listed[0]
+        if "sessions" not in listed:
+            if not _legacy_task_detail_matches_list(listed, task):
+                return None
+        elif (not isinstance(task, dict) or any(
+                listed.get(field) != task.get(field)
+                for field in (
+                    "id", "state", "created_at", "updated_at", "creator",
+                    "owner", "repository", "artifacts", "sessions",
+                ))):
+            return None
+        original_snapshot = {**snapshot, "issue": proof.get("issue")}
+        reservation_type = _legacy_task_reservation_type(
+            proof, {task_id: task}, original_snapshot,
+        )
+        if reservation_type is None or task.get("state") != "completed":
+            return None
+        session = task["sessions"][0]
+        prompt = session["prompt"]
+        reservation = re.fullmatch(
+            rf"fix:{proof['issue']}:(hermes-coordinator-fix:[0-9a-f]{{20}})",
+            proof.get("key", ""),
+        )
+        if (session.get("state") != "completed"
+                or reservation is None
+                or session.get("completed_at") != proof["receipt_completed_at"]
+                or any(
+                    action.get("body") != prompt
+                    for action in actions.values()
+                    if isinstance(action, dict)
+                    and action.get("task_id") == task_id
+                    and "body" in action
+                )):
+            return None
+        view = {
+            **proof, "head_ref": session["head_ref"], "body": prompt,
+            "task_created_at": task.get("created_at"), "marker": reservation[1],
+        }
+        bindings = {
+            "pull_number": proof["issue"], "start_head": proof["head"],
+            "base_sha": proof.get("main_sha", proof["receipt_base"]),
+        }
+        instructions = [receipt_instruction(proof["dispatch_nonce"], **bindings)]
+        if reservation_type:
+            if not prompt.startswith(
+                    f"Neutral reconciliation for PR #{proof['issue']} at exact PR "
+                    f"head `{proof['head']}`. The current target main is "
+                    f"`{proof.get('main_sha')}`; the PR's recorded base is "
+                    f"`{proof.get('recorded_base_sha')}`. "):
+                return None
+            instructions.extend([
+                receipt_instruction(
+                    proof["dispatch_nonce"], neutral=True, **bindings,
+                ),
+                _historical_neutral_receipt_instruction(
+                    proof["dispatch_nonce"], **bindings,
+                ),
+                _previous_release_neutral_receipt_instruction(
+                    proof["dispatch_nonce"], **bindings,
+                ),
+            ])
+            for comment in snapshot["comments"]:
+                if (not isinstance(comment, dict)
+                        or not _github_identity(comment.get("user"), OWNER_ID)
+                        or type(comment.get("id")) is not int
+                        or not 0 < comment["id"] <= 2**63 - 1
+                        or not _valid_timestamp(comment.get("created_at"))
+                        or comment.get("updated_at") != comment["created_at"]
+                        or not isinstance(comment.get("body"), str)
+                        or re.fullmatch(
+                            r"hermes-coordinator-neutral-receipt:[0-9a-f]{20}",
+                            comment["body"],
+                        ) is None):
+                    continue
+                anchor_bindings = {
+                    **bindings, "anchor_comment_id": comment["id"],
+                    "anchor_body": comment["body"],
+                }
+                anchored = [
+                    receipt_instruction(
+                        proof["dispatch_nonce"], neutral=True, **anchor_bindings,
+                    ),
+                    _anchored_neutral_receipt_instruction_v1(
+                        proof["dispatch_nonce"], **anchor_bindings,
+                    ),
+                ]
+                if any(prompt.endswith(f"\n\n{item}") for item in anchored):
+                    view.update(
+                        receipt_anchor_comment_id=comment["id"],
+                        receipt_anchor_body=comment["body"],
+                    )
+                    instructions.extend(anchored)
+        if not any(
+                prompt.endswith(f"<!-- {reservation[1]} -->\n\n{item}")
+                for item in instructions):
+            return None
+        historical_pull = deepcopy(snapshot["pull"])
+        historical_pull["head"]["sha"] = proof["receipt_head"]
+        historical_pull["base"]["sha"] = proof["receipt_base"]
+        try:
+            receipt = validate_task_receipt(
+                task, view, historical_pull, snapshot["comments"],
+                now=datetime.fromtimestamp(self.clock(), timezone.utc),
+            )
+        except (ReceiptError, OverflowError, TypeError, ValueError):
+            return None
+        if (receipt is None or any(
+                receipt.get(field) != proof.get(f"receipt_{field}")
+                for field in (
+                    "result", "comment_id", "created_at", "body", "task_id",
+                    "session_id", "completed_at", "nonce", "start_head",
+                    "head", "base",
+                ))):
+            return None
+        return view
+
     def _owner_abandonment_successor_proven(self, snapshot, record):
         pull = snapshot.get("pull")
         head = pull.get("head") if isinstance(pull, dict) else None
@@ -6642,14 +6774,48 @@ class Coordinator:
             "owner_abandonment_binding", "owner_abandonment_attestation",
         )
         representations = [*actions.values(), *proofs]
+        if any(
+                not isinstance(proof, dict)
+                or not isinstance(proof.get("task_id"), str)
+                or not proof["task_id"]
+                for proof in proofs):
+            return False
+        retained_task_ids = {proof["task_id"] for proof in proofs}
         relevant_task_ids = {
             candidate.get("task_id") for candidate in representations
             if isinstance(candidate, dict)
             and candidate.get("issue") == record["issue"]
             and isinstance(candidate.get("task_id"), str)
-        }
+        } | retained_task_ids
+        legacy_proofs = [
+            proof for proof in proofs
+            if isinstance(proof, dict) and "head_ref" not in proof
+            and proof.get("task_id") in relevant_task_ids
+        ]
+        legacy_views = {}
+        if legacy_proofs:
+            try:
+                tasks = _rest_list(
+                    self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+                    collection="tasks",
+                )
+                if (not _owner_abandonment_inventory_valid(
+                        tasks, abandoned_action, snapshot, record)
+                        or _current_owner_unverified_abandonment_command(
+                            self.api, record) is None):
+                    return False
+                for proof in legacy_proofs:
+                    view = self._legacy_receipt_branch_view(
+                        proof, snapshot, tasks, actions,
+                    )
+                    if view is None:
+                        return False
+                    legacy_views[id(proof)] = view
+            except (CoordinatorError, OverflowError, TypeError, ValueError):
+                return False
         reconciled = {}
         for candidate in representations:
+            candidate = legacy_views.get(id(candidate), candidate)
             if (not isinstance(candidate, dict)
                     or not isinstance(candidate.get("task_id"), str)
                     or candidate["task_id"] not in relevant_task_ids):
@@ -6664,11 +6830,13 @@ class Coordinator:
             if (not isinstance(candidate, dict)
                     or candidate.get("issue") != record["issue"]
                     or candidate.get("kind") != "fix"
-                    or candidate.get("task_type") not in {
+                    or candidate.get("task_type") not in (
                         None, "source", "review-followup", "neutral",
-                    }
+                    )
                     or candidate.get("status") != "completed"
                     or not _is_sha(candidate.get("receipt_start_head"))):
+                if candidate.get("task_id") in retained_task_ids:
+                    return False
                 continue
             candidates.append(candidate)
         if len(candidates) > REPAIR_LIMIT + NEUTRAL_LIMIT:
@@ -6904,6 +7072,26 @@ class Coordinator:
                 or not self._authorized_dispatch_head(
                     action["issue"], action["head"], current["base"]["sha"])):
             return "superseded"
+        state = self.store.snapshot()
+        enrollment = state["enrollments"].get(str(action["issue"]), {})
+        claims = _valid_owner_abandonment_claims(enrollment, state["actions"])
+        if claims:
+            try:
+                tasks = _rest_list(
+                    self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+                    collection="tasks",
+                )
+                comments = _all_review_comments(self.api, action["issue"], None)
+                for claim_key, record in claims:
+                    if (_current_owner_unverified_abandonment_command(
+                            self.api, record) is None
+                            or not self._owner_abandonment_task_terminal(
+                                {"issue": action["issue"], "pull": current,
+                                 "comments": comments},
+                                state["actions"].get(claim_key), record, tasks)):
+                        return "agent-running"
+            except CoordinatorError:
+                return "incomplete"
         if not self.store.claim_action(key, action):
             return "reserved"
         try:

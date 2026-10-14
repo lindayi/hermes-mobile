@@ -702,8 +702,26 @@ The terminal check uses both live actions and the enrollment's authenticated
 `receipt_proofs`; compaction must retain the neutral continuation's
 `recorded_base_sha` and exact `head_ref` as well as its receipt and
 owner-abandonment bindings. Missing or mismatched branch identity is never inferred
-from the current pull. A
-different current head is accepted only through a connected chain that starts with
+from the current pull.
+
+Pre-upgrade retained proofs omit `head_ref`. A read-only compatibility view may
+obtain it only from the original authenticated task session. It requires a fresh
+complete task inventory, positive task and session completion, the same owner,
+creator, repository, pull artifact and branch artifact, and exact task/session
+IDs. Original list and detail evidence must agree. The original prompt must match
+the supported reservation type, exact pull/start head and reservation marker, and
+end with a supported canonical receipt instruction bound to the stored nonce and
+base. If a live action remains, its original prompt must also agree. Anchored
+neutral prompts require the immutable authenticated original owner anchor and its
+exact receipt carrier. Revalidate the stored receipt against the original task's
+chronology and the unchanged receipt comment; require the immutable abandonment
+root and fresh scoped occupancy. Unknown, reactivated, mismatched, incomplete or
+unavailable original evidence denies the view. An explicitly present branch value
+is never replaced. No proof, claim or counter is migrated, and no current pull or
+enrollment supplies missing historical identity. Repeat these checks at the final
+source and reviewer write fences; planning evidence is not a write fence.
+
+A different current head is accepted only through a connected chain that starts with
 one distinct, abandonment-bound ready receipt and follows each later ready receipt's
 exact `receipt_start_head` to the preceding `receipt_head`. The chain is bounded by
 the source and neutral lifetime ceilings combined. Every edge must pass immutable

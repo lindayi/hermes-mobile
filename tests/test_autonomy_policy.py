@@ -207,7 +207,7 @@ _ISSUE106_REVIEW_SUMMARY_FIXTURE = {
 }
 
 _PR105_OWNER_ABANDONMENT_FIXTURE = {
-    'deploy/cloud_coordinator.py': '1dc2927a688268bc891cee01768a5a5186536c16f34b9ad0e11da63167b0709a',
+    'deploy/cloud_coordinator.py': '65ba46be19c5460b6ad975736cbe76437e7c535e32ef202ebc34c9d83ed74eb4',
     'deploy/task_receipts.py': '1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231',
 }
 
