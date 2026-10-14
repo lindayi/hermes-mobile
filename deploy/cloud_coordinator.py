@@ -203,6 +203,10 @@ class CoordinatorError(RuntimeError):
     """An incomplete or unsafe coordinator operation."""
 
 
+class _ContinuationPublicationFenceError(CoordinatorError):
+    """The durable continuation claim changed before its task request began."""
+
+
 class ApiError(CoordinatorError):
     """An authenticated GitHub API operation failed."""
 
@@ -7637,6 +7641,95 @@ class Coordinator:
             raise CoordinatorError(
                 "Owner continuation evidence changed before commit"
             )
+        final_anchor = None
+        if isinstance(successor_action, dict):
+            final_anchor = self._ensure_receipt_anchor(
+                successor_action, source=True,
+            )
+            expected_anchor = _source_receipt_anchor_request(
+                successor_action, successor_action.get("dispatch_nonce"),
+            )
+            if (expected_anchor is None
+                    or not isinstance(final_anchor, dict)
+                    or final_anchor.get("status") != "sent"
+                    or any(final_anchor.get(field) != value
+                           for field, value in expected_anchor.items())
+                    or final_anchor.get("comment_id")
+                        != successor_action.get("receipt_anchor_comment_id")
+                    or final_anchor.get("body")
+                        != successor_action.get("receipt_anchor_body")):
+                raise CoordinatorError(
+                    "Owner continuation receipt anchor changed before publication"
+                )
+        final_pull = self._fence_pull(
+            record["issue"], record["current_head_sha"], main_sha,
+        )
+        final_main = self.api.get(f"repos/{REPOSITORY}/commits/{MAIN_BRANCH}")
+        if (
+                not final_pull
+                or not _pull_identity(final_pull, action)
+                or final_pull.get("id") != record["pull_id"]
+                or final_pull.get("node_id") != record["pull_node_id"]
+                or final_pull.get("base", {}).get("sha") != main_sha
+                or final_pull.get("head", {}).get("sha")
+                    != record["current_head_sha"]
+                or final_pull.get("head", {}).get("ref") != record["head_ref"]
+                or final_pull.get("head", {}).get("repo", {}).get("id")
+                    != REPOSITORY_ID
+                or not isinstance(final_main, dict)
+                or final_main.get("sha") != main_sha
+        ):
+            raise CoordinatorError(
+                "Owner continuation pull or main changed at the final fence"
+            )
+        latest_state = StateStore(self.store.path).snapshot()
+        latest_enrollment = latest_state.get("enrollments", {}).get(
+            str(record["issue"]), {},
+        )
+        latest_actions = latest_state.get("actions", {})
+        latest_historical = [
+            item for item in latest_enrollment.get("owner_abandonments", [])
+            if isinstance(item, dict)
+            and item.get("action_key") == record["historical_action_key"]
+        ]
+        latest_continuations = latest_enrollment.get("owner_continuations", [])
+        latest_issue_actions = {
+            key: value for key, value in latest_actions.items()
+            if isinstance(value, dict) and value.get("issue") == record["issue"]
+        }
+        initial_issue_actions = {
+            key: value for key, value in state.get("actions", {}).items()
+            if isinstance(value, dict) and value.get("issue") == record["issue"]
+        }
+        if (
+                latest_enrollment != enrollment
+                or latest_issue_actions != initial_issue_actions
+                or latest_historical != historical
+                or latest_continuations != continuations
+        ):
+            raise CoordinatorError(
+                "Owner continuation canonical state changed at the final fence"
+            )
+        if successor_action is not None:
+            current_successor = latest_actions.get(successor_action.get("key"))
+            current_anchor = latest_state.get("outbox", {}).get(
+                successor_action.get("receipt_anchor_key"),
+            )
+            if (
+                    current_successor != successor_action
+                    or not isinstance(current_anchor, dict)
+                    or current_anchor.get("status") != "sent"
+                    or current_anchor.get("task_key") != successor_action.get("key")
+                    or current_anchor.get("comment_id")
+                        != successor_action.get("receipt_anchor_comment_id")
+                    or current_anchor.get("body")
+                        != successor_action.get("receipt_anchor_body")
+                    or current_anchor != final_anchor
+            ):
+                raise CoordinatorError(
+                    "Owner continuation successor claim changed at the final fence"
+                )
+        return successor_action
 
     def _authorized_dispatch_head(self, issue, head, base_sha=None, *,
                                   receipt_action=None, continuation_action=None):
@@ -8298,7 +8391,7 @@ class Coordinator:
             claimed_action = self.store.action(key)
         if owner_continuation_record is not None:
             try:
-                self._fence_owner_continuation(
+                claimed_action = self._fence_owner_continuation(
                     {
                         "issue": action["issue"],
                         "action_key": owner_continuation_record[
@@ -8313,10 +8406,25 @@ class Coordinator:
                 self.store.update_action(key, "superseded")
                 return "superseded"
         try:
-            response = self.api.write(
-                f"agents/repos/{REPOSITORY}/tasks",
-                {"prompt": claimed_action["body"], "base_ref": MAIN_BRANCH, "head_ref": branch},
-            )
+            task_request = {
+                "prompt": claimed_action["body"],
+                "base_ref": MAIN_BRANCH,
+                "head_ref": branch,
+            }
+            if owner_continuation_record is not None:
+                response = self.store.publish_continuation_task(
+                    key, claimed_action, owner_continuation_record,
+                    lambda: self.api.write(
+                        f"agents/repos/{REPOSITORY}/tasks", task_request,
+                    ),
+                )
+            else:
+                response = self.api.write(
+                    f"agents/repos/{REPOSITORY}/tasks", task_request,
+                )
+        except _ContinuationPublicationFenceError:
+            self.store.update_action(key, "superseded")
+            return "superseded"
         except CoordinatorError:
             event = self._record_uncertain_task(claimed_action)
             self.store.update_action_with_lifecycle(
@@ -8656,6 +8764,14 @@ class Coordinator:
             try:
                 self._fence_owner_continuation(recovery, plan["main_sha"])
             except CoordinatorError:
+                if self.store._prepared is not None:
+                    current_state = StateStore(self.store.path).snapshot()
+                    if current_state != self.store._preparation_base:
+                        # Rebase the scan on concurrent durable state. Its
+                        # affected continuation is removed below; commit_scan
+                        # must not replace the concurrent state with this plan.
+                        self.store.discard_preparation()
+                        self.store.begin_preparation()
                 record = recovery["record"]
                 plan["commands"] = [
                     (command, item) for command, item in plan["commands"]
@@ -10098,6 +10214,79 @@ class StateStore:
             action["task_dispatch_started"] = True
             return True
         return self._mutate(mark)
+
+    def publish_continuation_task(self, key, expected, record, publish):
+        if self._prepared is not None:
+            raise CoordinatorError("Task publication requires committed state")
+        self._ensure_directory()
+        lock_path = self.directory / f".{self.path.name}.lock"
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(lock_path, flags, 0o600)
+        publishing = False
+        try:
+            lock_info = os.fstat(fd)
+            if (lock_info.st_uid != os.getuid() or lock_info.st_mode & 0o077
+                    or not stat.S_ISREG(lock_info.st_mode) or lock_info.st_nlink != 1):
+                raise CoordinatorError("Coordinator lock is not private")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            data = self._load()
+            action = data["actions"].get(key)
+            enrollment = data["enrollments"].get(str(record.get("issue")), {})
+            anchor = (
+                data["outbox"].get(action.get("receipt_anchor_key"))
+                if isinstance(action, dict) else None
+            )
+            request = _source_receipt_anchor_request(
+                expected, expected.get("dispatch_nonce"),
+            )
+            if (
+                    action != expected
+                    or action.get("status") != "sending"
+                    or action.get("task_dispatch_started") is not True
+                    or action.get("task_id") is not None
+                    or record not in enrollment.get("owner_continuations", [])
+                    or not _owner_continuation_matches_history(
+                        record, enrollment, data["actions"],
+                    )
+                    or not _owner_continuation_successor_candidate_matches(
+                        record, action,
+                    )
+                    or request is None
+                    or not isinstance(anchor, dict)
+                    or anchor.get("status") != "sent"
+                    or any(anchor.get(field) != value
+                           for field, value in request.items())
+                    or anchor.get("comment_id")
+                        != action.get("receipt_anchor_comment_id")
+                    or anchor.get("body") != action.get("receipt_anchor_body")
+                    or action.get("receipt_anchor_role") != "continuation-source"
+            ):
+                raise _ContinuationPublicationFenceError(
+                    "Owner continuation claim changed at task publication"
+                )
+            instruction = receipt_instruction(
+                action["dispatch_nonce"], pull_number=action["issue"],
+                start_head=action["head"], base_sha=action["main_sha"],
+                anchor_comment_id=action["receipt_anchor_comment_id"],
+                anchor_body=action["receipt_anchor_body"],
+            )
+            if action.get("body") != (
+                    f"{action.get('task_request_body', '')}\n\n{instruction}"
+            ):
+                raise _ContinuationPublicationFenceError(
+                    "Owner continuation prompt changed at task publication"
+                )
+            publishing = True
+            return publish()
+        except CoordinatorError as error:
+            if not publishing and not isinstance(
+                    error, _ContinuationPublicationFenceError):
+                raise _ContinuationPublicationFenceError(
+                    "Coordinator state could not be verified at task publication"
+                ) from error
+            raise
+        finally:
+            os.close(fd)
 
     def claim_receipt_recovery(self, key, expected):
         if self._prepared is not None:

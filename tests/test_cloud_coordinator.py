@@ -4624,6 +4624,234 @@ def test_owner_continuation_rechecks_authority_before_successor_post(
     assert successors[0]["status"] == "superseded"
 
 
+@pytest.mark.parametrize("mutation", ["head", "enrollment", "historical"])
+def test_owner_continuation_disposition_final_read_preserves_concurrent_state(
+        tmp_path, monkeypatch, mutation):
+    api, store, abandonment, _, _ = _owner_continuation_advanced_case(tmp_path)
+    original_get = api.get
+    original_fence = CloudCoordinator._fence_owner_continuation
+    in_fence = []
+    mutations = []
+
+    def mutate_on_final_historical_task_read(route):
+        response = original_get(route)
+        if (in_fence and not mutations
+                and route.endswith(f"/tasks/{abandonment['task_id']}")):
+            mutations.append(True)
+            if mutation == "head":
+                api.pull["head"]["sha"] = "a" * 40
+                api.head_sha = "a" * 40
+            elif mutation == "enrollment":
+                store._mutate(lambda data: data["enrollments"]["16"].update(
+                    authorized_head="c" * 40,
+                ))
+            else:
+                historical = store.action(abandonment["action_key"])
+                store.update_action(
+                    abandonment["action_key"], historical["status"],
+                    body=historical["body"] + " changed",
+                )
+        return response
+
+    def fenced_read(self, *args, **kwargs):
+        in_fence.append(True)
+        try:
+            return original_fence(self, *args, **kwargs)
+        finally:
+            in_fence.pop()
+
+    monkeypatch.setattr(api, "get", mutate_on_final_historical_task_read)
+    monkeypatch.setattr(
+        CloudCoordinator, "_fence_owner_continuation", fenced_read,
+    )
+    prior_posts = api.task_posts
+    prior_attempts = store.snapshot()["enrollments"]["16"]["attempts"]
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+
+    current = StateStore(store.path).snapshot()
+    assert mutations == [True]
+    assert result["reasons"] == ["unauthorized-continuation"]
+    assert api.task_posts == prior_posts
+    assert "owner_continuations" not in current["enrollments"]["16"]
+    assert current["enrollments"]["16"]["attempts"] == prior_attempts
+    if mutation == "enrollment":
+        assert current["enrollments"]["16"]["authorized_head"] == "c" * 40
+    if mutation == "historical":
+        assert current["actions"][abandonment["action_key"]]["body"].endswith(
+            "changed",
+        )
+
+
+def test_owner_continuation_publication_lock_rejects_changed_claim(
+        tmp_path, monkeypatch):
+    api, store, _, _, _ = _owner_continuation_advanced_case(tmp_path)
+    original_publish = StateStore.publish_continuation_task
+    injected = []
+
+    def change_before_locked_publication(self, key, expected, record, publish):
+        if not injected:
+            injected.append(True)
+            self.update_action(key, "sending", body=expected["body"] + " changed")
+        return original_publish(self, key, expected, record, publish)
+
+    monkeypatch.setattr(
+        StateStore, "publish_continuation_task", change_before_locked_publication,
+    )
+    prior_posts = api.task_posts
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+
+    state = StateStore(store.path).snapshot()
+    successor = next(
+        item for item in state["actions"].values()
+        if item.get("owner_continuation_binding")
+    )
+    assert injected == [True]
+    assert api.task_posts == prior_posts
+    assert successor["status"] == "superseded"
+    assert successor["body"].endswith("changed")
+    assert not any(
+        event.get("action_key") == successor["key"]
+        and event.get("status") == "uncertain"
+        for event in state["lifecycle_events"]
+    )
+
+
+@pytest.mark.parametrize("mutation", ["final-pull-head", "final-pull-identity", "final-main"])
+def test_owner_continuation_final_rechecks_observe_read_mutations(
+        tmp_path, monkeypatch, mutation):
+    api, store, _, _, _ = _owner_continuation_advanced_case(tmp_path)
+    original_get = api.get
+    final_anchor_read = []
+    injected = []
+
+    def change_during_final_recheck(route):
+        actions = StateStore(store.path).actions()
+        successor = next((
+            item for item in actions.values()
+            if item.get("owner_continuation_binding")
+            and item.get("task_dispatch_started") is True
+        ), None)
+        if (successor is not None and "/issues/comments/" in route
+                and route.endswith(
+                    f"/{successor['receipt_anchor_comment_id']}"
+                )):
+            final_anchor_read.append(True)
+        if final_anchor_read and not injected:
+            if (mutation.startswith("final-pull")
+                    and route == "repos/lindayi/hermes-mobile/pulls/16"):
+                injected.append(True)
+                if mutation == "final-pull-head":
+                    api.pull["head"]["sha"] = "c" * 40
+                    api.head_sha = "c" * 40
+                else:
+                    api.pull["node_id"] += "-last-read-change"
+            elif (mutation == "final-main"
+                    and route == "repos/lindayi/hermes-mobile/commits/main"):
+                injected.append(True)
+                api.current_main_sha = "c" * 40
+                api.pull["base"]["sha"] = "c" * 40
+        return original_get(route)
+
+    monkeypatch.setattr(api, "get", change_during_final_recheck)
+    prior_posts = api.task_posts
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+
+    successor = next(
+        item for item in StateStore(store.path).actions().values()
+        if item.get("owner_continuation_binding")
+    )
+    assert final_anchor_read
+    assert injected == [True]
+    assert api.task_posts == prior_posts
+    assert successor["status"] == "superseded"
+
+
+@pytest.mark.parametrize("mutation", [
+    "head", "base-main", "pull-id", "pull-node", "branch", "repository",
+    "historical", "enrollment", "continuation", "claim", "anchor",
+])
+def test_owner_continuation_last_authority_read_fences_publication(
+        tmp_path, monkeypatch, mutation):
+    api, store, abandonment, _, _ = _owner_continuation_advanced_case(tmp_path)
+    original_get = api.get
+    mutated = []
+
+    def mutate_during_last_task_read(route):
+        response = original_get(route)
+        actions = StateStore(store.path).actions()
+        successor = next((
+            item for item in actions.values()
+            if item.get("owner_continuation_binding")
+            and item.get("task_dispatch_started") is True
+        ), None)
+        if (not mutated and successor is not None
+                and route.endswith(f"/tasks/{abandonment['task_id']}")):
+            mutated.append(True)
+            if mutation == "head":
+                api.pull["head"]["sha"] = "a" * 40
+                api.head_sha = "a" * 40
+            elif mutation == "base-main":
+                api.pull["base"]["sha"] = "b" * 40
+                api.current_main_sha = "b" * 40
+            elif mutation == "pull-id":
+                api.pull["id"] += 1
+            elif mutation == "pull-node":
+                api.pull["node_id"] += "-changed"
+            elif mutation == "branch":
+                api.pull["head"]["ref"] = "changed-topic"
+            elif mutation == "repository":
+                api.pull["head"]["repo"]["id"] += 1
+            elif mutation == "historical":
+                historical = store.action(abandonment["action_key"])
+                store.update_action(
+                    abandonment["action_key"], historical["status"],
+                    body=historical["body"] + " changed",
+                )
+            elif mutation == "enrollment":
+                store._mutate(lambda data: data["enrollments"]["16"].update(
+                    last_open_head="c" * 40,
+                ))
+            elif mutation == "continuation":
+                store._mutate(lambda data: data["enrollments"]["16"][
+                    "owner_continuations"
+                ][0].update(accepted_at="2026-10-01T12:12:01Z"))
+            elif mutation == "claim":
+                store.update_action(
+                    successor["key"], "sending", body=successor["body"] + " changed",
+                )
+            else:
+                store.update_outbox(
+                    successor["receipt_anchor_key"], "sent",
+                    body=successor["receipt_anchor_body"] + " changed",
+                )
+        return response
+
+    monkeypatch.setattr(api, "get", mutate_during_last_task_read)
+    prior_posts = api.task_posts
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+
+    state = StateStore(store.path).snapshot()
+    successor = next(
+        item for item in state["actions"].values()
+        if item.get("owner_continuation_binding")
+    )
+    assert mutated == [True]
+    assert api.task_posts == prior_posts
+    assert successor["status"] == "superseded"
+
+
 def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_path):
     from copy import deepcopy
 

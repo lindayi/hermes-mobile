@@ -771,9 +771,22 @@ result, not a neutral audit-bearing merge commit. Acceptance and retained proof
 require the same immutable owner anchor and exact bot reply envelope. Ordinary
 historical SOURCE and all neutral transport semantics remain unchanged.
 
-This transport slice does not complete issue #111. Finite final pull/main/canonical
-StateStore/claim comparisons after the actual last external authority or anchor
-read, including injected last-read mutations, remain a separate required fence.
+After the final ordinary authority reads, the disposition fence authenticates the
+immutable command and enrollment, then re-reads the exact PR and main and reloads
+canonical StateStore data from disk. It compares the complete affected enrollment,
+historical reservation, continuation list, same-PR action claims, and (for a SOURCE
+successor) the current claim and sent anchor. SOURCE anchor inventory and direct
+readback remain mandatory. A failed comparison rejects only the affected PR's
+continuation; if canonical state changed during a prepared scan, the scan is rebased
+on that durable state before committing unrelated eligible work.
+
+Immediately before a continuation task POST, the coordinator acquires the existing
+StateStore write lock, reloads and validates the exact successor claim, continuation,
+and anchor, and holds that lock through the POST. This prevents a stale local claim
+from being published or overwritten while the request is in flight. GitHub offers no
+transaction spanning the final pull/main reads and task POST, so a remote change
+after those reads remains an unavoidable race; these checks do not claim remote
+atomicity.
 
 An existing owner-abandonment record whose recovery head no longer equals the
 current PR head cannot be rebound by replaying its original command or by ordinary
