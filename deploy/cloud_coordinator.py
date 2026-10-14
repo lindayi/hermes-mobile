@@ -3436,6 +3436,12 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
             enrollment, actions,
         )
     ]
+    abandonment_records = enrollment.get("owner_abandonments", [])
+    if (not isinstance(abandonment_records, list)
+            or len(continuation_records) != len(abandonment_records)
+            or any(record.get("issue") != issue
+                   for record in continuation_records)):
+        return initial, authorized, set()
     blocked = set()
     proofs = enrollment.get("receipt_proofs", [])
     if not isinstance(proofs, list):
@@ -3515,14 +3521,16 @@ def _valid_owner_abandonment_claims(enrollment, actions):
     ) else []
     if not isinstance(records, list) or not isinstance(actions, dict):
         return []
-    return [
-        (record["action_key"], record)
-        for record in records
-        if isinstance(record, dict)
-        and _owner_abandonment_matches_action(
-            record, actions.get(record.get("action_key")),
-        )
-    ]
+    claims = []
+    seen = set()
+    for record in records:
+        key = record.get("action_key") if isinstance(record, dict) else None
+        if (not isinstance(key, str) or key in seen
+                or not _owner_abandonment_matches_action(record, actions.get(key))):
+            return []
+        seen.add(key)
+        claims.append((key, record))
+    return claims
 
 
 def _owner_abandonment_continuation(
@@ -4381,10 +4389,15 @@ class Coordinator:
             raise CoordinatorError("Pull request data was incomplete")
         if not _is_sha(head.get("sha")):
             raise CoordinatorError("Pull request head was not a commit SHA")
+        if not _pull_identity(pull, enrollment):
+            return {
+                "issue": number, "enrollment": enrollment, "pull": pull,
+                "head": head["sha"], "main_sha": main_sha, "scoped": False,
+                "terminal": False, "identity_invalid": True,
+            }
         head_repo, base_repo = head.get("repo"), base.get("repo")
         if (
             type(number) is not int or enrollment.get("issue") != number
-            or not _pull_identity(pull, enrollment)
             or enrollment.get("repository_id") != REPOSITORY_ID
             or not _github_identity(head_repo, REPOSITORY_ID)
             or not _github_identity(base_repo, REPOSITORY_ID)
@@ -5759,6 +5772,15 @@ class Coordinator:
     def _plan_pull(self, snapshot, actions, *, apply, reconciled_busy=None,
                    reconciled_busy_details=None):
         number, head = snapshot["issue"], snapshot["head"]
+        if snapshot.get("identity_invalid"):
+            return {
+                "issue": number, "head": head, "terminal": False,
+                "identity_invalid": True, "sensitive": True,
+                "review_valid": False, "required_checks_green": False,
+                "auto_merge_eligible": False, "repair": None,
+                "status_action": None, "merge_action": None,
+                "reasons": ["pull-identity"], "outcomes": [],
+            }
         if snapshot.get("terminal"):
             lifecycle = []
             enrollment = snapshot["enrollment"]
@@ -5882,11 +5904,15 @@ class Coordinator:
             snapshot["comments"], snapshot["pull"].get("base", {}).get("sha"),
         )
         if not self._owner_abandonment_head_proven(snapshot):
+            reasons = ["unauthorized-continuation"]
+            if (agent_busy and busy_details.get("external_busy") is False
+                    and busy_details.get("action_keys")):
+                reasons.append("agent")
             return {
                 "issue": number, "head": head, "sensitive": sensitive,
                 "terminal": False, "review_valid": review_ok,
                 "required_checks_green": checks_ok, "auto_merge_eligible": False,
-                "reasons": ["unauthorized-continuation"], "repair": None,
+                "reasons": reasons, "repair": None,
                 "status_action": None, "merge_action": None, "outcomes": [],
                 "receipt_recoveries": receipt_recoveries, "handoffs": handoffs,
             }
@@ -6533,6 +6559,9 @@ class Coordinator:
             snapshot = self._snapshot_pull(
                 int(key), enrollment, main_sha, actions=state["actions"],
             )
+            if snapshot.get("identity_invalid"):
+                scans.append(snapshot)
+                continue
             source = snapshot.get("initial_source")
             if _valid_initial_source(source):
                 starter_sources.append((snapshot["issue"], snapshot["head"], source))
@@ -6574,6 +6603,7 @@ class Coordinator:
                 (value for value in scans if value["issue"] == item["issue"]), None,
             )
             if (snapshot is None or snapshot.get("terminal")
+                    or snapshot.get("identity_invalid")
                     or snapshot["head"] != item["head_sha"]):
                 continue
             actions = [
@@ -6653,7 +6683,7 @@ class Coordinator:
             ]
         observations = [
             (snapshot["issue"], snapshot["head"]) for snapshot in scans
-            if not snapshot.get("terminal")
+            if not snapshot.get("terminal") and not snapshot.get("identity_invalid")
         ]
         return {
             "cursor": cursor, "main_sha": main_sha,
@@ -6918,16 +6948,20 @@ class Coordinator:
             and proof.get("task_id") in relevant_task_ids
         ]
         legacy_views = {}
+        try:
+            if _current_owner_unverified_abandonment_command(
+                    self.api, record) is None:
+                return False
+        except (CoordinatorError, OverflowError, TypeError, ValueError):
+            return False
         if legacy_proofs:
             try:
                 tasks = _rest_list(
                     self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
                     collection="tasks",
                 )
-                if (not _owner_abandonment_inventory_valid(
-                        tasks, abandoned_action, snapshot, record)
-                        or _current_owner_unverified_abandonment_command(
-                            self.api, record) is None):
+                if not _owner_abandonment_inventory_valid(
+                        tasks, abandoned_action, snapshot, record):
                     return False
                 for proof in legacy_proofs:
                     view = self._legacy_receipt_branch_view(
@@ -7109,6 +7143,13 @@ class Coordinator:
             return False
         state = self.store.snapshot()
         enrollment = state.get("enrollments", {}).get(str(issue), {})
+        records = enrollment.get("owner_abandonments", [])
+        recoveries = _valid_owner_abandonment_claims(
+            enrollment, state.get("actions", {}),
+        )
+        if (not isinstance(records, list) or len(recoveries) != len(records)
+                or any(record.get("issue") != issue for _, record in recoveries)):
+            return False
         current_proof = any(
             isinstance(proof, dict) and proof.get("issue") == issue
             and proof.get("receipt_head") == head.get("sha")
@@ -7117,10 +7158,7 @@ class Coordinator:
         if not current_proof:
             return True
         recoveries = [
-            record for _, record in _valid_owner_abandonment_claims(
-                enrollment, state.get("actions", {}),
-            )
-            if record.get("issue") == issue
+            record for _, record in recoveries if record.get("issue") == issue
         ]
         if not recoveries:
             return True
@@ -8108,6 +8146,7 @@ class Coordinator:
                 raise CoordinatorError("Starter admission binding changed before state commit")
 
     def _fence_starter_sources(self, sources, enrollments, main_sha):
+        identity_blocked = set()
         for number, expected_head, expected_source in sources:
             enrollment = enrollments.get(str(number))
             if not isinstance(enrollment, dict) or not _valid_initial_source(expected_source):
@@ -8115,15 +8154,26 @@ class Coordinator:
             current = self._snapshot_pull(
                 number, enrollment, main_sha, actions=self.store.actions(),
             )
+            if current.get("identity_invalid"):
+                identity_blocked.add(number)
+                continue
             if (current.get("head") != expected_head
                     or current.get("initial_source") != expected_source):
                 raise CoordinatorError("Initial starter source evidence changed before state commit")
+        return identity_blocked
 
     def _apply(self, plan, *, after_commit=None, acknowledgements=None):
         self._fence_starter_admissions(plan.get("starter_admissions", ()))
-        self._fence_starter_sources(
+        identity_blocked = self._fence_starter_sources(
             plan.get("starter_sources", ()), plan["enrollments"], plan["main_sha"],
         )
+        for item in plan["pull_requests"]:
+            if item["issue"] in identity_blocked:
+                item.update(
+                    identity_invalid=True, sensitive=True, repair=None,
+                    status_action=None, merge_action=None,
+                    auto_merge_eligible=False, reasons=["pull-identity"],
+                )
         for recovery in plan.get("owner_recoveries", ()):
             self._fence_owner_abandonment(recovery, plan["main_sha"])
         self.store.commit_scan(
@@ -8136,9 +8186,15 @@ class Coordinator:
                 event for item in plan["pull_requests"]
                 for event in item.get("lifecycle_events", [])
             ] + plan.get("source_lifecycle_events", [])),
-            observations=plan.get("observations", []),
+            observations=[
+                item for item in plan.get("observations", [])
+                if item[0] not in identity_blocked
+            ],
             sensitive_revocations=plan.get("sensitive_revocations", []),
-            starter_sources=plan.get("starter_sources", ()),
+            starter_sources=[
+                source for source in plan.get("starter_sources", ())
+                if source[0] not in identity_blocked
+            ],
             now=plan["now"],
         )
         # Publish only committed observations before fallible reads or mutations.
@@ -8146,6 +8202,9 @@ class Coordinator:
             after_commit()
         summaries = []
         for pr_plan, snapshot in zip(plan["pull_requests"], plan["snapshots"]):
+            if pr_plan.get("identity_invalid"):
+                summaries.append(self._summary(pr_plan))
+                continue
             if pr_plan.get("terminal"):
                 self.store.retire(
                     snapshot["issue"], snapshot["head"], snapshot["main_sha"],

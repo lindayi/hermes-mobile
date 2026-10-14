@@ -745,6 +745,12 @@ cannot disappear from this check. Include any live action sharing a retained tas
 ID before filtering by its issue identity, so a missing, malformed or mismatched
 issue cannot hide the duplicate. Identical copies count once; distinct tasks on
 unrelated pulls do not block this lineage.
+Every persisted abandonment record must resolve to one matching retained root
+action before any receipt, dispatch, reviewer, or terminal authority is granted.
+Missing, mismatched, or duplicate root claims block the affected enrollment. The
+immutable abandonment command is revalidated for both current and pre-upgrade
+receipt proofs at every applicable successor and final write fence; a current
+`head_ref` never replaces that check.
 A same-head
 ready receipt is still a valid direct continuation, but it cannot hide a cycle in a
 later edge. This only proves terminal occupancy; ordinary source authorization,

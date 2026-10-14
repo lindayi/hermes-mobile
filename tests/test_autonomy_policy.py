@@ -212,7 +212,7 @@ _PR105_OWNER_ABANDONMENT_FIXTURE = {
 }
 
 _PR109_SUPERVISED_CORRECTION_FIXTURE = {
-    'deploy/cloud_coordinator.py': '2dab58477f5d65310a358cb820fa64525ad2e573ff2ac6c74a366906da90d433',
+    'deploy/cloud_coordinator.py': '60a0bae7830acbe37fe64b2ca8a9460fcaccfbe3e5ba5a4f069719b3b0301e99',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
@@ -667,7 +667,7 @@ def test_current_pr109_candidate_table_matches_source_bytes():
     root = Path(__file__).resolve().parents[1]
     docs = (root / 'docs/autonomy-policy.md').read_text()
     section = docs.split(
-        '### PR #109 supervised correction5 current candidate', 1,
+        '### PR #109 supervised correction6 current candidate', 1,
     )[1].split('### Retained merged source and deliberate native refreshes', 1)[0]
     rows = [
         line for line in section.splitlines()
