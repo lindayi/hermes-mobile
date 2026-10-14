@@ -45,9 +45,10 @@ outbox, retirement and lifecycle changes, and omit its commands, recoveries,
 observations, source proof, revocations and lifecycle events from the commit.
 Keep the state-store preparation baseline unchanged so the ordinary compare-and-
 swap still rejects concurrent durable changes. If an owner command for that pull
-was read in the scan, retain the old global cursor and do not consume command
-event IDs; the next cold scan must reread and revalidate the command rather than
-silently losing its authority. Other eligible pulls may still commit and advance.
+was read in the scan, retain the old global cursor and do not consume that pull's
+command event IDs; the next cold scan must reread and revalidate the command rather
+than silently losing its authority. Consume other pulls' processed command IDs
+once, including stale or invalid commands. Other eligible pulls may still commit and advance.
 Direct snapshots and terminal identity mismatches remain strict.
 
 Extended starter admission additionally requires a strict positive integer comment
@@ -721,6 +722,9 @@ The terminal check uses both live actions and the enrollment's authenticated
 `recorded_base_sha` and exact `head_ref` as well as its receipt and
 owner-abandonment bindings. Missing or mismatched branch identity is never inferred
 from the current pull.
+For bare enrollments with valid retained abandonment claims, persist accepted receipt
+proofs atomically with completion too, so every lineage edge survives compaction and
+cold restart. These occupancy proofs do not create SHA-bound source authorization.
 
 Pre-upgrade retained proofs omit `head_ref`. A read-only compatibility view may
 obtain it only from the original authenticated task session. It requires a fresh
@@ -735,7 +739,8 @@ malformed, duplicate, or contradictory artifacts deny the view. The original
 prompt must match
 the supported reservation type, exact pull/start head and reservation marker, and
 end with a supported canonical receipt instruction bound to the stored nonce and
-base. If a live action remains, its original prompt must also agree. Anchored
+base. If a live action remains, its original prompt must also agree; a missing body
+is a mismatch. Anchored
 neutral prompts require the immutable authenticated original owner anchor and its
 exact receipt carrier. Revalidate the stored receipt against the original task's
 chronology and the unchanged receipt comment; require the immutable abandonment

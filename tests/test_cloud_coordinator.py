@@ -3102,12 +3102,20 @@ def test_known_id_uncertain_neutral_with_unproven_completion_is_read_once(
     assert api.task_posts == initial_posts
 
 
-def _owner_abandonment_case(tmp_path):
-    api, store, coordinator, _ = _ready_sha_bound_handoff(tmp_path)
+def _owner_abandonment_case(tmp_path, *, bare=False):
+    if bare:
+        api = FakeApi(unresolved=True, head_sha=NEXT_RESULT_HEAD)
+        api.current_main_sha = CURRENT_MAIN
+        api.pull["base"]["sha"] = CURRENT_MAIN
+        store = StateStore(tmp_path / "state.json")
+        coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+    else:
+        api, store, coordinator, _ = _ready_sha_bound_handoff(tmp_path)
     coordinator.run(apply=True)
     neutral = next(
         action for action in store.actions().values()
-        if action.get("task_type") == "neutral"
+        if action.get("kind") == "fix"
+        and (bare or action.get("task_type") == "neutral")
     )
     api.complete_task(
         neutral["task_id"], neutral, head_sha=NEXT_RESULT_HEAD,
@@ -3144,8 +3152,8 @@ def _owner_abandonment_case(tmp_path):
     return api, store, neutral
 
 
-def _owner_abandonment_historical_neutral_case(tmp_path):
-    api, store, neutral = _owner_abandonment_case(tmp_path)
+def _owner_abandonment_historical_neutral_case(tmp_path, *, bare=False):
+    api, store, neutral = _owner_abandonment_case(tmp_path, bare=bare)
     api.unresolved = False
     api.review_state = "COMMENTED"
     api.review_sha = api.head_sha
@@ -3657,10 +3665,12 @@ def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_pat
     )
 
 
-def _owner_abandonment_transitive_case(tmp_path, lineage_hazard=None):
+def _owner_abandonment_transitive_case(tmp_path, lineage_hazard=None, *, bare=False):
     neutral_head = "9" * 40
     source_head = neutral_head if lineage_hazard == "cycle" else "8" * 40
-    api, store, abandoned = _owner_abandonment_historical_neutral_case(tmp_path)
+    api, store, abandoned = _owner_abandonment_historical_neutral_case(
+        tmp_path, bare=bare,
+    )
     abandoned_reservation = deepcopy(store.action(abandoned["key"]))
 
     Coordinator(
@@ -3696,9 +3706,9 @@ def _owner_abandonment_transitive_case(tmp_path, lineage_hazard=None):
     assert any(
         proof.get("task_id") == neutral["task_id"]
         and proof.get("receipt_result") == "ready"
-        for proof in StateStore(store.path).snapshot()["enrollments"]["16"][
-            "receipt_proofs"
-        ]
+        for proof in StateStore(store.path).snapshot()["enrollments"]["16"].get(
+            "receipt_proofs", [],
+        )
     )
     coordinator = Coordinator(
         api, StateStore(store.path), clock=lambda: 1790856660,
@@ -4163,6 +4173,74 @@ def _previous_receipt_projection(action):
 
 
 @pytest.mark.parametrize("compacted", [False, True], ids=["live-copy", "proof-only"])
+def test_bare_enrollment_abandonment_lineage_survives_restart_and_compaction(
+        tmp_path, compacted):
+    (
+        api, store, abandoned, reservation, recovery, neutral, source,
+        _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path, bare=True)
+    before = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert before.get("authorized_head") is None
+    assert {proof["task_id"] for proof in before["receipt_proofs"]} == {
+        neutral["task_id"], source["task_id"],
+    }
+    if compacted:
+        api.review_state = "APPROVED"
+        api.review_sha = source_head
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+    StateStore(store.path).retire(
+        16, source_head, current_main_sha=FINAL_RESULT_HEAD,
+    )
+    assert StateStore(store.path).action(neutral["key"]) is None
+    if compacted:
+        assert StateStore(store.path).action(source["key"]) is None
+    api.review_state = api.review_sha = None
+
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+    snapshot = {"issue": 16, "pull": api.pull, "comments": api.comments}
+    assert coordinator._owner_abandonment_successor_proven(snapshot, recovery)
+    assert coordinator._owner_abandonment_task_terminal(
+        snapshot, reservation, recovery, list(api.tasks.values()),
+    )
+    original_reconcile = coordinator._reconcile_actions
+    apply_busy_keys = []
+
+    def reconcile(snapshot, actions, **kwargs):
+        result = original_reconcile(snapshot, actions, **kwargs)
+        if kwargs["apply"]:
+            apply_busy_keys.append(kwargs["busy_details"]["action_keys"])
+        return result
+
+    coordinator._reconcile_actions = reconcile
+    result = coordinator.run(apply=True)["pull_requests"][0]
+    assert result["head"] == source_head
+    assert apply_busy_keys
+    assert all(abandoned["key"] not in keys for keys in apply_busy_keys)
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+    after = StateStore(store.path).snapshot()
+    assert after["actions"][abandoned["key"]] == reservation
+    assert after["enrollments"]["16"]["owner_abandonments"] == [recovery]
+    for field in ("attempts", "neutral_attempts", "receipt_proofs"):
+        assert after["enrollments"]["16"][field] == before[field]
+    assert _authorized_result_heads(
+        16, after["enrollments"]["16"], after["actions"], api.comments,
+        FINAL_RESULT_HEAD,
+    ) == (None, set(), set())
+
+    writes = deepcopy(api.writes)
+    task_posts = api.task_posts
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert api.writes == writes
+    assert api.task_posts == task_posts
+
+
+@pytest.mark.parametrize("compacted", [False, True], ids=["live-copy", "proof-only"])
 @pytest.mark.parametrize("identical_duplicate", [False, True])
 @pytest.mark.parametrize("summary_inventory", [False, True])
 def test_owner_abandonment_previous_projection_advances_after_reopen(
@@ -4253,6 +4331,7 @@ def _owner_abandonment_previous_case(tmp_path, compacted):
     ("task_id", None), ("task_id", []), ("task_id", "other-task"),
     ("receipt_task_id", "other-task"), ("receipt_start_head", "invalid"),
     ("issue", 99), ("head", "7" * 40), ("dispatch_nonce", "other-nonce"),
+    ("body", None), ("body", ""), ("body", "other-prompt"),
 ])
 def test_owner_abandonment_reconciles_live_copy_by_durable_key(
         tmp_path, field, value):
@@ -4260,7 +4339,10 @@ def test_owner_abandonment_reconciles_live_copy_by_durable_key(
         _owner_abandonment_previous_case(tmp_path, False)
     )
     def corrupt_live_copy(state):
-        state["actions"][source["key"]][field] = value
+        if field == "body" and value is None:
+            state["actions"][source["key"]].pop(field)
+        else:
+            state["actions"][source["key"]][field] = value
 
     StateStore(store.path)._mutate(corrupt_live_copy)
     writes = list(api.writes)
@@ -5023,6 +5105,78 @@ def test_prepared_action_transition_isolated_after_identity_swap(tmp_path):
     assert len(new_writes) == 1
     assert new_writes[0][0] == "agents/repos/lindayi/hermes-mobile/tasks"
     assert "PR #17" in new_writes[0][1]["prompt"]
+
+
+def test_identity_blocked_commands_do_not_defer_other_pr_consumption(
+        tmp_path, monkeypatch):
+    api, store, _ = _owner_abandonment_case(tmp_path)
+    unrelated_pull = _add_unrelated_enrolled_pull(api, store)
+    unrelated_pull["head"]["ref"] = "topic-17"
+    _bind_unrelated_task_artifacts(api)
+    original_get_all = api.get_all
+    commands = [
+        {
+            "id": 8881 + index, "user": {"id": OWNER},
+            "body": f"/hermes enroll {head}",
+            "created_at": "2026-10-01T12:10:00Z",
+            "updated_at": updated_at,
+        }
+        for index, (head, updated_at) in enumerate([
+            (api.head_sha, "2026-10-01T12:10:00Z"),
+            ("7" * 40, "2026-10-01T12:10:00Z"),
+            (api.head_sha, "2026-10-01T12:11:00Z"),
+        ])
+    ]
+
+    def get_all(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments"):
+            return deepcopy(commands)
+        return original_get_all(route, collection=collection)
+
+    api.get_all = get_all
+    original_enrollment = cloud_coordinator.enrollment_from_comment
+    validated = []
+
+    def enrollment_from_comment(issue, pull, comment, **kwargs):
+        if issue["number"] == 17:
+            validated.append(comment["id"])
+        return original_enrollment(issue, pull, comment, **kwargs)
+
+    monkeypatch.setattr(
+        cloud_coordinator, "enrollment_from_comment", enrollment_from_comment,
+    )
+    source = _synthetic_initial_source()
+    source.update(
+        head_sha=api.pull["head"]["sha"], head_ref=api.pull["head"]["ref"],
+        pull_id=api.pull["id"], pull_node_id=api.pull["node_id"],
+    )
+    before = StateStore(store.path).snapshot()
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+    _inject_identity_swap_at_last_source_fence(api, coordinator, source)
+    result = coordinator.run(apply=True)
+    plans = {item["issue"]: item for item in result["pull_requests"]}
+    assert plans[16]["reasons"] == ["pull-identity"]
+    assert plans[17]["repair_requested"] is True
+    assert _pull_issue_state(StateStore(store.path).snapshot(), 16) == (
+        _pull_issue_state(before, 16)
+    )
+    assert StateStore(store.path).snapshot()["cursor"] == before["cursor"]
+    assert not StateStore(store.path).event_seen(7771)
+    assert validated == [8881, 8882, 8883]
+    assert all(StateStore(store.path).event_seen(key) for key in validated)
+
+    writes = deepcopy(api.writes)
+    task_posts = api.task_posts
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert validated == [8881, 8882, 8883]
+    assert not StateStore(store.path).event_seen(7771)
+    assert StateStore(store.path).snapshot()["cursor"] == before["cursor"]
+    assert api.writes == writes
+    assert api.task_posts == task_posts
 
 
 def test_pull_isolation_keeps_concurrent_state_compare_and_swap(tmp_path):

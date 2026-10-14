@@ -6868,7 +6868,6 @@ class Coordinator:
                     for action in actions.values()
                     if isinstance(action, dict)
                     and action.get("task_id") == task_id
-                    and "body" in action
                 )):
             return None
         view = {
@@ -8379,10 +8378,10 @@ class Coordinator:
         for recovery in plan.get("owner_recoveries", ()):
             if recovery["issue"] not in identity_blocked:
                 self._fence_owner_abandonment(recovery, plan["main_sha"])
-        deferred_command_events = any(
-            issue in identity_blocked
-            for issue, _ in plan.get("processed_by_issue", ())
-        )
+        deferred_command_ids = {
+            key for issue, key in plan.get("processed_by_issue", ())
+            if issue in identity_blocked
+        }
         if identity_blocked:
             self.store.restore_prepared_pull_state(identity_blocked)
         lifecycle_events = plan.get("lifecycle_events", [
@@ -8397,12 +8396,12 @@ class Coordinator:
         preparation_base = self.store._preparation_base
         commit_cursor = (
             preparation_base.get("cursor")
-            if deferred_command_events and isinstance(preparation_base, dict)
+            if deferred_command_ids and isinstance(preparation_base, dict)
             else plan["cursor"]
         )
         self.store.commit_scan(
             commit_cursor,
-            [] if deferred_command_events else plan["processed"],
+            [key for key in plan["processed"] if key not in deferred_command_ids],
             commands=[
                 (command, item) for command, item in plan["commands"]
                 if item.get("issue") not in identity_blocked
@@ -9842,7 +9841,11 @@ class StateStore:
                     and action.get("task_type") == "neutral"):
                 self._supersede_neutral_predecessors(data, action)
             enrollment = data["enrollments"].get(str(action.get("issue")), {})
-            if (enrollment.get("authorized_head") is not None
+            if ((enrollment.get("authorized_head") is not None or any(
+                    record["issue"] == action.get("issue")
+                    for _, record in _valid_owner_abandonment_claims(
+                        enrollment, data["actions"],
+                    )))
                     and status == "completed" and fields.get("receipt_result")):
                 # Persist the validated proof in the same write as completion,
                 # independently of the action that lifecycle compaction retires.

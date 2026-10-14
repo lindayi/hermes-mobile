@@ -201,7 +201,7 @@ digests are retained below. The current source fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `0626e54481a22832e952d361b02683d4edbc7154a39902e58d1eb2b72ed66038` |
+| `deploy/cloud_coordinator.py` | `287f55c530a350e847c1358b783f9bf77d9457962de4f8d0afb237cb21a3b96b` |
 
 | Historical candidate | SHA-256 |
 | --- | --- |
