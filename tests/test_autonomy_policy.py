@@ -212,7 +212,7 @@ _PR105_OWNER_ABANDONMENT_FIXTURE = {
 }
 
 _PR109_SUPERVISED_CORRECTION_FIXTURE = {
-    'deploy/cloud_coordinator.py': 'cc8c9f20cfd14f58848fc78b6f9e55640cf30177a8fecf7bbc394523d949b6fd',
+    'deploy/cloud_coordinator.py': 'fdeead9ef44de544cf7df733ae96b3be2471cf4fd0d47c62a9ad4a3cac9ef2d4',
 }
 
 _PR109_SUPERVISED_CORRECTION11_HISTORICAL_FIXTURE = {

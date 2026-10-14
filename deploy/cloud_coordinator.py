@@ -7136,8 +7136,10 @@ class Coordinator:
 
         def bound_to_current_pull(candidate):
             return (
-                candidate.get("owner_id") == OWNER_ID
-                and candidate.get("repository_id") == REPOSITORY_ID
+                type(candidate.get("owner_id")) is int
+                and candidate["owner_id"] == OWNER_ID
+                and type(candidate.get("repository_id")) is int
+                and candidate["repository_id"] == REPOSITORY_ID
                 and candidate.get("head_ref") == head.get("ref")
                 and _pull_identity(pull, candidate)
                 and _valid_receipt_proof(candidate, snapshot["comments"])
@@ -8001,7 +8003,9 @@ class Coordinator:
                 final_enrollment = final_state["enrollments"].get(
                     str(claimed_action["issue"]), {},
                 )
-                if (final_state["actions"].get(key) != claimed_action
+                if (not _canonical_json_match(
+                            final_state["actions"].get(key), claimed_action,
+                        )
                         or not _canonical_json_match(
                             final_authorization.get("projection"),
                             authorization_fence.get("projection"),
@@ -8045,7 +8049,9 @@ class Coordinator:
                     str(claimed_action["issue"]), {},
                 )
                 if (
-                        publication_state["actions"].get(key) != claimed_action
+                        not _canonical_json_match(
+                            publication_state["actions"].get(key), claimed_action,
+                        )
                         or not _canonical_json_match(
                             _dispatch_authorization_inputs(
                                 publication_state, claimed_action["issue"],

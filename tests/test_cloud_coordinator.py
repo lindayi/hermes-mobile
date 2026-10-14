@@ -4245,6 +4245,62 @@ def test_owner_abandonment_apply_rejects_lone_float_binding_after_compaction(
     assert api.task_posts == task_posts
 
 
+@pytest.mark.parametrize("field", ["owner_id", "repository_id"])
+def test_owner_abandonment_rejects_numeric_identity_alias_in_retained_proof(
+        tmp_path, field):
+    (
+        api, store, abandoned, reservation, recovery, neutral, source,
+        _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path, bare=True)
+    api.review_state = "APPROVED"
+    api.review_sha = source_head
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    StateStore(store.path).retire(
+        16, source_head, current_main_sha=FINAL_RESULT_HEAD,
+    )
+    assert StateStore(store.path).action(neutral["key"]) is None
+    assert StateStore(store.path).action(source["key"]) is None
+
+    def alias_retained_identity(state):
+        proof = next(
+            proof for proof in state["enrollments"]["16"]["receipt_proofs"]
+            if proof.get("task_id") == neutral["task_id"]
+        )
+        proof[field] = float(proof[field])
+
+    StateStore(store.path)._mutate(alias_retained_identity)
+    api.review_state = api.review_sha = None
+    restarted = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+    assert not restarted._owner_abandonment_successor_proven(
+        {"pull": api.pull, "comments": api.comments}, recovery,
+    )
+    before = StateStore(store.path).snapshot()
+    writes = deepcopy(api.writes)
+    task_posts = api.task_posts
+
+    result = restarted.run(apply=True)["pull_requests"][0]
+
+    assert result["head"] == source_head
+    assert api.writes == writes
+    assert api.task_posts == task_posts
+    after = StateStore(store.path).snapshot()
+    assert after["actions"][abandoned["key"]] == reservation
+    assert after["enrollments"]["16"]["owner_abandonments"] == [recovery]
+    assert after["enrollments"]["16"]["attempts"] == before[
+        "enrollments"
+    ]["16"]["attempts"]
+    assert after["enrollments"]["16"]["neutral_attempts"] == before[
+        "enrollments"
+    ]["16"]["neutral_attempts"]
+    assert after["enrollments"]["16"]["receipt_proofs"] == before[
+        "enrollments"
+    ]["16"]["receipt_proofs"]
+
+
 def _previous_receipt_projection(action):
     fields = {
         "key", "issue", "kind", "status", "head", "task_id",
@@ -5681,6 +5737,86 @@ def test_final_publication_fence_follows_last_legacy_task_read(
             write for write in api.writes
             if write[0].endswith("/requested_reviewers")
         ] == first_reviewer_writes
+
+
+@pytest.mark.parametrize("snapshot_number", [1, 2], ids=[
+    "final-state-read", "publication-state-read",
+])
+@pytest.mark.parametrize(("target", "field"), [
+    ("claimed", "owner_id"),
+    ("claimed", "repository_id"),
+    ("abandonment", "actor_id"),
+    ("recovered_action", "owner_id"),
+])
+def test_final_publication_fence_rejects_numeric_identity_alias(
+        tmp_path, monkeypatch, snapshot_number, target, field):
+    api, store, _, _, _, _, _, _, source_head, _ = (
+        _owner_abandonment_transitive_case(tmp_path)
+    )
+    api.source_failure = True
+    api.source_failure_sha = source_head
+    api.review_state = "APPROVED"
+    api.review_sha = source_head
+    StateStore(store.path)._mutate(
+        lambda state: [
+            proof.pop("head_ref", None)
+            for proof in state["enrollments"]["16"]["receipt_proofs"]
+        ],
+    )
+    writes_before = deepcopy(api.writes)
+    posts_before = api.task_posts
+    final_authorization = [False]
+    publication_reads = [0]
+    original_snapshot = StateStore.snapshot
+    original_authority = CloudCoordinator._authorized_dispatch_head
+
+    def snapshot(state_store):
+        if final_authorization[0]:
+            publication_reads[0] += 1
+            if publication_reads[0] == snapshot_number:
+                def alias_claimed_action(state):
+                    if target == "claimed":
+                        candidates = [
+                            action for action in state["actions"].values()
+                            if action.get("issue") == 16
+                            and action.get("head") == source_head
+                            and action.get("status") == "sending"
+                        ]
+                        assert len(candidates) == 1
+                        record = candidates[0]
+                    elif target == "abandonment":
+                        record = state["enrollments"]["16"][
+                            "owner_abandonments"
+                        ][0]
+                    else:
+                        record = state["actions"][
+                            state["enrollments"]["16"]["owner_abandonments"][0][
+                                "action_key"
+                            ]
+                        ]
+                    record[field] = float(record[field])
+
+                state_store._mutate(alias_claimed_action)
+        return original_snapshot(state_store)
+
+    def authority(self, issue, head, base_sha=None, **kwargs):
+        authorized = original_authority(self, issue, head, base_sha, **kwargs)
+        if kwargs.get("require_base_match") is True:
+            final_authorization[0] = True
+        return authorized
+
+    monkeypatch.setattr(StateStore, "snapshot", snapshot)
+    monkeypatch.setattr(
+        CloudCoordinator, "_authorized_dispatch_head", authority,
+    )
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert publication_reads[0] >= snapshot_number
+    assert api.task_posts == posts_before
+    assert api.writes == writes_before
 
 
 @pytest.mark.parametrize("mutation", ["edited", "deleted", "substituted"])

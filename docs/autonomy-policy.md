@@ -201,11 +201,15 @@ Unrelated PRs can still commit; the existing state compare-and-swap remains acti
 Malformed non-list retained `receipt_proofs` fail closed for that PR without blocking
 unrelated work. Correction11's root-binding and authorization-projection checks remain
 unchanged. Correction12 rejects non-integer stored issue aliases before per-PR identity
-isolation. Its final coordinator fingerprint is:
+isolation, and retained proof edges require exact integer owner and repository IDs.
+The claimed action is compared with canonical JSON at both final publication reads.
+Recovered abandonment records and abandonment-keyed actions remain protected by the
+canonical `_dispatch_authorization_inputs` projection at both reads; the ordinary
+equality checks for those records are retained. Its final coordinator fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `cc8c9f20cfd14f58848fc78b6f9e55640cf30177a8fecf7bbc394523d949b6fd` |
+| `deploy/cloud_coordinator.py` | `fdeead9ef44de544cf7df733ae96b3be2471cf4fd0d47c62a9ad4a3cac9ef2d4` |
 
 | Historical candidate | SHA-256 |
 | --- | --- |
