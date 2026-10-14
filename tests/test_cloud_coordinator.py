@@ -4396,6 +4396,14 @@ def test_owner_continuation_command_mismatches_cannot_authorize_dispatch(
     assert result["reasons"] == ["unauthorized-continuation"]
     assert api.task_posts == posts
     assert "owner_continuations" not in current
+    if hazard == "detail-error":
+        assert not cloud_coordinator._event_consumed(
+            StateStore(store.path).snapshot(), str(7773),
+        )
+    elif hazard == "missing-task":
+        assert cloud_coordinator._event_consumed(
+            StateStore(store.path).snapshot(), str(7773),
+        )
     assert current["attempts"] == attempts
 
 
@@ -4983,6 +4991,70 @@ def test_owner_continuation_requires_original_terminal_task_and_complete_occupan
     assert "owner_continuations" not in current
 
 
+@pytest.mark.parametrize("multiple_roots", [False, True])
+def test_owner_continuation_task_detail_outage_retries_original_command(
+        tmp_path, multiple_roots):
+    api, store, abandonment, _, _ = _owner_continuation_advanced_case(
+        tmp_path, multiple_roots=multiple_roots,
+    )
+    roots = store.snapshot()["enrollments"]["16"]["owner_abandonments"]
+    commands = [
+        comment for comment in api.comments
+        if comment["user"]["id"] == OWNER
+        and comment["body"].startswith("/hermes continue-unverified ")
+    ]
+    before = store.snapshot()
+    posts = api.task_posts
+    original_get = api.get
+    unavailable = [True]
+
+    def task_detail(route):
+        if unavailable[0] and route.endswith(f"/tasks/{abandonment['task_id']}"):
+            raise ApiError("task detail temporarily unavailable", status=503)
+        return original_get(route)
+
+    api.get = task_detail
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    deferred = StateStore(store.path).snapshot()
+    assert not deferred["enrollments"]["16"].get("owner_continuations")
+    assert all(not cloud_coordinator._event_consumed(
+        deferred, str(command["id"]),
+    ) for command in commands)
+    assert deferred["enrollments"]["16"]["attempts"] == (
+        before["enrollments"]["16"]["attempts"]
+    )
+    assert deferred["enrollments"]["16"]["owner_abandonments"] == roots
+    assert all(deferred["actions"][root["action_key"]]
+               == before["actions"][root["action_key"]] for root in roots)
+    assert api.task_posts == posts
+
+    unavailable[0] = False
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    accepted = StateStore(store.path).snapshot()
+    assert len(accepted["enrollments"]["16"]["owner_continuations"]) == len(roots)
+    assert all(cloud_coordinator._event_consumed(
+        accepted, str(command["id"]),
+    ) for command in commands)
+    assert api.task_posts == posts + 1
+    assert accepted["enrollments"]["16"]["attempts"] == (
+        before["enrollments"]["16"]["attempts"] + 1
+    )
+    assert sum(
+        comment["body"].startswith("/hermes continue-unverified ")
+        for comment in api.comments
+    ) == len(commands)
+    writes = list(api.writes)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    assert api.task_posts == posts + 1
+    assert api.writes == writes
+
+
 @pytest.mark.parametrize(("stage", "boundary"), [
     ("admission", "planning"), ("admission", "historical-task"),
     ("publication", "planning"), ("publication", "historical-task"),
@@ -5262,6 +5334,17 @@ def test_owner_continuation_two_distinct_roots_frozen_successor(
     for field in ("attempts", "neutral_attempts", "neutral_anchor_reservations",
                   "owner_abandonments", "owner_continuations"):
         assert reopened[field] == frozen[field]
+    bindings = cloud_coordinator._owner_continuation_bindings(successor)
+    assert bindings and len(bindings) == 2
+    assert reopened["comment"] != frozen["comment"]
+    assert {binding["enrollment_comment_id"] for binding in bindings} == {
+        frozen["comment"],
+    }
+    mixed_epoch = deepcopy(successor)
+    mixed_epoch["owner_continuation_companions"][0]["binding"][
+        "enrollment_comment_id"
+    ] = reopened["comment"]
+    assert cloud_coordinator._owner_continuation_bindings(mixed_epoch) is None
     api.source_failure = True
     api.source_failure_sha = result_head
     api.workflow_runs = [source_run(id=568, run_number=50, head_sha=result_head)]
@@ -5325,6 +5408,89 @@ def test_owner_continuation_incomplete_cohort_does_not_consume_dispositions(
     assert api.task_posts == posts
     assert not any(route.endswith(("/tasks", "/requested_reviewers", "/merge"))
                    for route, _ in api.writes[writes:])
+
+
+@pytest.mark.parametrize("disposition_id", [7781, 7782])
+@pytest.mark.parametrize("mutation", ["edited", "deleted"])
+def test_owner_continuation_final_admission_defers_all_roots_together(
+        tmp_path, monkeypatch, disposition_id, mutation):
+    api, store, _, _, _ = _owner_continuation_advanced_case(
+        tmp_path, multiple_roots=True,
+    )
+    roots = deepcopy(store.snapshot()["enrollments"]["16"]["owner_abandonments"])
+    target = deepcopy(next(
+        comment for comment in api.comments if comment["id"] == disposition_id
+    ))
+    original_fence = CloudCoordinator._fence_owner_continuation
+    injected = []
+
+    def mutate_at_fence(self, recovery, main_sha, *, successor_action=None):
+        record = recovery["record"]
+        if (successor_action is None
+                and record["disposition_comment_id"] == disposition_id
+                and not injected):
+            injected.append(True)
+            comment = next(
+                item for item in api.comments if item["id"] == disposition_id
+            )
+            if mutation == "edited":
+                comment["body"] += " edited"
+                comment["updated_at"] = "2026-10-01T12:13:00Z"
+            else:
+                api.comments.remove(comment)
+        return original_fence(
+            self, recovery, main_sha, successor_action=successor_action,
+        )
+
+    monkeypatch.setattr(
+        CloudCoordinator, "_fence_owner_continuation", mutate_at_fence,
+    )
+    before = store.snapshot()
+    posts = api.task_posts
+    writes = len(api.writes)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    deferred = StateStore(store.path).snapshot()
+
+    assert injected == [True]
+    assert not deferred["enrollments"]["16"].get("owner_continuations")
+    assert all(not cloud_coordinator._event_consumed(deferred, str(comment_id))
+               for comment_id in (7781, 7782))
+    assert deferred["enrollments"]["16"]["attempts"] == (
+        before["enrollments"]["16"]["attempts"]
+    )
+    assert deferred["enrollments"]["16"]["owner_abandonments"] == roots
+    assert api.task_posts == posts
+    assert not any(route.endswith(("/tasks", "/requested_reviewers", "/merge"))
+                   for route, _ in api.writes[writes:])
+
+    api.comments[:] = [
+        comment for comment in api.comments
+        if comment["id"] != disposition_id
+    ]
+    api.comments.append(target)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    recovered = StateStore(store.path).snapshot()
+    assert len(recovered["enrollments"]["16"]["owner_continuations"]) == 2
+    assert all(cloud_coordinator._event_consumed(
+        recovered, str(comment_id),
+    ) for comment_id in (7781, 7782))
+    assert api.task_posts == posts + 1
+    successor = next(
+        action for action in recovered["actions"].values()
+        if action.get("owner_continuation_binding")
+    )
+    anchor_id = successor["receipt_anchor_comment_id"]
+    assert sum(comment["id"] == anchor_id for comment in api.comments) == 1
+    writes = list(api.writes)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    assert api.task_posts == posts + 1
+    assert api.writes == writes
 
 
 def test_owner_continuation_deferred_cohort_survives_command_cursor(tmp_path, monkeypatch):

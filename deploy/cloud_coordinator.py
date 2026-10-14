@@ -116,6 +116,7 @@ LIFECYCLE_FILE_NAME = "workflow-events.json"
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_EVENTS = 4000
 TOMBSTONE_LIMIT = 512
+_OWNER_CONTINUATION_EVIDENCE_UNAVAILABLE = object()
 _LIFECYCLE_OWNER_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 LIFECYCLE_OUTCOMES = {
     "issue_failed": "failed",
@@ -7364,6 +7365,12 @@ class Coordinator:
             "actor_id": OWNER_ID,
             "accepted_at": now,
         }
+        task_terminal = self._owner_abandonment_task_terminal(
+            snapshot, action, historical, snapshot.get("tasks"),
+            supervised_head_advance=True, unavailable_is_none=True,
+        )
+        if task_terminal is None:
+            return _OWNER_CONTINUATION_EVIDENCE_UNAVAILABLE
         if (
                 not _owner_continuation_record_valid(record)
                 or _current_owner_unverified_continuation_command(
@@ -7372,10 +7379,7 @@ class Coordinator:
                 or _current_owner_continuation_enrollment(
                     self.api, record, pull,
                 ) is None
-                or not self._owner_abandonment_task_terminal(
-                    snapshot, action, historical, snapshot.get("tasks"),
-                    supervised_head_advance=True,
-                )
+                or not task_terminal
                 or not _owner_continuation_writers_clear(
                     previous, state["actions"], state.get("outbox", {}),
                     item["issue"], historical["action_key"],
@@ -7528,6 +7532,12 @@ class Coordinator:
             record = self._owner_continuation_record(
                 item, enrollment, snapshot, state,
             )
+            if record is _OWNER_CONTINUATION_EVIDENCE_UNAVAILABLE:
+                processed = [
+                    key for key in processed
+                    if key != str(item["command_comment_id"])
+                ]
+                continue
             if record is None:
                 continue
             existing = enrollment.get("owner_continuations", [])
@@ -7747,15 +7757,19 @@ class Coordinator:
 
     def _owner_abandonment_task_terminal(
             self, snapshot, action, record, tasks, *,
-            supervised_head_advance=False):
+            supervised_head_advance=False, unavailable_is_none=False):
         if not _owner_abandonment_inventory_valid(tasks, action, snapshot, record):
             return False
         try:
             task = self.api.get(
                 f"agents/repos/{REPOSITORY}/tasks/{quote(record['task_id'], safe='')}",
             )
-        except CoordinatorError:
+        except ApiError as error:
+            if unavailable_is_none and error.status != 404:
+                return None
             return False
+        except CoordinatorError:
+            return None if unavailable_is_none else False
         pull = snapshot.get("pull")
         base = pull.get("base") if isinstance(pull, dict) else None
         head = pull.get("head") if isinstance(pull, dict) else None
@@ -9149,7 +9163,11 @@ class Coordinator:
         )
         for recovery in plan.get("owner_recoveries", ()):
             self._fence_owner_abandonment(recovery, plan["main_sha"])
+        deferred_continuation_issues = set()
         for recovery in list(plan.get("owner_continuations", ())):
+            issue = recovery["issue"]
+            if issue in deferred_continuation_issues:
+                continue
             try:
                 self._fence_owner_continuation(recovery, plan["main_sha"])
             except CoordinatorError:
@@ -9159,35 +9177,54 @@ class Coordinator:
                             != _canonical_sha256(self.store._preparation_base)):
                         raise _PreparedScanChanged(
                             "Coordinator state changed during continuation preparation",
-                            issue=recovery["record"]["issue"],
+                            issue=issue,
                         )
-                record = recovery["record"]
+                deferred_continuation_issues.add(issue)
+                cohort = [
+                    item for item in plan["owner_continuations"]
+                    if item["issue"] == issue
+                ]
+                disposition_ids = {
+                    str(item["record"]["disposition_comment_id"])
+                    for item in cohort
+                }
+                disposition_ids.update(
+                    str(item["command_comment_id"])
+                    for command, item in plan["commands"]
+                    if command == "continue-unverified" and item["issue"] == issue
+                )
                 plan["commands"] = [
                     (command, item) for command, item in plan["commands"]
                     if not (
                         command == "continue-unverified"
-                        and item.get("command_comment_id")
-                            == record["disposition_comment_id"]
+                        and item.get("issue") == issue
                     )
                 ]
                 plan["processed"] = [
                     comment_id for comment_id in plan["processed"]
-                    if comment_id != str(record["disposition_comment_id"])
+                    if comment_id not in disposition_ids
                 ]
-                plan["owner_continuations"].remove(recovery)
-                enrollment = plan["enrollments"].get(str(record["issue"]), {})
-                enrollment["owner_continuations"] = [
+                plan["owner_continuations"] = [
+                    item for item in plan["owner_continuations"]
+                    if item["issue"] != issue
+                ]
+                enrollment = plan["enrollments"].get(str(issue), {})
+                retained = [
                     item for item in enrollment.get("owner_continuations", [])
-                    if item != record
+                    if str(item.get("disposition_comment_id")) not in disposition_ids
                 ]
+                if retained:
+                    enrollment["owner_continuations"] = retained
+                else:
+                    enrollment.pop("owner_continuations", None)
                 snapshot = next(
                     item for item in plan["snapshots"]
-                    if item["issue"] == record["issue"]
+                    if item["issue"] == issue
                 )
                 snapshot["enrollment"] = enrollment
                 pull_plan = next(
                     item for item in plan["pull_requests"]
-                    if item["issue"] == record["issue"]
+                    if item["issue"] == issue
                 )
                 pull_plan.update(
                     auto_merge_eligible=False,

@@ -196,12 +196,15 @@ replace a ready-receipt path from the bound successor. SOURCE continuation proof
 require their immutable owner anchor even if retained state omits optional anchor
 fields. Every cohort member must bind the same frozen enrollment comment, head, main,
 and immutable pull identity; a later enrollment cannot mix or renew a spent epoch.
-These candidate pins identify the exact proposed source bytes only; they do not
-establish review, merge, operational authorization, or activation.
+Newly planned cohort dispositions are admitted atomically per PR. Temporary task
+detail failures leave the original command retryable; positive invalid evidence
+does not authorize dispatch. These candidate pins identify exact proposed source
+bytes only; they do not establish review, merge, operational authorization, or
+activation.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `56a2eb920201ca1a1c99983200d23e9a560a1d778d1af0f77df5291663d651c4` |
+| `deploy/cloud_coordinator.py` | `b7b2e30f4432b2527165a85b1e5737a89eac28d19800de0ffc4bb6e5d29834ea` |
 | `deploy/task_receipts.py` | `7979a9df432d4a108cad727ba395917060b053fee46b7998d74ae331f5972008` |
 
 ### Retained merged source and deliberate native refreshes

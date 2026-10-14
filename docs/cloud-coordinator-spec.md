@@ -798,6 +798,11 @@ A continuation record must match the active enrollment's frozen comment ID, head
 base, owner-authorized head, and immutable pull/repository identity. Every member
 of a multi-root cohort must carry that same enrollment-comment ID; close/reopen
 cannot combine records from different enrollment epochs or renew a spent allowance.
+Newly planned dispositions for one PR form one admission unit. If any member's
+final fence fails, defer every newly planned disposition for that PR, remove all
+their processed IDs and staged continuation records, and suppress dependent
+publication plans together. Preserve previously committed history and claims, and
+continue independent reconciliation for other PRs.
 A failed comparison rejects the affected PR's continuation. If durable state
 changed during preparation, discard both the prepared mutations and all dependent
 scan plans, then rebuild the complete scan once from fresh durable state.
@@ -875,6 +880,12 @@ positive ancestry from the historical recovery head to the current head and from
 the historical base to the current main. Any uncertain publication, incomplete
 read, identity mismatch, ambiguous or competing disposition, or post-plan change
 rejects the affected write.
+
+A temporary or uncertain task-detail API failure is not a positive rejection.
+Do not consume its disposition comment ID; retry the original immutable command
+from the complete bounded comment inventory on a later or cold poll. A definitive
+missing-task response and positively invalid, stale, edited, or ambiguous evidence
+remain fail-closed and cannot authorize dispatch.
 
 Persist a bounded record separately from the historical abandonment records. The
 record binds the exact historical action and abandonment, immutable disposition
