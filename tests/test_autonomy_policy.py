@@ -212,6 +212,10 @@ _PR105_OWNER_ABANDONMENT_FIXTURE = {
 }
 
 _PR109_SUPERVISED_CORRECTION_FIXTURE = {
+    'deploy/cloud_coordinator.py': '3e129cc0a17c90f876dd3a4c2b4923669988ff03b67b35e4d9be1b1c78d0d9fd',
+}
+
+_PR109_SUPERVISED_CORRECTION12_HISTORICAL_FIXTURE = {
     'deploy/cloud_coordinator.py': 'fdeead9ef44de544cf7df733ae96b3be2471cf4fd0d47c62a9ad4a3cac9ef2d4',
 }
 
@@ -679,7 +683,7 @@ def test_current_pr109_candidate_table_matches_source_bytes():
     root = Path(__file__).resolve().parents[1]
     docs = (root / 'docs/autonomy-policy.md').read_text()
     section = docs.split(
-        '### PR #109 supervised correction12 current candidate', 1,
+        '### PR #109 supervised correction13 current candidate', 1,
     )[1].split('### Retained merged source and deliberate native refreshes', 1)[0]
     rows = [
         line for line in section.splitlines()
@@ -688,6 +692,10 @@ def test_current_pr109_candidate_table_matches_source_bytes():
 
     actual = hashlib.sha256((root / 'deploy/cloud_coordinator.py').read_bytes()).hexdigest()
     assert rows == [f'| `deploy/cloud_coordinator.py` | `{actual}` |']
+    assert (
+        f'| Correction12 historical pin | '
+        f'`{_PR109_SUPERVISED_CORRECTION12_HISTORICAL_FIXTURE["deploy/cloud_coordinator.py"]}` |'
+    ) in section
     assert (
         f'| Correction11 historical pin | '
         f'`{_PR109_SUPERVISED_CORRECTION11_HISTORICAL_FIXTURE["deploy/cloud_coordinator.py"]}` |'

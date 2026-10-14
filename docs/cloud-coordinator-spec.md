@@ -771,7 +771,10 @@ unrelated pulls do not block this lineage.
 Every persisted abandonment record must resolve to one matching retained root
 action before any receipt, dispatch, reviewer, or terminal authority is granted.
 Missing, mismatched, or duplicate root claims block the affected enrollment. The
-immutable abandonment command is revalidated for both current and pre-upgrade
+record's issue, command-comment and actor IDs, and the root action's issue, owner,
+repository and pull IDs must be exact positive integers; the enrolled repository ID
+is validated the same way at pull snapshot admission.
+The immutable abandonment command is revalidated for both current and pre-upgrade
 receipt proofs at every applicable successor and final write fence; a current
 `head_ref` never replaces that check.
 Each candidate root binding is checked against the expected binding with canonical

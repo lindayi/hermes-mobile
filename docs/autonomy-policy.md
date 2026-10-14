@@ -184,7 +184,7 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 | `deploy/cloud_coordinator.py` | `4c8ce668d216035eb79af4adfa48946159d75419d726a43faec661c402b21dbe` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
 
-### PR #109 supervised correction12 current candidate
+### PR #109 supervised correction13 current candidate
 
 Issue #108's bounded correction10 retains agreement between legacy summary and
 detail task artifacts, reconciles every live action sharing a retained task ID
@@ -199,20 +199,21 @@ prepared records, skips its recovery and publication inputs, and retains the pre
 cursor when an owner command must be re-read.
 Unrelated PRs can still commit; the existing state compare-and-swap remains active.
 Malformed non-list retained `receipt_proofs` fail closed for that PR without blocking
-unrelated work. Correction11's root-binding and authorization-projection checks remain
-unchanged. Correction12 rejects non-integer stored issue aliases before per-PR identity
-isolation, and retained proof edges require exact integer owner and repository IDs.
-The claimed action is compared with canonical JSON at both final publication reads.
-Recovered abandonment records and abandonment-keyed actions remain protected by the
-canonical `_dispatch_authorization_inputs` projection at both reads; the ordinary
-equality checks for those records are retained. Its final coordinator fingerprint is:
+unrelated work. Corrections11 and12 retain their root-binding, authorization,
+stored-issue, proof-edge, canonical projection and late-race checks. Correction13
+also requires exact positive integer IDs when it first validates abandonment roots:
+record issue, command comment and actor IDs; action issue, owner, repository and pull
+IDs; and the enrolled repository ID in direct and isolated pull snapshots. Canonical
+projections still reject identity changes between reads, but cannot replace these
+initial type checks. The coordinator's final fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `fdeead9ef44de544cf7df733ae96b3be2471cf4fd0d47c62a9ad4a3cac9ef2d4` |
+| `deploy/cloud_coordinator.py` | `3e129cc0a17c90f876dd3a4c2b4923669988ff03b67b35e4d9be1b1c78d0d9fd` |
 
 | Historical candidate | SHA-256 |
 | --- | --- |
+| Correction12 historical pin | `fdeead9ef44de544cf7df733ae96b3be2471cf4fd0d47c62a9ad4a3cac9ef2d4` |
 | Correction11 historical pin | `c8c7e8ef85c7a9c9dd60347c8745d5f003252649b668b6d921c7e7f42a16ec77` |
 | Correction8 historical pin | `198cea06e3cd03046751167fe167438a4880cf7a052e2455480a4f4de736775e` |
 | Correction7 historical pin | `8235a894bdb48663ddd673e4c78dca75cd09fd8ee94f7f74b3dd45c0e4b1903e` |

@@ -5810,9 +5810,15 @@ def test_final_publication_fence_rejects_numeric_identity_alias(
         CloudCoordinator, "_authorized_dispatch_head", authority,
     )
 
-    Coordinator(
+    coordinator = Coordinator(
         api, StateStore(store.path), clock=lambda: 1790856660,
-    ).run(apply=True)
+    )
+    if target == "abandonment" and field == "actor_id":
+        with pytest.raises(
+                CoordinatorError, match="Owner task abandonment history is invalid"):
+            coordinator.run(apply=True)
+    else:
+        coordinator.run(apply=True)
 
     assert publication_reads[0] >= snapshot_number
     assert api.task_posts == posts_before
@@ -6475,6 +6481,192 @@ def test_owner_abandonment_covers_only_source_fix_reservations(
     assert cloud_coordinator._owner_abandonment_matches_action(
         record, action,
     ) is expected
+
+
+def _persist_owner_abandonment_before_next_poll(api, store):
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+    coordinator._dispatch_task = lambda action: "agent-running"
+    coordinator.run(apply=True)
+    assert StateStore(store.path).snapshot()["enrollments"]["16"][
+        "owner_abandonments"
+    ]
+
+
+@pytest.mark.parametrize(
+    "target,field,kind",
+    [
+        (target, field, kind)
+        for target, fields in (
+            ("record", ("issue", "command_comment_id", "actor_id")),
+            ("action", ("issue", "pull_id", "owner_id", "repository_id")),
+        )
+        for field in fields
+        for kind in ("float", "bool", "string", "zero", "negative", "missing")
+    ],
+)
+def test_owner_abandonment_rejects_malformed_root_identity_before_capture(
+        tmp_path, target, field, kind):
+    api, store, action = _owner_abandonment_case(tmp_path)
+    action = deepcopy(store.action(action["key"]))
+    record = {
+        "version": 1, "issue": action["issue"], "action_key": action["key"],
+        "task_id": action["task_id"], "task_created_at": action["task_created_at"],
+        "reservation_sha256": cloud_coordinator._reservation_sha256(action),
+        "head_sha": NEXT_RESULT_HEAD, "base_sha": CURRENT_MAIN,
+        "command_comment_id": 7771,
+        "command_body": (
+            f"/hermes abandon-unverified {action['task_id']} {NEXT_RESULT_HEAD}"
+        ),
+        "command_created_at": "2026-10-01T12:10:00Z", "actor_id": OWNER,
+        "accepted_at": "2026-10-01T12:11:00Z",
+    }
+    identity = record if target == "record" else action
+    value = identity[field]
+    if kind == "missing":
+        identity.pop(field)
+    else:
+        identity[field] = {
+            "float": float(value),
+            "bool": True,
+            "string": str(value),
+            "zero": 0,
+            "negative": -1,
+        }[kind]
+    if target == "action":
+        record["reservation_sha256"] = cloud_coordinator._reservation_sha256(action)
+
+    if target == "record":
+        assert not cloud_coordinator._owner_abandonment_record_valid(record)
+    else:
+        assert not cloud_coordinator._owner_abandonment_matches_action(
+            record, action,
+        )
+
+
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+def test_owner_abandonment_publication_still_works_with_authentic_identity(
+        tmp_path, publication):
+    if publication == "source":
+        api, store, _ = _owner_abandonment_case(tmp_path)
+        _persist_owner_abandonment_before_next_poll(api, store)
+        posts = api.task_posts
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        assert result["repair_requested"]
+        assert api.task_posts == posts + 1
+        return
+
+    api, store, _, _, _, _, _, _, source_head, _ = (
+        _owner_abandonment_transitive_case(tmp_path)
+    )
+    api.review_state = api.review_sha = None
+    api.requested_reviewers = []
+    api.unresolved = False
+    writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)["pull_requests"][0]
+
+    assert result["head"] == source_head
+    reviewer_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    assert reviewer_writes[:-1] == writes
+    assert len(reviewer_writes) == len(writes) + 1
+
+
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+def test_owner_abandonment_initial_identity_alias_blocks_publication_after_restart(
+        tmp_path, publication):
+    if publication == "source":
+        api, store, abandoned = _owner_abandonment_case(tmp_path)
+        _persist_owner_abandonment_before_next_poll(api, store)
+        enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+        recovery = enrollment["owner_abandonments"][0]
+        source_head = NEXT_RESULT_HEAD
+        abandoned_reservation = StateStore(store.path).action(abandoned["key"])
+    else:
+        (
+            api, store, abandoned, abandoned_reservation, recovery, _, _, _,
+            source_head, _,
+        ) = _owner_abandonment_transitive_case(tmp_path)
+        StateStore(store.path).retire(
+            16, source_head, current_main_sha=FINAL_RESULT_HEAD,
+        )
+
+    def inject_alias(state):
+        record = state["enrollments"]["16"]["owner_abandonments"][0]
+        if publication == "source":
+            record["actor_id"] = float(record["actor_id"])
+        else:
+            action = state["actions"][record["action_key"]]
+            action["owner_id"] = float(action["owner_id"])
+            record["reservation_sha256"] = cloud_coordinator._reservation_sha256(
+                action,
+            )
+
+    StateStore(store.path)._mutate(inject_alias)
+    if publication == "reviewer":
+        api.review_state = api.review_sha = None
+        api.requested_reviewers = []
+        api.unresolved = False
+    writes = deepcopy(api.writes)
+    posts = api.task_posts
+    durable_before = store.path.read_bytes()
+    raw_before = json.loads(durable_before)
+
+    for _ in range(2):
+        coordinator = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        )
+        if publication == "source":
+            with pytest.raises(
+                    cloud_coordinator.CoordinatorError,
+                    match="Owner task abandonment history is invalid"):
+                coordinator.run(apply=True)
+        else:
+            result = coordinator.run(apply=True)["pull_requests"][0]
+            assert result["head"] == source_head
+        assert api.writes == writes
+        assert api.task_posts == posts
+        raw_state = json.loads(store.path.read_bytes())
+        assert raw_state["enrollments"]["16"]["owner_abandonments"] == (
+            raw_before["enrollments"]["16"]["owner_abandonments"]
+        )
+        assert raw_state["enrollments"]["16"]["attempts"] == (
+            raw_before["enrollments"]["16"]["attempts"]
+        )
+        assert raw_state["enrollments"]["16"]["neutral_attempts"] == (
+            raw_before["enrollments"]["16"]["neutral_attempts"]
+        )
+        assert raw_state["enrollments"]["16"]["receipt_proofs"] == (
+            raw_before["enrollments"]["16"]["receipt_proofs"]
+        )
+        if publication == "source":
+            assert store.path.read_bytes() == durable_before
+        else:
+            assert raw_state["actions"][abandoned["key"]] == raw_before[
+                "actions"
+            ][abandoned["key"]]
+    stored_recovery = raw_before["enrollments"]["16"]["owner_abandonments"][0]
+    if publication == "source":
+        assert raw_before["actions"][abandoned["key"]] == abandoned_reservation
+        assert stored_recovery["actor_id"] == float(recovery["actor_id"])
+    else:
+        root_action = raw_before["actions"][abandoned["key"]]
+        assert root_action["owner_id"] == float(abandoned_reservation["owner_id"])
+        assert stored_recovery["reservation_sha256"] == (
+            cloud_coordinator._reservation_sha256(root_action)
+        )
+    assert recovery["action_key"] == abandoned["key"]
 
 
 @pytest.mark.parametrize("hazard", [

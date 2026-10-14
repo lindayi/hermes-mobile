@@ -34,6 +34,24 @@ def setup(tmp_path, *, repair=True):
 
 @pytest.mark.parametrize(("field", "kind", "value"), [
     pytest.param("issue", "float", 16.0, id="float-stored-issue"),
+    pytest.param(
+        "repository_id", "float", 1399942965.0,
+        id="float-stored-repository-id",
+    ),
+    pytest.param(
+        "repository_id", "bool", True,
+        id="bool-stored-repository-id",
+    ),
+    pytest.param(
+        "repository_id", "string", "1399942965",
+        id="string-stored-repository-id",
+    ),
+    pytest.param("repository_id", "zero", 0, id="zero-stored-repository-id"),
+    pytest.param(
+        "repository_id", "negative", -1,
+        id="negative-stored-repository-id",
+    ),
+    pytest.param("repository_id", "missing", None, id="missing-stored-repository-id"),
     pytest.param("pull_id", "missing", None, id="missing-pull-id"),
     pytest.param("pull_id", "null", None, id="null-pull-id"),
     pytest.param("pull_id", "bool", True, id="bool-pull-id"),

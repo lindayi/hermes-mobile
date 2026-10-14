@@ -1632,7 +1632,8 @@ def _owner_abandonment_record_valid(record):
             or not _is_sha(record.get("head_sha"))
             or not _is_sha(record.get("base_sha"))
             or not positive_id(record.get("command_comment_id"))
-            or record.get("actor_id") != OWNER_ID
+            or type(record.get("actor_id")) is not int
+            or record["actor_id"] != OWNER_ID
             or record.get("command_body") != (
                 f"/hermes abandon-unverified {record.get('task_id')} "
                 f"{record.get('head_sha')}"
@@ -1754,12 +1755,16 @@ def _owner_abandonment_matches_action(record, action):
         and action.get("status") == "uncertain"
         and action.get("task_id") == record["task_id"]
         and action.get("task_created_at") == record["task_created_at"]
+        and type(action.get("issue")) is int
+        and action["issue"] == record["issue"]
         and type(action.get("receipt_waits")) is int
         and action["receipt_waits"] == MAX_RECEIPT_POLLS
         and type(action.get("pull_id")) is int and action["pull_id"] > 0
         and isinstance(action.get("pull_node_id"), str)
         and bool(action["pull_node_id"])
+        and type(action.get("owner_id")) is int
         and action.get("owner_id") == OWNER_ID
+        and type(action.get("repository_id")) is int
         and action.get("repository_id") == REPOSITORY_ID
         and _reservation_sha256(action) == record["reservation_sha256"]
     )
@@ -4478,6 +4483,7 @@ class Coordinator:
         if (
             type(number) is not int or type(enrollment.get("issue")) is not int
             or enrollment["issue"] != number
+            or type(enrollment.get("repository_id")) is not int
             or enrollment.get("repository_id") != REPOSITORY_ID
             or not _github_identity(head_repo, REPOSITORY_ID)
             or not _github_identity(base_repo, REPOSITORY_ID)
