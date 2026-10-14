@@ -7774,10 +7774,15 @@ class Coordinator:
             )
         final_anchor = None
         if isinstance(successor_action, dict):
+            neutral = successor_action.get("task_type") == "neutral"
             final_anchor = self._ensure_receipt_anchor(
-                successor_action, source=True,
+                successor_action, source=not neutral,
             )
-            expected_anchor = _source_receipt_anchor_request(
+            anchor_request = (
+                _neutral_receipt_anchor_request if neutral
+                else _source_receipt_anchor_request
+            )
+            expected_anchor = anchor_request(
                 successor_action, successor_action.get("dispatch_nonce"),
             )
             if (expected_anchor is None
@@ -7792,10 +7797,15 @@ class Coordinator:
                 raise CoordinatorError(
                     "Owner continuation receipt anchor changed before publication"
                 )
-        if _current_owner_unverified_abandonment_command(
-                self.api, historical[0]) is None:
+        if (
+                _current_owner_unverified_abandonment_command(
+                    self.api, historical[0]) is None
+                or _current_owner_unverified_continuation_command(
+                    self.api, record) is None
+                or _current_owner_continuation_enrollment(
+                    self.api, record, current) is None):
             raise CoordinatorError(
-                "Owner continuation original abandonment command changed"
+                "Owner continuation immutable owner authority changed"
             )
         final_pull = self._fence_pull(
             record["issue"], record["current_head_sha"], main_sha,
@@ -10435,7 +10445,12 @@ class StateStore:
             current_projection = _owner_continuation_publication_projection(
                 data, record.get("issue"),
             )
-            request = _source_receipt_anchor_request(
+            neutral = expected.get("task_type") == "neutral"
+            anchor_request = (
+                _neutral_receipt_anchor_request if neutral
+                else _source_receipt_anchor_request
+            )
+            request = anchor_request(
                 expected, expected.get("dispatch_nonce"),
             )
             if (
@@ -10470,7 +10485,9 @@ class StateStore:
                     or anchor.get("comment_id")
                         != action.get("receipt_anchor_comment_id")
                     or anchor.get("body") != action.get("receipt_anchor_body")
-                    or action.get("receipt_anchor_role") != "continuation-source"
+                    or action.get("receipt_anchor_role") != (
+                        None if neutral else "continuation-source"
+                    )
             ):
                 raise _ContinuationPublicationFenceError(
                     "Owner continuation claim changed at task publication"
@@ -10478,6 +10495,7 @@ class StateStore:
             instruction = receipt_instruction(
                 action["dispatch_nonce"], pull_number=action["issue"],
                 start_head=action["head"], base_sha=action["main_sha"],
+                neutral=neutral,
                 anchor_comment_id=action["receipt_anchor_comment_id"],
                 anchor_body=action["receipt_anchor_body"],
             )

@@ -782,8 +782,10 @@ do not count as competing dispositions. This inventory check runs at admission a
 again at publication, so commands consumed on an earlier poll are included.
 
 After the last historical-task and successor-anchor reads, independently
-reauthenticate the original immutable abandonment command against its retained
-historical binding, without filling missing fields from the new enrollment.
+reauthenticate all three immutable owner records: the original abandonment
+command against its retained historical binding, the fresh disposition, and the
+fresh exact-head enrollment. Do not fill missing historical fields from the new
+enrollment. Admission and publication both enforce this finite last-read fence.
 Then read the final pull and main. The final pull must have `draft` exactly
 `false`; absent or malformed values reject admission and publication.
 
@@ -811,6 +813,11 @@ published or overwritten while the request is in flight. GitHub offers no
 transaction spanning the final pull/main reads and task POST, so a remote change
 after those reads remains an unavoidable race; these checks do not claim remote
 atomicity.
+
+Neutral continuation successors use the existing neutral anchor, role, and
+receipt instruction at both the outer fence and locked publisher. SOURCE
+continuations keep their distinct SOURCE contract. Neither path renews an
+anchor publication allowance or the source/neutral lifetime counters.
 
 An existing owner-abandonment record whose recovery head no longer equals the
 current PR head cannot be rebound by replaying its original command or by ordinary

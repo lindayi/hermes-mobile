@@ -4892,8 +4892,9 @@ def test_owner_continuation_requires_original_terminal_task_and_complete_occupan
     ("publication", "anchor"),
 ])
 @pytest.mark.parametrize("mutation", ["edited", "deleted", "unchanged"])
+@pytest.mark.parametrize("owner_record", ["abandonment", "disposition", "enrollment"])
 def test_owner_continuation_original_command_final_authentication(
-        tmp_path, monkeypatch, stage, boundary, mutation):
+        tmp_path, monkeypatch, stage, boundary, mutation, owner_record):
     api, store, abandonment, _, _ = _owner_continuation_advanced_case(tmp_path)
     original_get = api.get
     original_fence = CloudCoordinator._fence_owner_continuation
@@ -4906,7 +4907,10 @@ def test_owner_continuation_original_command_final_authentication(
         injected.append(True)
         command = next(
             item for item in api.comments
-            if item["id"] == abandonment["command_comment_id"]
+            if item["id"] == {
+                "abandonment": abandonment["command_comment_id"],
+                "disposition": 7773, "enrollment": 7772,
+            }[owner_record]
         )
         if mutation == "deleted":
             api.comments.remove(command)
@@ -4971,6 +4975,71 @@ def test_owner_continuation_original_command_final_authentication(
             route.endswith(("/requested_reviewers", "/merge", "/tasks"))
             for route, _ in api.writes[writes:]
         )
+
+
+def test_owner_continuation_neutral_publication_and_ready_handoff(tmp_path):
+    api, store, abandonment, head, main = _owner_continuation_advanced_case(tmp_path)
+    api.pull.update(mergeable=True, mergeable_state="behind")
+    before = store.snapshot()["enrollments"]["16"]
+    posts = api.task_posts
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+    successors = [
+        action for action in state["actions"].values()
+        if action.get("owner_continuation_binding")
+    ]
+    assert len(successors) == 1, result
+    successor = successors[0]
+    assert successor["task_type"] == "neutral"
+    assert successor["key"] != abandonment["action_key"]
+    assert successor["status"] == "sent", result
+    assert api.task_posts == posts + 1
+    anchor = state["outbox"][successor["receipt_anchor_key"]]
+    assert anchor["kind"] == "neutral-receipt-anchor"
+    assert anchor["comment_id"] == successor["receipt_anchor_comment_id"]
+    assert successor.get("receipt_anchor_role") is None
+    assert state["enrollments"]["16"]["attempts"] == before["attempts"]
+    assert state["enrollments"]["16"]["neutral_attempts"] == (
+        before["neutral_attempts"] + 1
+    )
+    writes = list(api.writes)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    assert api.writes == writes
+    result_head = "8" * 40
+    api.complete_task(
+        successor["task_id"], successor, head_sha=result_head, base_sha=main,
+    )
+    assert api.reply_calls[-1]["commentId"] == anchor["comment_id"]
+    receipt = next(c for c in api.comments if c["user"]["id"] == COPILOT_AGENT
+                   and successor["dispatch_nonce"] in c["body"])
+    assert receipt["created_at"] == receipt["updated_at"]
+    api.head_sha = result_head
+    api.pull["head"]["sha"] = result_head
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.unresolved = False
+    api.review_state = None
+    api.review_sha = None
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    accepted = StateStore(store.path).snapshot()
+    ready = accepted["actions"][successor["key"]]
+    assert ready["receipt_result"] == "ready"
+    assert ready["receipt_start_head"] == head
+    assert ready["receipt_head"] == result_head
+    assert any(p["task_id"] == successor["task_id"]
+               for p in accepted["enrollments"]["16"]["receipt_proofs"])
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+    assert api.task_posts == posts + 1
 
 
 @pytest.mark.parametrize("stage", ["admission", "publication"])
