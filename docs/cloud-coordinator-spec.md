@@ -774,9 +774,16 @@ cannot disappear from this check. Include any live action sharing a retained tas
 ID before filtering by its issue identity, so a missing, malformed or mismatched
 issue cannot hide the duplicate. Identical copies count once; distinct tasks on
 unrelated pulls do not block this lineage.
+Receipt-like live actions with a numeric-equal malformed issue identity block the
+affected pull even with a fresh action key and task ID and no retained links.
+Both source-authority indexing and final remote lineage validation check this
+before filtering candidates. Boolean aliases of issue 1 fail the same way.
+Exact integer receipts for genuinely unrelated pulls remain isolated.
 Every persisted abandonment record must resolve to one matching retained root
 action before any receipt, dispatch, reviewer, or terminal authority is granted.
 Missing, mismatched, or duplicate root claims block the affected enrollment. The
+root action keys and abandoned task IDs must each be unique; distinct matching
+actions do not make two claims for the same abandoned task valid. The
 record's issue, command-comment and actor IDs, and the root action's issue, owner,
 repository and pull IDs must be exact positive integers; the enrolled repository ID
 is validated the same way at pull snapshot admission.

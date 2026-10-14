@@ -606,6 +606,89 @@ def test_apply_accepts_canonical_reordered_receipt_duplicates(tmp_path):
     ]) == 1
 
 
+def _alternate_receipt(api, proof, issue, *, linked=False):
+    candidate = deepcopy(proof)
+    if not linked:
+        candidate["key"] = "fix:alternate-receipt"
+        candidate["task_id"] = candidate["receipt_task_id"] = "alternate-task"
+        candidate["dispatch_nonce"] = candidate["receipt_nonce"] = "alternate-nonce"
+        candidate["receipt_session_id"] = "session-alternate"
+        candidate["receipt_comment_id"] = max(c["id"] for c in api.comments) + 1
+    candidate["issue"] = issue
+    fields = {
+        "pr": issue, "task": candidate["task_id"],
+        "nonce": candidate["receipt_nonce"],
+        "session": candidate["receipt_session_id"],
+    }
+    candidate["receipt_body"] = "\n".join(
+        f"{line.split('=', 1)[0]}={fields[line.split('=', 1)[0]]}"
+        if line.split("=", 1)[0] in fields else line
+        for line in candidate["receipt_body"].split("\n")
+    )
+    comment = next(
+        c for c in api.comments if c["id"] == proof["receipt_comment_id"]
+    )
+    updated = {
+        **deepcopy(comment), "id": candidate["receipt_comment_id"],
+        "body": candidate["receipt_body"],
+    }
+    if linked:
+        comment.update(updated)
+    else:
+        api.comments.append(updated)
+    assert cloud_coordinator._valid_receipt_proof(candidate, api.comments)
+    return candidate
+
+
+@pytest.mark.parametrize("issue", [1, 16])
+@pytest.mark.parametrize("form", [
+    "exact", "float-fresh", "float-linked", "bool-fresh",
+    "unrelated-integer", "legacy-keyless", "consistent-copy",
+])
+def test_receipt_alternate_identity_inventory_blocks_only_affected_authority(
+        tmp_path, issue, form):
+    api, store, proof, result_head = _accepted_compacted_receipt_case(tmp_path, issue)
+    value = {
+        "float-fresh": float(issue), "float-linked": float(issue),
+        "bool-fresh": True, "unrelated-integer": 99,
+    }.get(form, issue)
+    candidate = (
+        deepcopy(proof) if form in {"exact", "legacy-keyless", "consistent-copy"}
+        else _alternate_receipt(api, proof, value, linked=form == "float-linked")
+    )
+
+    def install(state):
+        if form == "legacy-keyless":
+            state["enrollments"][str(issue)]["receipt_proofs"][0].pop("key")
+        else:
+            state["actions"][candidate["key"]] = candidate
+
+    store._mutate(install)
+    before = store.snapshot()
+    api.review_state = api.review_sha = None
+    writes = deepcopy(api.writes)
+    denied = form.startswith("float-") or (form == "bool-fresh" and issue == 1)
+
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856540).run(apply=True)
+
+    after = StateStore(store.path).snapshot()
+    _, authorized, _ = _authorized_result_heads(
+        issue, after["enrollments"][str(issue)], after["actions"], api.comments, BASE,
+    )
+    assert (result_head in authorized) is not denied
+    if denied:
+        assert api.writes == writes
+    else:
+        assert len([
+            write for write in api.writes[len(writes):]
+            if write[0].endswith("/requested_reviewers")
+        ]) == 1
+    for field in ("receipt_proofs", "attempts", "neutral_attempts", "authorized_head"):
+        assert after["enrollments"][str(issue)].get(field) == before[
+            "enrollments"
+        ][str(issue)].get(field)
+
+
 def test_apply_rejects_receipt_proof_with_unknown_durable_key(tmp_path):
     api, store, proof, result_head = _accepted_compacted_receipt_case(tmp_path)
     malformed = deepcopy(proof)
@@ -4582,6 +4665,189 @@ def test_owner_abandonment_duplicate_projection_rejects_nested_numeric_alias(
     )._owner_abandonment_successor_proven(
         {"pull": api.pull, "comments": api.comments}, recovery,
     )
+
+
+@pytest.mark.parametrize("publication", ["source", "reviewer", "merge"])
+@pytest.mark.parametrize("form", [
+    "float-fresh", "float-linked", "unrelated-integer", "consistent-copy",
+])
+def test_owner_abandonment_alternate_live_identity_apply_restart_and_isolation(
+        tmp_path, publication, form):
+    (
+        api, store, abandoned, reservation, recovery, neutral, _,
+        _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+    StateStore(store.path).retire(16, source_head, current_main_sha=FINAL_RESULT_HEAD)
+    proof = next(
+        p for p in StateStore(store.path).snapshot()["enrollments"]["16"][
+            "receipt_proofs"
+        ] if p["task_id"] == neutral["task_id"]
+    )
+    candidate = (
+        deepcopy(proof) if form == "consistent-copy" else _alternate_receipt(
+            api, proof, 99 if form == "unrelated-integer" else 16.0,
+            linked=form == "float-linked",
+        )
+    )
+    StateStore(store.path)._mutate(
+        lambda state: state["actions"].update({candidate["key"]: candidate}),
+    )
+    denied = form.startswith("float-")
+    coordinator = Coordinator(api, StateStore(store.path), clock=lambda: 1790856660)
+    api.review_state = "APPROVED" if publication != "reviewer" else None
+    api.review_sha = source_head if publication != "reviewer" else None
+    if publication == "source":
+        api.source_failure = True
+        api.source_failure_sha = source_head
+    if denied:
+        unrelated = _add_unrelated_enrolled_pull(api, store)
+        unrelated["head"]["ref"] = "topic-17"
+        _bind_unrelated_task_artifacts(api)
+        original_graphql = api.graphql
+
+        def graphql(query, variables):
+            unresolved = api.unresolved
+            if variables.get("number") == 17:
+                api.unresolved = True
+            try:
+                return original_graphql(query, variables)
+            finally:
+                api.unresolved = unresolved
+
+        api.graphql = graphql
+    before = StateStore(store.path).snapshot()
+    writes = deepcopy(api.writes)
+    graphql_writes = deepcopy(api.graphql_writes)
+    task_posts = api.task_posts
+
+    result = coordinator.run(apply=True)
+    plans = {item["issue"]: item for item in result["pull_requests"]}
+    assert plans[16]["head"] == source_head
+    if denied:
+        assert plans[16]["repair_requested"] is False
+        assert api.graphql_writes == graphql_writes
+        assert plans[17]["repair_requested"] is True
+        assert api.task_posts == task_posts + 1
+        assert any(
+            route == "agents/repos/lindayi/hermes-mobile/tasks"
+            and "PR #17" in body.get("prompt", "")
+            for route, body in api.writes[len(writes):]
+        )
+        assert not any(
+            "/pulls/16/" in route
+            or (route == "agents/repos/lindayi/hermes-mobile/tasks"
+                and "PR #16" in body.get("prompt", ""))
+            for route, body in api.writes[len(writes):]
+        )
+        assert not coordinator._owner_abandonment_successor_proven(
+            {"pull": api.pull, "comments": api.comments}, recovery,
+        )
+        after = StateStore(store.path).snapshot()
+        assert after["actions"][abandoned["key"]] == reservation
+        assert after["actions"][candidate["key"]] == before["actions"][candidate["key"]]
+        for field in (
+                "owner_abandonments", "receipt_proofs", "authorized_head",
+                "attempts", "neutral_attempts", "repair_progress"):
+            assert after["enrollments"]["16"].get(field) == before[
+                "enrollments"
+            ]["16"].get(field)
+        StateStore(store.path).retire(
+            16, source_head, current_main_sha=FINAL_RESULT_HEAD,
+        )
+        writes = deepcopy(api.writes)
+        task_posts = api.task_posts
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        assert api.writes == writes
+        assert api.task_posts == task_posts
+        assert api.graphql_writes == graphql_writes
+    else:
+        assert coordinator._owner_abandonment_successor_proven(
+            {"pull": api.pull, "comments": api.comments}, recovery,
+        )
+        if publication == "merge":
+            assert plans[16]["auto_merge_requested"] is False
+            assert plans[16]["reasons"] == ["agent"]
+            assert api.graphql_writes == graphql_writes
+        elif publication == "source":
+            assert plans[16]["repair_requested"] is True
+            assert api.task_posts == task_posts + 1
+        else:
+            assert any(
+                route.endswith("/requested_reviewers")
+                for route, _ in api.writes[len(writes):]
+            )
+
+
+@pytest.mark.parametrize("duplicate", ["same-key", "same-task", "distinct-root"])
+def test_owner_abandonment_root_claim_uniqueness_inventory(tmp_path, duplicate):
+    api, store, _, _, recovery, _, _, _, _, _ = (
+        _owner_abandonment_transitive_case(tmp_path)
+    )
+    state = StateStore(store.path).snapshot()
+    enrollment, actions = state["enrollments"]["16"], state["actions"]
+    other = deepcopy(recovery)
+    action = deepcopy(actions[recovery["action_key"]])
+    if duplicate != "same-key":
+        action["key"] += ":second-root"
+        other["action_key"] = action["key"]
+        if duplicate == "distinct-root":
+            action["task_id"] = other["task_id"] = "distinct-abandoned-task"
+            other["command_body"] = (
+                f"/hermes abandon-unverified {other['task_id']} {other['head_sha']}"
+            )
+        other["reservation_sha256"] = cloud_coordinator._reservation_sha256(action)
+        actions[action["key"]] = action
+    assert cloud_coordinator._owner_abandonment_matches_action(other, action)
+    enrollment["owner_abandonments"].append(other)
+    claims = cloud_coordinator._valid_owner_abandonment_claims(enrollment, actions)
+    assert len(claims) == (2 if duplicate == "distinct-root" else 0)
+
+
+def test_owner_abandonment_duplicate_root_task_blocks_apply_and_preserves_state(tmp_path):
+    (
+        api, store, abandoned, reservation, recovery, _, _,
+        _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+
+    def duplicate_root(state):
+        action = deepcopy(state["actions"][abandoned["key"]])
+        action["key"] += ":second-root"
+        other = deepcopy(recovery)
+        other["action_key"] = action["key"]
+        other["reservation_sha256"] = cloud_coordinator._reservation_sha256(action)
+        assert cloud_coordinator._owner_abandonment_matches_action(other, action)
+        state["actions"][action["key"]] = action
+        state["enrollments"]["16"]["owner_abandonments"].append(other)
+
+    StateStore(store.path)._mutate(duplicate_root)
+    api.review_state = api.review_sha = None
+    before = StateStore(store.path).snapshot()
+    writes = deepcopy(api.writes)
+    task_posts = api.task_posts
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        state = StateStore(store.path).snapshot()
+        assert source_head not in _authorized_result_heads(
+            16, state["enrollments"]["16"], state["actions"], api.comments,
+            FINAL_RESULT_HEAD,
+        )[1]
+        StateStore(store.path).retire(
+            16, source_head, current_main_sha=FINAL_RESULT_HEAD,
+        )
+        assert api.writes == writes
+        assert api.task_posts == task_posts
+        after = StateStore(store.path).snapshot()
+        assert after["actions"][abandoned["key"]] == reservation
+        for field in (
+                "owner_abandonments", "receipt_proofs", "authorized_head",
+                "attempts", "neutral_attempts", "repair_progress"):
+            assert after["enrollments"]["16"].get(field) == before[
+                "enrollments"
+            ]["16"].get(field)
 
 
 def test_owner_abandonment_apply_rejects_lone_float_binding_after_compaction(

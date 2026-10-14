@@ -3608,6 +3608,8 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
             continue
         if (not exact_issue or not isinstance(candidate_key, str)
                 or candidate_key != key or not isinstance(task_id, str) or not task_id):
+            if receipt_like and aliases_issue:
+                return initial, authorized, set()
             invalid_proof_keys.update(linked_keys)
             invalid_task_ids.update(linked_tasks)
             continue
@@ -3765,12 +3767,15 @@ def _valid_owner_abandonment_claims(enrollment, actions):
         return []
     claims = []
     seen = set()
+    seen_task_ids = set()
     for record in records:
         key = record.get("action_key") if isinstance(record, dict) else None
         if (not isinstance(key, str) or key in seen
-                or not _owner_abandonment_matches_action(record, actions.get(key))):
+                or not _owner_abandonment_matches_action(record, actions.get(key))
+                or record["task_id"] in seen_task_ids):
             return []
         seen.add(key)
+        seen_task_ids.add(record["task_id"])
         claims.append((key, record))
     return claims
 
@@ -7184,6 +7189,10 @@ class Coordinator:
         enrollment = self.store.snapshot()["enrollments"].get(
             str(record.get("issue")), {},
         )
+        roots = enrollment.get("owner_abandonments")
+        if (not isinstance(roots, list)
+                or len(_valid_owner_abandonment_claims(enrollment, actions)) != len(roots)):
+            return False
         proofs = enrollment.get("receipt_proofs")
         if not isinstance(proofs, list):
             return False
@@ -7264,6 +7273,12 @@ class Coordinator:
                 continue
             if (not isinstance(key, str) or not isinstance(candidate, dict)
                     or candidate.get("key") != key):
+                return False
+            if (candidate.get("issue") == record["issue"]
+                    and type(candidate.get("issue")) is not int
+                    and any(field in candidate for field in (
+                        "receipt_result", "receipt_head", "receipt_body",
+                    ))):
                 return False
             candidate = legacy_views.get(id(candidate), candidate)
             duplicate = reconciled_by_key.get(key)
