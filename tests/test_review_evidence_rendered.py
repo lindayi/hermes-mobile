@@ -7,7 +7,7 @@ import pytest
 from deploy.cloud_coordinator import ApiError, GhApi, StateStore, copilot_review_valid, repair_request
 from deploy.review_evidence import OVERVIEW_MARKER, parse_body, review_body_disposition
 from test_cloud_coordinator import (
-    HEAD, ProgressApi, _managed_cycle, refresh_owner_review,
+    COPILOT_REVIEWER, HEAD, ProgressApi, _managed_cycle, refresh_owner_review,
 )
 from test_review_evidence import ReviewApi, copilot_review, _evidence
 
@@ -74,6 +74,36 @@ CURRENT_COPILOT_HTML = (
     "<p>🧠 <strong>Review effort:</strong> Balanced</p>"
 )
 
+LATEST_HUMAN_REVIEW_SUMMARY = (
+    "The authorization-sensitive coordinator and review-evidence changes require "
+    "final human security review despite extensive regression coverage."
+)
+LATEST_HUMAN_REVIEW_BODY = f"""<!-- ccr-overview-v2 -->
+
+### 🔵 Needs a closer look
+
+{LATEST_HUMAN_REVIEW_SUMMARY}
+
+**0 open findings**
+
+<details>
+<summary><strong>2 resolved since last review</strong></summary>
+
+- <picture><source media="(prefers-color-scheme: dark)" srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-light.svg"><img src="https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-light.png" alt="Low severity" width="62" height="18" align="texttop"></picture> [Rename fixture to reflect Issue #106 provenance](https://github.com/lindayi/hermes-mobile/pull/107#discussion_r4254794564)
+- <picture><source media="(prefers-color-scheme: dark)" srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-light.svg"><img src="https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-light.png" alt="Low severity" width="62" height="18" align="texttop"></picture> [Correct provenance label from Issue #107 to Issue #106](https://github.com/lindayi/hermes-mobile/pull/107#discussion_r4254794531)
+</details>
+
+🧠 **Review effort:** Balanced"""
+LATEST_HUMAN_REVIEW_HTML = f"""<h3>🔵 Needs a closer look</h3>
+<p>{LATEST_HUMAN_REVIEW_SUMMARY}</p>
+<p><strong>0 open findings</strong></p>
+<details><summary><strong>2 resolved since last review</strong></summary>
+<ul>
+<li><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-light.svg"><img src="https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-light.png" alt="Low severity" width="62" height="18" align="texttop"></picture> <a href="https://github.com/lindayi/hermes-mobile/pull/107#discussion_r4254794564">Rename fixture to reflect Issue #106 provenance</a></li>
+<li><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-light.svg"><img src="https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-light.png" alt="Low severity" width="62" height="18" align="texttop"></picture> <a href="https://github.com/lindayi/hermes-mobile/pull/107#discussion_r4254794531">Correct provenance label from Issue #107 to Issue #106</a></li>
+</ul></details>
+<p>🧠 <strong>Review effort:</strong> Balanced</p>"""
+
 
 @pytest.mark.parametrize("count", [0, 1, 8, 9])
 def test_rendered_inventory_reports_total_and_cap(count):
@@ -89,6 +119,34 @@ def test_rendered_inventory_reports_total_and_cap(count):
     assert len(result["findings"]) == min(count, 8)
     assert result["truncated"] is (count > 8)
     assert result["inventory_complete"] is (count <= 8)
+
+
+@pytest.mark.parametrize("concern", ["", "The source skips owner checks."])
+def test_latest_human_security_overview_stays_ambiguous(concern):
+    raw = LATEST_HUMAN_REVIEW_BODY
+    rendered = LATEST_HUMAN_REVIEW_HTML
+    if concern:
+        raw = raw.replace(
+            LATEST_HUMAN_REVIEW_SUMMARY,
+            LATEST_HUMAN_REVIEW_SUMMARY + "\n\n" + concern,
+        )
+        rendered = rendered.replace(
+            f"<p>{LATEST_HUMAN_REVIEW_SUMMARY}</p>",
+            f"<p>{LATEST_HUMAN_REVIEW_SUMMARY}</p><p>{concern}</p>",
+        )
+
+    review = review_pair(raw, rendered, state="COMMENTED")
+    review["id"] = 5499070544
+    review["submitted_at"] = "2026-10-13T05:10:57Z"
+    parsed = parse_body(raw, "COMMENTED", body_html=rendered)
+    disposition = review_body_disposition(
+        [review], HEAD, reviewer_id=COPILOT_REVIEWER,
+    )
+
+    assert parsed["ambiguous"] and not parsed["inventory_complete"]
+    assert disposition["ambiguous"] and not disposition["inventory_complete"]
+    assert "validation-only" not in parsed["classifications"]
+    assert "validation-only" not in disposition["classifications"]
 
 
 @pytest.mark.parametrize("legacy_heading", ["", "<h2>Copilot review overview</h2>"])
@@ -527,14 +585,31 @@ def test_current_review_resumes_completed_repair_without_replaying_or_losing_thr
     api.complete_task(source_action["task_id"], source_action, head_sha=result_head)
     refresh_owner_review(api, result_head, submitted_at="2026-10-01T12:06:00Z")
     api.progress_review = review_pair(
-        CURRENT_COPILOT_RAW,
-        CURRENT_COPILOT_HTML.replace("4250499422", "445"),
+        CURRENT_COPILOT_RAW.replace("/pull/99#", "/pull/16#").replace("4250499422", "445"),
+        CURRENT_COPILOT_HTML.replace("/pull/99#", "/pull/16#").replace("4250499422", "445"),
         state="COMMENTED",
     ) | {
         "id": api.progress_review["id"] + 1,
         "commit_id": result_head,
         "submitted_at": "2026-10-01T12:10:00Z",
     }
+    original_graphql = api.graphql
+
+    def authenticated_threads(query, variables):
+        response = original_graphql(query, variables)
+        if "reviewThreads" in query:
+            [thread] = response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            thread["comments"]["nodes"][0].update({
+                "author": {"databaseId": COPILOT_REVIEWER},
+                "createdAt": "2026-10-01T12:09:00Z",
+                "pullRequestReview": {
+                    "databaseId": api.progress_review["id"],
+                    "commit": {"oid": result_head},
+                },
+            })
+        return response
+
+    api.graphql = authenticated_threads
 
     second = _managed_cycle(api, path)["pull_requests"][0]
     saved = StateStore(path).snapshot()

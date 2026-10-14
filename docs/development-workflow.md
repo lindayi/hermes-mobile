@@ -128,6 +128,11 @@ not treat a definite rejection as acceptance. New commits invalidate head-bound
 review and status evidence. Sensitive changes still require separate exact-SHA
 owner authorization and targeted review.
 
+The narrow supervised operator path for a generic request for a non-required
+reviewer role is defined by
+[Supervised manual qualification](git-development-spec.md#supervised-manual-qualification).
+It does not change automatic evidence or add a reviewer gate.
+
 Use follow-up fix commits, reply in actual GitHub threads with the fix SHA and test
 evidence, and check findings before resolving them. Never fabricate the required
 Copilot internal check or publish `agent-review` for a new merge decision. Verify

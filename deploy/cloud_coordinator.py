@@ -145,7 +145,14 @@ query($number: Int!, $cursor: String) {
           id
           isResolved
           comments(first: 100) {
-            nodes { databaseId body }
+            nodes {
+              databaseId body createdAt
+              author {
+                ... on User { databaseId }
+                ... on Bot { databaseId }
+              }
+              pullRequestReview { databaseId commit { oid } }
+            }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -496,7 +503,8 @@ def independent_review_valid(head_sha, reviews, threads, *, pull_author_id,
             reviews, head_sha, pull_author_id=pull_author_id,
             complete=reviews_complete,
         )
-        and not disposition["findings"] and not disposition["ambiguous"]
+        and not disposition["findings"] and not disposition["inline_count"]
+        and not disposition["ambiguous"]
         and disposition["inventory_complete"] is True
     )
 
@@ -1857,7 +1865,11 @@ def _bound_pull_review_metadata(api, pull_number, review):
     user = review.get("user")
     if not isinstance(node_id, str) or not node_id:
         return review
-    if not isinstance(user, dict) or not isinstance(user.get("login"), str) or not user["login"]:
+    if (not isinstance(user, dict)
+            or not positive_id(user.get("id"))
+            or user.get("id") not in (OWNER_ID, COPILOT_REVIEWER_ID)
+            or user.get("type") != ("User" if user["id"] == OWNER_ID else "Bot")
+            or not isinstance(user.get("node_id"), str) or not user["node_id"]):
         return review
     try:
         response = api.graphql(GRAPHQL_REVIEW_METADATA, {"id": node_id})
@@ -2565,14 +2577,97 @@ def _negative_review_progress_fingerprints(actions, issue, head_sha, reviews, *,
     return _review_finding_fingerprints(report.get("findings"))
 
 
+def _complete_unique_thread_inventory(threads, *, threads_complete):
+    if threads_complete is not True or not isinstance(threads, list):
+        return False
+    thread_ids = set()
+    comment_ids = set()
+    for thread in threads:
+        if (not isinstance(thread, dict)
+                or type(thread.get("isResolved")) is not bool
+                or thread.get("comments_complete") is not True
+                or not isinstance(thread.get("id"), str)
+                or not thread["id"]
+                or len(thread["id"]) > MAX_THREAD_ID_LENGTH
+                or thread["id"] in thread_ids
+                or not isinstance(thread.get("comments"), list)
+                or not thread["comments"]):
+            return False
+        thread_ids.add(thread["id"])
+        for comment in thread["comments"]:
+            if (not isinstance(comment, dict)
+                    or not positive_id(comment.get("databaseId"))
+                    or comment["databaseId"] in comment_ids):
+                return False
+            comment_ids.add(comment["databaseId"])
+    return True
+
+
+def _matched_inline_inventory(targets, review, threads, *, pull_number,
+                              threads_complete):
+    if (not _complete_unique_thread_inventory(
+                threads, threads_complete=threads_complete,
+            )
+            or not targets or not positive_id(pull_number)
+            or not _valid_timestamp(review.get("submitted_at"))):
+        return False
+    submitted = datetime.fromisoformat(review["submitted_at"].replace("Z", "+00:00"))
+    expected = set()
+    for target in targets:
+        if not isinstance(target, str) or len(target) > MAX_BODY_CHARS:
+            return False
+        match = re.fullmatch(
+            rf"(?:https://github\.com/lindayi/hermes-mobile/pull/{pull_number})?"
+            r"#discussion_r([1-9][0-9]*)", target, re.IGNORECASE,
+        )
+        if match is None:
+            return False
+        try:
+            comment_id = int(match[1])
+        except ValueError:
+            return False
+        if comment_id in expected:
+            return False
+        expected.add(comment_id)
+    observed = set()
+    for thread in threads:
+        for comment in thread["comments"]:
+            comment_id = comment["databaseId"]
+            current = (
+                isinstance(comment.get("pullRequestReview"), dict)
+                and comment["pullRequestReview"].get("databaseId") == review["id"]
+            )
+            if thread["isResolved"] and comment_id not in expected:
+                continue
+            if comment_id not in expected and not current:
+                continue
+            if (thread["isResolved"] or not current
+                    or not isinstance(comment.get("author"), dict)
+                    or not positive_id(comment["author"].get("databaseId"))
+                    or comment["author"].get("databaseId") != COPILOT_REVIEWER_ID
+                    or not positive_id(comment["pullRequestReview"].get("databaseId"))
+                    or not isinstance(comment["pullRequestReview"].get("commit"), dict)
+                    or comment["pullRequestReview"]["commit"].get("oid") != review["commit_id"]
+                    or not isinstance(comment.get("body"), str) or not comment["body"].strip()
+                    or not _valid_timestamp(comment.get("createdAt"))
+                    or datetime.fromisoformat(comment["createdAt"].replace("Z", "+00:00"))
+                    > submitted
+                    or comment_id in observed):
+                return False
+            observed.add(comment_id)
+    return observed == expected
+
+
 def _current_copilot_rejection_progress(reviews, head_sha, *, pull_author_id,
-                                        reviews_complete):
+                                        reviews_complete, threads=None,
+                                        threads_complete=False, pull_number=0):
     if (reviews_complete is not True or not positive_id(pull_author_id)
             or pull_author_id == COPILOT_REVIEWER_ID):
         return False
     latest = latest_reviews(reviews, COPILOT_REVIEWER_ID)
+    review_state = latest[0].get("state") if latest and len(latest) == 1 else None
     if (not latest or len(latest) != 1
-            or latest[0].get("state") != "CHANGES_REQUESTED"
+            or review_state not in ("CHANGES_REQUESTED", "COMMENTED")
             or latest[0].get("commit_id") != head_sha
             or latest[0].get("dismissed") is True
             or latest[0].get("dismissed_at") not in (None, "")):
@@ -2580,9 +2675,32 @@ def _current_copilot_rejection_progress(reviews, head_sha, *, pull_author_id,
     disposition = review_body_disposition(
         reviews, head_sha, reviewer_id=COPILOT_REVIEWER_ID,
     )
+    commented_inventory_complete = (
+        review_state != "COMMENTED"
+        or _complete_unique_thread_inventory(
+            threads, threads_complete=threads_complete,
+        )
+    )
     return (
         disposition["inventory_complete"] is True
         and disposition["ambiguous"] is False
+        and (
+            review_state == "CHANGES_REQUESTED"
+            or (
+                commented_inventory_complete
+                and (bool(disposition["findings"]) or bool(disposition["inline_targets"]))
+                and (
+                    not disposition["inline_count"]
+                    or (
+                        len(disposition["inline_targets"]) == disposition["inline_count"]
+                        and _matched_inline_inventory(
+                            disposition["inline_targets"], latest[0], threads,
+                            pull_number=pull_number, threads_complete=threads_complete,
+                        )
+                    )
+                )
+            )
+        )
     )
 
 
@@ -5740,21 +5858,28 @@ class Coordinator:
             snapshot["threads_complete"] is True
             and current_evidence.get("progress_fingerprints_complete") is True
         )
-        negative_review_fingerprints, negative_review_complete = (
+        owner_review_fingerprints, owner_review_complete = (
             _negative_review_progress_fingerprints(
                 actions, number, head, snapshot["reviews"],
                 reviews_complete=snapshot["reviews_complete"],
             ) if not review_ok else ([], False)
         )
-        if not negative_review_complete and not review_ok:
-            negative_review_complete = _current_copilot_rejection_progress(
+        current_copilot_negative_progress = (
+            _current_copilot_rejection_progress(
                 snapshot["reviews"], head,
                 pull_author_id=pull_user.get("id") if isinstance(pull_user, dict) else None,
                 reviews_complete=snapshot["reviews_complete"],
+                threads=snapshot["threads"], threads_complete=snapshot["threads_complete"],
+                pull_number=number,
             )
-        if negative_review_complete:
+            if not review_ok else False
+        )
+        negative_review_complete = (
+            owner_review_complete or current_copilot_negative_progress
+        )
+        if owner_review_complete:
             current_fingerprints = sorted(
-                set(current_fingerprints) | set(negative_review_fingerprints),
+                set(current_fingerprints) | set(owner_review_fingerprints),
             )
         progress_actions = dict(actions)
         for key, action in actions.items():
@@ -5813,13 +5938,15 @@ class Coordinator:
         )
         progress = _completed_repair_progress(
             snapshot, progress_actions, current_fingerprints, authorized_heads,
-            review_ok=progress_review_ok, checks_ok=progress_checks_ok,
+            review_ok=(
+                review_ok and not current_copilot_negative_progress
+            ), checks_ok=progress_checks_ok,
             current_fingerprints_complete=current_fingerprints_complete,
             negative_review_complete=negative_review_complete,
             checks_terminal=checks_terminal,
             independently_resolved=(
                 followup_disposition.get("resolved", [])
-                if negative_review_complete and isinstance(followup_disposition, dict) else []
+                if owner_review_complete and isinstance(followup_disposition, dict) else []
             ),
         )
         if progress is None:

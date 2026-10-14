@@ -23,6 +23,10 @@ but GraphQL `statusCheckRollup` omits it and protected merge still reports it as
 expected. Thus `copilot-pull-request-reviewer` cannot be a required branch context.
 An absent review still blocks merge. Do not publish a replacement status or add
 a workflow wrapper, review service, independent reviewer, or human-review gate.
+A supervised operator may disposition a generic request for a non-required
+reviewer role only under the bounded
+[Supervised manual qualification contract](git-development-spec.md#supervised-manual-qualification);
+automatic evidence and authorization remain unchanged.
 
 ## Read-only validator
 
@@ -123,6 +127,28 @@ are not exact-head review acceptance, hosted CI evidence, merge authorization, o
 permission to deploy. Both behavioral contracts remain specified in
 [the coordinator specification](cloud-coordinator-spec.md).
 
+### Issue #106 verification-status parser overlay
+
+The current PR107 review-evidence overlay recognizes exactly two complete `COMMENTED`
+overview sentences as verification status:
+
+`The operationally sensitive coordinator gate lacks verified latest-head CI and required review evidence.`
+
+`The coordinator’s authorization and progress seam is security-sensitive, and exact-head owner authorization remains absent.`
+
+The complete rendered context must equal the exact entity-decoded live sentence;
+added blockquote, `code`, or `pre` material fails closed. Changed prose or a
+stripped substantive prefix does not extend this set. It does not confer review,
+CI, or owner authority; the earlier issue #100 pin remains retained as
+historical provenance.
+
+| Current candidate path | SHA-256 |
+| --- | --- |
+| `deploy/review_evidence.py` | `7a30ae1ea17916f415aee7d4967aec5995df783bca3d36c2c2f8d958a53d7a69` |
+
+This candidate still requires fresh exact-head review and all required checks.
+Sensitive owner authorization remains a separate gate.
+
 ### PR #105 owner-authorized task-abandonment and anchor-retention candidate
 
 PR #105 adds bounded recovery for owner-authorized abandonment of terminal tasks
@@ -155,7 +181,7 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `97bdfddcb2453fc95ee5ec7e09a746ee79566f8cff72d6416a494b163365392f` |
+| `deploy/cloud_coordinator.py` | `165260a6ed9abe83edfdac21c58f2478e09288727ec2221247ebc427524fac22` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
 
 ### Retained merged source and deliberate native refreshes
@@ -567,6 +593,32 @@ evidence.
 These pins identify candidate bytes only. Both files retain the
 `coordinator-review-contract` blocker; refreshing pins does not satisfy independent
 review, clear the source-contract hold, or authorize operational activation.
+
+Issue #106 updates only the current coordinator candidate pin for bounded evaluation
+of complete exact-head COMMENTED findings. The full-media body must provide a
+complete, unambiguous actionable inventory. Every COMMENTED admission also requires
+a complete, structurally valid thread inventory with unique bounded thread and
+comment IDs; a complete empty inventory remains valid for body-only findings.
+Linked open targets must additionally match the authenticated current-review/head
+thread inventory. Discussion IDs must use canonical positive ASCII digits within
+the body budget; integer conversion failure denies admission without aborting
+other pull requests. Generic COMMENTED state and unrelated unresolved threads do not
+prove negative admission. This evidence does not grant review approval,
+merge authority, or deployment authority. COMMENTED admission is separate from the
+owner-published proof needed to consume a follow-up resolution disposition. The
+independent fixture preserves the historical issue #100 pin, and the source-contract
+blocker remains active:
+
+| Issue #106 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `165260a6ed9abe83edfdac21c58f2478e09288727ec2221247ebc427524fac22` |
+
+The reconciled issue #106 and PR #105 candidate also binds REST and GraphQL review
+authors by matching positive numeric IDs, node IDs, and User/Bot types. Reviewer
+logins must use PR #105's finite canonical presentations before generic owner User
+login equality. Missing or inconsistent identity blocks enrichment; partial
+GraphQL errors and malformed envelopes abort collection. This does not change the
+review parser, sensitive owner command, or merge gates.
 
 Before the Issue #50 overlay, this assembly integrated final PR40 main
 `5316f7c75dced1bffafdb545cdd7677e98e855a6`, preserving its parser and previously

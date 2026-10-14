@@ -160,6 +160,9 @@ A suffix alone never establishes identity. Missing, malformed or mismatched acto
 identity cannot supply edit metadata.
 This binding does not change the prose disposition or make an ambiguous overview
 automatic review acceptance, even when the separate sensitive command binds.
+Request numeric and node IDs through the supported User/Bot fragments. Partial
+GraphQL errors or malformed response envelopes block collection. Review ID/node,
+repository, PR, head, body, submission and edit bindings remain required.
 
 This owner command is a separate, explicit authorization, not an automatic approval
 from enrollment or review prose. Planning and fresh status/merge fences re-read and
@@ -289,6 +292,21 @@ Neutral-only content cannot supply a finding; genuine corrections, independent
 siblings and their literal context remain eligible.
 Unsupported top-level disclosures remain ambiguous, not implicitly resolved.
 
+For a canonically marked `COMMENTED` overview only, these two complete sentences
+are recognized as gate-status prose:
+
+`The operationally sensitive coordinator gate lacks verified latest-head CI and required review evidence.`
+
+`The coordinator’s authorization and progress seam is security-sensitive, and exact-head owner authorization remains absent.`
+
+This exact whole-summary match classifies prose only; it does not prove review, CI,
+or owner authorization. The complete rendered context must equal the exact
+entity-decoded live sentence. Added text, including inert blockquote, `code`, or
+`pre` context, makes the summary ambiguous. Changed case or punctuation,
+optional-word changes, negation, an ASCII apostrophe, a substantive prefix, or
+added prose in the same or another sentence—including a no-code-findings
+sentence—also remains ambiguous. Quoted-only text remains ambiguous.
+
 Validation-only requires complete recognized status prose (optionally accompanied
 by no-code-issues sentences), not the presence of `pending` anywhere. Examples
 include `The exact-head verification remains pending.` and `Exact-head verification
@@ -337,6 +355,14 @@ only in marked overviews, and duplicates or any additional open section make the
 inventory incomplete. Nonzero bare counts require linked inventory rather than
 metadata suppression. Extra prose or markup in that paragraph is not discarded;
 free-form summaries still use the existing explicit disposition grammar.
+
+Top-level horizontal rules do not end summary inspection. Only the exact known
+rendered `Add a code-review agent skill` footer immediately after a separator is
+ignored. Any other content after a separator, including content after that
+footer, makes the summary ambiguous and the inventory incomplete; this content
+cannot create body-only repair evidence. Multiple separators do not clear this
+condition. Quoted and code/pre content remains inert, but its presence after a
+separator still makes the inventory incomplete.
 
 In this renderer only, one top-level paragraph immediately after the exact
 overview heading and recognized status heading is provider summary context.
@@ -768,8 +794,9 @@ unchanged ready receipt binds the task, session, starting head, result head, PR 
 dispatch base. The result head must be the current authorized PR head; the recorded
 dispatch base must still match the receipt, but need not remain current after main
 advances. The complete current GitHub collections must also prove successful
-required checks and a complete review-conversation inventory. A positive exact-head review can
-confirm progress as before. A complete authenticated, owner-published
+required checks and a complete review-conversation inventory. A positive exact-head
+review with no actionable findings and resolved conversations can confirm progress
+as before. A complete authenticated, owner-published
 `changes_requested` report for the current head can also prove which tracked
 independent-review findings remain or were resolved; the negative disposition is
 progress evidence only and never grants review approval, merge eligibility, or
@@ -808,7 +835,35 @@ when the exact-head task and Copilot review are complete, but never resolution
 credit or merge eligibility. Pending, null, unknown or malformed conclusions,
 wrong app/head bindings and incomplete pagination keep evaluation pending.
 A rejecting Copilot review supplies a negative review-stage disposition, not a
-successful CI result; all three CI checks must be observed before scoring.
+successful CI result; all three CI checks must be observed before scoring. A
+complete exact-head Copilot COMMENTED review may also admit evaluation only when
+its rendered full-media body proves a complete, unambiguous actionable finding
+inventory. It is negative evaluation evidence, not review approval, and cannot
+enable merge. For a linked `N open finding(s)` inventory, every live overview
+target must match an unresolved thread comment
+from that exact review and head in the authenticated, fully paginated thread
+collection. The numeric comment/review/author identities, nonempty finding text,
+and ordered comment/submission timestamps must agree. Absolute targets must
+name this pull request. Discussion IDs require canonical positive ASCII digits
+within the body budget; failed integer conversion denies admission without
+aborting other pull requests. Duplicate, missing, extra current-review, resolved,
+malformed, or mismatched targets do not admit evaluation. An `inline` label or
+an unrelated unresolved thread alone is not proof. Positive open targets also
+prevent a generic COMMENTED review state from supplying successful progress
+or merge evidence. Unknown summary prose remains ambiguous.
+Every COMMENTED admission also requires a structurally complete thread inventory
+with unique bounded thread IDs and unique positive comment IDs, even when all
+actionable findings are body-only. Each returned thread must contain at least one
+fully collected comment; a complete empty inventory is valid. When inline targets
+exist, exact target-to-comment, author, review-head, and timestamp matching remains
+an additional requirement. This inventory prerequisite does not change the
+existing CHANGES_REQUESTED path.
+This admission is distinct from the owner-published proof required
+to consume `progress_disposition.resolved`; a rejected, edited, superseded, or
+otherwise unproven owner follow-up cannot earn resolution credit. Findings present
+in the COMMENTED inventory remain current repair targets; COMMENTED state without
+proved actionable findings has no negative authority. The existing
+verified-resolution rules still govern progress credit.
 An incomplete or older-encoding reservation baseline receives an explicitly
 unknown decision only after fresh complete review/check evidence; it cannot clear
 targets or alter the streak. Neutral advancement can leave an older source result
@@ -984,6 +1039,13 @@ supports headroom beyond the former three-attempt cap but cannot predict future
 workloads.
 
 ## Review, checks, and merge
+
+The exceptional supervised semantic disposition for a generic request for a
+non-required reviewer role is defined by
+[`Supervised manual qualification`](git-development-spec.md#supervised-manual-qualification)
+in `docs/git-development-spec.md`.
+It does not change this collector's fail-closed result or any durable machine
+authorization.
 
 Owner-authorized issue #92 replaces independent-review merge gating. Technical
 acceptance requires the latest authenticated Copilot review from reviewer bot ID
@@ -1543,7 +1605,7 @@ including active and uncertain historical occupancy and malformed task identity:
 | Formerly collected test names | Collected replacement coverage |
 | --- | --- |
 | `ambiguous_corrective_review_creation_is_never_reposted`, `completed_partial_review_report_persists_error_and_retries_once`, `completed_report_correction_repairs_parent_after_publication_crash`, `correction_anchor_identity_changes_if_main_advances_before_claim`, `failed_correction_child_write_recovers_reserved_parent_after_reload`, `historical_correction_publication_stops_when_dirty`, `historical_dirty_keeps_active_correction_occupied`, `historical_dirty_plan_ignores_existing_correction_anchor`, `historical_dirty_report_failure_plans_only_one_neutral`, `historical_report_correction_never_dispatches_on_dirty_base`, `historical_report_correction_yields_if_dirty_before_plan_writes`, `historical_report_failure_rejects_unconfirmed_reconciliation`, `historical_report_recovery_uses_fresh_main_and_keeps_retry_separate`, `invalid_formal_review_id_stays_uncertain_until_authenticated_readback`, `later_bound_review_supersedes_malformed_parent_without_correction`, `later_review_before_malformed_parent_anchor_skips_correction`, `later_review_does_not_release_active_or_uncertain_correction`, `lost_correction_post_is_rejected_after_delayed_readback_and_reload`, `malformed_terminal_task_containers_are_diagnosed_and_recover`, `new_bound_review_is_rechecked_before_correction_task_claim`, `nonobject_review_task_response_stays_unresolved_until_terminal_evidence`, `obsolete_sent_preclaim_correction_anchors_remain_bounded`, `pending_correction_publication_rechecks_live_reservation`, `pending_correction_replay_rechecks_fresh_main_before_publication`, `pending_historical_correction_anchor_never_publishes_when_dirty`, `pending_historical_correction_anchor_resumes_after_transient_fence`, `report_correction_is_not_published_after_its_snapshot_advances`, `review_report_correction_rejects_reused_task_id_without_reposting`, `review_report_correction_requires_authenticated_terminal_task_metadata`, `review_report_dispatch_and_publication_complete_handoff`, `review_report_findings_publish_and_trigger_bounded_followup`, `review_report_observation_does_not_suppress_terminal_diagnosis`, `review_report_recovery_bounds_external_session_metadata`, `review_report_rejects_findings_outside_complete_changed_inventory`, `review_report_rejects_forged_file_sha256_inventory`, `stale_correction_is_rejected_at_fresh_merge_fences`, `stale_correction_rejection_binds_exact_selected_publication`, `stale_negative_correction_cannot_dispatch_fixer_after_reload`, `stale_pass_cannot_complete_handoff_after_reload`, `terminal_review_report_outcome_remains_deduplicated`, `uncertain_correction_review_publication_reads_back_without_reposting`, `unrepresentable_review_inventory_persists_one_deduplicated_blocker` | `test_later_review_does_not_release_active_or_uncertain_correction` checks persisted sent/uncertain records (including malformed task identity), no task/status publication, and no occupancy release. `test_waiting_copilot_review_handoff_survives_restart_without_budget` and `test_completed_task_handoff_waits_for_copilot_without_independent_dispatch` cover retained handoff locks and only the genuine Copilot request. |
-| `clipped_or_redacted_target_is_unresolvable_in_real_review`, `completed_negative_review_evaluates_only_complete_terminal_checks`, `current_independent_review_completes_handoff_without_copilot`, `invalid_review_timestamp_revokes_owned_success_on_same_head`, `mapped_partial_resolution_through_real_report_and_restart`, `negative_review_cannot_clear_incomplete_inventory`, `real_negative_review_source_evaluation`, `resolution_disposition_is_bound_to_real_report_envelope`, `terminal_source_waits_for_evaluation_then_resumes_once` | `test_current_copilot_rejection_advances_progress_but_cannot_merge`, `test_rejecting_review_progress_uses_non_review_checks_in_the_planner`, and the completed/current-head Copilot handoff tests cover bounded progress separately from merge acceptance. |
+| `clipped_or_redacted_target_is_unresolvable_in_real_review`, `completed_negative_review_evaluates_only_complete_terminal_checks`, `current_independent_review_completes_handoff_without_copilot`, `invalid_review_timestamp_revokes_owned_success_on_same_head`, `mapped_partial_resolution_through_real_report_and_restart`, `negative_review_cannot_clear_incomplete_inventory`, `real_negative_review_source_evaluation`, `resolution_disposition_is_bound_to_real_report_envelope`, `terminal_source_waits_for_evaluation_then_resumes_once` | `test_current_copilot_rejection_advances_progress_but_cannot_merge`, `test_commented_copilot_findings_are_negative_progress_not_review_approval`, `test_commented_findings_evaluate_completed_receipt_and_resume_once`, `test_rejecting_review_progress_uses_non_review_checks_in_the_planner`, and the completed/current-head Copilot handoff tests cover bounded evaluation separately from review approval and merge acceptance. |
 | `incomplete_preclaim_status_inventory_cannot_claim_or_post`, `new_head_publishes_status_in_first_cycle`, `rejected_status_generation_fails_cycle_instead_of_reporting_transition`, `returning_head_revokes_success_in_first_cycle`, `status_claim_never_invents_a_watermark`, `status_reconciliation_requires_durable_preclaim_id_watermark`, `status_transitions_can_repeat_on_same_head`, `uncertain_status_is_bound_to_generation_and_head`, `uncertain_status_reconciles_only_new_owned_remote_generation` | `test_foreign_retired_review_status_is_not_merge_authority`, `test_auto_merge_uses_current_three_checks_without_cloud_review`, and `test_required_policy_accepts_only_current_three_contexts_and_apps` cover the active check contract and reject retired review-status authority. No coordinator status is emitted for the retired context. |
 | `current_independent_review_completes_handoff_without_copilot`, `invalid_review_timestamp_revokes_owned_success_on_same_head`, `same_head_handoff_uses_independent_review_not_copilot`, `structured_owner_comment_accepts_review_without_copilot_approval`, `waiting_independent_review_handoff_survives_restart_without_budget` | `test_completed_copilot_review_completes_handoff_without_independent_report`, `test_completed_copilot_comment_accepts_review_without_independent_report`, `test_waiting_copilot_review_handoff_survives_restart_without_budget`, and `test_completed_task_handoff_waits_for_copilot_without_independent_dispatch` cover current Copilot identity, state, head, and durable handoff behavior. |
 

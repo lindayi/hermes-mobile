@@ -1,8 +1,11 @@
 from pathlib import Path
+from copy import deepcopy
+import json
 import os
 import re
 import shutil
 import subprocess
+from datetime import datetime, timezone
 
 import pytest
 import yaml
@@ -246,6 +249,1598 @@ def test_review_and_final_integration_contract_is_mandatory_on_both_routes():
         'guarded exact-main deployment gate before activation',
     ):
         assert clause in template, clause
+
+
+def test_supervised_review_qualification_contract_is_separate_and_fail_closed():
+    spec = ' '.join((ROOT / 'docs/git-development-spec.md').read_text().split())
+    assert 'Supervised manual qualification' in spec
+    for clause in (
+        'not a new reviewer requirement',
+        'generic request for a non-required reviewer role',
+        'no unresolved or uncertain source or safety concern',
+        'zero-findings headline alone is insufficient',
+        'complete authenticated raw and rendered review',
+        'complete paginated nested review threads',
+        'current on the exact head and in `COMMENTED` or `APPROVED` state',
+        'exact-head sensitive owner command',
+        'SHA-256 of the exact raw UTF-8 review body',
+        'command must be created no earlier than the unchanged review submission',
+        'no active or unknown task occupancy',
+        'certain source receipt and reservation provenance',
+        'fresh-main ancestry',
+        'all three current exact-head required checks',
+        'same-run complete `source-ci` aggregate',
+        'durable supervised qualification record',
+        'does not change `review_valid`, the owner-authorization ledger',
+        'Any head, base, review, or command change invalidates',
+        'missing, uncertain, or failing evidence blocks',
+        'does not alter receipts, claims, budgets',
+        'not an autonomous-trial success',
+        'normal protected merge without bypass',
+    ):
+        assert clause in spec, clause
+
+    for path in (
+        'AGENTS.md',
+        'docs/autonomy-policy.md',
+        'docs/cloud-coordinator-spec.md',
+        'docs/development-workflow.md',
+    ):
+        text = ' '.join((ROOT / path).read_text().split())
+        assert 'Supervised manual qualification' in text, path
+
+
+def test_manual_qualification_artifact_has_an_exact_typed_field_inventory():
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    assert '### Manual audit artifact v1' in spec
+    section = spec.split('### Manual audit artifact v1', 1)[1].split(
+        '### Publication and independent manual validation', 1)[0]
+    fields = re.findall(r'^\| `([^`]+)` \| ([^|]+) \|',
+                        section.split('Primitive types:', 1)[0], re.MULTILINE)
+    assert dict(fields) == {
+        'schema': 'Literal `hermes-supervised-qualification/v1`',
+        'kind': 'Enum `qualification`, `revalidation`',
+        'record_key': 'Key',
+        'prior_comment_id': 'ID or null',
+        'repository': 'Repository',
+        'pull': 'Pull',
+        'operator': 'Operator',
+        'head_sha': 'SHA',
+        'base_sha': 'SHA',
+        'reserved_at': 'Time',
+        'observed_at': 'Time',
+        'review': 'Review',
+        'review_inventory': 'EvidenceRef',
+        'source_proof': 'EvidenceRef',
+        'occupancy_proof': 'EvidenceRef',
+        'checks': 'Array of exactly three successful Check objects',
+        'source_run': 'Successful SourceRun',
+        'sensitive': 'Sensitive or null',
+        'role_request': 'Text',
+        'reasoning': 'Text',
+        'machine_outcome': 'MachineOutcome',
+        'status': 'Literal `supervised-only`',
+        'reason': 'Text',
+        'evidence': 'Array of 1–128 Evidence objects',
+    }
+    assert len(fields) == len(dict(fields)), 'Duplicate fields are not a contract'
+    assert 'The exact top-level keys for a `blocked` qualification or revalidation are' in spec
+    assert 'The exact top-level keys for an `invalidated` event are' in spec
+    assert '`supervised-only` qualification or revalidation' in spec
+
+
+def _validate_gate_observations(observations, refs, status):
+    assert all(item['gate'] in {
+        'check', 'source-run', 'sensitive', 'review', 'source',
+        'occupancy', 'machine', 'authorization',
+    }
+               for item in observations)
+    checks = [item for item in observations if item['gate'] == 'check']
+    assert len(checks) == 3
+    assert {item['name'] for item in checks} == {
+        'source-ci', 'integration-tests', 'issue-link',
+    }
+    for check in checks:
+        assert set(check) == {
+            'gate', 'name', 'outcome', 'id', 'app_id', 'head_sha',
+            'check_status', 'conclusion', 'completed_at', 'proof', 'reason',
+        }
+        assert check['outcome'] in {
+            'success', 'failure', 'pending', 'missing', 'unknown',
+        }
+        assert check['proof'] in refs
+        assert check['reason']
+        if check['outcome'] == 'missing':
+            assert all(check[key] is None for key in (
+                'id', 'app_id', 'head_sha', 'check_status', 'conclusion',
+                'completed_at',
+            ))
+        elif check['outcome'] == 'pending':
+            assert type(check['id']) is int and check['id'] > 0
+            assert re.fullmatch(r'[a-f0-9]{40}', check['head_sha'])
+            assert check['check_status'] and check['conclusion'] is None
+            assert check['completed_at'] is None
+        elif check['outcome'] in {'success', 'failure'}:
+            assert type(check['id']) is int and check['id'] > 0
+            assert re.fullmatch(r'[a-f0-9]{40}', check['head_sha'])
+            assert check['check_status']
+            assert check['conclusion'] is not None
+            assert (check['conclusion'] == 'success') == \
+                (check['outcome'] == 'success')
+            assert check['completed_at']
+        else:
+            assert check['id'] is None or check['id'] > 0
+            assert check['head_sha'] is None or \
+                re.fullmatch(r'[a-f0-9]{40}', check['head_sha'])
+        if check['name'] in {'source-ci', 'issue-link'} and check['id'] is not None:
+            assert check['app_id'] == 15368
+
+    source = next(item for item in observations if item['gate'] == 'source-run')
+    assert set(source) == {
+        'gate', 'outcome', 'id', 'attempt', 'head_sha', 'run_status', 'conclusion',
+        'completed_at', 'proof', 'reason',
+    }
+    assert source['outcome'] in {'success', 'failure', 'pending', 'missing', 'unknown'}
+    assert source['proof'] in refs
+    assert source['reason']
+    if source['outcome'] == 'missing':
+        assert all(source[key] is None for key in (
+            'id', 'attempt', 'head_sha', 'run_status', 'conclusion', 'completed_at',
+        ))
+    elif source['outcome'] == 'pending':
+        assert type(source['id']) is int and source['id'] > 0
+        assert type(source['attempt']) is int and 1 <= source['attempt'] <= 100
+        assert re.fullmatch(r'[a-f0-9]{40}', source['head_sha'])
+        assert source['run_status'] and source['conclusion'] is None
+        assert source['completed_at'] is None
+    elif source['outcome'] in {'success', 'failure'}:
+        assert type(source['id']) is int and source['id'] > 0
+        assert type(source['attempt']) is int and 1 <= source['attempt'] <= 100
+        assert re.fullmatch(r'[a-f0-9]{40}', source['head_sha'])
+        assert source['run_status']
+        assert source['completed_at']
+        assert source['conclusion'] is not None
+        assert (source['conclusion'] == 'success') == \
+            (source['outcome'] == 'success')
+    else:
+        assert source['id'] is None or source['id'] > 0
+        assert source['attempt'] is None or 1 <= source['attempt'] <= 100
+        assert source['head_sha'] is None or \
+            re.fullmatch(r'[a-f0-9]{40}', source['head_sha'])
+
+    sensitive = next(item for item in observations if item['gate'] == 'sensitive')
+    assert set(sensitive) == {'gate', 'outcome', 'command', 'proof', 'reason'}
+    assert sensitive['outcome'] in {
+        'authorized', 'not-required', 'missing', 'rejected', 'unknown',
+    }
+    assert sensitive['proof'] in refs and sensitive['reason']
+    if sensitive['outcome'] in {'missing', 'not-required'}:
+        assert sensitive['command'] is None
+    elif sensitive['outcome'] in {'authorized', 'rejected'}:
+        if sensitive['outcome'] == 'rejected':
+            assert sensitive['command'] in refs
+        else:
+            assert isinstance(sensitive['command'], dict)
+    else:
+        assert sensitive['command'] is None or sensitive['command'] in refs
+
+    other = [item for item in observations if item['gate'] not in {
+        'check', 'source-run', 'sensitive',
+    }]
+    for item in other:
+        assert set(item) == {'gate', 'outcome', 'observation', 'proof', 'reason'}
+        assert item['outcome'] in {
+            'missing', 'pending', 'failure', 'rejected', 'stale', 'unknown', 'uncertain',
+        }
+        assert item['observation'] is None or item['observation'] in refs
+        assert item['proof'] in refs and item['reason']
+
+    if status == 'supervised-only':
+        assert not other
+        assert all(check['outcome'] == 'success' for check in checks)
+        assert source['outcome'] == 'success'
+        assert sensitive['outcome'] in {'authorized', 'not-required'}
+    else:
+        assert any(check['outcome'] != 'success' for check in checks) or \
+            source['outcome'] != 'success' or \
+            sensitive['outcome'] not in {'authorized', 'not-required'} or bool(other)
+
+
+BLOCKED_FIXTURES = {'blocked-checks', 'blocked-sensitive', 'blocked-unknown-gate'}
+BLOCKED_KEYS = {
+    'schema', 'kind', 'record_key', 'prior_comment_id', 'repository', 'pull', 'operator',
+    'head_sha', 'base_sha', 'reserved_at', 'observed_at', 'status', 'reason',
+    'gate_evidence', 'evidence',
+}
+SHA = r'[a-f0-9]{40}'
+TIME = r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
+AUDIT_REFERENCE_NOW = datetime(2026, 1, 1, 0, 0, 10, tzinfo=timezone.utc)
+
+
+def _audit_datetime(value, now):
+    assert type(now) is datetime and now.tzinfo is not None and \
+        now.utcoffset().total_seconds() == 0
+    assert type(value) is str and re.fullmatch(TIME, value)
+    try:
+        parsed = datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ').replace(
+            tzinfo=timezone.utc,
+        )
+    except ValueError as error:
+        raise AssertionError('timestamp must be a valid UTC calendar date') from error
+    assert parsed <= now, 'timestamp must not be in the future'
+    return parsed
+
+
+def _validate_operator(operator, evidence_by_key):
+    assert type(operator) is dict
+    assert set(operator) == {'login', 'id', 'delegation'}
+    login = operator['login']
+    assert type(login) is str
+    try:
+        login_bytes = login.encode('utf-8')
+    except UnicodeEncodeError as error:
+        raise AssertionError('operator login must be valid UTF-8') from error
+    assert 0 < len(login_bytes) <= 8192
+    assert type(operator['id']) is int and 1 <= operator['id'] < 2**63
+    delegation = operator['delegation']
+    assert type(delegation) is str and delegation in evidence_by_key and \
+        evidence_by_key[delegation].get('type') == 'public-response', \
+        'delegation must reference a public response'
+
+
+def _validate_blocked_record(fixture, *, now=AUDIT_REFERENCE_NOW):
+    """Validate a complete synthetic blocked record, its root bindings and evidence graph."""
+    record = {key: value for key, value in fixture.items() if key != 'fixture'}
+    assert set(record) == BLOCKED_KEYS
+    assert record['schema'] == 'hermes-supervised-qualification/v1'
+    assert record['kind'] in {'qualification', 'revalidation'}
+    assert record['status'] == 'blocked'
+    assert re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', record['record_key'])
+    prior = record['prior_comment_id']
+    assert prior is None or (type(prior) is int and 1 <= prior < 2**63)
+    assert record['kind'] != 'revalidation' or prior is not None
+    assert record['repository'] == {'name': 'lindayi/hermes-mobile', 'id': 1}
+    assert set(record['pull']) == {'number', 'node_id', 'url'}
+    assert record['reason']
+    for root in ('head_sha', 'base_sha'):
+        assert type(record[root]) is str and re.fullmatch(SHA, record[root]), \
+            'blocked root bindings must be known SHAs'
+    reserved_at = _audit_datetime(record['reserved_at'], now)
+    observed_at = _audit_datetime(record['observed_at'], now)
+    assert reserved_at <= observed_at
+    binding = {
+        'repository_id': record['repository']['id'],
+        'pull_number': record['pull']['number'],
+        'head_sha': record['head_sha'],
+        'base_sha': record['base_sha'],
+    }
+
+    entries = record['evidence']
+    assert 1 <= len(entries) <= 128
+    by_key = {entry['key']: entry for entry in entries}
+    assert len(by_key) == len(entries)
+    assert len({entry['path'] for entry in entries}) == len(entries)
+    _validate_operator(record['operator'], by_key)
+    for entry in entries:
+        assert set(entry) == {
+            'key', 'type', 'path', 'sha256', 'bytes', 'url', 'retrieved_at',
+            'method', 'request_sha256', 'identity', 'pagination',
+        }
+        assert entry['type'] == 'public-response'
+        assert re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', entry['key'])
+        path = entry['path']
+        assert 0 < len(path.encode()) <= 256 and not path.startswith('/')
+        assert all(part not in {'', '.', '..'} for part in path.split('/'))
+        assert re.fullmatch(r'[a-f0-9]{64}', entry['sha256'])
+        assert re.fullmatch(r'[a-f0-9]{64}', entry['request_sha256'])
+        assert type(entry['bytes']) is int and 1 <= entry['bytes'] <= 2097152
+        assert entry['url'].startswith('https://api.github.com/')
+        assert entry['method'] in {'GET', 'POST-read-only'}
+        assert _audit_datetime(entry['retrieved_at'], now) <= observed_at
+        assert entry['identity'] == binding, 'evidence binding differs from the root'
+        for page in entry['pagination']:
+            assert set(page) == {'connection', 'page', 'cursor', 'next', 'total', 'count'}
+            assert page['page'] == 1 and page['next'] is None
+            assert page['total'] == page['count'] <= 100
+
+    observations = record['gate_evidence']
+    assert 1 <= len(observations) <= 32
+    _validate_gate_observations(observations, set(by_key), record['status'])
+
+    referenced = {record['operator']['delegation']}
+    for item in observations:
+        referenced.add(item['proof'])
+        if item['gate'] == 'sensitive' and isinstance(item['command'], str):
+            referenced.add(item['command'])
+        if item['gate'] not in {'check', 'source-run', 'sensitive'} and item['observation']:
+            referenced.add(item['observation'])
+        if item.get('head_sha') is not None:
+            assert item['head_sha'] == record['head_sha'], 'gate binding differs from the root'
+        if item.get('completed_at') is not None:
+            assert _audit_datetime(item['completed_at'], now) <= observed_at
+    assert referenced <= set(by_key), 'dangling reference'
+    assert set(by_key) <= referenced, 'unreferenced evidence'
+
+
+def _validate_gate_outcome_fixture(fixture, *, now=AUDIT_REFERENCE_NOW):
+    """Validate the documented gate fixtures without implementing a runtime validator."""
+    if fixture['fixture'] in BLOCKED_FIXTURES:
+        _validate_blocked_record(fixture, now=now)
+    else:
+        _validate_invalidation_record(fixture, now=now)
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES | {'invalidation'}))
+@pytest.mark.parametrize('field,value', (
+    ('id', True), ('id', 0), ('id', -1), ('id', 2**63), ('id', '1'),
+    ('id', None), ('id', 1.0), ('login', ''), ('login', None),
+    ('login', 'x' * 8193), ('login', 'é' * 4097),
+))
+def test_audit_records_reject_invalid_operator_fields(name, field, value):
+    record = deepcopy(_gate_fixtures()[name])
+    record['operator'][field] = value
+
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(record)
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES | {'invalidation'}))
+@pytest.mark.parametrize('operator_id', (1, 2**63 - 1))
+@pytest.mark.parametrize('login', ('synthetic-operator', 'é' * 4096))
+def test_audit_records_accept_operator_boundaries(name, operator_id, login):
+    record = deepcopy(_gate_fixtures()[name])
+    record['operator'].update(id=operator_id, login=login)
+
+    _validate_gate_outcome_fixture(record)
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES | {'invalidation'}))
+@pytest.mark.parametrize('delegation', ('missing', None, 1))
+def test_audit_records_reject_dangling_operator_delegation(name, delegation):
+    record = deepcopy(_gate_fixtures()[name])
+    record['operator']['delegation'] = delegation
+
+    with pytest.raises(AssertionError, match='delegation must reference a public response'):
+        _validate_gate_outcome_fixture(record)
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES | {'invalidation'}))
+def test_audit_records_require_operator_delegation_to_be_public_response(name):
+    record = deepcopy(_gate_fixtures()[name])
+    delegated = record['operator']['delegation']
+    next(entry for entry in record['evidence'] if entry['key'] == delegated)[
+        'type'
+    ] = 'private-attestation'
+
+    with pytest.raises(AssertionError, match='delegation must reference a public response'):
+        _validate_gate_outcome_fixture(record)
+
+
+def _validate_invalidation_record(fixture, *, prior_readback=None, now=AUDIT_REFERENCE_NOW):
+    """Check this complete synthetic event, not runtime qualification or live proof."""
+    record = {key: value for key, value in fixture.items() if key != 'fixture'}
+    assert set(record) == {
+        'schema', 'kind', 'record_key', 'prior_comment_id', 'repository', 'pull',
+        'operator', 'head_sha', 'base_sha', 'changed_binding', 'reserved_at',
+        'observed_at', 'status', 'reason', 'evidence',
+    }, 'invalidation must be a complete event'
+    assert fixture['fixture'] == 'invalidation'
+    assert record['schema'] == 'hermes-supervised-qualification/v1'
+    assert record['kind'] == 'invalidation' and record['status'] == 'invalidated'
+    assert re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', record['record_key'])
+    assert type(record['prior_comment_id']) is int and 1 <= record['prior_comment_id'] < 2**63
+    assert record['repository'] == {'name': 'lindayi/hermes-mobile', 'id': 1}
+    assert record['pull'] == {
+        'number': 1, 'node_id': 'SYNTHETIC_PR_NODE',
+        'url': 'https://api.github.com/repos/lindayi/hermes-mobile/pulls/1',
+    }
+    assert type(record['reason']) is str and 0 < len(record['reason'].encode()) <= 8192
+    changed = record['changed_binding']
+    assert set(changed) == {'head_sha', 'base_sha', 'observed_at', 'proof'}
+    for snapshot in (record, changed):
+        for field in ('head_sha', 'base_sha'):
+            assert type(snapshot[field]) is str and re.fullmatch(SHA, snapshot[field]), \
+                'invalidation bindings must be known SHAs'
+    reserved_at = _audit_datetime(record['reserved_at'], now)
+    observed_at = _audit_datetime(record['observed_at'], now)
+    changed_at = _audit_datetime(changed['observed_at'], now)
+    assert reserved_at <= observed_at and changed_at <= observed_at
+    old_binding = {
+        'repository_id': record['repository']['id'], 'pull_number': record['pull']['number'],
+        'head_sha': record['head_sha'], 'base_sha': record['base_sha'],
+    }
+    fresh_binding = dict(old_binding, head_sha=changed['head_sha'], base_sha=changed['base_sha'])
+    entries = record['evidence']
+    assert 1 <= len(entries) <= 128
+    by_key = {entry['key']: entry for entry in entries}
+    assert len(by_key) == len(entries), 'duplicate evidence key'
+    assert len({entry['path'] for entry in entries}) == len(entries), 'duplicate evidence path'
+    _validate_operator(record['operator'], by_key)
+    refs = {record['operator']['delegation'], 'prior-record', changed['proof']}
+    assert refs <= set(by_key), 'dangling reference'
+    assert set(by_key) <= refs, 'unreferenced evidence'
+    assert len(refs) == 3, 'old readback, fresh change and authority are distinct responses'
+    for entry in entries:
+        assert set(entry) == {
+            'key', 'type', 'path', 'sha256', 'bytes', 'url', 'retrieved_at',
+            'method', 'request_sha256', 'identity', 'pagination',
+        }
+        assert entry['type'] == 'public-response'
+        assert re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', entry['key'])
+        assert 0 < len(entry['path'].encode()) <= 256 and not entry['path'].startswith('/')
+        assert all(part not in {'', '.', '..'} for part in entry['path'].split('/'))
+        assert re.fullmatch(r'[a-f0-9]{64}', entry['sha256'])
+        assert re.fullmatch(r'[a-f0-9]{64}', entry['request_sha256'])
+        assert type(entry['bytes']) is int and 1 <= entry['bytes'] <= 2097152
+        assert entry['url'].startswith('https://api.github.com/repos/lindayi/hermes-mobile/')
+        assert entry['method'] == 'GET' and entry['pagination'] == []
+        retrieved_at = _audit_datetime(entry['retrieved_at'], now)
+        assert retrieved_at <= observed_at
+        if entry['key'] == changed['proof']:
+            assert entry['identity'] == fresh_binding, 'change proof must bind the fresh snapshot'
+            assert retrieved_at <= changed_at
+        else:
+            assert entry['identity'] == old_binding, 'historical proof must bind the old snapshot'
+
+    # The prior comment's full synthetic body is the documented blocked-checks record.
+    if prior_readback is None:
+        prior_readback = {
+            'id': 99, 'record': {
+                key: value for key, value in _gate_fixtures()['blocked-checks'].items()
+                if key != 'fixture'
+            },
+        }
+    assert record['prior_comment_id'] == prior_readback['id'], 'prior comment ID mismatch'
+    assert by_key['prior-record']['url'] == (
+        f"https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/{prior_readback['id']}"
+    )
+    prior = prior_readback['record']
+    for field in ('repository', 'pull', 'head_sha', 'base_sha'):
+        assert record[field] == prior[field], 'prior record binding mismatch'
+    assert _audit_datetime(prior['observed_at'], now) <= \
+        _audit_datetime(by_key['prior-record']['retrieved_at'], now)
+    assert _audit_datetime(prior['observed_at'], now) <= \
+        _audit_datetime(by_key[changed['proof']]['retrieved_at'], now) <= changed_at
+
+
+def test_invalidation_documents_known_fresh_bindings_and_private_unavailable_reads():
+    spec = ' '.join((ROOT / 'docs/git-development-spec.md').read_text().split())
+    for clause in (
+        'new head and base must both be known SHAs actually observed',
+        'no public invalidation event',
+        'preserve the failed or incomplete read and reservation privately',
+        'Unavailable evidence prevents reuse of prior qualification',
+        'even when no invalidation can be published',
+        'The head and base need not differ from the old snapshot',
+    ):
+        assert clause in spec, clause
+    assert 'new SHAs are the values actually observed or null when unavailable' not in spec
+
+
+@pytest.mark.parametrize('fields', (
+    ('head_sha',), ('base_sha',), ('head_sha', 'base_sha'),
+))
+@pytest.mark.parametrize('value', (None, 'missing', 'A' * 40, 'a' * 39))
+def test_invalidation_rejects_unavailable_or_malformed_changed_bindings(fields, value):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    for field in fields:
+        if value == 'missing':
+            del record['changed_binding'][field]
+        else:
+            record['changed_binding'][field] = value
+    with pytest.raises(AssertionError):
+        _validate_invalidation_record(record)
+
+
+@pytest.mark.parametrize('key', ('authority', 'prior-record', 'fresh-head'))
+@pytest.mark.parametrize('field', ('head_sha', 'base_sha', 'repository_id', 'pull_number'))
+@pytest.mark.parametrize('value', (None, 'mismatch'))
+def test_invalidation_rejects_null_or_mismatched_evidence_bindings(key, field, value):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    entry = next(item for item in record['evidence'] if item['key'] == key)
+    entry['identity'][field] = (
+        None if value is None else ('d' * 40 if field.endswith('sha') else 99)
+    )
+    with pytest.raises(AssertionError):
+        _validate_invalidation_record(record)
+
+
+@pytest.mark.parametrize('defect', (
+    'dangling-proof', 'dangling-delegation', 'missing-prior', 'duplicate-key',
+    'duplicate-path', 'unused-evidence', 'old-as-fresh', 'extra-key', 'missing-key',
+    'prior-id', 'prior-head', 'prior-base', 'prior-repository', 'prior-pull',
+    'prior-url', 'unknown-kind', 'qualification-kind', 'revalidation-kind',
+    'blocked-status', 'supervised-only-status', 'unknown-schema',
+))
+def test_invalidation_rejects_inconsistent_identity_references_and_promotion(defect):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    evidence = record['evidence']
+    if defect == 'dangling-proof':
+        record['changed_binding']['proof'] = 'absent'
+    elif defect == 'dangling-delegation':
+        record['operator']['delegation'] = 'absent'
+    elif defect == 'missing-prior':
+        evidence[:] = [item for item in evidence if item['key'] != 'prior-record']
+    elif defect == 'duplicate-key':
+        evidence.append(deepcopy(evidence[0]))
+    elif defect == 'duplicate-path':
+        evidence[2]['path'] = evidence[1]['path']
+    elif defect == 'unused-evidence':
+        extra = deepcopy(evidence[0])
+        extra.update(key='extra', path='extra.json')
+        evidence.append(extra)
+    elif defect == 'old-as-fresh':
+        record['changed_binding']['proof'] = 'prior-record'
+    elif defect == 'extra-key':
+        record['evidence_refs'] = []
+    elif defect == 'missing-key':
+        del record['reason']
+    elif defect == 'prior-id':
+        record['prior_comment_id'] = 98
+    elif defect in {'prior-head', 'prior-base', 'prior-repository', 'prior-pull'}:
+        if defect in {'prior-head', 'prior-base'}:
+            field = defect.split('-', 1)[1] + '_sha'
+            record[field] = 'd' * 40
+            for entry in evidence:
+                if entry['key'] != 'fresh-head':
+                    entry['identity'][field] = record[field]
+        elif defect == 'prior-repository':
+            record['repository']['id'] = 99
+        else:
+            record['pull']['number'] = 99
+    elif defect == 'prior-url':
+        next(item for item in evidence if item['key'] == 'prior-record')['url'] = (
+            'https://api.github.com/repos/lindayi/hermes-mobile/issues/comments/98'
+        )
+    elif defect.endswith('kind'):
+        record['kind'] = defect.removesuffix('-kind')
+    elif defect.endswith('status'):
+        record['status'] = defect.removesuffix('-status')
+    else:
+        record['schema'] = 'hermes-supervised-qualification/v2'
+    with pytest.raises(AssertionError):
+        _validate_invalidation_record(record)
+
+
+@pytest.mark.parametrize('field', ('repository', 'pull', 'head_sha', 'base_sha', 'id'))
+def test_invalidation_matches_the_prior_comment_readback(field):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    prior = {'id': 99, 'record': deepcopy(_gate_fixtures()['blocked-checks'])}
+    if field == 'id':
+        prior['id'] = 98
+    else:
+        prior['record'][field] = None
+    with pytest.raises(AssertionError):
+        _validate_invalidation_record(record, prior_readback=prior)
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES))
+def test_blocked_record_cannot_be_promoted_to_an_invalidation(name):
+    record = deepcopy(_gate_fixtures()[name])
+    record.update(kind='invalidation', status='invalidated', prior_comment_id=99)
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(record)
+
+
+@pytest.mark.parametrize('surface', ('review', 'command', 'check', 'attempt', 'occupancy'))
+def test_invalidation_accepts_changed_evidence_at_the_same_head_and_base(surface):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    record['changed_binding']['head_sha'] = record['head_sha']
+    fresh = next(item for item in record['evidence'] if item['key'] == 'fresh-head')
+    fresh['identity']['head_sha'] = record['head_sha']
+    fresh['url'] = 'https://api.github.com/repos/lindayi/hermes-mobile/' + {
+        'review': 'pulls/1/reviews/10', 'command': 'issues/comments/10',
+        'check': 'check-runs/10', 'attempt': 'actions/runs/10/attempts/2',
+        'occupancy': 'agents/tasks/synthetic-task',
+    }[surface]
+    record['reason'] = f'SYNTHETIC {surface} changed at the same head/base'
+    _validate_invalidation_record(record)
+
+
+@pytest.mark.parametrize('fields', (
+    ('head_sha',), ('base_sha',), ('head_sha', 'base_sha'),
+))
+def test_invalidation_accepts_actual_binding_changes_with_distinct_old_and_new_proof(fields):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    fresh = next(item for item in record['evidence'] if item['key'] == 'fresh-head')
+    record['changed_binding']['head_sha'] = record['head_sha']
+    fresh['identity']['head_sha'] = record['head_sha']
+    for field in fields:
+        record['changed_binding'][field] = fresh['identity'][field] = 'c' * 40
+    _validate_invalidation_record(record)
+    prior = next(item for item in record['evidence'] if item['key'] == 'prior-record')
+    assert prior['identity'] != fresh['identity']
+
+
+@pytest.mark.parametrize('field', ('reserved_at', 'observed_at', 'changed_at', 'retrieved_at'))
+@pytest.mark.parametrize('value', (
+    '2025-02-29T00:00:00Z', '2026-01-01T24:00:00Z', '2026-01-01T00:00:60Z',
+    '2026-1-01T00:00:00Z', '2026-01-01T00:00:00.000Z',
+    '2026-01-01T00:00:00+00:00', None, 1,
+))
+def test_invalidation_rejects_invalid_or_noncanonical_timestamps(field, value):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    if field == 'changed_at':
+        record['changed_binding']['observed_at'] = value
+    elif field == 'retrieved_at':
+        record['evidence'][0][field] = value
+    else:
+        record[field] = value
+    with pytest.raises(AssertionError):
+        _validate_invalidation_record(record)
+
+
+@pytest.mark.parametrize('defect', (
+    'late-evidence', 'late-change-proof', 'early-prior', 'early-change', 'stale-change-proof',
+))
+def test_invalidation_rejects_evidence_chronology_violations(defect):
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    by_key = {entry['key']: entry for entry in record['evidence']}
+    if defect == 'late-evidence':
+        by_key['authority']['retrieved_at'] = '2026-01-01T00:00:09Z'
+    elif defect == 'late-change-proof':
+        by_key['fresh-head']['retrieved_at'] = '2026-01-01T00:00:08Z'
+    elif defect == 'early-prior':
+        by_key['prior-record']['retrieved_at'] = '2026-01-01T00:00:04Z'
+    elif defect == 'stale-change-proof':
+        by_key['fresh-head']['retrieved_at'] = '2026-01-01T00:00:04Z'
+    else:
+        record['changed_binding']['observed_at'] = '2026-01-01T00:00:04Z'
+        by_key['fresh-head']['retrieved_at'] = '2026-01-01T00:00:04Z'
+    with pytest.raises(AssertionError):
+        _validate_invalidation_record(record)
+
+
+def _gate_fixtures():
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    section = spec.split('### SYNTHETIC gate outcome examples', 1)[1].split(
+        '### Publication and independent manual validation', 1)[0]
+    fixtures = [json.loads(value) for value in re.findall(
+        r'```json\n(.*?)\n```', section, re.DOTALL)]
+    return {fixture['fixture']: fixture for fixture in fixtures}
+
+
+def test_manual_qualification_documents_truthful_blocked_and_invalidation_variants():
+    fixtures = _gate_fixtures()
+    assert set(fixtures) == BLOCKED_FIXTURES | {'invalidation'}
+    for fixture in fixtures.values():
+        _validate_gate_outcome_fixture(fixture)
+
+    for name in BLOCKED_FIXTURES:
+        promoted = deepcopy(fixtures[name])
+        promoted['status'] = 'supervised-only'
+        with pytest.raises(AssertionError):
+            _validate_gate_outcome_fixture(promoted)
+
+    blocked = fixtures['blocked-checks']['gate_evidence']
+    assert {item['outcome'] for item in blocked if item['gate'] == 'check'} == {
+        'missing', 'failure', 'success',
+    }
+    assert next(item for item in blocked if item['gate'] == 'source-run')['outcome'] == 'pending'
+    assert next(item for item in blocked if item['gate'] == 'sensitive')['outcome'] == 'missing'
+    assert next(item for item in fixtures['blocked-sensitive']['gate_evidence']
+                if item['gate'] == 'sensitive')['outcome'] == 'rejected'
+    solely_unknown = fixtures['blocked-unknown-gate']['gate_evidence']
+    assert [item['outcome'] for item in solely_unknown if item['gate'] in {
+        'check', 'source-run'}] == ['success'] * 4
+    assert [(item['gate'], item['outcome']) for item in solely_unknown
+            if item['gate'] not in {'check', 'source-run'}] == [
+        ('sensitive', 'not-required'), ('review', 'unknown')]
+
+
+def test_replacement_qualification_references_the_invalidation_it_supersedes():
+    fixtures = _gate_fixtures()
+    first = deepcopy(fixtures['blocked-checks'])
+    _validate_blocked_record(first)
+
+    invalidation = deepcopy(fixtures['invalidation'])
+    _validate_invalidation_record(invalidation)
+    invalidation_readback = {
+        'id': 100,
+        'record': {key: value for key, value in invalidation.items() if key != 'fixture'},
+    }
+
+    replacement = deepcopy(first)
+    replacement.update(
+        record_key='synthetic-replacement-qualification',
+        prior_comment_id=invalidation_readback['id'],
+    )
+    assert replacement['prior_comment_id'] == invalidation_readback['id']
+    _validate_blocked_record(replacement)
+
+
+@pytest.mark.parametrize('kind', ('qualification', 'revalidation'))
+def test_blocked_record_accepts_maximum_prior_comment_id(kind):
+    record = deepcopy(_gate_fixtures()['blocked-checks'])
+    record.update(kind=kind, prior_comment_id=2**63 - 1)
+    _validate_blocked_record(record)
+
+
+@pytest.mark.parametrize('prior', (2**63, 0, -1, True, '99', 1.0, None))
+def test_blocked_revalidation_rejects_invalid_prior_comment_ids(prior):
+    record = deepcopy(_gate_fixtures()['blocked-checks'])
+    record.update(kind='revalidation', prior_comment_id=prior)
+    with pytest.raises(AssertionError):
+        _validate_blocked_record(record)
+
+
+def test_blocked_record_rejects_impossible_calendar_timestamps():
+    record = deepcopy(_gate_fixtures()['blocked-checks'])
+    impossible = '2026-02-30T00:00:00Z'
+    record['reserved_at'] = record['observed_at'] = impossible
+    for entry in record['evidence']:
+        entry['retrieved_at'] = impossible
+    for gate in record['gate_evidence']:
+        if gate.get('completed_at') is not None:
+            gate['completed_at'] = impossible
+
+    with pytest.raises(AssertionError):
+        _validate_blocked_record(record)
+
+
+@pytest.mark.parametrize('location', (
+    'blocked-reserved', 'blocked-observed', 'blocked-evidence', 'blocked-gate',
+    'invalidation-reserved', 'invalidation-observed', 'invalidation-change',
+    'invalidation-evidence',
+))
+def test_audit_artifacts_reject_impossible_dates_at_every_timestamp_location(location):
+    invalidation = location.startswith('invalidation-')
+    record = deepcopy(_gate_fixtures()['invalidation' if invalidation else 'blocked-checks'])
+    impossible = '2026-02-30T00:00:00Z'
+    if location.endswith('reserved'):
+        record['reserved_at'] = impossible
+    elif location.endswith('observed'):
+        record['observed_at'] = impossible
+    elif location in {'blocked-evidence', 'invalidation-evidence'}:
+        record['evidence'][0]['retrieved_at'] = impossible
+    elif location == 'blocked-gate':
+        next(item for item in record['gate_evidence']
+             if item.get('completed_at') is not None)['completed_at'] = impossible
+    else:
+        record['changed_binding']['observed_at'] = impossible
+
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(
+            record, now=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        )
+
+
+@pytest.mark.parametrize('value', (
+    '2025-02-29T00:00:00Z',
+    '2026-13-01T00:00:00Z',
+    '2026-01-00T00:00:00Z',
+    '2026-01-32T00:00:00Z',
+    '2026-01-01T24:00:00Z',
+    '2026-01-01T00:60:00Z',
+    '2026-01-01T00:00:60Z',
+    '2026-1-01T00:00:00Z',
+    '2026-01-01T00:00:00.000Z',
+    '2026-01-01T00:00:00+00:00',
+    None,
+    1,
+))
+def test_blocked_record_rejects_invalid_or_noncanonical_timestamps(value):
+    record = deepcopy(_gate_fixtures()['blocked-checks'])
+    record['reserved_at'] = value
+
+    with pytest.raises(AssertionError):
+        _validate_blocked_record(
+            record, now=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        )
+
+
+@pytest.mark.parametrize('location', (
+    'blocked-reserved', 'blocked-observed', 'blocked-evidence', 'blocked-gate',
+    'invalidation-reserved', 'invalidation-observed', 'invalidation-change',
+    'invalidation-evidence',
+))
+def test_audit_artifacts_reject_future_timestamps_at_every_timestamp_location(location):
+    invalidation = location.startswith('invalidation-')
+    record = deepcopy(_gate_fixtures()['invalidation' if invalidation else 'blocked-checks'])
+    if location.endswith('reserved'):
+        record['reserved_at'] = '2026-01-01T00:00:11Z'
+    elif location.endswith('observed'):
+        record['observed_at'] = '2026-01-01T00:00:11Z'
+    elif location in {'blocked-evidence', 'invalidation-evidence'}:
+        record['evidence'][0]['retrieved_at'] = '2026-01-01T00:00:11Z'
+    elif location == 'blocked-gate':
+        next(item for item in record['gate_evidence']
+             if item.get('completed_at') is not None)['completed_at'] = \
+            '2026-01-01T00:00:11Z'
+    else:
+        record['changed_binding']['observed_at'] = '2026-01-01T00:00:11Z'
+
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(
+            record, now=datetime(2026, 1, 1, 0, 0, 10, tzinfo=timezone.utc),
+        )
+
+
+def test_audit_timestamp_accepts_valid_leap_date_and_equal_now():
+    record = deepcopy(_gate_fixtures()['blocked-checks'])
+    exact_now = '2024-02-29T12:34:56Z'
+    record['reserved_at'] = record['observed_at'] = exact_now
+    for entry in record['evidence']:
+        entry['retrieved_at'] = exact_now
+    for gate in record['gate_evidence']:
+        if gate.get('completed_at') is not None:
+            gate['completed_at'] = exact_now
+
+    _validate_blocked_record(
+        record, now=datetime(2024, 2, 29, 12, 34, 56, tzinfo=timezone.utc),
+    )
+
+
+def test_invalidation_accepts_equal_timestamps():
+    record = deepcopy(_gate_fixtures()['invalidation'])
+    exact_now = '2026-01-01T00:00:10Z'
+    record['reserved_at'] = record['observed_at'] = exact_now
+    record['changed_binding']['observed_at'] = exact_now
+
+    _validate_gate_outcome_fixture(
+        record, now=datetime(2026, 1, 1, 0, 0, 10, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.parametrize('location', (
+    'blocked-reserved', 'blocked-evidence', 'blocked-gate',
+    'invalidation-reserved', 'invalidation-change',
+))
+def test_audit_artifacts_reject_timestamp_order_violations(location):
+    invalidation = location.startswith('invalidation-')
+    record = deepcopy(_gate_fixtures()['invalidation' if invalidation else 'blocked-checks'])
+    later = '2026-01-01T00:00:09Z' if invalidation else '2026-01-01T00:00:06Z'
+    if location.endswith('reserved'):
+        record['reserved_at'] = later
+    elif location == 'blocked-evidence':
+        record['evidence'][0]['retrieved_at'] = later
+    elif location == 'blocked-gate':
+        next(item for item in record['gate_evidence']
+             if item.get('completed_at') is not None)['completed_at'] = later
+    else:
+        record['changed_binding']['observed_at'] = later
+
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(record)
+
+
+def test_blocked_record_rejects_supervised_only_with_all_successful_gates():
+    record = deepcopy(_gate_fixtures()['blocked-unknown-gate'])
+    record['gate_evidence'] = [
+        item for item in record['gate_evidence'] if item['gate'] != 'review'
+    ]
+    record['evidence'] = [
+        item for item in record['evidence'] if item['key'] != 'review-pages'
+    ]
+    record['status'] = 'supervised-only'
+
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(record)
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES))
+@pytest.mark.parametrize('root', ('head_sha', 'base_sha'))
+@pytest.mark.parametrize('value', (None, 'missing', 'A' * 40, 'a' * 39))
+def test_blocked_record_rejects_unknown_or_malformed_root_bindings(name, root, value):
+    record = deepcopy(_gate_fixtures()[name])
+    if value == 'missing':
+        del record[root]
+    else:
+        record[root] = value
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(record)
+
+
+@pytest.mark.parametrize('name', sorted(BLOCKED_FIXTURES))
+@pytest.mark.parametrize('defect', (
+    'evidence-head', 'evidence-base', 'evidence-repository', 'evidence-pull', 'gate-head',
+    'dangling-proof', 'unused-evidence', 'duplicate-key', 'duplicate-path', 'unsafe-path',
+    'absolute-path', 'future-gate', 'extra-key', 'missing-key', 'bad-delegation',
+    'revalidation-without-prior', 'only-successes',
+))
+def test_blocked_record_rejects_inconsistent_roots_evidence_and_references(name, defect):
+    record = deepcopy(_gate_fixtures()[name])
+    evidence = record['evidence']
+    gates = record['gate_evidence']
+    if defect.startswith('evidence-'):
+        field = {'head': 'head_sha', 'base': 'base_sha', 'repository': 'repository_id',
+                 'pull': 'pull_number'}[defect.split('-', 1)[1]]
+        evidence[1]['identity'][field] = 'c' * 40 if field.endswith('sha') else 99
+    elif defect == 'gate-head':
+        next(item for item in gates if item['gate'] == 'source-run')['head_sha'] = 'c' * 40
+    elif defect == 'dangling-proof':
+        gates[0]['proof'] = 'absent'
+    elif defect == 'unused-evidence':
+        extra = deepcopy(evidence[1])
+        extra['key'], extra['path'] = 'extra', 'extra.json'
+        evidence.append(extra)
+    elif defect == 'duplicate-key':
+        evidence[2]['key'] = evidence[1]['key']
+    elif defect == 'duplicate-path':
+        evidence[2]['path'] = evidence[1]['path']
+    elif defect == 'unsafe-path':
+        evidence[1]['path'] = 'safe/../outside.json'
+    elif defect == 'absolute-path':
+        evidence[1]['path'] = '/outside.json'
+    elif defect == 'future-gate':
+        gates[1]['completed_at'] = '2026-01-01T00:00:06Z'
+    elif defect == 'extra-key':
+        record['evidence_refs'] = []
+    elif defect == 'missing-key':
+        del record['reason']
+    elif defect == 'bad-delegation':
+        record['operator']['delegation'] = 'absent'
+    elif defect == 'revalidation-without-prior':
+        record['kind'] = 'revalidation'
+    else:
+        for item in gates:
+            if item['gate'] == 'check':
+                item.update(outcome='success', id=item['id'] or 90, app_id=15368,
+                            head_sha=record['head_sha'], check_status='completed',
+                            conclusion='success', completed_at='2026-01-01T00:00:01Z')
+            elif item['gate'] == 'source-run':
+                item.update(outcome='success', id=84, attempt=1, head_sha=record['head_sha'],
+                            run_status='completed', conclusion='success',
+                            completed_at='2026-01-01T00:00:01Z')
+            elif item['gate'] == 'sensitive':
+                item.update(outcome='not-required', command=None)
+            else:
+                item['outcome'] = 'unknown'
+        gates[:] = [item for item in gates if item['gate'] in {'check', 'source-run', 'sensitive'}]
+    with pytest.raises(AssertionError):
+        _validate_gate_outcome_fixture(record)
+
+
+MANIFEST_ROLES = {
+    'review-inventory': {'reviews', 'threads', 'metadata'},
+    'review-metadata': {'full-media', 'edit-history'},
+    'source': {'tasks', 'sessions', 'receipts', 'prompts', 'commands', 'ancestry',
+               'diff', 'reservations'},
+    'occupancy': {'tasks', 'sessions', 'workflows', 'comments', 'state',
+                  'publication-reservation'},
+    'check': {'check-runs', 'binding'},
+    'source-run': {'run', 'jobs', 'binding'},
+    'sensitive': {'command', 'edit-history', 'review'},
+    'machine': {'observation', 'source'},
+}
+
+
+def _compound_example():
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    section = spec.split('### SYNTHETIC compound proof example', 1)[1]
+    return json.loads(section.split('```json\n', 1)[1].split('\n```', 1)[0])
+
+
+def _validate_documented_graph(example, private_proofs):
+    """Test-only documentation/example validation, not a runtime validator."""
+    assert set(example) == {'roots', 'evidence'}
+    entries = example['evidence']
+    assert 1 <= len(entries) <= 128
+    by_key = {entry['key']: entry for entry in entries}
+    assert len(by_key) == len(entries)
+    binding = next(entry['identity'] for entry in entries
+                   if entry['type'] == 'public-response')
+    visiting, visited = set(), set()
+
+    def visit(key, depth=0):
+        assert key in by_key, 'dangling reference'
+        assert key not in visiting, 'cyclic reference'
+        assert depth <= 8
+        if key in visited:
+            return
+        visiting.add(key)
+        entry = by_key[key]
+        kind = entry['type']
+        if kind == 'manifest':
+            assert set(entry) == {'key', 'type', 'purpose', 'members'}
+            roles = {member['role'] for member in entry['members']}
+            assert len(roles) == len(entry['members'])
+            assert roles == MANIFEST_ROLES[entry['purpose']], 'missing members'
+            for member in entry['members']:
+                assert set(member) == {'role', 'refs'}
+                refs = member['refs']
+                assert 1 <= len(refs) <= 20 and len(set(refs)) == len(refs)
+                for ref in refs:
+                    visit(ref, depth + 1)
+                    target = by_key[ref]
+                    private_role = member['role'] in {
+                        'reservations', 'state', 'publication-reservation', 'observation',
+                    }
+                    if private_role:
+                        assert target['type'] == 'private-attestation'
+                        allowed = {
+                            'reservations': {'coordinator-reservation', 'supervisor-reservation'},
+                            'state': {'coordinator-reservation', 'supervisor-reservation'},
+                            'publication-reservation': {'publication-reservation'},
+                            'observation': {'machine-observation'},
+                        }
+                        assert target['kind'] in allowed[member['role']]
+                    elif member['role'] in {'metadata', 'review'}:
+                        assert target['type'] == 'manifest'
+                        assert target['purpose'] == 'review-metadata'
+                    else:
+                        assert target['type'] == 'public-response'
+        elif kind == 'public-response':
+            assert set(entry) == {
+                'key', 'type', 'path', 'sha256', 'bytes', 'url', 'retrieved_at',
+                'method', 'request_sha256', 'identity', 'pagination',
+            }
+            assert entry['method'] in {'GET', 'POST-read-only'}
+            assert entry['url'].startswith('https://api.github.com/')
+            assert set(entry['identity']) == {'repository_id', 'pull_number', 'head_sha', 'base_sha'}
+            assert entry['identity'] == binding
+            for page in entry['pagination']:
+                assert set(page) == {'connection', 'page', 'cursor', 'next', 'total', 'count'}
+                assert page['page'] == 1 and page['next'] is None  # One-page synthetic collections.
+                assert page['total'] == page['count'] <= 100
+        elif kind == 'private-attestation':
+            assert set(entry) == {
+                'key', 'type', 'kind', 'reference', 'snapshot_id', 'observed_at',
+                'verifier', 'bindings', 'correlation', 'result', 'reason',
+            }
+            assert set(entry['verifier']) == {'login', 'id', 'delegation'}
+            assert set(entry['bindings']) == {
+                'repository_id', 'pull_number', 'head_sha', 'base_sha',
+                'task_id', 'session_id', 'receipt_comment_id', 'prompt_sha256',
+            }
+            visit(entry['verifier']['delegation'], depth + 1)
+            assert by_key[entry['verifier']['delegation']]['type'] == 'public-response', \
+                'delegation must reference a public response'
+            refs = entry['correlation']
+            assert 1 <= len(refs) <= 20 and len(set(refs)) == len(refs)
+            for ref in refs:
+                visit(ref, depth + 1)
+                assert by_key[ref]['type'] == 'public-response'
+            assert all(entry['bindings'][key] == value for key, value in binding.items())
+            assert entry['reference'] in private_proofs, 'absent private proof'
+            proof = private_proofs[entry['reference']]
+            assert proof['snapshot_id'] == entry['snapshot_id']
+            assert proof['bindings'] == entry['bindings']
+            assert proof['original_bytes'] and proof['origin_verified']
+            assert entry['result'] == 'verified'
+        else:
+            raise AssertionError('unknown evidence type')
+        visiting.remove(key)
+        visited.add(key)
+
+    root_purposes = {
+        'review_inventory': 'review-inventory',
+        'source_proof': 'source',
+        'occupancy_proof': 'occupancy',
+        'machine': 'machine',
+    }
+    assert set(example['roots']) == set(root_purposes), 'wrong root names'
+    for name, root in example['roots'].items():
+        assert by_key[root]['type'] == 'manifest'
+        assert by_key[root]['purpose'] == root_purposes[name], 'wrong root purpose'
+        visit(root)
+    assert visited == set(by_key), 'unreferenced evidence'
+
+
+def _synthetic_private_proofs(example):
+    return {
+        entry['reference']: {
+            'snapshot_id': entry['snapshot_id'], 'bindings': entry['bindings'],
+            'original_bytes': b'SYNTHETIC original private observation',
+            'origin_verified': True,
+        }
+        for entry in example['evidence'] if entry['type'] == 'private-attestation'
+    }
+
+
+def test_compound_example_represents_rest_graphql_and_separate_private_proof():
+    example = _compound_example()
+    _validate_documented_graph(example, _synthetic_private_proofs(example))
+    assert {'review_inventory', 'source_proof', 'occupancy_proof', 'machine'} == set(example['roots'])
+    assert {'GET', 'POST-read-only'} == {
+        entry['method'] for entry in example['evidence'] if entry['type'] == 'public-response'
+    }
+    assert {'supervisor-reservation', 'publication-reservation', 'machine-observation'} == {
+        entry['kind'] for entry in example['evidence'] if entry['type'] == 'private-attestation'
+    }
+    assert all('path' not in entry and 'sha256' not in entry
+               for entry in example['evidence'] if entry['type'] == 'private-attestation')
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    table = spec.split('| Manifest purpose |', 1)[1].split(
+        'Root `review_inventory`', 1)[0]
+    rows = re.findall(r'^\| `([^`]+)` \| ([^|]+) \|', table, re.MULTILINE)
+    assert {purpose: set(re.findall(r'`([^`]+)`', roles))
+            for purpose, roles in rows} == MANIFEST_ROLES
+
+
+@pytest.mark.parametrize('target', ('metadata', 'publication'))
+def test_compound_example_rejects_nonpublic_delegation(target):
+    example = deepcopy(_compound_example())
+    proofs = _synthetic_private_proofs(example)
+    reservation = next(entry for entry in example['evidence'] if entry['key'] == 'reservation')
+    reservation['verifier']['delegation'] = target
+    with pytest.raises(AssertionError, match='delegation must reference a public response'):
+        _validate_documented_graph(example, proofs)
+
+
+@pytest.mark.parametrize('root', ('review_inventory', 'source_proof', 'occupancy_proof', 'machine'))
+def test_compound_example_rejects_wrong_root_purpose(root):
+    example = deepcopy(_compound_example())
+    by_key = {entry['key']: entry for entry in example['evidence']}
+    target = by_key[example['roots'][root]]
+    other = by_key[example['roots']['occupancy_proof' if root == 'source_proof' else 'source_proof']]
+    target['purpose'], other['purpose'] = other['purpose'], target['purpose']
+    target['members'], other['members'] = other['members'], target['members']
+    with pytest.raises(AssertionError, match='wrong root purpose'):
+        _validate_documented_graph(example, _synthetic_private_proofs(example))
+
+
+@pytest.mark.parametrize('defect', ('swapped-roots', 'wrong-root-name', 'extra-root'))
+def test_compound_example_rejects_wrong_root_bindings(defect):
+    example = deepcopy(_compound_example())
+    roots = example['roots']
+    if defect == 'swapped-roots':
+        roots['source_proof'], roots['occupancy_proof'] = roots['occupancy_proof'], roots['source_proof']
+        message = 'wrong root purpose'
+    elif defect == 'wrong-root-name':
+        roots['source'] = roots.pop('source_proof')
+        message = 'wrong root names'
+    else:
+        roots['extra'] = roots['source_proof']
+        message = 'wrong root names'
+    with pytest.raises(AssertionError, match=message):
+        _validate_documented_graph(example, _synthetic_private_proofs(example))
+
+
+@pytest.mark.parametrize('defect', (
+    'missing-member', 'dangling', 'cycle', 'duplicate', 'wrong-type', 'absent-private',
+    'unknown-origin', 'changed-binding', 'duplicate-role', 'duplicate-ref',
+    'private-cycle', 'private-dangling', 'wrong-identity', 'incomplete-page',
+))
+def test_compound_example_rejects_incomplete_or_uncertain_proof(defect):
+    example = deepcopy(_compound_example())
+    proofs = _synthetic_private_proofs(example)
+    manifest = next(entry for entry in example['evidence'] if entry['type'] == 'manifest')
+    if defect == 'missing-member':
+        manifest['members'].pop()
+    elif defect in {'dangling', 'cycle', 'wrong-type'}:
+        manifest['members'][0]['refs'] = [{
+            'dangling': 'missing', 'cycle': manifest['key'], 'wrong-type': 'observation',
+        }[defect]]
+    elif defect == 'duplicate':
+        example['evidence'].append(deepcopy(example['evidence'][0]))
+    elif defect == 'duplicate-role':
+        manifest['members'].append(deepcopy(manifest['members'][0]))
+    elif defect == 'duplicate-ref':
+        manifest['members'][0]['refs'] *= 2
+    elif defect in {'private-cycle', 'private-dangling'}:
+        entry = next(entry for entry in example['evidence'] if entry['type'] == 'private-attestation')
+        entry['correlation'] = [entry['key'] if defect == 'private-cycle' else 'missing']
+    elif defect == 'wrong-identity':
+        next(entry for entry in example['evidence']
+             if entry['key'] == 'graphql')['identity']['repository_id'] = 99
+    elif defect == 'incomplete-page':
+        next(entry for entry in example['evidence']
+             if entry['key'] == 'graphql')['pagination'][0]['next'] = 'unread-cursor'
+    elif defect == 'absent-private':
+        proofs.clear()
+    elif defect == 'unknown-origin':
+        next(iter(proofs.values()))['origin_verified'] = False
+    else:
+        next(iter(proofs.values()))['bindings'] = {}
+    with pytest.raises(AssertionError):
+        _validate_documented_graph(example, proofs)
+
+
+@pytest.mark.parametrize('clause', (
+    'Evidence is a discriminated union',
+    'acyclic',
+    'maximum reference depth of 8',
+    'StateStore.snapshot() alone does not lock',
+    'O_RDONLY',
+    'LOCK_SH',
+    'original supervisor',
+    'not cryptographic remote proof of a local pre-POST write',
+    'No local paths or private hashes',
+    'explicitly delegated operator',
+    'not a second person',
+    'does not call the prose parser',
+))
+def test_compound_private_contract_has_realizable_boundaries(clause):
+    spec = ' '.join((ROOT / 'docs/git-development-spec.md').read_text().split())
+    assert clause in spec
+    assert 'not a bot or a delegated writer' not in spec
+    assert 'Another manual operator must' not in spec
+    assert 'If necessary proof cannot be reproduced from public authenticated evidence' not in spec
+
+
+@pytest.mark.parametrize('clause', (
+    '<!-- hermes-supervised-qualification/v1 -->',
+    'at most 60 KiB of UTF-8',
+    'Missing, extra, duplicate, mistyped, or malformed fields block',
+    'No runtime validator or coordinator qualification command is implemented',
+    'sha256 over the exact raw UTF-8',
+    'sha256 over the exact rendered UTF-8 `body_html`',
+    'complete review/thread/comment pagination',
+    'complete source task/session, receipt, reservation, and prompt bindings',
+    'full repository task inventory',
+    'same run ID and run attempt',
+    'actual machine acceptance or rejection',
+    'never set `review_valid` or edit a ledger',
+    'gh api --method POST',
+    'gh api --paginate --slurp',
+    'repos/$REPO/issues/comments/$COMMENT_ID',
+    'create-once reservation',
+    'Never replay an uncertain POST',
+    'No PATCH or DELETE',
+    'Immediately before any merge',
+    'append a new `invalidation` record',
+    'independently repeat every read',
+    'A runtime rejection still blocks that runtime path',
+    'Private evidence must not be uploaded',
+))
+def test_manual_qualification_artifact_lifecycle_is_documented(clause):
+    spec = ' '.join((ROOT / 'docs/git-development-spec.md').read_text().split())
+    assert clause in spec, clause
+
+
+def test_manual_qualification_shell_outputs_and_reservation_are_private(tmp_path):
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    section = spec.split('Use supported `gh api` commands', 1)[1]
+    blocks = re.findall(r'```sh\n(.*?)\n```', section, re.DOTALL)
+    setup = next(block for block in blocks if 'gh api user >' in block)
+    publication = next(block for block in blocks if 'jq -Rs' in block)
+    reservation = re.search(r'`(\( set -C; printf .*?\))`', section).group(1)
+
+    bundle = tmp_path / 'bundle'
+    private = tmp_path / 'private'
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    fake_gh = fake_bin / 'gh'
+    fake_gh.write_text(
+        '#!/bin/sh\nprintf invoked >> "$GH_CALL_LOG"\n'
+        'if [ ! -f "$BUNDLE/comment.txt" ]; then '
+        'printf synthetic > "$BUNDLE/comment.txt"; fi\n'
+        'case "$*" in\n'
+        '  *"--method POST"*) printf \'{"id":7}\\n\';;\n'
+        '  *) printf \'{"synthetic":true}\\n\';;\n'
+        'esac\n')
+    fake_gh.chmod(0o700)
+    env = dict(os.environ)
+    env.update({
+        'PATH': f'{fake_bin}:{env["PATH"]}',
+        'BUNDLE': str(bundle),
+        'PRIVATE': str(private),
+        'REPO': 'lindayi/hermes-mobile',
+        'PR': '107',
+        'RECORD_KEY': 'synthetic-record',
+        'GH_CALL_LOG': str(tmp_path / 'gh-calls'),
+    })
+    result = subprocess.run(
+        ['/bin/bash', '-e', '-c',
+         f'umask 022\n{setup}\n{reservation}\n{publication}'],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert all(path.stat().st_mode & 0o777 == 0o700 for path in (bundle, private))
+    files = list(bundle.iterdir()) + list(private.iterdir())
+    assert {path.name for path in files} == {
+        'publisher.json', 'repository.json', 'pull.json', 'comments-before.json',
+        'comment.txt', 'request.json', 'create-response.json', 'readback.json',
+        'comments-after.json', 'reservation',
+    }
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in files)
+    assert (private / 'reservation').read_text() == 'synthetic-record\n'
+
+
+def _run_manual_qualification_publication(
+        tmp_path, *, inherited_comment_id=None, post_response='{"id":731}',
+        post_fails=False, bundle_path=None, private_path=None, setup_only=False,
+        fake_parent_uid=None, track_fsync=False, fsync_failure_at=None):
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    section = spec.split('Use supported `gh api` commands', 1)[1]
+    blocks = re.findall(r'```sh\n(.*?)\n```', section, re.DOTALL)
+    setup = next(block for block in blocks if 'gh api user >' in block)
+    publication = next(block for block in blocks if 'jq -Rs' in block)
+    reservation = re.search(r'`(\( set -C; printf .*?\))`', section).group(1)
+    bundle_env = str(bundle_path) if bundle_path is not None else str(tmp_path / 'bundle')
+    private_env = str(private_path) if private_path is not None else str(tmp_path / 'private')
+    bundle = Path(bundle_env)
+    private = Path(private_env)
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    fake_gh = fake_bin / 'gh'
+    fake_gh.write_text(
+        '#!/usr/bin/env python3\n'
+        'import json, os, sys\n'
+        'args = sys.argv[1:]\n'
+        'with open(os.environ["GH_CALL_LOG"], "a") as calls:\n'
+        '    calls.write(" ".join(args) + "\\n")\n'
+        'route = next((arg for arg in args if arg == "user" or arg.startswith("repos/")), "")\n'
+        'if "--method" in args and "POST" in args:\n'
+        '    if os.environ.get("FSYNC_LOG"):\n'
+        '        with open(os.environ["FSYNC_LOG"]) as log:\n'
+        '            synced = log.read().splitlines()\n'
+        '        expected = os.environ["FSYNC_EXPECTED"].split(os.pathsep)\n'
+        '        if not all(path in synced for path in expected):\n'
+        '            sys.exit(24)\n'
+        '    if os.environ["POST_FAIL"] == "1":\n'
+        '        sys.exit(22)\n'
+        '    print(os.environ["POST_RESPONSE"])\n'
+        'elif route == "user":\n'
+        '    open(os.path.join(os.environ["BUNDLE"], "comment.txt"), "w").write("synthetic")\n'
+        '    print(\'{"login":"synthetic","id":1}\')\n'
+        'elif route == "repos/lindayi/hermes-mobile":\n'
+        '    print(\'{"id":2}\')\n'
+        'elif route == "repos/lindayi/hermes-mobile/pulls/107":\n'
+        '    print(\'{"number":107}\')\n'
+        'elif route == "repos/lindayi/hermes-mobile/issues/107/comments?per_page=100":\n'
+        '    print("[]")\n'
+        'elif route.startswith("repos/lindayi/hermes-mobile/issues/comments/"):\n'
+        '    print(\'{"id":731}\')\n'
+        'else:\n'
+        '    sys.exit(23)\n')
+    fake_gh.chmod(0o700)
+    if fake_parent_uid is not None:
+        fake_stat = fake_bin / 'stat'
+        fake_stat.write_text(
+            '#!/bin/sh\n'
+            'case "$2" in\n'
+            '  %a) printf "700\\n";;\n'
+            f'  %u) printf "{fake_parent_uid}\\n";;\n'
+            '  *) exit 1;;\n'
+            'esac\n')
+        fake_stat.chmod(0o700)
+    call_log = tmp_path / 'gh-calls'
+    env = dict(os.environ)
+    env.update({
+        'PATH': f'{fake_bin}:{env["PATH"]}',
+        'BUNDLE': bundle_env,
+        'PRIVATE': private_env,
+        'REPO': 'lindayi/hermes-mobile',
+        'PR': '107',
+        'RECORD_KEY': 'synthetic-record',
+        'GH_CALL_LOG': str(call_log),
+        'POST_RESPONSE': post_response,
+        'POST_FAIL': '1' if post_fails else '0',
+    })
+    if track_fsync or fsync_failure_at is not None:
+        fsync_support = tmp_path / 'fsync-support'
+        fsync_support.mkdir()
+        (fsync_support / 'sitecustomize.py').write_text(
+            'import os\n'
+            '_real_fsync = os.fsync\n'
+            'def _record_fsync(fd):\n'
+            '    path = os.readlink(f"/proc/self/fd/{fd}")\n'
+            '    log_path = os.environ["FSYNC_LOG"]\n'
+            '    with open(log_path, "a+") as log:\n'
+            '        log.seek(0)\n'
+            '        count = sum(1 for _ in log) + 1\n'
+            '        log.seek(0, 2)\n'
+            '        log.write(path + "\\n")\n'
+            '        log.flush()\n'
+            '    if count == int(os.environ.get("FSYNC_FAILURE_AT", "0")):\n'
+            '        raise OSError("synthetic fsync failure")\n'
+            '    return _real_fsync(fd)\n'
+            'os.fsync = _record_fsync\n')
+        expected = (
+            private / 'reservation', private, bundle / 'comment.txt',
+            bundle / 'request.json', bundle,
+        )
+        env.update({
+            'FSYNC_LOG': str(tmp_path / 'fsync.log'),
+            'FSYNC_EXPECTED': os.pathsep.join(map(str, expected)),
+            'FSYNC_FAILURE_AT': str(fsync_failure_at or 0),
+            'PYTHONPATH': os.pathsep.join(filter(None, (
+                str(fsync_support), env.get('PYTHONPATH'),
+            ))),
+        })
+    if inherited_comment_id is not None:
+        env['COMMENT_ID'] = inherited_comment_id
+    result = subprocess.run(
+        ['/bin/bash', '-e', '-c',
+         f'umask 022\n{setup}' +
+         ('' if setup_only else f'\n{reservation}\n{publication}')],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
+    )
+    calls = call_log.read_text().splitlines() if call_log.exists() else []
+    return result, calls, private
+
+
+@pytest.mark.parametrize('unsafe_layout', (
+    'dot-component', 'private-dot-component', 'empty-component',
+    'private-empty-component', 'aliased-bundle-contains-private',
+    'aliased-private-contains-bundle', 'equal-paths', 'symlink-parent',
+    'unsafe-parent-mode', 'unsafe-parent-owner',
+))
+def test_manual_qualification_shell_rejects_aliased_or_untrusted_paths_before_output(
+        tmp_path, unsafe_layout):
+    parent = tmp_path / 'trusted-parent'
+    parent.mkdir(mode=0o700)
+    parent.chmod(0o700)
+    bundle = parent / 'bundle'
+    private = parent / 'private'
+    if unsafe_layout == 'dot-component':
+        bundle = f'{parent}/./bundle'
+    elif unsafe_layout == 'private-dot-component':
+        private = f'{parent}/./private'
+    elif unsafe_layout == 'empty-component':
+        bundle = f'{parent}//bundle'
+    elif unsafe_layout == 'private-empty-component':
+        private = f'{parent}//private'
+    elif unsafe_layout == 'aliased-bundle-contains-private':
+        (parent / 'alias').mkdir(mode=0o700)
+        bundle = f'{parent}/alias/../record'
+        private = parent / 'record/private'
+    elif unsafe_layout == 'aliased-private-contains-bundle':
+        (parent / 'alias').mkdir(mode=0o700)
+        private = f'{parent}/alias/../record'
+        bundle = parent / 'record/bundle'
+    elif unsafe_layout == 'equal-paths':
+        bundle = private = parent / 'record'
+    elif unsafe_layout == 'symlink-parent':
+        real_parent = tmp_path / 'real-parent'
+        real_parent.mkdir(mode=0o700)
+        real_parent.chmod(0o700)
+        (tmp_path / 'linked-parent').symlink_to(real_parent, target_is_directory=True)
+        bundle = tmp_path / 'linked-parent/bundle'
+        private = real_parent / 'private'
+    elif unsafe_layout == 'unsafe-parent-mode':
+        parent.chmod(0o755)
+
+    result, calls, _ = _run_manual_qualification_publication(
+        tmp_path, bundle_path=bundle, private_path=private, setup_only=True,
+        fake_parent_uid=(os.getuid() + 1 if unsafe_layout == 'unsafe-parent-owner' else None))
+
+    assert result.returncode != 0
+    assert not calls
+    assert not Path(bundle).exists()
+    assert not Path(private).exists()
+
+
+@pytest.mark.parametrize('inherited_comment_id', (None, '999'))
+def test_manual_qualification_shell_reads_the_id_returned_by_post(
+        tmp_path, inherited_comment_id):
+    result, calls, private = _run_manual_qualification_publication(
+        tmp_path, inherited_comment_id=inherited_comment_id)
+
+    assert result.returncode == 0, result.stderr
+    assert sum('--method POST' in call for call in calls) == 1
+    assert any('repos/lindayi/hermes-mobile/issues/comments/731' in call
+               for call in calls)
+    assert not any('repos/lindayi/hermes-mobile/issues/comments/999' in call
+                   for call in calls)
+    assert (private / 'reservation').read_text() == 'synthetic-record\n'
+
+
+def test_manual_qualification_shell_flushes_frozen_artifacts_before_post(tmp_path):
+    result, calls, _ = _run_manual_qualification_publication(
+        tmp_path, track_fsync=True)
+
+    assert result.returncode == 0, result.stderr
+    assert sum('--method POST' in call for call in calls) == 1
+    synced = (tmp_path / 'fsync.log').read_text().splitlines()
+    assert all(path in synced for path in (
+        str(tmp_path / 'private' / 'reservation'),
+        str(tmp_path / 'private'),
+        str(tmp_path / 'bundle' / 'comment.txt'),
+        str(tmp_path / 'bundle' / 'request.json'),
+        str(tmp_path / 'bundle'),
+    ))
+
+
+@pytest.mark.parametrize('failure_at', range(1, 9))
+def test_manual_qualification_shell_does_not_post_after_any_sync_failure(
+        tmp_path, failure_at):
+    result, calls, private = _run_manual_qualification_publication(
+        tmp_path, fsync_failure_at=failure_at)
+
+    assert result.returncode != 0
+    assert not any('--method POST' in call for call in calls)
+    assert (private / 'reservation').read_text() == 'synthetic-record\n'
+
+
+@pytest.mark.parametrize('post_response', (
+    '{}',
+    '{"id":null}',
+    '{"id":"731"}',
+    '{"id":true}',
+    '{"id":731.5}',
+    '{"id":0}',
+    '{"id":-1}',
+    '{"id":9223372036854775808}',
+    '{"id":92233720368547758080000000000000000000}',
+    '{"id":1,"id":2}',
+    '{"id":1}\n{"id":2}',
+    'not-json',
+))
+def test_manual_qualification_shell_rejects_invalid_post_ids_before_readback(
+        tmp_path, post_response):
+    result, calls, private = _run_manual_qualification_publication(
+        tmp_path, inherited_comment_id='999', post_response=post_response)
+
+    assert result.returncode != 0
+    assert sum('--method POST' in call for call in calls) == 1
+    assert not any('repos/lindayi/hermes-mobile/issues/comments/' in call
+                   for call in calls)
+    assert (private / 'reservation').read_text() == 'synthetic-record\n'
+
+
+@pytest.mark.parametrize(('comment_id', 'inherited_comment_id'), (
+    (1, None), (9223372036854775807, '999'),
+))
+def test_manual_qualification_shell_accepts_exact_post_id_boundaries(
+        tmp_path, comment_id, inherited_comment_id):
+    result, calls, private = _run_manual_qualification_publication(
+        tmp_path, inherited_comment_id=inherited_comment_id,
+        post_response=f'{{"id":{comment_id}}}')
+
+    assert result.returncode == 0, result.stderr
+    assert sum('--method POST' in call for call in calls) == 1
+    readback = f'repos/lindayi/hermes-mobile/issues/comments/{comment_id}'
+    assert sum(readback in call for call in calls) == 1
+    assert not any('issues/comments/999' in call for call in calls)
+    assert (private / 'reservation').read_text() == 'synthetic-record\n'
+
+
+def test_manual_qualification_shell_keeps_reservation_when_post_fails(tmp_path):
+    result, calls, private = _run_manual_qualification_publication(
+        tmp_path, inherited_comment_id='999', post_fails=True)
+
+    assert result.returncode != 0
+    assert sum('--method POST' in call for call in calls) == 1
+    assert not any('repos/lindayi/hermes-mobile/issues/comments/' in call
+                   for call in calls)
+    assert (private / 'reservation').read_text() == 'synthetic-record\n'
+
+
+@pytest.mark.parametrize('target', ('BUNDLE', 'PRIVATE'))
+@pytest.mark.parametrize('kind', ('directory', 'symlink', 'file'))
+def test_manual_qualification_shell_rejects_existing_destinations(tmp_path, target, kind):
+    spec = (ROOT / 'docs/git-development-spec.md').read_text()
+    section = spec.split('Use supported `gh api` commands', 1)[1]
+    blocks = re.findall(r'```sh\n(.*?)\n```', section, re.DOTALL)
+    setup = next(block for block in blocks if 'gh api user >' in block)
+    reservation = re.search(r'`(\( set -C; printf .*?\))`', section).group(1)
+    bundle = tmp_path / 'bundle'
+    private = tmp_path / 'private'
+    unsafe = bundle if target == 'BUNDLE' else private
+    if kind == 'directory':
+        unsafe.mkdir()
+        unsafe.chmod(0o755)
+    elif kind == 'symlink':
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        unsafe.symlink_to(outside, target_is_directory=True)
+    else:
+        unsafe.write_text('preserve')
+
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    fake_gh = fake_bin / 'gh'
+    fake_gh.write_text(
+        '#!/bin/sh\nprintf invoked >> "$GH_CALL_LOG"\n'
+        'printf \'{"synthetic":true}\\n\'\n')
+    fake_gh.chmod(0o700)
+    env = dict(os.environ)
+    env.update({
+        'PATH': f'{fake_bin}:{env["PATH"]}',
+        'BUNDLE': str(bundle),
+        'PRIVATE': str(private),
+        'REPO': 'lindayi/hermes-mobile',
+        'PR': '107',
+        'RECORD_KEY': 'synthetic-record',
+        'GH_CALL_LOG': str(tmp_path / 'gh-calls'),
+    })
+    result = subprocess.run(
+        ['/bin/bash', '-e', '-c', f'umask 022\n{setup}\n{reservation}'],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / 'gh-calls').exists()
+    assert not (private if target == 'BUNDLE' else bundle).exists()
+    if kind == 'directory':
+        assert unsafe.stat().st_mode & 0o777 == 0o755
+    elif kind == 'symlink':
+        assert unsafe.is_symlink()
+        assert not any(outside.iterdir())
+    else:
+        assert unsafe.read_text() == 'preserve'
 
 
 def test_all_active_context_lists_include_issue_link():

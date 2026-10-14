@@ -121,6 +121,9 @@ operators validate the separate mandatory review evidence before merge. The
 internal `copilot-pull-request-reviewer` check is absent from GraphQL
 `statusCheckRollup` and cannot serve as a required branch context. Do not replace
 it with a synthetic status, workflow wrapper, review service, or human-review gate.
+The narrow supervised operator path for a generic non-required reviewer-role
+request is defined by [Supervised manual qualification](docs/git-development-spec.md#supervised-manual-qualification);
+it does not alter automatic evidence or add a reviewer gate.
 
 Required checks and protections are authoritative. Do not fabricate reviews,
 approvals, check results, or identities. Review and test evidence applies only to
