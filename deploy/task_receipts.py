@@ -887,7 +887,14 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     if len(matches) != 1:
         raise ReceiptError("Task nonce does not identify exactly one returned session")
     session = matches[0]
-    anchored = (
+    source_continuation = (
+        action.get("task_type") != "neutral"
+        and (
+            "owner_continuation_binding" in action
+            or "owner_continuation_companions" in action
+        )
+    )
+    anchored = source_continuation or (
         "receipt_anchor_comment_id" in action
         or "receipt_anchor_body" in action
     )

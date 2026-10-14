@@ -4216,6 +4216,54 @@ def test_owner_continuation_source_retained_anchor_proof_is_revalidated(
     assert not cloud_coordinator._valid_receipt_proof(proof, api.comments)
 
 
+@pytest.mark.parametrize("missing_fields", [
+    ("receipt_anchor_comment_id",),
+    ("receipt_anchor_body",),
+    ("receipt_anchor_comment_id", "receipt_anchor_body"),
+])
+@pytest.mark.parametrize("anchor_change", ["edited", "deleted"])
+def test_owner_continuation_live_receipt_requires_anchor_fields(
+        tmp_path, missing_fields, anchor_change):
+    api, store, abandonment, _, main = _owner_continuation_advanced_case(tmp_path)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    successor = next(
+        action for action in store.actions().values()
+        if action.get("owner_continuation_binding")
+    )
+    historical = deepcopy(store.action(abandonment["action_key"]))
+    result_head = "8" * 40
+    api.complete_task(successor["task_id"], successor, head_sha=result_head, base_sha=main)
+    anchor = next(
+        comment for comment in api.comments
+        if comment["id"] == successor["receipt_anchor_comment_id"]
+    )
+    if anchor_change == "edited":
+        anchor["body"] += " changed"
+    else:
+        api.comments.remove(anchor)
+    store._mutate(lambda state: [
+        state["actions"][successor["key"]].pop(field)
+        for field in missing_fields
+    ])
+    api.head_sha = api.pull["head"]["sha"] = result_head
+    api.unresolved = api.source_failure = False
+    posts = api.task_posts
+
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+
+    action = StateStore(store.path).action(successor["key"])
+    state = StateStore(store.path).snapshot()
+    assert "receipt_result" not in action
+    assert not any(
+        proof.get("owner_continuation_binding") == successor["owner_continuation_binding"]
+        for proof in state["enrollments"]["16"].get("receipt_proofs", [])
+    )
+    assert api.task_posts == posts
+    assert api.requested_reviewers == []
+    assert state["actions"][abandonment["action_key"]] == historical
+
+
 @pytest.mark.parametrize("retained", [False, True])
 @pytest.mark.parametrize("anchor_change", ["edited", "deleted"])
 def test_owner_continuation_source_proof_requires_omitted_anchor_fields(

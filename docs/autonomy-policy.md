@@ -205,7 +205,7 @@ activation.
 | Candidate path | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `b7b2e30f4432b2527165a85b1e5737a89eac28d19800de0ffc4bb6e5d29834ea` |
-| `deploy/task_receipts.py` | `7979a9df432d4a108cad727ba395917060b053fee46b7998d74ae331f5972008` |
+| `deploy/task_receipts.py` | `12e1b6b817d82990e5d38f20888baf400271bad7a4ff9d70324010cbf542f06c` |
 
 ### Retained merged source and deliberate native refreshes
 
