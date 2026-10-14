@@ -3533,6 +3533,7 @@ def test_owner_abandonment_neutral_successor_survives_main_advance_and_reopens(
     assert accepted["head"] == successor_head
     assert StateStore(store.path).action(successor["key"])["receipt_result"] == "ready"
     assert successor_head in authorized
+    assert successor_head not in blocked
 
     task_posts = api.task_posts
     reopened = Coordinator(
