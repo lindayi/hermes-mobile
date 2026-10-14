@@ -6600,30 +6600,138 @@ class Coordinator:
         pull = snapshot.get("pull")
         head = pull.get("head") if isinstance(pull, dict) else None
         base = pull.get("base") if isinstance(pull, dict) else None
+        abandoned_action = self.store.action(
+            record.get("action_key") if isinstance(record, dict) else None,
+        )
+        if (not _owner_abandonment_record_valid(record)
+                or not _owner_abandonment_matches_action(record, abandoned_action)
+                or not isinstance(head, dict) or not isinstance(base, dict)
+                or not _is_sha(head.get("sha"))
+                or not _is_sha(base.get("sha"))
+                or base.get("ref") != MAIN_BRANCH
+                or not _github_identity(base.get("repo"), REPOSITORY_ID)
+                or not isinstance(head.get("ref"), str) or not head["ref"]
+                or not _github_identity(head.get("repo"), REPOSITORY_ID)
+                or head.get("ref") != abandoned_action.get("head_ref")
+                or not _pull_identity(pull, {
+                    "issue": record["issue"],
+                    "pull_id": pull.get("id"),
+                    "pull_node_id": pull.get("node_id"),
+                })
+                or not isinstance(snapshot.get("comments"), list)):
+            return False
         actions = self.store.actions()
         enrollment = self.store.snapshot()["enrollments"].get(
             str(record.get("issue")), {},
         )
-        successors = [
-            *actions.values(),
-            *enrollment.get("receipt_proofs", []),
-        ]
-        return any(
-            _owner_abandonment_successor_matches(record, successor)
-            and successor.get("receipt_result") == "ready"
-            and successor.get("receipt_head") == (
-                head.get("sha") if isinstance(head, dict) else None
-            )
-            and isinstance(base, dict)
-            and base.get("sha") == (
-                successor.get("main_sha")
-                if successor.get("task_type") == "neutral"
-                else record["base_sha"]
-            )
-            and _pull_identity(pull, successor)
-            and _valid_receipt_proof(successor, snapshot.get("comments"))
-            for successor in successors
+        proofs = enrollment.get("receipt_proofs")
+        if not isinstance(proofs, list):
+            return False
+        candidates = []
+        proof_fields = (
+            "task_id", "issue", "kind", "task_type", "status",
+            "receipt_result", "receipt_comment_id", "receipt_created_at",
+            "receipt_body", "receipt_task_id", "receipt_session_id",
+            "receipt_completed_at", "receipt_session_completed_at",
+            "receipt_nonce", "receipt_start_head", "receipt_head",
+            "receipt_base", "receipt_version", "receipt_legacy_neutral",
+            "main_sha", "recorded_base_sha", "owner_id",
+            "repository_id", "pull_id", "pull_node_id",
+            "owner_abandonment_binding", "owner_abandonment_attestation",
         )
+        for candidate in [*actions.values(), *proofs]:
+            if (not isinstance(candidate, dict)
+                    or candidate.get("issue") != record["issue"]
+                    or candidate.get("kind") != "fix"
+                    or candidate.get("task_type") not in {
+                        None, "source", "review-followup", "neutral",
+                    }
+                    or candidate.get("status") != "completed"
+                    or not _is_sha(candidate.get("receipt_start_head"))):
+                continue
+            duplicate = next((
+                existing for existing in candidates
+                if existing.get("task_id") == candidate.get("task_id")
+            ), None)
+            if duplicate is not None:
+                if any(
+                    duplicate.get(field) != candidate.get(field)
+                    for field in proof_fields
+                ):
+                    return False
+                continue
+            candidates.append(candidate)
+        if len(candidates) > REPAIR_LIMIT + NEUTRAL_LIMIT:
+            return False
+
+        def bound_to_current_pull(candidate):
+            return (
+                candidate.get("owner_id") == OWNER_ID
+                and candidate.get("repository_id") == REPOSITORY_ID
+                and candidate.get("head_ref", head.get("ref")) == head.get("ref")
+                and _pull_identity(pull, candidate)
+                and _valid_receipt_proof(candidate, snapshot["comments"])
+            )
+
+        current = record["head_sha"]
+        visited = {current}
+        has_rooted_successor = False
+        max_steps = REPAIR_LIMIT + NEUTRAL_LIMIT
+        for step in range(max_steps + 1):
+            outgoing = [
+                candidate for candidate in candidates
+                if candidate.get("receipt_start_head") == current
+            ]
+            if not outgoing:
+                return has_rooted_successor and current == head["sha"]
+            if step == max_steps:
+                return False
+            if current == record["head_sha"]:
+                rooted_successors = [
+                    candidate for candidate in outgoing
+                    if _owner_abandonment_successor_matches(record, candidate)
+                ]
+                if len(rooted_successors) != 1:
+                    return False
+                successor = rooted_successors[0]
+                has_rooted_successor = True
+            else:
+                if len(outgoing) != 1:
+                    return False
+                successor = outgoing[0]
+            if (not bound_to_current_pull(successor)
+                    or successor.get("receipt_result") != "ready"
+                    or successor.get("receipt_base") != base["sha"]):
+                return False
+            if current == record["head_sha"]:
+                expected_base = (
+                    successor.get("main_sha")
+                    if successor.get("task_type") == "neutral"
+                    else record["base_sha"]
+                )
+                if base["sha"] != expected_base:
+                    return False
+            elif any(
+                    field in successor
+                    for field in (
+                        "owner_abandonment_binding",
+                        "owner_abandonment_attestation",
+                        "owner_abandonment_intent",
+                    )):
+                return False
+            next_head = successor["receipt_head"]
+            if (next_head == current == record["head_sha"]
+                    and next_head == head["sha"]):
+                return not any(
+                    candidate is not successor
+                    and candidate.get("receipt_start_head") == current
+                    for candidate in candidates
+                )
+            if next_head in visited:
+                return False
+            visited.add(next_head)
+            current = next_head
+        return False
 
     def _owner_abandonment_task_terminal(self, snapshot, action, record, tasks):
         if not _owner_abandonment_inventory_valid(tasks, action, snapshot, record):

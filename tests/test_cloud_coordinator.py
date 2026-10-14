@@ -3608,10 +3608,14 @@ def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_pat
     )
 
 
+@pytest.mark.parametrize(
+    "lineage_hazard",
+    [None, "missing", "disconnected", "wrong-pull", "non-ready", "cycle"],
+)
 def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
-        tmp_path):
+        tmp_path, lineage_hazard):
     neutral_head = "9" * 40
-    source_head = "8" * 40
+    source_head = neutral_head if lineage_hazard == "cycle" else "8" * 40
     api, store, abandoned = _owner_abandonment_historical_neutral_case(tmp_path)
     abandoned_reservation = deepcopy(store.action(abandoned["key"]))
 
@@ -3639,9 +3643,9 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
     api.head_sha = api.pull["head"]["sha"] = neutral_head
     api.pull["base"]["sha"] = FINAL_RESULT_HEAD
     api.pull.update(mergeable=True, mergeable_state="clean")
-    api.review_state = "APPROVED"
+    api.unresolved = True
+    api.review_state = "COMMENTED"
     api.review_sha = neutral_head
-    api.strict_protection = False
     Coordinator(
         api, StateStore(store.path), clock=lambda: 1790856660,
     ).run(apply=True)
@@ -3652,43 +3656,46 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
             "receipt_proofs"
         ]
     )
-
-    api.unresolved = True
-    dispatch = Coordinator(
+    coordinator = Coordinator(
         api, StateStore(store.path), clock=lambda: 1790856660,
-    ).run(apply=True)["pull_requests"][0]
-    assert dispatch["repair_requested"], (
-        dispatch["reasons"], api.task_posts, api.workflow_routes,
     )
+    assert coordinator._owner_abandonment_successor_proven(
+        {"pull": api.pull, "comments": api.comments}, recovery,
+    )
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
     actions_after_dispatch = StateStore(store.path).actions()
-    source = next((
+    source = next(
         action for action in actions_after_dispatch.values()
         if action.get("kind") == "fix"
         and action.get("head") == neutral_head
         and action.get("status") == "sent"
         and action["key"] != neutral["key"]
-    ), None)
-    assert source is not None, (
-        dispatch["reasons"], api.task_posts,
-        [(key, item.get("kind"), item.get("task_type"), item.get("status"),
-          item.get("head")) for key, item in actions_after_dispatch.items()],
-        [(route, body.get("head_ref"), body.get("prompt", "")[:60])
-         for route, body in api.writes if route.endswith("/tasks")],
     )
+    reviewer_writes_before = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
     api.complete_task(
-        source["task_id"], source, head_sha=source_head,
+        source["task_id"], source,
+        result="policy_broken" if lineage_hazard == "non-ready" else "ready",
+        head_sha=source_head,
         base_sha=FINAL_RESULT_HEAD,
     )
     api.head_sha = api.pull["head"]["sha"] = source_head
     api.unresolved = False
-    api.review_state = None
-    api.review_sha = None
+    api.review_state = "PENDING"
+    api.review_sha = source_head
     Coordinator(
         api, StateStore(store.path), clock=lambda: 1790856660,
     ).run(apply=True)
     assert any(
         proof.get("task_id") == source["task_id"]
-        and proof.get("receipt_result") == "ready"
+        and proof.get("receipt_result") == (
+            "policy_broken" if lineage_hazard == "non-ready" else "ready"
+        )
         for proof in StateStore(store.path).snapshot()["enrollments"]["16"][
             "receipt_proofs"
         ]
@@ -3701,7 +3708,8 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
     )
     restarted = StateStore(store.path)
     assert restarted.action(abandoned["key"]) == abandoned_reservation
-    assert restarted.action(neutral["key"]) is None
+    if source_head != neutral_head:
+        assert restarted.action(neutral["key"]) is None
     assert any(
         proof.get("task_id") == neutral["task_id"]
         for proof in restarted.snapshot()["enrollments"]["16"]["receipt_proofs"]
@@ -3711,31 +3719,66 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
         recovery,
     ]
 
-    reviewer_writes_before = [
+    if lineage_hazard == "missing":
+        def remove_intermediate(state):
+            state["actions"].pop(source["key"], None)
+            state["enrollments"]["16"]["receipt_proofs"] = [
+                proof for proof in state["enrollments"]["16"]["receipt_proofs"]
+                if proof.get("task_id") != source["task_id"]
+            ]
+
+        restarted._mutate(remove_intermediate)
+    elif lineage_hazard in {"disconnected", "wrong-pull"}:
+        def corrupt_intermediate(state):
+            action = state["actions"][source["key"]]
+            proofs = state["enrollments"]["16"]["receipt_proofs"]
+            proof = next(
+                proof for proof in proofs
+                if proof.get("task_id") == source["task_id"]
+            )
+            if lineage_hazard == "disconnected":
+                action["receipt_start_head"] = "7" * 40
+                proof["receipt_start_head"] = "7" * 40
+            else:
+                action["pull_node_id"] = proof["pull_node_id"] = "other-pull"
+
+        restarted._mutate(corrupt_intermediate)
+
+    attempts_before_review = restarted.snapshot()["enrollments"]["16"]["attempts"]
+    neutral_attempts = restarted.snapshot()["enrollments"]["16"]["neutral_attempts"]
+    if lineage_hazard is not None:
+        assert not Coordinator(
+            api, restarted, clock=lambda: 1790856660,
+        )._owner_abandonment_successor_proven(
+            {"pull": api.pull, "comments": api.comments}, recovery,
+        )
+    api.review_state = None
+    api.review_sha = None
+    reviewer_writes_at_restart = [
         write for write in api.writes
         if write[0].endswith("/requested_reviewers")
     ]
-    attempts_before_repair = restarted.snapshot()["enrollments"]["16"]["attempts"]
-    neutral_attempts = restarted.snapshot()["enrollments"]["16"]["neutral_attempts"]
     result = Coordinator(
         api, StateStore(store.path), clock=lambda: 1790856660,
     ).run(apply=True)["pull_requests"][0]
 
     assert result["head"] == source_head
-    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+    if lineage_hazard is None:
+        assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
     state = StateStore(store.path).snapshot()
     assert state["actions"][abandoned["key"]] == abandoned_reservation
-    assert state["enrollments"]["16"]["attempts"] == attempts_before_repair
+    assert state["enrollments"]["16"]["attempts"] == attempts_before_review
     assert state["enrollments"]["16"]["neutral_attempts"] == neutral_attempts
     assert state["enrollments"]["16"]["owner_abandonments"] == [recovery]
-    assert [
+    reviewer_writes_after = [
         write for write in api.writes
         if write[0].endswith("/requested_reviewers")
-    ] == reviewer_writes_before + [
-        write for write in api.writes
-        if write[0].endswith("/requested_reviewers")
-        and write not in reviewer_writes_before
     ]
+    if lineage_hazard is None:
+        assert len(reviewer_writes_after) == len(reviewer_writes_before) + 1
+        assert reviewer_writes_after[:-1] == reviewer_writes_before
+    else:
+        assert reviewer_writes_after == reviewer_writes_at_restart
     writes = list(api.writes)
     task_posts = api.task_posts
     Coordinator(

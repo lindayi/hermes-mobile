@@ -701,13 +701,28 @@ terminal check to that exact receipt lineage even when the PR head has advanced.
 The terminal check uses both live actions and the enrollment's authenticated
 `receipt_proofs`; compaction must retain the neutral continuation's
 `recorded_base_sha` as well as its receipt and owner-abandonment bindings. A
-different current head is accepted only when that retained or live proof validates
-for the exact current pull identity, head, and applicable source or neutral base.
-The recovery head remains continuation-only only while it lacks general receipt
+different current head is accepted only through a connected chain that starts with
+one distinct, abandonment-bound ready receipt and follows each later ready receipt's
+exact `receipt_start_head` to the preceding `receipt_head`. The chain is bounded by
+the source and neutral lifetime ceilings combined. Every edge must pass immutable
+receipt validation and match the current repository, pull request and branch; the
+current base must match the accepted receipts. Missing, ambiguous, disconnected,
+malformed, non-ready, wrong-identity or cyclic history fails closed. A same-head
+ready receipt is still a valid direct continuation, but it cannot hide a cycle in a
+later edge. This only proves terminal occupancy; ordinary source authorization,
+fresh review/check, current-main and sensitive-head fences remain separate. The
+recovery head remains continuation-only only while it lacks general receipt
 provenance. A distinct, bound ready receipt that returns the same head releases this
 restriction, including after a cold restart; recovery alone never does.
 Reactivation, duplicate commands, restart, or uncertain persistence must not cause
 a repeated POST, notice, or accepted result.
+
+A later owner-enrolled supervised task is not a coordinator receipt. Its enrollment
+or terminal task state alone grants no result authority. Any separate support after
+a neutral main merge must require an unchanged exact-head owner enrollment and
+positive authenticated ancestry from the abandonment-rooted ready result, with the
+same repository, pull request and branch. Until that contract is implemented and
+verified, this separate supervised-descendant case remains unsupported.
 
 Neutral task publication uses one immutable receipt-only PR reply, not a decision
 comment followed by a receipt comment. The complete per-hunk decision audit stays
