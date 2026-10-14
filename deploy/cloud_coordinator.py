@@ -3165,6 +3165,8 @@ def _legacy_task_reservation_type(record, tasks, snapshot):
 
 
 def _legacy_task_artifacts_match(listed, detailed, *, expected_pull=None):
+    if not isinstance(listed, dict) or not isinstance(detailed, dict):
+        return False
     listed_artifacts = listed.get("artifacts")
     detailed_artifacts = detailed.get("artifacts")
     if (not isinstance(listed_artifacts, list)
@@ -6862,11 +6864,7 @@ class Coordinator:
                 or not isinstance(head.get("ref"), str) or not head["ref"]
                 or not _github_identity(head.get("repo"), REPOSITORY_ID)
                 or head.get("ref") != abandoned_action.get("head_ref")
-                or not _pull_identity(pull, {
-                    "issue": record["issue"],
-                    "pull_id": pull.get("id"),
-                    "pull_node_id": pull.get("node_id"),
-                })
+                or not _pull_identity(pull, abandoned_action)
                 or not isinstance(snapshot.get("comments"), list)):
             return False
         actions = self.store.actions()
@@ -7193,9 +7191,13 @@ class Coordinator:
             pull = self.api.get(f"repos/{REPOSITORY}/pulls/{issue}")
         except CoordinatorError:
             return False
-        if (not _pull_identity(pull, enrollment)
-                or pull.get("head", {}).get("sha") != head
-                or not self._legacy_owner_abandonment_head_proven({
+        if not isinstance(pull, dict):
+            return False
+        pull_head = pull.get("head")
+        if (not isinstance(pull_head, dict)
+                or not _pull_identity(pull, enrollment)
+                or pull_head.get("sha") != head
+                or not self._owner_abandonment_head_proven({
                     "issue": issue, "pull": pull, "comments": comments,
                 })):
             return False

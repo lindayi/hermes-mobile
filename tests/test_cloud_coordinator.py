@@ -3736,6 +3736,171 @@ def _owner_abandonment_transitive_case(tmp_path, lineage_hazard=None):
     )
 
 
+@pytest.mark.parametrize("identity_field,replacement", [
+    ("id", 160000099), ("node_id", "PR_node_replacement"),
+])
+def test_owner_abandonment_lineage_binds_live_pull_to_abandoned_reservation(
+        tmp_path, identity_field, replacement):
+    (
+        api, store, abandoned, _, recovery, _, _, _, _, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+    original_pull_identity = (
+        abandoned["pull_id"], abandoned["pull_node_id"],
+    )
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+    snapshot = {"pull": api.pull, "comments": api.comments}
+    assert coordinator._owner_abandonment_successor_proven(snapshot, recovery)
+
+    def replace_successor_identities(state):
+        for candidate in [
+            *state["actions"].values(),
+            *state["enrollments"]["16"]["receipt_proofs"],
+        ]:
+            if candidate.get("task_id") != abandoned["task_id"]:
+                candidate["pull_id"] = (
+                    replacement if identity_field == "id"
+                    else original_pull_identity[0]
+                )
+                candidate["pull_node_id"] = (
+                    replacement if identity_field == "node_id"
+                    else original_pull_identity[1]
+                )
+
+    StateStore(store.path)._mutate(replace_successor_identities)
+    api.pull[identity_field] = replacement
+
+    assert StateStore(store.path).action(abandoned["key"])[
+        "pull_id"
+    ] == original_pull_identity[0]
+    assert StateStore(store.path).action(abandoned["key"])[
+        "pull_node_id"
+    ] == original_pull_identity[1]
+    assert not coordinator._owner_abandonment_successor_proven(
+        {"pull": api.pull, "comments": api.comments}, recovery,
+    )
+
+
+@pytest.mark.parametrize("stage", ["planning", "review-fence", "source-fence"])
+@pytest.mark.parametrize("identity_field", ["id", "node_id"])
+def test_owner_abandonment_replacement_identity_blocks_lifecycle_fences(
+        tmp_path, monkeypatch, stage, identity_field):
+    (
+        api, store, abandoned, abandoned_reservation, _, _, _, _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+    replacement = (
+        160000099 if identity_field == "id" else "PR_node_replacement"
+    )
+    replacement_identity = {
+        "pull_id": replacement if identity_field == "id" else abandoned["pull_id"],
+        "pull_node_id": (
+            replacement if identity_field == "node_id"
+            else abandoned["pull_node_id"]
+        ),
+    }
+    api.requested_reviewers = []
+    if stage == "source-fence":
+        api.source_failure = True
+        api.source_failure_sha = source_head
+        api.review_state = "APPROVED"
+        api.review_sha = source_head
+    else:
+        api.review_state = api.review_sha = None
+    injected = []
+    proofs_at_injection = []
+
+    def replace_identities():
+        injected.append(stage)
+        api.pull[identity_field] = replacement
+
+        def mutate(state):
+            state["enrollments"]["16"].update(replacement_identity)
+            for candidate in [
+                *state["actions"].values(),
+                *state["enrollments"]["16"]["receipt_proofs"],
+            ]:
+                if candidate.get("task_id") != abandoned["task_id"]:
+                    candidate.update(replacement_identity)
+
+        StateStore(store.path)._mutate(mutate)
+        proofs_at_injection[:] = deepcopy(
+            StateStore(store.path).snapshot()["enrollments"]["16"][
+                "receipt_proofs"
+            ],
+        )
+
+    original_get = api.get
+
+    def get(route):
+        if (stage == "review-fence" and not injected
+                and route.endswith("/requested_reviewers")):
+            replace_identities()
+        return original_get(route)
+
+    api.get = get
+    original_claim = StateStore.claim_action
+
+    def claim(state_store, key, action):
+        result = original_claim(state_store, key, action)
+        if (result and stage == "source-fence" and not injected
+                and action.get("kind") == "fix"
+                and action.get("head") == source_head):
+            replace_identities()
+        return result
+
+    monkeypatch.setattr(StateStore, "claim_action", claim)
+    if stage == "planning":
+        replace_identities()
+    writes_before = list(api.writes)
+    posts_before = api.task_posts
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert injected == [stage]
+    assert api.task_posts == posts_before
+    assert api.writes == writes_before
+    state = StateStore(store.path).snapshot()
+    assert state["actions"][abandoned["key"]] == abandoned_reservation
+    assert state["enrollments"]["16"]["receipt_proofs"] == proofs_at_injection
+
+
+@pytest.mark.parametrize("listed,detailed", [
+    (None, {}), ({}, None), ({}, []), ({}, 7),
+])
+def test_legacy_task_artifact_match_rejects_non_object_responses(listed, detailed):
+    assert not cloud_coordinator._legacy_task_artifacts_match(listed, detailed)
+
+
+@pytest.mark.parametrize("response", [None, [], 7])
+def test_authorized_dispatch_head_fails_closed_for_non_object_pull_response(
+        tmp_path, response):
+    api, store, _, _, _, _, _, _, source_head, _ = (
+        _owner_abandonment_transitive_case(tmp_path)
+    )
+    original_get = api.get
+
+    def get(route):
+        if route.endswith("/pulls/16"):
+            return response
+        return original_get(route)
+
+    api.get = get
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+    assert not coordinator._authorized_dispatch_head(
+        16, source_head, FINAL_RESULT_HEAD,
+    )
+
+    api.get = original_get
+    assert coordinator._authorized_dispatch_head(
+        16, source_head, FINAL_RESULT_HEAD,
+    )
+
+
 @pytest.mark.parametrize(
     "lineage_hazard",
     [
@@ -4163,7 +4328,11 @@ def _mutate_legacy_artifacts(task, hazard):
 @pytest.mark.parametrize("hazard", [
     None, "unrelated-writer", "active-writer", "unknown", "reactivated",
     "session-reactivated", "duplicate-inventory", "incomplete-inventory", "inventory-error",
-    "detail-error", "creator", "owner", "repository", "pull", "branch",
+    "detail-error", "detail-response-null", "detail-response-list",
+    "detail-response-scalar", "summary-detail-response-null",
+    "summary-detail-response-list", "summary-detail-response-scalar",
+    "live-pull-id", "live-pull-node-id",
+    "creator", "owner", "repository", "pull", "branch",
     "session", "session-task", "session-owner", "session-repository", "prompt",
     "prompt-prefix", "prompt-marker", "prompt-template",
     "summary-artifact-branch", "detail-artifact-branch",
@@ -4210,7 +4379,11 @@ def test_owner_abandonment_upgrade_fresh_fences(
         injected.append(hazard)
         task = api.tasks[source["task_id"]]
         session = task["sessions"][0]
-        if isinstance(hazard, str) and hazard.startswith("detail-artifact-"):
+        if hazard == "live-pull-id":
+            api.pull["id"] += 1
+        elif hazard == "live-pull-node-id":
+            api.pull["node_id"] += "_replacement"
+        elif isinstance(hazard, str) and hazard.startswith("detail-artifact-"):
             api.legacy_summary_artifacts = deepcopy(task["artifacts"])
             _mutate_legacy_artifacts(task, hazard.removeprefix("detail-"))
         elif isinstance(hazard, str) and "-inventory-" in hazard:
@@ -4369,6 +4542,12 @@ def test_owner_abandonment_upgrade_fresh_fences(
         if (stage == "review-fence" and not injected
                 and route.endswith("/requested_reviewers")):
             mutate()
+        if (injected and isinstance(hazard, str)
+                and hazard.startswith(("detail-response-", "summary-detail-response-"))
+                and route.endswith(f"/tasks/{source['task_id']}")):
+            return {
+                "null": None, "list": [], "scalar": 7,
+            }[hazard.rsplit("-", 1)[-1]]
         if (injected and hazard == "detail-error"
                 and route.endswith(f"/tasks/{source['task_id']}")):
             raise ApiError("original task detail unavailable", status=503)
@@ -4379,6 +4558,11 @@ def test_owner_abandonment_upgrade_fresh_fences(
             if hazard == "inventory-error":
                 raise ApiError("original inventory unavailable", status=503)
             inventory = deepcopy(original_get_all(route, collection=collection))
+            if isinstance(hazard, str) and hazard.startswith(
+                    "summary-detail-response-"):
+                for item in inventory:
+                    if item.get("id") == source["task_id"] and "sessions" in item:
+                        item["session_count"] = len(item.pop("sessions"))
             if isinstance(hazard, str) and (
                     (hazard.split("-", 1)[0] in {"summary", "detail"}
                      and "-artifact-" in hazard)

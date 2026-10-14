@@ -732,7 +732,9 @@ one distinct, abandonment-bound ready receipt and follows each later ready recei
 exact `receipt_start_head` to the preceding `receipt_head`. The chain is bounded by
 the source and neutral lifetime ceilings combined. Every edge must pass immutable
 receipt validation and match the current repository, pull request and branch; the
-current base must match the accepted receipts. Missing, ambiguous, disconnected,
+live pull's numeric and node IDs must also match the retained abandoned-task
+reservation; never bind a pull identity using the live pull's own IDs. The current
+base must match the accepted receipts. Missing, ambiguous, disconnected,
 malformed, non-ready, wrong-identity or cyclic history fails closed.
 Before eligibility filtering, correlate live and retained representations by the
 durable action key, then reconcile each task relevant to this pull. A missing,
