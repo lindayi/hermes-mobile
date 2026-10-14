@@ -188,13 +188,15 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 Issue #111 adds a finite owner-bound disposition for one exact historical
 abandonment, followed by one distinct bounded successor. It preserves the old
 abandonment and reservation and requires a fresh current-head enrollment. A
-successful receipt is still required before later source advancement. These
-candidate pins identify the exact proposed source bytes only; they do not establish
-review, merge, operational authorization, or activation.
+successful receipt is still required before later source advancement. The valid
+continuation result may advance only through an exact ready-receipt chain; a
+disconnected or blocked descendant cannot release historical occupancy or advance
+progress. These candidate pins identify the exact proposed source bytes only; they
+do not establish review, merge, operational authorization, or activation.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `9556165ac4c991ed1205ea980bc24302771420be3721f0751dc79b65fed99afb` |
+| `deploy/cloud_coordinator.py` | `97da1716032056f661060557ba69fc0f56ee69d3deefa7e1ddb2c12f9a913747` |
 
 ### Retained merged source and deliberate native refreshes
 

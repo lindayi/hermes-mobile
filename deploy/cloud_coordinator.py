@@ -3813,12 +3813,28 @@ def _owner_continuation_successor_proven(record, enrollment, actions, comments,
         *actions.values(),
         *enrollment.get("receipt_proofs", []),
     ]
-    return any(
+    direct_successor = any(
         isinstance(action, dict)
+        and _owner_continuation_successor_matches(record, action)
+        and _valid_receipt_proof(action, comments)
+        for action in candidates
+    )
+    if not direct_successor:
+        return False
+    _, authorized, blocked = _authorized_result_heads(
+        record["issue"], enrollment, actions, comments,
+        record["current_main_sha"],
+    )
+    return current_head in authorized and current_head not in blocked
+
+
+def _owner_continuation_progress_receipt_proven(
+        record, action, enrollment, actions, comments, current_head):
+    return (
+        _owner_continuation_matches_history(record, enrollment, actions)
         and _owner_continuation_successor_matches(record, action)
         and action.get("receipt_head") == current_head
         and _valid_receipt_proof(action, comments)
-        for action in candidates
     )
 
 
@@ -3938,8 +3954,19 @@ def _completed_repair_progress(snapshot, actions, current_fingerprints,
                 or action.get("issue") != snapshot["issue"]
                 or action.get("status") != "completed"
                 or not (ready_receipt or verified_failure)
-                or (enrollment.get("authorized_head") is not None
-                    and action.get("head") not in authorized_heads)
+                or (
+                    enrollment.get("authorized_head") is not None
+                    and action.get("head") not in authorized_heads
+                    and not any(
+                        _owner_continuation_progress_receipt_proven(
+                            record, action, enrollment, actions,
+                            snapshot["comments"], snapshot["head"],
+                        )
+                        for _, record in _valid_owner_continuation_claims(
+                            enrollment, actions,
+                        )
+                    )
+                )
                 or (ready_receipt
                     and action.get("receipt_base") != action.get("main_sha"))
                 or action.get("pull_id") != pull.get("id")
@@ -5304,6 +5331,12 @@ class Coordinator:
                                     or _current_owner_continuation_enrollment(
                                         self.api, continuation, pull,
                                     ) is not None
+                                    or _owner_continuation_successor_proven(
+                                        continuation,
+                                        snapshot.get("enrollment", {}),
+                                        actions, snapshot.get("comments", []),
+                                        snapshot.get("head"),
+                                    )
                                 )
                                 and self._owner_abandonment_task_terminal(
                                     snapshot, action, abandonment,
@@ -7309,6 +7342,21 @@ class Coordinator:
             for successor in successors
         )
 
+    def _owner_continuation_advances_abandonment(
+            self, prior, enrollment, actions, comments, current_head):
+        return any(
+            record["historical_action_key"] == prior.get("key")
+            and _current_owner_unverified_continuation_command(
+                self.api, record,
+            ) is not None
+            and _owner_continuation_successor_proven(
+                record, enrollment, actions, comments, current_head,
+            )
+            for _, record in _valid_owner_continuation_claims(
+                enrollment, actions,
+            )
+        )
+
     def _owner_abandonment_task_terminal(
             self, snapshot, action, record, tasks, *,
             supervised_head_advance=False):
@@ -7983,6 +8031,11 @@ class Coordinator:
                         owner_continuation_record is not None
                         and prior.get("key")
                             == owner_continuation_record["historical_action_key"]
+                        or self._owner_continuation_advances_abandonment(
+                            prior, enrollment, self.store.actions(),
+                            recovery_comments,
+                            current.get("head", {}).get("sha"),
+                        )
                     )):
                 return "agent-running"
         if (report_correction
@@ -8108,6 +8161,14 @@ class Coordinator:
                                         == owner_continuation_record[
                                             "historical_action_key"
                                         ]
+                                    or self._owner_continuation_advances_abandonment(
+                                        prior,
+                                        StateStore(self.store.path).snapshot()[
+                                            "enrollments"
+                                        ].get(str(claimed_action["issue"]), {}),
+                                        self.store.actions(), final_comments,
+                                        current.get("head", {}).get("sha"),
+                                    )
                                 ))):
                         self.store.update_action(key, "superseded")
                         return "agent-running"

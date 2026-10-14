@@ -3641,6 +3641,25 @@ def test_owner_continuation_disposition_records_missing_root_before_successor_di
             == ready["owner_continuation_binding"]
         for proof in compacted.get("receipt_proofs", [])
     )
+    continuation_proof = next(
+        proof for proof in compacted["receipt_proofs"]
+        if proof.get("owner_continuation_binding")
+            == ready["owner_continuation_binding"]
+    )
+    continuation_actions = StateStore(store.path).actions()
+    assert cloud_coordinator._owner_continuation_progress_receipt_proven(
+        continuation, continuation_proof, compacted, continuation_actions,
+        api.comments, successor_head,
+    )
+    assert not cloud_coordinator._owner_continuation_progress_receipt_proven(
+        continuation,
+        continuation_proof | {"owner_continuation_binding": "0" * 64},
+        compacted, continuation_actions, api.comments, successor_head,
+    )
+    assert not cloud_coordinator._owner_continuation_progress_receipt_proven(
+        continuation, continuation_proof, compacted, continuation_actions,
+        api.comments, continued_head,
+    )
 
     historical_action = deepcopy(
         StateStore(store.path).action(abandonment["action_key"]),
@@ -3700,19 +3719,12 @@ def test_owner_continuation_disposition_records_missing_root_before_successor_di
         successor_head, 63002, "The synthetic source failure remains.",
         "2026-10-01T12:15:00Z",
     ) | {"state": "CHANGES_REQUESTED"}
-    original_get_all = api.get_all
-
-    def include_progress_review(route, *, collection=None):
-        values = original_get_all(route, collection=collection)
-        if route.endswith("/pulls/16/reviews?per_page=100"):
-            return [
-                api.progress_review,
-                *[review for review in values
-                  if review.get("user", {}).get("id") != COPILOT_REVIEWER],
-            ]
-        return values
-
-    api.get_all = include_progress_review
+    api.set_copilot_review(
+        review_id=63002, head_sha=successor_head,
+        body=api.progress_review["body"],
+        body_html=api.progress_review["body_html"],
+        submitted_at="2026-10-01T12:15:00Z", state="CHANGES_REQUESTED",
+    )
     api.source_failure = True
     api.source_failure_sha = successor_head
     api.workflow_runs = [
@@ -3776,18 +3788,48 @@ def test_owner_continuation_disposition_records_missing_root_before_successor_di
         and proof.get("receipt_head") == descendant_head
         for proof in advanced_state["enrollments"]["16"]["receipt_proofs"]
     )
+    assert cloud_coordinator._owner_continuation_successor_proven(
+        continuation, advanced_state["enrollments"]["16"],
+        advanced_state["actions"], api.comments, descendant_head,
+    )
+    broken_root = deepcopy(advanced_state["enrollments"]["16"])
+    root_proof = next(
+        proof for proof in broken_root["receipt_proofs"]
+        if proof.get("owner_continuation_binding")
+    )
+    root_proof["owner_continuation_binding"] = "0" * 64
+    assert not cloud_coordinator._owner_continuation_successor_proven(
+        continuation, broken_root, advanced_state["actions"], api.comments,
+        descendant_head,
+    )
+    broken_descendant = deepcopy(advanced_state["enrollments"]["16"])
+    broken_descendant_actions = deepcopy(advanced_state["actions"])
+    descendant_proof = next(
+        proof for proof in broken_descendant["receipt_proofs"]
+        if proof.get("task_id") == later["task_id"]
+    )
+    descendant_proof["receipt_head"] = "6" * 40
+    broken_descendant_actions[later["key"]]["receipt_head"] = "6" * 40
+    assert not cloud_coordinator._owner_continuation_successor_proven(
+        continuation, broken_descendant, broken_descendant_actions, api.comments,
+        descendant_head,
+    )
     assert api.tasks[later["task_id"]]["state"] == "completed"
-    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+    assert api.requested_reviewers == []
 
     task_posts = api.task_posts
-    review_writes = [
-        write for write in api.writes
-        if write[0].endswith("/requested_reviewers")
-    ]
     restarted = Coordinator(
         api, StateStore(store.path), clock=lambda: 1790856780,
     ).run(apply=True)["pull_requests"][0]
     assert restarted["head"] == descendant_head
+    assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+    review_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
     assert api.task_posts == task_posts
     assert [
         write for write in api.writes

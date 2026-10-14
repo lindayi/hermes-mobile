@@ -857,6 +857,15 @@ deployment authority. Task state, agent prose, a
 changed SHA, code churn, unrelated green checks, elapsed time, changed issue text,
 cosmetic wording, or new review IDs alone cannot count as progress.
 
+For an owner-continuation successor, the historical dispatch head need not itself be
+authorized when the exact continuation record, historical action, successor binding,
+and immutable ready receipt are valid and the receipt result is the current
+authorized head. A later descendant remains connected only through an unbroken chain
+of valid ready receipts from that bound successor; a blocked or disconnected result
+cannot release the abandoned reservation or advance progress. Recheck this chain
+after compaction and restart before releasing historical occupancy or requesting
+review.
+
 Evidence collection is independent of dispatch caps and usable repair prose.
 An unresolved thread with missing comments is not an empty inventory. Historical
 main advancement does not invalidate a bound source receipt or its exact-head
