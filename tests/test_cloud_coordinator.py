@@ -4592,6 +4592,7 @@ def test_owner_continuation_source_anchor_failure_is_not_replayed(
 
 @pytest.mark.parametrize("hazard", [
     "prompt", "anchor-missing", "anchor-edited", "anchor-duplicate", "anchor-malformed",
+    "anchor-id-float",
     "nonce", "head", "base", "action", "duplicate-reply", "malformed-carrier",
 ])
 def test_owner_continuation_source_receipt_requires_bound_anchor_and_prompt(
@@ -4624,6 +4625,8 @@ def test_owner_continuation_source_receipt_requires_bound_anchor_and_prompt(
         api.comments.append(anchor | {"id": anchor["id"] + 10000})
     elif hazard == "anchor-malformed":
         anchor["body"] += " changed"
+    elif hazard == "anchor-id-float":
+        anchor["id"] = float(anchor["id"])
     elif hazard == "duplicate-reply":
         api.comments.append(receipt | {"id": receipt["id"] + 10000})
     elif hazard == "malformed-carrier":
@@ -4638,8 +4641,16 @@ def test_owner_continuation_source_receipt_requires_bound_anchor_and_prompt(
     api.unresolved = False
     api.source_failure = False
     posts = api.task_posts
-    for _ in range(3):
-        Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    if hazard == "anchor-id-float":
+        with pytest.raises(CoordinatorError, match="comment identity"):
+            Coordinator(
+                api, StateStore(store.path), clock=lambda: 1790856780,
+            ).run(apply=True)
+    else:
+        for _ in range(3):
+            Coordinator(
+                api, StateStore(store.path), clock=lambda: 1790856780,
+            ).run(apply=True)
     assert "receipt_result" not in store.action(successor["key"])
     assert api.task_posts == posts
     assert api.requested_reviewers == []
@@ -4678,7 +4689,10 @@ def test_owner_continuation_source_prompt_change_blocks_publication(tmp_path, mo
     )
 
 
-@pytest.mark.parametrize("hazard", ["missing", "edited", "duplicate", "prompt", "nonce"])
+@pytest.mark.parametrize("hazard", [
+    "missing", "edited", "duplicate", "prompt", "nonce", "anchor-id-float",
+    "anchor-id-boolean",
+])
 def test_owner_continuation_source_retained_anchor_proof_is_revalidated(
         tmp_path, hazard):
     api, store, _, _, main = _owner_continuation_advanced_case(tmp_path)
@@ -4706,7 +4720,25 @@ def test_owner_continuation_source_retained_anchor_proof_is_revalidated(
     elif hazard == "prompt":
         proof["body"] += " changed"
     else:
-        proof["dispatch_nonce"] = "changed"
+        if hazard == "nonce":
+            proof["dispatch_nonce"] = "changed"
+        elif hazard == "anchor-id-float":
+            anchor["id"] = float(anchor["id"])
+        else:
+            from deploy.task_receipts import receipt_instruction
+
+            proof["receipt_anchor_comment_id"] = 1
+            proof["body"] = (
+                f"{proof['task_request_body']}\n\n"
+                + receipt_instruction(
+                    proof["dispatch_nonce"], pull_number=16,
+                    start_head=proof["head"], base_sha=proof["main_sha"],
+                    anchor_comment_id=1, anchor_body=proof["receipt_anchor_body"],
+                )
+            )
+            anchor["id"] = 1
+            assert cloud_coordinator._valid_receipt_proof(proof, api.comments)
+            anchor["id"] = True
     assert not cloud_coordinator._valid_receipt_proof(proof, api.comments)
 
 

@@ -210,7 +210,7 @@ def source_receipt_anchor_valid(action, comments):
         return False
     matches = [
         comment for comment in comments
-        if isinstance(comment, dict) and (
+        if isinstance(comment, dict) and type(comment.get("id")) is int and (
             comment.get("id") == anchor_id
             or isinstance(comment.get("body"), str) and body in comment["body"]
             and _identity(comment.get("user"), action.get("owner_id"))
@@ -220,7 +220,8 @@ def source_receipt_anchor_valid(action, comments):
         return False
     anchor = matches[0]
     return (
-        anchor.get("id") == anchor_id
+        type(anchor.get("id")) is int
+        and anchor.get("id") == anchor_id
         and _identity(anchor.get("user"), action.get("owner_id"))
         and anchor.get("body") == body
         and anchor.get("created_at") == action.get("receipt_anchor_created_at")

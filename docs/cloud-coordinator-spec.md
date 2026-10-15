@@ -771,6 +771,9 @@ result, not a neutral audit-bearing merge commit. Acceptance and retained proof
 require the same immutable owner anchor and exact bot reply envelope. For a
 SOURCE continuation proof, anchor validation is mandatory even if retained state
 omits both optional anchor fields; generic v2 receipt parsing cannot replace it.
+The observed anchor comment ID must be an exact positive integer at initial
+receipt acceptance and retained-proof validation; equal float or boolean aliases
+are not identity evidence.
 Before the first receipt is accepted, a renewed owner enrollment may authorize
 the successor result head. The committed continuation candidate can bridge that
 head change only to the existing full receipt validator; it does not itself prove
