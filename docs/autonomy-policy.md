@@ -197,14 +197,18 @@ require their immutable owner anchor even if retained state omits optional ancho
 fields. Every cohort member must bind the same frozen enrollment comment, head, main,
 and immutable pull identity; a later enrollment cannot mix or renew a spent epoch.
 Newly planned cohort dispositions are admitted atomically per PR. Temporary task
-detail failures leave the original command retryable; positive invalid evidence
-does not authorize dispatch. These candidate pins identify exact proposed source
-bytes only; they do not establish review, merge, operational authorization, or
-activation.
+detail failures leave the original command retryable, including after the issue
+update cursor moves beyond its overlap window. The coordinator independently
+discovers active enrolled PRs with valid retained abandonment claims that are
+missing from the updated-issue results. Exact issue lookups are capped at 100 per
+poll; a larger backlog fails closed. Each discovered issue and pull must match
+the retained identity and remain open. Positive invalid evidence does not authorize
+dispatch. These candidate pins identify exact proposed source bytes only; they do
+not establish review, merge, operational authorization, or activation.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `e8e7af5d406a4221ab022f6d859d6149b8589fc5282d1162f748f078fda0c5fa` |
+| `deploy/cloud_coordinator.py` | `3cb00862b976cec9469f68c8eb786e2e7596d5503a03ead419cf7cc8fcfe0293` |
 | `deploy/task_receipts.py` | `12e1b6b817d82990e5d38f20888baf400271bad7a4ff9d70324010cbf542f06c` |
 
 ### Retained merged source and deliberate native refreshes

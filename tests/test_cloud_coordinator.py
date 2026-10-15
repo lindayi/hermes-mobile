@@ -1829,7 +1829,15 @@ class FakeApi:
             "merged_at": "2026-10-01T12:00:00Z",
             "head": {"sha": head_sha, "ref": "topic", "repo": {"id": 1399942965}},
         }
-        self.issue = {"number": 16, "pull_request": {"url": "pull/16"} if issue_is_pull else None}
+        self.issue = {
+            "number": 16,
+            "state": pull_state,
+            "updated_at": "2026-10-01T11:00:00Z",
+            "repository_url": "https://api.github.com/repos/lindayi/hermes-mobile",
+            "pull_request": {
+                "url": "https://api.github.com/repos/lindayi/hermes-mobile/pulls/16",
+            } if issue_is_pull else None,
+        }
         self.comments = [{
             "id": 123, "user": {"id": author_id}, "body": "/hermes enroll",
             "created_at": "2026-10-01T11:00:00Z",
@@ -1937,6 +1945,8 @@ class FakeApi:
             if task_id not in self.tasks:
                 raise ApiError("task not found", status=404)
             return self.tasks[task_id]
+        if route == "repos/lindayi/hermes-mobile/issues/16":
+            return self.issue | {"state": self.pull.get("state")}
         if route == "repos/lindayi/hermes-mobile/commits/main":
             self.main_reads += 1
             if self.current_main_sha is not None:
@@ -5107,6 +5117,102 @@ def test_owner_continuation_task_detail_outage_retries_original_command(
     assert api.writes == writes
 
 
+@pytest.mark.parametrize("multiple_roots", [False, True])
+def test_owner_continuation_task_detail_outage_outlives_issue_cursor(
+        tmp_path, monkeypatch, multiple_roots):
+    api, store, abandonment, _, _ = _owner_continuation_advanced_case(
+        tmp_path, multiple_roots=multiple_roots,
+    )
+    roots = deepcopy(store.snapshot()["enrollments"]["16"]["owner_abandonments"])
+    commands = [
+        comment for comment in api.comments
+        if comment["user"]["id"] == OWNER
+        and comment["body"].startswith("/hermes continue-unverified ")
+    ]
+    store._mutate(lambda data: data.update(cursor="2026-10-01T12:15:00Z"))
+    original_get = api.get
+    original_get_all = api.get_all
+    unavailable = [True]
+    issue_reads = []
+    issue_routes = []
+    comment_routes = []
+    task_detail_reads = []
+
+    def get(route):
+        if route == "repos/lindayi/hermes-mobile/issues/16":
+            issue_reads.append(route)
+        if (unavailable[0]
+                and any(route.endswith(f"/tasks/{root['task_id']}") for root in roots)):
+            task_detail_reads.append(route)
+            raise ApiError("task detail temporarily unavailable", status=503)
+        return original_get(route)
+
+    def get_all(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues?"):
+            issue_routes.append(route)
+            since = parse_qs(urlparse(route).query).get("since")
+            if since:
+                return [
+                    issue for issue in original_get_all(route, collection=collection)
+                    if issue["updated_at"] >= since[0]
+                ]
+        if route.startswith("repos/lindayi/hermes-mobile/issues/16/comments?"):
+            comment_routes.append(route)
+        return original_get_all(route, collection=collection)
+
+    monkeypatch.setattr(api, "get", get)
+    monkeypatch.setattr(api, "get_all", get_all)
+    before = StateStore(store.path).snapshot()
+    posts = api.task_posts
+
+    for now in (1790857080, 1790857200):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda now=now: now,
+        ).run(apply=True)
+    deferred = StateStore(store.path).snapshot()
+
+    assert len(issue_reads) == 2
+    assert len(task_detail_reads) >= 2
+    assert all(parse_qs(urlparse(route).query).get("since") for route in issue_routes)
+    assert comment_routes and all(
+        not parse_qs(urlparse(route).query).get("since") for route in comment_routes
+    )
+    assert not deferred["enrollments"]["16"].get("owner_continuations")
+    assert all(not cloud_coordinator._event_consumed(
+        deferred, str(command["id"]),
+    ) for command in commands)
+    assert deferred["enrollments"]["16"]["owner_abandonments"] == roots
+    assert deferred["enrollments"]["16"]["attempts"] == (
+        before["enrollments"]["16"]["attempts"]
+    )
+    assert api.task_posts == posts
+
+    unavailable[0] = False
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790857320,
+    ).run(apply=True)
+    recovered = StateStore(store.path).snapshot()
+    assert len(recovered["enrollments"]["16"]["owner_continuations"]) == len(roots)
+    assert all(cloud_coordinator._event_consumed(
+        recovered, str(command["id"]),
+    ) for command in commands)
+    assert api.task_posts == posts + 1
+    writes = list(api.writes)
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790857440,
+        ).run(apply=True)
+    repeated = StateStore(store.path).snapshot()
+    assert api.task_posts == posts + 1
+    assert api.writes == writes
+    assert repeated["enrollments"]["16"]["attempts"] == (
+        recovered["enrollments"]["16"]["attempts"]
+    )
+    assert repeated["enrollments"]["16"]["owner_continuations"] == (
+        recovered["enrollments"]["16"]["owner_continuations"]
+    )
+
+
 @pytest.mark.parametrize(("stage", "boundary"), [
     ("admission", "planning"), ("admission", "historical-task"),
     ("publication", "planning"), ("publication", "historical-task"),
@@ -5591,9 +5697,11 @@ def test_owner_continuation_final_admission_defers_all_roots_together(
     injected = []
 
     def mutate_at_fence(self, recovery, main_sha, *, successor_action=None):
-        record = recovery["record"]
+        cohort = recovery.get("admission_cohort", [recovery])
+        records = [item["record"] for item in cohort]
         if (successor_action is None
-                and record["disposition_comment_id"] == disposition_id
+                and any(item["disposition_comment_id"] == disposition_id
+                        for item in records)
                 and not injected):
             injected.append(True)
             comment = next(
@@ -5657,6 +5765,102 @@ def test_owner_continuation_final_admission_defers_all_roots_together(
     ).run(apply=True)
     assert api.task_posts == posts + 1
     assert api.writes == writes
+
+
+@pytest.mark.parametrize("reverse_roots", [False, True])
+@pytest.mark.parametrize("mutation", ["edited", "deleted"])
+@pytest.mark.parametrize("neutral", [False, True])
+def test_owner_continuation_final_admission_rechecks_whole_cohort_after_task_reads(
+        tmp_path, monkeypatch, reverse_roots, mutation, neutral):
+    api, store, _, _, _ = _owner_continuation_advanced_case(
+        tmp_path, multiple_roots=True,
+    )
+    if neutral:
+        api.pull.update(mergeable=True, mergeable_state="behind")
+    roots = deepcopy(store.snapshot()["enrollments"]["16"]["owner_abandonments"])
+    if reverse_roots:
+        roots.reverse()
+        store._mutate(
+            lambda state: state["enrollments"]["16"]["owner_abandonments"].reverse(),
+        )
+        dispositions = [
+            comment for comment in api.comments if comment["id"] in {7781, 7782}
+        ]
+        api.comments[:] = [
+            comment for comment in api.comments if comment["id"] not in {7781, 7782}
+        ] + list(reversed(dispositions))
+
+    original_fence = CloudCoordinator._fence_owner_continuation
+    original_get = api.get
+    first_record = []
+    last_task_id = []
+    mutated = []
+
+    def fence(self, recovery, main_sha, **kwargs):
+        if kwargs.get("successor_action") is None:
+            cohort = recovery.get("admission_cohort")
+            records = (
+                [item["record"] for item in cohort]
+                if cohort is not None
+                else [recovery["record"]]
+            )
+            if not first_record:
+                first_record.append(records[0])
+            if len(records) > 1:
+                last_task_id[:] = [records[-1]["historical_task_id"]]
+            elif first_record[0] is not recovery["record"]:
+                last_task_id[:] = [recovery["record"]["historical_task_id"]]
+        return original_fence(self, recovery, main_sha, **kwargs)
+
+    def mutate_after_task_read(route):
+        response = original_get(route)
+        if (last_task_id and not mutated
+                and route.endswith(f"/tasks/{last_task_id[0]}")):
+            mutated.append(True)
+            comment_id = first_record[0]["disposition_comment_id"]
+            comment = next(item for item in api.comments if item["id"] == comment_id)
+            if mutation == "edited":
+                comment["body"] += " edited"
+                comment["updated_at"] = "2026-10-01T12:13:00Z"
+            else:
+                api.comments.remove(comment)
+        return response
+
+    monkeypatch.setattr(CloudCoordinator, "_fence_owner_continuation", fence)
+    monkeypatch.setattr(api, "get", mutate_after_task_read)
+    before = StateStore(store.path).snapshot()
+    posts = api.task_posts
+    writes = len(api.writes)
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+
+    after = StateStore(store.path).snapshot()
+    disposition_ids = {7781, 7782}
+    assert mutated == [True]
+    assert not after["enrollments"]["16"].get("owner_continuations")
+    assert all(not cloud_coordinator._event_consumed(after, str(comment_id))
+               for comment_id in disposition_ids)
+    assert after["enrollments"]["16"]["owner_abandonments"] == (
+        before["enrollments"]["16"]["owner_abandonments"]
+    )
+    assert after["enrollments"]["16"]["attempts"] == (
+        before["enrollments"]["16"]["attempts"]
+    )
+    assert after["enrollments"]["16"]["neutral_attempts"] == (
+        before["enrollments"]["16"]["neutral_attempts"]
+    )
+    assert after["enrollments"]["16"]["neutral_anchor_reservations"] == (
+        before["enrollments"]["16"]["neutral_anchor_reservations"]
+    )
+    assert after["actions"] == before["actions"]
+    assert after["outbox"] == before["outbox"]
+    assert api.task_posts == posts
+    assert not any(
+        route.endswith(("/tasks", "/requested_reviewers", "/merge", "/issues/16/comments"))
+        for route, _ in api.writes[writes:]
+    )
 
 
 def test_owner_continuation_deferred_cohort_survives_command_cursor(tmp_path, monkeypatch):

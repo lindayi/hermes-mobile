@@ -803,6 +803,10 @@ final fence fails, defer every newly planned disposition for that PR, remove all
 their processed IDs and staged continuation records, and suppress dependent
 publication plans together. Preserve previously committed history and claims, and
 continue independent reconciliation for other PRs.
+After the final historical-task reads, reauthenticate every disposition, original
+abandonment command, and enrollment in that planned cohort. An earlier member
+changing while a later member is read must defer the whole cohort before event
+consumption or publication.
 A failed comparison rejects the affected PR's continuation. If durable state
 changed during preparation, discard both the prepared mutations and all dependent
 scan plans, then rebuild the complete scan once from fresh durable state.
@@ -842,7 +846,11 @@ authority for another or consume a disposition outside that frozen cohort.
 Do not commit or journal new dispositions while a required historical root lacks
 its own valid disposition. Read the complete bounded comment inventory for
 retained abandoned claims, so a deferred immutable command does not fall outside
-the ordinary polling cursor before the other disposition arrives.
+the ordinary polling cursor before the other disposition arrives. Independently
+of the issue-update cursor, discover active enrolled PRs with retained valid
+abandonment claims by reading their exact issue and pull identities; discovery is
+bounded to 100 claims per poll. Closed or non-PR issues are not eligible, and
+malformed identities, incomplete inventories, and API failures fail closed.
 One task and one receipt anchor spend one source or neutral lifetime attempt;
 each included disposition permanently spends its one-successor allowance.
 Only that task's authentic immutable ready receipt can directly satisfy the

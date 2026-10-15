@@ -115,6 +115,7 @@ NEUTRAL_RECEIPT_ANCHOR_MARKER_PREFIX = "hermes-coordinator-neutral-receipt:"
 LIFECYCLE_FILE_NAME = "workflow-events.json"
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_EVENTS = 4000
+MAX_RETAINED_ABANDONMENT_DISCOVERY = 100
 TOMBSTONE_LIMIT = 512
 _OWNER_CONTINUATION_EVIDENCE_UNAVAILABLE = object()
 _LIFECYCLE_OWNER_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
@@ -4513,6 +4514,76 @@ class Coordinator:
             route += "&" + urlencode({"since": since.isoformat().replace("+00:00", "Z")})
         return _rest_list(self.api, route)
 
+    def _retained_abandonment_issues(self, state, issues):
+        by_number = {}
+        for issue in issues:
+            if (not isinstance(issue, dict) or type(issue.get("number")) is not int
+                    or not 1 <= issue["number"] <= 2**31 - 1):
+                raise CoordinatorError("GitHub issue row identity was malformed")
+            by_number[issue["number"]] = issue
+        claims = []
+        for key, enrollment in state["enrollments"].items():
+            if not isinstance(enrollment, dict) or enrollment.get("active") is not True:
+                continue
+            valid_claims = _valid_owner_abandonment_claims(
+                enrollment, state["actions"],
+            )
+            if not valid_claims:
+                continue
+            if (not isinstance(key, str)
+                    or not re.fullmatch(r"[1-9][0-9]{0,9}", key)):
+                raise CoordinatorError("Retained enrollment identity was malformed")
+            number = int(key)
+            if number > 2**31 - 1:
+                raise CoordinatorError("Retained enrollment identity was malformed")
+            claims.append((number, enrollment, valid_claims))
+        claims.sort(key=lambda item: item[0])
+        missing_claims = [
+            item for item in claims if item[0] not in by_number
+        ]
+        if len(missing_claims) > MAX_RETAINED_ABANDONMENT_DISCOVERY:
+            raise CoordinatorError(
+                "Retained owner-abandonment discovery exceeded its safety bound"
+            )
+        for number, enrollment, valid_claims in missing_claims:
+            try:
+                issue = self.api.get(f"repos/{REPOSITORY}/issues/{number}")
+            except ApiError as error:
+                if error.status == 404:
+                    continue
+                raise
+            if (not isinstance(issue, dict) or type(issue.get("number")) is not int
+                    or issue.get("number") != number):
+                raise CoordinatorError("Retained issue identity was malformed")
+            pull_link = issue.get("pull_request")
+            if issue.get("state") != "open" or not isinstance(pull_link, dict):
+                continue
+            expected_pull_url = (
+                f"https://api.github.com/repos/{REPOSITORY}/pulls/{number}"
+            )
+            if pull_link.get("url") != expected_pull_url:
+                raise CoordinatorError("Retained issue pull identity was malformed")
+            pull = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
+            if (not isinstance(pull, dict)
+                    or not isinstance(pull.get("head"), dict)
+                    or not isinstance(pull["head"].get("repo"), dict)):
+                raise CoordinatorError("Retained pull identity was malformed")
+            if pull.get("state") != "open" or pull.get("merged") is not False:
+                continue
+            head_refs = {
+                state["actions"][action_key].get("head_ref")
+                for action_key, _ in valid_claims
+            }
+            if (not _pull_identity(pull, enrollment)
+                    or len(head_refs) != 1
+                    or pull["head"].get("ref") not in head_refs
+                    or not _github_identity(
+                        pull["head"]["repo"], REPOSITORY_ID,
+                    )):
+                raise CoordinatorError("Retained pull identity did not match enrollment")
+            by_number[number] = issue
+        return list(by_number.values())
+
     def _scan_enrollments(self, state, *, admission_checks=None,
                           blocked_continuations=()):
         commands, processed = [], []
@@ -4520,6 +4591,7 @@ class Coordinator:
         issues = self._issues(cursor)
         if not isinstance(issues, list):
             raise CoordinatorError("GitHub issue inventory was malformed")
+        issues = self._retained_abandonment_issues(state, issues)
         for issue in issues:
             if (not isinstance(issue, dict) or type(issue.get("number")) is not int
                     or not 1 <= issue["number"] <= 2**31 - 1):
@@ -7882,21 +7954,58 @@ class Coordinator:
             raise CoordinatorError(
                 "Owner continuation frozen enrollment epoch changed before publication"
             )
+        historical_records = enrollment.get("owner_abandonments", [])
+        action_records = state.get("actions", {})
+        if successor_action is None:
+            admission_cohort = recovery.get("admission_cohort")
+            cohort = (
+                [item.get("record") for item in admission_cohort]
+                if isinstance(admission_cohort, (list, tuple))
+                else [record]
+            )
+        else:
+            cohort = _owner_continuation_cohort(
+                successor_action, enrollment, action_records,
+            )
+        if (not cohort or record not in cohort
+                or any(not _owner_continuation_record_valid(member)
+                       or member["issue"] != record["issue"]
+                       for member in cohort)
+                or len({
+                    member["historical_action_key"] for member in cohort
+                }) != len(cohort)):
+            raise CoordinatorError("Owner continuation cohort changed before publication")
+        historical_by_key = {}
+        for member in cohort:
+            matching_history = [
+                item for item in historical_records
+                if isinstance(item, dict)
+                and item.get("action_key") == member["historical_action_key"]
+            ]
+            member_action = action_records.get(member["historical_action_key"])
+            if (len(matching_history) != 1
+                    or _canonical_sha256(matching_history[0])
+                        != member["historical_abandonment_sha256"]
+                    or not _owner_abandonment_matches_action(
+                        matching_history[0], member_action,
+                    )
+                    or not _owner_continuation_matches_history(
+                        member, enrollment, action_records,
+                    )):
+                raise CoordinatorError(
+                    "Owner continuation historical reservation changed before commit"
+                )
+            historical_by_key[member["historical_action_key"]] = (
+                matching_history[0], member_action,
+            )
         historical = [
-            item for item in enrollment.get("owner_abandonments", [])
+            item for item in historical_records
             if isinstance(item, dict)
             and item.get("action_key") == record["historical_action_key"]
         ]
-        action = state.get("actions", {}).get(record["historical_action_key"])
+        historical_record, action = historical_by_key[record["historical_action_key"]]
         continuations = enrollment.get("owner_continuations", [])
-        if (len(historical) != 1
-                or _canonical_sha256(historical[0])
-                    != record["historical_abandonment_sha256"]
-                or not _owner_abandonment_matches_action(historical[0], action)
-                or not _owner_continuation_matches_history(
-                    record, enrollment, state["actions"],
-                )
-                or not _owner_continuation_record_valid(record)
+        if (not _owner_continuation_record_valid(record)
                 or not _owner_continuations_valid(
                     continuations, issue=record["issue"],
                 )):
@@ -7933,12 +8042,6 @@ class Coordinator:
             raise CoordinatorError(
                 "Owner continuation successor changed before publication"
             )
-        cohort = (
-            _owner_continuation_cohort(successor_action, enrollment, state["actions"])
-            if isinstance(successor_action, dict) else [record]
-        )
-        if not cohort or record not in cohort:
-            raise CoordinatorError("Owner continuation cohort changed before publication")
         current = self._fence_pull(
             record["issue"], record["current_head_sha"], main_sha,
         )
@@ -7976,7 +8079,56 @@ class Coordinator:
         workflows, _ = _workflow_runs(
             self.api, record["head_ref"], record["issue"],
         )
-        if (
+        if successor_action is None and recovery.get("admission_cohort") is not None:
+            for member in cohort:
+                member_history, member_action = historical_by_key[
+                    member["historical_action_key"]
+                ]
+                if not self._owner_abandonment_task_terminal(
+                    {
+                        "issue": member["issue"], "pull": current,
+                        "head": member["current_head_sha"],
+                        "main_sha": main_sha, "comments": comments,
+                    },
+                    member_action, member_history, tasks,
+                    supervised_head_advance=True,
+                ):
+                    raise CoordinatorError(
+                        "Owner continuation historical task was not terminal"
+                    )
+            final_comments = _all_review_comments(self.api, record["issue"], None)
+            if any(
+                    _current_owner_unverified_abandonment_command(
+                        self.api, historical_by_key[
+                            member["historical_action_key"]
+                        ][0],
+                    ) is None
+                    or _current_owner_unverified_continuation_command(
+                        self.api, member,
+                    ) is None
+                    or _current_owner_continuation_enrollment(
+                        self.api, member, current,
+                    ) is None
+                    or not _owner_continuation_inventory_has_unique_disposition(
+                        self.api, member, final_comments,
+                    )
+                    or not self._compare_proves_ancestry(
+                        member["historical_head_sha"], member["current_head_sha"],
+                    )
+                    or not self._compare_proves_ancestry(
+                        member["historical_base_sha"], member["current_main_sha"],
+                        allow_identical=True,
+                    )
+                    or _cloud_agent_active(workflows, member["head_ref"])
+                    or not _owner_continuation_writers_clear(
+                        enrollment, state["actions"], state.get("outbox", {}),
+                        member["issue"], member["historical_action_key"],
+                    )
+                    for member in cohort):
+                raise CoordinatorError(
+                    "Owner continuation evidence changed before cohort admission"
+                )
+        elif (
                 _current_owner_unverified_continuation_command(
                     self.api, record,
                 ) is None
@@ -7996,7 +8148,7 @@ class Coordinator:
                         "head": record["current_head_sha"],
                         "main_sha": main_sha, "comments": comments,
                     },
-                    action, historical[0], tasks,
+                    action, historical_record, tasks,
                     supervised_head_advance=True,
                 )
                 or _cloud_agent_active(workflows, record["head_ref"])
@@ -8057,6 +8209,7 @@ class Coordinator:
                     {"issue": record["issue"], "pull": current, "comments": comments},
                     prior, abandonment, tasks, supervised_head_advance=True):
                 raise CoordinatorError("Owner continuation retained task changed")
+        final_comments = _all_review_comments(self.api, record["issue"], None)
         if (any(_current_owner_unverified_abandonment_command(
                     self.api, abandonment) is None
                 for _, abandonment in retained_claims)
@@ -8065,6 +8218,9 @@ class Coordinator:
                         self.api, member) is None
                     or _current_owner_continuation_enrollment(
                         self.api, member, current) is None
+                    or not _owner_continuation_inventory_has_unique_disposition(
+                        self.api, member, final_comments,
+                    )
                     for member in cohort)):
             raise CoordinatorError(
                 "Owner continuation immutable owner authority changed"
@@ -9181,12 +9337,21 @@ class Coordinator:
         for recovery in plan.get("owner_recoveries", ()):
             self._fence_owner_abandonment(recovery, plan["main_sha"])
         deferred_continuation_issues = set()
+        checked_continuation_issues = set()
         for recovery in list(plan.get("owner_continuations", ())):
             issue = recovery["issue"]
-            if issue in deferred_continuation_issues:
+            if (issue in deferred_continuation_issues
+                    or issue in checked_continuation_issues):
                 continue
+            cohort = [
+                item for item in plan["owner_continuations"]
+                if item["issue"] == issue
+            ]
+            checked_continuation_issues.add(issue)
             try:
-                self._fence_owner_continuation(recovery, plan["main_sha"])
+                self._fence_owner_continuation(
+                    recovery | {"admission_cohort": cohort}, plan["main_sha"],
+                )
             except CoordinatorError:
                 if self.store._prepared is not None:
                     current_state = StateStore(self.store.path).snapshot()
