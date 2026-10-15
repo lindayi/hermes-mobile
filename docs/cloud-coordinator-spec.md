@@ -827,13 +827,19 @@ all dependent scan plans, then rebuild the complete scan once from fresh durable
 state.
 Quarantine the failed continuation's PR for the rest of that poll: do not consume
 its commands, reconcile its claims, publish, or apply stale observations to it.
-Carry only positively identified unconsumed disposition IDs across the rebuild;
-do not carry authority or publication plans. Persist carried IDs as pending before
-event compaction. Reauthenticate receipts, source authority, commands, and lifecycle
-evidence during the rebuild. Compare the durable preparation baseline using
+Across a prepared-state conflict, carry only positively identified unconsumed command
+IDs; candidates include existing pending IDs and command IDs processed by the failed
+scan. New candidates must be unconsumed at the preparation baseline. Previously
+carried IDs remain eligible unless current durable state explicitly records their
+consumption; a newer watermark alone does not consume them. A continuation-fence
+conflict carries all existing pending IDs, including other PRs, as well as every
+disposition ID in the failing cohort. The retry list is bounded and overflow fails
+closed. Do not carry authority or publication plans. Persist carried IDs as pending
+before event compaction. Reauthenticate receipts, source authority, commands, and
+lifecycle evidence during the rebuild. Compare the durable preparation baseline using
 type-exact canonical JSON again under the commit lock. A second conflict stops the
-run without committing stale prepared state. This retry is allowed only before
-scan commit and external publication; it never replays an unknown external write.
+run without committing stale prepared state. This retry is allowed only before scan
+commit and external publication; it never replays an unknown external write.
 
 Immediately before a continuation task POST, the coordinator acquires the existing
 StateStore write lock, reloads and compares the fenced affected-state projection,

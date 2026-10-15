@@ -205,14 +205,18 @@ poll; a larger backlog fails closed. Each discovered issue and pull must match
 the retained identity and remain open. API failures during either initial ancestry
 comparison leave the disposition unconsumed; only its positively identified ID
 crosses a precommit state-conflict rebuild, where all authority and publication plans
-are rebuilt from durable state. The ID is persisted before event-watermark compaction.
+are rebuilt from durable state. Prepared-scan conflicts also retain all positively
+identified unconsumed command IDs, including commands already deferred for another
+PR. A newer compacted watermark does not consume an ID that was unconsumed at the
+preparation baseline; explicit durable event or continuation records do. Retry IDs
+remain bounded and are persisted before event-watermark compaction.
 Positive invalid evidence does not authorize dispatch. These candidate pins identify
 exact proposed source bytes only; they do not establish review, merge, operational
 authorization, or activation.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `63b50269f01d9327501e8d1fc1d908e1ecb2638f6f488a0f7731ee35254cc323` |
+| `deploy/cloud_coordinator.py` | `b5e0df13bb45c999e3f418bf872dc3857048b6e12ac3e7a00bb5f9fc068f52d6` |
 | `deploy/task_receipts.py` | `72615884d5e61a51f6fd8d9527774fc4982ebd66f98e5bd4b84a640404fccbe5` |
 
 ### Retained merged source and deliberate native refreshes

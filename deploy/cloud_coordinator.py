@@ -4613,8 +4613,9 @@ class Coordinator:
         return list(by_number.values())
 
     def _scan_enrollments(self, state, *, admission_checks=None,
-                          blocked_continuations=()):
+                          blocked_continuations=(), pending_event_exceptions=()):
         commands, processed = [], []
+        pending_event_exceptions = set(map(str, pending_event_exceptions))
         cursor = state.get("cursor")
         issues = self._issues(cursor)
         if not isinstance(issues, list):
@@ -4639,7 +4640,8 @@ class Coordinator:
                         or comment["id"] <= 0):
                     raise CoordinatorError("GitHub issue comment identity was malformed")
                 key = str(comment["id"])
-                if _event_consumed(state, key):
+                if (_event_consumed(state, key)
+                        and key not in pending_event_exceptions):
                     continue
                 user = comment.get("user")
                 if not isinstance(user, dict) or user.get("id") != OWNER_ID:
@@ -7513,7 +7515,8 @@ class Coordinator:
             return None
         return record
 
-    def _build_plan(self, *, apply, blocked_continuations=()):
+    def _build_plan(self, *, apply, blocked_continuations=(),
+                    pending_event_exceptions=()):
         state = self.store.snapshot()
         cursor = datetime.fromtimestamp(self.clock(), timezone.utc).isoformat().replace("+00:00", "Z")
         self._identity()
@@ -7526,6 +7529,8 @@ class Coordinator:
             {"blocked_continuations": blocked_continuations}
             if blocked_continuations else {}
         )
+        if pending_event_exceptions:
+            scan_options["pending_event_exceptions"] = pending_event_exceptions
         issues, commands, processed, enrollments = self._scan_enrollments(
             state, admission_checks=admission_checks, **scan_options,
         )
@@ -9429,10 +9434,15 @@ class Coordinator:
                     current_state = StateStore(self.store.path).snapshot()
                     if (_canonical_sha256(current_state)
                             != _canonical_sha256(self.store._preparation_base)):
+                        retryable = _retryable_pending_event_ids(
+                            self.store._preparation_base, current_state,
+                            [*plan.get("pending_events", ()), *disposition_ids],
+                            carried=plan.get("pending_event_exceptions", ()),
+                        )
                         raise _PreparedScanChanged(
                             "Coordinator state changed during continuation preparation",
                             issue=issue,
-                            pending_events=disposition_ids,
+                            pending_events=retryable,
                         )
                 deferred_continuation_issues.add(issue)
                 plan["pending_events"] = list(dict.fromkeys([
@@ -9482,6 +9492,7 @@ class Coordinator:
         self.store.commit_scan(
             plan["cursor"], plan["processed"], commands=plan["commands"],
             pending_events=plan.get("pending_events", ()),
+            pending_event_exceptions=plan.get("pending_event_exceptions", ()),
             retirements=[
                 item["issue"] for item in plan["pull_requests"] if item.get("terminal")
             ],
@@ -9781,7 +9792,12 @@ class Coordinator:
                         raise
                     if error.issue is not None:
                         blocked_continuations.add(error.issue)
-                    pending_events.extend(error.pending_events)
+                    current_state = StateStore(self.store.path).snapshot()
+                    pending_events.extend(_retryable_pending_event_ids(
+                        current_state, current_state, error.pending_events,
+                        carried=error.pending_events,
+                    ))
+                    pending_events = list(dict.fromkeys(pending_events))
         finally:
             if lock_fd is not None:
                 os.close(lock_fd)
@@ -9820,22 +9836,29 @@ class Coordinator:
                         raise CoordinatorError(
                             "Lifecycle ACK or owner evidence is unavailable"
                         ) from error
+            current_state = StateStore(self.store.path).snapshot()
+            pending_event_exceptions = tuple(
+                key for key in dict.fromkeys(map(str, pending_events))
+                if not _explicit_event_consumed(current_state, key)
+            )
             if blocked_continuations:
                 plan = self._build_plan(
                     apply=apply, blocked_continuations=blocked_continuations,
+                    pending_event_exceptions=pending_event_exceptions,
                 )
             else:
-                plan = self._build_plan(apply=apply)
-            if pending_events:
-                carried_pending = list(dict.fromkeys(map(str, pending_events)))
-                carried_set = set(carried_pending)
-                plan["processed"] = [
-                    item for item in plan["processed"]
-                    if str(item) not in carried_set
-                ]
-                plan["pending_events"] = list(dict.fromkeys([
-                    *plan.get("pending_events", []), *carried_pending,
-                ]))
+                plan = self._build_plan(
+                    apply=apply,
+                    pending_event_exceptions=pending_event_exceptions,
+                )
+            processed_ids = set(map(str, plan["processed"]))
+            carried_pending = [
+                key for key in pending_event_exceptions if key not in processed_ids
+            ]
+            plan["pending_events"] = list(dict.fromkeys([
+                *plan.get("pending_events", []), *carried_pending,
+            ]))
+            plan["pending_event_exceptions"] = pending_event_exceptions
             if apply:
                 if self.lifecycle_source_paths is not None:
                     from deploy.workflow_lifecycle_sources import (
@@ -9946,6 +9969,35 @@ def _event_consumed(data, key):
     return key in data.get("events", []) or (
         key.isdigit() and type(watermark) is int and int(key) <= watermark
     )
+
+
+def _explicit_event_consumed(data, key):
+    if key in data.get("events", ()):
+        return True
+    return any(
+        str(record.get("disposition_comment_id")) == key
+        for enrollment in data.get("enrollments", {}).values()
+        if isinstance(enrollment, dict)
+        for record in enrollment.get("owner_continuations", [])
+        if isinstance(record, dict)
+    )
+
+
+def _retryable_pending_event_ids(baseline, current, candidates, *, carried=(),
+                                 processed=()):
+    carried = set(map(str, carried))
+    processed = set(map(str, processed))
+    retryable = []
+    for item in candidates:
+        key = str(item)
+        if (key in processed or _explicit_event_consumed(current, key)):
+            continue
+        if key in carried or not _event_consumed(baseline, key):
+            retryable.append(key)
+    retryable = list(dict.fromkeys(retryable))
+    if len(retryable) > MAX_PENDING_EVENTS:
+        raise CoordinatorError("Pending owner command capacity reached")
+    return retryable
 
 
 def _bound_events(data):
@@ -10366,10 +10418,12 @@ class StateStore:
                 temporary.unlink()
 
     def commit_scan(self, cursor, processed, *, commands=(), pending_events=(),
+                    pending_event_exceptions=(),
                     retirements=(),
                     lifecycle_events=(), observations=(), sensitive_revocations=(),
                     starter_sources=(), now=None):
         keys = [str(item) for item in processed]
+        pending_exception_ids = set(map(str, pending_event_exceptions))
         prepared, baseline = self._prepared, self._preparation_base
         self.discard_preparation()
 
@@ -10377,8 +10431,14 @@ class StateStore:
             if prepared is not None:
                 if (_canonical_sha256(data) is None
                         or _canonical_sha256(data) != _canonical_sha256(baseline)):
+                    retryable = _retryable_pending_event_ids(
+                        baseline, data,
+                        [*pending_events, *pending_exception_ids, *keys],
+                        carried=pending_exception_ids,
+                    )
                     raise _PreparedScanChanged(
-                        "Coordinator state changed during preparation"
+                        "Coordinator state changed during preparation",
+                        pending_events=retryable,
                     )
                 data.clear()
                 data.update(prepared)
@@ -10393,11 +10453,13 @@ class StateStore:
                 key = str(item)
                 if key in keys or key in data["pending_events"]:
                     continue
-                watermark = data.get("event_watermark", 0)
-                if (key in data["events"]
-                        or key.isdigit() and type(watermark) is int
-                        and int(key) <= watermark):
+                if _explicit_event_consumed(data, key):
                     continue
+                watermark = data.get("event_watermark", 0)
+                if (key.isdigit() and type(watermark) is int
+                        and int(key) <= watermark):
+                    if key not in pending_exception_ids:
+                        continue
                 if len(data["pending_events"]) >= MAX_PENDING_EVENTS:
                     raise CoordinatorError("Pending owner command capacity reached")
                 data["pending_events"].append(key)
