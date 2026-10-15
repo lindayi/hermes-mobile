@@ -4612,6 +4612,65 @@ class Coordinator:
             by_number[number] = issue
         return list(by_number.values())
 
+    def _pending_event_issues(self, state, issues):
+        by_number = {issue["number"]: issue for issue in issues}
+        comments_by_issue = {}
+        issue_url_prefix = f"https://api.github.com/repos/{REPOSITORY}/issues/"
+        issue_url_pattern = re.compile(
+            re.escape(issue_url_prefix) + r"([1-9][0-9]{0,9})\Z",
+        )
+        for key in state.get("pending_events", ()):
+            try:
+                comment = self.api.get(
+                    f"repos/{REPOSITORY}/issues/comments/{key}",
+                )
+            except ApiError as error:
+                if error.status == 404:
+                    continue
+                raise
+            if (not isinstance(comment, dict)
+                    or type(comment.get("id")) is not int
+                    or comment["id"] != int(key)
+                    or not 0 < comment["id"] <= 2**63 - 1
+                    or not isinstance(comment.get("user"), dict)
+                    or type(comment["user"].get("id")) is not int
+                    or comment["user"]["id"] <= 0
+                    or not isinstance(comment.get("body"), str)
+                    or not _valid_timestamp(comment.get("created_at"))
+                    or not _valid_timestamp(comment.get("updated_at"))):
+                raise CoordinatorError("Pending comment response was malformed")
+            match = issue_url_pattern.fullmatch(comment.get("issue_url", ""))
+            if match is None:
+                raise CoordinatorError("Pending comment issue identity was malformed")
+            number = int(match.group(1))
+            if number > 2**31 - 1:
+                raise CoordinatorError("Pending comment issue identity was malformed")
+            if comment["user"]["id"] != OWNER_ID:
+                continue
+            try:
+                issue = self.api.get(f"repos/{REPOSITORY}/issues/{number}")
+            except ApiError as error:
+                if error.status == 404:
+                    continue
+                raise
+            if (not isinstance(issue, dict) or type(issue.get("number")) is not int
+                    or issue["number"] != number
+                    or issue.get("repository_url")
+                    != f"https://api.github.com/repos/{REPOSITORY}"
+                    or issue.get("state") not in {"open", "closed"}):
+                raise CoordinatorError("Pending issue response was malformed")
+            if issue["state"] != "open":
+                continue
+            pull_link = issue.get("pull_request")
+            if not isinstance(pull_link, dict):
+                continue
+            if pull_link.get("url") != (
+                    f"https://api.github.com/repos/{REPOSITORY}/pulls/{number}"):
+                raise CoordinatorError("Pending issue pull identity was malformed")
+            by_number[number] = issue
+            comments_by_issue.setdefault(number, {})[key] = comment
+        return list(by_number.values()), comments_by_issue
+
     def _scan_enrollments(self, state, *, admission_checks=None,
                           blocked_continuations=(), pending_event_exceptions=()):
         commands, processed = [], []
@@ -4621,6 +4680,7 @@ class Coordinator:
         if not isinstance(issues, list):
             raise CoordinatorError("GitHub issue inventory was malformed")
         issues = self._retained_abandonment_issues(state, issues)
+        issues, pending_comments = self._pending_event_issues(state, issues)
         for issue in issues:
             if (not isinstance(issue, dict) or type(issue.get("number")) is not int
                     or not 1 <= issue["number"] <= 2**31 - 1):
@@ -4635,6 +4695,15 @@ class Coordinator:
             comments = _all_review_comments(self.api, issue["number"], comment_cursor)
             if not isinstance(comments, list):
                 raise CoordinatorError("GitHub issue comment inventory was malformed")
+            pending_for_issue = pending_comments.get(issue["number"], {})
+            if pending_for_issue:
+                comments = [
+                    comment for comment in comments
+                    if not isinstance(comment, dict)
+                    or str(comment.get("id")) not in pending_for_issue
+                ]
+                comments.extend(pending_for_issue.values())
+                comments.sort(key=lambda comment: comment["id"])
             for comment in comments:
                 if (not isinstance(comment, dict) or type(comment.get("id")) is not int
                         or comment["id"] <= 0):

@@ -6143,6 +6143,150 @@ def test_prepared_scan_rebuild_stops_after_second_type_exact_conflict(
     assert store._prepared is None
 
 
+def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
+        tmp_path, monkeypatch):
+    api = FakeApi(sensitive=True, unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    first_poll = datetime(2026, 10, 15, 3, 0, tzinfo=timezone.utc).timestamp()
+    second_poll = datetime(2026, 10, 15, 3, 6, tzinfo=timezone.utc).timestamp()
+    recovery_poll = datetime(2026, 10, 15, 3, 12, tzinfo=timezone.utc).timestamp()
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    CloudCoordinator(
+        api, StateStore(store.path), clock=lambda: first_poll,
+        owner_user_id=str(OWNER),
+    ).run(apply=True)
+    assert store.snapshot()["enrollments"]["16"]["active"] is True
+
+    command_time = "2026-10-15T03:01:00Z"
+    api.issue["updated_at"] = command_time
+    api.comments.extend([
+        {
+            "id": 7773, "user": {"id": OWNER}, "body": f"/hermes enroll {HEAD}",
+            "created_at": command_time, "updated_at": command_time,
+        },
+        {
+            "id": 7774, "user": {"id": OWNER},
+            "body": (
+                f"/hermes authorize-sensitive {HEAD} review "
+                f"{api.copilot_review_id} {api.copilot_review_digest}"
+            ),
+            "created_at": command_time, "updated_at": command_time,
+        },
+    ])
+
+    original_get_all = api.get_all
+    issue_routes = []
+    comment_routes = []
+    comment_pages = []
+    rebuild_outage = []
+
+    def get_all(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues?"):
+            issue_routes.append(route)
+            if rebuild_outage:
+                raise ApiError("Synthetic rebuilt-scan outage", status=503)
+            since = parse_qs(urlparse(route).query).get("since")
+            if since and api.issue["updated_at"] < since[0]:
+                return []
+        if route.startswith("repos/lindayi/hermes-mobile/issues/16/comments?"):
+            values = original_get_all(route, collection=collection)
+            comment_routes.append(route)
+            comment_pages.append([comment.get("id") for comment in values])
+            return values
+        return original_get_all(route, collection=collection)
+
+    api.get_all = get_all
+    original_commit = StateStore.commit_scan
+    conflicts = []
+
+    def advance_durable_state(self, cursor, processed, **kwargs):
+        if not conflicts:
+            def mutate(data):
+                data["cursor"] = "2026-10-15T03:10:00Z"
+                data["enrollments"]["16"]["attempts"] = 2
+                data["events"].extend(
+                    str(100_000 + offset)
+                    for offset in range(cloud_coordinator.MAX_EVENTS + 1)
+                )
+                cloud_coordinator._bound_events(data)
+            StateStore(self.path)._mutate(mutate)
+            conflicts.append(True)
+            rebuild_outage.append(True)
+        return original_commit(self, cursor, processed, **kwargs)
+
+    monkeypatch.setattr(StateStore, "commit_scan", advance_durable_state)
+    writes = deepcopy(api.writes)
+    task_posts = api.task_posts
+
+    with pytest.raises(ApiError, match="rebuilt-scan outage"):
+        CloudCoordinator(
+            api, StateStore(store.path), clock=lambda: second_poll,
+            owner_user_id=str(OWNER),
+        ).run(apply=True)
+
+    pending = StateStore(store.path).snapshot()
+    assert conflicts == [True]
+    assert pending["pending_events"] == ["7773", "7774"]
+    assert pending["event_watermark"] > 7774
+    assert pending["enrollments"]["16"]["attempts"] == 2
+    assert pending["enrollments"]["16"]["comment"] == 123
+    assert pending["enrollments"]["16"].get("sensitive_authorization") is None
+    assert api.writes == writes
+    assert api.task_posts == task_posts
+
+    rebuild_outage.clear()
+    monkeypatch.setattr(StateStore, "commit_scan", original_commit)
+    exact_reads = []
+    original_get = api.get
+
+    def record_exact_reads(route):
+        if route.startswith("repos/lindayi/hermes-mobile/issues/comments/"):
+            exact_reads.append(route)
+        return original_get(route)
+
+    api.get = record_exact_reads
+    issue_routes.clear()
+    comment_routes.clear()
+    comment_pages.clear()
+    CloudCoordinator(
+        api, StateStore(store.path), clock=lambda: recovery_poll,
+        owner_user_id=str(OWNER),
+    ).run(apply=True)
+    recovered = StateStore(store.path).snapshot()
+    enrollment = recovered["enrollments"]["16"]
+
+    assert exact_reads[:2] == [
+        "repos/lindayi/hermes-mobile/issues/comments/7773",
+        "repos/lindayi/hermes-mobile/issues/comments/7774",
+    ]
+    assert exact_reads.count("repos/lindayi/hermes-mobile/issues/comments/7773") == 1
+    assert issue_routes and "since=" in issue_routes[0]
+    assert comment_routes and "since=" in comment_routes[0]
+    assert not {7773, 7774}.intersection(comment_pages[0])
+    assert recovered["cursor"] == "2026-10-15T03:12:00Z"
+    assert recovered["pending_events"] == []
+    assert recovered["event_watermark"] > 7774
+    assert enrollment["comment"] == 7773
+    assert enrollment["attempts"] == 2
+    assert enrollment["sensitive_authorization"]["command_comment_id"] == 7774
+    assert "owner_abandonments" not in enrollment
+    assert api.writes == writes
+    assert api.task_posts == task_posts
+
+    CloudCoordinator(
+        api, StateStore(store.path), clock=lambda: recovery_poll,
+        owner_user_id=str(OWNER),
+    ).run(apply=True)
+    final = StateStore(store.path).snapshot()
+    assert final["enrollments"]["16"]["comment"] == 7773
+    assert final["enrollments"]["16"]["sensitive_authorization"] == (
+        enrollment["sensitive_authorization"]
+    )
+    assert final["pending_events"] == []
+    assert api.writes == writes
+    assert api.task_posts == task_posts
+
+
 @pytest.mark.parametrize("hazard", [
     "missing-reservation", "changed-prompt", "changed-session",
     "changed-artifact", "waiting-task", "incomplete-inventory",
