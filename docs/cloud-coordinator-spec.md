@@ -835,8 +835,10 @@ consumption; a newer watermark alone does not consume them. A continuation-fence
 conflict carries all baseline pending IDs, including other PRs, discarded processed
 IDs, existing retry exceptions, and every disposition ID in the failing cohort.
 Every retry ID must be a canonical positive signed-64-bit integer. The retry list
-is bounded and overflow fails closed. Do not carry authority or publication plans. Persist carried IDs as pending
-before event compaction. Reauthenticate receipts, source authority, commands, and
+is bounded and overflow fails closed. Do not carry authority or publication plans.
+After the first conflict, reload and persist carried IDs as pending under the
+StateStore writer lock before making any network request in the rebuilt scan.
+Reauthenticate receipts, source authority, commands, and
 lifecycle evidence during the rebuild. Compare the durable preparation baseline using
 type-exact canonical JSON again under the commit lock. Before propagating a second
 conflict, reload fresh durable state under the writer lock and atomically preserve

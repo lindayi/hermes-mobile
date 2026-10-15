@@ -3896,7 +3896,8 @@ def test_terminal_conflict_pending_capacity_preserves_fresh_state(tmp_path, monk
     with pytest.raises(CoordinatorError, match="capacity"):
         Coordinator(api, store, clock=lambda: 1790856900).run(apply=True)
 
-    assert conflicts == [True, True]
+    assert conflicts == [True]
+    assert len(durable) == 1
     assert api.writes == []
     assert store._prepared is None
     assert StateStore(store.path).snapshot() == durable[0]
@@ -5997,6 +5998,125 @@ def test_early_conflict_preserves_processed_commands_across_compaction(
         comment.get("id") == continuation["receipt_anchor_comment_id"]
         for comment in api.comments
     ) == 1
+
+
+@pytest.mark.parametrize("conflict_source", ["continuation", "commit"])
+def test_first_scan_conflict_persists_retry_ids_before_rebuild_outage(
+        tmp_path, monkeypatch, conflict_source):
+    api, store, abandonment, head, main, _ = _owner_continuation_two_pull_case(
+        tmp_path,
+    )
+    api.comments.append({
+        "id": 7774, "user": {"id": OWNER},
+        "body": (
+            f"/hermes continue-unverified {abandonment['command_comment_id']} "
+            f"{abandonment['task_id']} {abandonment['reservation_sha256']} "
+            f"{head} {main}"
+        ),
+        "created_at": "2026-10-01T12:14:00Z",
+        "updated_at": "2026-10-01T12:14:00Z",
+    })
+    store._mutate(lambda data: data["pending_events"].extend(["9000", "9001"]))
+    original_fence = CloudCoordinator._fence_owner_continuation
+    original_commit_scan = StateStore.commit_scan
+    original_get_all = api.get_all
+    conflicts = []
+    compacted = []
+    rebuild_outage = []
+    outage = []
+
+    def compact():
+        def update(data):
+            data["events"].extend(
+                str(100_000 + offset)
+                for offset in range(cloud_coordinator.MAX_EVENTS + 1)
+            )
+            data["pending_events"].remove("9001")
+            data["events"].append("9001")
+            cloud_coordinator._bound_events(data)
+            data["enrollments"]["17"]["last_open_seen"] = False
+        StateStore(store.path)._mutate(update)
+        compacted.append(StateStore(store.path).snapshot())
+
+    def fence(self, *args, **kwargs):
+        result = original_fence(self, *args, **kwargs)
+        if not conflicts:
+            conflicts.append(True)
+            compact()
+            outage.append(True)
+            raise CoordinatorError("Synthetic continuation preparation conflict")
+        return result
+
+    def commit_scan(self, *args, **kwargs):
+        if not conflicts:
+            conflicts.append(True)
+            compact()
+            outage.append(True)
+        return original_commit_scan(self, *args, **kwargs)
+
+    def get_all(route, *, collection=None):
+        if outage:
+            rebuild_outage.append(StateStore(store.path).snapshot())
+            raise ApiError("Synthetic rebuilt-scan API outage", status=503)
+        return original_get_all(route, collection=collection)
+
+    if conflict_source == "continuation":
+        monkeypatch.setattr(
+            CloudCoordinator, "_fence_owner_continuation", fence,
+        )
+    else:
+        monkeypatch.setattr(StateStore, "commit_scan", commit_scan)
+    monkeypatch.setattr(api, "get_all", get_all)
+    writes = deepcopy(api.writes)
+    posts = api.task_posts
+
+    with pytest.raises(ApiError, match="rebuilt-scan API outage"):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856900,
+        ).run(apply=True)
+
+    assert conflicts == [True]
+    assert len(compacted) == len(rebuild_outage) == 1
+    after_outage = StateStore(store.path).snapshot()
+    assert {"9000", "7774"} <= set(after_outage["pending_events"])
+    assert "9001" not in after_outage["pending_events"]
+    assert "9001" in after_outage["events"]
+    expected = deepcopy(compacted[0])
+    expected["pending_events"] = after_outage["pending_events"]
+    assert after_outage == expected
+    assert after_outage["event_watermark"] > 7774
+    assert not after_outage["enrollments"]["16"].get("owner_continuations")
+    assert not [
+        action for action in after_outage["actions"].values()
+        if action.get("owner_continuation_binding")
+    ]
+    assert api.writes == writes
+    assert api.task_posts == posts
+    outage.clear()
+    assert Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856901,
+    ).run(apply=True)
+    recovered = StateStore(store.path).snapshot()
+    continuations = [
+        action for action in recovered["actions"].values()
+        if action.get("owner_continuation_binding")
+    ]
+    assert len(continuations) == 1
+    anchor_id = continuations[0]["receipt_anchor_comment_id"]
+    assert sum(comment.get("id") == anchor_id for comment in api.comments) == 1
+    assert "7774" not in recovered["pending_events"]
+    assert "9001" in recovered["events"]
+    posts = api.task_posts
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856901,
+        ).run(apply=True)
+    assert api.task_posts == posts
+    assert len([
+        action for action in StateStore(store.path).actions().values()
+        if action.get("owner_continuation_binding")
+    ]) == 1
+    assert sum(comment.get("id") == anchor_id for comment in api.comments) == 1
 
 
 def test_prepared_scan_rebuild_stops_after_second_type_exact_conflict(

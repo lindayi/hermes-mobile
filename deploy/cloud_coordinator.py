@@ -9802,18 +9802,17 @@ class Coordinator:
                 except _PreparedScanChanged as error:
                     if attempt or not apply:
                         if apply:
+                            self.store.discard_preparation()
                             self.store.preserve_pending_events([
                                 *pending_events, *error.pending_events,
                             ])
                         raise
                     if error.issue is not None:
                         blocked_continuations.add(error.issue)
-                    current_state = StateStore(self.store.path).snapshot()
-                    pending_events.extend(_retryable_pending_event_ids(
-                        current_state, current_state, error.pending_events,
-                        carried=error.pending_events,
-                    ))
-                    pending_events = list(dict.fromkeys(pending_events))
+                    self.store.discard_preparation()
+                    pending_events = self.store.preserve_pending_events([
+                        *pending_events, *error.pending_events,
+                    ])
         finally:
             if lock_fd is not None:
                 os.close(lock_fd)
@@ -10292,8 +10291,9 @@ class StateStore:
             data["pending_events"] = _retryable_pending_event_ids(
                 data, data, candidates, carried=candidates,
             )
+            return list(data["pending_events"])
 
-        self._mutate(preserve)
+        return self._mutate(preserve)
 
     @staticmethod
     def _add_lifecycle_events(data, events, *, now):
