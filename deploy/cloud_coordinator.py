@@ -4027,10 +4027,36 @@ def _owner_continuation_writers_clear(
                 or key in {historical_action_key, successor_action_key}):
             continue
         status = action.get("status")
-        if status in {"sending", "sent"}:
+        if status == "sending":
             return False
+        if status == "sent":
+            confirmed_review_request = (
+                action.get("kind") == "copilot-review-request"
+                and isinstance(enrollment, dict)
+                and key == action.get("key")
+                and type(action.get("issue")) is int
+                and action["issue"] == issue
+                and action.get("key")
+                    == f"copilot-review-request:{issue}:{action.get('head')}"
+                and _is_sha(action.get("head"))
+                and _is_sha(action.get("main_sha"))
+                and type(action.get("pull_id")) is int
+                and action["pull_id"] > 0
+                and isinstance(action.get("pull_node_id"), str)
+                and 1 <= len(action["pull_node_id"]) <= 256
+                and type(enrollment.get("pull_id")) is int
+                and action["pull_id"] == enrollment["pull_id"]
+                and action["pull_node_id"] == enrollment.get("pull_node_id")
+                and isinstance(action.get("created_at"), (int, float))
+                and not isinstance(action.get("created_at"), bool)
+                and math.isfinite(action["created_at"])
+                and action["created_at"] > 0
+            )
+            if not confirmed_review_request:
+                return False
         if status == "uncertain" and (
-                not isinstance(action.get("task_id"), str)
+                action.get("kind") == "copilot-review-request"
+                or not isinstance(action.get("task_id"), str)
                 or _owner_abandonment_for_action(enrollment, key, action) is None):
             return False
     return not any(
@@ -5850,13 +5876,22 @@ class Coordinator:
                                 snapshot["comments"],
                                 snapshot["pull"].get("base", {}).get("sha"),
                             )
+                            actions = self.store.actions()
                             continuation_start = any(
+                                prior_key != key
+                                and _owner_continuation_successor_candidate_matches(
+                                    record, action,
+                                )
+                                for prior_key, record in _valid_owner_continuation_claims(
+                                    snapshot["enrollment"], actions,
+                                )
+                            ) or any(
                                 prior_key != key
                                 and _owner_abandonment_successor_candidate_matches(
                                     record, action,
                                 )
                                 for prior_key, record in _valid_owner_abandonment_claims(
-                                    snapshot["enrollment"], self.store.actions(),
+                                    snapshot["enrollment"], actions,
                                 )
                             )
                             if (action.get("head") not in authorized_heads

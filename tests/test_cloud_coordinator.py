@@ -3940,6 +3940,211 @@ def test_owner_continuation_disposition_records_missing_root_before_successor_di
     ] == review_writes
 
 
+def test_owner_continuation_receipt_accepts_after_result_head_enrollment(
+        tmp_path):
+    api, store, abandonment, continued_head, continued_main = (
+        _owner_continuation_advanced_case(tmp_path)
+    )
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    state = StateStore(store.path).snapshot()
+    continuation = state["enrollments"]["16"]["owner_continuations"][0]
+    successor = next(
+        action for action in state["actions"].values()
+        if action.get("owner_continuation_binding")
+    )
+    successor_head = "8" * 40
+    historical = state["actions"][abandonment["action_key"]]
+    attempts = state["enrollments"]["16"]["attempts"]
+
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=successor_head, base_sha=continued_main,
+    )
+    api.head_sha = api.pull["head"]["sha"] = successor_head
+    api.pull["base"]["sha"] = continued_main
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.unresolved = False
+    api.review_state = None
+    api.review_sha = None
+    api.comments.append({
+        "id": 7774, "user": {"id": OWNER},
+        "body": f"/hermes enroll {successor_head}",
+        "created_at": "2026-10-01T12:13:00Z",
+        "updated_at": "2026-10-01T12:13:00Z",
+    })
+
+    accepted = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+    ready = state["actions"][successor["key"]]
+    _, authorized, blocked = _authorized_result_heads(
+        16, state["enrollments"]["16"], state["actions"], api.comments,
+        continued_main,
+    )
+
+    assert accepted["head"] == successor_head
+    assert state["enrollments"]["16"]["owner_authorized_head"] == successor_head
+    assert ready["status"] == "completed"
+    assert ready["receipt_result"] == "ready"
+    assert ready["receipt_head"] == successor_head
+    assert successor_head in authorized and successor_head not in blocked
+    assert state["enrollments"]["16"]["owner_continuations"] == [continuation]
+    assert state["actions"][abandonment["action_key"]] == historical
+    assert state["enrollments"]["16"]["attempts"] == attempts
+
+    task_posts = api.task_posts
+    reopened = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    review_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    StateStore(store.path).retire(16, successor_head, continued_main)
+    compacted = StateStore(store.path).snapshot()["enrollments"]["16"]
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+
+    assert reopened["head"] == successor_head
+    assert api.task_posts == task_posts
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == review_writes
+    assert any(
+        proof.get("owner_continuation_binding")
+            == ready["owner_continuation_binding"]
+        for proof in compacted["receipt_proofs"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "malformed"),
+    [
+        ("copilot-review-request", "sending", False),
+        ("copilot-review-request", "uncertain", False),
+        ("copilot-review-request", "sent", True),
+        ("fix", "sent", False),
+    ],
+)
+def test_owner_continuation_writer_admission_only_ignores_confirmed_review_request(
+        tmp_path, kind, status, malformed):
+    api, store, _, _, _ = _owner_continuation_advanced_case(tmp_path)
+    key = f"copilot-review-request:16:{NEXT_RESULT_HEAD}"
+    request = {
+        "kind": kind, "issue": 16, "head": NEXT_RESULT_HEAD,
+        "main_sha": CURRENT_MAIN, "key": key,
+        "pull_id": api.pull["id"], "pull_node_id": api.pull["node_id"],
+    }
+    if kind == "fix":
+        request.update(task_id="other-source-task", task_type="source")
+    assert store.claim_action(key, request)
+    if malformed:
+        store._mutate(
+            lambda state: state["actions"][key].update(status=status, key="malformed-review-request")
+        )
+    else:
+        store.update_action(key, status)
+
+    before_posts = api.task_posts
+    before = StateStore(store.path).snapshot()
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    after = StateStore(store.path).snapshot()
+    successors = [
+        action for action in after["actions"].values()
+        if action.get("owner_continuation_binding")
+    ]
+
+    assert api.task_posts == before_posts
+    assert successors == []
+    if not malformed:
+        assert after["actions"][key]["status"] == status
+    assert after["enrollments"]["16"].get("owner_continuations", []) == (
+        before["enrollments"]["16"].get("owner_continuations", [])
+    )
+    assert result["repair_requested"] is False
+
+
+def test_owner_continuation_admits_with_confirmed_sent_review_request(
+        tmp_path):
+    api, store, abandonment, continued_head, _ = (
+        _owner_continuation_advanced_case(tmp_path)
+    )
+    key = f"copilot-review-request:16:{NEXT_RESULT_HEAD}"
+    request = {
+        "kind": "copilot-review-request", "issue": 16,
+        "head": NEXT_RESULT_HEAD, "main_sha": CURRENT_MAIN, "key": key,
+        "pull_id": api.pull["id"], "pull_node_id": api.pull["node_id"],
+    }
+    assert store.claim_action(key, request)
+    store.update_action(key, "sent")
+    before = StateStore(store.path).snapshot()
+    assert before["actions"][key]["status"] == "sent"
+    before_posts = api.task_posts
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    after = StateStore(store.path).snapshot()
+    successors = [
+        action for action in after["actions"].values()
+        if action.get("owner_continuation_binding")
+    ]
+
+    assert result["repair_requested"] is True
+    assert len(successors) == 1
+    assert successors[0]["status"] == "sent"
+    assert successors[0]["head"] == continued_head
+    assert api.task_posts == before_posts + 1
+    assert after["actions"][abandonment["action_key"]] == (
+        before["actions"][abandonment["action_key"]]
+    )
+    assert after["enrollments"]["16"]["attempts"] == (
+        before["enrollments"]["16"]["attempts"] + 1
+    )
+
+    writes = list(api.writes)
+    task_posts = api.task_posts
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856780,
+        ).run(apply=True)
+    assert api.writes == writes
+    assert api.task_posts == task_posts
+    assert len([
+        action for action in StateStore(store.path).actions().values()
+        if action.get("owner_continuation_binding")
+    ]) == 1
+
+
+def test_owner_continuation_admission_still_blocks_uncertain_outbox(
+        tmp_path):
+    api, store, _, _, _ = _owner_continuation_advanced_case(tmp_path)
+    outbox_key = "uncertain-source-publication"
+    assert store.add_outbox(outbox_key, {
+        "kind": "workflow-notice", "issue": 16,
+    })
+    store.update_outbox(outbox_key, "uncertain")
+    before_posts = api.task_posts
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    after = StateStore(store.path).snapshot()
+
+    assert api.task_posts == before_posts
+    assert after["outbox"][outbox_key]["status"] == "uncertain"
+    assert "owner_continuations" not in after["enrollments"]["16"]
+
+
 def test_owner_continuation_rejects_disconnected_owner_authorized_head_after_restart(
         tmp_path):
     from copy import deepcopy

@@ -771,7 +771,16 @@ result, not a neutral audit-bearing merge commit. Acceptance and retained proof
 require the same immutable owner anchor and exact bot reply envelope. For a
 SOURCE continuation proof, anchor validation is mandatory even if retained state
 omits both optional anchor fields; generic v2 receipt parsing cannot replace it.
+Before the first receipt is accepted, a renewed owner enrollment may authorize
+the successor result head. The committed continuation candidate can bridge that
+head change only to the existing full receipt validator; it does not itself prove
+or accept a receipt.
 Ordinary historical SOURCE and all neutral transport semantics remain unchanged.
+
+A positively confirmed `sent` Copilot review-request action is settled and is not
+a source writer during continuation admission. `sending`, `uncertain`, malformed
+review-request claims, source actions, and uncertain outbox publications remain
+blocking.
 
 After the final ordinary authority reads, the disposition fence authenticates the
 immutable command and enrollment, then re-reads the exact PR and main and reloads
