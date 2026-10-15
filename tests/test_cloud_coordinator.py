@@ -6143,8 +6143,9 @@ def test_prepared_scan_rebuild_stops_after_second_type_exact_conflict(
     assert store._prepared is None
 
 
+@pytest.mark.parametrize("issue_present", [False, True])
 def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, issue_present):
     api = FakeApi(sensitive=True, unresolved=True)
     store = StateStore(tmp_path / "state.json")
     first_poll = datetime(2026, 10, 15, 3, 0, tzinfo=timezone.utc).timestamp()
@@ -6176,6 +6177,7 @@ def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
 
     original_get_all = api.get_all
     issue_routes = []
+    issue_pages = []
     comment_routes = []
     comment_pages = []
     rebuild_outage = []
@@ -6187,7 +6189,11 @@ def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
                 raise ApiError("Synthetic rebuilt-scan outage", status=503)
             since = parse_qs(urlparse(route).query).get("since")
             if since and api.issue["updated_at"] < since[0]:
+                issue_pages.append([])
                 return []
+            values = original_get_all(route, collection=collection)
+            issue_pages.append([issue.get("number") for issue in values])
+            return values
         if route.startswith("repos/lindayi/hermes-mobile/issues/16/comments?"):
             values = original_get_all(route, collection=collection)
             comment_routes.append(route)
@@ -6238,6 +6244,29 @@ def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
     monkeypatch.setattr(StateStore, "commit_scan", original_commit)
     exact_reads = []
     original_get = api.get
+    failed_exact_read = []
+
+    def fail_pending_read_once(route):
+        if (route == "repos/lindayi/hermes-mobile/issues/comments/7773"
+                and not failed_exact_read):
+            failed_exact_read.append(route)
+            raise ApiError("Synthetic pending-comment outage", status=503)
+        return original_get(route)
+
+    api.get = fail_pending_read_once
+    with pytest.raises(ApiError, match="pending-comment outage"):
+        CloudCoordinator(
+            api, StateStore(store.path), clock=lambda: recovery_poll,
+            owner_user_id=str(OWNER),
+        ).run(apply=True)
+    after_read_error = StateStore(store.path).snapshot()
+    assert failed_exact_read == [
+        "repos/lindayi/hermes-mobile/issues/comments/7773",
+    ]
+    assert after_read_error["pending_events"] == ["7773", "7774"]
+    assert after_read_error["cursor"] == "2026-10-15T03:10:00Z"
+    assert after_read_error["enrollments"]["16"]["comment"] == 123
+    assert after_read_error["enrollments"]["16"].get("sensitive_authorization") is None
 
     def record_exact_reads(route):
         if route.startswith("repos/lindayi/hermes-mobile/issues/comments/"):
@@ -6245,7 +6274,10 @@ def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
         return original_get(route)
 
     api.get = record_exact_reads
+    if issue_present:
+        api.issue["updated_at"] = "2026-10-15T03:11:00Z"
     issue_routes.clear()
+    issue_pages.clear()
     comment_routes.clear()
     comment_pages.clear()
     CloudCoordinator(
@@ -6261,6 +6293,7 @@ def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
     ]
     assert exact_reads.count("repos/lindayi/hermes-mobile/issues/comments/7773") == 1
     assert issue_routes and "since=" in issue_routes[0]
+    assert issue_pages and bool(issue_pages[0]) is issue_present
     assert comment_routes and "since=" in comment_routes[0]
     assert not {7773, 7774}.intersection(comment_pages[0])
     assert recovered["cursor"] == "2026-10-15T03:12:00Z"
@@ -6285,6 +6318,84 @@ def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
     assert final["pending_events"] == []
     assert api.writes == writes
     assert api.task_posts == task_posts
+
+
+@pytest.mark.parametrize("change", [
+    "comment-id", "foreign-issue-url", "malformed-issue-url",
+])
+def test_pending_event_exact_comment_rejects_malformed_identity(tmp_path, change):
+    api = FakeApi()
+    api.comments.append({
+        "id": 7773, "user": {"id": OWNER}, "body": f"/hermes enroll {HEAD}",
+        "created_at": "2026-10-15T03:01:00Z",
+        "updated_at": "2026-10-15T03:01:00Z",
+    })
+    original_get = api.get
+
+    def malformed_get(route):
+        value = original_get(route)
+        if route == "repos/lindayi/hermes-mobile/issues/comments/7773":
+            if change == "comment-id":
+                return value | {"id": 7774}
+            if change == "foreign-issue-url":
+                return value | {
+                    "issue_url": "https://api.github.com/repos/other/repo/issues/16",
+                }
+            if change == "malformed-issue-url":
+                return value | {"issue_url": []}
+        return value
+
+    api.get = malformed_get
+    coordinator = CloudCoordinator(api, StateStore(tmp_path / "state.json"))
+
+    with pytest.raises(CoordinatorError, match="Pending comment"):
+        coordinator._pending_event_issues({"pending_events": ["7773"]}, [])
+
+
+@pytest.mark.parametrize("change", ["repository", "pull-url"])
+def test_pending_event_exact_issue_rejects_mismatched_pr_linkage(
+        tmp_path, change):
+    api = FakeApi()
+    api.comments.append({
+        "id": 7773, "user": {"id": OWNER}, "body": f"/hermes enroll {HEAD}",
+        "created_at": "2026-10-15T03:01:00Z",
+        "updated_at": "2026-10-15T03:01:00Z",
+    })
+    original_get = api.get
+
+    def mismatched_get(route):
+        value = original_get(route)
+        if route == "repos/lindayi/hermes-mobile/issues/16":
+            if change == "repository":
+                return value | {"repository_url": "https://api.github.com/repos/other/repo"}
+            return value | {
+                "pull_request": {"url": "https://api.github.com/repos/other/repo/pulls/16"},
+            }
+        return value
+
+    api.get = mismatched_get
+    coordinator = CloudCoordinator(api, StateStore(tmp_path / "state.json"))
+
+    with pytest.raises(CoordinatorError, match="Pending issue"):
+        coordinator._pending_event_issues({"pending_events": ["7773"]}, [])
+
+
+def test_pending_event_non_owner_comment_is_not_discovered(tmp_path):
+    api = FakeApi()
+    api.comments.append({
+        "id": 7773, "user": {"id": COPILOT_REVIEWER},
+        "body": f"/hermes enroll {HEAD}",
+        "created_at": "2026-10-15T03:01:00Z",
+        "updated_at": "2026-10-15T03:01:00Z",
+    })
+    coordinator = CloudCoordinator(api, StateStore(tmp_path / "state.json"))
+
+    issues, comments = coordinator._pending_event_issues(
+        {"pending_events": ["7773"]}, [],
+    )
+
+    assert issues == []
+    assert comments == {}
 
 
 @pytest.mark.parametrize("hazard", [

@@ -4619,7 +4619,15 @@ class Coordinator:
         issue_url_pattern = re.compile(
             re.escape(issue_url_prefix) + r"([1-9][0-9]{0,9})\Z",
         )
-        for key in state.get("pending_events", ()):
+        pending_ids = state.get("pending_events", ())
+        if (not isinstance(pending_ids, list)
+                or len(pending_ids) > MAX_PENDING_EVENTS):
+            raise CoordinatorError("Pending owner command capacity was exceeded")
+        for key in pending_ids:
+            if (not isinstance(key, str)
+                    or not re.fullmatch(r"[1-9][0-9]{0,18}", key)
+                    or int(key) > 2**63 - 1):
+                raise CoordinatorError("Pending owner command ID is invalid")
             try:
                 comment = self.api.get(
                     f"repos/{REPOSITORY}/issues/comments/{key}",
@@ -4639,7 +4647,11 @@ class Coordinator:
                     or not _valid_timestamp(comment.get("created_at"))
                     or not _valid_timestamp(comment.get("updated_at"))):
                 raise CoordinatorError("Pending comment response was malformed")
-            match = issue_url_pattern.fullmatch(comment.get("issue_url", ""))
+            issue_url = comment.get("issue_url")
+            match = (
+                issue_url_pattern.fullmatch(issue_url)
+                if isinstance(issue_url, str) else None
+            )
             if match is None:
                 raise CoordinatorError("Pending comment issue identity was malformed")
             number = int(match.group(1))
@@ -4647,23 +4659,28 @@ class Coordinator:
                 raise CoordinatorError("Pending comment issue identity was malformed")
             if comment["user"]["id"] != OWNER_ID:
                 continue
-            try:
-                issue = self.api.get(f"repos/{REPOSITORY}/issues/{number}")
-            except ApiError as error:
-                if error.status == 404:
-                    continue
-                raise
+            issue = by_number.get(number)
+            if issue is None:
+                try:
+                    issue = self.api.get(f"repos/{REPOSITORY}/issues/{number}")
+                except ApiError as error:
+                    if error.status == 404:
+                        continue
+                    raise
             if (not isinstance(issue, dict) or type(issue.get("number")) is not int
                     or issue["number"] != number
                     or issue.get("repository_url")
                     != f"https://api.github.com/repos/{REPOSITORY}"
-                    or issue.get("state") not in {"open", "closed"}):
+                    or type(issue.get("state")) is not str
+                    or issue["state"] not in {"open", "closed"}):
                 raise CoordinatorError("Pending issue response was malformed")
             if issue["state"] != "open":
                 continue
             pull_link = issue.get("pull_request")
-            if not isinstance(pull_link, dict):
+            if pull_link is None:
                 continue
+            if not isinstance(pull_link, dict):
+                raise CoordinatorError("Pending issue pull identity was malformed")
             if pull_link.get("url") != (
                     f"https://api.github.com/repos/{REPOSITORY}/pulls/{number}"):
                 raise CoordinatorError("Pending issue pull identity was malformed")
