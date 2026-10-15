@@ -9445,7 +9445,10 @@ class Coordinator:
                             != _canonical_sha256(self.store._preparation_base)):
                         retryable = _retryable_pending_event_ids(
                             self.store._preparation_base, current_state,
-                            [*plan.get("pending_events", ()), *disposition_ids],
+                            [
+                                *plan.get("pending_events", ()),
+                                *plan.get("processed", ()), *disposition_ids,
+                            ],
                             carried=plan.get("pending_event_exceptions", ()),
                         )
                         raise _PreparedScanChanged(
@@ -9798,6 +9801,10 @@ class Coordinator:
                     )
                 except _PreparedScanChanged as error:
                     if attempt or not apply:
+                        if apply:
+                            self.store.preserve_pending_events([
+                                *pending_events, *error.pending_events,
+                            ])
                         raise
                     if error.issue is not None:
                         blocked_continuations.add(error.issue)
@@ -9997,7 +10004,11 @@ def _retryable_pending_event_ids(baseline, current, candidates, *, carried=(),
     carried = set(map(str, carried))
     processed = set(map(str, processed))
     retryable = []
-    for item in candidates:
+    for item in [*baseline.get("pending_events", ()), *candidates, *carried]:
+        if (type(item) not in {str, int}
+                or not re.fullmatch(r"[1-9][0-9]{0,18}", str(item))
+                or int(item) > 2**63 - 1):
+            raise CoordinatorError("Pending owner command ID is invalid")
         key = str(item)
         if (key in processed or _explicit_event_consumed(current, key)):
             continue
@@ -10272,6 +10283,17 @@ class StateStore:
                 data["events"].append(key)
                 _bound_events(data)
         self._mutate(record)
+
+    def preserve_pending_events(self, candidates):
+        if self._prepared is not None:
+            raise CoordinatorError("Pending recovery requires discarded preparation")
+
+        def preserve(data):
+            data["pending_events"] = _retryable_pending_event_ids(
+                data, data, candidates, carried=candidates,
+            )
+
+        self._mutate(preserve)
 
     @staticmethod
     def _add_lifecycle_events(data, events, *, now):

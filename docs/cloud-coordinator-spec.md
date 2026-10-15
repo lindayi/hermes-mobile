@@ -832,13 +832,18 @@ IDs; candidates include existing pending IDs and command IDs processed by the fa
 scan. New candidates must be unconsumed at the preparation baseline. Previously
 carried IDs remain eligible unless current durable state explicitly records their
 consumption; a newer watermark alone does not consume them. A continuation-fence
-conflict carries all existing pending IDs, including other PRs, as well as every
-disposition ID in the failing cohort. The retry list is bounded and overflow fails
-closed. Do not carry authority or publication plans. Persist carried IDs as pending
+conflict carries all baseline pending IDs, including other PRs, discarded processed
+IDs, existing retry exceptions, and every disposition ID in the failing cohort.
+Every retry ID must be a canonical positive signed-64-bit integer. The retry list
+is bounded and overflow fails closed. Do not carry authority or publication plans. Persist carried IDs as pending
 before event compaction. Reauthenticate receipts, source authority, commands, and
 lifecycle evidence during the rebuild. Compare the durable preparation baseline using
-type-exact canonical JSON again under the commit lock. A second conflict stops the
-run without committing stale prepared state. This retry is allowed only before scan
+type-exact canonical JSON again under the commit lock. Before propagating a second
+conflict, reload fresh durable state under the writer lock and atomically preserve
+only bounded retryable IDs, excluding explicit event or disposition consumption.
+Capacity or validation failure leaves that fresh state unchanged. Never replace
+newer progress, proofs, actions, attempts, or cursor with discarded preparation.
+A second conflict stops the run without committing stale prepared state. This retry is allowed only before scan
 commit and external publication; it never replays an unknown external write.
 
 Immediately before a continuation task POST, the coordinator acquires the existing

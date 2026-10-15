@@ -3854,6 +3854,54 @@ def test_prepared_retry_candidate_capacity_overflow_fails_closed(tmp_path):
     assert store.snapshot() == before
 
 
+@pytest.mark.parametrize("invalid", [
+    True, False, None, 0, -1, 2**63, "01", "0", "1.0", "１２", {}, [],
+])
+def test_pending_conflict_recovery_rejects_malformed_ids(tmp_path, invalid):
+    store = StateStore(tmp_path / "state.json")
+    store.record_event(1)
+    before = store.snapshot()
+
+    with pytest.raises(CoordinatorError, match="ID is invalid"):
+        store.preserve_pending_events(["2", invalid])
+
+    assert StateStore(store.path).snapshot() == before
+
+
+def test_terminal_conflict_pending_capacity_preserves_fresh_state(tmp_path, monkeypatch):
+    api = FakeApi(unresolved=True)
+    store = StateStore(tmp_path / "state.json")
+    original_commit = StateStore.commit_scan
+    original_preserve = StateStore.preserve_pending_events
+    conflicts = []
+    durable = []
+
+    def commit(self, *args, **kwargs):
+        conflicts.append(True)
+        StateStore(self.path).record_event(8000000 + len(conflicts))
+        return original_commit(self, *args, **kwargs)
+
+    def preserve(self, candidates):
+        def fill(data):
+            data["pending_events"] = [
+                str(100_000 + offset)
+                for offset in range(cloud_coordinator.MAX_PENDING_EVENTS)
+            ]
+        StateStore(self.path)._mutate(fill)
+        durable.append(StateStore(self.path).snapshot())
+        return original_preserve(self, candidates)
+
+    monkeypatch.setattr(StateStore, "commit_scan", commit)
+    monkeypatch.setattr(StateStore, "preserve_pending_events", preserve)
+    with pytest.raises(CoordinatorError, match="capacity"):
+        Coordinator(api, store, clock=lambda: 1790856900).run(apply=True)
+
+    assert conflicts == [True, True]
+    assert api.writes == []
+    assert store._prepared is None
+    assert StateStore(store.path).snapshot() == durable[0]
+
+
 @pytest.mark.parametrize("successor_path", ["source", "neutral"])
 @pytest.mark.parametrize("reverse_roots", [False, True])
 def test_mixed_current_head_abandonment_defers_continuation_before_anchor(
@@ -5493,9 +5541,11 @@ def test_owner_continuation_rebuild_retains_unrelated_ready_receipt(
                     pull_id=float(data["enrollments"]["16"]["pull_id"]),
                 ))
             elif mutation == "unrelated-compaction":
-                store._mutate(lambda data: data["enrollments"]["17"].update(
-                    last_open_seen=False,
-                ))
+                def accepted_unrelated_commands(data):
+                    data["events"].extend(str(item["id"]) for item in newer_processed)
+                    cloud_coordinator._bound_events(data)
+                    data["enrollments"]["17"]["last_open_seen"] = False
+                store._mutate(accepted_unrelated_commands)
                 raise ApiError("Synthetic continuation task-detail outage")
             elif mutation == "fence-other-deferred":
                 store._mutate(lambda data: data["enrollments"]["17"].update(
@@ -5800,6 +5850,153 @@ def test_consumed_owner_continuation_is_not_reopened_after_restart(tmp_path):
             if action.get("owner_continuation_binding")
         ]
         assert not state["enrollments"]["16"].get("owner_continuations", [])
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize("consumed", [False, True])
+def test_early_conflict_preserves_processed_commands_across_compaction(
+        tmp_path, monkeypatch, terminal, consumed):
+    api, store, abandonment, head, main, pull17 = _owner_continuation_two_pull_case(
+        tmp_path,
+    )
+    pull17["draft"] = True
+    api.comments.append({
+        "id": 7774, "user": {"id": OWNER},
+        "body": (
+            f"/hermes continue-unverified {abandonment['command_comment_id']} "
+            f"{abandonment['task_id']} {abandonment['reservation_sha256']} "
+            f"{head} {main}"
+        ),
+        "created_at": "2026-10-01T12:14:00Z",
+        "updated_at": "2026-10-01T12:14:00Z",
+    })
+    unrelated = [
+        {
+            "id": comment_id, "user": {"id": OWNER},
+            "body": (
+                f"/hermes continue-unverified 9999 unrelated-{comment_id} "
+                f"{'a' * 64} {head} {main}"
+            ),
+            "created_at": "2026-10-01T12:14:00Z",
+            "updated_at": "2026-10-01T12:14:00Z",
+        }
+        for comment_id in (8885, 8886)
+    ]
+    store._mutate(lambda data: data["pending_events"].append("8886"))
+    original_get_all = api.get_all
+
+    def get_all(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments?"):
+            return unrelated
+        if route.startswith("repos/lindayi/hermes-mobile/issues?"):
+            return original_get_all(route, collection=collection) + [{
+                "number": 17, "pull_request": True,
+                "updated_at": "2026-10-01T12:14:00Z",
+            }]
+        return original_get_all(route, collection=collection)
+
+    monkeypatch.setattr(api, "get_all", get_all)
+    original_fence = CloudCoordinator._fence_owner_continuation
+    original_build = CloudCoordinator._build_plan
+    original_commit = StateStore.commit_scan
+    plans = []
+    durable = []
+    injected = []
+
+    def compact():
+        def update(data):
+            data["events"].extend(
+                str(100_000 + offset)
+                for offset in range(cloud_coordinator.MAX_EVENTS + 1)
+            )
+            cloud_coordinator._bound_events(data)
+            if consumed:
+                data["events"].append("8885")
+            data["enrollments"]["17"]["last_open_seen"] = False
+        StateStore(store.path)._mutate(update)
+        durable.append(StateStore(store.path).snapshot())
+
+    def fence(self, *args, **kwargs):
+        if not injected:
+            original_fence(self, *args, **kwargs)
+            injected.append(True)
+            compact()
+            raise CoordinatorError("Synthetic late continuation outage")
+        return original_fence(self, *args, **kwargs)
+
+    def build(self, *args, **kwargs):
+        plan = original_build(self, *args, **kwargs)
+        plans.append(deepcopy(plan))
+        return plan
+
+    def commit(self, *args, **kwargs):
+        if terminal:
+            compact()
+        return original_commit(self, *args, **kwargs)
+
+    monkeypatch.setattr(CloudCoordinator, "_fence_owner_continuation", fence)
+    monkeypatch.setattr(CloudCoordinator, "_build_plan", build)
+    monkeypatch.setattr(StateStore, "commit_scan", commit)
+    writes = deepcopy(api.writes)
+    coordinator = Coordinator(api, StateStore(store.path), clock=lambda: 1790856900)
+    if terminal:
+        with pytest.raises(CoordinatorError, match="state changed during preparation"):
+            coordinator.run(apply=True)
+    else:
+        coordinator.run(apply=True)
+    assert injected == [True]
+    assert len(plans) == 2
+    assert "8885" in plans[0]["processed"]
+    assert ("8885" in plans[1]["processed"]) is not consumed
+    assert "8886" in plans[1]["processed"]
+    after = StateStore(store.path).snapshot()
+    assert after["event_watermark"] > 8886
+    if not terminal:
+        assert {"7772", "7773", "7774"} <= set(after["pending_events"]), (
+            after["pending_events"], plans[1]["processed"],
+        )
+    assert "7774" in after["pending_events"]
+    assert ("8885" in after["pending_events"]) is (terminal and not consumed)
+    if terminal:
+        assert set(after["pending_events"]) == (
+            {"7772", "7773", "7774", "8886"} | (set() if consumed else {"8885"})
+        )
+        expected = deepcopy(durable[-1])
+        expected["pending_events"] = after["pending_events"]
+        assert after == expected
+        assert api.writes == writes
+    assert coordinator.store._prepared is None
+    assert not after["enrollments"]["16"].get("owner_continuations")
+    assert after["enrollments"]["16"]["attempts"] == (
+        durable[0]["enrollments"]["16"]["attempts"]
+    )
+
+    monkeypatch.setattr(CloudCoordinator, "_fence_owner_continuation", original_fence)
+    monkeypatch.setattr(StateStore, "commit_scan", original_commit)
+    prior_plans = len(plans)
+    recovered = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856901,
+    ).run(apply=True)
+    cold = StateStore(store.path).snapshot()
+    if terminal:
+        assert ("8885" in plans[prior_plans]["processed"]) is not consumed
+        assert "8886" in plans[prior_plans]["processed"]
+    assert len(cold["enrollments"]["16"].get("owner_continuations", [])) == 1, (
+        recovered, plans[-1]["processed"], cold["pending_events"],
+        cold["enrollments"]["16"],
+    )
+    continuation = next(
+        action for action in cold["actions"].values()
+        if action.get("owner_continuation_binding")
+    )
+    posts = api.task_posts
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856901).run(apply=True)
+    assert api.task_posts == posts
+    assert sum(
+        comment.get("id") == continuation["receipt_anchor_comment_id"]
+        for comment in api.comments
+    ) == 1
 
 
 def test_prepared_scan_rebuild_stops_after_second_type_exact_conflict(
