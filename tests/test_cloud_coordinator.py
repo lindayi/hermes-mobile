@@ -3940,11 +3940,17 @@ def test_owner_continuation_disposition_records_missing_root_before_successor_di
     ] == review_writes
 
 
+@pytest.mark.parametrize("successor_type", ["source", "neutral"])
 def test_owner_continuation_receipt_accepts_after_result_head_enrollment(
-        tmp_path):
+        tmp_path, successor_type):
     api, store, abandonment, continued_head, continued_main = (
         _owner_continuation_advanced_case(tmp_path)
     )
+    if successor_type == "neutral":
+        api.source_failure = False
+        api.source_failure_sha = None
+        api.unresolved = False
+        api.pull.update(mergeable=False, mergeable_state="dirty")
     Coordinator(
         api, StateStore(store.path), clock=lambda: 1790856780,
     ).run(apply=True)
@@ -3953,6 +3959,9 @@ def test_owner_continuation_receipt_accepts_after_result_head_enrollment(
     successor = next(
         action for action in state["actions"].values()
         if action.get("owner_continuation_binding")
+    )
+    assert (successor.get("task_type") == "neutral") is (
+        successor_type == "neutral"
     )
     successor_head = "8" * 40
     historical = state["actions"][abandonment["action_key"]]
@@ -4022,6 +4031,57 @@ def test_owner_continuation_receipt_accepts_after_result_head_enrollment(
             == ready["owner_continuation_binding"]
         for proof in compacted["receipt_proofs"]
     )
+    assert sum(
+        comment.get("user", {}).get("id") == COPILOT_AGENT
+        and successor["dispatch_nonce"] in comment.get("body", "")
+        for comment in api.comments
+    ) == 1
+
+    api.set_copilot_review(
+        review_id=63002, head_sha=successor_head, body="",
+        submitted_at="2026-10-01T12:15:00Z", state="APPROVED",
+    )
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    api.progress_review = _progress_review(
+        successor_head, 63002, "The synthetic source failure remains.",
+        "2026-10-01T12:15:00Z",
+    ) | {"state": "CHANGES_REQUESTED"}
+    api.set_copilot_review(
+        review_id=63002, head_sha=successor_head,
+        body=api.progress_review["body"],
+        body_html=api.progress_review["body_html"],
+        submitted_at="2026-10-01T12:15:00Z", state="CHANGES_REQUESTED",
+    )
+    api.source_failure = True
+    api.source_failure_sha = successor_head
+    api.workflow_runs = [
+        source_run(id=568, run_number=50, head_sha=successor_head),
+    ]
+    repaired = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)["pull_requests"][0]
+    repaired_state = StateStore(store.path).snapshot()
+    ordinary = [
+        action for action in repaired_state["actions"].values()
+        if action.get("kind") == "fix" and action.get("head") == successor_head
+        and action.get("key") != successor["key"]
+    ]
+    assert repaired["repair_requested"] is True, repaired["reasons"]
+    assert len(ordinary) == 1
+    assert not ordinary[0].get("owner_continuation_binding")
+    assert not ordinary[0].get("owner_abandonment_binding")
+    assert repaired_state["enrollments"]["16"]["attempts"] == attempts + 1
+
+    writes = list(api.writes)
+    task_posts = api.task_posts
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856780,
+        ).run(apply=True)
+    assert api.writes == writes
+    assert api.task_posts == task_posts
 
 
 @pytest.mark.parametrize(
