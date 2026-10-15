@@ -887,6 +887,16 @@ all per-root bindings and spent allowances. A retained authenticated same-head
 successor proof prevents later ordinary work from rebinding a spent disposition.
 Malformed retained evidence remains blocked, not a fresh allowance.
 
+A SOURCE or neutral successor cannot combine an ordinary
+`owner_abandonment_intent` with an `owner_continuation_intent`. If a planned
+successor would carry both, defer every new disposition for that PR before scan
+commit or receipt-anchor publication, retain the immutable command IDs as pending,
+and suppress that PR's dependent publication plans for the poll. Preserve unrelated
+accepted scan progress and all existing claims, receipts, counters, and budgets.
+This is a source-safety boundary only; it does not prove an operational recovery
+path for such a mixed cohort. Combined abandonment and continuation successors
+remain unsupported.
+
 An existing owner-abandonment record whose recovery head no longer equals the
 current PR head cannot be rebound by replaying its original command or by ordinary
 re-enrollment. The only supported exception is this finite, append-only owner

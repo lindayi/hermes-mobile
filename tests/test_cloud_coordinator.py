@@ -3854,6 +3854,97 @@ def test_prepared_retry_candidate_capacity_overflow_fails_closed(tmp_path):
     assert store.snapshot() == before
 
 
+@pytest.mark.parametrize("successor_path", ["source", "neutral"])
+@pytest.mark.parametrize("reverse_roots", [False, True])
+def test_mixed_current_head_abandonment_defers_continuation_before_anchor(
+        tmp_path, successor_path, reverse_roots):
+    api, store, _, _, _ = _owner_continuation_advanced_case(
+        tmp_path, multiple_roots=True,
+    )
+    roots = deepcopy(store.snapshot()["enrollments"]["16"]["owner_abandonments"])
+    older_root, current_root = roots
+    current_head = current_root["head_sha"]
+    if reverse_roots:
+        store._mutate(
+            lambda state: state["enrollments"]["16"]["owner_abandonments"].reverse(),
+        )
+    for comment in list(api.comments):
+        if comment.get("id") == 7782:
+            api.comments.remove(comment)
+        elif comment.get("id") == 7780:
+            comment["body"] = f"/hermes enroll {current_head}"
+        elif comment.get("id") == 7781:
+            comment["body"] = (
+                f"/hermes continue-unverified {older_root['command_comment_id']} "
+                f"{older_root['task_id']} {older_root['reservation_sha256']} "
+                f"{current_head} {CURRENT_MAIN}"
+            )
+    api.head_sha = api.pull["head"]["sha"] = current_head
+    api.current_main_sha = CURRENT_MAIN
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.unresolved = True
+    api.compare_results = {
+        f"{older_root['head_sha']}...{current_head}": _compare_result(
+            older_root["head_sha"], ahead_by=1,
+        ),
+        f"{CURRENT_MAIN}...{CURRENT_MAIN}": _compare_result(
+            CURRENT_MAIN, ahead_by=0, status="identical",
+        ),
+    }
+    if successor_path == "neutral":
+        api.source_failure = False
+        api.source_failure_sha = None
+        api.pull.update(mergeable=False, mergeable_state="behind")
+    else:
+        api.source_failure = True
+        api.source_failure_sha = current_head
+        api.pull.update(mergeable=True, mergeable_state="clean")
+
+    before = StateStore(store.path).snapshot()
+    writes = list(api.writes)
+    task_posts = api.task_posts
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+
+    deferred = StateStore(store.path).snapshot()
+    assert deferred["pending_events"] == ["7781"]
+    assert not cloud_coordinator._event_consumed(deferred, "7781")
+    assert cloud_coordinator._event_consumed(deferred, "7780")
+    assert deferred["cursor"] > before["cursor"]
+    assert deferred["enrollments"]["16"]["comment"] == 7780
+    assert deferred["enrollments"]["16"].get("owner_continuations", []) == (
+        before["enrollments"]["16"].get("owner_continuations", [])
+    )
+    for field in (
+        "owner_abandonments", "receipt_proofs", "attempts",
+        "neutral_attempts", "repair_progress",
+    ):
+        assert deferred["enrollments"]["16"].get(field) == (
+            before["enrollments"]["16"].get(field)
+        )
+    assert deferred["actions"] == before["actions"]
+    assert deferred["outbox"] == before["outbox"]
+    assert api.writes[len(writes):] == []
+    assert api.task_posts == task_posts
+
+    StateStore(store.path).retire(16, current_head, CURRENT_MAIN)
+    restarted = StateStore(store.path).snapshot()
+    assert restarted["pending_events"] == ["7781"]
+    assert restarted["enrollments"]["16"]["receipt_proofs"] == (
+        before["enrollments"]["16"]["receipt_proofs"]
+    )
+    writes = list(api.writes)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    retried = StateStore(store.path).snapshot()
+    assert retried["pending_events"] == ["7781"]
+    assert not cloud_coordinator._event_consumed(retried, "7781")
+    assert api.writes == writes
+    assert api.task_posts == task_posts
+
+
 @pytest.mark.parametrize("pending_events", [
     [True], [1.0], ["01"], ["0"], ["9223372036854775808"], [{"id": "1"}],
 ])

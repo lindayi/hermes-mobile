@@ -9408,6 +9408,15 @@ class Coordinator:
             ]
             checked_continuation_issues.add(issue)
             try:
+                pull_plan = next(
+                    item for item in plan["pull_requests"] if item["issue"] == issue
+                )
+                repair = pull_plan.get("repair")
+                if (isinstance(repair, dict)
+                        and repair.get("owner_abandonment_intent") is not None):
+                    raise CoordinatorError(
+                        "Mixed owner abandonment and continuation successor is unsupported"
+                    )
                 self._fence_owner_continuation(
                     recovery | {"admission_cohort": cohort}, plan["main_sha"],
                 )
