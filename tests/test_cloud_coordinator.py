@@ -3723,6 +3723,68 @@ def test_deferred_owner_continuation_survives_event_watermark_and_restart(
     )
 
 
+@pytest.mark.parametrize("comparison", ["head", "base"])
+def test_owner_continuation_retries_transient_initial_ancestry_comparison(
+        tmp_path, comparison):
+    api, store, abandonment, continued_head, continued_main = (
+        _owner_continuation_advanced_case(tmp_path)
+    )
+    base_sha, tip_sha = (
+        (abandonment["head_sha"], continued_head)
+        if comparison == "head"
+        else (abandonment["base_sha"], continued_main)
+    )
+    failed_route = (
+        f"repos/lindayi/hermes-mobile/compare/{base_sha}...{tip_sha}"
+    )
+    original_get = api.get
+    failed = []
+
+    def get(route):
+        if route == failed_route and not failed:
+            failed.append(route)
+            raise ApiError("Synthetic comparison outage", status=503)
+        return original_get(route)
+
+    api.get = get
+    posts = api.task_posts
+    deferred = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856900,
+    ).run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+
+    assert failed == [failed_route]
+    assert deferred["repair_requested"] is False
+    assert state["pending_events"] == ["7773"]
+    assert "7773" not in state["events"]
+    assert "owner_continuations" not in state["enrollments"]["16"]
+    assert api.task_posts == posts
+
+    api.get = original_get
+    recovered = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856901,
+    ).run(apply=True)["pull_requests"][0]
+    recovered_state = StateStore(store.path).snapshot()
+    successors = [
+        action for action in recovered_state["actions"].values()
+        if action.get("owner_continuation_binding")
+    ]
+
+    assert recovered["repair_requested"] is True
+    assert len(successors) == 1
+    assert recovered_state["enrollments"]["16"]["owner_continuations"][0][
+        "disposition_comment_id"
+    ] == 7773
+    assert api.task_posts == posts + 1
+    anchor_id = successors[0]["receipt_anchor_comment_id"]
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856901,
+        ).run(apply=True)
+    assert api.task_posts == posts + 1
+    assert len([item for item in api.comments if item.get("id") == anchor_id]) == 1
+
+
 @pytest.mark.parametrize("change", ["edited", "deleted"])
 def test_deferred_owner_continuation_does_not_authorize_changed_command(
         tmp_path, change):
@@ -5140,7 +5202,9 @@ def test_invalid_owner_continuation_does_not_block_unrelated_pr_progress(tmp_pat
     ]) == original_task_writes + 1
 
 
-@pytest.mark.parametrize("mutation", ["enrollment", "historical", "type-alias"])
+@pytest.mark.parametrize(
+    "mutation", ["enrollment", "historical", "type-alias", "unrelated-compaction"],
+)
 def test_owner_continuation_rebuild_retains_unrelated_ready_receipt(
         tmp_path, monkeypatch, mutation):
     api, store, abandonment, head, main, pull17 = (
@@ -5190,7 +5254,16 @@ def test_owner_continuation_rebuild_retains_unrelated_ready_receipt(
 
     def get_all(route, *, collection=None):
         if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments?"):
-            return [receipt]
+            return [receipt, *newer_processed]
+        if (mutation == "unrelated-compaction"
+                and route.startswith("repos/lindayi/hermes-mobile/issues?")):
+            return original_get_all(route, collection=collection) + [{
+                "number": 17,
+                "pull_request": {
+                    "url": "https://api.github.com/repos/lindayi/hermes-mobile/pulls/17",
+                },
+                "updated_at": "2026-10-01T12:14:00Z",
+            }]
         if f"/commits/{result_head}/check-runs?" in route:
             return [
                 {"name": name, "head_sha": result_head,
@@ -5219,6 +5292,20 @@ def test_owner_continuation_rebuild_retains_unrelated_ready_receipt(
         "created_at": "2026-10-01T12:14:00Z",
         "updated_at": "2026-10-01T12:14:00Z",
     })
+    newer_processed = []
+    if mutation == "unrelated-compaction":
+        for offset in range(cloud_coordinator.MAX_EVENTS + 1):
+            comment = {
+                "id": 100_000 + offset, "user": {"id": OWNER},
+                "body": (
+                    f"/hermes continue-unverified "
+                    f"{8_000_000_000_000_000_000 + offset} "
+                    f"unrelated-{offset} {'a' * 64} {head} {main}"
+                ),
+                "created_at": "2026-10-01T12:14:00Z",
+                "updated_at": "2026-10-01T12:14:00Z",
+            }
+            newer_processed.append(comment)
     before = StateStore(store.path).snapshot()
     original_fence = CloudCoordinator._fence_owner_continuation
     original_get = api.get
@@ -5250,6 +5337,11 @@ def test_owner_continuation_rebuild_retains_unrelated_ready_receipt(
                 store._mutate(lambda data: data["enrollments"]["16"].update(
                     pull_id=float(data["enrollments"]["16"]["pull_id"]),
                 ))
+            elif mutation == "unrelated-compaction":
+                store._mutate(lambda data: data["enrollments"]["17"].update(
+                    last_open_seen=False,
+                ))
+                raise ApiError("Synthetic continuation task-detail outage")
             else:
                 historical = store.action(abandonment["action_key"])
                 store.update_action(
@@ -5288,6 +5380,49 @@ def test_owner_continuation_rebuild_retains_unrelated_ready_receipt(
         assert after["enrollments"]["16"]["active"] is False
     elif mutation == "type-alias":
         assert type(after["enrollments"]["16"]["pull_id"]) is float
+    elif mutation == "unrelated-compaction":
+        assert after["pending_events"] == ["7774"]
+        assert after["event_watermark"] > 7774
+        assert all(
+            cloud_coordinator._event_consumed(after, str(item["id"]))
+            for item in newer_processed
+        )
+        assert "7774" not in after["events"]
+        assert api.task_posts == posts
+        assert any(item["issue"] == 17 for item in result["pull_requests"])
+        assert after["actions"][other["key"]]["status"] == "completed"
+        retained_proofs = deepcopy(after["enrollments"]["17"]["receipt_proofs"])
+        assert after["enrollments"]["17"]["attempts"] == 1
+        assert after["cursor"] == "2026-10-01T12:15:00Z"
+
+        recovered = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856901,
+        ).run(apply=True)
+        recovered_state = StateStore(store.path).snapshot()
+        continuation_actions = [
+            action for action in recovered_state["actions"].values()
+            if action.get("owner_continuation_binding")
+        ]
+        assert len(continuation_actions) == 1
+        assert recovered_state["enrollments"]["16"]["owner_continuations"][0][
+            "disposition_comment_id"
+        ] == 7774
+        assert "7774" not in recovered_state["pending_events"]
+        assert cloud_coordinator._event_consumed(recovered_state, "7774")
+        assert api.task_posts == posts + 1
+        assert recovered_state["actions"][other["key"]]["status"] == "completed"
+        assert recovered_state["enrollments"]["17"]["receipt_proofs"] == retained_proofs
+        assert recovered_state["enrollments"]["17"]["attempts"] == 1
+        assert recovered_state["cursor"] == "2026-10-01T12:15:01Z"
+        continuation = continuation_actions[0]
+        anchor_id = continuation["receipt_anchor_comment_id"]
+        for _ in range(2):
+            Coordinator(
+                api, StateStore(store.path), clock=lambda: 1790856901,
+            ).run(apply=True)
+        assert api.task_posts == posts + 1
+        assert len([item for item in api.comments if item.get("id") == anchor_id]) == 1
+        return
     else:
         assert after["actions"][abandonment["action_key"]]["body"].endswith(
             " changed",

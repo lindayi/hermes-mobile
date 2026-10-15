@@ -202,13 +202,17 @@ update cursor moves beyond its overlap window. The coordinator independently
 discovers active enrolled PRs with valid retained abandonment claims that are
 missing from the updated-issue results. Exact issue lookups are capped at 100 per
 poll; a larger backlog fails closed. Each discovered issue and pull must match
-the retained identity and remain open. Positive invalid evidence does not authorize
-dispatch. These candidate pins identify exact proposed source bytes only; they do
-not establish review, merge, operational authorization, or activation.
+the retained identity and remain open. API failures during either initial ancestry
+comparison leave the disposition unconsumed; only its positively identified ID
+crosses a precommit state-conflict rebuild, where all authority and publication plans
+are rebuilt from durable state. The ID is persisted before event-watermark compaction.
+Positive invalid evidence does not authorize dispatch. These candidate pins identify
+exact proposed source bytes only; they do not establish review, merge, operational
+authorization, or activation.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `10776ed36fcc2c579888e2f1721202fcee15f3d50c51fad852d904ff1e04b6e3` |
+| `deploy/cloud_coordinator.py` | `63b50269f01d9327501e8d1fc1d908e1ecb2638f6f488a0f7731ee35254cc323` |
 | `deploy/task_receipts.py` | `12e1b6b817d82990e5d38f20888baf400271bad7a4ff9d70324010cbf542f06c` |
 
 ### Retained merged source and deliberate native refreshes

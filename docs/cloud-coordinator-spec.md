@@ -816,16 +816,21 @@ After the final historical-task reads, reauthenticate every disposition, origina
 abandonment command, and enrollment in that planned cohort. An earlier member
 changing while a later member is read must defer the whole cohort before event
 consumption or publication.
-A failed comparison rejects the affected PR's continuation. If durable state
-changed during preparation, discard both the prepared mutations and all dependent
-scan plans, then rebuild the complete scan once from fresh durable state.
+A positively confirmed ancestry mismatch rejects the affected PR's continuation.
+An API failure during either initial ancestry comparison is unavailable evidence,
+not a mismatch; leave the immutable disposition unconsumed for a later poll. If
+durable state changed during preparation, discard both the prepared mutations and
+all dependent scan plans, then rebuild the complete scan once from fresh durable
+state.
 Quarantine the failed continuation's PR for the rest of that poll: do not consume
 its commands, reconcile its claims, publish, or apply stale observations to it.
-Reauthenticate receipts, source authority, commands, and lifecycle evidence during
-that rebuild. Compare the durable preparation baseline using type-exact canonical
-JSON again under the commit lock. A second conflict stops the run without
-committing stale prepared state. This retry is allowed only before scan commit
-and external publication; it never replays an unknown external write.
+Carry only positively identified unconsumed disposition IDs across the rebuild;
+do not carry authority or publication plans. Persist carried IDs as pending before
+event compaction. Reauthenticate receipts, source authority, commands, and lifecycle
+evidence during the rebuild. Compare the durable preparation baseline using
+type-exact canonical JSON again under the commit lock. A second conflict stops the
+run without committing stale prepared state. This retry is allowed only before
+scan commit and external publication; it never replays an unknown external write.
 
 Immediately before a continuation task POST, the coordinator acquires the existing
 StateStore write lock, reloads and compares the fenced affected-state projection,

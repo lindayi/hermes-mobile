@@ -213,9 +213,10 @@ class _ContinuationPublicationFenceError(CoordinatorError):
 class _PreparedScanChanged(CoordinatorError):
     """Durable state invalidated preparation before any scan publication."""
 
-    def __init__(self, message, *, issue=None):
+    def __init__(self, message, *, issue=None, pending_events=()):
         super().__init__(message)
         self.issue = issue
+        self.pending_events = tuple(pending_events)
 
 
 class ApiError(CoordinatorError):
@@ -4751,13 +4752,16 @@ class Coordinator:
                 item["validated"] = True
         return issues, commands, processed, candidates
 
-    def _compare_proves_ancestry(self, base_sha, tip_sha, *, allow_identical=False):
+    def _compare_proves_ancestry(self, base_sha, tip_sha, *, allow_identical=False,
+                                 unavailable_value=False):
         if not _is_sha(base_sha) or not _is_sha(tip_sha):
             return False
         try:
             comparison = self.api.get(
                 f"repos/{REPOSITORY}/compare/{base_sha}...{tip_sha}",
             )
+        except ApiError:
+            return unavailable_value
         except CoordinatorError:
             return False
         if not isinstance(comparison, dict):
@@ -7430,17 +7434,27 @@ class Coordinator:
                 or not _pull_identity(pull, action)
                 or snapshot.get("terminal")
                 or item.get("current_head_sha") == historical.get("head_sha")
-                or not self._compare_proves_ancestry(
-                    historical["head_sha"], item["current_head_sha"],
-                )
-                or not self._compare_proves_ancestry(
-                    historical["base_sha"], item["current_main_sha"],
-                    allow_identical=True,
-                )
+        ):
+            return None
+        head_ancestry = self._compare_proves_ancestry(
+            historical["head_sha"], item["current_head_sha"],
+            unavailable_value=_OWNER_CONTINUATION_EVIDENCE_UNAVAILABLE,
+        )
+        if head_ancestry is _OWNER_CONTINUATION_EVIDENCE_UNAVAILABLE:
+            return head_ancestry
+        if not head_ancestry:
+            return None
+        base_ancestry = self._compare_proves_ancestry(
+            historical["base_sha"], item["current_main_sha"],
+            allow_identical=True,
+            unavailable_value=_OWNER_CONTINUATION_EVIDENCE_UNAVAILABLE,
+        )
+        if base_ancestry is _OWNER_CONTINUATION_EVIDENCE_UNAVAILABLE:
+            return base_ancestry
+        if (not base_ancestry
                 or _current_owner_unverified_abandonment_command(
                     self.api, historical,
-                ) is None
-        ):
+                ) is None):
             return None
         enrollment_comment = self.api.get(
             f"repos/{REPOSITORY}/issues/comments/{enrollment['comment']}",
@@ -9393,6 +9407,24 @@ class Coordinator:
                     recovery | {"admission_cohort": cohort}, plan["main_sha"],
                 )
             except CoordinatorError:
+                cohort = [
+                    item for item in plan["owner_continuations"]
+                    if item["issue"] == issue
+                ]
+                disposition_ids = list(dict.fromkeys([
+                    *(
+                        str(item["record"]["disposition_comment_id"])
+                        for item in cohort
+                    ),
+                    *(
+                        str(item["command_comment_id"])
+                        for command, item in plan["commands"]
+                        if command == "continue-unverified"
+                        and item.get("issue") == issue
+                        and type(item.get("command_comment_id")) is int
+                        and 0 < item["command_comment_id"] <= 2**63 - 1
+                    ),
+                ]))
                 if self.store._prepared is not None:
                     current_state = StateStore(self.store.path).snapshot()
                     if (_canonical_sha256(current_state)
@@ -9400,21 +9432,9 @@ class Coordinator:
                         raise _PreparedScanChanged(
                             "Coordinator state changed during continuation preparation",
                             issue=issue,
+                            pending_events=disposition_ids,
                         )
                 deferred_continuation_issues.add(issue)
-                cohort = [
-                    item for item in plan["owner_continuations"]
-                    if item["issue"] == issue
-                ]
-                disposition_ids = {
-                    str(item["record"]["disposition_comment_id"])
-                    for item in cohort
-                }
-                disposition_ids.update(
-                    str(item["command_comment_id"])
-                    for command, item in plan["commands"]
-                    if command == "continue-unverified" and item["issue"] == issue
-                )
                 plan["pending_events"] = list(dict.fromkeys([
                     *plan.get("pending_events", []), *disposition_ids,
                 ]))
@@ -9749,21 +9769,24 @@ class Coordinator:
         lock_fd = self.store.execution_lock() if apply else None
         try:
             blocked_continuations = set()
+            pending_events = []
             for attempt in range(2):
                 try:
                     return self._run_scan(
                         apply=apply, blocked_continuations=blocked_continuations,
+                        pending_events=pending_events,
                     )
                 except _PreparedScanChanged as error:
                     if attempt or not apply:
                         raise
                     if error.issue is not None:
                         blocked_continuations.add(error.issue)
+                    pending_events.extend(error.pending_events)
         finally:
             if lock_fd is not None:
                 os.close(lock_fd)
 
-    def _run_scan(self, *, apply, blocked_continuations):
+    def _run_scan(self, *, apply, blocked_continuations, pending_events=()):
         try:
             owner_user_id = self.owner_user_id
             export_directory = None
@@ -9803,6 +9826,16 @@ class Coordinator:
                 )
             else:
                 plan = self._build_plan(apply=apply)
+            if pending_events:
+                carried_pending = list(dict.fromkeys(map(str, pending_events)))
+                carried_set = set(carried_pending)
+                plan["processed"] = [
+                    item for item in plan["processed"]
+                    if str(item) not in carried_set
+                ]
+                plan["pending_events"] = list(dict.fromkeys([
+                    *plan.get("pending_events", []), *carried_pending,
+                ]))
             if apply:
                 if self.lifecycle_source_paths is not None:
                     from deploy.workflow_lifecycle_sources import (
