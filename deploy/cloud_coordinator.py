@@ -115,6 +115,7 @@ NEUTRAL_RECEIPT_ANCHOR_MARKER_PREFIX = "hermes-coordinator-neutral-receipt:"
 LIFECYCLE_FILE_NAME = "workflow-events.json"
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_EVENTS = 4000
+MAX_PENDING_EVENTS = MAX_EVENTS
 MAX_RETAINED_ABANDONMENT_DISCOVERY = 100
 TOMBSTONE_LIMIT = 512
 _OWNER_CONTINUATION_EVIDENCE_UNAVAILABLE = object()
@@ -7515,6 +7516,7 @@ class Coordinator:
             state, admission_checks=admission_checks, **scan_options,
         )
         scans, sensitive_revocations, starter_sources = [], [], []
+        pending_events = []
         for key, enrollment in enrollments.items():
             if int(key) in blocked_continuations:
                 continue
@@ -7644,6 +7646,7 @@ class Coordinator:
                     key for key in processed
                     if key != str(item["command_comment_id"])
                 ]
+                pending_events.append(str(item["command_comment_id"]))
                 continue
             if record is None:
                 continue
@@ -7728,6 +7731,7 @@ class Coordinator:
                 if command == "continue-unverified" and item["issue"] == issue
             }
             processed = [key for key in processed if key not in deferred_keys]
+            pending_events.extend(deferred_keys)
             retained = [
                 record for record in enrollment.get("owner_continuations", [])
                 if record["disposition_comment_id"] not in rejected_ids
@@ -7781,6 +7785,7 @@ class Coordinator:
         return {
             "cursor": cursor, "main_sha": main_sha,
             "processed": processed, "commands": accepted_commands,
+            "pending_events": list(dict.fromkeys(pending_events)),
             "starter_admissions": admission_checks,
             "starter_sources": starter_sources,
             "owner_recoveries": owner_recoveries,
@@ -9410,6 +9415,9 @@ class Coordinator:
                     for command, item in plan["commands"]
                     if command == "continue-unverified" and item["issue"] == issue
                 )
+                plan["pending_events"] = list(dict.fromkeys([
+                    *plan.get("pending_events", []), *disposition_ids,
+                ]))
                 plan["commands"] = [
                     (command, item) for command, item in plan["commands"]
                     if not (
@@ -9453,6 +9461,7 @@ class Coordinator:
                 )
         self.store.commit_scan(
             plan["cursor"], plan["processed"], commands=plan["commands"],
+            pending_events=plan.get("pending_events", ()),
             retirements=[
                 item["issue"] for item in plan["pull_requests"] if item.get("terminal")
             ],
@@ -9898,6 +9907,8 @@ class Coordinator:
 
 def _event_consumed(data, key):
     """Return whether an owner command ID is fenced by the list or its watermark."""
+    if key in data.get("pending_events", ()):
+        return False
     watermark = data.get("event_watermark", 0)
     return key in data.get("events", []) or (
         key.isdigit() and type(watermark) is int and int(key) <= watermark
@@ -9988,7 +9999,8 @@ class StateStore:
     @staticmethod
     def _empty():
         return {"version": 1, "cursor": None, "events": [], "event_watermark": 0,
-                "enrollments": {}, "actions": {}, "outbox": {}, "retired": {},
+                "pending_events": [], "enrollments": {}, "actions": {},
+                "outbox": {}, "retired": {},
                 "lifecycle_events": []}
 
     def _ensure_directory(self):
@@ -10013,6 +10025,7 @@ class StateStore:
             raise CoordinatorError("Coordinator state is unreadable") from exc
         if (not isinstance(data, dict) or data.get("version") != 1
                 or not isinstance(data.get("events"), list)
+                or not isinstance(data.setdefault("pending_events", []), list)
                 or not isinstance(data.get("enrollments"), dict)
                 or not isinstance(data.get("actions"), dict)
                 or not isinstance(data.get("outbox"), dict)
@@ -10024,6 +10037,18 @@ class StateStore:
                            and isinstance(item.get("outbox"), list)
                            for item in data["retired"].values())):
             raise CoordinatorError("Coordinator state has an unsupported format")
+        pending_events = data["pending_events"]
+        if (len(pending_events) > MAX_PENDING_EVENTS
+                or not all(
+                    isinstance(item, str)
+                    and item.isdigit()
+                    and str(int(item)) == item
+                    and 0 < int(item) <= 2**63 - 1
+                    for item in pending_events
+                )
+                or len(set(pending_events)) != len(pending_events)
+                or set(pending_events).intersection(data["events"])):
+            raise CoordinatorError("Pending owner command state is invalid")
         if any(not isinstance(item, dict)
                or type(item.get("sensitive_generation", 0)) is not int
                or not 0 <= item.get("sensitive_generation", 0) <= 2**31 - 1
@@ -10307,7 +10332,8 @@ class StateStore:
             if temporary.exists():
                 temporary.unlink()
 
-    def commit_scan(self, cursor, processed, *, commands=(), retirements=(),
+    def commit_scan(self, cursor, processed, *, commands=(), pending_events=(),
+                    retirements=(),
                     lifecycle_events=(), observations=(), sensitive_revocations=(),
                     starter_sources=(), now=None):
         keys = [str(item) for item in processed]
@@ -10325,9 +10351,23 @@ class StateStore:
                 data.update(prepared)
             seen = set(data["events"])
             for item in keys:
+                if item in data["pending_events"]:
+                    data["pending_events"].remove(item)
                 if item not in seen and not _event_consumed(data, item):
                     data["events"].append(item)
                     seen.add(item)
+            for item in pending_events:
+                key = str(item)
+                if key in keys or key in data["pending_events"]:
+                    continue
+                watermark = data.get("event_watermark", 0)
+                if (key in data["events"]
+                        or key.isdigit() and type(watermark) is int
+                        and int(key) <= watermark):
+                    continue
+                if len(data["pending_events"]) >= MAX_PENDING_EVENTS:
+                    raise CoordinatorError("Pending owner command capacity reached")
+                data["pending_events"].append(key)
             _bound_events(data)
             for action, item in commands:
                 if action != "enroll":

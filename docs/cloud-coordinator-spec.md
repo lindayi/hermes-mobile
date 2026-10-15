@@ -860,6 +860,11 @@ of the issue-update cursor, discover active enrolled PRs with retained valid
 abandonment claims by reading their exact issue and pull identities; discovery is
 bounded to 100 claims per poll. Closed or non-PR issues are not eligible, and
 malformed identities, incomplete inventories, and API failures fail closed.
+Temporarily unavailable disposition commands remain in a separate bounded pending-ID
+list. Their IDs remain retryable even if the consumed-event watermark advances past
+them; overflow aborts the scan before cursor or event state commits. Pending IDs do
+not waive immutable owner-command revalidation and are removed only when consumed.
+Edited or deleted pending commands cannot authorize a continuation.
 One task and one receipt anchor spend one source or neutral lifetime attempt;
 each included disposition permanently spends its one-successor allowance.
 Only that task's authentic immutable ready receipt can directly satisfy the

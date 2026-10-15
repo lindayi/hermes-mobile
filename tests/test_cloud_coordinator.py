@@ -3635,6 +3635,163 @@ def test_owner_abandonment_neutral_successor_survives_main_advance_and_reopens(
     ] == review_writes
 
 
+def test_deferred_owner_continuation_survives_event_watermark_and_restart(
+        tmp_path):
+    api, store, abandonment, continued_head, continued_main = (
+        _owner_continuation_advanced_case(tmp_path)
+    )
+    original_get = api.get
+    task_detail_available = False
+
+    def get(route):
+        if (not task_detail_available
+                and route == (
+                    f"agents/repos/lindayi/hermes-mobile/tasks/{abandonment['task_id']}"
+                )):
+            raise ApiError("Synthetic task-detail outage")
+        return original_get(route)
+
+    api.get = get
+    newer_commands = []
+    for offset in range(cloud_coordinator.MAX_EVENTS + 1):
+        historical_command_id = 8_000_000_000_000_000_000 + offset
+        comment_id = 10_000 + offset
+        body = (
+            f"/hermes continue-unverified {historical_command_id} "
+            f"unrelated-{offset} {'a' * 64} {'9' * 40} {'f' * 40}"
+        )
+        newer_commands.append(comment_id)
+        api.comments.append({
+            "id": comment_id, "user": {"id": OWNER}, "body": body,
+            "created_at": "2026-10-01T12:13:00Z",
+            "updated_at": "2026-10-01T12:13:00Z",
+        })
+
+    task_posts = api.task_posts
+    deferred = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856900,
+    ).run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+    assert deferred["head"] == continued_head
+    assert state["event_watermark"] > 7773
+    assert all(cloud_coordinator._event_consumed(state, str(item))
+               for item in newer_commands)
+    assert api.task_posts == task_posts
+    assert "owner_continuations" not in state["enrollments"]["16"]
+
+    task_detail_available = True
+    comment_routes = []
+    original_get_all = api.get_all
+
+    def get_all(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues/16/comments?"):
+            comment_routes.append(route)
+        return original_get_all(route, collection=collection)
+
+    api.get_all = get_all
+    recovered = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856901,
+    ).run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+    successors = [
+        action for action in state["actions"].values()
+        if action.get("owner_continuation_binding")
+    ]
+    assert recovered["repair_requested"], recovered["reasons"]
+    assert len(successors) == 1
+    assert state["enrollments"]["16"]["owner_continuations"][0][
+        "disposition_comment_id"
+    ] == 7773
+    assert state["event_watermark"] > 7773
+    assert api.task_posts == task_posts + 1
+    assert comment_routes and all("since=" not in route for route in comment_routes)
+
+    successor = successors[0]
+    anchor_id = successor["receipt_anchor_comment_id"]
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856901,
+        ).run(apply=True)
+    final = StateStore(store.path).snapshot()
+    assert api.task_posts == task_posts + 1
+    assert len([
+        comment for comment in api.comments
+        if comment["id"] == anchor_id
+    ]) == 1
+    assert final["enrollments"]["16"]["owner_continuations"] == (
+        state["enrollments"]["16"]["owner_continuations"]
+    )
+
+
+@pytest.mark.parametrize("change", ["edited", "deleted"])
+def test_deferred_owner_continuation_does_not_authorize_changed_command(
+        tmp_path, change):
+    api, store, abandonment, _, _ = _owner_continuation_advanced_case(tmp_path)
+    original_get = api.get
+    task_detail_available = False
+
+    def get(route):
+        if (not task_detail_available
+                and route.endswith(f"/tasks/{abandonment['task_id']}")):
+            raise ApiError("Synthetic task-detail outage")
+        return original_get(route)
+
+    api.get = get
+    command = next(comment for comment in api.comments if comment["id"] == 7773)
+    posts = api.task_posts
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856900).run(apply=True)
+    deferred = StateStore(store.path).snapshot()
+    assert deferred["pending_events"] == ["7773"]
+    if change == "edited":
+        command["body"] += " edited"
+        command["updated_at"] = "2026-10-01T12:14:00Z"
+    else:
+        api.comments.remove(command)
+    task_detail_available = True
+
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856901,
+        ).run(apply=True)
+    current = StateStore(store.path).snapshot()
+    assert "owner_continuations" not in current["enrollments"]["16"]
+    assert current["pending_events"] == ["7773"]
+    assert api.task_posts == posts
+
+
+def test_pending_owner_command_capacity_fails_closed(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    store.record_event(1)
+    before = store.snapshot()
+
+    with pytest.raises(CoordinatorError, match="capacity"):
+        store.commit_scan(
+            "advanced-cursor", [],
+            pending_events=[
+                str(item) for item in range(
+                    10, 10 + cloud_coordinator.MAX_PENDING_EVENTS + 1,
+                )
+            ],
+        )
+
+    assert store.snapshot() == before
+
+
+@pytest.mark.parametrize("pending_events", [
+    [True], [1.0], ["01"], ["0"], ["9223372036854775808"], [{"id": "1"}],
+])
+def test_malformed_pending_owner_command_state_fails_closed(
+        tmp_path, pending_events):
+    store = StateStore(tmp_path / "state.json")
+    store.record_event(1)
+    data = store.snapshot()
+    data["pending_events"] = pending_events
+    store.path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(CoordinatorError, match="Pending owner command"):
+        StateStore(store.path).snapshot()
+
+
 def test_owner_continuation_disposition_records_missing_root_before_successor_dispatch(
         tmp_path):
     from copy import deepcopy
