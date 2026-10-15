@@ -8328,8 +8328,8 @@ def test_owner_abandonment_final_fence_matrix(tmp_path, monkeypatch, recovery_mo
     original_build = CloudCoordinator._build_plan
     original_fence = CloudCoordinator._fence_owner_abandonment
 
-    def tracked_build(self, *, apply=False):
-        plan = original_build(self, apply=apply)
+    def tracked_build(self, *, apply=False, **kwargs):
+        plan = original_build(self, apply=apply, **kwargs)
         if apply:
             probe["plan"] = deepcopy(plan)
         return plan
@@ -11419,8 +11419,8 @@ def test_cold_legacy_receipts_recover_source_budget_and_resume_after_main_advanc
             elif recovery_interruption == "later-snapshot":
                 build = coordinator._build_plan
 
-                def interrupt_snapshot(*, apply):
-                    build(apply=apply)
+                def interrupt_snapshot(*, apply, **kwargs):
+                    build(apply=apply, **kwargs)
                     raise RuntimeError("later snapshot failed")
 
                 patch.setattr(coordinator, "_build_plan", interrupt_snapshot)
