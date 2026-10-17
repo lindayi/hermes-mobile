@@ -4028,6 +4028,8 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
                 ))
                 or not isinstance(task_id, str) or not task_id):
             return initial, set(), set()
+        if receipt_like and _valid_receipt_proof(candidate, comments):
+            live_records.append(candidate)
         matching_proofs = {
             id(proof): proof for proof in [
                 *(
@@ -4056,11 +4058,9 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
                 proof["task_id"] for proof in matching_proofs
             )
             continue
-        if receipt_like and _valid_receipt_proof(candidate, comments):
-            live_records.append(candidate)
 
-    retained_blockers = [
-        proof for proof in proof_records
+    authenticated_blockers = [
+        proof for proof in [*proof_records, *live_records]
         if proof.get("receipt_result") != "ready"
         and _valid_receipt_proof(proof, comments)
     ]
@@ -4118,7 +4118,7 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     ]
     while True:
         changed = False
-        for action in [*candidates, *retained_blockers]:
+        for action in [*candidates, *authenticated_blockers]:
             start_head = action.get("receipt_start_head")
             if (start_head not in authorized and not any(
                     recovery["head_sha"] == start_head

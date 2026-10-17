@@ -791,7 +791,9 @@ def test_apply_rejects_conflicting_live_projection_of_retained_receipt(
 
 
 @pytest.mark.parametrize("publication", ["source", "reviewer"])
-@pytest.mark.parametrize("representation", ["retained-retained", "retained-live"])
+@pytest.mark.parametrize("representation", [
+    "retained-retained", "retained-live", "live-retained", "live-live",
+])
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("separate_owner_head", [False, True])
 def test_conflicting_receipt_cannot_erase_authenticated_blocker(
@@ -809,7 +811,10 @@ def test_conflicting_receipt_cannot_erase_authenticated_blocker(
         ).replace("result=ready", "result=policy_broken"),
     )
     duplicate = deepcopy(proof)
-    duplicate_task = "conflicting-ready-task"
+    duplicate_task = (
+        proof["task_id"] if representation == "live-live"
+        else "conflicting-ready-task"
+    )
     duplicate_nonce = "conflicting-ready-nonce"
     duplicate_session = "session-conflicting-ready"
     duplicate_comment_id = proof["receipt_comment_id"] + 1
@@ -836,6 +841,8 @@ def test_conflicting_receipt_cannot_erase_authenticated_blocker(
             f"start_head={result_head}",
         ),
     )
+    if representation == "live-live":
+        duplicate["key"] += ":ready"
     blocker_comment = next(
         comment for comment in api.comments
         if comment.get("id") == proof["receipt_comment_id"]
@@ -861,21 +868,28 @@ def test_conflicting_receipt_cannot_erase_authenticated_blocker(
             enrollment["owner_authorized_head"] = result_head
         else:
             enrollment.pop("owner_authorized_head", None)
-        enrollment["receipt_proofs"] = (
-            [blocker, duplicate] if representation == "retained-retained"
-            else [blocker]
-        )
-        if reverse and representation == "retained-retained":
-            enrollment["receipt_proofs"].reverse()
-        if representation == "retained-live":
-            state["actions"][proof["key"]] = duplicate
+        retained, live = {
+            "retained-retained": ([blocker, duplicate], []),
+            "retained-live": ([blocker], [duplicate]),
+            "live-retained": ([duplicate], [blocker]),
+            "live-live": ([], [blocker, duplicate]),
+        }[representation]
+        enrollment["receipt_proofs"] = list(reversed(retained)) if reverse else retained
+        for record in reversed(live) if reverse else live:
+            state["actions"][record["key"]] = record
 
     store._mutate(install)
     api.review_state = api.review_sha = None
     api.requested_reviewers = []
     if publication == "source":
+        api.review_state = "APPROVED"
+        api.review_sha = result_head
         api.source_failure = True
         api.source_failure_sha = result_head
+        api.workflow_runs = [source_run(id=568, run_number=50, head_sha=result_head)]
+        assert cloud_coordinator._latest_source_failure(
+            api.workflow_runs, result_head, api.pull["head"]["ref"], 16,
+        )
     else:
         api.source_failure = False
         api.source_failure_sha = None
@@ -896,12 +910,7 @@ def test_conflicting_receipt_cannot_erase_authenticated_blocker(
     assert not coordinator._authorized_dispatch_head(16, result_head, BASE)
     after_state = StateStore(store.path).snapshot()
     after = after_state["enrollments"]["16"]
-    expected_proofs = (
-        [blocker, duplicate] if representation == "retained-retained"
-        else [blocker]
-    )
-    if reverse and representation == "retained-retained":
-        expected_proofs.reverse()
+    expected_proofs = before_state["enrollments"]["16"]["receipt_proofs"]
     assert after["authorized_head"] == (HEAD if separate_owner_head else result_head)
     assert after.get("owner_authorized_head") == (
         result_head if separate_owner_head else None
@@ -913,6 +922,74 @@ def test_conflicting_receipt_cannot_erase_authenticated_blocker(
             "receipt_proofs", "authorized_head", "owner_authorized_head"):
         assert after.get(field) == before_state["enrollments"]["16"].get(field)
     assert after_state["lifecycle_events"] == before_state["lifecycle_events"]
+    writes = deepcopy(api.writes)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856540,
+    ).run(apply=True)
+    assert api.writes == writes
+    assert api.task_posts == before_posts
+    restarted = StateStore(store.path).snapshot()
+    assert restarted["actions"] == after_state["actions"]
+    assert restarted["enrollments"]["16"] == after
+
+
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+@pytest.mark.parametrize("live_form", ["identical", "reordered", "unauthenticated-blocker"])
+def test_live_receipt_duplicate_preserves_ready_publication(
+        tmp_path, publication, live_form):
+    api, store, proof, result_head = _accepted_compacted_receipt_case(tmp_path)
+    live = deepcopy(proof)
+    if live_form == "reordered":
+        live = dict(reversed(list(live.items())))
+    elif live_form == "unauthenticated-blocker":
+        live["receipt_result"] = "policy_broken"
+        live["receipt_body"] = live["receipt_body"].replace(
+            "result=ready", "result=policy_broken",
+        )
+        assert not cloud_coordinator._valid_receipt_proof(live, api.comments)
+
+    def install(state):
+        state["enrollments"]["16"]["authorized_head"] = result_head
+        state["actions"][live["key"]] = live
+
+    store._mutate(install)
+    api.review_state = api.review_sha = None
+    api.requested_reviewers = []
+    if publication == "source":
+        api.review_state = "APPROVED"
+        api.review_sha = result_head
+        api.source_failure = True
+        api.source_failure_sha = result_head
+        api.workflow_runs = [source_run(id=568, run_number=50, head_sha=result_head)]
+        assert cloud_coordinator._latest_source_failure(
+            api.workflow_runs, result_head, api.pull["head"]["ref"], 16,
+        )
+    posts = api.task_posts
+    writes = deepcopy(api.writes)
+    coordinator = Coordinator(api, StateStore(store.path), clock=lambda: 1790856540)
+
+    result = coordinator.run(apply=True)["pull_requests"][0]
+
+    assert coordinator._authorized_dispatch_head(16, result_head, BASE)
+    if publication == "source":
+        assert result["repair_requested"], result["reasons"]
+        assert api.task_posts == posts + 1
+        assert not [
+            write for write in api.writes[len(writes):]
+            if write[0].endswith("/requested_reviewers")
+        ]
+    else:
+        assert api.task_posts == posts
+        assert len([
+            write for write in api.writes[len(writes):]
+            if write[0].endswith("/requested_reviewers")
+        ]) == 1
+    after = StateStore(store.path).snapshot()
+    if live["key"] in after["actions"]:
+        assert after["actions"][live["key"]] == live
+    else:
+        assert live in after["enrollments"]["16"]["receipt_proofs"]
+    assert after["enrollments"]["16"]["receipt_proofs"] == [proof]
 
 
 @pytest.mark.parametrize("embedded_key", ["absent", "null", "wrong"])
