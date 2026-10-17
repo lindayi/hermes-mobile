@@ -4800,11 +4800,18 @@ class Coordinator:
                                   and isinstance(enrollment.get("comment"), int)
                                   and enrollment["comment"] > prior["comment"])):
                     effective = True
-                    candidates[str(enrollment["issue"])] = {
+                    candidate = {
                         **enrollment, "attempts": 0, "sensitive_sha": None,
                         "sensitive_authorization": None, "targeted_review": None,
                         "active": True,
                     }
+                    if prior:
+                        for field in (
+                                "receipt_proofs", "owner_abandonments",
+                                "owner_continuations"):
+                            if field in prior:
+                                candidate[field] = deepcopy(prior[field])
+                    candidates[str(enrollment["issue"])] = candidate
                 if effective and "starter_admission" in enrollment and admission_checks is not None:
                     admission_checks.append(deepcopy(enrollment))
         for action, item in commands:
@@ -7864,6 +7871,23 @@ class Coordinator:
             owner_continuations = [
                 recovery for recovery in owner_continuations if recovery["issue"] != issue
             ]
+        for key, enrollment in enrollments.items():
+            previous = state["enrollments"].get(key)
+            if (not isinstance(previous, dict) or previous.get("active") is not False
+                    or type(previous.get("comment")) is not int
+                    or type(enrollment.get("comment")) is not int
+                    or enrollment["comment"] <= previous["comment"]):
+                continue
+            for field in ("receipt_proofs", "owner_abandonments"):
+                enrollment.pop(field, None)
+            retained_continuations = [
+                record for record in enrollment.get("owner_continuations", [])
+                if record not in previous.get("owner_continuations", [])
+            ]
+            if retained_continuations:
+                enrollment["owner_continuations"] = retained_continuations
+            else:
+                enrollment.pop("owner_continuations", None)
         plans = [
             self._plan_pull(snapshot, state["actions"], apply=apply)
             for snapshot in scans

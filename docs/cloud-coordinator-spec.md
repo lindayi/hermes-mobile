@@ -954,6 +954,10 @@ positive ancestry from the historical recovery head to the current head and from
 the historical base to the current main. Any uncertain publication, incomplete
 read, identity mismatch, ambiguous or competing disposition, or post-plan change
 rejects the affected write.
+When a fresh enrollment and disposition are discovered in one poll, the admission
+candidate carries forward retained receipt proofs, abandonment records, and
+continuation records before cohort validation; scan commit is not the first point
+at which the validator may see that history.
 
 A temporary or uncertain task-detail API failure is not a positive rejection.
 Do not consume its disposition comment ID; retry the original immutable command
