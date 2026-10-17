@@ -819,13 +819,16 @@ Malformed retained `receipt_proofs` that are not lists deny owner-abandonment he
 authority for that PR without aborting unrelated PR work. An empty list and valid
 legacy proofs retain their existing meanings.
 
-A same-head
-ready receipt is still a valid direct continuation, but it cannot hide a cycle in a
-later edge. This only proves terminal occupancy; ordinary source authorization,
-fresh review/check, current-main and sensitive-head fences remain separate. The
-recovery head remains continuation-only only while it lacks general receipt
-provenance. A distinct, bound ready receipt that returns the same head releases this
-restriction, including after a cold restart; recovery alone never does.
+A same-head ready receipt is still a valid direct continuation, but it cannot hide a
+cycle in a later edge. At the abandonment root, one bound `A -> A` receipt may be
+followed by exactly one authenticated ready source receipt reserved later from `A`
+to a different head. The self-edge is consumed once; any additional competing edge
+or later cycle still fails closed. This only proves terminal occupancy; ordinary
+source authorization, fresh review/check, current-main and sensitive-head fences
+remain separate. The recovery head remains continuation-only only while it lacks
+general receipt provenance. A distinct, bound ready receipt that returns the same
+head releases this restriction, including after a cold restart; recovery alone
+never does.
 Reactivation, duplicate commands, restart, or uncertain persistence must not cause
 a repeated POST, notice, or accepted result.
 

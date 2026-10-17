@@ -4145,7 +4145,9 @@ def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_pat
 
 
 def _owner_abandonment_transitive_case(tmp_path, lineage_hazard=None, *, bare=False):
-    neutral_head = "9" * 40
+    neutral_head = (
+        NEXT_RESULT_HEAD if lineage_hazard == "same-head-successor" else "9" * 40
+    )
     source_head = neutral_head if lineage_hazard == "cycle" else "8" * 40
     api, store, abandoned = _owner_abandonment_historical_neutral_case(
         tmp_path, bare=bare,
@@ -4410,6 +4412,7 @@ def test_authorized_dispatch_head_fails_closed_for_non_object_pull_response(
         None, "missing", "disconnected", "wrong-pull", "non-ready", "cycle",
         "missing-branch-unproved", "wrong-branch", "live-proof-branch-mismatch",
         "ambiguous-root", "ambiguous-intermediate",
+        "same-head-successor",
         "edited-root-command", "deleted-root-command",
         "duplicate-status", "duplicate-issue", "duplicate-start",
         "duplicate-head", "duplicate-nonce", "duplicate-kind",
@@ -4429,6 +4432,34 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
         proof.get("head_ref") == api.pull["head"]["ref"]
         for proof in original_proofs
     )
+    if lineage_hazard == "same-head-successor":
+        neutral_proof = next(
+            proof for proof in original_proofs
+            if proof["task_id"] == neutral["task_id"]
+        )
+        source_proof = next(
+            proof for proof in original_proofs
+            if proof["task_id"] == source["task_id"]
+        )
+        assert neutral_proof["receipt_head"] == neutral_head == NEXT_RESULT_HEAD
+        assert source_proof["receipt_start_head"] == neutral_head
+        assert source_proof["created_at"] > neutral_proof["created_at"]
+        assert cloud_coordinator._owner_abandonment_successor_matches(
+            recovery, neutral_proof,
+        )
+        assert source_proof.get("task_type") in (None, "source")
+        assert source_proof["receipt_result"] == "ready"
+        assert not any(
+            field in source_proof for field in (
+                "owner_abandonment_binding", "owner_abandonment_attestation",
+                "owner_abandonment_intent",
+            )
+        )
+        assert Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        )._owner_abandonment_successor_proven(
+            {"pull": api.pull, "comments": api.comments}, recovery,
+        )
     if lineage_hazard == "live-proof-branch-mismatch":
         def mismatch_live_proof_branch(state):
             proof = next(
@@ -4574,7 +4605,9 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
 
     attempts_before_review = restarted.snapshot()["enrollments"]["16"]["attempts"]
     neutral_attempts = restarted.snapshot()["enrollments"]["16"]["neutral_attempts"]
-    valid_lineage = lineage_hazard in {None, "unrelated-action"}
+    valid_lineage = lineage_hazard in {
+        None, "unrelated-action", "same-head-successor",
+    }
     if not valid_lineage and not lineage_hazard.startswith("duplicate-"):
         assert not Coordinator(
             api, restarted, clock=lambda: 1790856660,
@@ -7113,6 +7146,118 @@ def test_final_publication_fence_rejects_late_receipt_body_only_action(
     assert publication_reads[0] >= 1
     assert api.task_posts == posts_before
     assert api.writes == writes_before
+
+
+@pytest.mark.parametrize("path", ["source", "reviewer"])
+def test_final_publication_projection_rejects_late_embedded_proof_key_action(
+        tmp_path, monkeypatch, path):
+    (
+        api, store, _, _, _, _, _, _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+    if path == "source":
+        api.source_failure = True
+        api.source_failure_sha = source_head
+        api.review_state = "APPROVED"
+        api.review_sha = source_head
+    else:
+        api.review_state = api.review_sha = None
+    retained_key = StateStore(store.path).snapshot()["enrollments"]["16"][
+        "receipt_proofs"
+    ][0]["key"]
+    writes_before = deepcopy(api.writes)
+    posts_before = api.task_posts
+    final_authorization = [False]
+    injected = []
+    original_snapshot = StateStore.snapshot
+    original_authority = CloudCoordinator._authorized_dispatch_head
+
+    def snapshot(state_store):
+        if final_authorization[0] and not injected:
+            state_store._mutate(lambda state: state["actions"].update({
+                "fresh-map-key": {
+                    "key": retained_key,
+                    "kind": "fix",
+                    "task_id": "late-conflicting-task",
+                    "receipt_result": "ready",
+                    "receipt_head": source_head,
+                },
+            }))
+            injected.append(True)
+        return original_snapshot(state_store)
+
+    def authority(self, issue, head, base_sha=None, **kwargs):
+        authorized = original_authority(self, issue, head, base_sha, **kwargs)
+        if kwargs.get("require_base_match") is True:
+            final_authorization[0] = True
+        return authorized
+
+    monkeypatch.setattr(StateStore, "snapshot", snapshot)
+    monkeypatch.setattr(
+        CloudCoordinator, "_authorized_dispatch_head", authority,
+    )
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert injected == [True]
+    assert api.task_posts == posts_before
+    assert api.writes == writes_before
+
+
+def test_final_reviewer_fence_distinguishes_missing_receipt_proofs_from_null(
+        tmp_path, monkeypatch):
+    (
+        api, store, _, _, _, neutral, source, _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+
+    def restore_direct_head_authority(state):
+        enrollment = state["enrollments"]["16"]
+        enrollment["authorized_head"] = source_head
+        enrollment.pop("receipt_proofs", None)
+        enrollment["owner_abandonments"] = []
+        for key, action in list(state["actions"].items()):
+            if (action.get("issue") == 16 and action.get("kind") == "fix"
+                    and key not in {neutral["key"], source["key"]}):
+                state["actions"].pop(key)
+
+    store._mutate(restore_direct_head_authority)
+    api.review_state = api.review_sha = None
+    assert "receipt_proofs" not in store.snapshot()["enrollments"]["16"]
+    writes_before = deepcopy(api.writes)
+    final_authorization = [False]
+    injected = []
+    original_snapshot = StateStore.snapshot
+    original_authority = CloudCoordinator._authorized_dispatch_head
+
+    def snapshot(state_store):
+        if final_authorization[0] and not injected:
+            state_store._mutate(
+                lambda state: state["enrollments"]["16"].update(
+                    receipt_proofs=None,
+                ),
+            )
+            injected.append(True)
+        return original_snapshot(state_store)
+
+    def authority(self, issue, head, base_sha=None, **kwargs):
+        authorized = original_authority(self, issue, head, base_sha, **kwargs)
+        if kwargs.get("require_base_match") is True:
+            final_authorization[0] = True
+        return authorized
+
+    monkeypatch.setattr(StateStore, "snapshot", snapshot)
+    monkeypatch.setattr(
+        CloudCoordinator, "_authorized_dispatch_head", authority,
+    )
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert injected == [True]
+    assert api.writes == writes_before
+    assert not any(
+        route.endswith("/requested_reviewers") for route, _ in api.writes
+    )
 
 
 @pytest.mark.parametrize("mutation", ["edited", "deleted", "substituted"])

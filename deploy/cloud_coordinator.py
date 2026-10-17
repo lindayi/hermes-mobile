@@ -3736,6 +3736,9 @@ def _dispatch_authorization_inputs(state, issue):
             isinstance(action, dict)
             and (
                 (
+                    isinstance(action.get("key"), str)
+                    and action["key"] in proof_keys
+                ) or (
                     isinstance(action.get("task_id"), str)
                     and action["task_id"] in proof_task_ids
                 )
@@ -3757,6 +3760,7 @@ def _dispatch_authorization_inputs(state, issue):
                 "base", "authorized_head", "owner_authorized_head",
                 "owner_abandonments", "receipt_proofs",
             )
+            if field != "receipt_proofs" or field in enrollment
         },
         "actions": relevant_actions,
     }
@@ -7335,20 +7339,21 @@ class Coordinator:
 
         current = record["head_sha"]
         visited = {current}
+        used = set()
         has_rooted_successor = False
         max_steps = REPAIR_LIMIT + NEUTRAL_LIMIT
         for step in range(max_steps + 1):
             outgoing = [
                 candidate for candidate in candidates
-                if candidate.get("receipt_start_head") == current
+                if (candidate.get("receipt_start_head") == current
+                    and id(candidate) not in used)
             ]
             if not outgoing:
                 return has_rooted_successor and current == head["sha"]
             if step == max_steps:
                 return False
-            if current == record["head_sha"]:
-                if len(outgoing) != 1:
-                    return False
+            root_step = current == record["head_sha"] and not has_rooted_successor
+            if root_step:
                 rooted_successors = [
                     candidate for candidate in outgoing
                     if _owner_abandonment_successor_matches(record, candidate)
@@ -7356,6 +7361,26 @@ class Coordinator:
                 if len(rooted_successors) != 1:
                     return False
                 successor = rooted_successors[0]
+                parallel = [
+                    candidate for candidate in outgoing
+                    if candidate is not successor
+                ]
+                if parallel and not (
+                        successor.get("receipt_head") == current
+                        and len(parallel) == 1
+                        and parallel[0].get("task_type") in (None, "source")
+                        and parallel[0].get("receipt_result") == "ready"
+                        and type(successor.get("created_at")) in (int, float)
+                        and type(parallel[0].get("created_at")) in (int, float)
+                        and all(
+                            type(value) is int or math.isfinite(value)
+                            for value in (
+                                successor["created_at"],
+                                parallel[0]["created_at"],
+                            )
+                        )
+                        and parallel[0]["created_at"] > successor["created_at"]):
+                    return False
                 has_rooted_successor = True
             else:
                 if len(outgoing) != 1:
@@ -7365,7 +7390,7 @@ class Coordinator:
                     or successor.get("receipt_result") != "ready"
                     or successor.get("receipt_base") != base["sha"]):
                 return False
-            if current == record["head_sha"]:
+            if root_step:
                 expected_base = (
                     successor.get("main_sha")
                     if successor.get("task_type") == "neutral"
@@ -7381,14 +7406,12 @@ class Coordinator:
                         "owner_abandonment_intent",
                     )):
                 return False
+            used.add(id(successor))
             next_head = successor["receipt_head"]
-            if (next_head == current == record["head_sha"]
-                    and next_head == head["sha"]):
-                return not any(
-                    candidate is not successor
-                    and candidate.get("receipt_start_head") == current
-                    for candidate in candidates
-                )
+            if next_head == current:
+                if current != record["head_sha"]:
+                    return False
+                continue
             if next_head in visited:
                 return False
             visited.add(next_head)

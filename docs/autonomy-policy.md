@@ -227,7 +227,7 @@ The coordinator's final fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `9f448b061a2adc2f9625eab98376248ca814521646e20af4959db7e77022e573` |
+| `deploy/cloud_coordinator.py` | `dc0a3f4146e0733534ef9d7a05c0d71bcf37e95e704afd850b6390fb92937209` |
 
 | Historical candidate | SHA-256 |
 | --- | --- |
