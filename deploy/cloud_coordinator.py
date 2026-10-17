@@ -3516,11 +3516,21 @@ def _receipt_projection(action):
 def _receipt_proof_matches_live(proof, action):
     if not isinstance(proof, dict) or not isinstance(action, dict):
         return False
-    if any(field not in action for field in proof):
-        return False
-    return _canonical_receipt_json(proof) == _canonical_receipt_json({
-        field: action[field] for field in proof
-    })
+    fields = _RECEIPT_PROOF_FIELDS | proof.keys()
+    legacy_fields = {"key", "head_ref"}
+    if (proof.get("receipt_version", "v1") == "v1"
+            and action.get("receipt_version", "v1") == "v1"):
+        legacy_fields.update(("receipt_version", "main_sha", "task_type"))
+    legacy_omissions = {field for field in legacy_fields if field not in proof}
+    return _projected_fields_match(proof, action, fields - legacy_omissions)
+
+
+def _receipt_like_action(action):
+    return isinstance(action, dict) and any(
+        field in action for field in (
+            "receipt_result", "receipt_start_head", "receipt_head", "receipt_body",
+        )
+    )
 
 
 def _legacy_task_reservation_type(record, tasks, snapshot):
@@ -3992,10 +4002,7 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
             continue
         candidate_key = candidate.get("key")
         task_id = candidate.get("task_id")
-        receipt_like = any(
-            field in candidate
-            for field in ("receipt_result", "receipt_head", "receipt_body")
-        )
+        receipt_like = _receipt_like_action(candidate)
         linked_keys = {
             value for value in (key, candidate_key)
             if isinstance(value, str) and value in proof_keys
@@ -4173,10 +4180,7 @@ def _dispatch_authorization_inputs(state, issue):
                     action.get("issue") == issue
                     and (
                         action.get("key") != key
-                        or "receipt_result" in action
-                        or "receipt_start_head" in action
-                        or "receipt_head" in action
-                        or "receipt_body" in action
+                        or _receipt_like_action(action)
                     )
                 )
             )
@@ -8727,9 +8731,7 @@ class Coordinator:
                 return False
             if (candidate.get("issue") == record["issue"]
                     and type(candidate.get("issue")) is not int
-                    and any(field in candidate for field in (
-                        "receipt_result", "receipt_head", "receipt_body",
-                    ))):
+                    and _receipt_like_action(candidate)):
                 return False
             candidate = legacy_views.get(id(candidate), candidate)
             duplicate = reconciled_by_key.get(key)
@@ -8948,6 +8950,12 @@ class Coordinator:
                 or not isinstance(comments, list)):
             return False
         state = self.store.snapshot()
+        if any(
+                _receipt_like_action(action)
+                and action.get("issue") == issue
+                and type(action.get("issue")) is not int
+                for action in state.get("actions", {}).values()):
+            return False
         enrollment = state.get("enrollments", {}).get(str(issue), {})
         records = enrollment.get("owner_abandonments", [])
         recoveries = _valid_owner_abandonment_claims(
@@ -12891,6 +12899,11 @@ class StateStore:
                 for proof in retained_enrollment.get("receipt_proofs", [])
                 if isinstance(proof, dict)
             ]
+            outgoing_heads = {
+                proof["receipt_start_head"] for proof in proofs
+                if proof.get("issue") == issue
+                and _is_sha(proof.get("receipt_start_head"))
+            }
             for key, action in list(data["actions"].items()):
                 if (type(action.get("issue")) is not int
                         or action["issue"] != issue
@@ -12909,6 +12922,10 @@ class StateStore:
                         key, action, proof.get("key"), proof.get("task_id"),
                     )
                 ]
+                if (not related_proofs and _receipt_like_action(action)
+                        and _is_sha(action.get("receipt_start_head"))
+                        and action.get("receipt_start_head") in outgoing_heads):
+                    continue
                 if any(
                         type(proof.get("issue")) is not int
                         or proof["issue"] != issue

@@ -786,6 +786,14 @@ affected pull even with a fresh action key and task ID and no retained links.
 Both source-authority indexing and final remote lineage validation check this
 before filtering candidates. Boolean aliases of issue 1 fail the same way.
 Exact integer receipts for genuinely unrelated pulls remain isolated.
+Apply the same bounded receipt-like identity check before the no-current-proof
+fallback, including first-successor dispatch. Retirement must preserve live/proof
+authority-field presence and canonical-value conflicts, not just compare fields
+present in the proof. Preserve supported authentic legacy omissions only.
+An unrepresented competing same-pull outgoing edge remains evidence by its
+`receipt_start_head`, even with a fresh key/task and old dispatch head. Repeated
+apply, explicit retirement and cold restart must retain those exact conflicting
+bytes and deny source/reviewer writes; unrelated terminal actions still compact.
 Every persisted abandonment record must resolve to one matching retained root
 action before any receipt, dispatch, reviewer, or terminal authority is granted.
 Missing, mismatched, or duplicate root claims block the affected enrollment. The

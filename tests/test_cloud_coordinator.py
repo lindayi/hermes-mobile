@@ -9830,6 +9830,126 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
     assert api.writes == writes
 
 
+@pytest.mark.parametrize("bare", [False, True])
+@pytest.mark.parametrize("form", ["float", "unrelated", "legacy"])
+@pytest.mark.parametrize("receipt_field", ["receipt_body", "receipt_start_head"])
+def test_owner_abandonment_first_successor_checks_receipt_like_alias(
+        tmp_path, bare, form, receipt_field):
+    api, store, _ = _owner_abandonment_case(tmp_path, bare=bare)
+    _persist_owner_abandonment_before_next_poll(api, store)
+    if form != "legacy":
+        alias = {
+            "key": "fresh-receipt-like-alias", "issue": 16.0 if form == "float" else 99,
+            "kind": "fix", "task_id": "fresh-receipt-like-task",
+            "head": "0" * 40, "status": "completed",
+            receipt_field: NEXT_RESULT_HEAD,
+        }
+        StateStore(store.path)._mutate(
+            lambda state: state["actions"].update({alias["key"]: alias}),
+        )
+    before = StateStore(store.path).snapshot()
+    posts, writes = api.task_posts, deepcopy(api.writes)
+    for _ in range(2):
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        after = StateStore(store.path).snapshot()
+        if form == "float":
+            assert api.task_posts == posts
+            assert api.writes == writes
+            assert after == before
+        else:
+            assert api.task_posts == posts + 1
+            assert after["enrollments"]["16"]["attempts"] == (
+                before["enrollments"]["16"]["attempts"] + 1
+            )
+        assert result["head"] == NEXT_RESULT_HEAD
+
+
+@pytest.mark.parametrize("field", [
+    "owner_abandonment_binding", "owner_abandonment_attestation",
+    "created_at", "owner_id", "pull_id", "receipt_version", "main_sha", "task_type",
+])
+def test_owner_abandonment_presence_conflict_survives_retirement(tmp_path, field):
+    api, store, abandoned, _, _, neutral, _, _, head, _ = (
+        _owner_abandonment_transitive_case(tmp_path)
+    )
+
+    def mutate(state):
+        proof = next(
+            proof for proof in state["enrollments"]["16"]["receipt_proofs"]
+            if proof["task_id"] == neutral["task_id"]
+        )
+        action = deepcopy(proof)
+        action["handoff_state"] = "done"
+        state["actions"][action["key"]] = action
+        proof.pop(field)
+
+    StateStore(store.path)._mutate(mutate)
+    api.review_state = api.review_sha = None
+    api.requested_reviewers = []
+    before = StateStore(store.path).snapshot()
+    action_bytes = json.dumps(before["actions"][neutral["key"]], sort_keys=True)
+    posts, writes = api.task_posts, deepcopy(api.writes)
+    for _ in range(3):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        StateStore(store.path).retire(16, head, FINAL_RESULT_HEAD)
+        after = StateStore(store.path).snapshot()
+        assert json.dumps(after["actions"].get(neutral["key"]), sort_keys=True) == action_bytes
+        assert after["actions"][abandoned["key"]] == before["actions"][abandoned["key"]]
+        for name in ("receipt_proofs", "owner_abandonments", "attempts", "neutral_attempts"):
+            assert after["enrollments"]["16"][name] == before["enrollments"]["16"][name]
+        assert api.task_posts == posts
+        assert api.writes == writes
+
+
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+@pytest.mark.parametrize("start_at", ["root", "intermediate"])
+def test_owner_abandonment_competing_start_head_survives_retirement(
+        tmp_path, publication, start_at):
+    api, store, abandoned, _, recovery, _, _, intermediate, head, _ = (
+        _owner_abandonment_transitive_case(tmp_path)
+    )
+    candidate = {
+        "key": "fresh-competing-edge", "task_id": "fresh-competing-task",
+        "issue": 16, "kind": "fix", "status": "completed", "head": "0" * 40,
+        "receipt_start_head": recovery["head_sha"] if start_at == "root" else intermediate,
+        "handoff_state": "done",
+    }
+    unrelated = {
+        "key": "unrelated-terminal-edge", "task_id": "unrelated-terminal-task",
+        "issue": 16, "kind": "fix", "status": "completed", "head": "0" * 40,
+        "receipt_start_head": "4" * 40, "handoff_state": "done",
+    }
+    StateStore(store.path)._mutate(lambda state: state["actions"].update({
+        candidate["key"]: deepcopy(candidate), unrelated["key"]: unrelated,
+    }))
+    if publication == "source":
+        api.source_failure = True
+        api.source_failure_sha = head
+    else:
+        api.review_state = api.review_sha = None
+        api.requested_reviewers = []
+    before = StateStore(store.path).snapshot()
+    candidate_bytes = json.dumps(candidate, sort_keys=True)
+    posts, writes = api.task_posts, deepcopy(api.writes)
+    for _ in range(3):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        StateStore(store.path).retire(16, head, FINAL_RESULT_HEAD)
+        after = StateStore(store.path).snapshot()
+        assert json.dumps(after["actions"].get(candidate["key"]), sort_keys=True) == candidate_bytes
+        assert unrelated["key"] not in after["actions"]
+        assert after["actions"][abandoned["key"]] == before["actions"][abandoned["key"]]
+        for field in ("receipt_proofs", "owner_abandonments", "attempts", "neutral_attempts"):
+            assert after["enrollments"]["16"][field] == before["enrollments"]["16"][field]
+        assert api.task_posts == posts
+        assert api.writes == writes
+
+
 @pytest.mark.parametrize("duplicate_by", ["key", "task-id"])
 @pytest.mark.parametrize("alias_copy", ["action", "proof"])
 def test_owner_abandonment_duplicate_projection_rejects_nested_numeric_alias(
