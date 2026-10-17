@@ -19,6 +19,8 @@ import warnings
 import anyio
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from .photo_policy import PhotoPolicy, PhotoPolicyError, PhotosDisabled
+
 
 MAX_INPUT_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
@@ -134,7 +136,7 @@ def _normalize_image(path):
 class AttachmentStore:
     def __init__(self, database, root, *, user_quota_bytes=128 * 1024 * 1024,
                  global_quota_bytes=512 * 1024 * 1024, min_free_bytes=1024 * 1024 * 1024,
-                 user_metadata_rows=None, global_metadata_rows=None):
+                 user_metadata_rows=None, global_metadata_rows=None, photos_enabled=True):
         if any(type(value) is not int or not 1 <= value <= 2**63 - 1
                for value in (user_quota_bytes, global_quota_bytes)):
             raise ValueError('Photo byte quotas must be positive signed-64-bit integers')
@@ -209,6 +211,8 @@ class AttachmentStore:
             if 'remaining' not in cursor_columns:
                 db.execute('ALTER TABLE attachment_cleanup_cursor ADD COLUMN remaining INTEGER NOT NULL DEFAULT 0')
             db.commit()
+        self.photo_policy = PhotoPolicy(self.database)
+        self.photo_policy.initialize(photos_enabled)
 
     def connect(self):
         db = sqlite3.connect(self.database, timeout=10)
@@ -344,6 +348,14 @@ class AttachmentStore:
                 if existing['state'] == 'expired':
                     raise AttachmentError(410, 'This photo upload expired; select the photo again.')
                 return dict(existing), False
+            try:
+                self.photo_policy.require_enabled(db)
+            except PhotosDisabled as exc:
+                raise AttachmentError(
+                    503, 'New photo uploads are disabled; existing photos and text runs remain available.') from exc
+            except PhotoPolicyError as exc:
+                raise AttachmentError(
+                    503, 'Photo policy is unavailable; no new photo was accepted.') from exc
             counts = db.execute('''SELECT COUNT(*),
                 COALESCE(SUM(CASE WHEN user_id=? THEN 1 ELSE 0 END),0) FROM attachments''',
                 (user['id'],)).fetchone()
