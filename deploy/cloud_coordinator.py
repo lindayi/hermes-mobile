@@ -7529,10 +7529,6 @@ class Coordinator:
                     pull_number=number, source_failure=snapshot["source_failure"],
                     reviews=snapshot["reviews"],
                 )
-        if malformed_receipt_repair_head:
-            print("receipt repair plan:", repair_scoped, needs_neutral_reconciliation,
-                  neutral_attempts, neutral_blocker, mergeability_unknown,
-                  repair, agent_busy)
         owner_abandonment_recovery = next((
             record for key, record in _valid_owner_abandonment_claims(
                 snapshot["enrollment"], actions,

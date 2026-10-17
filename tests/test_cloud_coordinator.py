@@ -434,7 +434,8 @@ def test_apply_rejects_malformed_receipt_issue_identity_in_all_forms(
         write for write in api.writes
         if write[0].endswith("/requested_reviewers")
     ] == reviewer_writes
-    assert api.task_posts == task_posts + 1
+    # Merge 7898103 accidentally weakened the 65ff49b/8360abb no-publication contract.
+    assert api.task_posts == task_posts
     after = StateStore(store.path).snapshot()
     if form != "retained":
         assert after["actions"].get(proof["key"]) == before["actions"].get(
@@ -4807,15 +4808,6 @@ def test_owner_continuation_disposition_records_missing_root_before_successor_di
     records = cloud_coordinator._valid_owner_continuation_claims(
         enrollment, state["actions"],
     )
-    print("TRACE", reopened["reasons"], [
-        (
-            cloud_coordinator._owner_continuation_matches_history(record, enrollment, state["actions"]),
-            cloud_coordinator._owner_continuation_successor_proven(
-                record, enrollment, state["actions"], api.comments, successor_head,
-            ),
-        )
-        for _, record in records
-    ])
     assert reopened["head"] == successor_head
     assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
 
