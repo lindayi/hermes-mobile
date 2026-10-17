@@ -884,6 +884,241 @@ Finite acceptance for this recovery:
   network write, and that neutral instructions, serialized synthetic carrier, and
   strict immutable receipt validation use the same one-comment contract.
 
+#### Append-only continuation disposition after supervised advancement
+
+New SOURCE successors positively bound to an `owner_continuation` disposition
+reserve one create-once owner receipt anchor before task publication. Its durable
+identity binds the disposition, action, PR identity, branch, exact head/main/base,
+attempt, nonce, and original request. Authenticate the immutable owner comment by
+complete inventory and direct readback. Uncertain POSTs are never retried; only
+authenticated readback of the original reservation can recover them. Retirement,
+restart, and re-enrollment must not renew this publication allowance.
+
+The exact outgoing task prompt names `engine-tools-reply_to_comment`, the reserved
+`commentId`, and the exact anchor body. It requires exactly one call with only the
+eight canonical v2 receipt lines, never an edit, retry, or second reply. Validate
+the existing complete bounded quote carriers before task publication and bind the
+returned task session to that exact prompt. SOURCE `ready` means the actual pushed
+result, not a neutral audit-bearing merge commit. Acceptance and retained proof
+require the same immutable owner anchor and exact bot reply envelope. For a
+SOURCE continuation proof, anchor validation is mandatory even if retained state
+omits both optional anchor fields; generic v2 receipt parsing cannot replace it.
+The observed anchor comment ID must be an exact positive integer at initial
+receipt acceptance and retained-proof validation; equal float or boolean aliases
+are not identity evidence.
+Before the first receipt is accepted, a renewed owner enrollment may authorize
+the successor result head. The committed continuation candidate can bridge that
+head change only to the existing full receipt validator; it does not itself prove
+or accept a receipt.
+An inactive close/reopen may produce a fresh exact-head enrollment with
+`authorized_head` but no `owner_authorized_head`. Admission, commit, and publication
+use `owner_authorized_head` when that field exists; only when it is absent may the
+exact `authorized_head` match the continuation's frozen current head. An explicit
+stale owner-authorized head never falls back. The historical bindings and spent
+budgets remain unchanged.
+Ordinary historical SOURCE and all neutral transport semantics remain unchanged.
+
+A positively confirmed `sent` Copilot review-request action is settled and is not
+a source writer during continuation admission. `sending`, `uncertain`, malformed
+review-request claims, source actions, and uncertain outbox publications remain
+blocking.
+
+After the final ordinary authority reads, the disposition fence authenticates the
+immutable command and enrollment, then re-reads the exact PR and main and reloads
+canonical StateStore data from disk. It validates exactly one immutable owner
+disposition for the same historical action, task, and reservation from the complete
+PR comment inventory. The reserved command must match the exact head, main, PR,
+owner, and chronology; competing owner commands for that reservation reject the
+continuation. Non-owner commands and unrelated owner chatter are not authority and
+do not count as competing dispositions. This inventory check runs at admission and
+again at publication, so commands consumed on an earlier poll are included.
+An exact pending-comment lookup only discovers its PR. For a PR with pending hints,
+fetch the complete bounded comment inventory before accepting any command; do not
+restore cached comment bytes absent from that inventory, and leave their IDs pending.
+
+After the last historical-task and successor-anchor reads, independently
+reauthenticate all three immutable owner records: the original abandonment
+command against its retained historical binding, the fresh disposition, and the
+fresh exact-head enrollment. Do not fill missing historical fields from the new
+enrollment. Admission and publication both enforce this finite last-read fence.
+Then read the final pull and main. The final pull must have `draft` exactly
+`false`; absent or malformed values reject admission and publication.
+
+The fence compares the complete affected enrollment, historical reservation,
+continuation list, same-PR action claims, and outbox claims using canonical
+type-preserving JSON. SOURCE anchor inventory and direct readback remain mandatory.
+A continuation record must match the active enrollment's frozen comment ID, head,
+base, owner-authorized head, and immutable pull/repository identity. Every member
+of a multi-root cohort must carry that same enrollment-comment ID; close/reopen
+cannot combine records from different enrollment epochs or renew a spent allowance.
+Newly planned dispositions for one PR form one admission unit. If any member's
+final fence fails, defer every newly planned disposition for that PR, remove all
+their processed IDs and staged continuation records, and suppress dependent
+publication plans together. Preserve previously committed history and claims, and
+continue independent reconciliation for other PRs.
+After the final historical-task reads, reauthenticate every disposition, original
+abandonment command, and enrollment in that planned cohort. An earlier member
+changing while a later member is read must defer the whole cohort before event
+consumption or publication.
+A positively confirmed ancestry mismatch rejects the affected PR's continuation.
+An API failure during either initial ancestry comparison is unavailable evidence,
+not a mismatch; leave the immutable disposition unconsumed for a later poll. If
+durable state changed during preparation, discard both the prepared mutations and
+all dependent scan plans, then rebuild the complete scan once from fresh durable
+state.
+Quarantine the failed continuation's PR for the rest of that poll: do not consume
+its commands, reconcile its claims, publish, or apply stale observations to it.
+Across a prepared-state conflict, carry only positively identified unconsumed command
+IDs; candidates include existing pending IDs and command IDs processed by the failed
+scan. New candidates must be unconsumed at the preparation baseline. Previously
+carried IDs remain eligible unless current durable state explicitly records their
+consumption; a newer watermark alone does not consume them. A continuation-fence
+conflict carries all baseline pending IDs, including other PRs, discarded processed
+IDs, existing retry exceptions, and every disposition ID in the failing cohort.
+Every retry ID must be a canonical positive signed-64-bit integer. The retry list
+is bounded and overflow fails closed. Do not carry authority or publication plans.
+After the first conflict, reload and persist carried IDs as pending under the
+StateStore writer lock before making any network request in the rebuilt scan.
+Reauthenticate receipts, source authority, commands, and
+lifecycle evidence during the rebuild. Compare the durable preparation baseline using
+type-exact canonical JSON again under the commit lock. Before propagating a second
+conflict, reload fresh durable state under the writer lock and atomically preserve
+only bounded retryable IDs, excluding explicit event or disposition consumption.
+Capacity or validation failure leaves that fresh state unchanged. Never replace
+newer progress, proofs, actions, attempts, or cursor with discarded preparation.
+A second conflict stops the run without committing stale prepared state. This retry is allowed only before scan
+commit and external publication; it never replays an unknown external write.
+
+Immediately before a continuation task POST, the coordinator acquires the existing
+StateStore write lock, reloads and compares the fenced affected-state projection,
+revalidates active exact-enrollment identity and writer occupancy, and validates
+the exact successor claim, continuation, and anchor. The projection is scoped to
+the affected PR, so unrelated PR state changes do not block publication. The lock
+is held through the POST. This prevents stale affected local authority from being
+published or overwritten while the request is in flight. GitHub offers no
+transaction spanning the final pull/main reads and task POST, so a remote change
+after those reads remains an unavoidable race; these checks do not claim remote
+atomicity.
+
+Neutral continuation successors use the existing neutral anchor, role, and
+receipt instruction at both the outer fence and locked publisher. SOURCE
+continuations keep their distinct SOURCE contract. Neither path renews an
+anchor publication allowance or the source/neutral lifetime counters.
+
+The multiple-root contract is a direct, frozen cohort, not transitive acceptance.
+Each distinct historical action retains its original reservation, task, command,
+uncertainty, and separately authenticated disposition. A single successor may
+serve those dispositions only when its reservation explicitly binds each one at
+the same exact enrolled head, main, PR, and branch. Authenticate every member's
+own original command and latest task detail before publication, including
+non-selected roots whose inventory rows still report completion. Missing,
+ambiguous, changed, or active roots block the cohort. Never substitute one root's
+authority for another or consume a disposition outside that frozen cohort.
+Do not commit or journal new dispositions while a required historical root lacks
+its own valid disposition. Read the complete bounded comment inventory for
+retained abandoned claims, so a deferred immutable command does not fall outside
+the ordinary polling cursor before the other disposition arrives. Independently of
+the issue-update cursor, discover active enrolled PRs with retained valid
+abandonment claims by reading their exact issue and pull identities; discovery is
+bounded to 100 claims per poll. Closed or non-PR issues are not eligible, and
+malformed identities, incomplete inventories, and API failures fail closed.
+Preparation conflicts preserve unconsumed command IDs in the bounded pending-ID
+list. On later polls, retrieve each ID through the exact issue-comment endpoint,
+independent of both issue and comment update cursors. Accept the returned comment
+only when its integer ID matches, its issue URL is the exact canonical URL in this
+repository, and a fresh open issue response links to the exact canonical pull URL.
+The ID is only a discovery hint; existing owner, body, edit, head, and identity
+checks remain authoritative. Each ID causes at most one exact comment lookup per
+poll; the scan reuses an issue already in its authenticated inventory and performs
+at most one issue lookup per missing PR, caching 404, closed, and non-PR results
+only for that scan. A 404 remains retryable, temporary API errors abort the scan
+without consuming the ID, and malformed or mismatched responses fail closed.
+The later comment inventory takes precedence over pending lookup hints; append
+only absent IDs after validating inventory identities, including duplicates.
+These IDs remain retryable even if the consumed-event watermark advances past them;
+overflow aborts the scan before cursor or event state commits. Pending IDs do not
+waive immutable owner-command revalidation and are removed only when consumed.
+Edited or deleted pending commands cannot authorize a continuation.
+One task and one receipt anchor spend one source or neutral lifetime attempt;
+each included disposition permanently spends its one-successor allowance.
+Only that task's authentic immutable ready receipt can directly satisfy the
+included roots. Restart, compaction, and inactive close/reopen must preserve
+all per-root bindings and spent allowances. A retained authenticated same-head
+successor proof prevents later ordinary work from rebinding a spent disposition.
+Malformed retained evidence remains blocked, not a fresh allowance.
+
+A SOURCE or neutral successor cannot combine an ordinary
+`owner_abandonment_intent` with an `owner_continuation_intent`. If a planned
+successor would carry both, defer every new disposition for that PR before scan
+commit or receipt-anchor publication, retain the immutable command IDs as pending,
+and suppress that PR's dependent publication plans for the poll. Preserve unrelated
+accepted scan progress and all existing claims, receipts, counters, and budgets.
+This is a source-safety boundary only; it does not prove an operational recovery
+path for such a mixed cohort. Combined abandonment and continuation successors
+remain unsupported.
+
+An existing owner-abandonment record whose recovery head no longer equals the
+current PR head cannot be rebound by replaying its original command or by ordinary
+re-enrollment. The only supported exception is this finite, append-only owner
+disposition, consumed after the owner has disclosed and supervised the source
+advancement:
+
+```
+/hermes continue-unverified <abandonment-comment-id> <task-id> <reservation-sha256> <current-head-sha> <current-main-sha>
+```
+
+The command is one immutable owner comment on the same PR issue. Its positive
+decimal comment ID, task ID, and lowercase digests are exact values, not aliases.
+It refers to exactly one already-persisted abandonment by that record's original
+command-comment ID, task ID, and digest of the complete original reservation.
+Those historical values must be verified from the original command, reservation,
+and task evidence; later enrollment or task evidence must never fill a missing
+historical identity.
+
+Accept the disposition only for the same numeric issue and repository, pull request
+REST and node IDs, head repository and branch, and a fresh active exact-head owner
+enrollment. The command's head and main must match the live PR head and base, the
+fresh enrollment, and the freshly observed main. Complete task inventory and task
+detail, session and artifact identity, original prompt and reservation, immutable
+original command, and positive latest terminality must all be revalidated. Require
+complete pagination and writer occupancy, no other active writer for the PR, and
+positive ancestry from the historical recovery head to the current head and from
+the historical base to the current main. Any uncertain publication, incomplete
+read, identity mismatch, ambiguous or competing disposition, or post-plan change
+rejects the affected write.
+When a fresh enrollment and disposition are discovered in one poll, the admission
+candidate carries forward retained receipt proofs, abandonment records, and
+continuation records before cohort validation; scan commit is not the first point
+at which the validator may see that history.
+
+A temporary or uncertain task-detail API failure is not a positive rejection.
+Do not consume its disposition comment ID; retry the original immutable command
+from the complete bounded comment inventory on a later or cold poll. A definitive
+missing-task response and positively invalid, stale, edited, or ambiguous evidence
+remain fail-closed and cannot authorize dispatch.
+
+Persist a bounded record separately from the historical abandonment records. The
+record binds the exact historical action and abandonment, immutable disposition
+comment, current enrollment comment, current head and main, pull identity, and
+acceptance time. It is append-only, unique for both the abandoned action and
+disposition comment, and may authorize at most one distinct successor reservation.
+The successor uses existing per-PR execution locks and lifetime accounting. This
+authorization does not accept either task's result, create a ready receipt, grant
+source provenance, qualify review, or authorize merge. A source or review-followup
+successor must provide an authenticated immutable ready receipt through the new
+single-publication SOURCE owner anchor; a neutral successor must use the existing
+single-publication neutral owner receipt anchor.
+Only that ready receipt can authorize later source or review advancement. The
+disposition command is not itself a receipt or anchor. Preserve the original
+abandonment, command, receipt bytes or absence, uncertainty, action reservation,
+attempts, and spent budgets.
+
+The disposition command is not accepted by the automatic enrollment or abandonment
+anchors. A repeat, edit, deletion, competing command, close/reopen, or cold restart
+must not create another disposition, successor task, anchor, command, reservation,
+or budget renewal. It does not change the legacy parser, manual qualification,
+review protection, production ledger, or deployment contract.
+
 Live REST pull numbers, pull IDs, and head/base repository IDs must be positive
 integers at collection and every dispatch, ready/review handoff, and merge fence;
 booleans, floats, strings, and missing values are not identity proof.
@@ -935,6 +1170,21 @@ progress evidence only and never grants review approval, merge eligibility, or
 deployment authority. Task state, agent prose, a
 changed SHA, code churn, unrelated green checks, elapsed time, changed issue text,
 cosmetic wording, or new review IDs alone cannot count as progress.
+
+For an owner-continuation successor, the historical dispatch head need not itself be
+authorized when the exact continuation record, historical action, successor binding,
+and immutable ready receipt are valid and the receipt result is the current
+authorized head. A later descendant remains connected only through an unbroken chain
+of valid ready receipts from that bound successor; a blocked or disconnected result
+cannot release the abandoned reservation or advance progress. Recheck this chain
+after compaction and restart before releasing historical occupancy or requesting
+review.
+
+Prove this reachability from the matching direct successor receipt results. Global
+authorization from a later owner enrollment, another continuation, or another
+receipt root does not connect a head to this successor. Every traversed receipt must
+be valid and `ready`; do not traverse a blocked intermediate. Accept any valid ready
+path rooted at the matching successor, without requiring a single linear history.
 
 Evidence collection is independent of dispatch caps and usable repair prose.
 An unresolved thread with missing comments is not an empty inventory. Historical

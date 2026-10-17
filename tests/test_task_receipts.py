@@ -710,6 +710,55 @@ def test_receipt_only_provider_carrier_validates_and_survives_proof_recheck():
     assert _valid_receipt_proof(record, comments)
 
 
+@pytest.mark.parametrize(
+    ("anchor_id", "observed_id"),
+    [(7001, 7001.0), (1, True)],
+    ids=["float-alias", "boolean-alias"],
+)
+def test_source_receipt_anchor_requires_exact_observed_integer_id(
+        anchor_id, observed_id):
+    task, action, pull, comments = v2_binding()
+    anchor_body = "hermes-coordinator-source-receipt:" + "c" * 20
+    anchor_created_at = "2026-10-01T12:00:30Z"
+    action.update(
+        kind="fix", task_type="source", main_sha=BASE,
+        receipt_anchor_comment_id=anchor_id,
+        receipt_anchor_body=anchor_body,
+        receipt_anchor_role="continuation-source",
+        receipt_anchor_created_at=anchor_created_at,
+        task_request_body="Source continuation request.",
+        owner_continuation_binding={
+            "version": 1, "current_head_sha": START_HEAD,
+            "current_main_sha": BASE, "pull_id": pull["id"],
+            "pull_node_id": pull["node_id"], "head_ref": "topic",
+        },
+    )
+    instruction = receipt_instruction(
+        NONCE, pull_number=16, start_head=START_HEAD, base_sha=BASE,
+        anchor_comment_id=anchor_id, anchor_body=anchor_body,
+    )
+    action["body"] = f"{action['task_request_body']}\n\n{instruction}"
+    task["sessions"][0]["prompt"] = action["body"]
+    comments[0]["body"] = (
+        f"\n> {anchor_body}\n\n"
+        + receipt_body().replace("Hermes-Task-Receipt: v1", "Hermes-Task-Receipt: v2")
+        .replace(f"task={TASK_ID}\n", "")
+    )
+    anchor = {
+        "id": anchor_id, "user": {"id": action["owner_id"]},
+        "body": anchor_body, "created_at": anchor_created_at,
+        "updated_at": anchor_created_at,
+        "issue_url": "https://api.github.com/repos/lindayi/hermes-mobile/issues/16",
+    }
+    comments.append(anchor)
+
+    assert validate_task_receipt(task, action, pull, comments, now=NOW)
+
+    anchor["id"] = observed_id
+    with pytest.raises(ReceiptError):
+        validate_task_receipt(task, action, pull, comments, now=NOW)
+
+
 def test_historical_neutral_instruction_remains_exact_for_saved_prompts():
     from deploy.task_receipts import _historical_neutral_receipt_instruction
 

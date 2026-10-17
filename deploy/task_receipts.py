@@ -75,7 +75,7 @@ def _receipt_instruction(nonce, *, pull_number, start_head, base_sha,
 
 def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=False,
                         anchor_comment_id=None, anchor_body=None):
-    if neutral and (anchor_comment_id is not None or anchor_body is not None):
+    if anchor_comment_id is not None or anchor_body is not None:
         if (type(anchor_comment_id) is not int
                 or not 0 < anchor_comment_id <= 2**63 - 1
                 or not _neutral_anchor_body_valid(anchor_body)):
@@ -132,7 +132,7 @@ def receipt_instruction(nonce, *, pull_number, start_head, base_sha, neutral=Fal
         nonce, pull_number=pull_number, start_head=start_head, base_sha=base_sha,
         posting_instruction=posting_instruction, neutral=neutral,
     )
-    if neutral and anchor_comment_id is not None:
+    if anchor_comment_id is not None:
         payload = (
             f"{V2_RECEIPT_HEADER}\nnonce={nonce}\npr={pull_number}\n"
             f"start_head={start_head}\nbase={base_sha}\n"
@@ -175,6 +175,60 @@ def _neutral_receipt_body_matches(body, anchor_body):
                    for prefix in _neutral_receipt_prefixes(anchor_body))
     except ReceiptError:
         return False
+
+
+def source_receipt_anchor_valid(action, comments):
+    """Authenticate the immutable anchor retained by a continuation SOURCE claim."""
+    anchor_id = action.get("receipt_anchor_comment_id")
+    body = action.get("receipt_anchor_body")
+    if (action.get("receipt_anchor_role") != "continuation-source"
+            or action.get("task_type") not in {None, "source", "review-followup"}
+            or not isinstance(action.get("owner_continuation_binding"), dict)
+            or action["owner_continuation_binding"].get("version") != 1
+            or type(anchor_id) is not int or not 0 < anchor_id <= 2**63 - 1
+            or not _neutral_anchor_body_valid(body)
+            or not isinstance(comments, list)):
+        return False
+    binding = action["owner_continuation_binding"]
+    if any(binding.get(field) != action.get(target) for field, target in (
+        ("current_head_sha", "head"), ("current_main_sha", "main_sha"),
+        ("pull_id", "pull_id"), ("pull_node_id", "pull_node_id"),
+        ("head_ref", "head_ref"),
+    )):
+        return False
+    try:
+        _time(action.get("receipt_anchor_created_at"))
+        instruction = receipt_instruction(
+            action.get("dispatch_nonce"), pull_number=action.get("issue"),
+            start_head=action.get("head"), base_sha=action.get("main_sha"),
+            anchor_comment_id=anchor_id, anchor_body=body,
+        )
+    except (ReceiptError, TypeError, ValueError):
+        return False
+    if (not isinstance(action.get("task_request_body"), str)
+            or action.get("body") != f"{action['task_request_body']}\n\n{instruction}"):
+        return False
+    matches = [
+        comment for comment in comments
+        if isinstance(comment, dict) and type(comment.get("id")) is int and (
+            comment.get("id") == anchor_id
+            or isinstance(comment.get("body"), str) and body in comment["body"]
+            and _identity(comment.get("user"), action.get("owner_id"))
+        )
+    ]
+    if len(matches) != 1:
+        return False
+    anchor = matches[0]
+    return (
+        type(anchor.get("id")) is int
+        and anchor.get("id") == anchor_id
+        and _identity(anchor.get("user"), action.get("owner_id"))
+        and anchor.get("body") == body
+        and anchor.get("created_at") == action.get("receipt_anchor_created_at")
+        and anchor.get("updated_at") == action.get("receipt_anchor_created_at")
+        and anchor.get("issue_url")
+            == f"https://api.github.com/repos/lindayi/hermes-mobile/issues/{action.get('issue')}"
+    )
 
 
 def _anchored_neutral_receipt_instruction_v1(nonce, *, pull_number, start_head,
@@ -834,11 +888,19 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     if len(matches) != 1:
         raise ReceiptError("Task nonce does not identify exactly one returned session")
     session = matches[0]
-    anchored_neutral = (
+    source_continuation = (
+        action.get("task_type") != "neutral"
+        and (
+            "owner_continuation_binding" in action
+            or "owner_continuation_companions" in action
+        )
+    )
+    anchored = source_continuation or (
         "receipt_anchor_comment_id" in action
         or "receipt_anchor_body" in action
     )
-    if anchored_neutral:
+    anchored_neutral = anchored and action.get("task_type") == "neutral"
+    if anchored:
         anchor_bindings = {
             "pull_number": action.get("issue"), "start_head": action.get("head"),
             "base_sha": action.get("main_sha"),
@@ -846,17 +908,20 @@ def validate_task_receipt(task, action, pull, comments, *, now):
             "anchor_body": action.get("receipt_anchor_body"),
         }
         anchor_instructions = (
-            receipt_instruction(nonce, neutral=True, **anchor_bindings),
-            _anchored_neutral_receipt_instruction_v1(nonce, **anchor_bindings),
+            (receipt_instruction(nonce, neutral=True, **anchor_bindings),
+             _anchored_neutral_receipt_instruction_v1(nonce, **anchor_bindings))
+            if anchored_neutral else (
+                receipt_instruction(nonce, **anchor_bindings),
+            )
         )
-        if (action.get("task_type") != "neutral"
+        if ((not anchored_neutral and not source_receipt_anchor_valid(action, comments))
                 or not isinstance(action.get("body"), str)
                 or session.get("prompt") != action.get("body")
                 or not any(action["body"].endswith(f"\n\n{instruction}")
                            for instruction in anchor_instructions)):
             raise ReceiptError("Neutral receipt anchor prompt is not exactly bound")
     legacy_neutral = (
-        not anchored_neutral and len(sessions) == 1
+        not anchored and len(sessions) == 1
         and _legacy_neutral_prompt_matches(action, session)
     )
     task_updated = _time(task.get("updated_at"))
@@ -882,7 +947,7 @@ def validate_task_receipt(task, action, pull, comments, *, now):
     )
     if receipt is None:
         return None
-    if anchored_neutral:
+    if anchored:
         anchor_id = action["receipt_anchor_comment_id"]
         anchor_body = action["receipt_anchor_body"]
         if (receipt["comment_id"] == anchor_id
