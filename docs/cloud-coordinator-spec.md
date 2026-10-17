@@ -840,6 +840,11 @@ Repeated polls do not replay either write.
 Malformed retained `receipt_proofs` that are not lists deny owner-abandonment head
 authority for that PR without aborting unrelated PR work. An empty list and valid
 legacy proofs retain their existing meanings.
+Legacy receipt actions may omit their embedded `key`; an omitted key remains
+distinct from an explicit null, malformed, or mismatched key. Conflicting receipt
+representations cannot erase a separately authenticated `policy_broken` proof:
+its result head stays blocked, and conflicting ready records do not restore source
+or reviewer publication authority.
 
 A same-head ready receipt is still a valid direct continuation, but it cannot hide a
 cycle in a later edge. At the abandonment root, one bound `A -> A` receipt may be

@@ -790,6 +790,155 @@ def test_apply_rejects_conflicting_live_projection_of_retained_receipt(
     ]["16"]["attempts"]
 
 
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+@pytest.mark.parametrize("representation", ["retained-retained", "retained-live"])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("separate_owner_head", [False, True])
+def test_conflicting_receipt_cannot_erase_authenticated_blocker(
+        tmp_path, publication, representation, reverse, separate_owner_head):
+    api, store, proof, result_head = _accepted_compacted_receipt_case(tmp_path)
+    blocker = deepcopy(proof)
+    blocker.update(
+        head=result_head,
+        receipt_result="policy_broken",
+        receipt_start_head=result_head,
+        receipt_head=result_head,
+        receipt_body=blocker["receipt_body"].replace(
+            f"start_head={proof['receipt_start_head']}",
+            f"start_head={result_head}",
+        ).replace("result=ready", "result=policy_broken"),
+    )
+    duplicate = deepcopy(proof)
+    duplicate_task = "conflicting-ready-task"
+    duplicate_nonce = "conflicting-ready-nonce"
+    duplicate_session = "session-conflicting-ready"
+    duplicate_comment_id = proof["receipt_comment_id"] + 1
+    duplicate.update(
+        head=result_head,
+        task_id=duplicate_task,
+        dispatch_nonce=duplicate_nonce,
+        receipt_task_id=duplicate_task,
+        receipt_session_id=duplicate_session,
+        receipt_nonce=duplicate_nonce,
+        receipt_start_head=result_head,
+        receipt_head=result_head,
+        receipt_result="ready",
+        receipt_comment_id=duplicate_comment_id,
+        receipt_body=proof["receipt_body"].replace(
+            f"nonce={proof['dispatch_nonce']}", f"nonce={duplicate_nonce}",
+        ).replace(
+            f"task={proof['task_id']}", f"task={duplicate_task}",
+        ).replace(
+            f"session={proof['receipt_session_id']}",
+            f"session={duplicate_session}",
+        ).replace(
+            f"start_head={proof['receipt_start_head']}",
+            f"start_head={result_head}",
+        ),
+    )
+    blocker_comment = next(
+        comment for comment in api.comments
+        if comment.get("id") == proof["receipt_comment_id"]
+    )
+    blocker_comment.update(
+        body=blocker["receipt_body"],
+        updated_at=blocker["receipt_created_at"],
+    )
+    api.comments.append({
+        **deepcopy(blocker_comment),
+        "id": duplicate_comment_id,
+        "body": duplicate["receipt_body"],
+    })
+    assert cloud_coordinator._valid_receipt_proof(blocker, api.comments)
+    assert cloud_coordinator._valid_receipt_proof(duplicate, api.comments)
+
+    def install(state):
+        enrollment = state["enrollments"]["16"]
+        enrollment["authorized_head"] = (
+            HEAD if separate_owner_head else result_head
+        )
+        if separate_owner_head:
+            enrollment["owner_authorized_head"] = result_head
+        else:
+            enrollment.pop("owner_authorized_head", None)
+        enrollment["receipt_proofs"] = (
+            [blocker, duplicate] if representation == "retained-retained"
+            else [blocker]
+        )
+        if reverse and representation == "retained-retained":
+            enrollment["receipt_proofs"].reverse()
+        if representation == "retained-live":
+            state["actions"][proof["key"]] = duplicate
+
+    store._mutate(install)
+    api.review_state = api.review_sha = None
+    api.requested_reviewers = []
+    if publication == "source":
+        api.source_failure = True
+        api.source_failure_sha = result_head
+    else:
+        api.source_failure = False
+        api.source_failure_sha = None
+    before_state = store.snapshot()
+    before_writes = deepcopy(api.writes)
+    before_posts = api.task_posts
+
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856540,
+    )
+    coordinator.run(apply=True)
+
+    assert not [
+        write for write in api.writes[len(before_writes):]
+        if write[0].endswith("/requested_reviewers")
+    ]
+    assert api.task_posts == before_posts
+    assert not coordinator._authorized_dispatch_head(16, result_head, BASE)
+    after_state = StateStore(store.path).snapshot()
+    after = after_state["enrollments"]["16"]
+    expected_proofs = (
+        [blocker, duplicate] if representation == "retained-retained"
+        else [blocker]
+    )
+    if reverse and representation == "retained-retained":
+        expected_proofs.reverse()
+    assert after["authorized_head"] == (HEAD if separate_owner_head else result_head)
+    assert after.get("owner_authorized_head") == (
+        result_head if separate_owner_head else None
+    )
+    assert after["receipt_proofs"] == expected_proofs
+    assert after_state["actions"] == before_state["actions"]
+    for field in (
+            "attempts", "neutral_attempts", "owner_abandonments",
+            "receipt_proofs", "authorized_head", "owner_authorized_head"):
+        assert after.get(field) == before_state["enrollments"]["16"].get(field)
+    assert after_state["lifecycle_events"] == before_state["lifecycle_events"]
+
+
+@pytest.mark.parametrize("embedded_key", ["absent", "null", "wrong"])
+def test_legacy_receipt_key_omission_is_distinct_from_malformed_key(
+        tmp_path, embedded_key):
+    api, _, proof, result_head = _accepted_compacted_receipt_case(tmp_path)
+    candidate = deepcopy(proof)
+    candidate.pop("key")
+    if embedded_key == "null":
+        candidate["key"] = None
+    elif embedded_key == "wrong":
+        candidate["key"] = "wrong-receipt-key"
+    action_key = "legacy-receipt" if embedded_key == "absent" else proof["key"]
+
+    initial, authorized, _ = _authorized_result_heads(
+        16,
+        {"issue": 16, "authorized_head": HEAD, "receipt_proofs": []},
+        {action_key: candidate},
+        api.comments,
+        BASE,
+    )
+
+    assert initial == HEAD
+    assert (result_head in authorized) is (embedded_key == "absent")
+
+
 def test_sha_bound_enrollment_rejects_unproven_or_unrelated_result_heads(tmp_path):
     api = FakeApi(unresolved=True)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"

@@ -4022,8 +4022,11 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
         if not linked_keys and not linked_tasks and not (
                 receipt_like and (exact_issue or aliases_issue)):
             continue
-        if (not exact_issue or not isinstance(candidate_key, str)
-                or candidate_key != key or not isinstance(task_id, str) or not task_id):
+        if (not exact_issue
+                or ("key" in candidate and (
+                    not isinstance(candidate_key, str) or candidate_key != key
+                ))
+                or not isinstance(task_id, str) or not task_id):
             return initial, set(), set()
         matching_proofs = {
             id(proof): proof for proof in [
@@ -4056,9 +4059,18 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
         if receipt_like and _valid_receipt_proof(candidate, comments):
             live_records.append(candidate)
 
+    retained_blockers = [
+        proof for proof in proof_records
+        if proof.get("receipt_result") != "ready"
+        and _valid_receipt_proof(proof, comments)
+    ]
     live_by_key, live_by_task = {}, {}
     for candidate in live_records:
-        live_by_key.setdefault(candidate["key"], []).append(candidate)
+        receipt_key = (
+            candidate["key"] if "key" in candidate
+            else ("legacy-task", candidate["task_id"])
+        )
+        live_by_key.setdefault(receipt_key, []).append(candidate)
         live_by_task.setdefault(candidate["task_id"], []).append(candidate)
     for key, records in live_by_key.items():
         canonical = _canonical_receipt_json(_receipt_projection(records[0]))
@@ -4069,13 +4081,21 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
             invalid_task_ids.update(record["task_id"] for record in records)
     for task_id, records in live_by_task.items():
         canonical = _canonical_receipt_json(_receipt_projection(records[0]))
-        if (len({record["key"] for record in records}) != 1
+        if (len({
+                record["key"] if "key" in record
+                else ("legacy-task", record["task_id"])
+                for record in records
+        }) != 1
                 or canonical is None or any(
                     _canonical_receipt_json(_receipt_projection(record)) != canonical
                     for record in records[1:]
                 )):
             invalid_task_ids.add(task_id)
-            invalid_proof_keys.update(record["key"] for record in records)
+            invalid_proof_keys.update(
+                record["key"] if "key" in record
+                else ("legacy-task", record["task_id"])
+                for record in records
+            )
 
     candidates_by_key = {
         key: records[0] for key, records in proofs_by_key.items()
@@ -4098,7 +4118,7 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     ]
     while True:
         changed = False
-        for action in candidates:
+        for action in [*candidates, *retained_blockers]:
             start_head = action.get("receipt_start_head")
             if (start_head not in authorized and not any(
                     recovery["head_sha"] == start_head
