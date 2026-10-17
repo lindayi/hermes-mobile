@@ -259,6 +259,14 @@ _ISSUE85_PHOTO_FIXTURE = {
     'requirements.lock': 'ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04',
 }
 
+_ISSUE98_PHOTO_POLICY_FIXTURE = {
+    'backend/app.py': 'a78f48ce835121cd6b156881074fa25ff330c37f2b0f6ae264f2437404144069',
+    'backend/attachments.py': '1b19e101a6db20dc0e2b8fe4a1604c772c7ed8b0a27a94282bf60c2428d8165b',
+    'backend/orchestration.py': 'baa7959b56277348f2ac34f8c537509369520e9639c47b999b9c135f0cbfc4b8',
+    'backend/photo_policy.py': 'a4a4524ef7786e8cae5a284024b84f6231b65465d9610b8e10545960a4e92a4e',
+    'backend/runs.py': 'be188d9897ff925fc55677881b380bba5f97f3c5d6b3ae3d6e7faca72c3d8464',
+}
+
 
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _ISSUE52_MERGED_MAIN_BASE_FIXTURE
@@ -272,6 +280,7 @@ def _source_files():
             | _ISSUE79_REVIEW_RECOVERY_FIXTURE | _ISSUE83_INITIAL_REVIEW_FIXTURE
             | _ISSUE85_PHOTO_FIXTURE | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
             | _ISSUE92_COPILOT_REVIEW_FIXTURE | _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE
+            | _ISSUE98_PHOTO_POLICY_FIXTURE
             | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
             | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
             | _ISSUE106_REVIEW_SUMMARY_FIXTURE
@@ -687,6 +696,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_PENDING_ISSUE77_CLARIFICATION_FIXTURE)
     pending |= set(_ISSUE83_INITIAL_REVIEW_FIXTURE)
     pending |= set(_ISSUE85_PHOTO_FIXTURE)
+    pending |= set(_ISSUE98_PHOTO_POLICY_FIXTURE)
     pending |= set(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
@@ -779,9 +789,11 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     } == {
         path: digest for path, digest in (
             _PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
+            | _ISSUE98_PHOTO_POLICY_FIXTURE
         ).items() if path in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
     }
-    for path, digest in (_PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE).items():
+    for path, digest in (_PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
+                         | _ISSUE98_PHOTO_POLICY_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
@@ -985,7 +997,7 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
         'backend/hermes_client.py', 'backend/jobs.py', 'backend/model_controls.py',
         'backend/native_catalog.py', 'backend/native_run_controls.py', 'backend/notification_policy.py',
         'backend/notifications.py', 'backend/operational_notifications.py',
-        'backend/orchestration.py', 'backend/profiles.py', 'backend/public_commentary.py',
+        'backend/orchestration.py', 'backend/photo_policy.py', 'backend/profiles.py', 'backend/public_commentary.py',
         'backend/request_notifications.py', 'backend/runs.py', 'backend/runtime_binding.py',
         'backend/runtime_notice_presentation.py', 'backend/session_deletion.py',
         'backend/session_telemetry.py', 'backend/session_visibility.py',
@@ -1001,7 +1013,7 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
     }
     starter_bridge = {'deploy/issue_starter.py'}
     assert closure == shared | coordinator | starter_bridge
-    assert len(closure) == 41
+    assert len(closure) == 42
     assert closure <= set(REQUIRED_FILES)
     assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in coordinator)
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract' for path in shared)

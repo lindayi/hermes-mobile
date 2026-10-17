@@ -273,19 +273,52 @@ owner/profile/Session binding. Staging cleanup is bounded and cannot follow
 symlinks or delete outside the attachment root.
 
 Storage and metadata changes are additive. Text-only requests and legacy
-history remain readable. The application configuration field `photos_enabled`
-provides a runtime photo-only disable switch: `false` rejects new uploads and new
-photo-bearing runs, while retaining text runs, retries of already admitted photo
-runs, authenticated reads, metadata, and normal cleanup. Its behavior is covered
-by synthetic route/browser tests.
+history remain readable. The private `photos_enabled` configuration value seeds
+the durable `photo_admission_policy` row in `runs.sqlite` only when that policy
+does not exist. The running bridge reads this row for each new upload reservation
+and photo-bearing run admission. Each check shares the SQLite writer lock with
+its admission, so an operator change is ordered against new work. A request
+already admitted before disable may finish. Existing run retries, authenticated
+reads, metadata, and normal cleanup remain available while disabled.
 
-This PR does not implement a guarded operator command to change that field in
-production. A verified activation and disable/re-enable procedure remains an
-operational acceptance prerequisite under issue #85, not a completed rollback
-path. Do not edit live configuration or immutable releases to work around that
-missing procedure. A rollback to pre-photo code does not preserve photo reads or
-cleanup and is not retention-safe. Source merge runs CI only; it does not activate
-photos or discharge these operational gates. Production, real accounts, private
+Run the supported operator commands as the owner of the private config and state
+directory. The owner shell does not inherit the service environment. Bind the
+active release source, application virtualenv, and live config explicitly before
+any status or mutation command. These paths match `deploy/hermes-mobile.service`
+and the `deploy/self_deploy.py` working-directory drop-in. Do not run from a
+checkout or use the shell's default Python:
+
+```sh
+(
+set -eu
+cd /home/lindayi/.local/share/hermes-mobile-deploy/current
+export HERMES_MOBILE_CONFIG=/home/lindayi/.local/share/hermes-mobile-live/config.json
+unset PYTHONPATH PYTHONHOME
+PYTHON=/home/lindayi/projects/hermes-mobile/.venv/bin/python
+"$PYTHON" -B -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
+"$PYTHON" -B -m backend.manage photo-disable --config "$HERMES_MOBILE_CONFIG" --confirm
+"$PYTHON" -B -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
+"$PYTHON" -B -m backend.manage photo-enable --config "$HERMES_MOBILE_CONFIG" --confirm
+"$PYTHON" -B -m backend.manage photo-status --config "$HERMES_MOBILE_CONFIG"
+)
+```
+
+Status is read-only. Its `photos_enabled`, `persisted`, and `live` values come
+from the same durable policy used by the running bridge. Disable rejects new
+uploads and new photo-bearing runs with the existing typed response. It does not
+stop admitted runs, text runs, retries, reads, metadata, or cleanup. Enable
+restores new photo admission without removing or rewriting stored photos. Every
+mutation requires `--confirm` and reports a database readback. If a command
+reports an uncertain write or cannot read back its result, run status before
+deciding whether to retry; never repeat an unconfirmed mutation blindly.
+
+The operator rejects symlinked paths, multiply hard-linked regular config or
+database files, non-private paths, wrong ownership, and malformed policy data.
+It does not edit configuration, change native services, restart the bridge, or
+touch photo files. A pre-photo
+code rollback still does not preserve photo reads or cleanup and is not
+retention-safe. This source procedure does not activate photos or complete the
+operational acceptance under issue #85. Production, real accounts, private
 photos, and real model calls are never test fixtures.
 
 ## Review-thread recovery boundaries

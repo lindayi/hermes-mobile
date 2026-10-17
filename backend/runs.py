@@ -238,7 +238,8 @@ class RunJournal:
             (run_id,))]
 
     def submit(self, user_id, profile, session_id, text, key, *, history_anchor=None, selection=None,
-               conversation_roots=None, attachment_ids=(), attachment_store=None):
+               conversation_roots=None, attachment_ids=(), attachment_store=None,
+               admission_guard=None):
         with closing(self.connect()) as c, c:
             c.execute('BEGIN IMMEDIATE')
             if c.execute('SELECT 1 FROM deployment_gate').fetchone():
@@ -260,6 +261,8 @@ class RunJournal:
                 if saved_attachments:
                     extra['attachment_ids'] = saved_attachments
                 return dict(row, **extra), False
+            if attachment_ids and admission_guard is not None:
+                admission_guard(c)
             if c.execute("SELECT 1 FROM runs WHERE profile=? AND session_id=? AND status IN ('queued','running','stopping','waiting_for_approval','waiting_for_clarification','unknown')", (profile,session_id)).fetchone():
                 raise RunConflict('Session has an active or unresolved run')
             # Match the dedicated native listener's bounded capacity. Unknown
