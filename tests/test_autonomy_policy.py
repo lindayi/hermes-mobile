@@ -253,7 +253,7 @@ _ISSUE111_OWNER_CONTINUATION_FIXTURE = {
 }
 
 _ISSUE108_PR109_PR112_MERGED_FIXTURE = {
-    'deploy/cloud_coordinator.py': '0de309b2c3b77c02ef42183f0d6de9c212de7ef79bc777e11e74a245bbce1c2d',
+    'deploy/cloud_coordinator.py': '5bf9be294a6f3d846e8909731a9f86c57b1058ec8660c39f95a95ab8cfe9ee36',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {

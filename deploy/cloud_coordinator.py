@@ -7251,7 +7251,7 @@ class Coordinator:
         if (missing_root_disposition
                 or (not abandonment_head_proven and not continuation_for_head)):
             reasons = ["unauthorized-continuation"]
-            if (not abandonment_head_proven and agent_busy
+            if (not abandonment_head_proven and not owner_continuations and agent_busy
                     and busy_details.get("external_busy") is False
                     and busy_details.get("action_keys")
                     and isinstance(historical_roots, list)

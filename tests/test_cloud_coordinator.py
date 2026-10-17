@@ -12155,6 +12155,9 @@ def test_owner_continuation_ready_receipt_rechecks_disposition(
         16, before["enrollments"]["16"], main, actions=before["actions"],
     )
     assert coordinator._owner_abandonment_head_proven(snapshot) is False
+    assert coordinator._authorized_dispatch_head(
+        16, result_head, main, proof_fence={}, require_base_match=True,
+    ) is False
 
     for _ in range(2):
         result = Coordinator(
