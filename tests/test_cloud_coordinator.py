@@ -7273,6 +7273,25 @@ def test_owner_continuation_requires_original_terminal_task_and_complete_occupan
         assert StateStore(store.path).snapshot() == before
         assert api.task_posts == posts
         return
+    if hazard in {"wrong-pull-id", "wrong-pull-node"}:
+        coordinator = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856780,
+        )
+        # Strict snapshots still reject; apply isolates a valid replacement identity.
+        with pytest.raises(CoordinatorError, match="identity did not match enrollment"):
+            coordinator._snapshot_pull(
+                16, before["enrollments"]["16"], api.current_main_sha,
+            )
+        assert StateStore(store.path).snapshot() == before
+        assert api.task_posts == posts
+        result = coordinator.run(apply=True)["pull_requests"][0]
+        assert result["reasons"] == ["pull-identity"]
+        assert result["repair_requested"] is False
+        assert _pull_issue_state(StateStore(store.path).snapshot(), 16) == (
+            _pull_issue_state(before, 16)
+        )
+        assert api.task_posts == posts
+        return
     if hazard in {
         "wrong-pull-id", "wrong-pull-node", "wrong-repository",
         "float-pull-id", "boolean-pull-id",
@@ -12075,6 +12094,84 @@ def test_new_lineage_rechecks_late_reviewer_reads_before_claim(tmp_path, race):
         write for write in writes_before
         if write[0].endswith("/requested_reviewers")
     ]
+
+
+@pytest.mark.parametrize("mutation", ["edited", "deleted"])
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+def test_owner_continuation_ready_receipt_rechecks_disposition(
+        tmp_path, mutation, publication):
+    api, store, _, _, main = _owner_continuation_advanced_case(tmp_path)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    successor = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("owner_continuation_binding")
+    )
+    result_head = "8" * 40
+    api.complete_task(
+        successor["task_id"], successor, head_sha=result_head, base_sha=main,
+    )
+    api.head_sha = api.pull["head"]["sha"] = result_head
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.unresolved = False
+    api.review_state = api.review_sha = None
+    api.comments.append({
+        "id": 7774, "user": {"id": OWNER},
+        "body": f"/hermes enroll {result_head}",
+        "created_at": "2026-10-01T12:13:00Z",
+        "updated_at": "2026-10-01T12:13:00Z",
+    })
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    assert StateStore(store.path).action(successor["key"])["receipt_result"] == "ready"
+    StateStore(store.path).retire(16, result_head, main)
+    before = StateStore(store.path).snapshot()
+    continuation = before["enrollments"]["16"]["owner_continuations"][0]
+    command = next(
+        comment for comment in api.comments
+        if comment["id"] == continuation["disposition_comment_id"]
+    )
+    if mutation == "deleted":
+        api.comments.remove(command)
+    else:
+        command["updated_at"] = "2026-10-01T12:14:00Z"
+    api.requested_reviewers = []
+    if publication == "source":
+        api.source_failure = True
+        api.source_failure_sha = result_head
+        api.workflow_runs = [source_run(id=568, run_number=50, head_sha=result_head)]
+    posts = api.task_posts
+    review_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856900,
+    )
+    snapshot = coordinator._snapshot_pull(
+        16, before["enrollments"]["16"], main, actions=before["actions"],
+    )
+    assert coordinator._owner_abandonment_head_proven(snapshot) is False
+
+    for _ in range(2):
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856900,
+        ).run(apply=True)["pull_requests"][0]
+        assert result["repair_requested"] is False
+        assert "unauthorized-continuation" in result["reasons"]
+    assert api.task_posts == posts
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == review_writes
+    after = StateStore(store.path).snapshot()
+    assert after["enrollments"]["16"]["owner_continuations"] == (
+        before["enrollments"]["16"]["owner_continuations"]
+    )
+    assert after["enrollments"]["16"]["attempts"] == before["enrollments"]["16"]["attempts"]
 
 
 def test_reviewer_publication_fences_late_owner_continuation_removal(

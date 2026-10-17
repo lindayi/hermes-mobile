@@ -1179,6 +1179,9 @@ of valid ready receipts from that bound successor; a blocked or disconnected res
 cannot release the abandoned reservation or advance progress. Recheck this chain
 after compaction and restart before releasing historical occupancy or requesting
 review.
+Revalidate the immutable disposition command even when a retained ready receipt
+establishes the successor chain. Edited or deleted commands deny the continuation
+fallback at planning and final source/reviewer publication fences.
 
 Prove this reachability from the matching direct successor receipt results. Global
 authorization from a later owner enrollment, another continuation, or another

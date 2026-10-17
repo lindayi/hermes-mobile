@@ -7236,6 +7236,8 @@ class Coordinator:
             and _owner_abandonment_record_valid(record)
             and record["head_sha"] != head
             and head not in receipt_authorized_heads
+            and not self._owner_abandonment_successor_proven(snapshot, record)
+            and not self._owner_abandonment_continuation_proven(snapshot, record)
             and not any(
                 continuation["historical_action_key"]
                     == record["action_key"]
@@ -7245,14 +7247,23 @@ class Coordinator:
             )
             for record in historical_roots
         )
+        abandonment_head_proven = self._owner_abandonment_head_proven(snapshot)
         if (missing_root_disposition
-                or (not self._owner_abandonment_head_proven(snapshot)
-                    and not continuation_for_head)):
+                or (not abandonment_head_proven and not continuation_for_head)):
+            reasons = ["unauthorized-continuation"]
+            if (not abandonment_head_proven and agent_busy
+                    and busy_details.get("external_busy") is False
+                    and busy_details.get("action_keys")
+                    and isinstance(historical_roots, list)
+                    and len(_valid_owner_abandonment_claims(
+                        enrollment, self.store.actions(),
+                    )) == len(historical_roots)):
+                reasons.append("agent")
             return {
                 "issue": number, "head": head, "sensitive": sensitive,
                 "terminal": False, "review_valid": review_ok,
                 "required_checks_green": checks_ok, "auto_merge_eligible": False,
-                "reasons": ["unauthorized-continuation"], "repair": None,
+                "reasons": reasons, "repair": None,
                 "status_action": None, "merge_action": None, "outcomes": [],
                 "receipt_recoveries": receipt_recoveries, "handoffs": handoffs,
             }
@@ -8976,6 +8987,9 @@ class Coordinator:
             and _owner_continuation_successor_proven(
                 continuation, enrollment, actions, comments, head["sha"],
             )
+            and _current_owner_unverified_continuation_command(
+                self.api, continuation,
+            ) is not None
             for _, continuation in _valid_owner_continuation_claims(
                 enrollment, actions,
             )
@@ -11167,11 +11181,13 @@ class Coordinator:
                     apply=apply, blocked_continuations=blocked_continuations,
                     pending_event_exceptions=pending_event_exceptions,
                 )
-            else:
+            elif pending_event_exceptions:
                 plan = self._build_plan(
                     apply=apply,
                     pending_event_exceptions=pending_event_exceptions,
                 )
+            else:
+                plan = self._build_plan(apply=apply)
             processed_ids = set(map(str, plan["processed"]))
             carried_pending = [
                 key for key in pending_event_exceptions if key not in processed_ids
