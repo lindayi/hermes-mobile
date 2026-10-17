@@ -763,7 +763,14 @@ the source and neutral lifetime ceilings combined. Every edge must pass immutabl
 receipt validation and match the current repository, pull request and branch; the
 live pull's numeric and node IDs must also match the retained abandoned-task
 reservation; never bind a pull identity using the live pull's own IDs. The current
-base must match the accepted receipts. Missing, ambiguous, disconnected,
+base must match each receipt's original dispatch base. Historical dispatch bases
+may precede the current pull base only with authenticated ancestry to that base
+and the edge's result head. A later bound edge must match its own unique retained
+valid abandonment root and unchanged original owner command, including its causal
+binding and attestation. Sequential roots followed by a main advance must survive
+actual apply, retirement and cold restart without duplicate dispatches, changed
+history or reset allowances. Missing or contradictory ancestry must deny progress.
+Missing, ambiguous, disconnected,
 malformed, non-ready, wrong-identity or cyclic history fails closed.
 Before eligibility filtering, correlate live and retained representations by the
 durable action key, then reconcile each task relevant to this pull. A missing,

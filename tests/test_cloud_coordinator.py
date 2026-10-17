@@ -9142,7 +9142,8 @@ def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_pat
     )
 
 
-def _owner_abandonment_transitive_case(tmp_path, lineage_hazard=None, *, bare=False):
+def _owner_abandonment_transitive_case(
+        tmp_path, lineage_hazard=None, *, bare=False, sequential_root=False):
     neutral_head = (
         NEXT_RESULT_HEAD if lineage_hazard == "same-head-successor" else "9" * 40
     )
@@ -9211,6 +9212,41 @@ def _owner_abandonment_transitive_case(tmp_path, lineage_hazard=None, *, bare=Fa
         write for write in api.writes
         if write[0].endswith("/requested_reviewers")
     ]
+    if sequential_root:
+        api.complete_task(
+            source["task_id"], source, head_sha=neutral_head,
+            base_sha=FINAL_RESULT_HEAD,
+        )
+        receipt = next(
+            comment for comment in api.comments
+            if comment.get("user", {}).get("id") == COPILOT_AGENT
+            and source["dispatch_nonce"] in comment["body"]
+        )
+        receipt["body"] += "\nedited"
+        receipt["updated_at"] = "2026-10-01T12:06:00Z"
+        coordinator = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        )
+        coordinator.store.update_action_with_lifecycle(
+            source["key"], "uncertain", coordinator._record_uncertain_task(source),
+            now=1790856660, blocker="execution_uncertain",
+            receipt_waits=MAX_RECEIPT_POLLS, receipt_recovery_attempted=True,
+            receipt_recovery_revision=cloud_coordinator.LEGACY_NEUTRAL_RECEIPT_RECOVERY_REVISION,
+        )
+        api.comments.append({
+            "id": 7772, "user": {"id": OWNER},
+            "body": f"/hermes abandon-unverified {source['task_id']} {neutral_head}",
+            "created_at": "2026-10-01T12:10:30Z",
+            "updated_at": "2026-10-01T12:10:30Z",
+        })
+        coordinator.run(apply=True)
+        source = next(
+            action for action in StateStore(store.path).actions().values()
+            if action.get("kind") == "fix" and action.get("status") == "sent"
+        )
+        assert len(StateStore(store.path).snapshot()["enrollments"]["16"][
+            "owner_abandonments"
+        ]) == 2
     api.complete_task(
         source["task_id"], source,
         result="policy_broken" if lineage_hazard == "non-ready" else "ready",
@@ -9237,6 +9273,135 @@ def _owner_abandonment_transitive_case(tmp_path, lineage_hazard=None, *, bare=Fa
         api, store, abandoned, abandoned_reservation, recovery, neutral, source,
         neutral_head, source_head, reviewer_writes_before,
     )
+
+
+@pytest.mark.parametrize("sequential_root", [False, True])
+@pytest.mark.parametrize("advance", [
+    None, "valid", "missing-base", "wrong-base", "missing-head", "wrong-head",
+])
+def test_owner_abandonment_sequential_roots_and_historical_base_apply_restart(
+        tmp_path, sequential_root, advance):
+    api, store, abandoned, _, recovery, _, _, intermediate, head, _ = (
+        _owner_abandonment_transitive_case(
+            tmp_path, sequential_root=sequential_root,
+        )
+    )
+    api.review_state, api.review_sha = "APPROVED", head
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    current_base = FINAL_RESULT_HEAD
+    if advance:
+        current_base = "6" * 40
+        api.current_main_sha = api.pull["base"]["sha"] = current_base
+        api.pull.update(mergeable=False, mergeable_state="dirty")
+        for base in (CURRENT_MAIN, FINAL_RESULT_HEAD):
+            for tip, label in (
+                    (current_base, "base"), (intermediate, "head"), (head, "head")):
+                if advance == f"missing-{label}":
+                    continue
+                api.compare_results[f"{base}...{tip}"] = _compare_result(
+                    "0" * 40 if advance == f"wrong-{label}" else base,
+                    ahead_by=1,
+                )
+        original_get = api.get
+
+        def get(route):
+            if ("/compare/" in route
+                    and route.rsplit("/compare/", 1)[1] not in api.compare_results):
+                raise ApiError("unproved ancestry", status=404)
+            return original_get(route)
+
+        api.get = get
+    api.review_state = api.review_sha = None
+    api.requested_reviewers = []
+    before = StateStore(store.path).snapshot()
+    posts, writes = api.task_posts, deepcopy(api.writes)
+    valid = advance in (None, "valid")
+    for poll in range(3):
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)["pull_requests"][0]
+        if valid:
+            if advance:
+                assert api.task_posts == posts + 1, json.dumps(result, sort_keys=True)
+                assert any(
+                    action.get("task_type") == "neutral"
+                    and action.get("main_sha") == current_base
+                    and action.get("status") == "sent"
+                    for action in StateStore(store.path).actions().values()
+                )
+            else:
+                assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+                assert api.task_posts == posts
+        else:
+            assert api.task_posts == posts
+            assert api.writes == writes
+        StateStore(store.path).retire(16, head, current_base)
+        after = StateStore(store.path).snapshot()
+        assert after["actions"][abandoned["key"]] == before["actions"][abandoned["key"]]
+        for field in ("owner_abandonments", "receipt_proofs", "attempts"):
+            assert after["enrollments"]["16"][field] == before["enrollments"]["16"][field]
+        assert after["enrollments"]["16"]["neutral_attempts"] == (
+            before["enrollments"]["16"]["neutral_attempts"]
+            + int(valid and bool(advance))
+        )
+        if poll == 0:
+            first_writes = deepcopy(api.writes)
+        else:
+            assert api.writes == first_writes
+    assert recovery in after["enrollments"]["16"]["owner_abandonments"]
+
+
+@pytest.mark.parametrize("hazard", [
+    "edited-command", "deleted-command", "invalid-binding", "missing-binding",
+    "unknown-task", "reactivated-task",
+])
+def test_owner_abandonment_sequential_root_still_requires_original_authority(
+        tmp_path, hazard):
+    api, store, _, _, _, _, source, _, head, _ = (
+        _owner_abandonment_transitive_case(tmp_path, sequential_root=True)
+    )
+    roots = StateStore(store.path).snapshot()["enrollments"]["16"]["owner_abandonments"]
+    root = roots[1]
+    if hazard in {"edited-command", "deleted-command"}:
+        command = next(c for c in api.comments if c["id"] == root["command_comment_id"])
+        if hazard == "edited-command":
+            command["updated_at"] = "2026-10-01T12:10:31Z"
+        else:
+            api.comments.remove(command)
+    elif hazard in {"invalid-binding", "missing-binding"}:
+        def mutate(state):
+            for candidate in [
+                    *state["actions"].values(),
+                    *state["enrollments"]["16"]["receipt_proofs"]]:
+                if candidate.get("task_id") == source["task_id"]:
+                    if hazard == "missing-binding":
+                        candidate.pop("owner_abandonment_binding")
+                    else:
+                        candidate["owner_abandonment_binding"]["version"] = 1.0
+
+        StateStore(store.path)._mutate(mutate)
+    elif hazard == "unknown-task":
+        del api.tasks[root["task_id"]]
+    else:
+        api.tasks[root["task_id"]]["state"] = "in_progress"
+    api.review_state = api.review_sha = None
+    api.requested_reviewers = []
+    before = StateStore(store.path).snapshot()
+    writes, posts = deepcopy(api.writes), api.task_posts
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        StateStore(store.path).retire(16, head, FINAL_RESULT_HEAD)
+        after = StateStore(store.path).snapshot()
+        assert api.writes == writes
+        assert api.task_posts == posts
+        for record in roots:
+            assert after["actions"][record["action_key"]] == before["actions"][record["action_key"]]
+        for field in ("owner_abandonments", "receipt_proofs", "attempts", "neutral_attempts"):
+            assert after["enrollments"]["16"][field] == before["enrollments"]["16"][field]
 
 
 @pytest.mark.parametrize("identity_field,replacement", [

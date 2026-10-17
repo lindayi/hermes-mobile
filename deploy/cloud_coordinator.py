@@ -8832,24 +8832,31 @@ class Coordinator:
                 successor = outgoing[0]
             if (not bound_to_current_pull(successor)
                     or successor.get("receipt_result") != "ready"
-                    or successor.get("receipt_base") != base["sha"]):
+                    or successor.get("receipt_base") != successor.get("main_sha")):
                 return False
-            if root_step:
-                expected_base = (
-                    successor.get("main_sha")
-                    if successor.get("task_type") == "neutral"
-                    else record["base_sha"]
-                )
-                if base["sha"] != expected_base:
-                    return False
-            elif any(
+            edge_base = successor["receipt_base"]
+            if edge_base != base["sha"] and not (
+                    self._compare_proves_ancestry(edge_base, base["sha"])
+                    and self._compare_proves_ancestry(
+                        edge_base, successor["receipt_head"], allow_identical=True,
+                    )):
+                return False
+            if not root_step and any(
                     field in successor
                     for field in (
                         "owner_abandonment_binding",
                         "owner_abandonment_attestation",
                         "owner_abandonment_intent",
                     )):
-                return False
+                bound_roots = [
+                    root for root in roots
+                    if _owner_abandonment_successor_matches(root, successor)
+                ]
+                if (len(bound_roots) != 1
+                        or _current_owner_unverified_abandonment_command(
+                            self.api, bound_roots[0],
+                        ) is None):
+                    return False
             used.add(id(successor))
             next_head = successor["receipt_head"]
             if next_head == current:
