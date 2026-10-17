@@ -2019,6 +2019,23 @@ that proof by its exact task ID, without adding a key to persisted history.
 Explicit null, empty, or malformed keys remain invalid. Keyless successor proofs
 must match all other receipt fields in live copies; conflicting task or keyed
 aliases deny source and reviewer publication after compaction and restart.
+Bare final publication authorization uses this same canonical key/task
+reconciliation before its snapshot fence; individually valid retained proofs
+cannot hide a pre-existing conflicting live copy. This does not create SHA source
+authority or add an authorized head to bare enrollment.
+
+For a retained-only direct successor with an omitted key, authenticate the
+original task, session, prompt and unique reservation marker before recovering
+the original key into a read-only view. The same view proves an omitted branch
+and supplies the original abandonment attestation key to source authorization.
+Never infer that key from current enrollment or write it into retained history.
+Missing or ambiguous original evidence and explicit malformed keys fail closed.
+A live action may omit its embedded key when its action-map key proves it;
+explicit key mismatches and task aliases still conflict. Key and task joins use
+the existing v1 omission rules for receipt version, main SHA and task type, while
+retaining authenticated supplied values for downstream checks. Require receipt
+base equality for v2 or an explicitly supplied main SHA, not an omitted v1 field.
+Historical-base ancestry checks and active-writer exclusion remain mandatory.
 
 ACK-backed lifecycle retirement does not erase history. The optional
 `lifecycle_context` preserves each retired event's canonical payload and exact

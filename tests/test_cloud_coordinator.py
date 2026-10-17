@@ -10788,6 +10788,169 @@ def test_owner_abandonment_keyless_retained_successor_apply_restart(
             assert api.writes == first_writes
 
 
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+@pytest.mark.parametrize("shape", [
+    "direct", "direct-no-branch", "direct-null", "direct-empty", "direct-list",
+    "direct-missing-task", "direct-missing-prompt", "direct-ambiguous-prompt",
+    "live-key-omitted", "live-key-null", "live-key-mismatch",
+    "v1-projection", "v1-task-join", "v1-retained-only",
+    "v1-explicit-base-conflict",
+])
+def test_owner_abandonment_legacy_lineage_seam_apply_restart(
+        tmp_path, publication, shape):
+    (
+        api, store, abandoned, reservation, recovery, neutral, source, _, head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+    StateStore(store.path).retire(16, head, FINAL_RESULT_HEAD)
+
+    def configure(state):
+        proofs = state["enrollments"]["16"]["receipt_proofs"]
+        original = neutral if shape.startswith("direct") else source
+        proof = next(item for item in proofs if item["task_id"] == original["task_id"])
+        if shape.startswith("direct"):
+            proof.pop("key")
+            state["actions"].pop(original["key"], None)
+            if shape == "direct-no-branch":
+                proof.pop("head_ref")
+            elif shape in {"direct-null", "direct-empty", "direct-list"}:
+                proof["key"] = {
+                    "direct-null": None, "direct-empty": "", "direct-list": [],
+                }[shape]
+        elif shape.startswith("live-key"):
+            action = state["actions"][source["key"]]
+            action.pop("key")
+            if shape != "live-key-omitted":
+                action["key"] = None if shape == "live-key-null" else "wrong-key"
+        else:
+            assert proof["receipt_version"] == "v1"
+            for field in ("receipt_version", "main_sha", "task_type"):
+                proof.pop(field, None)
+            if shape == "v1-task-join":
+                proof.pop("key")
+            elif shape == "v1-retained-only":
+                state["actions"].pop(source["key"], None)
+            elif shape == "v1-explicit-base-conflict":
+                proof["main_sha"] = "e" * 40
+
+    StateStore(store.path)._mutate(configure)
+    if shape == "direct-missing-task":
+        api.tasks.pop(neutral["task_id"])
+    elif shape == "direct-missing-prompt":
+        api.tasks[neutral["task_id"]]["sessions"][0].pop("prompt")
+    elif shape == "direct-ambiguous-prompt":
+        session = api.tasks[neutral["task_id"]]["sessions"][0]
+        session["prompt"] = session["prompt"].replace(
+            f"<!-- {neutral['marker']} -->",
+            f"<!-- {neutral['marker']} -->\n<!-- hermes-coordinator-fix:{'a' * 20} -->",
+        )
+    api.review_state = "APPROVED" if publication == "source" else None
+    api.review_sha = head if publication == "source" else None
+    api.requested_reviewers = []
+    api.source_failure = publication == "source"
+    api.source_failure_sha = head if publication == "source" else None
+    valid = shape in {
+        "direct", "direct-no-branch", "live-key-omitted",
+        "v1-projection", "v1-task-join", "v1-retained-only",
+    }
+    before = StateStore(store.path).snapshot()
+    writes, posts = deepcopy(api.writes), api.task_posts
+    for poll in range(2):
+        coordinator = Coordinator(api, StateStore(store.path), clock=lambda: 1790856660)
+        assert coordinator._owner_abandonment_successor_proven(
+            {"pull": api.pull, "comments": api.comments}, recovery,
+        ) is (valid and not (
+            poll == 1 and publication == "source" and shape.startswith("direct")
+        ))
+        result = coordinator.run(apply=True)
+        assert api.task_posts == posts + int(valid and publication == "source"), json.dumps(
+            result, sort_keys=True,
+        )
+        assert len([
+            write for write in api.writes[len(writes):]
+            if write[0].endswith("/requested_reviewers")
+        ]) == int(valid and publication == "reviewer"), json.dumps(result, sort_keys=True)
+        if not valid:
+            assert api.writes == writes
+        after = StateStore(store.path).snapshot()
+        assert after["actions"][abandoned["key"]] == reservation
+        assert after["enrollments"]["16"]["receipt_proofs"] == before[
+            "enrollments"
+        ]["16"]["receipt_proofs"]
+        assert after["enrollments"]["16"]["owner_abandonments"] == [recovery]
+        assert after["enrollments"]["16"]["attempts"] == (
+            before["enrollments"]["16"]["attempts"]
+            + int(valid and publication == "source")
+        )
+        assert after["enrollments"]["16"]["neutral_attempts"] == before[
+            "enrollments"
+        ]["16"]["neutral_attempts"]
+
+
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+@pytest.mark.parametrize("conflict", ["attempt", "receipt_body", "absent", "empty"])
+def test_bare_final_authorization_reconciles_existing_live_receipt(
+        tmp_path, monkeypatch, publication, conflict):
+    api, store, _, _, _, _, source, _, head, _ = (
+        _owner_abandonment_transitive_case(tmp_path, bare=True)
+    )
+
+    def isolate(state):
+        enrollment = state["enrollments"]["16"]
+        enrollment["owner_abandonments"] = []
+        enrollment["receipt_proofs"] = [
+            item for item in enrollment["receipt_proofs"]
+            if item["task_id"] == source["task_id"]
+        ]
+        state["actions"] = {source["key"]: state["actions"][source["key"]]}
+        if conflict == "absent":
+            enrollment.pop("receipt_proofs")
+        elif conflict == "empty":
+            enrollment["receipt_proofs"] = []
+
+    StateStore(store.path)._mutate(isolate)
+    api.review_state = "APPROVED" if publication == "source" else None
+    api.review_sha = head if publication == "source" else None
+    api.requested_reviewers = []
+    api.source_failure = publication == "source"
+    api.source_failure_sha = head if publication == "source" else None
+    writes, posts = deepcopy(api.writes), api.task_posts
+    original = CloudCoordinator._authorized_dispatch_head
+    final_calls = []
+    live_copy = deepcopy(StateStore(store.path).action(source["key"]))
+
+    def authority(self, issue, current_head, base_sha=None, **kwargs):
+        if kwargs.get("require_base_match") or kwargs.get("proof_fence") is not None:
+            if not final_calls and conflict in {"attempt", "receipt_body"}:
+                self.store._mutate(lambda state: state["actions"].update({
+                    source["key"]: {
+                        **live_copy,
+                        conflict: 99 if conflict == "attempt" else "conflicting receipt",
+                    },
+                }))
+            final_calls.append(current_head)
+        return original(self, issue, current_head, base_sha, **kwargs)
+
+    monkeypatch.setattr(CloudCoordinator, "_authorized_dispatch_head", authority)
+    valid = conflict in {"absent", "empty"}
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856660).run(apply=True)
+        assert api.task_posts == posts + int(valid and publication == "source")
+        assert len([
+            write for write in api.writes[len(writes):]
+            if write[0].endswith("/requested_reviewers")
+        ]) == int(valid and publication == "reviewer")
+        if not valid:
+            assert api.writes == writes
+            assert not original(
+                Coordinator(api, StateStore(store.path), clock=lambda: 1790856660),
+                16, head, FINAL_RESULT_HEAD, require_base_match=True,
+            )
+        assert StateStore(store.path).snapshot()["enrollments"]["16"].get(
+            "authorized_head"
+        ) is None
+    assert final_calls
+
+
 @pytest.mark.parametrize("bare", [False, True])
 @pytest.mark.parametrize("form", ["float", "unrelated", "legacy"])
 @pytest.mark.parametrize("receipt_field", ["receipt_body", "receipt_start_head"])
