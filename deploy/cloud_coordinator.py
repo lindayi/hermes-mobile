@@ -12887,7 +12887,7 @@ class StateStore:
             for key, action in list(data["actions"].items()):
                 if (type(action.get("issue")) is not int
                         or action["issue"] != issue
-                        or action.get("key") != key
+                        or ("key" in action and action["key"] != key)
                         or any(
                             _action_correlates_authority(
                                 key, action, root.get("action_key"), root.get("task_id"),

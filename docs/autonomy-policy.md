@@ -302,7 +302,7 @@ historical evidence.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `a8c5d8adfdf534605ddc4ce493ac740175f221a5b88931edbc416c52f30813e0` |
+| `deploy/cloud_coordinator.py` | `277bb0ee2ba8e6bf01234b6efb2da7517de66a95bed96e4b2ec8de0dfe9c645d` |
 | `deploy/task_receipts.py` | `72615884d5e61a51f6fd8d9527774fc4982ebd66f98e5bd4b84a640404fccbe5` |
 
 ### Retained merged source and deliberate native refreshes
