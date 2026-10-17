@@ -3750,7 +3750,9 @@ def _dispatch_authorization_inputs(state, issue):
                 or (
                     action.get("issue") == issue
                     and (
-                        "receipt_result" in action or "receipt_head" in action
+                        action.get("key") != key
+                        or "receipt_result" in action
+                        or "receipt_head" in action
                         or "receipt_body" in action
                     )
                 )
@@ -7232,13 +7234,16 @@ class Coordinator:
                 for proof in proofs):
             return False
         retained_task_ids = {proof["task_id"] for proof in proofs}
+        abandoned_task_ids = {root["task_id"] for root in roots}
         relevant_keys = {proof["key"] for proof in proofs} | {
             key for key, candidate in actions.items()
             if isinstance(candidate, dict)
             and (
                 candidate.get("issue") == record["issue"]
                 or (isinstance(candidate.get("task_id"), str)
-                    and candidate["task_id"] in retained_task_ids)
+                    and candidate["task_id"] in (
+                        retained_task_ids | abandoned_task_ids
+                    ))
             )
         }
         relevant_task_ids = {
@@ -7246,7 +7251,7 @@ class Coordinator:
             if isinstance(candidate, dict)
             and candidate.get("issue") == record["issue"]
             and isinstance(candidate.get("task_id"), str)
-        } | retained_task_ids
+        } | retained_task_ids | abandoned_task_ids
         legacy_proofs = [
             proof for proof in proofs
             if isinstance(proof, dict) and "head_ref" not in proof

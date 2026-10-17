@@ -7250,6 +7250,97 @@ def test_final_publication_projection_rejects_late_embedded_proof_key_action(
 
 
 @pytest.mark.parametrize("path", ["source", "reviewer"])
+@pytest.mark.parametrize("embedded_key", ["fresh-embedded-key", "abandoned"])
+def test_final_publication_projection_rejects_late_malformed_same_issue_key(
+        tmp_path, monkeypatch, path, embedded_key):
+    (
+        api, store, abandoned, _, _, _, _, _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+    if path == "source":
+        api.source_failure = True
+        api.source_failure_sha = source_head
+        api.review_state = "APPROVED"
+        api.review_sha = source_head
+    else:
+        api.review_state = api.review_sha = None
+    embedded_key = (
+        abandoned["key"] if embedded_key == "abandoned" else embedded_key
+    )
+    writes_before = deepcopy(api.writes)
+    posts_before = api.task_posts
+    final_authorization = [False]
+    injected = []
+    original_snapshot = StateStore.snapshot
+    original_authority = CloudCoordinator._authorized_dispatch_head
+
+    def snapshot(state_store):
+        if final_authorization[0] and not injected:
+            state_store._mutate(lambda state: state["actions"].update({
+                "late-malformed-map-key": {
+                    "key": embedded_key,
+                    "issue": 16,
+                    "kind": "fix",
+                    "task_id": "late-malformed-task",
+                },
+            }))
+            injected.append(True)
+        return original_snapshot(state_store)
+
+    def authority(self, issue, head, base_sha=None, **kwargs):
+        authorized = original_authority(self, issue, head, base_sha, **kwargs)
+        if kwargs.get("require_base_match") is True:
+            final_authorization[0] = True
+        return authorized
+
+    monkeypatch.setattr(StateStore, "snapshot", snapshot)
+    monkeypatch.setattr(
+        CloudCoordinator, "_authorized_dispatch_head", authority,
+    )
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert injected == [True]
+    assert api.task_posts == posts_before
+    assert api.writes == writes_before
+
+
+@pytest.mark.parametrize("path", ["source", "reviewer"])
+@pytest.mark.parametrize("alias_issue", ["missing", "foreign"])
+def test_owner_abandonment_rejects_preexisting_foreign_issue_task_alias(
+        tmp_path, path, alias_issue):
+    (
+        api, store, abandoned, _, _, _, _, _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+    if path == "source":
+        api.source_failure = True
+        api.source_failure_sha = source_head
+        api.review_state = "APPROVED"
+        api.review_sha = source_head
+    else:
+        api.review_state = api.review_sha = None
+    alias = {
+        "key": "preexisting-abandoned-task-alias",
+        "kind": "fix",
+        "task_id": abandoned["task_id"],
+    }
+    if alias_issue == "foreign":
+        alias["issue"] = 17
+    store._mutate(lambda state: state["actions"].update({
+        alias["key"]: deepcopy(alias),
+    }))
+    writes_before = deepcopy(api.writes)
+    posts_before = api.task_posts
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert api.task_posts == posts_before
+    assert api.writes == writes_before
+
+
+@pytest.mark.parametrize("path", ["source", "reviewer"])
 def test_final_publication_projection_rejects_late_abandoned_task_alias(
         tmp_path, monkeypatch, path):
     (
