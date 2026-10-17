@@ -3484,18 +3484,24 @@ def _valid_receipt_proof(action, comments):
     )
 
 
+_RECEIPT_AUTHORITY_FIELDS = frozenset({
+    "owner_abandonment_binding", "owner_abandonment_attestation",
+    "owner_continuation_binding", "owner_continuation_attestation",
+    "owner_continuation_companions",
+})
+
+
 _RECEIPT_PROOF_FIELDS = frozenset({
     "key", "issue", "kind", "status", "head", "task_id", "dispatch_nonce",
     "created_at", "receipt_result", "receipt_comment_id", "receipt_created_at",
     "receipt_body", "receipt_task_id", "receipt_session_id",
     "receipt_completed_at", "receipt_session_completed_at", "receipt_nonce",
     "receipt_start_head", "receipt_head", "receipt_base", "receipt_legacy_neutral",
-    "head_ref", "recorded_base_sha", "owner_abandonment_binding",
-    "owner_abandonment_attestation", "attempt", "owner_id", "repository_id",
+    "head_ref", "recorded_base_sha", "attempt", "owner_id", "repository_id",
     "pull_id", "pull_node_id", "repair_policy_version", "repair_fingerprints",
     "repair_fingerprints_complete", "repair_fingerprint_version",
     "repair_target_map", "receipt_version", "main_sha", "task_type",
-})
+}) | _RECEIPT_AUTHORITY_FIELDS
 
 
 def _canonical_receipt_json(value):
@@ -3513,8 +3519,11 @@ def _receipt_projection(action):
     }
 
 
-def _receipt_proof_matches_live(proof, action):
+def _receipt_proof_matches_live(proof, action, *, require_proven_branch=False):
     if not isinstance(proof, dict) or not isinstance(action, dict):
+        return False
+    if (require_proven_branch and "head_ref" in action
+            and "head_ref" not in proof):
         return False
     fields = _RECEIPT_PROOF_FIELDS | proof.keys()
     legacy_fields = {"key", "head_ref"}
@@ -4160,16 +4169,17 @@ def _dispatch_authorization_inputs(state, issue):
         record["task_id"] for record in abandonment_records
         if isinstance(record, dict) and isinstance(record.get("task_id"), str)
     }
+    authority_keys = proof_keys | abandonment_keys | continuation_keys
     relevant_actions = {
         key: deepcopy(action)
         for key, action in actions.items()
-        if key in proof_keys | abandonment_keys | continuation_keys
+        if key in authority_keys
         or (
             isinstance(action, dict)
             and (
                 (
                     isinstance(action.get("key"), str)
-                    and action["key"] in proof_keys
+                    and action["key"] in authority_keys
                 ) or (
                     isinstance(action.get("task_id"), str)
                     and action["task_id"] in (
@@ -8649,7 +8659,7 @@ class Coordinator:
         if not isinstance(proofs, list):
             return False
         candidates = []
-        proof_fields = (
+        proof_fields = frozenset({
             "key", "task_id", "issue", "kind", "task_type", "status", "head",
             "dispatch_nonce", "created_at",
             "receipt_result", "receipt_comment_id", "receipt_created_at",
@@ -8660,8 +8670,7 @@ class Coordinator:
             "head_ref",
             "main_sha", "recorded_base_sha", "owner_id",
             "repository_id", "pull_id", "pull_node_id",
-            "owner_abandonment_binding", "owner_abandonment_attestation",
-        )
+        }) | _RECEIPT_AUTHORITY_FIELDS
         representations = [*actions.values(), *proofs]
         if any(
                 not isinstance(proof, dict)
@@ -8672,7 +8681,23 @@ class Coordinator:
             return False
         retained_task_ids = {proof["task_id"] for proof in proofs}
         abandoned_task_ids = {root["task_id"] for root in roots}
-        relevant_keys = {proof["key"] for proof in proofs} | {
+        continuations = enrollment.get("owner_continuations", [])
+        if not isinstance(continuations, list):
+            continuations = []
+        authority_keys = (
+            {proof["key"] for proof in proofs}
+            | {root["action_key"] for root in roots
+               if isinstance(root.get("action_key"), str)}
+            | {
+                continuation["historical_action_key"]
+                for continuation in continuations
+                if isinstance(continuation, dict)
+                and isinstance(
+                    continuation.get("historical_action_key"), str,
+                )
+            }
+        )
+        relevant_keys = authority_keys | {
             key for key, candidate in actions.items()
             if isinstance(candidate, dict)
             and (
@@ -8681,6 +8706,12 @@ class Coordinator:
                     and candidate["task_id"] in (
                         retained_task_ids | abandoned_task_ids
                     ))
+                or any(
+                    _action_correlates_authority(
+                        key, candidate, authority_key, None,
+                    )
+                    for authority_key in authority_keys
+                )
             )
         }
         relevant_task_ids = {
@@ -12932,7 +12963,9 @@ class StateStore:
                         or ("key" in proof
                             and proof.get("key") != action.get("key"))
                         or proof.get("task_id") != action.get("task_id")
-                        or not _receipt_proof_matches_live(proof, action)
+                        or not _receipt_proof_matches_live(
+                            proof, action, require_proven_branch=True,
+                        )
                         for proof in related_proofs):
                     continue
                 del data["actions"][key]

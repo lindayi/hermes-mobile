@@ -9866,6 +9866,132 @@ def test_owner_abandonment_first_successor_checks_receipt_like_alias(
         assert result["head"] == NEXT_RESULT_HEAD
 
 
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+@pytest.mark.parametrize("alias_issue", ["missing", "foreign"])
+def test_bare_lineage_correlates_embedded_proof_key_before_issue_filter(
+        tmp_path, publication, alias_issue):
+    (
+        api, store, abandoned, _, recovery, _, _, _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path, bare=True)
+    proof_key = StateStore(store.path).snapshot()["enrollments"]["16"][
+        "receipt_proofs"
+    ][0]["key"]
+    alias = {
+        "key": proof_key,
+        "kind": "fix",
+        "task_id": "fresh-conflicting-task",
+        "receipt_result": "ready",
+        "receipt_head": source_head,
+    }
+    if alias_issue == "foreign":
+        alias["issue"] = 17
+    StateStore(store.path)._mutate(
+        lambda state: state["actions"].update(
+            {"fresh-conflicting-map-key": deepcopy(alias)},
+        ),
+    )
+    if publication == "source":
+        api.source_failure = True
+        api.source_failure_sha = source_head
+        api.review_state = "APPROVED"
+        api.review_sha = source_head
+    else:
+        api.review_state = api.review_sha = None
+        api.requested_reviewers = []
+    before = StateStore(store.path).snapshot()
+    alias_bytes = json.dumps(
+        before["actions"]["fresh-conflicting-map-key"], sort_keys=True,
+    )
+    posts, writes = api.task_posts, deepcopy(api.writes)
+
+    for _ in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        StateStore(store.path).retire(16, source_head, FINAL_RESULT_HEAD)
+        restarted = StateStore(store.path)
+        after = restarted.snapshot()
+        assert json.dumps(
+            after["actions"].get("fresh-conflicting-map-key"), sort_keys=True,
+        ) == alias_bytes
+        assert after["actions"][abandoned["key"]] == before["actions"][abandoned["key"]]
+        for field in ("receipt_proofs", "owner_abandonments", "attempts"):
+            assert after["enrollments"]["16"][field] == before["enrollments"]["16"][field]
+        assert api.task_posts == posts
+        assert api.writes == writes
+        assert not Coordinator(
+            api, restarted, clock=lambda: 1790856660,
+        )._owner_abandonment_successor_proven(
+            {"pull": api.pull, "comments": api.comments}, recovery,
+        )
+
+
+@pytest.mark.parametrize("field", [
+    "owner_continuation_binding", "owner_continuation_attestation",
+    "owner_continuation_companions",
+])
+@pytest.mark.parametrize("bare", [False, True])
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+def test_owner_continuation_presence_conflict_survives_retirement(
+        tmp_path, field, bare, publication):
+    (
+        api, store, abandoned, _, recovery, neutral, _, _, head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path, bare=bare)
+
+    def mutate(state):
+        proof = next(
+            proof for proof in state["enrollments"]["16"]["receipt_proofs"]
+            if proof["task_id"] == neutral["task_id"]
+        )
+        action = deepcopy(proof)
+        action["handoff_state"] = "done"
+        action[field] = (
+            {"version": 1} if field.endswith("_binding")
+            else "conflicting-continuation" if field.endswith("_attestation")
+            else [{"binding": {"version": 1}}]
+        )
+        state["actions"][action["key"]] = action
+
+    StateStore(store.path)._mutate(mutate)
+    if publication == "source":
+        api.source_failure = True
+        api.source_failure_sha = head
+        api.review_state = "APPROVED"
+        api.review_sha = head
+    else:
+        api.source_failure = False
+        api.source_failure_sha = None
+        api.review_state = api.review_sha = None
+        api.requested_reviewers = []
+    before = StateStore(store.path).snapshot()
+    action_bytes = json.dumps(
+        before["actions"][neutral["key"]], sort_keys=True,
+    )
+    posts, writes = api.task_posts, deepcopy(api.writes)
+    for _ in range(3):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        StateStore(store.path).retire(16, head, FINAL_RESULT_HEAD)
+        after = StateStore(store.path).snapshot()
+        assert json.dumps(
+            after["actions"].get(neutral["key"]), sort_keys=True,
+        ) == action_bytes
+        assert after["actions"][abandoned["key"]] == before["actions"][abandoned["key"]]
+        for name in (
+                "receipt_proofs", "owner_abandonments", "attempts",
+                "neutral_attempts"):
+            assert after["enrollments"]["16"][name] == before["enrollments"]["16"][name]
+        assert api.task_posts == posts
+        assert api.writes == writes
+        recovery = after["enrollments"]["16"]["owner_abandonments"][0]
+        assert not Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        )._owner_abandonment_successor_proven(
+            {"pull": api.pull, "comments": api.comments}, recovery,
+        )
+
+
 @pytest.mark.parametrize("field", [
     "owner_abandonment_binding", "owner_abandonment_attestation",
     "created_at", "owner_id", "pull_id", "receipt_version", "main_sha", "task_type",
@@ -9948,6 +10074,62 @@ def test_owner_abandonment_competing_start_head_survives_retirement(
             assert after["enrollments"]["16"][field] == before["enrollments"]["16"][field]
         assert api.task_posts == posts
         assert api.writes == writes
+
+
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+def test_legacy_proof_missing_branch_does_not_erase_conflicting_live_branch(
+        tmp_path, publication):
+    (
+        api, store, abandoned, _, recovery, _, source, _, head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+
+    def mismatch_branch(state):
+        proof = next(
+            proof for proof in state["enrollments"]["16"]["receipt_proofs"]
+            if proof["task_id"] == source["task_id"]
+        )
+        proof.pop("head_ref")
+        action = state["actions"][source["key"]]
+        action["head_ref"] = "other-branch"
+        action["handoff_state"] = "done"
+
+    StateStore(store.path)._mutate(mismatch_branch)
+    if publication == "source":
+        api.source_failure = True
+        api.source_failure_sha = head
+        api.review_state = "APPROVED"
+        api.review_sha = head
+    else:
+        api.review_state = api.review_sha = None
+        api.requested_reviewers = []
+    before = StateStore(store.path).snapshot()
+    action_bytes = json.dumps(before["actions"][source["key"]], sort_keys=True)
+    posts, writes = api.task_posts, deepcopy(api.writes)
+
+    for _ in range(3):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        StateStore(store.path).retire(16, head, FINAL_RESULT_HEAD)
+        restarted = StateStore(store.path)
+        after = restarted.snapshot()
+        assert json.dumps(
+            after["actions"].get(source["key"]), sort_keys=True,
+        ) == action_bytes
+        assert after["actions"][abandoned["key"]] == before["actions"][abandoned["key"]]
+        assert after["enrollments"]["16"]["receipt_proofs"] == (
+            before["enrollments"]["16"]["receipt_proofs"]
+        )
+        assert after["enrollments"]["16"]["owner_abandonments"] == (
+            before["enrollments"]["16"]["owner_abandonments"]
+        )
+        assert api.task_posts == posts
+        assert api.writes == writes
+        assert not Coordinator(
+            api, restarted, clock=lambda: 1790856660,
+        )._owner_abandonment_successor_proven(
+            {"pull": api.pull, "comments": api.comments}, recovery,
+        )
 
 
 @pytest.mark.parametrize("duplicate_by", ["key", "task-id"])
@@ -12979,10 +13161,12 @@ def test_final_publication_fence_rejects_late_receipt_body_only_action(
 
 
 @pytest.mark.parametrize("path", ["source", "reviewer"])
-def test_final_publication_projection_rejects_late_embedded_proof_key_action(
-        tmp_path, monkeypatch, path):
+@pytest.mark.parametrize("alias_issue", ["missing", "foreign"])
+@pytest.mark.parametrize("authority_key", ["proof", "abandonment", "continuation"])
+def test_final_publication_projection_rejects_late_embedded_authority_key_action(
+        tmp_path, monkeypatch, path, alias_issue, authority_key):
     (
-        api, store, _, _, _, _, _, _, source_head, _,
+        api, store, _, _, recovery, _, _, _, source_head, _,
     ) = _owner_abandonment_transitive_case(tmp_path)
     if path == "source":
         api.source_failure = True
@@ -12991,9 +13175,39 @@ def test_final_publication_projection_rejects_late_embedded_proof_key_action(
         api.review_sha = source_head
     else:
         api.review_state = api.review_sha = None
-    retained_key = StateStore(store.path).snapshot()["enrollments"]["16"][
-        "receipt_proofs"
-    ][0]["key"]
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    if authority_key == "proof":
+        retained_key = enrollment["receipt_proofs"][0]["key"]
+    elif authority_key == "abandonment":
+        retained_key = recovery["action_key"]
+    else:
+        continuation_dir = tmp_path / "continuation-fixture"
+        continuation_dir.mkdir()
+        (
+            continuation_api, continuation_store, _, _, _,
+        ) = _owner_continuation_advanced_case(continuation_dir)
+        Coordinator(
+            continuation_api, StateStore(continuation_store.path),
+            clock=lambda: 1790856780,
+        ).run(apply=True)
+        continuation = StateStore(continuation_store.path).snapshot()[
+            "enrollments"
+        ]["16"]["owner_continuations"][0]
+        StateStore(store.path)._mutate(
+            lambda state: state["enrollments"]["16"].update(
+                owner_continuations=[deepcopy(continuation)],
+            ),
+        )
+        retained_key = continuation["historical_action_key"]
+    late_action = {
+        "key": retained_key,
+        "kind": "fix",
+        "task_id": "late-conflicting-task",
+        "receipt_result": "ready",
+        "receipt_head": source_head,
+    }
+    if alias_issue == "foreign":
+        late_action["issue"] = 17
     writes_before = deepcopy(api.writes)
     posts_before = api.task_posts
     final_authorization = [False]
@@ -13004,13 +13218,7 @@ def test_final_publication_projection_rejects_late_embedded_proof_key_action(
     def snapshot(state_store):
         if final_authorization[0] and not injected:
             state_store._mutate(lambda state: state["actions"].update({
-                "fresh-map-key": {
-                    "key": retained_key,
-                    "kind": "fix",
-                    "task_id": "late-conflicting-task",
-                    "receipt_result": "ready",
-                    "receipt_head": source_head,
-                },
+                "fresh-map-key": deepcopy(late_action),
             }))
             injected.append(True)
         return original_snapshot(state_store)

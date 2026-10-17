@@ -787,9 +787,16 @@ Both source-authority indexing and final remote lineage validation check this
 before filtering candidates. Boolean aliases of issue 1 fail the same way.
 Exact integer receipts for genuinely unrelated pulls remain isolated.
 Apply the same bounded receipt-like identity check before the no-current-proof
-fallback, including first-successor dispatch. Retirement must preserve live/proof
-authority-field presence and canonical-value conflicts, not just compare fields
-present in the proof. Preserve supported authentic legacy omissions only.
+fallback, including first-successor dispatch. Correlate embedded action keys against
+retained proof, abandonment, and continuation keys before issue or task filtering,
+including final source and reviewer publication fences. Retirement and lineage
+reconciliation must preserve live/proof authority-field presence and canonical-value
+conflicts, including continuation bindings, attestations, and companions, not just
+compare fields present in the proof. A legacy proof without `head_ref` cannot erase a
+live branch value unless authenticated retained evidence establishes that exact
+branch; retirement must retain uncertainty rather than infer it from the current
+pull. Preserve supported authentic legacy omissions and unrelated terminal
+compaction.
 An unrepresented competing same-pull outgoing edge remains evidence by its
 `receipt_start_head`, even with a fresh key/task and old dispatch head. Repeated
 apply, explicit retirement and cold restart must retain those exact conflicting
