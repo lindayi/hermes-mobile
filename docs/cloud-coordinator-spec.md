@@ -2014,6 +2014,11 @@ including attempt and repair metadata.
 Canonical value or presence conflicts deny source and reviewer publication and
 remain retained; identical or reordered canonical copies and authentic legacy
 omissions remain valid.
+An authenticated retained receipt may omit its legacy reservation key. Reconcile
+that proof by its exact task ID, without adding a key to persisted history.
+Explicit null, empty, or malformed keys remain invalid. Keyless successor proofs
+must match all other receipt fields in live copies; conflicting task or keyed
+aliases deny source and reviewer publication after compaction and restart.
 
 ACK-backed lifecycle retirement does not erase history. The optional
 `lifecycle_context` preserves each retired event's canonical payload and exact

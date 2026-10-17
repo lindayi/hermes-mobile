@@ -10707,6 +10707,87 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
     assert api.writes == writes
 
 
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+@pytest.mark.parametrize("key_state", [
+    "omitted", "omitted-retained-only", "null", "empty", "list", "integer",
+    "conflicting-live-key", "conflicting-live-task", "conflicting-proof",
+])
+def test_owner_abandonment_keyless_retained_successor_apply_restart(
+        tmp_path, publication, key_state):
+    (
+        api, store, abandoned, reservation, recovery, _, source, _, head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+    StateStore(store.path).retire(16, head, FINAL_RESULT_HEAD)
+
+    def configure_proofs(state):
+        proofs = state["enrollments"]["16"]["receipt_proofs"]
+        proof = next(item for item in proofs if item["task_id"] == source["task_id"])
+        proof.pop("key")
+        if key_state == "omitted-retained-only":
+            state["actions"].pop(source["key"])
+        if key_state in {"null", "empty", "list", "integer"}:
+            proof["key"] = {
+                "null": None, "empty": "", "list": [], "integer": 16,
+            }[key_state]
+        elif key_state == "conflicting-live-key":
+            state["actions"][source["key"]]["key"] = "other-reservation"
+        elif key_state == "conflicting-live-task":
+            alias = deepcopy(state["actions"][source["key"]])
+            alias["key"] = "other-reservation"
+            state["actions"][alias["key"]] = alias
+        elif key_state == "conflicting-proof":
+            alias = deepcopy(proof)
+            alias["attempt"] = 99
+            proofs.append(alias)
+
+    StateStore(store.path)._mutate(configure_proofs)
+    api.review_state = "APPROVED" if publication == "source" else None
+    api.review_sha = head if publication == "source" else None
+    api.requested_reviewers = []
+    api.unresolved = False
+    api.source_failure = publication == "source"
+    api.source_failure_sha = head if publication == "source" else None
+    before = StateStore(store.path).snapshot()
+    writes, posts = deepcopy(api.writes), api.task_posts
+    valid = key_state in {"omitted", "omitted-retained-only"}
+    for poll in range(2):
+        coordinator = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        )
+        assert coordinator._owner_abandonment_successor_proven(
+            {"pull": api.pull, "comments": api.comments}, recovery,
+        ) is valid
+        result = coordinator.run(apply=True)
+        if valid:
+            assert api.task_posts == posts + int(publication == "source"), json.dumps(
+                result, sort_keys=True,
+            )
+            assert len([
+                write for write in api.writes[len(writes):]
+                if write[0].endswith("/requested_reviewers")
+            ]) == int(publication == "reviewer")
+        else:
+            assert api.writes == writes
+            assert api.task_posts == posts
+        after = StateStore(store.path).snapshot()
+        assert after["actions"][abandoned["key"]] == reservation
+        assert after["enrollments"]["16"]["owner_abandonments"] == [recovery]
+        assert after["enrollments"]["16"]["receipt_proofs"] == before[
+            "enrollments"
+        ]["16"]["receipt_proofs"]
+        assert after["enrollments"]["16"]["attempts"] == (
+            before["enrollments"]["16"]["attempts"]
+            + int(valid and publication == "source")
+        )
+        assert after["enrollments"]["16"]["neutral_attempts"] == (
+            before["enrollments"]["16"]["neutral_attempts"]
+        )
+        if poll == 0:
+            first_writes = deepcopy(api.writes)
+        else:
+            assert api.writes == first_writes
+
+
 @pytest.mark.parametrize("bare", [False, True])
 @pytest.mark.parametrize("form", ["float", "unrelated", "legacy"])
 @pytest.mark.parametrize("receipt_field", ["receipt_body", "receipt_start_head"])

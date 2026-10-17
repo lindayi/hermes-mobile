@@ -3492,7 +3492,8 @@ def _retained_receipt_proofs_valid(enrollment, issue, comments=None):
         return False
     return all(
         isinstance(proof, dict)
-        and isinstance(proof.get("key"), str) and proof["key"]
+        and ("key" not in proof
+             or (isinstance(proof["key"], str) and proof["key"]))
         and isinstance(proof.get("task_id"), str) and proof["task_id"]
         and type(proof.get("issue")) is int and proof["issue"] == issue
         and _is_sha(proof.get("receipt_head"))
@@ -8697,7 +8698,7 @@ class Coordinator:
         if not isinstance(continuations, list):
             continuations = []
         authority_keys = (
-            {proof["key"] for proof in proofs}
+            {proof["key"] for proof in proofs if "key" in proof}
             | {root["action_key"] for root in roots
                if isinstance(root.get("action_key"), str)}
             | {
@@ -8763,14 +8764,23 @@ class Coordinator:
             except (CoordinatorError, OverflowError, TypeError, ValueError):
                 return False
         keyed_representations = [
-            *actions.items(), *((proof["key"], proof) for proof in proofs),
+            *actions.items(),
+            *((proof["key"] if "key" in proof else ("legacy-task", proof["task_id"]),
+               proof) for proof in proofs),
         ]
+        relevant_keys.update(
+            ("legacy-task", proof["task_id"]) for proof in proofs
+            if "key" not in proof
+        )
         reconciled_by_key = {}
         for key, candidate in keyed_representations:
             if key not in relevant_keys:
                 continue
-            if (not isinstance(key, str) or not isinstance(candidate, dict)
-                    or candidate.get("key") != key):
+            if (not isinstance(candidate, dict)
+                    or (isinstance(key, str) and candidate.get("key") != key)
+                    or (not isinstance(key, str)
+                        and (key != ("legacy-task", candidate.get("task_id"))
+                             or "key" in candidate))):
                 return False
             if (candidate.get("issue") == record["issue"]
                     and type(candidate.get("issue")) is not int
@@ -8791,12 +8801,17 @@ class Coordinator:
                     or candidate["task_id"] not in relevant_task_ids):
                 continue
             duplicate = reconciled.get(candidate["task_id"])
+            fields = _RECEIPT_PROOF_FIELDS
+            if duplicate is not None and (
+                    "key" not in duplicate or "key" not in candidate):
+                fields = fields - {"key"}
             if (duplicate is not None
                     and not _projected_fields_match(
-                        duplicate, candidate, _RECEIPT_PROOF_FIELDS,
+                        duplicate, candidate, fields,
                     )):
                 return False
-            reconciled[candidate["task_id"]] = candidate
+            if duplicate is None or "key" in candidate:
+                reconciled[candidate["task_id"]] = candidate
         for candidate in reconciled.values():
             if (not isinstance(candidate, dict)
                     or type(candidate.get("issue")) is not int
