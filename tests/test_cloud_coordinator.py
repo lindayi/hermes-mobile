@@ -844,6 +844,43 @@ def test_blocker_receipt_never_authorizes_a_result_head():
     assert blocked == {result_head}
 
 
+def test_foreign_keyless_receipt_proof_invalidates_shared_task_without_key_error():
+    result_head = "c" * 40
+    body = (
+        "Hermes-Task-Receipt: v1\nnonce=nonce\ntask=task-1\nsession=session-1\n"
+        f"pr=16\nstart_head={HEAD}\nhead={result_head}\nbase={BASE}\nresult=ready"
+    )
+    proof = {
+        "key": "fix", "issue": 16, "kind": "fix", "status": "completed",
+        "task_id": "task-1", "dispatch_nonce": "nonce", "head": HEAD,
+        "receipt_result": "ready", "receipt_comment_id": 900,
+        "receipt_task_id": "task-1", "receipt_session_id": "session-1",
+        "receipt_nonce": "nonce", "receipt_start_head": HEAD,
+        "receipt_head": result_head, "receipt_base": BASE,
+        "receipt_body": body, "receipt_created_at": "2026-10-01T12:04:00Z",
+        "receipt_completed_at": "2026-10-01T12:04:00Z",
+        "receipt_session_completed_at": "2026-10-01T12:04:00Z",
+    }
+    proof.pop("key")
+    comments = [{
+        "id": 900, "user": {"id": 198982749},
+        "body": body, "created_at": "2026-10-01T12:04:00Z",
+        "updated_at": "2026-10-01T12:04:00Z",
+    }]
+
+    initial, authorized, _ = _authorized_result_heads(
+        16,
+        {
+            "authorized_head": HEAD,
+            "receipt_proofs": [proof, {"issue": 17, "task_id": "task-1"}],
+        },
+        {}, comments, BASE,
+    )
+
+    assert initial == HEAD
+    assert authorized == {HEAD}
+
+
 def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_path):
     from deploy.task_receipts import receipt_instruction
 
@@ -6659,7 +6696,10 @@ def test_malformed_retained_receipt_proofs_fail_closed_without_blocking_other_pr
     root_action = before["actions"][abandoned["key"]]
 
     def corrupt_proofs(state):
-        state["enrollments"]["16"]["receipt_proofs"] = receipt_proofs
+        enrollment = state["enrollments"]["16"]
+        enrollment["receipt_proofs"] = receipt_proofs
+        if receipt_proofs is None:
+            enrollment["neutral_attempts_unknown"] = True
 
     StateStore(store.path)._mutate(corrupt_proofs)
     before_posts = api.task_posts
@@ -6687,6 +6727,11 @@ def test_malformed_retained_receipt_proofs_fail_closed_without_blocking_other_pr
     assert after["enrollments"]["16"]["attempts"] == (
         before["enrollments"]["16"]["attempts"]
     )
+    if receipt_proofs is None:
+        assert after["enrollments"]["16"]["neutral_attempts_unknown"] is True
+        assert after["enrollments"]["16"]["neutral_attempts"] == (
+            before["enrollments"]["16"]["neutral_attempts"]
+        )
     assert after["enrollments"]["16"]["owner_abandonments"] == (
         before["enrollments"]["16"]["owner_abandonments"]
     )
@@ -7180,6 +7225,58 @@ def test_final_publication_projection_rejects_late_embedded_proof_key_action(
                     "task_id": "late-conflicting-task",
                     "receipt_result": "ready",
                     "receipt_head": source_head,
+                },
+            }))
+            injected.append(True)
+        return original_snapshot(state_store)
+
+    def authority(self, issue, head, base_sha=None, **kwargs):
+        authorized = original_authority(self, issue, head, base_sha, **kwargs)
+        if kwargs.get("require_base_match") is True:
+            final_authorization[0] = True
+        return authorized
+
+    monkeypatch.setattr(StateStore, "snapshot", snapshot)
+    monkeypatch.setattr(
+        CloudCoordinator, "_authorized_dispatch_head", authority,
+    )
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert injected == [True]
+    assert api.task_posts == posts_before
+    assert api.writes == writes_before
+
+
+@pytest.mark.parametrize("path", ["source", "reviewer"])
+def test_final_publication_projection_rejects_late_abandoned_task_alias(
+        tmp_path, monkeypatch, path):
+    (
+        api, store, abandoned, _, _, _, _, _, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path)
+    if path == "source":
+        api.source_failure = True
+        api.source_failure_sha = source_head
+        api.review_state = "APPROVED"
+        api.review_sha = source_head
+    else:
+        api.review_state = api.review_sha = None
+    writes_before = deepcopy(api.writes)
+    posts_before = api.task_posts
+    final_authorization = [False]
+    injected = []
+    original_snapshot = StateStore.snapshot
+    original_authority = CloudCoordinator._authorized_dispatch_head
+
+    def snapshot(state_store):
+        if final_authorization[0] and not injected:
+            state_store._mutate(lambda state: state["actions"].update({
+                "late-abandoned-task-alias": {
+                    "key": "late-abandoned-task-alias",
+                    "issue": 16,
+                    "kind": "fix",
+                    "task_id": abandoned["task_id"],
                 },
             }))
             injected.append(True)

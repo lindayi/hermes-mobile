@@ -3576,6 +3576,7 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
                 invalid_task_ids.add(task_id)
                 invalid_proof_keys.update(
                     item["key"] for item in proofs_by_task[task_id]
+                    if isinstance(item.get("key"), str)
                 )
 
     live_records = []
@@ -3728,6 +3729,10 @@ def _dispatch_authorization_inputs(state, issue):
         record["action_key"] for record in abandonment_records
         if isinstance(record, dict) and isinstance(record.get("action_key"), str)
     }
+    abandonment_task_ids = {
+        record["task_id"] for record in abandonment_records
+        if isinstance(record, dict) and isinstance(record.get("task_id"), str)
+    }
     relevant_actions = {
         key: deepcopy(action)
         for key, action in actions.items()
@@ -3740,7 +3745,7 @@ def _dispatch_authorization_inputs(state, issue):
                     and action["key"] in proof_keys
                 ) or (
                     isinstance(action.get("task_id"), str)
-                    and action["task_id"] in proof_task_ids
+                    and action["task_id"] in proof_task_ids | abandonment_task_ids
                 )
                 or (
                     action.get("issue") == issue
@@ -6161,7 +6166,8 @@ class Coordinator:
         enrollment["receipt_proofs"] = self.store.snapshot()["enrollments"].get(
             str(number), {},
         ).get("receipt_proofs", [])
-        if enrollment.get("neutral_attempts_unknown") is True:
+        if (enrollment.get("neutral_attempts_unknown") is True
+                and isinstance(enrollment.get("receipt_proofs"), list)):
             task_details = self._hydrate_legacy_task_details(
                 enrollment, actions, snapshot,
             )
