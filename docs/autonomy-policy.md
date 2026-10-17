@@ -151,10 +151,9 @@ Sensitive owner authorization remains a separate gate.
 
 ### PR #105 owner-authorized task-abandonment and anchor-retention candidate
 
-PR #105 adds bounded recovery for owner-authorized abandonment of terminal tasks
-with unverified receipts. The current candidate pins identify the exact proposed
-source bytes; prior issue-specific hashes remain historical. Refreshing these pins
-does not clear the `coordinator-review-contract` blocker, satisfy exact-head review,
+PR #105 added bounded recovery for owner-authorized abandonment of terminal tasks
+with unverified receipts. Its pins below are historical and remain unchanged.
+They do not clear the `coordinator-review-contract` blocker, satisfy exact-head review,
 or authorize operational activation. The coordinator durably reserves and verifies
 one short owner-authored anchor before neutral task dispatch. The prompt binds its
 returned comment ID and exact body. The neutral producer keeps the complete
@@ -183,6 +182,52 @@ remains historical bootstrap15/16 evidence, not the current candidate pin.
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `165260a6ed9abe83edfdac21c58f2478e09288727ec2221247ebc427524fac22` |
 | `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
+
+### Issue #111 bounded owner continuation disposition candidate
+
+Issue #111 adds a finite owner-bound disposition for one exact historical
+abandonment, followed by one distinct bounded successor. It preserves the old
+abandonment and reservation and requires a fresh current-head enrollment. A
+successful receipt is still required before later source advancement. The valid
+continuation result may advance only through an exact ready-receipt chain; a
+disconnected or blocked descendant cannot release historical occupancy or advance
+progress. Global authorization from a later enrollment or another root cannot
+replace a ready-receipt path from the bound successor. SOURCE continuation proofs
+require their immutable owner anchor even if retained state omits optional anchor
+fields. Every cohort member must bind the same frozen enrollment comment, head, main,
+and immutable pull identity; a later enrollment cannot mix or renew a spent epoch.
+After an inactive close/reopen, the exact-head enrollment may carry `authorized_head`
+without `owner_authorized_head`. Admission, commit, and publication may use that
+fresh exact head only when the latter field is absent; an explicit stale value never
+falls back. Historical bindings and spent budgets remain unchanged.
+Newly planned cohort dispositions are admitted atomically per PR. Temporary task
+detail failures leave the original command retryable, including after the issue
+update cursor moves beyond its overlap window. The coordinator independently
+discovers active enrolled PRs with valid retained abandonment claims that are
+missing from the updated-issue results. Exact issue lookups are capped at 100 per
+poll; a larger backlog fails closed. Each discovered issue and pull must match
+the retained identity and remain open. API failures during either initial ancestry
+comparison leave the disposition unconsumed; only its positively identified ID
+crosses a precommit state-conflict rebuild, where all authority and publication plans
+are rebuilt from durable state. Prepared-scan conflicts also retain all positively
+identified unconsumed command IDs, including commands already deferred for another
+PR. A newer compacted watermark does not consume an ID that was unconsumed at the
+preparation baseline; explicit durable event or continuation records do. Retry IDs
+remain bounded and are persisted before event-watermark compaction. Each pending ID
+is also recovered by an exact comment lookup independent of issue and comment cursors,
+then bound to a canonical same-repository open PR issue. The normal immutable
+owner-command checks remain authoritative; malformed identity or temporary API
+failure cannot consume the pending ID. The exact lookup is discovery only: fetch the
+complete bounded comment inventory for that PR, do not restore cached bytes that are
+absent from it, and leave missing IDs pending.
+Positive invalid evidence does not authorize dispatch. These candidate pins identify
+exact proposed source bytes only; they do not establish review, merge, operational
+authorization, or activation.
+
+| Candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `ab34dffdac0ddec3244863015cdb2485c4900229f99f7472194c97cec5845cb8` |
+| `deploy/task_receipts.py` | `72615884d5e61a51f6fd8d9527774fc4982ebd66f98e5bd4b84a640404fccbe5` |
 
 ### Retained merged source and deliberate native refreshes
 

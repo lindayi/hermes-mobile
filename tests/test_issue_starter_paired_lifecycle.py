@@ -1375,8 +1375,8 @@ def test_starter_admission_final_precommit_aborts_entire_preparation(tmp_path, m
     worker = Coordinator(api, store, clock=lambda: NOW)
     original = worker._build_plan
 
-    def changed_after_plan(*, apply):
-        plan = original(apply=apply)
+    def changed_after_plan(*, apply, **kwargs):
+        plan = original(apply=apply, **kwargs)
         assert plan["commands"] and plan["starter_admissions"]
         if not renewal:
             assert plan["pull_requests"][0]["repair"]

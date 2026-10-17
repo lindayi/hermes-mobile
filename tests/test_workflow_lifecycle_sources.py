@@ -1566,8 +1566,8 @@ def test_persistent_coordinator_incident_replays_canonical_retired_payload(tmp_p
     api.head_sha = "d" * 40
     api.pull["head"]["sha"] = api.head_sha
     class ReplayCoordinator(CloudCoordinator):
-        def _build_plan(self, *, apply):
-            plan = super()._build_plan(apply=apply)
+        def _build_plan(self, *, apply, **kwargs):
+            plan = super()._build_plan(apply=apply, **kwargs)
             regenerated, = plan["pull_requests"][0]["lifecycle_events"]
             assert regenerated["event_id"] == original[0]["event_id"]
             assert regenerated["head_sha"] == api.head_sha != original[0]["head_sha"]
