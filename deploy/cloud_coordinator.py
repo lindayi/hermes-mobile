@@ -3916,7 +3916,7 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     if _is_sha(enrollment.get("owner_authorized_head")):
         authorized.add(enrollment["owner_authorized_head"])
     if type(issue) is not int or issue <= 0:
-        return initial, authorized, set()
+        return initial, set(), set()
     continuation_records = [
         recovery for _, recovery in _valid_owner_abandonment_claims(
             enrollment, actions,
@@ -3927,7 +3927,7 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
             or len(continuation_records) != len(abandonment_records)
             or any(record.get("issue") != issue
                    for record in continuation_records)):
-        return initial, authorized, set()
+        return initial, set(), set()
     owner_continuation_records = [
         recovery for _, recovery in _valid_owner_continuation_claims(
             enrollment, actions,
@@ -3936,21 +3936,21 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     blocked = set()
     proofs = enrollment.get("receipt_proofs", [])
     if not isinstance(proofs, list):
-        proofs = []
+        return initial, set(), set()
     proof_records = []
     for proof in proofs:
         if not isinstance(proof, dict):
-            return initial, authorized, set()
+            return initial, set(), set()
         proof_issue = proof.get("issue")
         if type(proof_issue) is not int or proof_issue <= 0:
-            return initial, authorized, set()
+            return initial, set(), set()
         if proof_issue != issue:
             continue
         if (("key" in proof
              and (not isinstance(proof.get("key"), str) or not proof["key"]))
                 or not isinstance(proof.get("task_id"), str)
                 or not proof["task_id"]):
-            return initial, authorized, set()
+            return initial, set(), set()
         proof_records.append(proof)
 
     proof_keys = {
@@ -4028,7 +4028,7 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
         if (not exact_issue or not isinstance(candidate_key, str)
                 or candidate_key != key or not isinstance(task_id, str) or not task_id):
             if receipt_like and aliases_issue:
-                return initial, authorized, set()
+                return initial, set(), set()
             invalid_proof_keys.update(linked_keys)
             invalid_task_ids.update(linked_tasks)
             continue
@@ -8659,18 +8659,6 @@ class Coordinator:
         if not isinstance(proofs, list):
             return False
         candidates = []
-        proof_fields = frozenset({
-            "key", "task_id", "issue", "kind", "task_type", "status", "head",
-            "dispatch_nonce", "created_at",
-            "receipt_result", "receipt_comment_id", "receipt_created_at",
-            "receipt_body", "receipt_task_id", "receipt_session_id",
-            "receipt_completed_at", "receipt_session_completed_at",
-            "receipt_nonce", "receipt_start_head", "receipt_head",
-            "receipt_base", "receipt_version", "receipt_legacy_neutral",
-            "head_ref",
-            "main_sha", "recorded_base_sha", "owner_id",
-            "repository_id", "pull_id", "pull_node_id",
-        }) | _RECEIPT_AUTHORITY_FIELDS
         representations = [*actions.values(), *proofs]
         if any(
                 not isinstance(proof, dict)
@@ -8768,7 +8756,7 @@ class Coordinator:
             duplicate = reconciled_by_key.get(key)
             if (duplicate is not None
                     and not _projected_fields_match(
-                        duplicate, candidate, proof_fields,
+                        duplicate, candidate, _RECEIPT_PROOF_FIELDS,
                     )):
                 return False
             reconciled_by_key[key] = candidate
@@ -8781,7 +8769,7 @@ class Coordinator:
             duplicate = reconciled.get(candidate["task_id"])
             if (duplicate is not None
                     and not _projected_fields_match(
-                        duplicate, candidate, proof_fields,
+                        duplicate, candidate, _RECEIPT_PROOF_FIELDS,
                     )):
                 return False
             reconciled[candidate["task_id"]] = candidate
