@@ -4004,10 +4004,7 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     for key, candidate in actions.items():
         if not isinstance(candidate, dict):
             if key in proof_keys:
-                invalid_proof_keys.add(key)
-                invalid_task_ids.update(
-                    proof["task_id"] for proof in proofs_by_key[key]
-                )
+                return initial, set(), set()
             continue
         candidate_key = candidate.get("key")
         task_id = candidate.get("task_id")
@@ -4027,11 +4024,7 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
             continue
         if (not exact_issue or not isinstance(candidate_key, str)
                 or candidate_key != key or not isinstance(task_id, str) or not task_id):
-            if receipt_like and aliases_issue:
-                return initial, set(), set()
-            invalid_proof_keys.update(linked_keys)
-            invalid_task_ids.update(linked_tasks)
-            continue
+            return initial, set(), set()
         matching_proofs = {
             id(proof): proof for proof in [
                 *(

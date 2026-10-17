@@ -816,7 +816,8 @@ def test_sha_bound_enrollment_rejects_unproven_or_unrelated_result_heads(tmp_pat
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("malformed", [
     "nonobject", "issue", "key", "task", "container",
-    "live-key", "live-task",
+    "live-key", "live-task", "live-missing-issue",
+    "live-foreign-issue",
 ])
 def test_malformed_authority_cannot_bypass_same_head_blocker(
         tmp_path, publication, separate_owner_head, reverse, malformed):
@@ -851,8 +852,16 @@ def test_malformed_authority_cannot_bypass_same_head_blocker(
         elif malformed.startswith("live-"):
             enrollment["receipt_proofs"] = [deepcopy(proof)]
             alias = deepcopy(proof)
-            alias["key" if malformed == "live-key" else "task_id"] = None
-            state["actions"]["malformed-live-receipt"] = alias
+            alias_key = "malformed-live-receipt"
+            if malformed == "live-missing-issue":
+                alias.pop("issue")
+                alias_key = proof["key"]
+            elif malformed == "live-foreign-issue":
+                alias["issue"] = 17
+                alias_key = proof["key"]
+            else:
+                alias["key" if malformed == "live-key" else "task_id"] = None
+            state["actions"][alias_key] = alias
 
     store._mutate(install)
     if publication == "source":
@@ -903,6 +912,16 @@ def test_malformed_authority_identity_or_roots_never_return_success(
             "authorized_head": HEAD, "owner_authorized_head": RESULT_HEAD,
             "owner_abandonments": abandonments,
         }, {}, [], BASE,
+    )
+    assert authorized == set()
+
+
+def test_nonobject_live_receipt_alias_never_preserves_initial_authority(tmp_path):
+    api, store, proof, head = _accepted_compacted_receipt_case(tmp_path)
+    enrollment = store.snapshot()["enrollments"]["16"]
+    enrollment["authorized_head"] = head
+    _, authorized, _ = _authorized_result_heads(
+        16, enrollment, {proof["key"]: None}, api.comments, BASE,
     )
     assert authorized == set()
 
