@@ -4097,7 +4097,8 @@ def _owner_continuation_enrollment_active(record, enrollment):
         and enrollment["comment"] == record["enrollment_comment_id"]
         and enrollment.get("head") == record["current_head_sha"]
         and enrollment.get("base") == record["current_main_sha"]
-        and enrollment.get("owner_authorized_head") == record["current_head_sha"]
+        and _owner_continuation_enrollment_head(enrollment)
+            == record["current_head_sha"]
         and type(enrollment.get("pull_id")) is int
         and enrollment["pull_id"] == record["pull_id"]
         and enrollment.get("pull_node_id") == record["pull_node_id"]
@@ -4109,6 +4110,14 @@ def _owner_continuation_enrollment_active(record, enrollment):
             for item in continuations
         )
     )
+
+
+def _owner_continuation_enrollment_head(enrollment):
+    if not isinstance(enrollment, dict):
+        return None
+    if "owner_authorized_head" in enrollment:
+        return enrollment["owner_authorized_head"]
+    return enrollment.get("authorized_head")
 
 
 def _owner_continuation_successor_proven(record, enrollment, actions, comments,
@@ -4711,8 +4720,10 @@ class Coordinator:
             if issue["number"] in blocked_continuations:
                 continue
             enrollment = state["enrollments"].get(str(issue["number"]), {})
+            pending_for_issue = pending_comments.get(issue["number"], {})
             comment_cursor = (
-                None if _valid_owner_abandonment_claims(enrollment, state["actions"])
+                None if pending_for_issue
+                or _valid_owner_abandonment_claims(enrollment, state["actions"])
                 else cursor
             )
             comments = _all_review_comments(self.api, issue["number"], comment_cursor)
@@ -4724,13 +4735,6 @@ class Coordinator:
                         or comment["id"] <= 0 or comment["id"] in inventory_ids):
                     raise CoordinatorError("GitHub issue comment identity was malformed")
                 inventory_ids.add(comment["id"])
-            pending_for_issue = pending_comments.get(issue["number"], {})
-            if pending_for_issue:
-                comments.extend(
-                    comment for comment in pending_for_issue.values()
-                    if comment["id"] not in inventory_ids
-                )
-                comments.sort(key=lambda comment: comment["id"])
             for comment in comments:
                 key = str(comment["id"])
                 if (_event_consumed(state, key)
@@ -7512,7 +7516,7 @@ class Coordinator:
                 or not _owner_abandonment_matches_action(historical, action)
                 or not isinstance(enrollment, dict)
                 or enrollment.get("active") is not True
-                or enrollment.get("owner_authorized_head")
+                or _owner_continuation_enrollment_head(enrollment)
                     != item.get("current_head_sha")
                 or enrollment.get("head") != item.get("current_head_sha")
                 or enrollment.get("base") != item.get("current_main_sha")
@@ -10714,7 +10718,7 @@ class StateStore:
                             or record.get("issue") != enrollment.get("issue")
                             or enrollment.get("comment")
                                 != record.get("enrollment_comment_id")
-                            or enrollment.get("owner_authorized_head")
+                            or _owner_continuation_enrollment_head(enrollment)
                                 != record.get("current_head_sha")):
                         raise CoordinatorError(
                             "Owner continuation did not match fresh enrollment"

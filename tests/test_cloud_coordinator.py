@@ -476,8 +476,9 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     assert api.fix_attempts == 2
 
 
-@pytest.mark.parametrize("edited", [False, True])
-def test_pending_enrollment_uses_later_inventory_before_apply(tmp_path, edited):
+@pytest.mark.parametrize("inventory_change", [False, True, "deleted"])
+def test_pending_enrollment_uses_later_inventory_before_apply(
+        tmp_path, inventory_change):
     api = FakeApi(unresolved=True)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     store = StateStore(tmp_path / "state.json")
@@ -496,10 +497,16 @@ def test_pending_enrollment_uses_later_inventory_before_apply(tmp_path, edited):
     def get_all(route, *, collection=None):
         if route.startswith("repos/lindayi/hermes-mobile/issues/16/comments?"):
             assert exact_reads
-            if edited:
+            if inventory_change is True:
                 api.comments[0]["body"] = f"/hermes enroll {'c' * 40}"
                 api.comments[0]["updated_at"] = "2026-10-01T11:01:00Z"
-            inventory_reads.append(deepcopy(api.comments[0]))
+            elif inventory_change == "deleted":
+                api.comments[:] = [
+                    comment for comment in api.comments if comment["id"] != 123
+                ]
+            comments = original_get_all(route, collection=collection)
+            inventory_reads.append(deepcopy(comments))
+            return comments
         return original_get_all(route, collection=collection)
 
     api.get = get
@@ -510,10 +517,17 @@ def test_pending_enrollment_uses_later_inventory_before_apply(tmp_path, edited):
     assert exact_reads[0]["created_at"] == exact_reads[0]["updated_at"]
     assert inventory_reads
     state = StateStore(store.path).snapshot()
-    if edited:
-        assert inventory_reads[0]["updated_at"] != inventory_reads[0]["created_at"]
+    if inventory_change is True:
+        assert inventory_reads[0][0]["updated_at"] != inventory_reads[0][0]["created_at"]
         assert state["enrollments"] == {}
         assert state["actions"] == {}
+        assert api.task_posts == 0
+        assert api.writes == []
+    elif inventory_change == "deleted":
+        assert inventory_reads and all(not comments for comments in inventory_reads)
+        assert state["enrollments"] == {}
+        assert state["actions"] == {}
+        assert state["pending_events"] == ["123"]
         assert api.task_posts == 0
         assert api.writes == []
     else:
@@ -3401,7 +3415,8 @@ def _store_precovery_owner_abandonment_successor(
         api, store, *, created_at, receipt_head, receipt_base,
         start_head=NEXT_RESULT_HEAD,
         receipt_result="ready",
-        action_key="precovery-owner-abandonment-successor"):
+        action_key="precovery-owner-abandonment-successor",
+        receipt_comment_id=9901):
     action = {
         "key": action_key,
         "issue": 16,
@@ -3433,12 +3448,12 @@ def _store_precovery_owner_abandonment_successor(
         task["id"], claimed, result=receipt_result,
         head_sha=receipt_head, base_sha=receipt_base,
     )
-    api.comments[-1]["id"] = 9901
+    api.comments[-1]["id"] = receipt_comment_id
     store.update_action_with_lifecycle(
         action["key"], "completed", None, now=created_at,
         receipt_version="v1",
         receipt_result=receipt_result,
-        receipt_comment_id=9901,
+        receipt_comment_id=receipt_comment_id,
         receipt_created_at="2026-10-01T12:05:00Z",
         receipt_body=api.comments[-1]["body"],
         receipt_task_id=task["id"],
@@ -5130,6 +5145,7 @@ def test_owner_continuation_rejects_a_blocked_intermediate_receipt(tmp_path):
         start_head=blocked_head, receipt_head=descendant_head,
         receipt_base=continued_main,
         action_key="ready-owner-continuation-after-block",
+        receipt_comment_id=9902,
     )
     api.head_sha = descendant_head
     api.pull["head"]["sha"] = descendant_head
@@ -5161,6 +5177,81 @@ def test_owner_continuation_rejects_a_blocked_intermediate_receipt(tmp_path):
     assert not cloud_coordinator._owner_continuation_successor_proven(
         continuation, enrollment, actions, api.comments, descendant_head,
     )
+
+
+def test_owner_continuation_after_persisted_close_reopen_uses_fresh_enrollment(
+        tmp_path):
+    api, store, abandonment, continued_head, continued_main = (
+        _owner_continuation_advanced_case(tmp_path, disposition=False)
+    )
+    api.pull.update(state="closed", merged=False, closed_at="2026-10-01T12:13:00Z")
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    closed = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert closed["active"] is False
+    posts = api.task_posts
+
+    api.pull.update(state="open", closed_at=None)
+    api.comments.extend([
+        {
+            "id": 7784, "user": {"id": OWNER},
+            "body": f"/hermes enroll {continued_head}",
+            "created_at": "2026-10-01T12:14:00Z",
+            "updated_at": "2026-10-01T12:14:00Z",
+        },
+        {
+            "id": 7785, "user": {"id": OWNER},
+            "body": (
+                f"/hermes continue-unverified {abandonment['command_comment_id']} "
+                f"{abandonment['task_id']} {abandonment['reservation_sha256']} "
+                f"{continued_head} {continued_main}"
+            ),
+            "created_at": "2026-10-01T12:15:00Z",
+            "updated_at": "2026-10-01T12:15:00Z",
+        },
+    ])
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856900,
+    ).run(apply=True)
+
+    admitted = StateStore(store.path).snapshot()
+    reopened = admitted["enrollments"]["16"]
+    assert reopened["active"] is True
+    assert reopened.get("owner_continuations")
+    record = reopened["owner_continuations"][0]
+    assert record["enrollment_comment_id"] == 7784
+    assert record["current_head_sha"] == continued_head
+    assert record["current_main_sha"] == continued_main
+    assert reopened["authorized_head"] == continued_head
+    assert "owner_authorized_head" not in reopened
+    assert reopened["owner_abandonments"] == closed["owner_abandonments"]
+    assert reopened["attempts"] == closed["attempts"]
+    assert reopened["neutral_attempts"] == closed["neutral_attempts"]
+    assert cloud_coordinator._event_consumed(admitted, "7785")
+    assert api.task_posts == posts
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856960,
+    ).run(apply=True)
+    state = StateStore(store.path).snapshot()
+    reopened = state["enrollments"]["16"]
+    assert reopened["attempts"] == closed["attempts"] + 1
+    assert api.task_posts == posts + 1
+    successor = next(
+        action for action in state["actions"].values()
+        if action.get("owner_continuation_binding")
+    )
+    assert successor["status"] == "sent"
+    assert cloud_coordinator._owner_continuation_enrollment_active(record, reopened)
+    stale = reopened | {"owner_authorized_head": abandonment["head_sha"]}
+    assert not cloud_coordinator._owner_continuation_enrollment_active(record, stale)
+    writes = list(api.writes)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790857020,
+    ).run(apply=True)
+    assert api.task_posts == posts + 1
+    assert api.writes == writes
 
 
 def test_reenrollment_cannot_bypass_missing_abandonment_root(tmp_path):
@@ -6403,8 +6494,8 @@ def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
     assert exact_reads.count("repos/lindayi/hermes-mobile/issues/comments/7773") == 1
     assert issue_routes and "since=" in issue_routes[0]
     assert issue_pages and bool(issue_pages[0]) is issue_present
-    assert comment_routes and "since=" in comment_routes[0]
-    assert not {7773, 7774}.intersection(comment_pages[0])
+    assert comment_routes and all("since=" not in route for route in comment_routes)
+    assert {7773, 7774}.issubset(comment_pages[0])
     assert recovered["cursor"] == "2026-10-15T03:12:00Z"
     assert recovered["pending_events"] == []
     assert recovered["event_watermark"] > 7774

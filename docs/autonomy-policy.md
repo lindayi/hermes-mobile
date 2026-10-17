@@ -196,6 +196,10 @@ replace a ready-receipt path from the bound successor. SOURCE continuation proof
 require their immutable owner anchor even if retained state omits optional anchor
 fields. Every cohort member must bind the same frozen enrollment comment, head, main,
 and immutable pull identity; a later enrollment cannot mix or renew a spent epoch.
+After an inactive close/reopen, the exact-head enrollment may carry `authorized_head`
+without `owner_authorized_head`. Admission, commit, and publication may use that
+fresh exact head only when the latter field is absent; an explicit stale value never
+falls back. Historical bindings and spent budgets remain unchanged.
 Newly planned cohort dispositions are admitted atomically per PR. Temporary task
 detail failures leave the original command retryable, including after the issue
 update cursor moves beyond its overlap window. The coordinator independently
@@ -213,14 +217,16 @@ remain bounded and are persisted before event-watermark compaction. Each pending
 is also recovered by an exact comment lookup independent of issue and comment cursors,
 then bound to a canonical same-repository open PR issue. The normal immutable
 owner-command checks remain authoritative; malformed identity or temporary API
-failure cannot consume the pending ID.
+failure cannot consume the pending ID. The exact lookup is discovery only: fetch the
+complete bounded comment inventory for that PR, do not restore cached bytes that are
+absent from it, and leave missing IDs pending.
 Positive invalid evidence does not authorize dispatch. These candidate pins identify
 exact proposed source bytes only; they do not establish review, merge, operational
 authorization, or activation.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `13ef597ed9c041d795c2484e80c946018230db0a8e84412c5bd327c3663703ad` |
+| `deploy/cloud_coordinator.py` | `0e71c05f93a241c5c39673caee5ccccf9636b09a062164170e695fc69c3370d9` |
 | `deploy/task_receipts.py` | `72615884d5e61a51f6fd8d9527774fc4982ebd66f98e5bd4b84a640404fccbe5` |
 
 ### Retained merged source and deliberate native refreshes

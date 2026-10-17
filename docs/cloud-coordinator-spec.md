@@ -778,6 +778,12 @@ Before the first receipt is accepted, a renewed owner enrollment may authorize
 the successor result head. The committed continuation candidate can bridge that
 head change only to the existing full receipt validator; it does not itself prove
 or accept a receipt.
+An inactive close/reopen may produce a fresh exact-head enrollment with
+`authorized_head` but no `owner_authorized_head`. Admission, commit, and publication
+use `owner_authorized_head` when that field exists; only when it is absent may the
+exact `authorized_head` match the continuation's frozen current head. An explicit
+stale owner-authorized head never falls back. The historical bindings and spent
+budgets remain unchanged.
 Ordinary historical SOURCE and all neutral transport semantics remain unchanged.
 
 A positively confirmed `sent` Copilot review-request action is settled and is not
@@ -794,6 +800,9 @@ owner, and chronology; competing owner commands for that reservation reject the
 continuation. Non-owner commands and unrelated owner chatter are not authority and
 do not count as competing dispositions. This inventory check runs at admission and
 again at publication, so commands consumed on an earlier poll are included.
+An exact pending-comment lookup only discovers its PR. For a PR with pending hints,
+fetch the complete bounded comment inventory before accepting any command; do not
+restore cached comment bytes absent from that inventory, and leave their IDs pending.
 
 After the last historical-task and successor-anchor reads, independently
 reauthenticate all three immutable owner records: the original abandonment
