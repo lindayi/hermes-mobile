@@ -226,7 +226,7 @@ authorization, or activation.
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `e45f884f88229a63b96cfd170cb602d3742f4ef598962ec1842da130a1761a99` |
+| `deploy/cloud_coordinator.py` | `ab34dffdac0ddec3244863015cdb2485c4900229f99f7472194c97cec5845cb8` |
 | `deploy/task_receipts.py` | `72615884d5e61a51f6fd8d9527774fc4982ebd66f98e5bd4b84a640404fccbe5` |
 
 ### Retained merged source and deliberate native refreshes
