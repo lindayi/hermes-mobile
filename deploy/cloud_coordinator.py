@@ -3741,7 +3741,10 @@ def _dispatch_authorization_inputs(state, issue):
                 )
                 or (
                     action.get("issue") == issue
-                    and ("receipt_result" in action or "receipt_head" in action)
+                    and (
+                        "receipt_result" in action or "receipt_head" in action
+                        or "receipt_body" in action
+                    )
                 )
             )
         )

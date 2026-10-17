@@ -7061,6 +7061,60 @@ def test_final_publication_fence_rejects_numeric_identity_alias(
     assert api.writes == writes_before
 
 
+def test_final_publication_fence_rejects_late_receipt_body_only_action(
+        tmp_path, monkeypatch):
+    api, store, _, _, _, _, _, _, source_head, _ = (
+        _owner_abandonment_transitive_case(tmp_path)
+    )
+    api.source_failure = True
+    api.source_failure_sha = source_head
+    api.review_state = "APPROVED"
+    api.review_sha = source_head
+    StateStore(store.path)._mutate(
+        lambda state: [
+            proof.pop("head_ref", None)
+            for proof in state["enrollments"]["16"]["receipt_proofs"]
+        ],
+    )
+    writes_before = deepcopy(api.writes)
+    posts_before = api.task_posts
+    final_authorization = [False]
+    publication_reads = [0]
+    original_snapshot = StateStore.snapshot
+    original_authority = CloudCoordinator._authorized_dispatch_head
+
+    def snapshot(state_store):
+        if final_authorization[0]:
+            publication_reads[0] += 1
+            if publication_reads[0] == 1:
+                state_store._mutate(lambda state: state["actions"].update({
+                    "late-receipt-body-only": {
+                        "key": "late-receipt-body-only",
+                        "issue": 16.0,
+                        "receipt_body": "late receipt-like action",
+                    },
+                }))
+        return original_snapshot(state_store)
+
+    def authority(self, issue, head, base_sha=None, **kwargs):
+        authorized = original_authority(self, issue, head, base_sha, **kwargs)
+        if kwargs.get("require_base_match") is True:
+            final_authorization[0] = True
+        return authorized
+
+    monkeypatch.setattr(StateStore, "snapshot", snapshot)
+    monkeypatch.setattr(
+        CloudCoordinator, "_authorized_dispatch_head", authority,
+    )
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert publication_reads[0] >= 1
+    assert api.task_posts == posts_before
+    assert api.writes == writes_before
+
+
 @pytest.mark.parametrize("mutation", ["edited", "deleted", "substituted"])
 def test_new_lineage_rechecks_root_before_source_post(tmp_path, mutation, monkeypatch):
     api, store, abandoned, _, recovery, _, _, _, source_head, _ = (
