@@ -7450,6 +7450,79 @@ def test_owner_continuation_same_poll_reenrollment_admits_complete_cohort(
     assert api.task_posts == prior_posts
 
 
+@pytest.mark.parametrize("neutral", [False, True])
+def test_owner_continuation_same_poll_reenrollment_defers_mixed_roots(
+        tmp_path, neutral):
+    api, store, _, _, main = _owner_continuation_advanced_case(
+        tmp_path, disposition=False, multiple_roots=True,
+    )
+    roots = deepcopy(store.snapshot()["enrollments"]["16"]["owner_abandonments"])
+    older_root, current_root = roots
+    head = current_root["head_sha"]
+    api.head_sha = api.pull["head"]["sha"] = head
+    api.source_failure_sha = head
+    api.compare_results[
+        f"{older_root['head_sha']}...{head}"
+    ] = _compare_result(older_root["head_sha"], ahead_by=1)
+    for root in roots:
+        api.compare_results[
+            f"{root['base_sha']}...{head}"
+        ] = _compare_result(root["base_sha"], ahead_by=1)
+    api.pull.update(mergeable=True, mergeable_state="behind" if neutral else "clean")
+    api.pull.update(state="closed", merged=False, closed_at="2026-10-01T12:15:00Z")
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856960).run(apply=True)
+    StateStore(store.path).retire(16, head, main)
+
+    api.pull.update(state="open", closed_at=None)
+    api.comments.extend([
+        {
+            "id": 7783, "user": {"id": OWNER},
+            "body": f"/hermes enroll {head}",
+            "created_at": "2026-10-01T12:16:00Z",
+            "updated_at": "2026-10-01T12:16:00Z",
+        },
+        {
+            "id": 7784, "user": {"id": OWNER},
+            "body": (
+                f"/hermes continue-unverified {older_root['command_comment_id']} "
+                f"{older_root['task_id']} {older_root['reservation_sha256']} "
+                f"{head} {main}"
+            ),
+            "created_at": "2026-10-01T12:17:00Z",
+            "updated_at": "2026-10-01T12:17:00Z",
+        },
+    ])
+    before = StateStore(store.path).snapshot()
+    prior_enrollment = before["enrollments"]["16"]
+    posts = api.task_posts
+    writes = list(api.writes)
+
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790857200).run(
+            apply=True,
+        )
+
+    after = StateStore(store.path).snapshot()
+    enrollment = after["enrollments"]["16"]
+    assert enrollment["active"] is True
+    assert enrollment["comment"] == 7783
+    assert enrollment["owner_abandonments"] == roots
+    assert not cloud_coordinator._event_consumed(after, "7784")
+    assert "7784" in after["pending_events"]
+    assert enrollment.get("owner_continuations", []) == (
+        prior_enrollment.get("owner_continuations", [])
+    )
+    assert enrollment["attempts"] == prior_enrollment["attempts"]
+    assert enrollment["neutral_attempts"] == prior_enrollment["neutral_attempts"]
+    assert enrollment["neutral_anchor_reservations"] == (
+        prior_enrollment["neutral_anchor_reservations"]
+    )
+    assert after["actions"] == before["actions"]
+    assert after["outbox"] == before["outbox"]
+    assert api.task_posts == posts
+    assert api.writes == writes
+
+
 @pytest.mark.parametrize("disposition_id", [7781, 7782])
 @pytest.mark.parametrize("mutation", ["edited", "deleted"])
 def test_owner_continuation_final_admission_defers_all_roots_together(

@@ -7795,6 +7795,7 @@ class Coordinator:
                 "record": record,
                 "enrollment": enrollment,
             })
+        deferred_mixed_enrollments = set()
         for snapshot in scans:
             issue = snapshot["issue"]
             new_records = [
@@ -7819,7 +7820,19 @@ class Coordinator:
                         is type(enrollment.get("comment"))
                     and record["enrollment_comment_id"] == enrollment.get("comment"))
             ]
-            incomplete = any(
+            mixed_current_root = any(
+                root["head_sha"] == snapshot["head"]
+                and not any(
+                    record["historical_action_key"] == root["action_key"]
+                    for record in records
+                )
+                and any(
+                    record["historical_action_key"] != root["action_key"]
+                    for record in new_records
+                )
+                for root in roots
+            )
+            incomplete = mixed_current_root or any(
                 not _owner_abandonment_record_valid(root)
                 or any(
                     record["historical_action_key"] == root["action_key"]
@@ -7848,6 +7861,8 @@ class Coordinator:
             )
             if not incomplete:
                 continue
+            if mixed_current_root:
+                deferred_mixed_enrollments.add(issue)
             rejected_ids = {record["disposition_comment_id"] for record in new_records}
             deferred_keys = {
                 str(item["command_comment_id"]) for command, item in commands
@@ -7879,6 +7894,9 @@ class Coordinator:
                     or enrollment["comment"] <= previous["comment"]):
                 continue
             for field in ("receipt_proofs", "owner_abandonments"):
+                if (field == "owner_abandonments"
+                        and enrollment["issue"] in deferred_mixed_enrollments):
+                    continue
                 enrollment.pop(field, None)
             retained_continuations = [
                 record for record in enrollment.get("owner_continuations", [])
