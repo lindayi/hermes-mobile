@@ -4131,6 +4131,18 @@ def _dispatch_authorization_inputs(state, issue):
         proof["task_id"] for proof in proof_records
         if isinstance(proof, dict) and isinstance(proof.get("task_id"), str)
     }
+    continuations = enrollment.get("owner_continuations")
+    continuation_records = continuations if isinstance(continuations, list) else []
+    continuation_keys = {
+        record["historical_action_key"] for record in continuation_records
+        if isinstance(record, dict)
+        and isinstance(record.get("historical_action_key"), str)
+    }
+    continuation_task_ids = {
+        record["historical_task_id"] for record in continuation_records
+        if isinstance(record, dict)
+        and isinstance(record.get("historical_task_id"), str)
+    }
     abandonments = enrollment.get("owner_abandonments")
     abandonment_records = abandonments if isinstance(abandonments, list) else []
     abandonment_keys = {
@@ -4144,7 +4156,7 @@ def _dispatch_authorization_inputs(state, issue):
     relevant_actions = {
         key: deepcopy(action)
         for key, action in actions.items()
-        if key in proof_keys | abandonment_keys
+        if key in proof_keys | abandonment_keys | continuation_keys
         or (
             isinstance(action, dict)
             and (
@@ -4153,7 +4165,9 @@ def _dispatch_authorization_inputs(state, issue):
                     and action["key"] in proof_keys
                 ) or (
                     isinstance(action.get("task_id"), str)
-                    and action["task_id"] in proof_task_ids | abandonment_task_ids
+                    and action["task_id"] in (
+                        proof_task_ids | abandonment_task_ids | continuation_task_ids
+                    )
                 )
                 or (
                     action.get("issue") == issue
@@ -4174,7 +4188,7 @@ def _dispatch_authorization_inputs(state, issue):
             for field in (
                 "active", "issue", "repository_id", "pull_id", "pull_node_id",
                 "base", "authorized_head", "owner_authorized_head",
-                "owner_abandonments", "receipt_proofs",
+                "owner_abandonments", "owner_continuations", "receipt_proofs",
             )
             if field != "receipt_proofs" or field in enrollment
         },
@@ -5165,6 +5179,7 @@ class Coordinator:
                             "issue": issue["number"], **continuation,
                         }))
                         processed.append(key)
+                        processed_by_issue.append((issue["number"], key))
                         continue
                     authorization = _is_owner_sensitive_command(comment)
                     if authorization:
@@ -7230,17 +7245,14 @@ class Coordinator:
             )
             for record in historical_roots
         )
-        if (not self._owner_abandonment_head_proven(snapshot)
-                and missing_root_disposition):
-            reasons = ["unauthorized-continuation"]
-            if (agent_busy and busy_details.get("external_busy") is False
-                    and busy_details.get("action_keys")):
-                reasons.append("agent")
+        if (missing_root_disposition
+                or (not self._owner_abandonment_head_proven(snapshot)
+                    and not continuation_for_head)):
             return {
                 "issue": number, "head": head, "sensitive": sensitive,
                 "terminal": False, "review_valid": review_ok,
                 "required_checks_green": checks_ok, "auto_merge_eligible": False,
-                "reasons": reasons, "repair": None,
+                "reasons": ["unauthorized-continuation"], "repair": None,
                 "status_action": None, "merge_action": None, "outcomes": [],
                 "receipt_recoveries": receipt_recoveries, "handoffs": handoffs,
             }
@@ -7517,6 +7529,10 @@ class Coordinator:
                     pull_number=number, source_failure=snapshot["source_failure"],
                     reviews=snapshot["reviews"],
                 )
+        if malformed_receipt_repair_head:
+            print("receipt repair plan:", repair_scoped, needs_neutral_reconciliation,
+                  neutral_attempts, neutral_blocker, mergeability_unknown,
+                  repair, agent_busy)
         owner_abandonment_recovery = next((
             record for key, record in _valid_owner_abandonment_claims(
                 snapshot["enrollment"], actions,
@@ -11418,7 +11434,7 @@ class StateStore:
                 } else any(
                     isinstance(item, dict)
                     and (
-                        type(item.get("issue")) is int
+                        type(item.get("issue")) in (int, float, bool)
                         and item["issue"] in blocked
                         or isinstance(item.get("issue"), str)
                         and item["issue"] in blocked_keys

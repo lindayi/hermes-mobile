@@ -425,7 +425,6 @@ def test_apply_rejects_malformed_receipt_issue_identity_in_all_forms(
         if write[0].endswith("/requested_reviewers")
     ]
     task_posts = api.task_posts
-
     result = Coordinator(
         api, StateStore(store.path), clock=lambda: 1790856540,
     ).run(apply=True)["pull_requests"][0]
@@ -11711,6 +11710,69 @@ def test_no_source_identity_fence_defers_owner_recovery_and_consumes_other_pr_co
     assert StateStore(store.path).event_seen(7771)
 
 
+def test_identity_blocked_owner_continuation_survives_compaction_and_retries_once(
+        tmp_path, monkeypatch):
+    api, store, _, continued_head, _ = _owner_continuation_advanced_case(tmp_path)
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    original_pull_id = enrollment["pull_id"]
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    )
+    snapshot_pull = coordinator._snapshot_pull
+    invalidated = []
+
+    def snapshot_with_changed_identity(number, *args, **kwargs):
+        if number == 16 and not invalidated:
+            api.pull = deepcopy(api.pull)
+            api.pull["id"] += 1
+            invalidated.append(True)
+        return snapshot_pull(number, *args, **kwargs)
+
+    monkeypatch.setattr(coordinator, "_snapshot_pull", snapshot_with_changed_identity)
+    blocked = coordinator.run(apply=True)["pull_requests"][0]
+    state = StateStore(store.path).snapshot()
+
+    assert invalidated == [True]
+    assert blocked["reasons"] == ["pull-identity"]
+    assert not state["enrollments"]["16"].get("owner_continuations")
+    assert "7773" in state["pending_events"]
+    assert not StateStore(store.path).event_seen("7773")
+
+    def compact_other_events(data):
+        data["events"] = [
+            str(100_000 + offset)
+            for offset in range(cloud_coordinator.MAX_EVENTS + 1)
+        ]
+        cloud_coordinator._bound_events(data)
+
+    StateStore(store.path)._mutate(compact_other_events)
+    compacted = StateStore(store.path).snapshot()
+    assert compacted["event_watermark"] >= 100_000
+    assert not cloud_coordinator._event_consumed(compacted, "7773")
+
+    api.pull["id"] = original_pull_id
+    api.pull["node_id"] = enrollment["pull_node_id"]
+    writes = list(api.writes)
+    task_posts = api.task_posts
+    retried = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856781,
+    ).run(apply=True)["pull_requests"][0]
+    after_retry = StateStore(store.path).snapshot()
+
+    assert retried["head"] == continued_head
+    assert after_retry["pending_events"] == []
+    assert cloud_coordinator._event_consumed(after_retry, "7773")
+    assert len(after_retry["enrollments"]["16"]["owner_continuations"]) == 1
+    assert api.task_posts == task_posts + 1
+    committed_writes = list(api.writes)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856782,
+    ).run(apply=True)
+    assert api.task_posts == task_posts + 1
+    assert api.writes == committed_writes
+    assert committed_writes != writes
+
+
 @pytest.mark.parametrize("identity", ["boolean-id", "missing-node"])
 def test_no_source_identity_fence_keeps_malformed_live_identity_strict(
         tmp_path, monkeypatch, identity):
@@ -11778,6 +11840,27 @@ def test_pull_isolation_keeps_concurrent_state_compare_and_swap(tmp_path):
     with pytest.raises(CoordinatorError, match="changed during preparation"):
         store.commit_scan("2026-10-01T12:00:00Z", [])
     assert StateStore(store.path).snapshot() == concurrent_state
+
+
+@pytest.mark.parametrize(("issue", "alias"), [(16, 16.0), (1, True)])
+def test_restore_prepared_pull_state_restores_numeric_issue_aliases(
+        tmp_path, issue, alias):
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record(issue=issue))
+    store._mutate(lambda data: (
+        data["actions"].__setitem__("action", {"issue": alias, "status": "sent"}),
+        data["outbox"].__setitem__("outcome", {"issue": alias, "kind": "outcome"}),
+    ))
+    baseline = store.snapshot()
+    store.begin_preparation()
+    store._prepared["actions"]["action"]["status"] = "completed"
+    store._prepared["outbox"]["outcome"]["kind"] = "changed"
+
+    store.restore_prepared_pull_state({issue})
+
+    restored = store.snapshot()
+    assert restored["actions"]["action"] == baseline["actions"]["action"]
+    assert restored["outbox"]["outcome"] == baseline["outbox"]["outcome"]
 
 
 @pytest.mark.parametrize("receipt_proofs", [None, {"malformed": True}])
@@ -12000,6 +12083,79 @@ def test_new_lineage_rechecks_late_reviewer_reads_before_claim(tmp_path, race):
         write for write in writes_before
         if write[0].endswith("/requested_reviewers")
     ]
+
+
+def test_reviewer_publication_fences_late_owner_continuation_removal(
+        tmp_path, monkeypatch):
+    api, store, _, _, continued_main = _owner_continuation_advanced_case(tmp_path)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+    state = StateStore(store.path).snapshot()
+    successor = next(
+        action for action in state["actions"].values()
+        if action.get("owner_continuation_binding")
+    )
+    successor_head = "8" * 40
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=successor_head, base_sha=continued_main,
+    )
+    api.head_sha = api.pull["head"]["sha"] = successor_head
+    api.pull["base"]["sha"] = continued_main
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.unresolved = False
+    api.review_state = api.review_sha = None
+    api.comments.append({
+        "id": 7774, "user": {"id": OWNER},
+        "body": f"/hermes enroll {successor_head}",
+        "created_at": "2026-10-01T12:13:00Z",
+        "updated_at": "2026-10-01T12:13:00Z",
+    })
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    ).run(apply=True)
+
+    action = {
+        "key": f"copilot-review-request:16:{successor_head}",
+        "kind": "copilot-review-request", "issue": 16, "head": successor_head,
+        "main_sha": continued_main, "pull_id": api.pull["id"],
+        "pull_node_id": api.pull["node_id"],
+    }
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856780,
+    )
+    prove_head = coordinator._owner_abandonment_head_proven
+    proof_reads = 0
+    removed = []
+
+    def prove_then_remove(snapshot):
+        nonlocal proof_reads
+        proved = prove_head(snapshot)
+        proof_reads += 1
+        if proof_reads == 4:
+            StateStore(store.path)._mutate(
+                lambda data: data["enrollments"]["16"].pop("owner_continuations"),
+            )
+            removed.append(True)
+        return proved
+
+    monkeypatch.setattr(coordinator, "_owner_abandonment_head_proven", prove_then_remove)
+    reviewer_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+
+    result = coordinator._request_copilot_review(action)
+
+    assert removed == [True]
+    assert result == "superseded"
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == reviewer_writes
 
 
 @pytest.mark.parametrize("path", ["source", "reviewer"])
