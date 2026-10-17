@@ -223,11 +223,14 @@ Correction17 checks planned pull identity before revalidating new starter admiss
 A valid open numeric/node replacement at either fence isolates only that pull,
 restores its prepared state, and defers its command. Changed command, body/linkage,
 malformed identity, and repository/base mismatches remain strict.
+This follow-up includes malformed same-PR actions in the final source/reviewer
+projection and correlates alternate-key representations of abandoned root tasks
+before issue filtering.
 The coordinator's final fingerprint is:
 
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `0326f26fd4502f29b4303173322d0b8a8b0e9f2b5d05f51b550f60d8897b016d` |
+| `deploy/cloud_coordinator.py` | `b670c792e0852b313f17e88d82f0ab836a79e06f4cfd0c006f9c95a64a0fc618` |
 
 | Historical candidate | SHA-256 |
 | --- | --- |
