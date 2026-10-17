@@ -476,6 +476,115 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     assert api.fix_attempts == 2
 
 
+@pytest.mark.parametrize("edited", [False, True])
+def test_pending_enrollment_uses_later_inventory_before_apply(tmp_path, edited):
+    api = FakeApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    store = StateStore(tmp_path / "state.json")
+    store.preserve_pending_events(["123"])
+    original_get = api.get
+    original_get_all = api.get_all
+    exact_reads = []
+    inventory_reads = []
+
+    def get(route):
+        value = original_get(route)
+        if route == "repos/lindayi/hermes-mobile/issues/comments/123":
+            exact_reads.append(deepcopy(value))
+        return value
+
+    def get_all(route, *, collection=None):
+        if route.startswith("repos/lindayi/hermes-mobile/issues/16/comments?"):
+            assert exact_reads
+            if edited:
+                api.comments[0]["body"] = f"/hermes enroll {'c' * 40}"
+                api.comments[0]["updated_at"] = "2026-10-01T11:01:00Z"
+            inventory_reads.append(deepcopy(api.comments[0]))
+        return original_get_all(route, collection=collection)
+
+    api.get = get
+    api.get_all = get_all
+    Coordinator(api, store, clock=lambda: 1790856900).run(apply=True)
+
+    assert exact_reads[0]["body"] == f"/hermes enroll {HEAD}"
+    assert exact_reads[0]["created_at"] == exact_reads[0]["updated_at"]
+    assert inventory_reads
+    state = StateStore(store.path).snapshot()
+    if edited:
+        assert inventory_reads[0]["updated_at"] != inventory_reads[0]["created_at"]
+        assert state["enrollments"] == {}
+        assert state["actions"] == {}
+        assert api.task_posts == 0
+        assert api.writes == []
+    else:
+        assert state["enrollments"]["16"]["authorized_head"] == HEAD
+        assert api.task_posts == 1
+
+
+@pytest.mark.parametrize("identity", ["string", "float", "duplicate"])
+def test_pending_hint_does_not_hide_invalid_inventory_identity(tmp_path, identity):
+    api = FakeApi(unresolved=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    store = StateStore(tmp_path / "state.json")
+    store.preserve_pending_events(["123"])
+    original_get_all = api.get_all
+
+    def get_all(route, *, collection=None):
+        values = original_get_all(route, collection=collection)
+        if route.startswith("repos/lindayi/hermes-mobile/issues/16/comments?"):
+            row = deepcopy(values[0])
+            if identity == "duplicate":
+                return [row, deepcopy(row)]
+            row["id"] = "123" if identity == "string" else 123.0
+            return [row]
+        return values
+
+    api.get_all = get_all
+    with pytest.raises(CoordinatorError, match="comment identity was malformed"):
+        Coordinator(api, store, clock=lambda: 1790856900).run(apply=True)
+    assert StateStore(store.path).snapshot()["enrollments"] == {}
+    assert api.task_posts == 0
+    assert api.writes == []
+
+
+@pytest.mark.parametrize("negative", ["missing", "closed", "non-pr", "transient"])
+def test_pending_issue_negative_lookup_is_cached_only_per_scan(tmp_path, negative):
+    api = FakeApi()
+    api.comments.append(api.comments[0] | {"id": 124})
+    coordinator = Coordinator(api, StateStore(tmp_path / "state.json"))
+    original_get = api.get
+    issue_reads = []
+
+    def get(route):
+        if route == "repos/lindayi/hermes-mobile/issues/16":
+            issue_reads.append(route)
+            if negative == "missing":
+                raise ApiError("Synthetic missing issue", status=404)
+            if negative == "transient":
+                raise ApiError("Synthetic issue outage", status=503)
+            value = original_get(route)
+            if negative == "closed":
+                return value | {"state": "closed"}
+            if negative == "non-pr":
+                return value | {"pull_request": None}
+        return original_get(route)
+
+    api.get = get
+    state = {"pending_events": ["123", "124"]}
+    if negative == "transient":
+        with pytest.raises(ApiError, match="Synthetic issue outage"):
+            coordinator._pending_event_issues(state, [])
+    else:
+        assert coordinator._pending_event_issues(state, []) == ([], {})
+    assert len(issue_reads) == 1
+
+    negative = None
+    issues, comments = coordinator._pending_event_issues(state, [])
+    assert len(issue_reads) == 2
+    assert issues == [api.issue]
+    assert set(comments[16]) == {"123", "124"}
+
+
 @pytest.mark.parametrize("change", [
     {"base": {"sha": BASE, "ref": "other", "repo": {"id": 1399942965}}},
     {"base": {"sha": BASE, "ref": "main", "repo": {"id": 9}}},

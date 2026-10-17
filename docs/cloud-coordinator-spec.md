@@ -889,9 +889,11 @@ repository, and a fresh open issue response links to the exact canonical pull UR
 The ID is only a discovery hint; existing owner, body, edit, head, and identity
 checks remain authoritative. Each ID causes at most one exact comment lookup per
 poll; the scan reuses an issue already in its authenticated inventory and performs
-at most one issue lookup per missing PR. A 404 remains retryable, temporary API
-errors abort the scan without consuming the ID, and malformed or mismatched
-responses fail closed.
+at most one issue lookup per missing PR, caching 404, closed, and non-PR results
+only for that scan. A 404 remains retryable, temporary API errors abort the scan
+without consuming the ID, and malformed or mismatched responses fail closed.
+The later comment inventory takes precedence over pending lookup hints; append
+only absent IDs after validating inventory identities, including duplicates.
 These IDs remain retryable even if the consumed-event watermark advances past them;
 overflow aborts the scan before cursor or event state commits. Pending IDs do not
 waive immutable owner-command revalidation and are removed only when consumed.
