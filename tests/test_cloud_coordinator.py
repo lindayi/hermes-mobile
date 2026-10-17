@@ -4579,6 +4579,98 @@ def test_owner_abandonment_head_proven_allows_enrollment_without_recovery(tmp_pa
     })
 
 
+@pytest.mark.parametrize(
+    "proof_hazard",
+    ["none", "missing-issue", "wrong-issue", "missing-head", "wrong-head"],
+)
+def test_owner_abandonment_malformed_proofs_block_original_head_apply(
+        tmp_path, proof_hazard):
+    (
+        api, store, abandoned, reservation, recovery, neutral, _, _, _, _,
+    ) = _owner_abandonment_transitive_case(tmp_path, bare=True)
+    original_head = recovery["head_sha"]
+    api.head_sha = api.pull["head"]["sha"] = original_head
+    api.source_failure = True
+    api.source_failure_sha = original_head
+    api.review_state = "APPROVED"
+    api.review_sha = original_head
+
+    def corrupt_proofs(state):
+        enrollment = state["enrollments"]["16"]
+        proofs = enrollment["receipt_proofs"]
+        if proof_hazard == "none":
+            enrollment["receipt_proofs"] = [None]
+            return
+        proof = next(item for item in proofs if item["task_id"] == neutral["task_id"])
+        if proof_hazard == "missing-issue":
+            proof.pop("issue")
+        elif proof_hazard == "wrong-issue":
+            proof["issue"] = 17
+        elif proof_hazard == "missing-head":
+            proof.pop("receipt_head")
+        else:
+            proof["receipt_head"] = "f" * 40
+
+    StateStore(store.path)._mutate(corrupt_proofs)
+    before = StateStore(store.path).snapshot()
+    writes, posts = deepcopy(api.writes), api.task_posts
+    restarted = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+    snapshot = {"issue": 16, "pull": api.pull, "comments": api.comments}
+    proven = restarted._owner_abandonment_head_proven(snapshot)
+    restarted.run(apply=True)
+
+    after = StateStore(store.path).snapshot()
+    assert api.writes == writes
+    assert api.task_posts == posts
+    assert not proven
+    assert after["actions"][abandoned["key"]] == reservation
+    assert after["enrollments"]["16"]["owner_abandonments"] == [recovery]
+    assert after["enrollments"]["16"]["receipt_proofs"] == before[
+        "enrollments"
+    ]["16"]["receipt_proofs"]
+    for field in ("attempts", "neutral_attempts"):
+        assert after["enrollments"]["16"][field] == before[
+            "enrollments"
+        ]["16"][field]
+
+
+@pytest.mark.parametrize("proof_state", ["absent", "empty"])
+def test_bare_owner_abandonment_allows_first_successor_with_legacy_proofs(
+        tmp_path, proof_state):
+    api, store, abandoned = _owner_abandonment_case(tmp_path, bare=True)
+    reservation = deepcopy(store.action(abandoned["key"]))
+
+    def configure_proofs(state):
+        enrollment = state["enrollments"]["16"]
+        if proof_state == "absent":
+            enrollment.pop("receipt_proofs", None)
+        else:
+            enrollment["receipt_proofs"] = []
+
+    StateStore(store.path)._mutate(configure_proofs)
+    before = StateStore(store.path).snapshot()["enrollments"]["16"]
+    posts = api.task_posts
+
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    after = StateStore(store.path).snapshot()
+    assert api.task_posts == posts + 1
+    assert after["actions"][abandoned["key"]] == reservation
+    assert len(after["enrollments"]["16"]["owner_abandonments"]) == 1
+    assert after["enrollments"]["16"]["attempts"] == before["attempts"] + 1
+    assert after["enrollments"]["16"]["neutral_attempts"] == (
+        before["neutral_attempts"]
+    )
+    if proof_state == "absent":
+        assert "receipt_proofs" not in after["enrollments"]["16"]
+    else:
+        assert after["enrollments"]["16"]["receipt_proofs"] == []
+
+
 def test_owner_abandonment_same_head_successor_releases_continuation_only_after_restart(
         tmp_path):
     api, store, abandoned = _owner_abandonment_case(tmp_path)
@@ -9991,6 +10083,151 @@ def test_owner_abandonment_sequential_roots_and_historical_base_apply_restart(
         else:
             assert api.writes == first_writes
     assert recovery in after["enrollments"]["16"]["owner_abandonments"]
+
+
+@pytest.mark.parametrize("publication", ["reviewer", "source"])
+def test_bare_owner_abandonment_rejects_malformed_proofs_before_first_publication(
+        tmp_path, publication):
+    if publication == "source":
+        api, store, abandoned = _owner_abandonment_case(tmp_path, bare=True)
+        abandoned_reservation = deepcopy(store.action(abandoned["key"]))
+        api.source_failure = True
+        api.source_failure_sha = api.head_sha
+    else:
+        (
+            api, store, abandoned, abandoned_reservation, recovery, _, _,
+            _, _, _,
+        ) = _owner_abandonment_transitive_case(tmp_path, bare=True)
+        api.head_sha = api.pull["head"]["sha"] = recovery["head_sha"]
+        api.pull["base"]["sha"] = recovery["base_sha"]
+        api.current_main_sha = recovery["base_sha"]
+        StateStore(store.path).retire(
+            16, recovery["head_sha"],
+            current_main_sha=recovery["base_sha"],
+        )
+        api.review_state = api.review_sha = None
+        api.requested_reviewers = []
+    api.requested_reviewers = []
+
+    def corrupt_proofs(state):
+        state["enrollments"]["16"]["receipt_proofs"] = [None]
+
+    StateStore(store.path)._mutate(corrupt_proofs)
+    writes, posts = deepcopy(api.writes), api.task_posts
+
+    coordinator = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+    dispatch_allowed = coordinator._authorized_dispatch_head(
+        16, api.head_sha, api.pull["base"]["sha"],
+    )
+    if publication == "source":
+        with pytest.raises(
+                cloud_coordinator.CoordinatorError,
+                match="Owner abandonment task evidence was incomplete"):
+            coordinator.run(apply=True)
+    else:
+        coordinator.run(apply=True)
+
+    assert not dispatch_allowed
+    assert api.writes == writes
+    assert api.task_posts == posts
+    state = StateStore(store.path).snapshot()
+    assert state["actions"][abandoned["key"]] == abandoned_reservation
+    assert state["enrollments"]["16"]["receipt_proofs"] == [None]
+    if publication == "reviewer":
+        assert len(state["enrollments"]["16"]["owner_abandonments"]) == 1
+
+
+@pytest.mark.parametrize("proof_state", ["absent", "empty", "null"])
+def test_owner_abandonment_live_successor_accepts_absent_legacy_proofs_after_restart(
+        tmp_path, proof_state):
+    api, store, abandoned = _owner_abandonment_case(tmp_path)
+    abandoned_reservation = deepcopy(store.action(abandoned["key"]))
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    recovery = StateStore(store.path).snapshot()["enrollments"]["16"][
+        "owner_abandonments"
+    ][0]
+    successor = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("kind") == "fix" and action.get("key") != abandoned["key"]
+    )
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=NEXT_RESULT_HEAD, base_sha=CURRENT_MAIN,
+    )
+    api.head_sha = api.pull["head"]["sha"] = NEXT_RESULT_HEAD
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.unresolved = False
+    api.review_state = api.review_sha = None
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    assert StateStore(store.path).action(successor["key"])["status"] == "completed"
+    enrollment_before = StateStore(store.path).snapshot()["enrollments"]["16"]
+
+    def configure_proofs(state):
+        enrollment = state["enrollments"]["16"]
+        if proof_state == "absent":
+            enrollment.pop("receipt_proofs")
+        elif proof_state == "empty":
+            enrollment["receipt_proofs"] = []
+        else:
+            enrollment["receipt_proofs"] = None
+
+    StateStore(store.path)._mutate(configure_proofs)
+    restarted_store = StateStore(store.path)
+    api.requested_reviewers = []
+    api.review_state = api.review_sha = None
+    writes, posts = deepcopy(api.writes), api.task_posts
+    coordinator = Coordinator(
+        api, restarted_store, clock=lambda: 1790856660,
+    )
+
+    proven = coordinator._owner_abandonment_successor_proven(
+        {"pull": api.pull, "comments": api.comments}, recovery,
+    )
+    if proof_state == "null":
+        coordinator.run(apply=True)
+
+    if proof_state == "null":
+        assert not proven
+        assert api.writes == writes
+        assert api.task_posts == posts
+    else:
+        assert proven
+        result = coordinator.run(apply=True)["pull_requests"][0]
+        assert result["head"] == NEXT_RESULT_HEAD
+        reviewer_writes = [
+            write for write in api.writes
+            if write[0].endswith("/requested_reviewers")
+        ]
+        assert len(reviewer_writes) == 1
+        assert api.task_posts == posts
+        writes = deepcopy(api.writes)
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        assert api.writes == writes
+        assert api.task_posts == posts
+    after = StateStore(store.path).snapshot()
+    assert after["actions"][abandoned["key"]] == abandoned_reservation
+    assert after["enrollments"]["16"]["owner_abandonments"] == [recovery]
+    assert after["enrollments"]["16"]["attempts"] == enrollment_before["attempts"]
+    assert after["enrollments"]["16"]["neutral_attempts"] == (
+        enrollment_before["neutral_attempts"]
+    )
+    if proof_state == "absent":
+        assert "receipt_proofs" not in after["enrollments"]["16"]
+    elif proof_state == "empty":
+        assert after["enrollments"]["16"]["receipt_proofs"] == []
+    else:
+        assert after["enrollments"]["16"]["receipt_proofs"] is None
 
 
 @pytest.mark.parametrize("hazard", [

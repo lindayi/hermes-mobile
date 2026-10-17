@@ -3484,6 +3484,23 @@ def _valid_receipt_proof(action, comments):
     )
 
 
+def _retained_receipt_proofs_valid(enrollment, issue, comments=None):
+    if not isinstance(enrollment, dict) or type(issue) is not int:
+        return False
+    proofs = enrollment.get("receipt_proofs", [])
+    if not isinstance(proofs, list):
+        return False
+    return all(
+        isinstance(proof, dict)
+        and isinstance(proof.get("key"), str) and proof["key"]
+        and isinstance(proof.get("task_id"), str) and proof["task_id"]
+        and type(proof.get("issue")) is int and proof["issue"] == issue
+        and _is_sha(proof.get("receipt_head"))
+        and (comments is None or _valid_receipt_proof(proof, comments))
+        for proof in proofs
+    )
+
+
 _RECEIPT_AUTHORITY_FIELDS = frozenset({
     "owner_abandonment_binding", "owner_abandonment_attestation",
     "owner_continuation_binding", "owner_continuation_attestation",
@@ -8668,18 +8685,12 @@ class Coordinator:
         if (not isinstance(roots, list)
                 or len(_valid_owner_abandonment_claims(enrollment, actions)) != len(roots)):
             return False
-        proofs = enrollment.get("receipt_proofs")
-        if not isinstance(proofs, list):
+        proofs = enrollment.get("receipt_proofs", [])
+        if not _retained_receipt_proofs_valid(
+                enrollment, record["issue"], snapshot["comments"]):
             return False
         candidates = []
         representations = [*actions.values(), *proofs]
-        if any(
-                not isinstance(proof, dict)
-                or not isinstance(proof.get("key"), str) or not proof["key"]
-                or not isinstance(proof.get("task_id"), str)
-                or not proof["task_id"]
-                for proof in proofs):
-            return False
         retained_task_ids = {proof["task_id"] for proof in proofs}
         abandoned_task_ids = {root["task_id"] for root in roots}
         continuations = enrollment.get("owner_continuations", [])
@@ -8998,11 +9009,10 @@ class Coordinator:
                 or any(record.get("issue") != issue for _, record in recoveries)):
             return False
         receipt_proofs = enrollment.get("receipt_proofs", [])
-        if not isinstance(receipt_proofs, list):
+        if not _retained_receipt_proofs_valid(enrollment, issue, comments):
             return False
         current_proof = any(
-            isinstance(proof, dict) and proof.get("issue") == issue
-            and proof.get("receipt_head") == head.get("sha")
+            proof["receipt_head"] == head.get("sha")
             for proof in receipt_proofs
         )
         if not current_proof:
@@ -9492,7 +9502,17 @@ class Coordinator:
         if proof_fence is not None:
             proof_fence["projection"] = _dispatch_authorization_inputs(state, issue)
         if enrollment.get("authorized_head") is None:
-            return True
+            if not _retained_receipt_proofs_valid(enrollment, issue):
+                return False
+            if not enrollment.get("receipt_proofs"):
+                return True
+            try:
+                comments = _all_review_comments(self.api, issue, None)
+            except CoordinatorError:
+                return False
+            return _retained_receipt_proofs_valid(
+                enrollment, issue, comments,
+            )
         try:
             comments = _all_review_comments(self.api, issue, None)
         except CoordinatorError:

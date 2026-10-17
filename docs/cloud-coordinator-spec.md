@@ -2004,11 +2004,13 @@ with no source or reviewer publication. Unrelated terminal actions still compact
 
 Malformed receipt-proof containers, entries, identities, or same-issue live
 receipt aliases cannot preserve initial or separate owner-authorized head
-permission while skipping blocker evidence. An absent legacy proof list remains
-valid. Acceptance covers both proof orders beside an authenticated same-head
-`policy_broken` receipt, real apply and final dispatch denial, retirement, cold
-restart, and unchanged budgets and history. Bare-enrollment reconciliation uses
-the complete shared receipt projection, including attempt and repair metadata.
+permission while skipping blocker evidence. An absent or empty legacy proof list
+remains valid; explicit null and malformed members fail closed before fallback or
+bare-enrollment publication. Acceptance covers both proof orders beside an
+authenticated same-head `policy_broken` receipt, real apply and final dispatch
+denial, retirement, cold restart, and unchanged budgets and history.
+Bare-enrollment reconciliation uses the complete shared receipt projection,
+including attempt and repair metadata.
 Canonical value or presence conflicts deny source and reviewer publication and
 remain retained; identical or reordered canonical copies and authentic legacy
 omissions remain valid.
