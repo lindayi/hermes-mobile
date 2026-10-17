@@ -823,7 +823,10 @@ A same-head ready receipt is still a valid direct continuation, but it cannot hi
 cycle in a later edge. At the abandonment root, one bound `A -> A` receipt may be
 followed by exactly one authenticated ready source receipt reserved later from `A`
 to a different head. The self-edge is consumed once; any additional competing edge
-or later cycle still fails closed. This only proves terminal occupancy; ordinary
+or later cycle still fails closed.
+Live and retained copies must agree on reservation `created_at`, including field
+presence and value, before that timestamp can establish same-head root ordering.
+This only proves terminal occupancy; ordinary
 source authorization, fresh review/check, current-main and sensitive-head fences
 remain separate. The recovery head remains continuation-only only while it lacks
 general receipt provenance. A distinct, bound ready receipt that returns the same
@@ -1046,6 +1049,9 @@ included roots. Restart, compaction, and inactive close/reopen must preserve
 all per-root bindings and spent allowances. A retained authenticated same-head
 successor proof prevents later ordinary work from rebinding a spent disposition.
 Malformed retained evidence remains blocked, not a fresh allowance.
+After receipt acceptance, both the original abandonment command and its continuation
+command must still authenticate unchanged before granting terminal/head authority,
+including merge replanning and final publication.
 
 A SOURCE or neutral successor cannot combine an ordinary
 `owner_abandonment_intent` with an `owner_continuation_intent`. If a planned
@@ -1957,6 +1963,13 @@ Positively completed `inventory_blocked` fixer handoffs are terminal too and are
 retired by the same head-change/inactive contract; active, current-head, and
 uncertain work and pending outbox posts remain retained. Their retirement comparison
 uses the authenticated `receipt_head` when available, not the dispatch head.
+Compaction preserves every action correlated by map key, embedded reservation key,
+or task ID to a retained abandonment root, and conflicting copies of retained
+receipt proofs. Missing or foreign issue fields never sever that correlation.
+Before the first successor, alternate representations of an abandoned reservation
+or task deny admission too. Repeated apply polls, explicit retirement, and cold
+restart must retain the original conflicting bytes, histories, and attempt counts
+with no source or reviewer publication. Unrelated terminal actions still compact.
 
 ACK-backed lifecycle retirement does not erase history. The optional
 `lifecycle_context` preserves each retired event's canonical payload and exact

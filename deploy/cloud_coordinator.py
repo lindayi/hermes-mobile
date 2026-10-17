@@ -4196,6 +4196,15 @@ def _dispatch_authorization_inputs(state, issue):
     }
 
 
+def _action_correlates_authority(key, action, reservation_key, task_id):
+    return isinstance(action, dict) and (
+        (isinstance(reservation_key, str) and reservation_key
+         and reservation_key in (key, action.get("key")))
+        or (isinstance(task_id, str) and task_id
+            and action.get("task_id") == task_id)
+    )
+
+
 def _valid_owner_abandonment_claims(enrollment, actions):
     records = enrollment.get("owner_abandonments", []) if isinstance(
         enrollment, dict,
@@ -4209,7 +4218,14 @@ def _valid_owner_abandonment_claims(enrollment, actions):
         key = record.get("action_key") if isinstance(record, dict) else None
         if (not isinstance(key, str) or key in seen
                 or not _owner_abandonment_matches_action(record, actions.get(key))
-                or record["task_id"] in seen_task_ids):
+                or record["task_id"] in seen_task_ids
+                or any(
+                    candidate_key != key
+                    and _action_correlates_authority(
+                        candidate_key, candidate, key, record["task_id"],
+                    )
+                    for candidate_key, candidate in actions.items()
+                )):
             return []
         seen.add(key)
         seen_task_ids.add(record["task_id"])
@@ -8631,7 +8647,7 @@ class Coordinator:
         candidates = []
         proof_fields = (
             "key", "task_id", "issue", "kind", "task_type", "status", "head",
-            "dispatch_nonce",
+            "dispatch_nonce", "created_at",
             "receipt_result", "receipt_comment_id", "receipt_created_at",
             "receipt_body", "receipt_task_id", "receipt_session_id",
             "receipt_completed_at", "receipt_session_completed_at",
@@ -8977,7 +8993,10 @@ class Coordinator:
             if key == record["action_key"]
             and _canonical_json_match(candidate, record)
         ]
-        if len(matching_roots) != 1:
+        if (len(matching_roots) != 1
+                or _current_owner_unverified_abandonment_command(
+                    self.api, record,
+                ) is None):
             return False
         return any(
             continuation["historical_action_key"] == record["action_key"]
@@ -12853,20 +12872,36 @@ class StateStore:
                 "status_generation": 0, "actions": [], "outbox": [],
             }
             changed = False
+            roots = [
+                root for retained_enrollment in data["enrollments"].values()
+                if isinstance(retained_enrollment.get("owner_abandonments", []), list)
+                for root in retained_enrollment.get("owner_abandonments", [])
+                if isinstance(root, dict)
+            ]
+            proofs = [
+                proof for retained_enrollment in data["enrollments"].values()
+                if isinstance(retained_enrollment.get("receipt_proofs", []), list)
+                for proof in retained_enrollment.get("receipt_proofs", [])
+                if isinstance(proof, dict)
+            ]
             for key, action in list(data["actions"].items()):
                 if (type(action.get("issue")) is not int
                         or action["issue"] != issue
+                        or action.get("key") != key
+                        or any(
+                            _action_correlates_authority(
+                                key, action, root.get("action_key"), root.get("task_id"),
+                            )
+                            for root in roots
+                        )
                         or not _retirable_action(action, current_head, inactive)):
                     continue
-                retained = enrollment.get("receipt_proofs", [])
                 related_proofs = [
-                    proof for proof in retained if isinstance(proof, dict)
-                    and (
-                        proof.get("key") == key
-                        or proof.get("key") == action.get("key")
-                        or proof.get("task_id") == action.get("task_id")
+                    proof for proof in proofs
+                    if _action_correlates_authority(
+                        key, action, proof.get("key"), proof.get("task_id"),
                     )
-                ] if isinstance(retained, list) else []
+                ]
                 if any(
                         type(proof.get("issue")) is not int
                         or proof["issue"] != issue
