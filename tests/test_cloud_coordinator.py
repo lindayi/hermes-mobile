@@ -10787,6 +10787,66 @@ def test_owner_abandonment_upgrade_fresh_fences(
     assert api.writes == writes
 
 
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+def test_owner_abandonment_final_fence_catches_late_receipt_start(
+        tmp_path, monkeypatch, publication):
+    api, store, abandoned, reservation, source, source_head = (
+        _owner_abandonment_previous_case(tmp_path, False)
+    )
+    if publication == "source":
+        api.source_failure = True
+        api.source_failure_sha = source_head
+        api.review_state = "APPROVED"
+        api.review_sha = source_head
+    else:
+        api.requested_reviewers = []
+
+    original_authorize = CloudCoordinator._authorized_dispatch_head
+    fenced_calls = 0
+    inserted = []
+
+    def authorize(coordinator, *args, **kwargs):
+        nonlocal fenced_calls
+        result = original_authorize(coordinator, *args, **kwargs)
+        if kwargs.get("proof_fence") is not None:
+            fenced_calls += 1
+            if fenced_calls == 2 and result:
+                duplicate_key = "fix:16:late-receipt-start:" + "f" * 20
+                StateStore(store.path)._mutate(
+                    lambda state: state["actions"].__setitem__(duplicate_key, {
+                        "key": duplicate_key,
+                        "issue": 16,
+                        "kind": "fix",
+                        "task_type": "source",
+                        "status": "completed",
+                        "task_id": "fresh-late-task",
+                        "head": source["receipt_start_head"],
+                        "receipt_start_head": source["receipt_start_head"],
+                    }),
+                )
+                inserted.append(duplicate_key)
+        return result
+
+    monkeypatch.setattr(CloudCoordinator, "_authorized_dispatch_head", authorize)
+    task_posts = api.task_posts
+    writes = list(api.writes)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    assert len(inserted) == 1
+    assert api.task_posts == task_posts
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == [
+        write for write in writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    after = StateStore(store.path).snapshot()
+    assert after["actions"][abandoned["key"]] == reservation
+
+
 def _add_unrelated_enrolled_pull(api, store):
     from copy import deepcopy
 

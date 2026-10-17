@@ -4160,6 +4160,7 @@ def _dispatch_authorization_inputs(state, issue):
                     and (
                         action.get("key") != key
                         or "receipt_result" in action
+                        or "receipt_start_head" in action
                         or "receipt_head" in action
                         or "receipt_body" in action
                     )
