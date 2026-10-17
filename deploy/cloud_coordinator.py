@@ -8848,6 +8848,7 @@ class Coordinator:
                         and len(parallel) == 1
                         and parallel[0].get("task_type") in (None, "source")
                         and parallel[0].get("receipt_result") == "ready"
+                        and parallel[0].get("receipt_head") != current
                         and type(successor.get("created_at")) in (int, float)
                         and type(parallel[0].get("created_at")) in (int, float)
                         and all(
@@ -12931,13 +12932,38 @@ class StateStore:
                 for proof in retained_enrollment.get("receipt_proofs", [])
                 if isinstance(proof, dict)
             ]
+            live_receipts_by_task = {}
+            for key, action in data["actions"].items():
+                if (isinstance(action, dict)
+                        and type(action.get("issue")) is int
+                        and action["issue"] == issue
+                        and isinstance(action.get("task_id"), str)
+                        and action["task_id"]
+                        and _receipt_like_action(action)):
+                    live_receipts_by_task.setdefault(
+                        action["task_id"], [],
+                    ).append((key, action))
+            conflicting_live_receipt_keys = set()
+            for records in live_receipts_by_task.values():
+                if len(records) < 2:
+                    continue
+                canonical = _canonical_receipt_json(
+                    _receipt_projection(records[0][1]),
+                )
+                if canonical is None or any(
+                        _canonical_receipt_json(_receipt_projection(action))
+                        != canonical for _, action in records[1:]):
+                    conflicting_live_receipt_keys.update(
+                        key for key, _ in records
+                    )
             outgoing_heads = {
                 proof["receipt_start_head"] for proof in proofs
                 if proof.get("issue") == issue
                 and _is_sha(proof.get("receipt_start_head"))
             }
             for key, action in list(data["actions"].items()):
-                if (type(action.get("issue")) is not int
+                if (key in conflicting_live_receipt_keys
+                        or type(action.get("issue")) is not int
                         or action["issue"] != issue
                         or ("key" in action and action["key"] != key)
                         or any(

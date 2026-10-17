@@ -934,6 +934,112 @@ def test_conflicting_receipt_cannot_erase_authenticated_blocker(
 
 
 @pytest.mark.parametrize("publication", ["source", "reviewer"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_live_receipt_conflict_survives_apply_retirement_and_restart(
+        tmp_path, publication, reverse):
+    api, store, proof, result_head = _accepted_compacted_receipt_case(tmp_path)
+    blocker = deepcopy(proof)
+    blocker["receipt_result"] = "policy_broken"
+    blocker["receipt_body"] = blocker["receipt_body"].replace(
+        "result=ready", "result=policy_broken",
+    )
+    blocker.pop("blocker", None)
+    blocker_comment = next(
+        comment for comment in api.comments
+        if comment["id"] == blocker["receipt_comment_id"]
+    )
+    blocker_comment["body"] = blocker["receipt_body"]
+
+    duplicate = deepcopy(proof)
+    duplicate_key = f"{proof['key']}:conflicting-live-copy"
+    duplicate_nonce = "conflicting-ready-nonce"
+    duplicate_session = "session-conflicting-ready"
+    duplicate_head = "d" * 40
+    duplicate_comment_id = proof["receipt_comment_id"] + 1
+    duplicate.update(
+        key=duplicate_key,
+        dispatch_nonce=duplicate_nonce,
+        receipt_nonce=duplicate_nonce,
+        receipt_session_id=duplicate_session,
+        receipt_head=duplicate_head,
+        receipt_comment_id=duplicate_comment_id,
+        receipt_body=proof["receipt_body"].replace(
+            f"nonce={proof['dispatch_nonce']}", f"nonce={duplicate_nonce}",
+        ).replace(
+            f"session={proof['receipt_session_id']}",
+            f"session={duplicate_session}",
+        ).replace(
+            f"head={result_head}", f"head={duplicate_head}",
+        ),
+    )
+    api.comments.append({
+        "id": duplicate_comment_id, "user": {"id": COPILOT_AGENT},
+        "body": duplicate["receipt_body"],
+        "created_at": duplicate["receipt_created_at"],
+        "updated_at": duplicate["receipt_created_at"],
+    })
+    assert cloud_coordinator._valid_receipt_proof(blocker, api.comments)
+    assert cloud_coordinator._valid_receipt_proof(duplicate, api.comments)
+
+    unrelated = {
+        "key": "unrelated-terminal-status", "issue": 16, "kind": "status",
+        "status": "completed", "head": "0" * 40, "generation": 50,
+    }
+
+    def install(state):
+        enrollment = state["enrollments"]["16"]
+        enrollment["authorized_head"] = proof["receipt_start_head"]
+        enrollment["owner_authorized_head"] = result_head
+        enrollment["receipt_proofs"] = []
+        state["actions"].pop(proof["key"], None)
+        records = [blocker, duplicate]
+        if reverse:
+            records.reverse()
+        for record in records:
+            state["actions"][record["key"]] = deepcopy(record)
+        state["actions"][unrelated["key"]] = unrelated
+
+    store._mutate(install)
+    if publication == "source":
+        api.source_failure = True
+        api.source_failure_sha = result_head
+        api.review_state, api.review_sha = "APPROVED", result_head
+        api.workflow_runs = [
+            source_run(id=568, run_number=50, head_sha=result_head),
+        ]
+    else:
+        api.source_failure = False
+        api.source_failure_sha = None
+        api.review_state = api.review_sha = None
+        api.requested_reviewers = []
+    reviewer_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    task_posts = api.task_posts
+    StateStore(store.path).retire(16, result_head, BASE)
+
+    for _ in range(2):
+        coordinator = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856540,
+        )
+        coordinator.run(apply=True)
+    assert api.task_posts == task_posts
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == reviewer_writes
+    state = StateStore(store.path).snapshot()
+    assert state["actions"][blocker["key"]] == blocker
+    assert state["actions"][duplicate["key"]] == duplicate
+    assert unrelated["key"] not in state["actions"]
+    assert state["enrollments"]["16"]["receipt_proofs"] == []
+    assert not Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856540,
+    )._authorized_dispatch_head(16, result_head, BASE)
+
+
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
 @pytest.mark.parametrize("live_form", ["identical", "reordered", "unauthenticated-blocker"])
 def test_live_receipt_duplicate_preserves_ready_publication(
         tmp_path, publication, live_form):
@@ -9738,6 +9844,74 @@ def _owner_abandonment_transitive_case(
     return (
         api, store, abandoned, abandoned_reservation, recovery, neutral, source,
         neutral_head, source_head, reviewer_writes_before,
+    )
+
+
+def test_owner_abandonment_rejects_duplicate_same_head_receipt_after_restart(
+        tmp_path):
+    (
+        api, store, _, _, recovery, _, source, neutral_head, source_head, _,
+    ) = _owner_abandonment_transitive_case(tmp_path, "same-head-successor")
+    before = StateStore(store.path).snapshot()
+    source_action = before["actions"][source["key"]]
+    source_proof = next(
+        item for item in before["enrollments"]["16"]["receipt_proofs"]
+        if item["task_id"] == source["task_id"]
+    )
+    source_body = source_action["receipt_body"].replace(
+        f"head={source_head}", f"head={neutral_head}",
+    )
+    assert source_body != source_action["receipt_body"]
+
+    def make_source_a_second_self_edge(state):
+        action = state["actions"][source["key"]]
+        proof = next(
+            item for item in state["enrollments"]["16"]["receipt_proofs"]
+            if item["task_id"] == source["task_id"]
+        )
+        for record in (action, proof):
+            record["receipt_head"] = neutral_head
+            record["receipt_body"] = source_body
+
+    source_comment = next(
+        comment for comment in api.comments
+        if comment["id"] == source_proof["receipt_comment_id"]
+    )
+    source_comment["body"] = source_body
+    store._mutate(make_source_a_second_self_edge)
+    api.head_sha = api.pull["head"]["sha"] = neutral_head
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.review_state = api.review_sha = None
+    api.requested_reviewers = []
+    state = StateStore(store.path).snapshot()
+    source_action = state["actions"][source["key"]]
+    source_proof = next(
+        item for item in state["enrollments"]["16"]["receipt_proofs"]
+        if item["task_id"] == source["task_id"]
+    )
+    assert cloud_coordinator._valid_receipt_proof(source_action, api.comments)
+    assert cloud_coordinator._valid_receipt_proof(source_proof, api.comments)
+    reviewer_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    task_posts = api.task_posts
+
+    for _ in range(2):
+        coordinator = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        )
+        coordinator.run(apply=True)
+    assert api.task_posts == task_posts
+    assert [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ] == reviewer_writes
+    assert not Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )._owner_abandonment_successor_proven(
+        {"pull": api.pull, "comments": api.comments}, recovery,
     )
 
 

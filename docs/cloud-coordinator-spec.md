@@ -853,7 +853,8 @@ A same-head ready receipt is still a valid direct continuation, but it cannot hi
 cycle in a later edge. At the abandonment root, one bound `A -> A` receipt may be
 followed by exactly one authenticated ready source receipt reserved later from `A`
 to a different head. The self-edge is consumed once; any additional competing edge
-or later cycle still fails closed.
+or later cycle still fails closed. A second `A -> A` receipt does not advance the
+lineage and is rejected.
 Live and retained copies must agree on reservation `created_at`, including field
 presence and value, before that timestamp can establish same-head root ordering.
 This only proves terminal occupancy; ordinary
