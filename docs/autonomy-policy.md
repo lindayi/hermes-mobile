@@ -178,10 +178,72 @@ coordinator digest
 `40b88943f50d7c44d1f74d86f8e72b17b4c4b5ee2339850657821936b37ad40b`
 remains historical bootstrap15/16 evidence, not the current candidate pin.
 
+| Historical PR #105 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `4c8ce668d216035eb79af4adfa48946159d75419d726a43faec661c402b21dbe` |
+| `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
+
+### PR #109 supervised correction17 current candidate
+
+Issue #108's bounded correction10 retains agreement between legacy summary and
+detail task artifacts, reconciles every live action sharing a retained task ID
+before issue-identity filtering, and binds lineage to the retained abandoned-task
+pull identity. It revalidates the immutable root command for current and legacy
+proofs, isolates a structurally valid identity mismatch only when both stored pull
+identity fields are valid, and keeps direct snapshot and terminal identity checks
+strict. Duplicate action/proof records are compared with canonical JSON projections,
+including nested values, and fail closed on serialization errors. This distinguishes
+integer and floating-point aliases. A late identity mismatch restores only that PR's
+prepared records, skips its recovery and publication inputs, and retains the previous
+cursor when an owner command must be re-read.
+Unrelated PRs can still commit; the existing state compare-and-swap remains active.
+Malformed non-list retained `receipt_proofs` fail closed for that PR without blocking
+unrelated work. Corrections11 and12 retain their root-binding, authorization,
+stored-issue, proof-edge, canonical projection and late-race checks. Correction13
+requires exact positive integer IDs when it first validates abandonment roots:
+record issue, command comment and actor IDs; action issue, owner, repository and pull
+IDs; and the enrolled repository ID in direct and isolated pull snapshots. Canonical
+projections still reject identity changes between reads, but cannot replace these
+initial type checks. Correction14 also validates every individual successor proof's
+issue as an exact positive integer before comparison, even when no duplicate exists.
+Correction15 applies exact positive integer issue checks to retained proofs across
+the general source and review authorization callers. It reconciles proofs by durable
+key and task ID with canonical JSON before traversal, compares retained and live
+representations, and denies conflicting identities without discarding their claims.
+Reordered identical duplicates remain idempotent, and legacy proofs without a durable
+key retain task-bound compatibility.
+Correction16 adds a final identity recheck for every planned enrolled pull before
+the scan commit, even when no optional starter-source proof exists. A valid open
+replacement identity isolates only that pull's prepared records and writes, while
+malformed identities remain strict and unrelated pulls continue. Owner commands for
+the isolated pull remain unconsumed until identity is restored and the command is
+revalidated.
+Correction17 checks planned pull identity before revalidating new starter admissions.
+A valid open numeric/node replacement at either fence isolates only that pull,
+restores its prepared state, and defers its command. Changed command, body/linkage,
+malformed identity, and repository/base mismatches remain strict.
+This follow-up includes malformed same-PR actions in the final source/reviewer
+projection and correlates alternate-key representations of abandoned root tasks
+before issue filtering.
+The coordinator's final fingerprint is:
+
 | Candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `165260a6ed9abe83edfdac21c58f2478e09288727ec2221247ebc427524fac22` |
-| `deploy/task_receipts.py` | `1fa98a44ddc729f4b0ef9b15bb6cfe06b3c8a5fe0beca66cdd5acf7b5f0fa231` |
+| `deploy/cloud_coordinator.py` | `b670c792e0852b313f17e88d82f0ab836a79e06f4cfd0c006f9c95a64a0fc618` |
+
+| Historical candidate | SHA-256 |
+| --- | --- |
+| Correction16 historical pin | `6a8506a7160acdf3f8611aa8c08bcd744bd5e283b87d00ba7798b5d6533678f7` |
+| Correction15 historical pin | `9b8d89a38047f3b64329a9c4c6c466fe2f90654eb9b8268ce80b997a5b5140a8` |
+| Correction14 historical pin | `f624f325af72bf481c201d4d1ffe76a50f8752206bcf8811b013b32674a8b0cf` |
+| Correction13 historical pin | `3e129cc0a17c90f876dd3a4c2b4923669988ff03b67b35e4d9be1b1c78d0d9fd` |
+| Correction12 historical pin | `fdeead9ef44de544cf7df733ae96b3be2471cf4fd0d47c62a9ad4a3cac9ef2d4` |
+| Correction11 historical pin | `c8c7e8ef85c7a9c9dd60347c8745d5f003252649b668b6d921c7e7f42a16ec77` |
+| Correction8 historical pin | `198cea06e3cd03046751167fe167438a4880cf7a052e2455480a4f4de736775e` |
+| Correction7 historical pin | `8235a894bdb48663ddd673e4c78dca75cd09fd8ee94f7f74b3dd45c0e4b1903e` |
+
+This exact-source pin does not establish review acceptance, merge readiness,
+authorization beyond the standing delegation, or operational activation.
 
 ### Issue #111 bounded owner continuation disposition candidate
 
@@ -227,6 +289,20 @@ authorization, or activation.
 | Candidate path | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `ab34dffdac0ddec3244863015cdb2485c4900229f99f7472194c97cec5845cb8` |
+| `deploy/task_receipts.py` | `72615884d5e61a51f6fd8d9527774fc4982ebd66f98e5bd4b84a640404fccbe5` |
+
+### Issue #108 PR #109 and PR #112 merged candidate
+
+This candidate reconciles abandonment-rooted ready-receipt lineage with PR #112's
+append-only pending-event recovery, retained abandonment discovery, and exact
+continuation fences. Identity-blocked commands are retained as pending events, so
+unrelated progress can advance through event compaction and cold restart can recover
+the original command. The earlier PR #109 and Issue #111 candidate pins above remain
+historical evidence.
+
+| Candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `3e2a2676143f318567a2f0022b1fc6a9ad7300ce3b1973726a4e06b694d0306d` |
 | `deploy/task_receipts.py` | `72615884d5e61a51f6fd8d9527774fc4982ebd66f98e5bd4b84a640404fccbe5` |
 
 ### Retained merged source and deliberate native refreshes
@@ -656,7 +732,7 @@ blocker remains active:
 
 | Issue #106 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `165260a6ed9abe83edfdac21c58f2478e09288727ec2221247ebc427524fac22` |
+| `deploy/cloud_coordinator.py` | `7f26cbb9b7c4982b3d1691b308a6c25c7a2700668498e41b35159333bd2bb497` |
 
 The reconciled issue #106 and PR #105 candidate also binds REST and GraphQL review
 authors by matching positive numeric IDs, node IDs, and User/Bot types. Reviewer
