@@ -10,7 +10,7 @@ const approvalItem=()=>({id:'a',run_id:'r',request_id:'native-a',session_id:'s',
 for(const status of ['pending','expired'])test(`approval notification opens exact chat without deciding (${status})`,async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];let scrolled;
  win.HTMLElement.prototype.scrollIntoView=function(){scrolled=this;};
- const app=await mountApp(doc,{clear(){},async request(p,o={}){calls.push({p,o});if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};if(p==='/approvals')return {items:status==='pending'?[{id:'a',run_id:'r',request_id:'native-a',session_id:'s',title:'Execute fixture',command:'echo fixture',target:'fixture target',expires_at:2000000000,executable:true,choices:['once','deny']}]:[]};if(p==='/approvals/a')return {id:'a',run_id:'r',request_id:'native-a',session_id:'s',status,command:'echo fixture',target:'fixture target',expires_at:status==='expired'?1:2000000000,executable:true,choices:['once','deny']};return {items:[]};}},win);
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){calls.push({p,o});if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};if(p==='/approvals')return {items:status==='pending'?[{...approvalItem(),run_id:'r',session_id:'s'}]:[]};if(p==='/approvals/a')return {...approvalItem(),run_id:'r',session_id:'s',status,expires_at:status==='expired'?1:2000000000};return {items:[]};}},win);
  try{
   assert.equal(doc.querySelector('.conversation')!==null,true);
   assert.equal(doc.querySelector('h1').textContent,'Exact chat title');
@@ -102,7 +102,7 @@ test('active run does not reset a request target and following resumes at the bo
 
 test('navigation during approval reconciliation cannot mount a stale chat',async()=>{
  const gate=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
- const mounted=mountApp(doc,{clear(){},async request(p){calls.push(p);if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],offset:0,total:0};if(p==='/approvals')return gate.promise;if(p==='/approvals/a')throw Object.assign(new Error('unavailable'),{status:404});return {items:[]};}},win);
+ const mounted=mountApp(doc,{clear(){},async request(p){calls.push(p);if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],offset:0,total:0};if(p==='/approvals')return gate.promise;if(p==='/approvals/a')throw Object.assign(new Error('unavailable'),{status:404});return {items:[]};}},win);
  try{
   while(!calls.includes('/approvals'))await tick();
   doc.querySelector('[data-view="chats"]').click();
@@ -117,7 +117,7 @@ test('navigation during approval reconciliation cannot mount a stale chat',async
 
 test('late approval detail 401 cannot expire a newer route',async()=>{
  const gate=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
- const mounted=mountApp(doc,{clear(){},async request(p){calls.push(p);if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],offset:0,total:0};if(p==='/approvals')return {items:[]};if(p==='/approvals/a')return gate.promise;return {items:[]};}},win);
+ const mounted=mountApp(doc,{clear(){},async request(p){calls.push(p);if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],offset:0,total:0};if(p==='/approvals')return {items:[]};if(p==='/approvals/a')return gate.promise;return {items:[]};}},win);
  try{
   while(!calls.includes('/approvals/a'))await tick();
   doc.querySelector('[data-view="chats"]').click();await tick();
@@ -134,7 +134,7 @@ test('unchanged approval survives a focus refresh during passkey verification',a
  const credential=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
  win.PublicKeyCredential=class {};
  win.navigator.credentials={get:()=>credential.promise};
- const app=await mountApp(doc,{clear(){},async request(p){calls.push(p);if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],offset:0,total:0};if(p==='/approvals')return {items:[approvalItem()]};if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};if(p==='/auth/verify/finish')return {ok:true};if(p==='/approvals/a/decision')return {status:'resolved'};return {items:[]};}},win);
+ const app=await mountApp(doc,{clear(){},async request(p){calls.push(p);if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],total:0,offset:0};if(p==='/approvals')return {items:[approvalItem()]};if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};if(p==='/auth/verify/finish')return {ok:true};if(p==='/approvals/a/decision')return {status:'resolved'};return {items:[]};}},win);
  try{
   doc.querySelector('[data-approval-id="a"] button').click();
   while(!calls.includes('/auth/verify/options'))await tick();
@@ -152,7 +152,7 @@ test('successful approval acknowledgement wins over a concurrent pending-list re
  const app=await mountApp(doc,{clear(){},async request(p,o={}){
   calls.push({p,o});
   if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
-  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
   if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
   if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],total:0,offset:0};
   if(p==='/approvals')return {items:++approvalReads===1?[approvalItem()]:[]};
@@ -168,7 +168,7 @@ test('successful approval acknowledgement wins over a concurrent pending-list re
   credential.resolve(fakeCredential());
   while(!calls.some(call=>call.p==='/approvals/a/decision'))await tick();
   win.dispatchEvent(new win.Event('focus'));await tick();
-  assert.equal(card.querySelector('h3').textContent,'Approval unavailable');
+  assert.equal(card.querySelector('h3').textContent,'Decision pending');
   decision.resolve({status:'resolved'});await tick();
   assert.equal(calls.filter(call=>call.p==='/approvals/a/decision').length,1);
   assert.equal(card.querySelector('h3').textContent,'Resolved');
@@ -185,7 +185,7 @@ test('approval decision is not sent after its route or owner changes during pass
   const app=await mountApp(doc,{clear(){},async request(p){
     calls.push(p);
     if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
-    if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+    if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
     if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
     if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],total:0,offset:0};
     if(p==='/approvals')return {items:[approvalItem()]};

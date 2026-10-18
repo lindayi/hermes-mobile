@@ -1039,16 +1039,26 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     });
     const accepted=result.run || result.last_run;
     const approvalNotice=h('div',{class:'approval-notice',role:'status','aria-live':'polite',hidden:true});
-    const approvalCards=new Map(),approvalItems=new Map(),approvalFinals=new Map();
+    const approvalCards=new Map(),approvalItems=new Map(),approvalFinals=new Map(),approvalCardViews=new Map(),approvalActionStates=new Map();
     let approvalRevision=0,approvalPending=new Map(),genericApproval=false,
-      currentApprovalRun=accepted?.id || notificationTarget?.run_id;
+      currentApprovalRun=accepted?.id || notificationTarget?.run_id,approvalTargetPlaceholder=null,
+      approvalTargetTimer=null,approvalTargetFocusedCard=false,approvalTargetPlaceholderFocused=false;
+    const sameApprovalIdentity=(left,right)=>left?.id===right?.id && left.run_id===right.run_id
+      && left.request_id===right.request_id && left.session_id===right.session_id
+      && left.run_session_id===right.run_session_id;
+    const clearApprovalTargetTimer=()=>{
+      if(approvalTargetTimer)win.clearTimeout(approvalTargetTimer);
+      approvalTargetTimer=null;
+    };
     const placeApprovalCard=(card,item)=>{
       const anchor=[...messages.querySelectorAll('[data-history-run]')].find(node=>
         node.dataset.historyRun===item.run_id && node.dataset.historySession===session.id
         && !node.matches('.approval-card'));
-      if(anchor?.matches('.live-message'))anchor.append(card);
-      else if(anchor)anchor.after(card);
-      else messages.append(card);
+      if(anchor?.matches('.live-message')){
+        if(card.parentNode!==anchor || card!==anchor.lastElementChild)anchor.append(card);
+      }else if(anchor){
+        if(card.parentNode!==anchor.parentNode || card.previousElementSibling!==anchor)anchor.after(card);
+      }else if(card.parentNode!==messages)messages.append(card);
     };
     const renderApprovalCard=(item,status)=>{
       const key=approvalKey(item);
@@ -1059,50 +1069,103 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           'aria-labelledby':`approval-title-${item.id}`});
         approvalCards.set(key,card);
       }
+      let actionState=approvalActionStates.get(key);
+      if(!actionState){actionState={pending:false,decisionStarted:false,uncertain:false,error:''};approvalActionStates.set(key,actionState);}
+      let view=approvalCardViews.get(key);
+      if(!view || view.item!==item){
+        if(actionState.pending && actionState.decisionStarted && !sameApprovalIdentity(view?.item,item))
+          actionState={pending:false,decisionStarted:false,uncertain:true,
+            error:'Approval identity changed while a decision was in progress. Check its current status before deciding again.'};
+        else if(!actionState.pending || !actionState.decisionStarted)
+          actionState={pending:false,decisionStarted:false,uncertain:false,error:''};
+        approvalActionStates.set(key,actionState);
+        const heading=h('h3',{id:`approval-title-${item.id}`});
+        const title=h('p',{},typeof item.title==='string'?item.title:'');title.hidden=!title.textContent.trim();
+        const commandText=typeof item.command==='string'?item.command:typeof item.action==='string'?item.action:'';
+        const command=h('pre',{class:'review-payload'},commandText);command.hidden=!commandText;
+        const targetText=typeof item.target==='string'?item.target:'';
+        const target=h('p',{},targetText?['Target: ',targetText]:[]);target.hidden=!targetText;
+        const error=h('p',{class:'inline-error',role:'alert'});
+        const itemError=h('p',{class:'caption'},typeof item.error==='string'?item.error:'');
+        itemError.hidden=!!commandText || typeof item.error!=='string';
+        const expires=h('p',{class:'caption'},Number.isFinite(item.expires_at)?['Expires: ',date(item.expires_at)]:[]);
+        expires.hidden=!Number.isFinite(item.expires_at) || status!=='pending';
+        const detailsUnavailable=h('p',{class:'caption'},'No decision was sent. Review this action in the native client.');
+        detailsUnavailable.hidden=item.details_unavailable!==true;
+        const decisions=h('div',{class:'actions'});
+        const canDecide=status==='pending' && item.executable===true && Array.isArray(item.choices)
+          && item.choices.includes('once') && item.choices.includes('deny');
+        const decide=async choice=>{
+          const sameApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
+            && approvalCards.get(key)===card && card.isConnected && approvalPending.get(key)===item
+            && approvalItems.get(key)===item && approvalActionStates.get(key)===actionState;
+          const sameAcknowledgedApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
+            && approvalCards.get(key)===card && card.isConnected
+            && sameApprovalIdentity(item,approvalItems.get(key))
+            && approvalActionStates.get(key)===actionState;
+          if(!sameApproval() || actionState.pending || actionState.uncertain)return;
+          const hadFocus=card.contains(doc.activeElement);
+          actionState.pending=true;actionState.error='';renderApprovals();
+          if(hadFocus && !card.contains(doc.activeElement))card.focus({preventScroll:true});
+          let decisionStarted=false;
+          try{
+            if(choice==='once')await ceremony('verify');
+            if(!sameApproval())return;
+            decisionStarted=true;actionState.decisionStarted=true;
+            await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,
+              {method:'POST',body:{decision:choice}});
+            if(!sameAcknowledgedApproval())return;
+            actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
+            handledApprovals.add(key);approvalPending.delete(key);approvalFinals.set(key,'resolved');
+            renderApprovals();
+          }catch(error){
+            if(!sameAcknowledgedApproval())return;
+            if(decisionStarted && [404,409].includes(error.status)){
+              await reconcileApprovals();
+              if(!sameAcknowledgedApproval())return;
+              actionState.pending=false;actionState.decisionStarted=false;
+              actionState.error='This approval changed or is no longer pending. Review its current state before deciding.';
+            }else{
+              actionState.pending=false;actionState.decisionStarted=false;actionState.error=errorMessage(error);
+            }
+            if(decisionStarted && ![404,409].includes(error.status)){
+              actionState.uncertain=true;approvalFinals.set(key,'unknown');
+            }
+            if(error.status===401){expiredSession();return;}
+            renderApprovals();
+          }
+        };
+        let approve=null,deny=null;
+        if(canDecide){
+          approve=button('Approve once',()=>void decide('once'),'primary');
+          deny=button('Deny',()=>void decide('deny'),'secondary');
+          decisions.append(approve,deny);
+        }
+        view={item,heading,title,command,target,error,itemError,expires,detailsUnavailable,decisions,approve,deny,canDecide};
+        approvalCardViews.set(key,view);
+        card.replaceChildren(heading,title,command,target,error,itemError,expires,detailsUnavailable,decisions);
+      }
       const labels={pending:'Approval required',expired:'Expired',resolved:'Resolved',
         resolved_external:'No longer pending',cancelled:'Cancelled',unknown:'Decision status unknown',
         sending:'Decision pending',unavailable:'Approval unavailable',details_unavailable:'Approval details unavailable'};
-      const command=typeof item.command==='string'?item.command
-        :typeof item.action==='string'?item.action:'';
-      const target=typeof item.target==='string'?item.target:'';
-      const canDecide=status==='pending' && item.executable===true
-        && Array.isArray(item.choices) && item.choices.includes('once') && item.choices.includes('deny');
-      const detailsUnavailable=item.details_unavailable===true || status==='details_unavailable';
-      const contents=[h('h3',{id:`approval-title-${item.id}`},labels[status] || 'Approval unavailable')];
-      if(typeof item.title==='string' && item.title.trim())contents.push(h('p',{},item.title));
-      if(command)contents.push(h('pre',{class:'review-payload'},command));
-      if(target)contents.push(h('p',{},'Target: ',target));
-      if(!command && typeof item.error==='string')contents.push(h('p',{class:'caption'},item.error));
-      if(status==='pending' && Number.isFinite(item.expires_at))
-        contents.push(h('p',{class:'caption'},'Expires: ',date(item.expires_at)));
-      if(detailsUnavailable)contents.push(h('p',{class:'caption'},'No decision was sent. Review this action in the native client.'));
-      const decisions=h('div',{class:'actions'});
-      const decide=(choice,control)=>action(control,async()=>{
-        const sameApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
-          && approvalCards.get(key)===card && card.isConnected && approvalPending.get(key)===item;
-        const sameAcknowledgedApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
-          && approvalCards.get(key)===card && card.isConnected && approvalItems.get(key)===item;
-        if(!sameApproval())return;
-        if(choice==='once')await ceremony('verify');
-        if(!sameApproval())return;
-        try{
-          await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,
-            {method:'POST',body:{decision:choice}});
-        }catch(error){
-          if([404,409].includes(error.status) && sameApproval()){await reconcileApprovals();return;}
-          throw error;
-        }
-        if(!sameAcknowledgedApproval())return;
-        handledApprovals.add(key);approvalPending.delete(key);approvalFinals.set(key,'resolved');
-        renderApprovals();
-      });
-      if(canDecide){
-        decisions.append(button('Approve once',event=>decide('once',event.currentTarget),'primary'),
-          button('Deny',event=>decide('deny',event.currentTarget),'secondary'));
-        contents.push(decisions);
-      }
-      card.replaceChildren(...contents);
+      const effectiveStatus=actionState.pending?'sending':actionState.uncertain?'unknown':status;
+      view.heading.textContent=labels[effectiveStatus] || 'Approval unavailable';
+      view.error.textContent=actionState.error;view.error.hidden=!actionState.error;
+      view.itemError.hidden=!!view.command.textContent || typeof item.error!=='string';
+      view.expires.hidden=!Number.isFinite(item.expires_at) || effectiveStatus!=='pending';
+      view.detailsUnavailable.hidden=item.details_unavailable!==true && effectiveStatus!=='details_unavailable';
+      const canDecide=view.canDecide && (effectiveStatus==='pending' || actionState.pending) && !actionState.uncertain;
+      view.decisions.hidden=!canDecide;
+      for(const control of [view.approve,view.deny])if(control)control.disabled=actionState.pending || actionState.uncertain;
+      if(!canDecide && !actionState.pending && view.decisions.childNodes.length)view.decisions.replaceChildren();
+      const focused=card.contains(doc.activeElement)?doc.activeElement:null;
       placeApprovalCard(card,item);
+      if(focused?.isConnected && doc.activeElement!==focused)focused.focus({preventScroll:true});
+      if(notificationTarget?.kind==='approval' && item.id===notificationTarget.approval_id){
+        clearApprovalTargetTimer();
+        approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
+        if(content.contains(messages))focusApprovalTarget();
+      }
       return card;
     };
     const renderApprovals=()=>{
@@ -1125,9 +1188,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         const next=new Map(items.map(item=>{
           const key=approvalKey(item),previous=approvalPending.get(key);
           const unchanged=previous && [
-            'id','run_id','request_id','session_id','status','title','command','action',
+            'id','run_id','run_session_id','request_id','session_id','status','title','command','action',
             'target','expires_at','executable','choices','error','details_unavailable'
           ].every(field=>JSON.stringify(previous[field])===JSON.stringify(item[field]));
+          const actionState=approvalActionStates.get(key);
+          if(previous && !unchanged && !(actionState?.pending && actionState.decisionStarted))
+            approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
           return [key,unchanged?previous:item];
         }));
         for(const [key,item] of approvalPending)if(!next.has(key)){
@@ -1144,7 +1210,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       reconcile:reconcileApprovals,
       run(id){currentApprovalRun=id;renderApprovals();},
       event(item,runId){
-        const value={...item,run_id:runId,session_id:session.id},key=approvalKey(value);
+        const value={...item,run_id:runId,
+          run_session_id:item.run_session_id || item.session_id || session.id,session_id:session.id},
+          key=approvalKey(value);
         if(version!==routeVersion || handledApprovals.has(key))return false;
         approvalRevision++;
         if(value.id || value.request_id){approvalItems.set(key,value);approvalPending.set(key,value);}
@@ -1159,38 +1227,90 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         genericApproval=false;renderApprovals();
       }
     };
-    win.addEventListener('focus',reconcileApprovals);stopExtras=()=>{approvalRevision++;win.removeEventListener('focus',reconcileApprovals);};
-    await reconcileApprovals();
-    if(!current())return;
+    const focusApprovalTarget=()=>{
+      if(!current())return;
+      const card=[...approvalCards.values()].find(node=>node.dataset.approvalId===notificationTarget?.approval_id);
+      if(card){
+        if(approvalTargetFocusedCard)return;
+        approvalTargetFocusedCard=true;card.scrollIntoView?.({block:'center'});card.focus();
+      }else if(approvalTargetPlaceholder && !approvalTargetPlaceholderFocused){
+        approvalTargetPlaceholderFocused=true;
+        approvalTargetPlaceholder.scrollIntoView?.({block:'center'});approvalTargetPlaceholder.focus();
+      }
+    };
+    const resolveApprovalTarget=async target=>{
+      const matches=item=>item?.id===target.approval_id && item.run_id===target.run_id
+        && item.request_id===target.request_id && item.session_id===session.id
+        && item.run_session_id===target.run_session_id && typeof item.status==='string';
+      try{
+        let item=[...approvalItems.values()].find(matches);
+        if(!item){
+          const revision=approvalRevision;
+          item=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
+          if(!current())return;
+          clearApprovalTargetTimer();
+          if(revision!==approvalRevision){
+            item=[...approvalItems.values()].find(matches);
+            if(!item){
+              approvalTargetPlaceholder?.querySelector('h3') && (approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable');
+              if(approvalTargetPlaceholder)approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+              focusApprovalTarget();return;
+            }
+          }
+        }
+        if(!current())return;
+        if(matches(item)){
+          const key=approvalKey(item),existing=approvalItems.get(key);
+          const same=existing && [
+            'id','run_id','run_session_id','request_id','session_id','status','title','command','action',
+            'target','expires_at','executable','choices','error','details_unavailable'
+          ].every(field=>JSON.stringify(existing[field])===JSON.stringify(item[field]));
+          if(same)item=existing;
+          else{
+            const actionState=approvalActionStates.get(key);
+            if(!actionState?.pending || !actionState.decisionStarted)
+              approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
+          }
+          approvalItems.set(key,item);
+          if(item.status==='pending' && item.executable===true)approvalPending.set(key,item);
+          else approvalFinals.set(key,item.status);
+          approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
+          renderApprovals();focusApprovalTarget();
+        }else{
+          approvalTargetPlaceholder?.querySelector('h3') && (approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable');
+          if(approvalTargetPlaceholder)approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+          focusApprovalTarget();
+        }
+      }catch(error){
+        if(!current())return;
+        if(error.status===401){expiredSession();return;}
+        if(approvalTargetPlaceholder){
+          const unavailable=[404,409,410].includes(error.status);
+          approvalTargetPlaceholder.querySelector('h3').textContent=unavailable?'Approval unavailable':'Approval status unavailable';
+          approvalTargetPlaceholder.querySelector('p').textContent=unavailable
+            ? 'This approval is no longer pending in this chat.'
+            : 'This chat is ready. Approval status could not be confirmed.';
+        }
+        clearApprovalTargetTimer();
+        focusApprovalTarget();
+      }
+    };
+    win.addEventListener('focus',reconcileApprovals);
+    stopExtras=()=>{approvalRevision++;win.removeEventListener('focus',reconcileApprovals);clearApprovalTargetTimer();};
+    void reconcileApprovals();
     if(notificationTarget?.kind==='approval'){
       const target=notificationTarget;
-      const targetKey=[...approvalItems].find(([,item])=>item.id===target.approval_id
-        && item.run_id===target.run_id && item.request_id===target.request_id
-        && item.session_id===session.id
-        && (!target.run_session_id || item.run_session_id===target.run_session_id))?.[0];
-      if(!targetKey){
-        try{
-          const item=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
-          if(!current())return;
-          if(item?.id===target.approval_id && item.run_id===target.run_id
-              && item.request_id===target.request_id && item.session_id===session.id
-              && (!target.run_session_id || item.run_session_id===target.run_session_id)
-              && typeof item.status==='string'){
-            const key=approvalKey(item);approvalItems.set(key,item);
-            if(item.status==='pending' && item.executable===true)approvalPending.set(key,item);
-            else approvalFinals.set(key,item.status);
-            renderApprovals();
-          }
-        }catch(error){if(!current())return;if(error.status===401){expiredSession();return;}}
-      }
-      const card=[...approvalCards.values()].find(node=>node.dataset.approvalId===target.approval_id);
-      if(card){card.scrollIntoView?.({block:'center'});card.focus();}
-      else{
-        const unavailable=h('section',{class:'card approval approval-card notification-unavailable',
-          role:'status',tabindex:'-1'},h('h3',{},'Approval unavailable'),
-          h('p',{},'This approval is no longer pending in this chat.'));
-        messages.append(unavailable);unavailable.scrollIntoView?.({block:'center'});unavailable.focus();
-      }
+      approvalTargetPlaceholder=h('section',{class:'card approval approval-card notification-unavailable',
+        role:'status',tabindex:'-1'},h('h3',{},'Checking approval status'),
+        h('p',{},'This chat is ready. Approval details are loading.'));
+      messages.append(approvalTargetPlaceholder);
+      approvalTargetTimer=win.setTimeout(()=>{
+        if(current() && approvalTargetPlaceholder?.isConnected){
+          approvalTargetPlaceholder.querySelector('h3').textContent='Approval status is taking longer to load';
+          approvalTargetPlaceholder.querySelector('p').textContent='You can continue using this chat while the status is checked.';
+        }
+      },10000);
+      void resolveApprovalTarget(target);
     }
     let pending=attempts.get(session.id);
     try {pending ||= JSON.parse(storage.get(key(`attempt:${session.id}`)));}catch{}
@@ -1444,6 +1564,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       technical.replaceChildren(...(technical.hidden?[]:[h('summary',{class:'technical-summary'},summary.join(' · ') || 'Session lifetime usage'),...details.map(text=>h('p',{},text))]));
     };
     content.replaceChildren(header,approvalNotice,messages,technical,composer);
+    if(notificationTarget?.kind==='approval')focusApprovalTarget();
     stopPushPresence=watchPushPresence(session,version);
     const backgroundCards=new Map();
     let backgroundItems=new Map();

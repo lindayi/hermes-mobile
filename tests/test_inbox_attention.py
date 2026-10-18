@@ -233,7 +233,7 @@ def test_notification_target_lookup_is_owner_scoped_and_binds_request_or_approva
     assert approval_target.status_code == 200
     assert approval_target.json() == {
         'kind': 'approval', 'session_id': 'chat-1', 'run_id': 'run-2',
-        'approval_id': 'approval-2', 'request_id': 'native-2'
+        'approval_id': 'approval-2', 'request_id': 'native-2', 'run_session_id': 'chat-1'
     }
     assert client.get(BASE + f"/inbox/{request['id']}/target").status_code == 200
     service.request_target_resolver = lambda *identity: None

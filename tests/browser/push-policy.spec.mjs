@@ -12,7 +12,7 @@ const repo=fileURLToPath(new URL('../../',import.meta.url));
 const defaults=()=>({revision:0,enabled:true,categories:{completion:true,approval:true,attention:true,scheduled:true,operational:true},hide_details:false});
 async function fixture(run){
  const tmp=await mkdtemp((process.env.TMPDIR || '/tmp')+'/b-');let server,browser;
- const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null};
+ const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,approvals:[],approvalHold:null,approvalDetail:null,decisionHold:null,decisionStatus:200,activeRun:null};
  try{
   const names=await readdir(dir),ui=names.find(n=>/^ui\.[a-f0-9]+\.mjs$/.test(n)),sw=names.find(n=>/^sw\.[a-f0-9]+\.js$/.test(n));
   assert.ok(ui && sw,'tests use generated release graph');
@@ -25,6 +25,13 @@ async function fixture(run){
     if(p==='/auth/me'){if(control.authHold)await control.authHold;data={user:{id:control.user,status:'ready'},csrf_token:control.csrf || 'fixture-csrf'};}
     if(p==='/auth/logout' && control.logoutDelay)await new Promise(resolve=>setTimeout(resolve,control.logoutDelay));
     if(p==='/push/presence' && call.body.visible && control.presenceHold)await control.presenceHold;
+    if(p==='/approvals'){if(control.approvalHold)await control.approvalHold;data={items:control.approvals};}
+    if(p.startsWith('/approvals/') && p.endsWith('/decision') && req.method==='POST'){
+     if(control.decisionHold)await control.decisionHold;
+     status=control.decisionStatus;data=status===200?{status:'resolved'}:{detail:'Synthetic unavailable'};
+    }else if(p.startsWith('/approvals/') && req.method==='GET' && control.approvalDetail?.id===decodeURIComponent(p.split('/').at(-1)))data=control.approvalDetail;
+    if(p==='/auth/verify/options')data={challenge_id:'fixture-challenge',publicKey:{challenge:'AQ'}};
+    if(p==='/auth/verify/finish')data={verified:true};
     if(p==='/sessions')data={items:[{id:'session-one',title:'First conversation'},{id:'session-two',title:'Second conversation'}]};
     if(p==='/inbox/notice-target/target' && control.notificationTarget)data=control.notificationTarget;
     if(control.notificationTarget && p===`/sessions/${control.notificationTarget.session_id}`)data={id:control.notificationTarget.session_id,title:'Exact notification chat'};
@@ -37,6 +44,8 @@ async function fixture(run){
       ? {items:[{id:1,role:'user',content:'Original request',run_id:'older-run',session_id:'session-one'}],offset:0,total:11}
       : {items:[{id:20,role:'assistant',content:'Newer response',run_id:'newer-run',session_id:'session-one'}],offset:10,total:11};
     }else if(p.endsWith('/messages')){if(control.messagesDelay)await new Promise(resolve=>setTimeout(resolve,control.messagesDelay));data={items:[],total:0};}
+    if(p.endsWith('/messages') && control.activeRun)data.run=control.activeRun;
+    if(p.endsWith('/controls') && control.activeRun)data={steering:true,attempts:[]};
     if(p.startsWith('/runs/') && control.realHistory)data=control.realHistory.runs[p.slice('/runs/'.length)]||{items:[]};
     else if(p==='/runs/older-run')data={id:'older-run',session_id:'session-one',input:'Original request',status:'completed',output:'Exact notification result',created_at:1,updated_at:2};
     if(p==='/push/preferences'){
@@ -64,6 +73,26 @@ async function fixture(run){
   await run({page,context,url,calls,control,ui,sw,dir,mount});
   assert.deepEqual(errors,[]);
  }finally{await browser?.close();server?.closeAllConnections();await new Promise(r=>server?server.close(r):r());await rm(tmp,{recursive:true,force:true});}
+}
+const approvalRecord=(overrides={})=>({
+ id:'approval-1',run_id:'approval-run',request_id:'request-1',session_id:'session-one',
+ run_session_id:'session-one',status:'pending',title:'Review synthetic action',
+ command:'Run a synthetic command',target:'Synthetic target',expires_at:Date.now()/1000+600,
+ executable:true,choices:['once','deny'],...overrides
+});
+const approvalTarget={
+ kind:'approval',session_id:'session-one',run_id:'approval-run',
+ run_session_id:'session-one',approval_id:'approval-1',request_id:'request-1'
+};
+async function holdPasskey(page){
+ await page.evaluate(()=>{
+  window.PublicKeyCredential=function(){};
+  let resolve,reject;
+  window.passkeyRequest={started:false};
+  Object.defineProperty(navigator,'credentials',{configurable:true,value:{get:()=>{passkeyRequest.started=true;return new Promise((yes,no)=>{resolve=yes;reject=no;});}}});
+  window.finishPasskey=()=>resolve({id:'fixture',rawId:new Uint8Array([1]).buffer,type:'public-key',response:{clientDataJSON:new Uint8Array([1]).buffer},getClientExtensionResults:()=>({})});
+  window.cancelPasskey=()=>reject(new DOMException('Passkey cancelled','NotAllowedError'));
+ });
 }
 test('sessions list has a compact heading and Search Filter New toolbar without summary',{timeout:30000},()=>fixture(async({page})=>{
  await page.getByRole('button',{name:'First conversation',exact:true}).waitFor();
@@ -359,6 +388,84 @@ test('generated request routing uses composed native+journal anchors beyond a hi
  assert.equal(await newerRequest.evaluate((newer,node)=>Boolean(node.compareDocumentPosition(newer)&Node.DOCUMENT_POSITION_FOLLOWING),await target.elementHandle()),true);
  assert.ok(calls.filter(call=>call.p===`/sessions/${history.session_id}/messages`&&call.query.includes('offset=')).length>=2,'the target required multiple older pages');
  assert.deepEqual(await page.locator('.user-message').filter({hasText:'Old notification request'}).count(),1);
+}));
+test('generated chat stays usable while approval reconciliation is unresolved and applies late results',{timeout:30000},()=>fixture(async({page,control})=>{
+ let release;control.approvalHold=new Promise(resolve=>release=resolve);
+ control.approvals=[approvalRecord()];
+ control.activeRun={id:'active-run',session_id:'session-one',status:'running',input:'Synthetic active request',created_at:1};
+ await page.getByRole('button',{name:/First conversation/}).click();
+ await page.getByRole('textbox',{name:'Message Hermes'}).waitFor();
+ await page.getByRole('button',{name:'Stop run'}).waitFor();
+ assert.equal(await page.locator('.approval-card').count(),0,'unresolved approval lookup must not block chat');
+ release();await page.getByRole('heading',{name:'Approval required'}).waitFor();
+ assert.equal(await page.getByRole('textbox',{name:'Message Hermes'}).isVisible(),true);
+}));
+test('approval controls retain pending and card-scoped errors across focus refresh',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ const item=approvalRecord();control.notificationTarget=approvalTarget;control.approvals=[item];control.approvalDetail=item;
+ await mount(page,'?notification=notice-target');await page.getByRole('button',{name:'Approve once'}).waitFor();
+ await page.waitForTimeout(100);
+ const preview=page.locator('.review-payload');
+ await preview.evaluate(node=>{node.style.width='10px';node.style.height='8px';node.style.overflow='auto';node.scrollTop=8;});
+ const previewScroll=await preview.evaluate(node=>node.scrollTop);
+ const approve=page.getByRole('button',{name:'Approve once'}),cardElement=await page.locator('.approval-card').elementHandle();
+ await holdPasskey(page);
+ await approve.focus();
+ await approve.click();
+ await page.waitForFunction(()=>window.passkeyRequest?.started);
+ const passkeyFocus=await cardElement.evaluate(node=>({connected:node.isConnected,active:document.activeElement===node}));
+ assert.ok(passkeyFocus.connected && passkeyFocus.active,`passkey flow keeps focus in the approval card: ${JSON.stringify({passkeyFocus,calls:calls.map(call=>call.p)})}`);
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));await page.waitForTimeout(80);
+ const focusAfterRefresh=await cardElement.evaluate(node=>({connected:node.isConnected,active:document.activeElement===node}));
+ assert.ok(focusAfterRefresh.connected && focusAfterRefresh.active,`an unchanged refresh preserves keyboard focus: ${JSON.stringify(focusAfterRefresh)}`);
+ assert.equal(await preview.evaluate(node=>node.scrollTop),previewScroll,'an unchanged refresh preserves preview scroll');
+ assert.equal(await page.getByRole('button',{name:'Approve once'}).isDisabled(),true,'focus refresh must not enable duplicate approval while passkey is pending');
+ await page.evaluate(()=>cancelPasskey());
+ await page.locator('.approval-card').getByText(/Passkey request cancelled or not allowed/).waitFor();
+ assert.equal(await page.locator('.approval-card').getByRole('button',{name:'Approve once'}).isDisabled(),false,'a cancelled verification can be deliberately retried');
+
+ let release;control.decisionHold=new Promise(resolve=>release=resolve);control.decisionStatus=503;
+ await page.locator('.approval-card').getByRole('button',{name:'Deny'}).click();
+ await page.waitForFunction(()=>document.querySelector('.approval-card')?.querySelector('.actions button[disabled]'));
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));await page.waitForTimeout(80);
+ assert.equal(await page.locator('.approval-card').getByRole('button',{name:'Deny'}).isDisabled(),true,'refresh must keep a submitted decision locked');
+ release();await page.locator('.approval-card').getByText('Synthetic unavailable').waitFor();
+ assert.equal(await page.locator('.approval-card').getByRole('button',{name:'Deny'}).count(),0,'an uncertain decision must not be resubmitted');
+}));
+test('approval acknowledgement wins over list removal and changed actions reject stale passkey results',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ const item=approvalRecord();control.notificationTarget=approvalTarget;control.approvals=[item];control.approvalDetail=item;
+ await mount(page,'?notification=notice-target');await page.getByRole('button',{name:'Deny'}).waitFor();
+ let release;control.decisionHold=new Promise(resolve=>release=resolve);
+ await page.getByRole('button',{name:'Deny'}).click();
+ await page.waitForFunction(()=>window.app && document.querySelector('.approval-card .actions button[disabled]'));
+ control.approvals=[];await page.evaluate(()=>dispatchEvent(new Event('focus')));await page.waitForTimeout(80);
+ release();await page.locator('.approval-card').getByRole('heading',{name:'Resolved'}).waitFor();
+ assert.equal(calls.filter(call=>call.p==='/approvals/approval-1/decision').length,1);
+
+ control.approvals=[item];control.approvalDetail=item;await mount(page,'?notification=notice-target');await page.getByRole('button',{name:'Approve once'}).waitFor();
+ await holdPasskey(page);await page.getByRole('button',{name:'Approve once'}).click();await page.waitForFunction(()=>window.passkeyRequest?.started);
+ control.approvals=[approvalRecord({command:'Changed synthetic command'})];
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));await page.locator('.approval-card').getByText('Changed synthetic command').waitFor();
+ await page.evaluate(()=>finishPasskey());await page.waitForTimeout(80);
+ assert.equal(calls.filter(call=>call.p==='/approvals/approval-1/decision').length,1,'changed action details must reject the stale passkey result');
+}));
+test('late approval lists and passkey results cannot cross a newer route or owner',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ let release;control.approvalHold=new Promise(resolve=>release=resolve);control.approvals=[approvalRecord()];
+ await page.getByRole('button',{name:/First conversation/}).click();
+ await page.getByRole('textbox',{name:'Message Hermes'}).waitFor();
+ await page.getByRole('button',{name:'Chats',exact:true}).click();
+ await page.getByRole('button',{name:/Second conversation/}).click();
+ await page.getByRole('textbox',{name:'Message Hermes'}).waitFor();
+ release();await page.waitForTimeout(80);
+ assert.match(await page.locator('.conversation-head h1').innerText(),/Second conversation/);
+ assert.equal(await page.locator('.approval-card').count(),0,'a prior session response cannot place its approval in a newer chat');
+
+ control.notificationTarget=approvalTarget;control.approvals=[approvalRecord()];control.approvalDetail=control.approvals[0];
+ await mount(page,'?notification=notice-target');await page.getByRole('button',{name:'Approve once'}).waitFor();
+ await holdPasskey(page);await page.getByRole('button',{name:'Approve once'}).click();await page.waitForFunction(()=>window.passkeyRequest?.started);
+ control.user='fixture-new-owner';control.approvals=[];
+ await page.evaluate(()=>app.start());await page.waitForFunction(()=>app.state.user?.id==='fixture-new-owner');
+ await page.evaluate(()=>finishPasskey());await page.waitForTimeout(80);
+ assert.equal(calls.filter(call=>call.p==='/approvals/approval-1/decision').length,0,'a late verification cannot decide for a replacement owner');
 }));
 test('pending presence cannot renew during account revalidation or after a new owner',{timeout:30000},()=>fixture(async({page,control,calls})=>{
  await page.clock.install();
