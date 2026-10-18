@@ -586,6 +586,12 @@ test('generated unavailable approval stays retired after list refresh and approv
  await card.getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
  await other.getByRole('button',{name:'Approve once'}).waitFor();
  const before=calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length;
+ control.approvals=[
+  ...Array.from({length:100},(_,index)=>approvalRecord({
+   id:`expired-${index}`,request_id:`expired-request-${index}`,expires_at:1
+  })),
+  target,sibling
+ ];
  emitRunEvent('status',{status:'waiting_for_approval'},'refresh-after-unavailable');
  const deadline=Date.now()+2500;
  while(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length===before&&Date.now()<deadline)

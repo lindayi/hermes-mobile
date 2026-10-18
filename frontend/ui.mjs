@@ -1320,7 +1320,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(!current() || revision!==approvalRevision || !Array.isArray(data.items))return;
         approvalListRevision++;
         const items=data.items.filter(item=>(item.run_id===currentApprovalRun || item.session_id===session.id)
-          && !handledApprovals.has(approvalKey(item)));
+          && !handledApprovals.has(approvalKey(item)) && !approvalFinals.has(approvalKey(item)));
         const activeItems=[];
         for(const item of items){
           if(!approvalExpired(item)){activeItems.push(item);continue;}
@@ -1364,7 +1364,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         let value={...item,run_id:runId,
           run_session_id:item.run_session_id || item.session_id || session.id,session_id:session.id},
           key=approvalKey(value);
-        if(version!==routeVersion || handledApprovals.has(key))return false;
+        if(version!==routeVersion || handledApprovals.has(key) || approvalFinals.has(key))return false;
         const previous=approvalItems.get(key);
         if(sameApprovalData(previous,value))value=previous;
         approvalRevision++;
@@ -1506,8 +1506,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           const actionState=approvalActionStates.get(key),
             freshFinal=finalApprovalStatuses.has(item.status),
             previousStatus=actionState?.uncertain?'unknown':approvalFinals.get(key) || existing?.status,
-            nextStatus=actionState?.uncertain && !freshFinal
-              ?'unknown':preferredApprovalStatus(item.status,previousStatus);
+            nextStatus=actionState?.uncertain && !freshFinal?'unknown'
+              :freshFinal?item.status
+                :approvalFinals.get(key)==='unavailable' || existing?.status==='unavailable'
+                  ?'unavailable':preferredApprovalStatus(item.status,previousStatus);
           const unchanged=sameApprovalData(existing,item),statusOverridden=nextStatus!==item.status;
           if(statusOverridden)item={...(existing || item),status:nextStatus,executable:false,choices:[]};
           else if(unchanged)item=existing;
