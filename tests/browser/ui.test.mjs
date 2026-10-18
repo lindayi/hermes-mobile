@@ -114,7 +114,7 @@ test('photos selected while a run is pending survive its accepted response',asyn
   select('submitted.png');click(doc,'Send message');
   for(let i=0;i<20&&!acceptRun;i++)await tick();
   assert.equal(typeof acceptRun,'function');
-  click(doc,'Photos');select('later.png');
+  click(doc,'Add photos');select('later.png');
   acceptRun({id:'r1',session_id:'s1',status:'completed'});
   await tick();await tick();
   assert.deepEqual([...doc.querySelectorAll('.photo-preview img')].map(img=>img.getAttribute('src')),
@@ -147,7 +147,7 @@ test('ambiguous photo retry blocks a changed photo selection',async t=>{
   select('first.png');click(doc,'Send message');await tick();await tick();await tick();
   const firstKey=requests[0]?.idempotency_key;
   assert.ok(firstKey);
-  click(doc,'Photos');select('later.png');
+  click(doc,'Add photos');select('later.png');
   click(doc,'Send message');await tick();await tick();await tick();
   assert.equal(requests.length,1,'changed selection must not retry the ambiguous request');
   assert.equal(requests[0].idempotency_key,firstKey);

@@ -110,7 +110,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   }
   // Text-only status symbols and one stroke family keep mechanical controls neutral.
   const icons = {success:'✓',failed:'×',running:'◔',completed:'✓',cancelled:'■',mixed:'!',unknown:'?'};
-  const paths = {trash:'M4 6h16 M9 6V3h6v3 M6 6l1 15h10l1-15 M10 10v7 M14 10v7',progress:'M12 3a9 9 0 1 1-9 9',clock:'M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18 M12 7v5l3 2',refresh:'M20 8a8 8 0 1 0 0 8 M20 3v5h-5',search:'M16 16l5 5 M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',newchat:'M4 4h10 M20 10v6H9l-5 4V4 M19 2v8 M15 6h8',chats:'M4 4h16v12H9l-5 4Z',inbox:'M4 4h16v16H4Z M4 13h5l2 3h2l2-3h5',jobs:'M4 6h16v14H4Z M8 3v6 M16 3v6 M4 11h16',settings:'M4 6h16 M4 12h16 M4 18h16 M9 3v6 M15 9v6 M9 15v6',back:'M14 5l-7 7 7 7 M7 12h13',edit:'M4 20l1-6L16 3l5 5L10 19Z M13 6l5 5',copy:'M8 8h12v12H8Z M16 8V4H4v12h4',send:'M12 20V4 M5 11l7-7 7 7',stop:'M6 6h12v12H6Z',expand:'M14 4h6v6 M20 4l-7 7 M10 20H4v-6 M4 20l7-7',disclosure:'M9 5l7 7-7 7'};
+  const paths = {trash:'M4 6h16 M9 6V3h6v3 M6 6l1 15h10l1-15 M10 10v7 M14 10v7',progress:'M12 3a9 9 0 1 1-9 9',clock:'M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18 M12 7v5l3 2',refresh:'M20 8a8 8 0 1 0 0 8 M20 3v5h-5',search:'M16 16l5 5 M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',newchat:'M4 4h10 M20 10v6H9l-5 4V4 M19 2v8 M15 6h8',chats:'M4 4h16v12H9l-5 4Z',inbox:'M4 4h16v16H4Z M4 13h5l2 3h2l2-3h5',jobs:'M4 6h16v14H4Z M8 3v6 M16 3v6 M4 11h16',settings:'M4 6h16 M4 12h16 M4 18h16 M9 3v6 M15 9v6 M9 15v6',back:'M14 5l-7 7 7 7 M7 12h13',edit:'M4 20l1-6L16 3l5 5L10 19Z M13 6l5 5',copy:'M8 8h12v12H8Z M16 8V4H4v12h4',send:'M12 20V4 M5 11l7-7 7 7',stop:'M6 6h12v12H6Z',expand:'M14 4h6v6 M20 4l-7 7 M10 20H4v-6 M4 20l7-7',disclosure:'M9 5l7 7-7 7',image:'M3 5h18v14H3Z M3 15l5-5 4 4 3-3 6 6 M15 9h.01'};
   const icon=name=>{
     const svg=doc.createElementNS('http://www.w3.org/2000/svg','svg');
     for(const [key,value] of Object.entries({'aria-hidden':'true',focusable:'false',class:'ui-icon',viewBox:'0 0 24 24',width:18,height:18,fill:'none',stroke:'currentColor','stroke-width':1.7,'stroke-linecap':'round','stroke-linejoin':'round'}))svg.setAttribute(key,value);
@@ -912,7 +912,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const selectedPhotos=[];
     let pendingPhotoSubmission=null;
     const photoInput=h('input',{class:'photo-input',type:'file',hidden:true,multiple:true,accept:'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp','aria-label':'Add photos'});
-    const addPhotos=button('Photos',()=>photoInput.click(),'quiet',{'aria-label':'Add photos',title:'Add up to four JPEG, PNG, or WebP photos'});
+    const addPhotos=button('',()=>photoInput.click(),'quiet',{'aria-label':'Add photos',title:'Add up to four JPEG, PNG, or WebP photos'});
+    addPhotos.append(icon('image'));
     const photoTray=h('div',{class:'photo-tray',hidden:true,'aria-label':'Selected photos'});
     const photoStatus=h('p',{class:'photo-status caption',role:'status','aria-live':'polite',hidden:true});
     const releasePreview=photo=>{if(photo.previewUrl)win.URL?.revokeObjectURL?.(photo.previewUrl);};

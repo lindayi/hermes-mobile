@@ -164,6 +164,11 @@ authenticated DELETE requests for unbound uploads, including uploads that finish
 after navigation. Accepted-run photos are not released. Individual asynchronous
 removal resolves the selected item by identity, not by its earlier list index.
 
+The photo picker control uses a monochrome outline image icon instead of visible
+text. It keeps the accessible name “Add photos,” its format and size tooltip,
+the existing 44-pixel touch target, and keyboard activation of the same file
+chooser.
+
 Run admission atomically binds the exact attachment IDs to the existing durable
 run identity. The bridge reads normalized bytes only for that run and sends
 them, with its text, in the native multimodal user message. A run retry cannot
