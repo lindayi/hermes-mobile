@@ -1920,8 +1920,9 @@ def test_active_gate_contract_preserves_exact_head_review():
         'read-only coordinator state snapshot',
         'authenticated edit metadata, complete check runs and thread pagination',
         'It writes no files or state and never plans/applies coordinator actions.',
-        'A collection error blocks without emitting partial evidence or clearing persisted authorization.',
-        'Malformed current owner-comment responses at either the initial or final read abort collection with `invalid-evidence`, not `sensitive-review-authorization`;',
+        'A collection error blocks without emitting partial evidence or changing persisted state.',
+        'It does not fetch or revalidate legacy sensitive authorization fields.',
+        'sensitive evidence passes without a separate owner grant',
         'does not authenticate the JSON file',
         'Ordinary merge evidence has no structured independent report',
         'Installed-runtime compatibility remains an exact-main guarded deployment gate',
@@ -1937,11 +1938,10 @@ def test_active_gate_contract_preserves_exact_head_review():
     ):
         assert clause in ' '.join((ROOT / 'AGENTS.md').read_text().split()), clause
     for clause in (
-        '`copilot_review.reviews`',
-        '`copilot_review.change.owner_command`',
-        '`sensitive-review-authorization`',
+        'Sensitive-path classification is informative and does not require a separate owner command or targeted review.',
         'current genuine Copilot review',
-        'Never reconstruct this record from the persisted authorization',
+        'does not fetch or revalidate legacy sensitive-grant comments',
+        'all three successful required checks',
     ):
         assert clause in policy, clause
 

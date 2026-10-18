@@ -16940,7 +16940,7 @@ def test_owner_enrollment_allows_sensitive_change_without_extra_authorization(tm
         enrollment = store.snapshot()["enrollments"]["16"]
 
         assert plan["sensitive"] is sensitive
-        assert plan["auto_merge_eligible"] is True, plan
+        assert plan["auto_merge_eligible"] is True
         assert plan["auto_merge_requested"] is True
         assert "sensitive" not in plan["reasons"]
         assert enrollment["active"] is True
@@ -17030,7 +17030,7 @@ def test_final_review_read_revoked_copilot_blocks_auto_merge(tmp_path, sensitive
 
 
 @pytest.mark.parametrize("invalid_on_read", [2, 3, 4])
-def test_sensitive_owner_review_is_revalidated_at_planning_status_and_merge_fences(
+def test_sensitive_owner_grant_is_not_revalidated_at_status_or_merge_fences(
         tmp_path, invalid_on_read):
     class ChangingOwnerReview(FakeApi):
         review_reads = 0
@@ -17053,13 +17053,10 @@ def test_sensitive_owner_review_is_revalidated_at_planning_status_and_merge_fenc
     result = Coordinator(api, store).run(apply=True)
 
     assert api.review_reads >= invalid_on_read
-    assert not api.graphql_writes
-    assert not any(
-        body.get("context") == "cloud-review" and body.get("state") == "success"
-        for route, body in api.writes if "/statuses/" in route
-    )
-    reason = "sensitive"
-    assert reason in result["pull_requests"][0]["reasons"]
+    assert api.graphql_writes
+    assert result["pull_requests"][0]["review_valid"] is True
+    assert result["pull_requests"][0]["auto_merge_requested"] is True
+    assert "sensitive" not in result["pull_requests"][0]["reasons"]
 
 
 @pytest.mark.parametrize("merged", [False, True])
@@ -21074,12 +21071,14 @@ def test_scan_cursor_and_owner_commands_commit_atomically(tmp_path):
     assert state["enrollments"]["16"]["sensitive_sha"] == "c" * 40
 
 
-def test_stale_owner_sensitive_authorization_does_not_carry_to_current_head(tmp_path):
+def test_stale_owner_sensitive_authorization_does_not_block_current_head(tmp_path):
     api = FakeApi(sensitive=True, authorize=True, authorize_sha=BASE)
     store = StateStore(tmp_path / "state.json")
-    Coordinator(api, store).run(apply=True)
+    result = Coordinator(api, store).run(apply=True)
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
-    assert not api.graphql_writes
+    assert api.graphql_writes
+    assert result["pull_requests"][0]["auto_merge_requested"] is True
+    assert "sensitive" not in result["pull_requests"][0]["reasons"]
 
 
 def source_run(**changes):

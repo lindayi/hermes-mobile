@@ -713,7 +713,10 @@ def test_export_omits_obsolete_approval_without_rewriting_history(tmp_path, chan
         store.record_lifecycle(event, now=now)
     export = tmp_path / "workflow-events.json"
     store.write_lifecycle_export(now=now, owner_user_id=APP_OWNER_ID)
-    assert json.loads(export.read_text())["events"] == [approval, *history]
+    if history:
+        assert json.loads(export.read_text())["events"] == history
+    else:
+        assert not export.exists()
 
     if change == "authorized":
         store.authorize_sensitive(16, HEAD)
@@ -744,33 +747,58 @@ def test_export_omits_obsolete_approval_without_rewriting_history(tmp_path, chan
         assert store.snapshot()["lifecycle_events"] == retained
 
 
-@pytest.mark.parametrize("authorize", [False, True])
-def test_apply_refreshes_approval_export_from_current_scan(tmp_path, authorize):
-    api = FakeApi(sensitive=True)
-    store = StateStore(tmp_path / "state.json")
-    coordinator = Coordinator(api, store, clock=lambda: 1790856660)
+def test_cold_restart_ignores_revoked_sensitive_grant_and_retires_pending_notice(
+        tmp_path):
+    now = 1790856660
+    api = FakeApi(sensitive=True, authorize=True)
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    coordinator = Coordinator(api, store, clock=lambda: now)
     coordinator.run(apply=True)
-    export = tmp_path / "workflow-events.json"
-    old_event = json.loads(export.read_text())["events"][0]
-    assert old_event["head_sha"] == HEAD
-    if authorize:
-        api.authorize_sha_review = True
-        api.comments.append({
-            "id": 124, "user": {"id": 5164171},
-            "body": (f"/hermes authorize-sensitive {HEAD} review "
-                     f"{api.copilot_review_id} {api.copilot_review_digest}"),
-            "created_at": "2026-10-01T12:10:00Z",
-            "updated_at": "2026-10-01T12:10:00Z",
-        })
-    else:
-        api.head_sha = "c" * 40
-        api.pull["head"]["sha"] = api.head_sha
-    coordinator.run(apply=True)
-    exported = json.loads(export.read_text())["events"] if export.exists() else []
-    approvals = [event for event in exported if event["reason"] == "sensitive_approval"]
-    assert [event["head_sha"] for event in approvals] == ([] if authorize else ["c" * 40])
-    assert old_event in store.snapshot()["lifecycle_events"]
-    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] == (HEAD if authorize else None)
+    enrollment = store.snapshot()["enrollments"]["16"]
+    authorization = deepcopy(enrollment["sensitive_authorization"])
+    generation = enrollment.get("sensitive_generation", 0)
+    assert authorization
+
+    key, pending_notice = coordinator._outcome(
+        {"issue": 16, "head": HEAD}, "sensitive",
+        "Owner exact-head authorization is required for sensitive changes.",
+    )
+    store.add_outbox(key, pending_notice)
+    approval = pull_event(
+        {"issue": 16, "head": HEAD, "enrollment": enrollment},
+        "sensitive_approval", occurred_at="2026-10-01T12:10:00Z",
+        decision="authorize_sensitive_action",
+    )
+    store.record_lifecycle(approval, now=now)
+    before_history = store.snapshot()["lifecycle_events"]
+    api.comments = [comment for comment in api.comments if comment["id"] != 124]
+    sensitive_reads = []
+    original_get = api.get
+
+    def record_get(route):
+        if "/issues/comments/124" in route:
+            sensitive_reads.append(route)
+        return original_get(route)
+
+    api.get = record_get
+    restarted = StateStore(path)
+    result = Coordinator(api, restarted, clock=lambda: now + 1).run(apply=True)
+    plan = result["pull_requests"][0]
+
+    assert plan["sensitive"] is True
+    assert plan["auto_merge_eligible"] is True
+    assert "sensitive" not in plan["reasons"]
+    assert sensitive_reads == []
+    assert restarted.snapshot()["enrollments"]["16"]["sensitive_authorization"] == authorization
+    assert restarted.snapshot()["enrollments"]["16"].get("sensitive_generation", 0) == generation
+    assert restarted.snapshot()["lifecycle_events"] == before_history
+    assert restarted.snapshot()["outbox"][key]["status"] == "superseded"
+    assert not (tmp_path / "workflow-events.json").exists()
+    assert not any(
+        "Owner exact-head authorization is required" in body
+        for _, body in api.writes if isinstance(body, dict)
+    )
 
 
 @pytest.mark.parametrize("field", ["creator", "repository"])

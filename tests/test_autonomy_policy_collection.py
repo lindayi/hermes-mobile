@@ -63,16 +63,19 @@ def collection(tmp_path, monkeypatch):
     return api, baseline, state_path, evidence_path, args, protection
 
 
-def test_cli_collects_current_owner_command_through_actual_snapshot(collection, capsys):
+def test_cli_collects_sensitive_review_without_owner_command(collection, capsys):
     api, baseline, state_path, evidence_path, args, _ = collection
     before = (state_path.read_bytes(), evidence_path.read_bytes())
     assert cli.main(args) == 0
     report = json.loads(capsys.readouterr().out)
     assert report['ready'] is True
     evidence = report['evidence']
-    command = evidence['copilot_review']['change']['owner_command']
-    assert command['comment_id'] == 4
-    assert command['actor_id'] == coordinator.OWNER_ID
+    change = evidence['copilot_review']['change']
+    assert change['sensitive'] is True
+    assert not any(
+        field in change
+        for field in ('owner_authorization', 'owner_command', 'targeted_review')
+    )
     assert evidence['copilot_review']['checks_complete'] is True
     assert evidence['copilot_review']['reviews'][0]['updatedAt'] == api.review_submitted_at
     assert evidence['main'] == baseline['main']
@@ -124,7 +127,7 @@ def test_cli_rejects_inactive_or_malformed_enrollment(collection, capsys, active
 
 
 @pytest.mark.parametrize('mutation', ['missing', 'edited', 'body', 'actor', 'wrong-context'])
-def test_cli_invalid_current_command_blocks_without_mutating_state(collection, capsys, mutation):
+def test_cli_invalid_current_command_does_not_affect_collection(collection, capsys, mutation):
     api, _, state_path, _, args, _ = collection
     before = state_path.read_bytes()
     if mutation == 'missing':
@@ -145,15 +148,19 @@ def test_cli_invalid_current_command_blocks_without_mutating_state(collection, c
             return value
 
         api.get = wrong_context
-    assert cli.main(args) == 1
+    assert cli.main(args) == 0
     report = json.loads(capsys.readouterr().out)
-    assert 'sensitive-review-authorization' in report['blockers']
+    assert report['ready'] is True
+    assert not any(
+        field in report['evidence']['copilot_review']['change']
+        for field in ('owner_authorization', 'owner_command', 'targeted_review')
+    )
     assert state_path.read_bytes() == before
     assert api.writes == api.graphql_writes == []
 
 
 @pytest.mark.parametrize('status', [401, 403, 429, 500, None])
-def test_cli_transient_command_read_preserves_authorization(collection, capsys, status):
+def test_cli_does_not_read_transient_sensitive_command(collection, capsys, status):
     api, _, state_path, _, args, _ = collection
     before = state_path.read_bytes()
     get = api.get
@@ -164,52 +171,37 @@ def test_cli_transient_command_read_preserves_authorization(collection, capsys, 
         return get(route)
 
     api.get = unavailable
-    assert cli.main(args) == 1
+    assert cli.main(args) == 0
     captured = capsys.readouterr()
     report = json.loads(captured.out)
-    assert report['ready'] is False
-    assert 'evidence' not in report
-    assert 'synthetic unavailable' in captured.err
-    assert report['blockers'] == ['invalid-evidence']
+    assert report['ready'] is True
+    assert not any(
+        field in report['evidence']['copilot_review']['change']
+        for field in ('owner_authorization', 'owner_command', 'targeted_review')
+    )
+    assert captured.err == ''
     assert state_path.read_bytes() == before
     assert api.writes == api.graphql_writes == []
 
 
-@pytest.mark.parametrize('read', ['initial', 'final'])
-@pytest.mark.parametrize('field, malformed', [
-    (None, None), (None, []), (None, 'not a comment'),
-    ('user', []), ('user', None), ('user', {'id': '1'}),
-    ('body', []), ('body', None), ('created_at', []),
-    ('created_at', 'invalid'), ('updated_at', {}), ('id', True),
-    ('issue_url', []),
-])
-def test_malformed_owner_comment_aborts_collection(collection, capsys, read, field, malformed):
+def test_malformed_legacy_owner_command_is_not_read(collection, capsys):
     api, _, state_path, evidence_path, args, _ = collection
     before = (state_path.read_bytes(), evidence_path.read_bytes())
     get = api.get
-    final = False
-    command_reads = 0
+    command_reads = []
 
     def malformed_get(route):
-        nonlocal final, command_reads
-        value = get(route)
-        # The final identity read is after the initial command has been collected.
-        if route == 'user' and command_reads:
-            final = True
         if '/issues/comments/' in route:
-            command_reads += 1
-            if read == 'initial' or final:
-                return malformed if field is None else value | {field: malformed}
-        return value
+            command_reads.append(route)
+            raise coordinator.ApiError('obsolete sensitive command read', status=500)
+        return get(route)
 
     api.get = malformed_get
-    assert cli.main(args) == 1
+    assert cli.main(args) == 0
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {
-        'ready': False, 'phase': 'staging', 'blockers': ['invalid-evidence'],
-    }
-    assert 'Malformed current owner-comment response' in captured.err
-    assert read == 'initial' or (final and command_reads >= 2)
+    assert json.loads(captured.out)['ready'] is True
+    assert captured.err == ''
+    assert command_reads == []
     assert before == (state_path.read_bytes(), evidence_path.read_bytes())
     assert api.writes == api.graphql_writes == []
 
@@ -261,54 +253,6 @@ def test_final_collection_fences_fail_closed(collection, capsys, hazard):
     assert api.writes == api.graphql_writes == []
 
 
-@pytest.mark.parametrize('fence, final_read', [
-    ('/pulls/16', 2), ('/commits/main', 2), ('/branches/main/protection', 3),
-])
-@pytest.mark.parametrize('mutation', ['edited', 'deleted', 401, 403, 429, 500, None])
-def test_final_owner_command_read_fails_closed(collection, capsys, fence, final_read, mutation):
-    api, baseline, state_path, evidence_path, args, _ = collection
-    before = (state_path.read_bytes(), evidence_path.read_bytes())
-    original_pull = copy.deepcopy(api.pull)
-    assert api.pull['head']['sha'] != baseline['main']['sha']
-    get = api.get
-    fence_reads = command_reads = 0
-    changed = False
-
-    def concurrent_change(route):
-        nonlocal fence_reads, command_reads, changed
-        if '/issues/comments/' in route:
-            command_reads += 1
-            if changed and mutation not in ('edited', 'deleted'):
-                raise coordinator.ApiError('synthetic final command unavailable', status=mutation)
-        value = get(route)
-        if route.endswith(fence):
-            fence_reads += 1
-            if fence_reads == final_read:
-                assert command_reads >= 1
-                changed = True
-                if mutation == 'edited':
-                    api.comments[-1]['updated_at'] = '2026-10-02T00:00:00Z'
-                elif mutation == 'deleted':
-                    api.comments.pop()
-        return value
-
-    api.get = concurrent_change
-    assert cli.main(args) == 1
-    captured = capsys.readouterr()
-    report = json.loads(captured.out)
-    assert changed and command_reads >= 2
-    assert report['ready'] is False
-    assert report['blockers'] == ['invalid-evidence']
-    assert 'evidence' not in report
-    if mutation in ('edited', 'deleted'):
-        assert 'Final review collection fence changed' in captured.err
-    else:
-        assert 'synthetic final command unavailable' in captured.err
-    assert api.pull == original_pull
-    assert before == (state_path.read_bytes(), evidence_path.read_bytes())
-    assert api.writes == api.graphql_writes == []
-
-
 @pytest.mark.parametrize('hazard', ['edited-review', 'pending-check', 'partial-checks', 'malformed-check'])
 def test_real_snapshot_review_and_check_contracts_remain_blocking(collection, capsys, hazard):
     api, _, state_path, _, args, _ = collection
@@ -341,10 +285,11 @@ def test_offline_cli_does_not_construct_transport(collection, monkeypatch, capsy
         pytest.fail('offline validation must not construct a network transport')
 
     monkeypatch.setattr(coordinator, 'GhApi', forbidden)
-    assert cli.main(['--phase', 'staging', str(evidence_path)]) == 1
+    assert cli.main(['--phase', 'staging', str(evidence_path)]) == 0
     report = json.loads(capsys.readouterr().out)
-    assert report['blockers'] == ['sensitive-review-authorization']
-    assert 'evidence' not in report
+    assert report['ready'] is True
+    assert report['blockers'] == []
+    assert 'evidence' in report
 
 
 @pytest.mark.parametrize('flag', ['--state', '--pull', '--head'])
