@@ -200,6 +200,33 @@ def test_unknown_retry_rechecks_exact_source_run_before_send(tmp_path):
         assert notifications.flush()['sent'] == (1 if transition == 'completed' else 0)
 
 
+def test_unknown_notice_opens_current_run_outcome_but_stale_push_is_ineligible(tmp_path):
+    import time
+    app, client, user, home = setup_app(tmp_path)
+    notifications = app.state.notifications
+    journal = app.state.journal
+    run, _ = journal.submit(user['id'], 'default', 'wa-1', 'PRIVATE', 'unknown result')
+    journal.finish(user['id'], run['id'], 'unknown')
+    now = time.time() + 121
+    app.state.request_notifications.clock = lambda: now
+    app.state.request_notifications.tick()
+    with notifications._db() as db:
+        notice = db.execute('SELECT id,delivery_id,session_id FROM inbox WHERE user_id=?',
+                            (user['id'],)).fetchone()
+    assert notice['delivery_id'] == f"request:{run['id']}:unknown"
+
+    journal.finish(user['id'], run['id'], 'completed', output='Public final')
+
+    assert not notifications.request_validator(
+        user['id'], notice['delivery_id'], notice['session_id'], 'attention')
+    response = client.get(BASE + f"/inbox/{notice['id']}/target")
+    assert response.status_code == 200
+    assert response.json() == {
+        'kind': 'request', 'session_id': 'wa-1', 'run_id': run['id'],
+        'run_session_id': 'wa-1'
+    }
+
+
 def test_presence_and_final_send_validate_fresh_owned_eligible_session(tmp_path):
     app, client, user, home = setup_app(tmp_path)
     notifications = app.state.notifications

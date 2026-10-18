@@ -304,7 +304,7 @@ def create_app(settings=None, *, gateway_client=None):
             return notification_session(user,session_id) is not None
         return category in ('operational','scheduled','test','approval')
 
-    def request_notification_binding(user_id,delivery_id,session_id,category):
+    def request_notification_binding(user_id,delivery_id,session_id,category,*,for_push=False):
         from contextlib import closing
         user=notification_user(user_id)
         if not user or not isinstance(delivery_id,str) or not delivery_id.startswith('request:'):
@@ -321,7 +321,7 @@ def create_app(settings=None, *, gateway_client=None):
         expected=('unknown' if parts[2]=='unknown' and category=='attention' else
                   'completed' if parts[2]=='terminal' and category=='completion' else
                   'failed' if parts[2]=='terminal' and category=='attention' else None)
-        if row['status']!=expected:
+        if expected is None or (for_push and row['status']!=expected):
             return None
         canonical=notification_session(user,row['session_id'])
         if not canonical or canonical!=notification_session(user,session_id):
@@ -329,7 +329,8 @@ def create_app(settings=None, *, gateway_client=None):
         return {'session_id':canonical,'run_session_id':row['session_id']}
 
     def valid_request_notification(user_id,delivery_id,session_id,category):
-        return request_notification_binding(user_id,delivery_id,session_id,category) is not None
+        return request_notification_binding(
+            user_id,delivery_id,session_id,category,for_push=True) is not None
 
     notifications.presence_validator=valid_presence
     notifications.request_validator=valid_request_notification

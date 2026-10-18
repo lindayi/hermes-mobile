@@ -323,7 +323,7 @@ test('service worker rejects malformed previews and binds navigation and tag to 
  assert.deepEqual(clicks,[['close'],['navigate',base],['focus'],['close'],['navigate',base+'?inbox=notice-123'],['focus'],['close'],['navigate',base+'?notification=notice-123'],['focus']]);
 }));
 test('generated app restores opaque and legacy notification links to the exact older request',{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
- control.notificationTarget={kind:'request',session_id:'session-one',run_id:'older-run'};
+ control.notificationTarget={kind:'request',session_id:'session-one',run_id:'older-run',run_session_id:'session-one'};
  for(const target of ['?notification=notice-target','?inbox=notice-target']){
   await mount(page,target);
   await page.locator('[data-notification-run="older-run"]').waitFor();

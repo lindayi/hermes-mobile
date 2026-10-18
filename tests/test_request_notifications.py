@@ -69,7 +69,7 @@ def test_unknown_threshold_survives_restart_and_resolves_once(tmp_path):
     insert_run(journal, 'unknown', status='unknown', output='PRIVATE partial')
     now[0] = 220
     service.tick()
-    assert notifications.list_inbox('u') == []
+    assert stored_items(notifications) == []
     now[0] = 221
     service.tick()
     items = stored_items(notifications)
@@ -135,8 +135,8 @@ def test_cancel_stop_intent_hidden_unready_and_rebound_runs_are_silent(tmp_path)
                    ('u', 'default', 'deleted', 'operation', 'prepared', 100))
     now[0] = 102
     service.tick()
-    assert notifications.list_inbox('u') == []
+    assert stored_items(notifications) == []
     insert_run(journal, 'unready')
     users.clear()
     service.tick()
-    assert notifications.list_inbox('u') == []
+    assert stored_items(notifications) == []
