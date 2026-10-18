@@ -818,7 +818,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const initial=connection.token();
     let result;
     try {result=await api.request(`/sessions/${encodeURIComponent(session.id)}/messages?latest=true&turn_boundary=true`);}
-    catch(error){if(!current())return;connection.failure(initial);throw error;}
+    catch(error){
+      if(!current())return;
+      if(error.status===401){expiredSession();return;}
+      connection.failure(initial);
+      content.replaceChildren(header,h('p',{class:'inline-error',role:'status'},errorMessage(error)),
+        button('Retry opening conversation',()=>{if(current())void action(null,()=>openSession({id:session.id},notificationTarget));},'secondary'));
+      return;
+    }
     if (!current()) return;
     connection.snapshot(result,initial);
     const messages = h('div',{class:'messages','aria-label':'Conversation'});
@@ -929,7 +936,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           .find(node=>node.dataset.historyRun===run.id && node.dataset.historySession===session.id);
         let anchor=findAnchor(),pages=0;
         while(!anchor && oldestOffset>0 && pages++<100){
-          if(!await loadOlder())break;
+          const loaded=await loadOlder();
+          if(!current())return;
+          if(!loaded)break;
           anchor=findAnchor();
         }
         const target=h('article',{class:'message notification-target','data-notification-run':run.id,
@@ -1071,6 +1080,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const decide=(choice,control)=>action(control,async()=>{
         const sameApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
           && approvalCards.get(key)===card && card.isConnected && approvalPending.get(key)===item;
+        const sameAcknowledgedApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
+          && approvalCards.get(key)===card && card.isConnected && approvalItems.get(key)===item;
         if(!sameApproval())return;
         if(choice==='once')await ceremony('verify');
         if(!sameApproval())return;
@@ -1081,7 +1092,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           if([404,409].includes(error.status) && sameApproval()){await reconcileApprovals();return;}
           throw error;
         }
-        if(!sameApproval())return;
+        if(!sameAcknowledgedApproval())return;
         handledApprovals.add(key);approvalPending.delete(key);approvalFinals.set(key,'resolved');
         renderApprovals();
       });
@@ -1098,7 +1109,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const count=approvalPending.size;
       approvalNotice.hidden=!count && !genericApproval;
       approvalNotice.textContent=count?`${count} approval${count===1?'':'s'} require your review.`
-        :genericApproval?'An approval needs review. Open this chat to check its current state.':'';
+        :genericApproval?'An approval needs your review. Open this chat to check its current state.':'';
       for(const [key,item] of approvalItems){
         if(item.session_id!==session.id && item.run_id!==currentApprovalRun)continue;
         renderApprovalCard(item,approvalPending.has(key)?'pending':approvalFinals.get(key) || 'unavailable');
