@@ -44,7 +44,7 @@ async function fixture(run){
       ? {items:[{id:1,role:'user',content:'Original request',run_id:'older-run',session_id:'session-one'}],offset:0,total:11}
       : {items:[{id:20,role:'assistant',content:'Newer response',run_id:'newer-run',session_id:'session-one'}],offset:10,total:11};
     }else if(p.endsWith('/messages')){if(control.messagesDelay)await new Promise(resolve=>setTimeout(resolve,control.messagesDelay));data={items:[],total:0};}
-    if(p.endsWith('/messages') && control.activeRun)data.run=control.activeRun;
+    if(p.endsWith('/messages') && control.activeRun)data={...data,run:control.activeRun};
     if(p.endsWith('/controls') && control.activeRun)data={steering:true,attempts:[]};
     if(p.startsWith('/runs/') && control.realHistory)data=control.realHistory.runs[p.slice('/runs/'.length)]||{items:[]};
     else if(p==='/runs/older-run')data={id:'older-run',session_id:'session-one',input:'Original request',status:'completed',output:'Exact notification result',created_at:1,updated_at:2};
