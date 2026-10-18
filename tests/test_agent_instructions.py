@@ -1911,6 +1911,15 @@ def test_active_gate_contract_preserves_exact_head_review():
         assert 'COMMENT' in text
         assert 'APPROVED' in text
 
+    copilot = ' '.join((ROOT / '.github/copilot-instructions.md').read_text().split())
+    assert (
+        'Sensitive-path classification is informative only; it adds no separate owner '
+        'authorization or targeted review. Owner enrollment defines permitted work, '
+        'while current Copilot review, resolved conversations, and required checks '
+        'remain mandatory. Guarded exact-main deployment remains separate.'
+    ) in copilot
+    assert 'exact-SHA owner authorization and targeted review' not in copilot
+
     policy = ' '.join((ROOT / 'docs/autonomy-policy.md').read_text().split())
     for clause in (
         'The default offline CLI performs no network calls, writes, status publication, '
@@ -1920,6 +1929,9 @@ def test_active_gate_contract_preserves_exact_head_review():
         'authenticated edit metadata, complete check runs and thread pagination',
         'It writes no files or state and never plans/applies coordinator actions.',
         'A collection error blocks without emitting partial evidence or changing persisted state.',
+        'The final fence does not re-fetch reviews, threads or check runs',
+        'review metadata, threads and check runs are validated from the earlier snapshot',
+        'Reviews, threads and check runs are validated from the collected snapshot.',
         'It does not fetch or revalidate legacy sensitive authorization fields.',
         'sensitive evidence passes without a separate owner grant',
         'does not authenticate the JSON file',

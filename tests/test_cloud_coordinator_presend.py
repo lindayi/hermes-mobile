@@ -168,7 +168,7 @@ def test_recovery_allows_fresh_sensitive_paths_without_separate_owner_grant(tmp_
     assert store.action(action["key"])["status"] == "sent"
     enrollment = store.snapshot()["enrollments"]["16"]
     assert enrollment["sensitive_sha"] is None
-    assert enrollment["sensitive_authorization"] is None
+    assert enrollment.get("sensitive_authorization") is None
     assert not any(key.endswith(":sensitive") for key in store.snapshot()["outbox"])
     Coordinator(api, StateStore(store.path)).run(apply=True)
     assert len(api.graphql_writes) == 1

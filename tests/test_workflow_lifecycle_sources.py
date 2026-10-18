@@ -547,14 +547,10 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
             if self.armed:
                 self.committed = True
                 if change == "authorized":
-                    # Legacy authorization remains readable before handoff.
                     enrollment = self.snapshot()["enrollments"]["16"]
-                    assert enrollment["sensitive_sha"] == HEAD
-                    assert enrollment["sensitive_authorization"]["head_sha"] == HEAD
-                    assert enrollment["sensitive_authorization"]["review_id"] == api.copilot_review_id
-                    assert enrollment["sensitive_authorization"]["body_sha256"] == api.copilot_review_digest
-                    assert enrollment["targeted_review"]["head_sha"] == HEAD
-                    assert enrollment["targeted_review"]["review_id"] == api.copilot_review_id
+                    assert {
+                        key: enrollment[key] for key in legacy_history
+                    } == legacy_history
                 if failure == "race":
                     api.head_sha = "c" * 40
                     api.pull["head"]["sha"] = api.head_sha
@@ -591,6 +587,7 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
     store.record_lifecycle(approval, now=NOW)
     api = FailingApi(sensitive=True, unresolved=True)
     Coordinator(api, store, clock=NOW.timestamp, lifecycle_source_paths=paths).run(apply=True)
+    legacy_history = {}
     export = state_dir / "workflow-events.json"
     os.utime(export, (NOW.timestamp(), NOW.timestamp()))
     old_events = json.loads(export.read_bytes())["events"]
@@ -620,6 +617,16 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
     else:
         api.head_sha = "c" * 40
         api.pull["head"]["sha"] = api.head_sha
+    if change == "authorized":
+        legacy_history = {
+            "sensitive_sha": HEAD,
+            "sensitive_generation": 4,
+            "sensitive_authorization": {"legacy": "authorization"},
+            "targeted_review": {"legacy": "review"},
+        }
+        data = store.snapshot()
+        data["enrollments"]["16"].update(legacy_history)
+        store._save(data)
     writes, graphql_writes = list(api.writes), list(api.graphql_writes)
     store.armed = True
     coordinator = Coordinator(api, store, clock=lambda: NOW.timestamp() + 60,

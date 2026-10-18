@@ -114,8 +114,31 @@ class SensitiveCopilotApi(FakeApi):
         return super().graphql(query, variables)
 
 
-def test_owner_command_binds_copilot_review_across_cold_restart_and_keeps_merge_gates(
-        tmp_path):
+def _seed_legacy_grant(store, head=HEAD):
+    data = store.snapshot()
+    enrollment = data["enrollments"]["16"]
+    body_digest = hashlib.sha256(BODY_ONLY.encode("utf-8")).hexdigest()
+    history = {
+        "sensitive_sha": head,
+        "sensitive_generation": 7,
+        "sensitive_authorization": {
+            "actor_id": OWNER, "head_sha": head, "state": "approved",
+            "review_id": REVIEW_ID, "body_sha256": body_digest,
+            "command_comment_id": OWNER_COMMAND_ID,
+            "command_body_sha256": "b" * 64, "command_created_at": SUBMITTED,
+        },
+        "targeted_review": {
+            "review_id": REVIEW_ID, "reviewer_id": COPILOT_REVIEWER,
+            "head_sha": head, "state": "COMMENTED", "body_sha256": body_digest,
+        },
+        "attempts": 2,
+    }
+    enrollment.update(history)
+    store._save(data)
+    return history
+
+
+def test_retired_command_is_consumed_without_weakening_current_review_gates(tmp_path):
     api = SensitiveCopilotApi()
     state_path = tmp_path / "coordinator-state.json"
 
@@ -131,22 +154,15 @@ def test_owner_command_binds_copilot_review_across_cold_restart_and_keeps_merge_
     result = Coordinator(api, StateStore(state_path)).run(apply=True)
     enrollment = StateStore(state_path).snapshot()["enrollments"]["16"]
 
-    assert enrollment["sensitive_sha"] == HEAD
-    assert enrollment["sensitive_authorization"]["review_id"] == REVIEW_ID
-    assert enrollment["sensitive_authorization"]["body_sha256"] == api.copilot_digest
-    assert enrollment["targeted_review"] == {
-        "review_id": REVIEW_ID,
-        "reviewer_id": COPILOT_REVIEWER,
-        "head_sha": HEAD,
-        "state": "COMMENTED",
-        "body_sha256": api.copilot_digest,
-    }
+    assert enrollment.get("sensitive_sha") is None
+    assert StateStore(state_path).event_seen(OWNER_COMMAND_ID)
+    assert "sensitive" not in result["pull_requests"][0]["reasons"]
     assert result["pull_requests"][0]["repair_requested"]
     assert not result["pull_requests"][0]["auto_merge_eligible"]
     assert api.fix_attempts == 1
 
     replay = Coordinator(api, StateStore(state_path)).run(apply=True)
-    assert StateStore(state_path).snapshot()["enrollments"]["16"]["sensitive_sha"] == HEAD
+    assert StateStore(state_path).event_seen(OWNER_COMMAND_ID)
     assert not replay["pull_requests"][0]["auto_merge_eligible"]
     assert api.fix_attempts == 1
     assert not api.graphql_writes
@@ -191,10 +207,7 @@ def test_unproved_transport_actor_does_not_authorize(tmp_path, transport, field,
 
     path = tmp_path / "state.json"
     result = Coordinator(api, StateStore(path)).run(apply=True)
-    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
-    assert enrollment["sensitive_sha"] is None
-    assert enrollment["sensitive_authorization"] is None
-    assert enrollment["targeted_review"] is None
+    assert not result["pull_requests"][0]["review_valid"]
     assert not result["pull_requests"][0]["auto_merge_eligible"]
     assert not api.graphql_writes
 
@@ -262,10 +275,7 @@ def test_unbound_metadata_does_not_authorize(tmp_path, mutation):
         assert api.writes == api.graphql_writes == []
         return
     result = Coordinator(api, StateStore(path)).run(apply=True)
-    enrollment = StateStore(path).snapshot()["enrollments"]["16"]
-    assert enrollment["sensitive_sha"] is None
-    assert enrollment["sensitive_authorization"] is None
-    assert enrollment["targeted_review"] is None
+    assert not result["pull_requests"][0]["review_valid"]
     assert not result["pull_requests"][0]["auto_merge_eligible"]
     assert not api.graphql_writes
 
@@ -283,9 +293,8 @@ def test_sensitive_repair_uses_enrollment_without_merge_authorization(tmp_path):
     api.comments = [c for c in api.comments if c['id'] != OWNER_COMMAND_ID]
     store = StateStore(tmp_path / 'state.json')
     result = Coordinator(api, store).run(apply=True)
-    enrollment = store.snapshot()['enrollments']['16']
-    assert enrollment['sensitive_authorization'] is None
     assert result['pull_requests'][0]['repair_requested']
+    assert 'sensitive' not in result['pull_requests'][0]['reasons']
     assert api.fix_attempts == 1
     assert not result['pull_requests'][0]['auto_merge_eligible']
     assert not api.graphql_writes
@@ -345,7 +354,8 @@ def test_obsolete_current_comment_is_not_read_and_preserves_history(tmp_path, fi
     api = SensitiveCopilotApi()
     path = tmp_path / 'state.json'
     Coordinator(api, StateStore(path)).run(apply=True)
-    before = StateStore(path).snapshot()['enrollments']['16']
+    store = StateStore(path)
+    before = _seed_legacy_grant(store)
     api.writes.clear()
     api.graphql_writes.clear()
     get = api.get
@@ -361,8 +371,8 @@ def test_obsolete_current_comment_is_not_read_and_preserves_history(tmp_path, fi
     api.get = malformed_get
     result = Coordinator(api, StateStore(path)).run(apply=True)['pull_requests'][0]
     assert command_reads == []
-    assert StateStore(path).snapshot()['enrollments']['16'] == before
-    assert before['sensitive_authorization']['review_id'] == REVIEW_ID
+    enrollment = StateStore(path).snapshot()['enrollments']['16']
+    assert {key: enrollment[key] for key in before} == before
     assert 'sensitive' not in result['reasons']
     assert not result['auto_merge_eligible']
     assert api.fix_attempts == 1
@@ -370,12 +380,9 @@ def test_obsolete_current_comment_is_not_read_and_preserves_history(tmp_path, fi
 
 
 @pytest.mark.parametrize("mutation", [
-    "wrong_identity", "wrong_head", "negative_state", "edited_review", "edited_command",
-    "body_changed", "wrong_digest", "ambiguous_latest", "legacy_report",
-    "preauthorized_review",
+    "wrong_identity", "wrong_head", "negative_state", "edited_review", "ambiguous_latest",
 ])
-def test_invalid_or_legacy_evidence_does_not_grant_sensitive_authorization(
-        tmp_path, mutation):
+def test_invalid_copilot_review_evidence_still_blocks_ordinary_merge(tmp_path, mutation):
     api = SensitiveCopilotApi()
     if mutation == "wrong_identity":
         api.copilot_author = COPILOT_AGENT
@@ -386,22 +393,11 @@ def test_invalid_or_legacy_evidence_does_not_grant_sensitive_authorization(
     elif mutation == "edited_review":
         api.updated_at = "2026-10-01T12:31:00Z"
         api.last_edited_at = api.updated_at
-    elif mutation == "edited_command":
-        api.command(edited=True)
-    elif mutation == "body_changed":
-        api.copilot_body += " "
-    elif mutation == "wrong_digest":
-        api.command(digest="d" * 64)
     elif mutation == "ambiguous_latest":
         api.extra_copilot_review = api._copilot_review() | {
             "id": REVIEW_ID + 1,
             "node_id": None,
         }
-    elif mutation == "legacy_report":
-        api.command(OWNER_REVIEW=True)
-    elif mutation == "preauthorized_review":
-        command = next(c for c in api.comments if c["id"] == OWNER_COMMAND_ID)
-        command["created_at"] = command["updated_at"] = "2026-10-01T12:29:59Z"
 
     if mutation == "ambiguous_latest":
         original_get_all = api.get_all
@@ -415,11 +411,9 @@ def test_invalid_or_legacy_evidence_does_not_grant_sensitive_authorization(
         api.get_all = duplicate_latest
 
     state_path = tmp_path / f"{mutation}.json"
-    Coordinator(api, StateStore(state_path)).run(apply=True)
-    enrollment = StateStore(state_path).snapshot()["enrollments"]["16"]
-    assert enrollment["sensitive_sha"] is None
-    assert enrollment["sensitive_authorization"] is None
-    assert enrollment["targeted_review"] is None
+    result = Coordinator(api, StateStore(state_path)).run(apply=True)
+    assert not result["pull_requests"][0]["review_valid"]
+    assert "review" in result["pull_requests"][0]["reasons"]
 
 
 def test_incomplete_review_pages_do_not_commit_owner_authorization(tmp_path):
@@ -434,11 +428,12 @@ def test_incomplete_review_pages_do_not_commit_owner_authorization(tmp_path):
     assert not api.graphql_writes
 
 
-def test_changed_head_revokes_copilot_authorization_after_restart(tmp_path):
+def test_changed_head_preserves_legacy_grant_history_and_blocks_review(tmp_path):
     api = SensitiveCopilotApi()
     state_path = tmp_path / "state.json"
-    Coordinator(api, StateStore(state_path)).run(apply=True)
-    assert StateStore(state_path).snapshot()["enrollments"]["16"]["sensitive_sha"] == HEAD
+    store = StateStore(state_path)
+    Coordinator(api, store).run(apply=True)
+    history = _seed_legacy_grant(store)
 
     new_head = "d" * 40
     api.head_sha = new_head
@@ -446,9 +441,7 @@ def test_changed_head_revokes_copilot_authorization_after_restart(tmp_path):
     result = Coordinator(api, StateStore(state_path)).run(apply=True)
 
     enrollment = StateStore(state_path).snapshot()["enrollments"]["16"]
-    assert enrollment["sensitive_sha"] is None
-    assert enrollment["sensitive_authorization"] is None
-    assert enrollment["targeted_review"] is None
+    assert {key: enrollment[key] for key in history} == history
     assert "sensitive" not in result["pull_requests"][0]["reasons"]
     assert "review" in result["pull_requests"][0]["reasons"]
     assert api.fix_attempts == 1

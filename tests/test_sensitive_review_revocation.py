@@ -44,12 +44,30 @@ def authorize(api, comment_id=124):
     })
 
 
+def seed_legacy_grant(store):
+    data = store.snapshot()
+    enrollment = data["enrollments"]["16"]
+    history = {
+        "sensitive_sha": HEAD,
+        "sensitive_generation": 7,
+        "sensitive_authorization": {
+            "actor_id": OWNER, "head_sha": HEAD, "review_id": 63001,
+            "command_comment_id": 124,
+        },
+        "targeted_review": {"review_id": 63001, "head_sha": HEAD},
+    }
+    enrollment.update(history)
+    store._save(data)
+    return history
+
+
 @pytest.mark.parametrize("change", ["edited", "removed", "dismissed", "superseded", "legacy"])
 def test_regressions_revocation_commits_before_export(tmp_path, change):
     api = RevocationApi(sensitive=True, authorize=True)
     api.pending_required = True  # Isolate authorization from otherwise eligible merge.
     store = StateStore(tmp_path / "state.json")
     Coordinator(api, store, clock=lambda: NOW).run(apply=True)
+    seed_legacy_grant(store)
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] == HEAD
     if change == "legacy":
         data = store.snapshot()
@@ -161,7 +179,7 @@ def test_regressions_revocation_episode_reaches_real_inbox_after_restart(tmp_pat
     assert review_reads == [
         "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100",
     ]
-    assert not store.event_seen("124")
+    assert store.event_seen("124")
     assert "checks" in result["pull_requests"][0]["reasons"]
     assert "sensitive" not in result["pull_requests"][0]["reasons"]
     assert {
@@ -211,6 +229,59 @@ def test_regressions_revocation_episode_reaches_real_inbox_after_restart(tmp_pat
     assert api.fix_attempts == 0 and not api.graphql_writes
 
 
+def test_pending_legacy_authorization_is_consumed_once_after_restart(tmp_path):
+    api = RevocationApi(sensitive=True)
+    api.pending_required = True
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    Coordinator(api, store, clock=lambda: NOW).run(apply=True)
+    authorize(api)
+    history = seed_legacy_grant(store)
+    data = store.snapshot()
+    data["pending_events"] = ["124"]
+    store._save(data)
+
+    pending_comment_reads = []
+    review_reads = []
+    original_get = api.get
+    original_get_all = api.get_all
+
+    def get(route):
+        if route.endswith("/issues/comments/124"):
+            pending_comment_reads.append(route)
+        return original_get(route)
+
+    def get_all(route, *, collection=None):
+        if route.endswith("/pulls/16/reviews?per_page=100"):
+            review_reads.append(route)
+        return original_get_all(route, collection=collection)
+
+    api.get = get
+    api.get_all = get_all
+    result = Coordinator(api, StateStore(path), clock=lambda: NOW + 1).run(apply=True)
+
+    assert "sensitive" not in result["pull_requests"][0]["reasons"]
+    assert "checks" in result["pull_requests"][0]["reasons"]
+    assert store.snapshot()["pending_events"] == []
+    assert store.event_seen("124")
+    assert pending_comment_reads == [
+        "repos/lindayi/hermes-mobile/issues/comments/124",
+    ]
+    assert len(review_reads) == 1
+    assert {
+        key: store.snapshot()["enrollments"]["16"][key] for key in history
+    } == history
+    assert not (tmp_path / "workflow-events.json").exists()
+    assert not any(
+        "Owner exact-head authorization" in body.get("body", "")
+        for _, body in api.writes if isinstance(body, dict)
+    )
+
+    Coordinator(api, StateStore(path), clock=lambda: NOW + 2).run(apply=True)
+    assert len(pending_comment_reads) == 1
+    assert len(review_reads) == 2
+
+
 @pytest.mark.parametrize("failure", ["capacity", "replace", "incomplete_reviews"])
 def test_regressions_revocation_failure_preserves_producer_export_and_consumer(
         tmp_path, monkeypatch, failure):
@@ -228,6 +299,7 @@ def test_regressions_revocation_failure_preserves_producer_export_and_consumer(
     api.pending_required = True
     coordinator = Coordinator(api, store, clock=CLOCK.timestamp, lifecycle_source_paths=sources)
     coordinator.run(apply=True)
+    seed_legacy_grant(store)
     export = state_dir / "workflow-events.json"
     assert not export.exists()
     with pytest.raises(Blocked, match="^Required private evidence is unavailable$"):
@@ -303,6 +375,7 @@ def test_regressions_revocation_generation_fails_closed_at_bound(tmp_path, gener
     api.pending_required = True
     store = StateStore(tmp_path / "state.json")
     Coordinator(api, store, clock=lambda: NOW).run(apply=True)
+    seed_legacy_grant(store)
     data = store.snapshot()
     data["enrollments"]["16"]["sensitive_generation"] = generation
     store._save(data)
@@ -337,6 +410,7 @@ def test_regressions_revocation_new_head_and_enrollment_scope(tmp_path):
                            owner_user_id="synthetic-mobile-owner").run(apply=True)
 
     poll()
+    legacy_history = seed_legacy_grant(store)
     old = pull_event({"issue": 16, "head": HEAD,
                       "enrollment": store.snapshot()["enrollments"]["16"]},
                      "sensitive_approval", occurred_at="2026-10-01T20:59:00Z",
@@ -357,8 +431,7 @@ def test_regressions_revocation_new_head_and_enrollment_scope(tmp_path):
                          "updated_at": "2026-10-01T21:00:00Z"})
     result = poll()["pull_requests"][0]
     enrollment = store.snapshot()["enrollments"]["16"]
-    assert enrollment["sensitive_sha"] is None
-    assert enrollment["sensitive_generation"] == 0
+    assert {key: enrollment[key] for key in legacy_history} == legacy_history
     assert not export.exists()
     assert "sensitive" not in result["reasons"]
     assert "checks" in result["reasons"]

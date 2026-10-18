@@ -56,7 +56,7 @@ The opt-in `--collect-review --state STATE_JSON --pull NUMBER --head SHA` mode
 uses the executing trusted checkout's coordinator implementation, an explicit
 read-only coordinator state snapshot, and the positional baseline evidence file.
 There are no default state/evidence paths or candidate-source imports. It assembles
-``copilot_review` through the actual coordinator pull snapshot (including full-media
+`copilot_review` through the actual coordinator pull snapshot (including full-media
 reviews, authenticated edit metadata, complete check runs and thread pagination)
 and classifies the changed files. It does not fetch or revalidate legacy sensitive
 authorization fields. The selected enrollment must be explicitly active; disabled
@@ -68,23 +68,30 @@ python3 scripts/autonomy_policy.py --phase staging --collect-review \
   /private/path/evidence.json
 ```
 
-Collection fences the authenticated owner/repository, current remote main, exact PR
-identity/head/base/open state, and protections before and after assembly. Only review
-and protection evidence is refreshed. Baseline `main.files`, `source_ci`, artifact
-and attestation evidence remains unchanged and must already be independently trusted;
+The bounded reads collect authenticated owner/repository identity, current main, the
+exact PR, branch protection and required-check policy, and the review, thread and
+check-run snapshot. After assembly, the final reads recheck identity, current main,
+pull identity/state, branch protection and required-check policy, and unchanged local
+state. The final fence does not re-fetch reviews, threads or check runs; review
+metadata, threads and check runs are validated from the earlier snapshot. Baseline
+`main.files`, `source_ci`, artifact and
+attestation evidence remains unchanged and must already be independently trusted;
 this mode does not qualify it as freshly collected or recreate artifact collection.
 The output includes the assembled evidence and the normal validator report. It writes
 no files or state and never plans/applies coordinator actions. A collection error
-blocks without emitting partial evidence or changing persisted state. Identity,
-head/base/main, protection, review, thread, and required-check changes still block
-at the final fence; old sensitive grant or owner-comment state is not fetched.
+blocks without emitting partial evidence or changing persisted state. Changes to
+identity, pull/head/base/state, main, protection policy or local state detected by
+the final reads block there. Review metadata, threads and check runs are validated
+from the collected snapshot, not re-read at that final fence. Old sensitive grant or
+owner-comment state is not fetched.
 
 Acceptance cases use only synthetic transports/state through the real CLI assembly
 and validator: sensitive evidence passes without a separate owner grant; missing,
 edited, or wrong-context legacy owner comments do not block or trigger a fetch;
 transient failures in unrelated required reads preserve state and fail closed; final
-identity, head/base/main, review, and protection changes block. The existing offline
-mode stays unchanged.
+identity, pull/head/base/main, and protection-policy changes block. Reviews, threads
+and check runs are validated from the collected snapshot. The existing offline mode
+stays unchanged.
 These tests are not live activation evidence or genuine Copilot review.
 
 The evidence must be collected independently from authenticated, read-only GitHub
@@ -139,7 +146,7 @@ evidence.
 
 | Current source path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `7613caa6b1223e20c1eaec6c02e66d773466828055499e95c72f78e526b3c91e` |
+| `deploy/cloud_coordinator.py` | `672ee5b7072f4ed7221b39a8242cc9a0971f14d637a833029e7ad4989f590f45` |
 | `deploy/review_evidence.py` | `e2f9a8c2082ca5b4c180395bd915d983ed9ba3aeaa8670d0083696c17500d3d6` |
 
 ### Historical Issue #106 verification-status parser overlay

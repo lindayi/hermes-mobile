@@ -154,8 +154,7 @@ def test_actor_identity_sensitive_command_and_cold_read_only_collector(tmp_path,
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
     result = coordinator.run(apply=True)
     enrollment = store.snapshot()["enrollments"]["16"]
-    assert enrollment["sensitive_sha"] == HEAD
-    assert enrollment["targeted_review"] == _actor_selected(api, _actor_reviews(api))
+    assert enrollment.get("sensitive_sha") is None
     assert store.event_seen("124")
     assert not result["pull_requests"][0]["review_valid"]
     assert not result["pull_requests"][0]["auto_merge_eligible"]
@@ -167,9 +166,7 @@ def test_actor_identity_sensitive_command_and_cold_read_only_collector(tmp_path,
     assert path.read_bytes() == before
     assert api.writes == writes and not api.graphql_writes and api.task_posts == 0
     restarted.run(apply=True)
-    assert StateStore(path).snapshot()["enrollments"]["16"]["targeted_review"] == (
-        enrollment["targeted_review"]
-    )
+    assert StateStore(path).snapshot()["enrollments"]["16"].get("targeted_review") is None
     assert not api.graphql_writes and api.task_posts == 0
 
 
@@ -755,7 +752,15 @@ def test_cold_restart_ignores_revoked_sensitive_grant_and_retires_pending_notice
     store = StateStore(path)
     coordinator = Coordinator(api, store, clock=lambda: now)
     coordinator.run(apply=True)
-    enrollment = store.snapshot()["enrollments"]["16"]
+    data = store.snapshot()
+    enrollment = data["enrollments"]["16"]
+    enrollment.update(
+        sensitive_sha=HEAD,
+        sensitive_generation=4,
+        sensitive_authorization={"legacy": "authorization"},
+        targeted_review={"legacy": "review"},
+    )
+    store._save(data)
     authorization = deepcopy(enrollment["sensitive_authorization"])
     generation = enrollment.get("sensitive_generation", 0)
     assert authorization
@@ -787,13 +792,14 @@ def test_cold_restart_ignores_revoked_sensitive_grant_and_retires_pending_notice
     plan = result["pull_requests"][0]
 
     assert plan["sensitive"] is True
-    assert plan["auto_merge_eligible"] is True
+    assert plan["auto_merge_eligible"]
     assert "sensitive" not in plan["reasons"]
     assert sensitive_reads == []
     assert restarted.snapshot()["enrollments"]["16"]["sensitive_authorization"] == authorization
     assert restarted.snapshot()["enrollments"]["16"].get("sensitive_generation", 0) == generation
     assert restarted.snapshot()["lifecycle_events"] == []
     assert restarted.snapshot()["lifecycle_context"]["events"] == before_history
+    assert restarted.event_seen("124")
     assert restarted.snapshot()["outbox"][key]["status"] == "superseded"
     assert not (tmp_path / "workflow-events.json").exists()
     assert not any(

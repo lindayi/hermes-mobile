@@ -5267,6 +5267,12 @@ class Coordinator:
                 if not isinstance(user, dict) or user.get("id") != OWNER_ID:
                     continue
                 body = comment.get("body")
+                if (isinstance(body, str)
+                        and (body == "/hermes authorize-sensitive"
+                             or body.startswith("/hermes authorize-sensitive "))):
+                    processed.append(key)
+                    processed_by_issue.append((issue["number"], key))
+                    continue
                 if (body == "/hermes enroll"
                         or isinstance(body, str) and re.fullmatch(
                             r"/hermes enroll [0-9a-f]{40}(?: issue [^\n]*)?", body,

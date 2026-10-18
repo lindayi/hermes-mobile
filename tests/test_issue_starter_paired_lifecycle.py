@@ -198,12 +198,19 @@ def test_starter_rejects_edited_or_unverifiable_owner_commands(tmp_path, updated
     assert not any(route.endswith("/tasks") for route, _ in api.posts)
 
 
-def test_bound_result_head_clears_sensitive_authorization(tmp_path):
+def test_bound_result_head_preserves_legacy_sensitive_history(tmp_path):
     api, store, worker, action = bound_worker(tmp_path, sensitive=True, authorize=True)
+    legacy_history = {
+        "sensitive_sha": HEAD,
+        "sensitive_generation": 4,
+        "sensitive_authorization": {"legacy": "authorization"},
+        "targeted_review": {"legacy": "review"},
+    }
+    data = store.snapshot()
+    data["enrollments"]["16"].update(legacy_history)
+    store._save(data)
     enrollment = store.snapshot()["enrollments"]["16"]
     assert enrollment["sensitive_sha"] == HEAD
-    assert enrollment["sensitive_authorization"]["head_sha"] == HEAD
-    assert enrollment["targeted_review"]["head_sha"] == HEAD
     finish(api, action)
     api.unresolved = False
     result = worker.run(apply=True)["pull_requests"][0]
@@ -211,11 +218,8 @@ def test_bound_result_head_clears_sensitive_authorization(tmp_path):
     assert result["auto_merge_requested"]
     assert not any(event["reason"] == "sensitive_approval"
                    for event in store.snapshot()["lifecycle_events"])
-    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
     enrollment = store.snapshot()["enrollments"]["16"]
-    assert enrollment["sensitive_authorization"] is None
-    assert enrollment["targeted_review"] is None
-    # Select a fresh Copilot review for the result head with a new owner command.
+    assert {key: enrollment[key] for key in legacy_history} == legacy_history
     api.authorize_sha = RESULT_HEAD
     api.set_copilot_review(
         review_id=api.copilot_review_id + 1,
@@ -231,13 +235,8 @@ def test_bound_result_head_clears_sensitive_authorization(tmp_path):
         "updated_at": "2026-10-01T12:11:00Z",
     })
     result = worker.run(apply=True)["pull_requests"][0]
-    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] == RESULT_HEAD
     enrollment = store.snapshot()["enrollments"]["16"]
-    assert enrollment["sensitive_authorization"]["head_sha"] == RESULT_HEAD
-    assert enrollment["sensitive_authorization"]["review_id"] == api.copilot_review_id
-    assert enrollment["sensitive_authorization"]["body_sha256"] == api.copilot_review_digest
-    assert enrollment["targeted_review"]["head_sha"] == RESULT_HEAD
-    assert enrollment["targeted_review"]["review_id"] == api.copilot_review_id
+    assert {key: enrollment[key] for key in legacy_history} == legacy_history
     assert result["auto_merge_requested"]
 
 

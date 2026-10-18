@@ -257,7 +257,7 @@ _ISSUE108_PR109_PR112_MERGED_FIXTURE = {
 }
 
 _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE = {
-    'deploy/cloud_coordinator.py': '7613caa6b1223e20c1eaec6c02e66d773466828055499e95c72f78e526b3c91e',
+    'deploy/cloud_coordinator.py': '672ee5b7072f4ed7221b39a8242cc9a0971f14d637a833029e7ad4989f590f45',
     'deploy/review_evidence.py': 'e2f9a8c2082ca5b4c180395bd915d983ed9ba3aeaa8670d0083696c17500d3d6',
 }
 
