@@ -124,14 +124,15 @@ def test_approval_target_resolves_absent_run_alias_through_verified_lineage(tmp_
         assert details['status']=='pending'
 
 
-def test_expired_approval_target_keeps_authorized_chat_but_has_no_decision(tmp_path):
+@pytest.mark.parametrize('final_status', ['expired','resolved','unavailable'])
+def test_final_approval_target_keeps_authorized_chat_but_has_no_decision(tmp_path, final_status):
     with environment(tmp_path) as (app, client, user, rid, _):
         runtime=app.state.orchestrator
         runtime.gateway.execution_ready=True
         runtime.gateway.action_approvals_ready=True
         runtime._approval(user,runtime.get(user,rid),{
-            'event':'approval.request','request_id':'expired-action','run_id':'native-run',
-            'command':'echo expired'})
+            'event':'approval.request','request_id':'final-action','run_id':'native-run',
+            'command':'echo final'})
         with app.state.notifications._db() as db:
             notice=db.execute('SELECT id FROM inbox WHERE user_id=?',(user['id'],)).fetchone()
         approval_id=client.get(BASE+f"/inbox/{notice['id']}/target").json()['approval_id']
@@ -141,12 +142,16 @@ def test_expired_approval_target_keeps_authorized_chat_but_has_no_decision(tmp_p
         assert pending.json()['executable'] is True
         assert pending.json()['choices']==['once','deny']
         with app.state.journal.connect() as db, db:
-            db.execute('UPDATE orchestration_approvals SET expires_at=? WHERE request_id=?',
-                       (time.time()-1,'expired-action'))
-        target=client.get(BASE+f"/inbox/{notice['id']}/target")
-        assert target.status_code==200
-        approval=client.get(BASE+f"/approvals/{target.json()['approval_id']}")
-        assert approval.status_code==200 and approval.json()['status']=='expired'
+            if final_status=='expired':
+                db.execute('UPDATE orchestration_approvals SET expires_at=? WHERE request_id=?',
+                           (time.time()-1,'final-action'))
+            elif final_status=='resolved':
+                db.execute("UPDATE orchestration_approvals SET status='resolved' WHERE request_id=?",
+                           ('final-action',))
+        if final_status=='unavailable':
+            app.state.journal.finish(user['id'],rid,'completed')
+        approval=client.get(BASE+f'/approvals/{approval_id}')
+        assert approval.status_code==200 and approval.json()['status']==final_status
         assert approval.json()['executable'] is False
         assert approval.json()['choices']==[]
 

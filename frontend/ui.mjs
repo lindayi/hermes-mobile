@@ -1043,9 +1043,15 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     let approvalRevision=0,approvalPending=new Map(),genericApproval=false,
       currentApprovalRun=accepted?.id || notificationTarget?.run_id,approvalTargetPlaceholder=null,
       approvalTargetTimer=null,approvalTargetFocusedCard=false,approvalTargetPlaceholderFocused=false;
+    const approvalDataFields=[
+      'id','run_id','run_session_id','request_id','session_id','status','title','command','action',
+      'target','expires_at','executable','choices','error','details_unavailable'
+    ];
     const sameApprovalIdentity=(left,right)=>left?.id===right?.id && left.run_id===right.run_id
       && left.request_id===right.request_id && left.session_id===right.session_id
       && left.run_session_id===right.run_session_id;
+    const sameApprovalData=(left,right)=>!!left && approvalDataFields.every(field=>
+      JSON.stringify(left[field])===JSON.stringify(right[field]));
     const clearApprovalTargetTimer=()=>{
       if(approvalTargetTimer)win.clearTimeout(approvalTargetTimer);
       approvalTargetTimer=null;
@@ -1076,7 +1082,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(actionState.pending && actionState.decisionStarted && !sameApprovalIdentity(view?.item,item))
           actionState={pending:false,decisionStarted:false,uncertain:true,
             error:'Approval identity changed while a decision was in progress. Check its current status before deciding again.'};
-        else if(!actionState.pending || !actionState.decisionStarted)
+        else if((!actionState.pending || !actionState.decisionStarted) && !actionState.uncertain)
           actionState={pending:false,decisionStarted:false,uncertain:false,error:''};
         approvalActionStates.set(key,actionState);
         const heading=h('h3',{id:`approval-title-${item.id}`});
@@ -1087,7 +1093,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         const target=h('p',{},targetText?['Target: ',targetText]:[]);target.hidden=!targetText;
         const error=h('p',{class:'inline-error',role:'alert'});
         const itemError=h('p',{class:'caption'},typeof item.error==='string'?item.error:'');
-        itemError.hidden=!!commandText || typeof item.error!=='string';
+        itemError.hidden=typeof item.error!=='string' || !item.error;
         const expires=h('p',{class:'caption'},Number.isFinite(item.expires_at)?['Expires: ',date(item.expires_at)]:[]);
         expires.hidden=!Number.isFinite(item.expires_at) || status!=='pending';
         const detailsUnavailable=h('p',{class:'caption'},'No decision was sent. Review this action in the native client.');
@@ -1103,24 +1109,36 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             && approvalCards.get(key)===card && card.isConnected
             && sameApprovalIdentity(item,approvalItems.get(key))
             && approvalActionStates.get(key)===actionState;
+          const sameUnsubmittedApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
+            && approvalCards.get(key)===card && card.isConnected
+            && approvalActionStates.get(key)===actionState
+            && !decisionStarted && !actionState.decisionStarted;
           if(!sameApproval() || actionState.pending || actionState.uncertain)return;
           const hadFocus=card.contains(doc.activeElement);
           actionState.pending=true;actionState.error='';renderApprovals();
           if(hadFocus && !card.contains(doc.activeElement))card.focus({preventScroll:true});
           let decisionStarted=false;
           try{
-            if(choice==='once')await ceremony('verify');
-            if(!sameApproval())return;
+            await ceremony('verify');
+            if(!sameApproval()){
+              if(sameUnsubmittedApproval()){
+                actionState.pending=false;actionState.error='';renderApprovals();
+              }
+              return;
+            }
             decisionStarted=true;actionState.decisionStarted=true;
             await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,
               {method:'POST',body:{decision:choice}});
             if(!sameAcknowledgedApproval())return;
             actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
-            handledApprovals.add(key);approvalPending.delete(key);approvalFinals.set(key,'resolved');
+            approvalRevision++;handledApprovals.add(key);approvalPending.delete(key);approvalFinals.set(key,'resolved');
             renderApprovals();
           }catch(error){
             if(!sameAcknowledgedApproval())return;
-            if(decisionStarted && [404,409].includes(error.status)){
+            if(error.status===403){
+              actionState.pending=false;actionState.decisionStarted=false;
+              actionState.error='Passkey verification expired. Verify again before deciding.';
+            }else if(decisionStarted && [404,409].includes(error.status)){
               await reconcileApprovals();
               if(!sameAcknowledgedApproval())return;
               actionState.pending=false;actionState.decisionStarted=false;
@@ -1128,7 +1146,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             }else{
               actionState.pending=false;actionState.decisionStarted=false;actionState.error=errorMessage(error);
             }
-            if(decisionStarted && ![404,409].includes(error.status)){
+            if(decisionStarted && ![403,404,409].includes(error.status)){
               actionState.uncertain=true;approvalFinals.set(key,'unknown');
             }
             if(error.status===401){expiredSession();return;}
@@ -1151,7 +1169,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const effectiveStatus=actionState.pending?'sending':actionState.uncertain?'unknown':status;
       view.heading.textContent=labels[effectiveStatus] || 'Approval unavailable';
       view.error.textContent=actionState.error;view.error.hidden=!actionState.error;
-      view.itemError.hidden=!!view.command.textContent || typeof item.error!=='string';
+      view.itemError.hidden=typeof item.error!=='string' || !item.error;
       view.expires.hidden=!Number.isFinite(item.expires_at) || effectiveStatus!=='pending';
       view.detailsUnavailable.hidden=item.details_unavailable!==true && effectiveStatus!=='details_unavailable';
       const canDecide=view.canDecide && (effectiveStatus==='pending' || actionState.pending) && !actionState.uncertain;
@@ -1186,18 +1204,21 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         const items=data.items.filter(item=>(item.run_id===currentApprovalRun || item.session_id===session.id)
           && !handledApprovals.has(approvalKey(item)));
         const next=new Map(items.map(item=>{
-          const key=approvalKey(item),previous=approvalPending.get(key);
-          const unchanged=previous && [
-            'id','run_id','run_session_id','request_id','session_id','status','title','command','action',
-            'target','expires_at','executable','choices','error','details_unavailable'
-          ].every(field=>JSON.stringify(previous[field])===JSON.stringify(item[field]));
+          const key=approvalKey(item),previous=approvalPending.get(key) || approvalItems.get(key);
+          const unchanged=sameApprovalData(previous,item);
           const actionState=approvalActionStates.get(key);
-          if(previous && !unchanged && !(actionState?.pending && actionState.decisionStarted))
+          const sameIdentity=sameApprovalIdentity(previous,item);
+          if(previous && !unchanged && !(sameIdentity && actionState?.pending && actionState.decisionStarted)
+              && !actionState?.uncertain)
             approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
           return [key,unchanged?previous:item];
         }));
         for(const [key,item] of approvalPending)if(!next.has(key)){
           handledApprovals.add(key);
+          const actionState=approvalActionStates.get(key);
+          if(actionState?.pending && !actionState.decisionStarted && !actionState.uncertain){
+            actionState.pending=false;actionState.error='';
+          }
           if(!approvalFinals.has(key))approvalFinals.set(key,'unavailable');
         }
         approvalPending=next;
@@ -1210,10 +1231,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       reconcile:reconcileApprovals,
       run(id){currentApprovalRun=id;renderApprovals();},
       event(item,runId){
-        const value={...item,run_id:runId,
+        let value={...item,run_id:runId,
           run_session_id:item.run_session_id || item.session_id || session.id,session_id:session.id},
           key=approvalKey(value);
         if(version!==routeVersion || handledApprovals.has(key))return false;
+        const previous=approvalItems.get(key);
+        if(sameApprovalData(previous,value))value=previous;
         approvalRevision++;
         if(value.id || value.request_id){approvalItems.set(key,value);approvalPending.set(key,value);}
         else genericApproval=true;
@@ -1223,6 +1246,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         approvalRevision++;
         for(const [key,item] of approvalPending)if(item.run_id===runId){
           handledApprovals.add(key);approvalPending.delete(key);approvalFinals.set(key,'unavailable');
+          const actionState=approvalActionStates.get(key);
+          if(actionState?.pending && !actionState.decisionStarted && !actionState.uncertain){
+            actionState.pending=false;actionState.error='';
+          }
         }
         genericApproval=false;renderApprovals();
       }
@@ -1243,37 +1270,50 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         && item.request_id===target.request_id && item.session_id===session.id
         && item.run_session_id===target.run_session_id && typeof item.status==='string';
       try{
-        let item=[...approvalItems.values()].find(matches);
+        let item=[...approvalItems.values()].find(matches),detailRevision=null;
         if(!item){
-          const revision=approvalRevision;
+          detailRevision=approvalRevision;
           item=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
           if(!current())return;
           clearApprovalTargetTimer();
-          if(revision!==approvalRevision){
-            item=[...approvalItems.values()].find(matches);
-            if(!item){
+        }
+        if(!current())return;
+        if(matches(item)){
+          const key=approvalKey(item),existing=approvalItems.get(key);
+          if(handledApprovals.has(key)){
+            approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
+            renderApprovals();focusApprovalTarget();return;
+          }
+          if(detailRevision!==null && detailRevision!==approvalRevision && item.status==='pending'){
+            const latest=approvalItems.get(key);
+            if(approvalPending.has(key) && matches(latest))item=latest;
+            else if(existing && matches(existing)){
+              approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
+              renderApprovals();focusApprovalTarget();return;
+            }else{
               approvalTargetPlaceholder?.querySelector('h3') && (approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable');
               if(approvalTargetPlaceholder)approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
               focusApprovalTarget();return;
             }
           }
-        }
-        if(!current())return;
-        if(matches(item)){
-          const key=approvalKey(item),existing=approvalItems.get(key);
-          const same=existing && [
-            'id','run_id','run_session_id','request_id','session_id','status','title','command','action',
-            'target','expires_at','executable','choices','error','details_unavailable'
-          ].every(field=>JSON.stringify(existing[field])===JSON.stringify(item[field]));
-          if(same)item=existing;
-          else{
+          if(sameApprovalData(existing,item))item=existing;
+          else if(item.status!=='pending'){
             const actionState=approvalActionStates.get(key);
-            if(!actionState?.pending || !actionState.decisionStarted)
+            if(actionState && !actionState.decisionStarted){
+              actionState.pending=false;actionState.decisionStarted=false;
+              actionState.uncertain=false;actionState.error='';
+            }
+          }else{
+            const actionState=approvalActionStates.get(key);
+            if(!actionState?.pending && !actionState?.uncertain)
               approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
           }
           approvalItems.set(key,item);
-          if(item.status==='pending' && item.executable===true)approvalPending.set(key,item);
-          else approvalFinals.set(key,item.status);
+          if(item.status==='pending'){
+            approvalPending.set(key,item);approvalFinals.delete(key);
+          }else{
+            approvalPending.delete(key);handledApprovals.add(key);approvalFinals.set(key,item.status);
+          }
           approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
           renderApprovals();focusApprovalTarget();
         }else{
