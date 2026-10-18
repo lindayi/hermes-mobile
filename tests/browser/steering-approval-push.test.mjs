@@ -274,6 +274,183 @@ test('repeated unrelated refreshes offer one explicit approval-status retry',asy
  }finally{app.destroy();win.close();}
 });
 
+for(const status of [404,409,410])test(`authoritative ${status} detail failure removes only its mounted pending approval`,async()=>{
+ const detail=deferred(),list=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const target={...approvalItem(),status:'pending'};
+ const sibling={...approvalItem(),id:'b',request_id:'native-b',status:'pending'};
+ let detailReads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return list.promise;
+  if(p==='/approvals/a'){detailReads++;return detail.promise;}
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>detailReads===1);
+  list.resolve({items:[target,sibling]});
+  await waitFor(()=>doc.querySelectorAll('.approval-card').length===2);
+  assert.equal(doc.querySelector('[data-approval-id="a"] button.primary')!==null,true);
+  detail.reject(Object.assign(new Error('Approval unavailable'),{status}));
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Approval unavailable');
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+  assert.equal(doc.querySelector('[data-approval-id="b"] button.primary')!==null,true,
+    'an unrelated approval stays actionable');
+  assert.equal(doc.querySelector('.approval-notice').textContent,'1 approval require your review.');
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
+test('authoritative detail error applies when a revalidation loses its placeholder to a refreshed list',async()=>{
+ const first=deferred(),second=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const target={...approvalItem(),status:'pending'};
+ let detailReads=0,listReads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:++listReads===1?[]:[target]};
+  if(p==='/approvals/a')return ++detailReads===1?first.promise:second.promise;
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>detailReads===1&&listReads===1);
+  first.resolve({...target});
+  await waitFor(()=>detailReads===2,'the empty first list triggers target-detail revalidation');
+  win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>listReads===2);
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+  second.reject(Object.assign(new Error('Approval unavailable'),{status:409}));
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Approval unavailable');
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+  assert.equal(doc.querySelector('.approval-notice').hidden,true);
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
+test('a transient detail failure does not make a mounted approval unavailable',async()=>{
+ const detail=deferred(),list=deferred(),dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const target={...approvalItem(),status:'pending'};
+ const app=await mountApp(doc,{clear(){},async request(p){
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return list.promise;
+  if(p==='/approvals/a')return detail.promise;
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>doc.querySelector('.notification-unavailable'));
+  list.resolve({items:[target]});
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+  detail.reject(Object.assign(new Error('Temporary failure'),{status:503}));
+  await tick();
+  assert.equal(doc.querySelector('[data-approval-id="a"] h3').textContent,'Approval required');
+  assert.equal(doc.querySelectorAll('[data-approval-id="a"] button').length,2);
+  assert.equal(doc.querySelector('.approval-notice').textContent,'1 approval require your review.');
+ }finally{app.destroy();win.close();}
+});
+
+for(const outcome of ['resolved','in_flight','unknown'])test(`an older unavailable detail error cannot replace a ${outcome} approval decision`,async()=>{
+ const detail=deferred(),list=deferred(),decision=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};
+ win.navigator.credentials={get:async()=>fakeCredential()};
+ const target={...approvalItem(),status:'pending'};
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return list.promise;
+  if(p==='/approvals/a')return detail.promise;
+  if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision'){
+   if(outcome==='in_flight')return decision.promise;
+   if(outcome==='unknown')throw Object.assign(new Error('Synthetic timeout'),{status:503});
+   return {status:'resolved'};
+  }
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>calls.includes('/approvals/a'));
+  list.resolve({items:[target]});
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+  const card=doc.querySelector('[data-approval-id="a"]');
+  card.querySelector('button.primary').click();
+  if(outcome==='in_flight'){
+   await waitFor(()=>calls.includes('/approvals/a/decision'));
+   detail.reject(Object.assign(new Error('Approval unavailable'),{status:409}));
+   await tick();
+   assert.equal(card.querySelector('h3').textContent,'Decision pending');
+   assert.equal(card.querySelector('button.primary').disabled,true);
+   decision.resolve({status:'resolved'});
+   await waitFor(()=>card.querySelector('h3').textContent==='Resolved');
+  }else if(outcome==='unknown'){
+   await waitFor(()=>card.querySelector('h3').textContent==='Decision status unknown');
+   detail.reject(Object.assign(new Error('Approval unavailable'),{status:409}));
+   await tick();
+   assert.equal(card.querySelector('h3').textContent,'Decision status unknown');
+  }else{
+   await waitFor(()=>card.querySelector('h3').textContent==='Resolved');
+   detail.reject(Object.assign(new Error('Approval unavailable'),{status:409}));
+   await tick();
+   assert.equal(card.querySelector('h3').textContent,'Resolved');
+  }
+  assert.equal(card.querySelector('button'),null);
+  assert.equal(calls.filter(path=>path==='/approvals/a/decision').length,1);
+ }finally{app.destroy();win.close();}
+});
+
+test('a held unavailable detail cannot replace an acknowledged decision after same-owner reentry',async()=>{
+ const detail=deferred(),list=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};
+ win.navigator.credentials={get:async()=>fakeCredential()};
+ const target={...approvalItem(),status:'pending'};
+ let detailReads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return list.promise;
+  if(p==='/approvals/a')return ++detailReads===1?detail.promise:{...target};
+  if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision')return {status:'resolved'};
+  return {items:[]};
+ }},win);
+ const reenter=async()=>{
+  doc.querySelector('[data-view="settings"]').click();
+  await waitFor(()=>[...doc.querySelectorAll('button')].some(button=>button.textContent==='Sign out'));
+  [...doc.querySelectorAll('button')].find(button=>button.textContent==='Sign out').click();
+  await waitFor(()=>[...doc.querySelectorAll('button')].some(button=>button.textContent==='Sign in with a passkey'));
+  await app.start();
+ };
+ try{
+  await waitFor(()=>detailReads===1);
+  list.resolve({items:[target]});
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+  doc.querySelector('[data-approval-id="a"] button.primary').click();
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Resolved');
+  await reenter();
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Resolved');
+  detail.reject(Object.assign(new Error('Approval unavailable'),{status:409}));
+  await tick();
+  assert.equal(doc.querySelector('[data-approval-id="a"] h3').textContent,'Resolved');
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,1);
+ }finally{app.destroy();win.close();}
+});
+
 for(const staleStatus of ['pending','sending','unknown'])test(`an initial ${staleStatus} detail cannot replace an acknowledged approval`,async()=>{
  const detail=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
  win.PublicKeyCredential=class {};
@@ -991,6 +1168,36 @@ test('late approval details cannot update a changed route or owner',async()=>{
    detail.resolve({...approvalItem(),status:'expired',executable:false,choices:[]});await tick();await tick();
    assert.equal(doc.querySelector('[data-approval-id="a"]'),null);
    assert.equal(calls.filter(path=>path==='/approvals/a/decision').length,0);
+  }finally{app.destroy();win.close();}
+ }
+});
+
+test('late unavailable approval errors cannot update a changed route or owner',async()=>{
+ for(const departure of ['route','owner']){
+  const detail=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+  let owner='owner';
+  const app=await mountApp(doc,{clear(){},async request(p){
+   calls.push(p);
+   if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+   if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+   if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+   if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],total:0,offset:0};
+   if(p==='/approvals')return {items:[]};
+   if(p==='/approvals/a')return detail.promise;
+   if(p.startsWith('/sessions?'))return {items:[],total:0};
+   return {items:[]};
+  }},win);
+  try{
+   await waitFor(()=>calls.includes('/approvals/a'));
+   if(departure==='route')doc.querySelector('[data-view="chats"]').click();
+   else{
+    win.history.replaceState({},'','/hermes/');owner='another-owner';
+    await app.start();
+   }
+   detail.reject(Object.assign(new Error('Approval unavailable'),{status:409}));
+   await tick();await tick();
+   assert.equal(doc.querySelector('[data-approval-id="a"]'),null);
+   assert.equal(calls.filter(path=>path.endsWith('/decision')).length,0);
   }finally{app.destroy();win.close();}
  }
 });

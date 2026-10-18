@@ -1530,8 +1530,19 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }catch(error){
         if(!current())return;
         if(error.status===401){expiredSession();return;}
+        const unavailable=[404,409,410].includes(error.status);
+        if(unavailable){
+          const key=approvalKey({...target,id:target.approval_id});
+          const item=approvalPending.get(key),actionState=approvalActionStates.get(key);
+          if(item && matches(item) && approvalItems.get(key)===item && !handledApprovals.has(key)
+              && !finalApprovalStatuses.has(approvalFinals.get(key))
+              && !actionState?.pending && !actionState?.decisionStarted && !actionState?.uncertain){
+            const finalItem={...item,status:'unavailable',executable:false,choices:[]};
+            approvalRevision++;approvalPending.delete(key);approvalItems.set(key,finalItem);
+            approvalFinals.set(key,'unavailable');clearApprovalExpiry(key);renderApprovals();
+          }
+        }
         if(approvalTargetPlaceholder){
-          const unavailable=[404,409,410].includes(error.status);
           approvalTargetPlaceholder.querySelector('h3').textContent=unavailable?'Approval unavailable':'Approval status unavailable';
           approvalTargetPlaceholder.querySelector('p').textContent=unavailable
             ? 'This approval is no longer pending in this chat.'
@@ -2453,7 +2464,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(event.lastEventId)renderedIds.add(event.lastEventId);
       }catch{inform('A live update could not be read. Reopen the conversation to check the saved result.',true);}
     });
-    on('status',apply);
+    on('status',data=>{
+      apply(data);
+      if(data.status==='waiting_for_approval')void approvalState?.reconcile();
+    });
     on('steering',data=>{composerAction.receive?.(data);void composerAction.refresh?.();});
     on('steer',data=>{composerAction.receive?.(data);void composerAction.refresh?.();});
     on('commentary',renderCommentary);

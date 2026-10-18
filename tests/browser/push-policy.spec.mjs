@@ -20,7 +20,7 @@ const responseBatch=(page,path,count)=>new Promise(resolve=>{
 });
 async function fixture(run){
  const tmp=await mkdtemp((process.env.TMPDIR || '/tmp')+'/b-');let server,browser;
- const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,approvals:[],approvalHold:null,approvalDetail:null,approvalDetailHold:null,decisionHold:null,decisionStatus:200,activeRun:null};
+ const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,approvals:[],approvalHold:null,approvalDetail:null,approvalDetailHold:null,approvalDetailStatus:200,decisionHold:null,decisionStatus:200,activeRun:null,runEventStreams:[],runEventSequence:0};
  try{
   const names=await readdir(dir),ui=names.find(n=>/^ui\.[a-f0-9]+\.mjs$/.test(n)),sw=names.find(n=>/^sw\.[a-f0-9]+\.js$/.test(n));
   assert.ok(ui && sw,'tests use generated release graph');
@@ -29,6 +29,13 @@ async function fixture(run){
    if(path.startsWith('/hermes/app-api/')){
     let raw='';for await(const part of req)raw+=part;
     const p=path.slice('/hermes/app-api'.length),call={p,query:requestURL.search,method:req.method,body:raw?JSON.parse(raw):null,csrf:req.headers['x-csrf-token']};calls.push(call);
+    if(/^\/runs\/[^/]+\/events$/.test(p)){
+     res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'});
+     res.write(': connected\n\n');
+     control.runEventStreams.push(res);
+     res.on('close',()=>{control.runEventStreams=control.runEventStreams.filter(stream=>stream!==res);});
+     return;
+    }
     let data={items:[]},status=200;
     if(p==='/auth/me'){if(control.authHold)await control.authHold;data={user:{id:control.user,status:'ready'},csrf_token:control.csrf || 'fixture-csrf'};}
     if(p==='/auth/logout' && control.logoutDelay)await new Promise(resolve=>setTimeout(resolve,control.logoutDelay));
@@ -40,7 +47,7 @@ async function fixture(run){
     }else if(p.startsWith('/approvals/') && req.method==='GET'){
      const detail=control.approvalDetail;
      if(control.approvalDetailHold)await control.approvalDetailHold;
-     if(detail?.id===decodeURIComponent(p.split('/').at(-1)))data=detail;
+     if(detail?.id===decodeURIComponent(p.split('/').at(-1))){data=detail;status=control.approvalDetailStatus;}
     }
     if(p==='/auth/verify/options')data={challenge_id:'fixture-challenge',publicKey:{challenge:'AQ'}};
     if(p==='/auth/verify/finish')data={verified:true};
@@ -83,7 +90,10 @@ async function fixture(run){
    await page.evaluate(async({ui})=>{document.body.innerHTML='<div id="app"></div>';const style=document.createElement('link');style.rel='stylesheet';style.href='./styles.'+ui.split('.')[1]+'.css';document.head.append(style);const {createAPI}=await import('./api.'+ui.split('.')[1]+'.mjs');const {mountApp}=await import('./'+ui);window.app=await mountApp(document,createAPI(),window);},{ui});
   }
   await mount(page);
-  await run({page,context,url,calls,control,ui,sw,dir,mount});
+  await run({page,context,url,calls,control,ui,sw,dir,mount,emitRunEvent(name,data,id=++control.runEventSequence){
+   for(const stream of control.runEventStreams)if(!stream.writableEnded)
+    stream.write(`id: ${id}\nevent: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+  }});
   assert.deepEqual(errors,[]);
  }finally{await browser?.close();server?.closeAllConnections();await new Promise(r=>server?server.close(r):r());await rm(tmp,{recursive:true,force:true});}
 }
@@ -526,6 +536,61 @@ test('generated expired non-pending approval details retain status through same-
   await card.getByRole('heading',{name:label,exact:true}).waitFor();
   assert.equal(await card.getByRole('button').count(),0);
  }
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+}));
+
+test('generated run status refresh removes an externally answered approval and preserves its sibling',{timeout:30000},()=>fixture(async({page,control,calls,emitRunEvent})=>{
+ const answered=approvalRecord(),sibling=approvalRecord({id:'approval-2',request_id:'request-2'});
+ control.approvals=[answered,sibling];
+ control.activeRun={id:answered.run_id,session_id:answered.session_id,status:'waiting_for_approval',input:'Synthetic request',created_at:1};
+ await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ const connectDeadline=Date.now()+2500;
+ while(!control.runEventStreams.length&&Date.now()<connectDeadline)await page.waitForTimeout(10);
+ assert.ok(control.runEventStreams.length,`the generated chat must open its run event stream: ${JSON.stringify(calls.map(call=>call.p))}`);
+ const answeredCard=page.locator(`[data-approval-id="${answered.id}"]`),siblingCard=page.locator(`[data-approval-id="${sibling.id}"]`);
+ await answeredCard.getByRole('button',{name:'Approve once'}).waitFor();
+ await siblingCard.getByRole('button',{name:'Approve once'}).waitFor();
+ await page.getByRole('textbox',{name:'Message Hermes'}).focus();
+ const initialReads=calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length;
+ control.approvals=[sibling];
+ emitRunEvent('status',{status:'waiting_for_approval'},'external-approval-response');
+ const deadline=Date.now()+2500;
+ while(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length===initialReads&&Date.now()<deadline)
+  await page.waitForTimeout(10);
+ await answeredCard.getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
+ assert.equal(await answeredCard.getByRole('button').count(),0,'the externally answered card has no controls');
+ assert.equal(await siblingCard.getByRole('button').count(),2,'the still-pending sibling remains actionable');
+ assert.equal(await page.locator('.approval-notice').innerText(),'1 approval require your review.');
+ assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),'Message Hermes','refresh does not steal focus');
+ const refreshedReads=calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length;
+ emitRunEvent('status',{status:'waiting_for_approval'},'external-approval-response');
+ await page.waitForTimeout(100);
+ assert.equal(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length,refreshedReads,
+  'replayed status IDs do not cause another list request');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0,'status reconciliation never decides an approval');
+}));
+
+test('generated pending-list card loses controls after its held detail returns deletion-fence 409',{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ const target=approvalRecord(),sibling=approvalRecord({id:'approval-2',request_id:'request-2'});
+ control.notificationTarget=approvalTarget;
+ control.approvals=[target,sibling];control.approvalDetail=target;control.approvalDetailStatus=409;
+ let release;control.approvalDetailHold=new Promise(resolve=>release=resolve);
+ const listResponse=page.waitForResponse(response=>response.url().endsWith('/approvals')&&response.request().method()==='GET');
+ await mount(page,'?notification=notice-target');
+ await listResponse;
+ const card=page.locator(`[data-approval-id="${target.id}"]`),other=page.locator(`[data-approval-id="${sibling.id}"]`);
+ await card.getByRole('button',{name:'Approve once'}).waitFor();
+ await other.getByRole('button',{name:'Approve once'}).waitFor();
+ const detailPath='/approvals/approval-1';
+ const detailResponse=page.waitForResponse(response=>response.url().endsWith(detailPath)&&response.request().method()==='GET');
+ const deadline=Date.now()+2500;
+ while(!calls.some(call=>call.p===detailPath&&call.method==='GET')&&Date.now()<deadline)await page.waitForTimeout(10);
+ assert.ok(calls.some(call=>call.p===detailPath&&call.method==='GET'),'the exact target detail read is held');
+ control.approvalDetailHold=null;release();await detailResponse;
+ await card.getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(await other.getByRole('button').count(),2,'the other approval is unchanged');
+ assert.equal(await page.locator('.approval-notice').innerText(),'1 approval require your review.');
  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
 }));
 
