@@ -93,7 +93,7 @@ with tempfile.TemporaryDirectory(prefix='photo-browser-route-') as temporary:
   close:async()=>{await queue;child.stdin.end();const code=await closed;reader.close();assert.equal(code,0,diagnostic);}};
 }
 
-test('real file input removal aborts an undispatched photo batch and retries remaining photo',async t=>{
+test('photo picker icon stays accessible and removal retries only the remaining photo',async t=>{
   const calls=[],uploads=[],runs=[],deletes=[];
   let finishSecond,notifySecond;
   const secondStarted=new Promise(resolve=>{notifySecond=resolve;});
@@ -143,14 +143,43 @@ test('real file input removal aborts an undispatched photo batch and retries rem
   const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',
     headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
   t.after(async()=>{await browser.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));});
-  const page=await browser.newPage({viewport:{width:390,height:844}});
+  const page=await browser.newPage({viewport:{width:320,height:844}});
   page.setDefaultTimeout(5000);
   await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);
   await page.getByRole('button',{name:'Photo fixture'}).click();
-  await page.locator('input[type=file]').setInputFiles([
+  const addPhotos=page.getByRole('button',{name:'Add photos',exact:true});
+  assert.equal((await addPhotos.innerText()).trim(),'','the photo picker must not show a text label');
+  assert.equal(await addPhotos.getAttribute('title'),'Add up to four JPEG, PNG, or WebP photos');
+  assert.equal(await addPhotos.locator('svg.ui-icon[aria-hidden="true"] path').count(),1);
+  const bounds=await addPhotos.evaluate(el=>{const {x,right,width,height}=el.getBoundingClientRect();return{x,right,width,height};});
+  assert.ok(bounds.width>=44 && bounds.height>=44,'the photo picker must retain a 44px touch target');
+  assert.ok(bounds.x>=0 && bounds.right<=320,'the photo picker must not clip at narrow mobile width');
+  assert.ok(await addPhotos.evaluate(el=>el.scrollWidth<=el.clientWidth),'the composer must not overflow at narrow mobile width');
+  for(const theme of ['light','dark']){
+    const ratio=await addPhotos.evaluate((el,theme)=>{
+      document.documentElement.dataset.theme=theme;
+      const luminance=color=>color.match(/\d+/g).slice(0,3).map(Number).map(channel=>{channel/=255;return channel<=.04045?channel/12.92:((channel+.055)/1.055)**2.4;}).reduce((sum,channel,index)=>sum+channel*[.2126,.7152,.0722][index],0);
+      const foreground=luminance(getComputedStyle(el).color),background=luminance(getComputedStyle(el.closest('.composer')).backgroundColor);
+      return (Math.max(foreground,background)+.05)/(Math.min(foreground,background)+.05);
+    },theme);
+    assert.ok(ratio>=3,`the photo icon must have adequate ${theme}-theme contrast`);
+  }
+  const theme=await page.evaluate(()=>document.documentElement.dataset.theme);
+  await page.evaluate(value=>document.documentElement.dataset.theme=value,theme);
+  await page.getByRole('button',{name:'Send message'}).focus();
+  await page.keyboard.press('Shift+Tab');
+  assert.ok(await addPhotos.evaluate(el=>document.activeElement===el),'the photo picker must be keyboard focusable');
+  let chooserCount=0;
+  page.on('filechooser',()=>chooserCount++);
+  const chooserEvent=page.waitForEvent('filechooser');
+  await page.keyboard.press('Enter');
+  const chooser=await chooserEvent;
+  assert.equal(chooser.isMultiple(),true);
+  await chooser.setFiles([
     {name:'first.png',mimeType:'image/png',buffer:photoBytes},
     {name:'second.png',mimeType:'image/png',buffer:photoBytes},
   ]);
+  assert.equal(chooserCount,1,'one keyboard activation must open the file chooser once');
   await page.getByRole('button',{name:'Send message'}).click();
   await secondStarted;
   await page.getByRole('button',{name:'Remove photo 1'}).click();
