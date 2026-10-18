@@ -4,7 +4,6 @@ import re
 from deploy.review_evidence import (
     current_copilot_review_valid,
     review_body_disposition,
-    sensitive_review_authorized,
 )
 
 REPOSITORY = 'lindayi/hermes-mobile'
@@ -517,17 +516,6 @@ def _check_review(evidence, main_sha, phase, blockers):
             or change.get('files_complete') is not True
             or type(change.get('sensitive')) is not bool):
         blockers.add('change-scope-evidence')
-    elif change['sensitive']:
-        authorization = change.get('owner_authorization')
-        targeted = change.get('targeted_review')
-        if not sensitive_review_authorized(
-                reviews, head, authorization, targeted, owner_id=OWNER_ID,
-                owner_command=change.get('owner_command'),
-                pull_author_id=review.get('pull_author_id'),
-                complete=review.get('reviews_complete')):
-            blockers.add('sensitive-review-authorization')
-
-
 def validate_transition(evidence, *, phase):
     """Validate injected read-only GitHub evidence and main-source contracts; perform no I/O."""
     blockers = set()

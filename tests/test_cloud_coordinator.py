@@ -2051,7 +2051,6 @@ def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
         statuses=[],
         checks_complete=True,
         review_valid=True,
-        sensitive_authorized=True,
         up_to_date_required=True,
         conversation_resolution_required=True,
         agent_running=False,
@@ -2060,7 +2059,6 @@ def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
     for key, value in (
         ("current_main_sha", "c" * 40),
         ("review_valid", False),
-        ("sensitive_authorized", False),
         ("up_to_date_required", False),
         ("conversation_resolution_required", False),
         ("agent_running", True),
@@ -2092,7 +2090,7 @@ def test_auto_merge_uses_current_three_checks_without_cloud_review():
     assert eligible_for_auto_merge(
         pr, current_main_sha=BASE, required_checks=required, check_runs=runs,
         statuses=[], checks_complete=True, review_valid=True,
-        sensitive_authorized=True, up_to_date_required=True,
+        up_to_date_required=True,
         conversation_resolution_required=True, agent_running=False,
     )
 
@@ -16942,7 +16940,7 @@ def test_owner_enrollment_allows_sensitive_change_without_extra_authorization(tm
         enrollment = store.snapshot()["enrollments"]["16"]
 
         assert plan["sensitive"] is sensitive
-        assert plan["auto_merge_eligible"] is True
+        assert plan["auto_merge_eligible"] is True, plan
         assert plan["auto_merge_requested"] is True
         assert "sensitive" not in plan["reasons"]
         assert enrollment["active"] is True

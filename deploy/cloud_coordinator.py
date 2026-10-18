@@ -617,12 +617,12 @@ def _pull_merge_eligible(pull, current_main_sha):
 
 
 def eligible_for_auto_merge(pull, *, current_main_sha, required_checks, check_runs,
-                            statuses, checks_complete, review_valid, sensitive_authorized,
+                            statuses, checks_complete, review_valid,
                             up_to_date_required, conversation_resolution_required,
                             agent_running):
     """Pure eligibility gate; GitHub still enforces protected auto-merge."""
     if (not _pull_merge_eligible(pull, current_main_sha)
-            or not review_valid or not sensitive_authorized
+            or not review_valid
             or not up_to_date_required or not conversation_resolution_required
             or agent_running):
         return False
@@ -7176,7 +7176,7 @@ class Coordinator:
             legacy_key, legacy_report,
         )
         for code, message in reasons:
-            if code not in {"sensitive", "budget", "up-to-date-policy",
+            if code not in {"budget", "up-to-date-policy",
                             "conversation-policy", "status-owner", "scope",
                             "conflict-incompatible", "policy-broken",
                             "review-report", "review-report-exhausted",
@@ -7190,13 +7190,7 @@ class Coordinator:
                 continue
             key, entry = self._outcome(snapshot, code, message)
             outcomes.append((key, entry))
-            if code == "sensitive":
-                lifecycle.append(_lifecycle_event(
-                    snapshot, "sensitive_approval", occurred_at=self._now_string(),
-                    decision="authorize_sensitive_action",
-                    incident=str(snapshot["enrollment"].get("sensitive_generation") or ""),
-                ))
-            elif code == "budget":
+            if code == "budget":
                 lifecycle.append(_lifecycle_event(
                     snapshot, "execution_exhausted", occurred_at=self._now_string(),
                     incident=snapshot.get(
@@ -7314,23 +7308,6 @@ class Coordinator:
         )
         sensitive = classify_sensitive_paths(
             snapshot["files"], complete=snapshot["files_complete"],
-        )
-        owner_authorization = snapshot["enrollment"].get("sensitive_authorization")
-        owner_command = (
-            _current_sensitive_owner_command(self.api, number, owner_authorization)
-            if sensitive else None
-        )
-        authorized = not sensitive or (
-            snapshot["enrollment"].get("sensitive_sha") == head
-            and sensitive_review_authorized(
-                snapshot["reviews"], head,
-                owner_authorization,
-                snapshot["enrollment"].get("targeted_review"),
-                owner_id=OWNER_ID, owner_command=owner_command,
-                pull_author_id=(
-                    pull_user.get("id") if isinstance(pull_user, dict) else None
-                ),
-            )
         )
         required = snapshot["required"]
         checks_ok = required_checks_pass(
@@ -7891,8 +7868,6 @@ class Coordinator:
             reasons.append(("up-to-date-policy", "Branch protection must require current-main checks."))
         if not snapshot["conversation_resolution_required"]:
             reasons.append(("conversation-policy", "Branch protection must require resolved review conversations."))
-        if sensitive and not authorized:
-            reasons.append(("sensitive", "Owner exact-head authorization is required for sensitive changes."))
         if not review_ok:
             reasons.append(("review", "A current genuine Copilot review and resolved conversations are required."))
         source_provenance_missing = (
@@ -8070,7 +8045,7 @@ class Coordinator:
             snapshot["pull"], current_main_sha=snapshot["main_sha"],
             required_checks=required, check_runs=snapshot["check_runs"],
             statuses=snapshot["statuses"], checks_complete=snapshot["policy_complete"],
-            review_valid=review_ok, sensitive_authorized=authorized,
+            review_valid=review_ok,
             up_to_date_required=snapshot["up_to_date_required"],
             conversation_resolution_required=snapshot["conversation_resolution_required"],
             agent_running=(agent_busy or repair is not None or bool(neutral_blocker)
@@ -8286,7 +8261,7 @@ class Coordinator:
             state, admission_checks=admission_checks, **scan_options,
         )
         processed_by_issue = self._processed_by_issue
-        scans, sensitive_revocations, starter_sources = [], [], []
+        scans, starter_sources = [], []
         pending_events = []
         for key, enrollment in enrollments.items():
             if int(key) in blocked_continuations:
@@ -8301,31 +8276,6 @@ class Coordinator:
             source = snapshot.get("initial_source")
             if _valid_initial_source(source):
                 starter_sources.append((snapshot["issue"], snapshot["head"], source))
-            if (not snapshot.get("terminal") and enrollment.get("sensitive_sha")
-                    and (enrollment["sensitive_sha"] != snapshot["head"]
-                         or not sensitive_review_authorized(
-                             snapshot["reviews"], snapshot["head"],
-                             enrollment.get("sensitive_authorization"),
-                             enrollment.get("targeted_review"), owner_id=OWNER_ID,
-                             owner_command=_current_sensitive_owner_command(
-                                 self.api, snapshot["issue"],
-                                 enrollment.get("sensitive_authorization"),
-                             ),
-                             pull_author_id=(
-                                 snapshot["pull"].get("user", {}).get("id")
-                                 if isinstance(snapshot["pull"].get("user"), dict) else None
-                             ),
-                         ))):
-                # Advance once per revoked grant, never per poll or review digest.
-                # This also covers readable head-only authorization without proof.
-                # Commit the clearing and episode with the scan before exporting.
-                generation = enrollment.get("sensitive_generation", 0) + 1
-                if generation > 2**31 - 1:
-                    raise CoordinatorError("Sensitive authorization episode capacity reached")
-                enrollment["sensitive_generation"] = generation
-                sensitive_revocations.append((snapshot["issue"], generation))
-                for field in ("sensitive_sha", "sensitive_authorization", "targeted_review"):
-                    enrollment[field] = None
             scans.append(snapshot)
         accepted_commands = [
             (command, item) for command, item in commands
@@ -8605,7 +8555,7 @@ class Coordinator:
             "owner_recoveries": owner_recoveries,
             "owner_continuations": owner_continuations,
             "enrollments": enrollments, "snapshots": scans, "pull_requests": plans,
-            "observations": observations, "sensitive_revocations": sensitive_revocations,
+            "observations": observations,
             "now": self.clock(),
         }
 
@@ -10666,7 +10616,6 @@ class Coordinator:
                     action["issue"], action["head"], snapshot["main_sha"],
                 )
                 pull_user = current_pull.get("user") if isinstance(current_pull, dict) else None
-                sensitive = classify_sensitive_paths(files, complete=True)
                 if (not isinstance(current_pull, dict)
                         or not independent_review_valid(
                             action["head"], reviews, threads,
@@ -10674,26 +10623,7 @@ class Coordinator:
                             threads_complete=threads_complete, reviews_complete=True,
                             issue=action["issue"], review_actions=self.store.actions(),
                         )
-                        or (sensitive
-                            and (
-                                snapshot["enrollment"].get("sensitive_sha") != action["head"]
-                                or not sensitive_review_authorized(
-                                    reviews, action["head"],
-                                    snapshot["enrollment"].get("sensitive_authorization"),
-                                    snapshot["enrollment"].get("targeted_review"),
-                                    owner_id=OWNER_ID,
-                                    owner_command=_current_sensitive_owner_command(
-                                        self.api, action["issue"],
-                                        snapshot["enrollment"].get(
-                                            "sensitive_authorization",
-                                        ),
-                                    ),
-                                    pull_author_id=(
-                                        pull_user.get("id")
-                                        if isinstance(pull_user, dict) else None
-                                    ),
-                                )
-                            ))):
+                        ):
                     self.store.update_action(key, "blocked")
                     return "blocked"
             current_statuses = _rest_list(
@@ -10804,30 +10734,6 @@ class Coordinator:
                 current_plan["merge_action"] = None
                 current_plan["reasons"] = list(dict.fromkeys(
                     current_plan["reasons"] + ["review"],
-                ))
-                return current_plan
-            if (classify_sensitive_paths(
-                    current["files"], complete=current["files_complete"],
-                )
-                    and not sensitive_review_authorized(
-                        final_reviews, action["head"],
-                        current["enrollment"].get("sensitive_authorization"),
-                        current["enrollment"].get("targeted_review"),
-                        owner_id=OWNER_ID,
-                        owner_command=_current_sensitive_owner_command(
-                            self.api, action["issue"],
-                            current["enrollment"].get("sensitive_authorization"),
-                        ),
-                        pull_author_id=(
-                            current_user.get("id")
-                            if isinstance(current_user, dict) else None
-                        ),
-                    )):
-                self.store.update_action(key, "blocked")
-                current_plan["auto_merge_eligible"] = False
-                current_plan["merge_action"] = None
-                current_plan["reasons"] = list(dict.fromkeys(
-                    current_plan["reasons"] + ["sensitive"],
                 ))
                 return current_plan
         except CoordinatorError:
@@ -11126,10 +11032,6 @@ class Coordinator:
                 item for item in plan.get("observations", [])
                 if item[0] not in identity_blocked
             ],
-            sensitive_revocations=[
-                item for item in plan.get("sensitive_revocations", [])
-                if item[0] not in identity_blocked
-            ],
             starter_sources=[
                 source for source in plan.get("starter_sources", ())
                 if source[0] not in identity_blocked
@@ -11270,6 +11172,12 @@ class Coordinator:
                 )
             for key, entry in pr_plan["outcomes"]:
                 self.store.add_outbox(key, entry)
+            for key, entry in self.store.snapshot()["outbox"].items():
+                if (entry.get("issue") == snapshot["issue"]
+                        and entry.get("kind") == "outcome"
+                        and key == f"{snapshot['issue']}:{entry.get('head')}:sensitive"
+                        and entry.get("status") == "pending"):
+                    self.store.update_outbox(key, "superseded")
             comments = snapshot["comments"]
             for key, entry in self.store.snapshot()["outbox"].items():
                 if (entry.get("issue") != snapshot["issue"]
@@ -12077,22 +11985,7 @@ class StateStore:
         events = []
         for event in state["lifecycle_events"]:
             if event["reason"] == "sensitive_approval":
-                enrollment = state["enrollments"].get(str(event["pr_number"]), {})
-                if (enrollment.get("active") is not True
-                        or enrollment.get("last_open_seen") is not True
-                        or enrollment.get("last_open_head") != event["head_sha"]
-                        or enrollment.get("sensitive_sha") == event["head_sha"]
-                        or event["decision"] != "authorize_sensitive_action"):
-                    continue
-                current = _lifecycle_event(
-                    {"issue": event["pr_number"], "head": event["head_sha"],
-                     "enrollment": enrollment},
-                    "sensitive_approval", occurred_at=event["occurred_at"],
-                    decision="authorize_sensitive_action",
-                    incident=str(enrollment.get("sensitive_generation") or ""),
-                )
-                if event["event_id"] != current["event_id"]:
-                    continue
+                continue
             # Filter only the exported view; immutable incidents and consumer ACK
             # identities are history, not permission to request a stale decision.
             events.append(event)
@@ -12394,12 +12287,6 @@ class StateStore:
                 if existing is not None and existing != source:
                     raise CoordinatorError("Initial starter source provenance changed")
                 enrollment["initial_source"] = deepcopy(source)
-            for issue, generation in sensitive_revocations:
-                enrollment = data["enrollments"].get(str(issue))
-                if enrollment and enrollment.get("active"):
-                    enrollment["sensitive_generation"] = generation
-                    for field in ("sensitive_sha", "sensitive_authorization", "targeted_review"):
-                        enrollment[field] = None
             self._add_lifecycle_events(
                 data, lifecycle_events, now=time.time() if now is None else now,
             )
