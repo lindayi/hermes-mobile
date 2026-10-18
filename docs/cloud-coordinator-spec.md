@@ -54,6 +54,15 @@ pulls' processed command IDs once, including stale or invalid commands. Other
 eligible pulls may still commit and advance.
 Direct snapshots and terminal identity mismatches remain strict.
 
+Mixed-root continuation preparation must also skip identity-isolated snapshots.
+Acceptance uses a multi-PR apply cycle with multiple retained abandonment roots,
+matching retained continuations and a newly scanned continuation command. The
+isolated pull keeps its commands pending and unconsumed, with no publication,
+history or lifetime-budget changes, while a separate eligible pull advances.
+Cold restarts preserve those pending IDs and do not duplicate accepted work.
+Restoring the identity permits retry only after fresh authenticated evidence;
+missing comment evidence is never replaced with an empty list.
+
 Extended starter admission additionally requires a strict positive integer comment
 ID and owner ID, an explicitly non-draft open same-repository PR, matching current
 head/body, and exactly one canonical originating-issue closing edge. The shared

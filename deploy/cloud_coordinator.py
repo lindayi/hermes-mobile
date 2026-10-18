@@ -8442,6 +8442,8 @@ class Coordinator:
             })
         deferred_mixed_enrollments = set()
         for snapshot in scans:
+            if snapshot.get("identity_invalid"):
+                continue
             issue = snapshot["issue"]
             new_records = [
                 recovery["record"] for recovery in owner_continuations

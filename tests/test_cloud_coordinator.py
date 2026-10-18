@@ -13347,6 +13347,123 @@ def _bind_unrelated_task_artifacts(api):
     api.write = write
 
 
+def test_identity_isolated_mixed_roots_defer_commands_and_progress_other_pr(tmp_path):
+    api, store, _, _, _ = _owner_continuation_advanced_case(
+        tmp_path, multiple_roots=True,
+    )
+    api.pull.update(mergeable=None, mergeable_state="unknown")
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(
+        apply=True,
+    )
+    retained = StateStore(store.path).snapshot()["enrollments"]["16"]
+    assert len(retained["owner_abandonments"]) == 2
+    assert len(retained["owner_continuations"]) == 2
+    command = deepcopy(next(c for c in api.comments if c["id"] == 7781))
+    command.update(
+        id=7783, created_at="2026-10-01T12:14:00Z",
+        updated_at="2026-10-01T12:14:00Z",
+    )
+    api.comments.append(command)
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    unrelated_pull = _add_unrelated_enrolled_pull(api, store)
+    unrelated_pull["head"]["ref"] = "topic-17"
+    _bind_unrelated_task_artifacts(api)
+    original_pull_id = api.pull["id"]
+    api.pull["id"] += 1
+    before = StateStore(store.path).snapshot()
+    before_issue = _pull_issue_state(before, 16)
+    writes = len(api.writes)
+    graphql_writes = len(api.graphql_writes)
+    posts = api.task_posts
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856900,
+    ).run(apply=True)
+
+    plans = {item["issue"]: item for item in result["pull_requests"]}
+    after = StateStore(store.path).snapshot()
+    assert plans[16]["reasons"] == ["pull-identity"]
+    assert plans[16]["repair_requested"] is False
+    assert plans[17]["repair_requested"] is True
+    assert _pull_issue_state(after, 16) == before_issue
+    assert after["cursor"] == before["cursor"]
+    assert after["pending_events"] == ["7783"]
+    assert not StateStore(store.path).event_seen(7783)
+    assert api.task_posts == posts + 1
+    assert len(api.writes[writes:]) == 1
+    route, body = api.writes[writes]
+    assert route == "agents/repos/lindayi/hermes-mobile/tasks"
+    assert "PR #17" in body["prompt"]
+    assert api.graphql_writes[graphql_writes:] == []
+    accepted_other = _pull_issue_state(after, 17)
+    other_action = next(iter(accepted_other["actions"].values()))
+    assert other_action["status"] == "sent"
+    assert other_action["task_id"] in api.tasks
+    writes = deepcopy(api.writes)
+
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856900).run(
+            apply=True,
+        )
+        repeated = StateStore(store.path).snapshot()
+        assert _pull_issue_state(repeated, 16) == before_issue
+        assert _pull_issue_state(repeated, 17) == accepted_other
+        assert repeated["cursor"] == before["cursor"]
+        assert repeated["pending_events"] == ["7783"]
+        assert not StateStore(store.path).event_seen(7783)
+        assert api.task_posts == posts + 1
+        assert api.writes == writes
+
+    api.pull["id"] = original_pull_id
+    original_get = api.get
+    unavailable = [True]
+    evidence_reads = []
+    historical_task = retained["owner_abandonments"][0]["task_id"]
+
+    def get(route):
+        if route.endswith(f"/tasks/{historical_task}"):
+            evidence_reads.append(route)
+            if unavailable[0]:
+                raise ApiError("task detail temporarily unavailable", status=503)
+        return original_get(route)
+
+    api.get = get
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856900).run(
+        apply=True,
+    )
+    deferred = StateStore(store.path).snapshot()
+    assert evidence_reads
+    assert deferred["pending_events"] == ["7783"]
+    assert not StateStore(store.path).event_seen(7783)
+    assert deferred["enrollments"]["16"] == before_issue["enrollment"]
+    assert api.task_posts == posts + 1
+    assert api.writes == writes
+
+    unavailable[0] = False
+    evidence_reads.clear()
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856900).run(
+        apply=True,
+    )
+    recovered = StateStore(store.path).snapshot()
+    assert evidence_reads
+    assert StateStore(store.path).event_seen(7783)
+    assert "7783" not in recovered["pending_events"]
+    assert recovered["enrollments"]["16"]["owner_abandonments"] == (
+        retained["owner_abandonments"]
+    )
+    assert recovered["enrollments"]["16"]["owner_continuations"] == (
+        retained["owner_continuations"]
+    )
+    assert _pull_issue_state(recovered, 17) == accepted_other
+    posts = api.task_posts
+    writes = deepcopy(api.writes)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856900).run(
+        apply=True,
+    )
+    assert api.task_posts == posts
+    assert api.writes == writes
+
+
 def test_owner_recovery_identity_swap_isolated_and_command_rechecked(
         tmp_path, monkeypatch):
     from copy import deepcopy
