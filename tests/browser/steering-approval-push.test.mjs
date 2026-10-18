@@ -76,7 +76,8 @@ test('an open approval expires on time without affecting a parallel approval',as
  }},win);
  try{
   await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
-  await new Promise(resolve=>setTimeout(resolve,350));
+  await waitFor(()=>/Expired/.test(doc.querySelector('[data-approval-id="a"] h3')?.textContent || ''),
+    'the open approval must expire at its deadline');
   assert.match(doc.querySelector('[data-approval-id="a"] h3').textContent,/Expired/);
   assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
   assert.equal(doc.querySelectorAll('[data-approval-id="b"] button').length,2);
@@ -109,7 +110,7 @@ test('an expired timer from a closed chat cannot change a parallel session appro
   await waitFor(()=>doc.querySelector('[aria-label="Second chat"]'));
   doc.querySelector('[aria-label="Second chat"]').click();
   await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
-  await new Promise(resolve=>setTimeout(resolve,350));
+  await waitFor(()=>Date.now()>expires_at*1000+50);
   const cards=doc.querySelectorAll('[data-approval-id="a"]');
   assert.equal(cards.length,1);
   assert.equal(cards[0].closest('.conversation').querySelector('h1').textContent,'Second chat');
@@ -139,7 +140,7 @@ test('approval expiry during a held passkey ceremony prevents the decision POST'
   await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
   doc.querySelector('[data-approval-id="a"] button.primary').click();
   await waitFor(()=>calls.includes('/auth/verify/options'));
-  await new Promise(resolve=>setTimeout(resolve,150));
+  await waitFor(()=>Date.now()>expires_at*1000+20);
   credential.resolve(fakeCredential());
   await waitFor(()=>calls.includes('/auth/verify/finish'));
   await tick();await tick();
