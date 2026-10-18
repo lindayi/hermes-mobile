@@ -33,6 +33,185 @@ for(const status of ['pending','expired'])test(`approval notification opens exac
  }finally{app.destroy();win.close();}
 });
 
+test('a delayed pending approval detail is not actionable after its expiry',async()=>{
+ const list=deferred(),detail=deferred(),calls=[];
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return list.promise;
+  if(p==='/approvals/a')return detail.promise;
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>calls.includes('/approvals/a'));
+  await new Promise(resolve=>setTimeout(resolve,100));
+  detail.resolve({...approvalItem(),status:'pending',expires_at:Date.now()/1000-1});
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"]'));
+  assert.match(doc.querySelector('[data-approval-id="a"] h3').textContent,/Expired/);
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null,'a delayed pending detail cannot expose expired controls');
+  list.resolve({items:[]});
+  assert.equal(calls.some(path=>path.endsWith('/decision')),false);
+ }finally{app.destroy();win.close();}
+});
+
+test('an open approval expires on time without affecting a parallel approval',async()=>{
+ const expires_at=Date.now()/1000+0.3,calls=[];
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:[
+   {...approvalItem(),expires_at},
+   {...approvalItem(),id:'b',request_id:'native-b',expires_at:Date.now()/1000+20}
+  ]};
+  if(p==='/approvals/a')return {...approvalItem(),status:'pending',expires_at};
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+  await new Promise(resolve=>setTimeout(resolve,350));
+  assert.match(doc.querySelector('[data-approval-id="a"] h3').textContent,/Expired/);
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+  assert.equal(doc.querySelectorAll('[data-approval-id="b"] button').length,2);
+  assert.equal(calls.some(path=>path.endsWith('/decision')),false);
+ }finally{app.destroy();win.close();}
+});
+
+test('approval expiry during a held passkey ceremony prevents the decision POST',async()=>{
+ const credential=deferred(),calls=[],expires_at=Date.now()/1000+0.12;
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};
+ win.navigator.credentials={get:()=>credential.promise};
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:[{...approvalItem(),expires_at}]};
+  if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision')return {status:'resolved'};
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+  doc.querySelector('[data-approval-id="a"] button.primary').click();
+  await waitFor(()=>calls.includes('/auth/verify/options'));
+  await new Promise(resolve=>setTimeout(resolve,150));
+  credential.resolve(fakeCredential());
+  await waitFor(()=>calls.includes('/auth/verify/finish'));
+  await tick();await tick();
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,0);
+  assert.match(doc.querySelector('[data-approval-id="a"] h3').textContent,/Expired/);
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+ }finally{app.destroy();win.close();}
+});
+
+test('an answered approval stays final on same-owner sign-in at the retained notification target',async()=>{
+ const calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};
+ win.navigator.credentials={get:async()=>fakeCredential()};
+ let listReads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:++listReads===1?[approvalItem()]:[]};
+  if(p==='/approvals/a')return {...approvalItem(),status:'pending'};
+  if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision')return {status:'resolved'};
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.secondary'));
+  doc.querySelector('[data-approval-id="a"] button.secondary').click();
+  await waitFor(()=>calls.filter(path=>path.endsWith('/decision')).length===1);
+  await tick();
+  doc.querySelector('[data-view="settings"]').click();await tick();
+  await waitFor(()=>doc.querySelector('button.danger'));
+  [...doc.querySelectorAll('button')].find(button=>button.textContent==='Sign out').click();await tick();
+  assert.ok([...doc.querySelectorAll('button')].some(button=>button.textContent==='Sign in with a passkey'));
+  await app.start();await tick();
+  const card=doc.querySelector('[data-approval-id="a"]');
+  assert.ok(card,'the exact target remains visible after same-owner sign-in');
+  assert.match(card.textContent,/Resolved/);
+  assert.equal(card.querySelector('button'),null,'a remembered final approval has no decision controls');
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,1);
+ }finally{app.destroy();win.close();}
+});
+
+for(const revalidated of ['resolved','pending'])test(`empty approval list revalidates a delayed pending detail (${revalidated})`,async()=>{
+ const stale=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ let detailReads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:[]};
+  if(p==='/approvals/a')return ++detailReads===1?stale.promise:{...approvalItem(),status:revalidated};
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>calls.includes('/approvals/a'),`approval detail request missing: ${JSON.stringify(calls)}`);
+  await tick();
+  stale.resolve({...approvalItem(),status:'pending'});
+  await waitFor(()=>detailReads===2);
+  const card=doc.querySelector('[data-approval-id="a"]');
+  assert.ok(card);
+  if(revalidated==='resolved'){
+   assert.match(card.textContent,/Resolved/);
+   assert.equal(card.querySelector('button'),null);
+  }else{
+   assert.match(card.textContent,/Approval required/);
+   assert.equal(card.querySelectorAll('button').length,2,'a genuinely new pending action after an empty snapshot remains actionable');
+  }
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
+test('automatic approval history shares manual loads and refocuses after relocation',async()=>{
+ const older=deferred(),calls=[],scrolls=[];
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.HTMLElement.prototype.scrollIntoView=function(){scrolls.push(this);};
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p==='/sessions/s/messages?latest=true&turn_boundary=true')
+   return {items:[{role:'user',content:'Newer request',run_id:'new',session_id:'s'}],total:11,offset:10};
+  if(p==='/sessions/s/messages?limit=10&offset=0&turn_boundary=true')return older.promise;
+  if(p==='/approvals')return {items:[approvalItem()]};
+  if(p==='/approvals/a')return {...approvalItem(),status:'pending'};
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>calls.includes('/sessions/s/messages?limit=10&offset=0&turn_boundary=true'));
+  doc.querySelector('button[aria-label="Load older messages"]')?.click();
+  [...doc.querySelectorAll('button')].find(button=>button.textContent==='Load older messages')?.click();
+  assert.equal(calls.filter(path=>path==='/sessions/s/messages?limit=10&offset=0&turn_boundary=true').length,1,
+    'manual and automatic requests share the same in-flight page');
+  older.resolve({items:[{role:'user',content:'Original request',run_id:'r',session_id:'s'}],total:11,offset:0});
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"]')?.previousElementSibling?.dataset.historyRun==='r');
+  const card=doc.querySelector('[data-approval-id="a"]');
+  assert.ok(scrolls.filter(node=>node===card).length>=2,'the moved target is scrolled into view after automatic history restoration');
+  assert.equal(doc.querySelectorAll('.user-message').length,2,'the concurrently requested history page is inserted once');
+ }finally{app.destroy();win.close();}
+});
+
 test('opening a canonical chat normally discovers its pending compressed-session approval',async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document;
  const item={...approvalItem(),session_id:'tip',run_session_id:'wa-1'};
