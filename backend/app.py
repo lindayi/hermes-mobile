@@ -304,30 +304,36 @@ def create_app(settings=None, *, gateway_client=None):
             return notification_session(user,session_id) is not None
         return category in ('operational','scheduled','test','approval')
 
-    def valid_request_notification(user_id,delivery_id,session_id,category):
+    def request_notification_binding(user_id,delivery_id,session_id,category):
         from contextlib import closing
         user=notification_user(user_id)
         if not user or not isinstance(delivery_id,str) or not delivery_id.startswith('request:'):
-            return False
+            return None
         parts=delivery_id.split(':')
         if len(parts)!=3 or parts[2] not in ('terminal','unknown'):
-            return False
+            return None
         with closing(journal.connect()) as db:
             row=db.execute('''SELECT r.user_id,r.profile,r.session_id,r.status FROM runs r
                 WHERE r.id=? AND r.user_id=? AND NOT EXISTS
                 (SELECT 1 FROM run_stop_intents WHERE run_id=r.id)''',(parts[1],user_id)).fetchone()
         if not row or row['profile']!=user['profile']:
-            return False
+            return None
         expected=('unknown' if parts[2]=='unknown' and category=='attention' else
                   'completed' if parts[2]=='terminal' and category=='completion' else
                   'failed' if parts[2]=='terminal' and category=='attention' else None)
         if row['status']!=expected:
-            return False
+            return None
         canonical=notification_session(user,row['session_id'])
-        return bool(canonical and canonical==notification_session(user,session_id))
+        if not canonical or canonical!=notification_session(user,session_id):
+            return None
+        return {'session_id':canonical,'run_session_id':row['session_id']}
+
+    def valid_request_notification(user_id,delivery_id,session_id,category):
+        return request_notification_binding(user_id,delivery_id,session_id,category) is not None
 
     notifications.presence_validator=valid_presence
     notifications.request_validator=valid_request_notification
+    notifications.request_target_resolver=request_notification_binding
     notifications.presence_resolver=resolve_presence
     notifications.event_validator=valid_notification_event
     request_notifications=RequestNotificationService(notifications,journal,

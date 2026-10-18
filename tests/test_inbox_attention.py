@@ -206,6 +206,9 @@ def test_request_and_session_approval_rows_are_hidden_without_changing_push_stor
 def test_notification_target_lookup_is_owner_scoped_and_binds_request_or_approval(attention_env):
     service, client, now, user = attention_env
     service.approval_validator = lambda *identity: True
+    service.request_target_resolver = lambda owner, delivery_id, session_id, category: {
+        'session_id': session_id, 'run_session_id': delivery_id.split(':')[1]
+    }
     request = service.ingest(user['id'], 'request:run-1:terminal', 'Finished', 'Public result',
         'chat-1', category='completion')
     failed = service.ingest(user['id'], 'request:run-failed:terminal', 'Needs attention',
@@ -220,13 +223,20 @@ def test_notification_target_lookup_is_owner_scoped_and_binds_request_or_approva
     approval_target = client.get(BASE + f"/inbox/{approval['id']}/target")
 
     assert request_target.status_code == 200
-    assert request_target.json() == {'kind': 'request', 'session_id': 'chat-1', 'run_id': 'run-1'}
-    assert failed_target.json() == {'kind': 'request', 'session_id': 'chat-1', 'run_id': 'run-failed'}
+    assert request_target.json() == {
+        'kind': 'request', 'session_id': 'chat-1', 'run_id': 'run-1', 'run_session_id': 'run-1'
+    }
+    assert failed_target.json() == {
+        'kind': 'request', 'session_id': 'chat-1', 'run_id': 'run-failed',
+        'run_session_id': 'run-failed'
+    }
     assert approval_target.status_code == 200
     assert approval_target.json() == {
         'kind': 'approval', 'session_id': 'chat-1', 'run_id': 'run-2',
         'approval_id': 'approval-2', 'request_id': 'native-2'
     }
     assert client.get(BASE + f"/inbox/{request['id']}/target").status_code == 200
+    service.request_target_resolver = lambda *identity: None
+    assert client.get(BASE + f"/inbox/{request['id']}/target").status_code == 404
     assert client.get(BASE + f"/inbox/{foreign['id']}/target").status_code == 404
     assert client.get(BASE + '/inbox/foreign-notice/target').status_code == 404

@@ -56,9 +56,10 @@ approvals remain visible in Inbox.
 Web Push carries the opaque stored notification ID, not a trusted destination.
 The service worker builds a same-origin `?notification=ID` URL from that ID and
 never uses a payload-supplied URL. After authentication, the API resolves an
-owned notification to its session and run/request identity. Legacy delivered
-`?inbox=ID` links use the same lookup; non-chat notifications retain Inbox.
-Request targets load their exact authorized run and older history as needed.
+owned notification to its current chat and run/request identity, and verifies
+the run's session lineage before returning its source-session binding. Legacy
+delivered `?inbox=ID` links use the same lookup; non-chat notifications retain
+Inbox. Request targets load their exact authorized run and older history as needed.
 Approval targets focus the exact chat card and never decide an action. Opening a
 chat also reconciles pending session approvals, so push is not required to find
 them. The existing step-up, CSRF, owner/run/request binding, expiry and

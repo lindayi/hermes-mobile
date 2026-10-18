@@ -78,6 +78,12 @@ def test_completion_routes_to_current_compression_tip_and_alias_tombstone_fences
     assert len(rows) == 1
     assert rows[0]['session_id'] == 'tip'
     assert app.state.notifications.list_inbox(user['id']) == []
+    with app.state.notifications._db() as db:
+        notice_id = db.execute('SELECT id FROM inbox WHERE user_id=?', (user['id'],)).fetchone()[0]
+    assert client.get(BASE + f'/inbox/{notice_id}/target').json() == {
+        'kind': 'request', 'session_id': 'tip', 'run_id': run['id'],
+        'run_session_id': 'wa-1'
+    }
     assert app.state.notifications.presence_validator(user['id'], 'tip')
     # A live view may retain the original ID after compression.
     assert app.state.notifications.presence_validator(user['id'], 'wa-1')

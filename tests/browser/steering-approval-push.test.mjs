@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {mountApp} from '../../frontend/ui.mjs';
 const {JSDOM}=createRequire('/usr/local/lib/hermes-agent/package.json')('jsdom');
+const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
+const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
+const fakeCredential=()=>({id:'cred',rawId:new Uint8Array([1]).buffer,type:'public-key',getClientExtensionResults:()=>({}),response:{clientDataJSON:new Uint8Array([2]).buffer,authenticatorData:new Uint8Array([3]).buffer,signature:new Uint8Array([4]).buffer,userHandle:null}});
+const approvalItem=()=>({id:'a',run_id:'r',request_id:'native-a',session_id:'s',title:'Execute fixture',command:'echo fixture',target:'fixture target',expires_at:2000000000,executable:true,choices:['once','deny']});
 for(const status of ['pending','expired'])test(`approval notification opens exact chat without deciding (${status})`,async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];let scrolled;
  win.HTMLElement.prototype.scrollIntoView=function(){scrolled=this;};
@@ -31,7 +35,7 @@ for(const status of ['pending','expired'])test(`approval notification opens exac
 test('request notification loads older history and shows its exact run input and result',async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];
  win.HTMLElement.prototype.scrollIntoView=function(){};
- const app=await mountApp(doc,{clear(){},async request(p,o={}){calls.push({p,o});if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'request',session_id:'s',run_id:'old-run'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[{id:20,role:'assistant',content:'A newer response',run_id:'new-run',session_id:'s'}],offset:10,total:11};if(p==='/sessions/s/messages?limit=10&offset=0&turn_boundary=true')return {items:[{id:1,role:'user',content:'The original request',run_id:'old-run',session_id:'s'}],offset:0,total:11};if(p==='/runs/old-run')return {id:'old-run',session_id:'s',input:'The original request',status:'completed',output:'The exact result',created_at:1,updated_at:2};return {items:[]};}},win);
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){calls.push({p,o});if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'request',session_id:'s',run_id:'old-run',run_session_id:'s'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[{id:20,role:'assistant',content:'A newer response',run_id:'new-run',session_id:'s'}],offset:10,total:11};if(p==='/sessions/s/messages?limit=10&offset=0&turn_boundary=true')return {items:[{id:1,role:'user',content:'The original request',run_id:'old-run',session_id:'s'}],offset:0,total:11};if(p==='/runs/old-run')return {id:'old-run',session_id:'s',input:'The original request',status:'completed',output:'The exact result',created_at:1,updated_at:2};return {items:[]};}},win);
  try{
   const target=doc.querySelector('[data-notification-run="old-run"]');
   assert.ok(target);
@@ -41,5 +45,81 @@ test('request notification loads older history and shows its exact run input and
   assert.ok(target.previousElementSibling?.textContent.includes('The original request'),'target is placed next to its original turn');
   assert.equal(doc.querySelector('h1').textContent,'Exact chat title');
   assert.equal(calls.some(call=>call.p==='/inbox'),false);
+ }finally{app.destroy();win.close();}
+});
+
+test('request notification follows verified compression lineage',async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];
+ let focused;
+ Object.defineProperty(win.HTMLElement.prototype,'scrollHeight',{configurable:true,get(){return this.classList?.contains('messages')?1000:0;}});
+ Object.defineProperty(win.HTMLElement.prototype,'clientHeight',{configurable:true,get(){return this.classList?.contains('messages')?300:0;}});
+ win.HTMLElement.prototype.scrollIntoView=function(){focused=this;const messages=this.closest('.messages');if(messages)messages.scrollTop=500;};
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){calls.push({p,o});if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'request',session_id:'tip',run_id:'old-run',run_session_id:'wa-1'};if(p==='/sessions/tip')return {id:'tip',title:'Exact chat title'};if(p==='/sessions/tip/messages?latest=true&turn_boundary=true')return {items:[],offset:0,total:0};if(p==='/runs/old-run')return {id:'old-run',session_id:'wa-1',input:'Original request',status:'completed',output:'The exact result',created_at:1,updated_at:2};return {items:[]};}},win);
+ try{
+  const target=doc.querySelector('[data-notification-run="old-run"]'),messages=doc.querySelector('.messages');
+  assert.ok(target);
+  assert.equal(focused,target);
+  assert.equal(messages.scrollTop,500,'compressed run history must route to its authorized current chat');
+ }finally{app.destroy();win.close();}
+});
+
+test('active run does not reset a request target and following resumes at the bottom',async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ Object.defineProperty(win.HTMLElement.prototype,'scrollHeight',{configurable:true,get(){return this.classList?.contains('messages')?1000:0;}});
+ Object.defineProperty(win.HTMLElement.prototype,'clientHeight',{configurable:true,get(){return this.classList?.contains('messages')?300:0;}});
+ win.HTMLElement.prototype.scrollIntoView=function(){const messages=this.closest('.messages');if(messages)messages.scrollTop=500;};
+ class Events{constructor(){this.listeners={};win.activeStream=this;}addEventListener(name,fn){this.listeners[name]=fn;}emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}close(){}}
+ win.EventSource=Events;
+ const app=await mountApp(doc,{clear(){},async request(p){if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'request',session_id:'s',run_id:'old-run',run_session_id:'s'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],offset:0,total:0,run:{id:'new-run',session_id:'s',status:'running',input:'Newer request'}};if(p==='/runs/old-run')return {id:'old-run',session_id:'s',input:'Original request',status:'completed',output:'The exact result',created_at:1,updated_at:2};return {items:[]};}},win);
+ try{
+  const messages=doc.querySelector('.messages');
+  assert.equal(messages.scrollTop,500,'restoration must preserve the request target over the newer active run');
+  messages.scrollTop=700;
+  win.activeStream.emit('delta',{text:'More output'});
+  assert.equal(messages.scrollTop,1000,'following resumes after the reader returns to the bottom');
+ }finally{app.destroy();win.close();}
+});
+
+test('navigation during approval reconciliation cannot mount a stale chat',async()=>{
+ const gate=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const mounted=mountApp(doc,{clear(){},async request(p){calls.push(p);if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],offset:0,total:0};if(p==='/approvals')return gate.promise;if(p==='/approvals/a')throw Object.assign(new Error('unavailable'),{status:404});return {items:[]};}},win);
+ try{
+  while(!calls.includes('/approvals'))await tick();
+  doc.querySelector('[data-view="chats"]').click();
+  await tick();
+  gate.resolve({items:[]});
+  const app=await mounted;await tick();
+  assert.ok(doc.querySelector('.session-list'));
+  assert.equal(doc.querySelector('.conversation'),null);
+  app.destroy();
+ }finally{win.close();}
+});
+
+test('late approval detail 401 cannot expire a newer route',async()=>{
+ const gate=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const mounted=mountApp(doc,{clear(){},async request(p){calls.push(p);if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],offset:0,total:0};if(p==='/approvals')return {items:[]};if(p==='/approvals/a')return gate.promise;return {items:[]};}},win);
+ try{
+  while(!calls.includes('/approvals/a'))await tick();
+  doc.querySelector('[data-view="chats"]').click();await tick();
+  gate.reject(Object.assign(new Error('expired'),{status:401}));
+  const app=await mounted;await tick();
+  assert.equal(app.state.user?.id,'owner');
+  assert.equal(doc.querySelector('.session-list')!==null,true);
+  assert.equal(doc.querySelector('[aria-label="Sign in with a passkey"]'),null);
+  app.destroy();
+ }finally{win.close();}
+});
+
+test('unchanged approval survives a focus refresh during passkey verification',async()=>{
+ const credential=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};
+ win.navigator.credentials={get:()=>credential.promise};
+ const app=await mountApp(doc,{clear(){},async request(p){calls.push(p);if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],offset:0,total:0};if(p==='/approvals')return {items:[approvalItem()]};if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};if(p==='/auth/verify/finish')return {ok:true};if(p==='/approvals/a/decision')return {status:'resolved'};return {items:[]};}},win);
+ try{
+  doc.querySelector('[data-approval-id="a"] button').click();
+  while(!calls.includes('/auth/verify/options'))await tick();
+  win.dispatchEvent(new win.Event('focus'));await tick();
+  credential.resolve(fakeCredential());await tick();await tick();
+  assert.equal(calls.filter(path=>path==='/approvals/a/decision').length,1);
  }finally{app.destroy();win.close();}
 });

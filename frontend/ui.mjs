@@ -847,7 +847,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       messages.removeEventListener('keydown',markInitialScrollIntent);
       messages.removeEventListener('scroll',noteInitialScroll);
     };
-    const shouldFollowInitialRestore=()=>!notificationTarget
+    const shouldFollowInitialRestore=()=>(!notificationTarget || !initialRestorePending)
       && messages.scrollHeight-messages.scrollTop-messages.clientHeight<100
       && !win.getSelection()?.toString() && (!initialRestorePending || !initialScrollAway);
     stopDisclosureReachability=observeDisclosureReachability(messages,current);
@@ -922,7 +922,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       try{
         const run=await api.request(`/runs/${encodeURIComponent(notificationTarget.run_id)}`);
         if(!current())return;
-        if(run?.id!==notificationTarget.run_id || run.session_id!==session.id
+        if(run?.id!==notificationTarget.run_id || run.session_id!==notificationTarget.run_session_id
+            || notificationTarget.session_id!==session.id
             || typeof run.input!=='string' || !run.input.trim())throw new Error('Request identity mismatch.');
         const findAnchor=()=>[...messages.querySelectorAll('[data-history-run]')]
           .find(node=>node.dataset.historyRun===run.id && node.dataset.historySession===session.id);
@@ -1107,10 +1108,17 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const revision=++approvalRevision;
       try{
         const data=await api.request('/approvals');
-        if(version!==routeVersion || revision!==approvalRevision || !Array.isArray(data.items))return;
+        if(!current() || revision!==approvalRevision || !Array.isArray(data.items))return;
         const items=data.items.filter(item=>(item.run_id===currentApprovalRun || item.session_id===session.id)
           && !handledApprovals.has(approvalKey(item)));
-        const next=new Map(items.map(item=>[approvalKey(item),item]));
+        const next=new Map(items.map(item=>{
+          const key=approvalKey(item),previous=approvalPending.get(key);
+          const unchanged=previous && [
+            'id','run_id','request_id','session_id','status','title','command','action',
+            'target','expires_at','executable','choices','error','details_unavailable'
+          ].every(field=>JSON.stringify(previous[field])===JSON.stringify(item[field]));
+          return [key,unchanged?previous:item];
+        }));
         for(const [key,item] of approvalPending)if(!next.has(key)){
           handledApprovals.add(key);
           if(!approvalFinals.has(key))approvalFinals.set(key,'unavailable');
@@ -1119,7 +1127,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         for(const [key,item] of next){approvalItems.set(key,item);approvalFinals.delete(key);}
         genericApproval=false;renderApprovals();
         if(next.size)connection.run('waiting_for_approval');
-      }catch(error){if(version===routeVersion && error.status===401)expiredSession();}
+      }catch(error){if(current() && error.status===401)expiredSession();}
     };
     approvalState={
       reconcile:reconcileApprovals,
@@ -1142,6 +1150,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     win.addEventListener('focus',reconcileApprovals);stopExtras=()=>{approvalRevision++;win.removeEventListener('focus',reconcileApprovals);};
     await reconcileApprovals();
+    if(!current())return;
     if(notificationTarget?.kind==='approval'){
       const target=notificationTarget;
       const targetKey=[...approvalItems].find(([,item])=>item.id===target.approval_id
@@ -1159,7 +1168,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             else approvalFinals.set(key,item.status);
             renderApprovals();
           }
-        }catch(error){if(error.status===401){expiredSession();return;}}
+        }catch(error){if(!current())return;if(error.status===401){expiredSession();return;}}
       }
       const card=[...approvalCards.values()].find(node=>node.dataset.approvalId===target.approval_id);
       if(card){card.scrollIntoView?.({block:'center'});card.focus();}
@@ -1576,7 +1585,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(result.run) {
         messages.querySelector('.empty')?.remove();
         messages.append(renderMessage({role:'user',content:result.run.input,timestamp:result.run.created_at,run_id:result.run.id,session_id:session.id,attachments:result.run.attachments}),...renderReminders(result.run));
-        messages.scrollTop=messages.scrollHeight;
+        if(!notificationTarget)messages.scrollTop=messages.scrollHeight;
         await trackRun(result.run,messages,composerAction,result.tool_replay,{follow:shouldFollowInitialRestore,finish:finishInitialRestore});
       } else if(result.last_run?.status==='unknown') {
         composerAction.set('unknown');

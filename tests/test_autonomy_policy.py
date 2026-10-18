@@ -317,6 +317,12 @@ _ISSUE98_PHOTO_POLICY_FIXTURE = {
     'backend/runs.py': 'be188d9897ff925fc55677881b380bba5f97f3c5d6b3ae3d6e7faca72c3d8464',
 }
 
+_PR119_NOTIFICATION_FOLLOWUP_FIXTURE = {
+    'backend/app.py': 'f143fe0f6bfd89cbe266a128d257270fae44c983c67e08760c01a0ea72cb1ba5',
+    'backend/notifications.py': '42de0bcae886c139aa61ea23ef4dd0a24cc17a8d338ab3edbfeadd6b47a70935',
+    'backend/orchestration.py': '82589613f732673df5c17b7add63fb127fac5084919562e00768a36c118c362b',
+}
+
 
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _ISSUE52_MERGED_MAIN_BASE_FIXTURE
@@ -337,7 +343,8 @@ def _source_files():
             | _PR105_OWNER_ABANDONMENT_FIXTURE
             | _ISSUE111_OWNER_CONTINUATION_FIXTURE
             | _ISSUE108_PR109_PR112_MERGED_FIXTURE
-            | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE)
+            | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE
+            | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE)
 
 
 def _source_ci():
@@ -815,6 +822,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_ISSUE85_PHOTO_FIXTURE)
     pending |= set(_ISSUE98_PHOTO_POLICY_FIXTURE)
     pending |= set(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)
+    pending |= set(_PR119_NOTIFICATION_FOLLOWUP_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
@@ -889,6 +897,12 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         if path in _PENDING_ISSUE67_WORKFLOW_FIXTURE
     } == _PENDING_ISSUE67_WORKFLOW_FIXTURE
     assert {
+        path: SOURCE_FINGERPRINTS[path] for path in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
+    } == _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
+    for path, digest in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE.items():
+        source = Path(__file__).resolve().parents[1] / path
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
+    assert {
         path: SOURCE_FINGERPRINTS[path] for path in _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
     } == _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
     assert {
@@ -909,11 +923,12 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     } == {
         path: digest for path, digest in (
             _PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
-            | _ISSUE98_PHOTO_POLICY_FIXTURE
+            | _ISSUE98_PHOTO_POLICY_FIXTURE | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
         ).items() if path in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
     }
     for path, digest in (_PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
-                         | _ISSUE98_PHOTO_POLICY_FIXTURE).items():
+                         | _ISSUE98_PHOTO_POLICY_FIXTURE
+                         | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {

@@ -39,6 +39,25 @@ def test_new_approval_creates_owned_deduplicated_notification(tmp_path):
         assert not calls
 
 
+def test_approval_details_respect_run_session_deletion_fence(tmp_path):
+    from contextlib import closing
+
+    with environment(tmp_path) as (app,client,user,rid,_):
+        runtime=app.state.orchestrator
+        runtime._approval(user,runtime.get(user,rid),{
+            'event':'approval.request','request_id':'delete-fence','run_id':'native-run',
+            'command':'private action details'})
+        approval_id=runtime.approvals(user)['items'][0]['id']
+        with closing(app.state.journal.connect()) as db, db:
+            db.execute('INSERT INTO session_deletions VALUES(?,?,?,?,?,?)',
+                       (user['id'],user['profile'],'wa-1','deletion-operation','deleted',1))
+
+        response=client.get(BASE+f'/approvals/{approval_id}')
+
+        assert response.status_code==409
+        assert 'private action details' not in response.text
+
+
 def test_cross_database_failure_leaves_retryable_intent_not_historical_sweep(tmp_path):
     with environment(tmp_path) as (app,client,user,rid,_):
         runtime=app.state.orchestrator

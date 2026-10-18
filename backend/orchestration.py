@@ -942,6 +942,7 @@ class Orchestrator:
                 (approval_id, user['id'], user['profile'])).fetchone()
         if row is None:
             raise KeyError(approval_id)
+        self.get(user, row['run_id'])
         status = row['status']
         if (status == 'pending' and type(row['expires_at']) in (int, float)
                 and row['expires_at'] <= time.time()):
