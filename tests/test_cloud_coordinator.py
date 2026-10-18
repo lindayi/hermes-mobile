@@ -26537,12 +26537,12 @@ def test_units_are_templates_only_and_apply_is_explicit():
 @pytest.mark.parametrize("status", ["pending", "sending", "uncertain"])
 @pytest.mark.parametrize("proof", ["owner", "stranger", "missing-user", "missing-id", "string-id", "edited"])
 def test_outbox_reconciliation_requires_owner_and_exact_published_body(tmp_path, status, proof):
-    api = FakeApi(sensitive=True)
+    api = FakeApi(sensitive=True, strict_protection=False)
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store)
     plan = coordinator._build_plan(apply=False)
     key, entry = next((key, entry) for key, entry in plan["pull_requests"][0]["outcomes"]
-                      if key.endswith(":sensitive"))
+                      if key.endswith(":up-to-date-policy"))
     assert store.add_outbox(key, entry)
     store.update_outbox(key, status)
     comment = {"id": 200, "user": {"id": OWNER}, "body": entry["body"],
@@ -26588,7 +26588,7 @@ def test_outbox_write_response_requires_same_owner_publication_proof(tmp_path, p
                     response["body"] = "changed " + body["body"]
             return response
 
-    api = UnprovenComment(sensitive=True)
+    api = UnprovenComment(sensitive=True, strict_protection=False)
     path = tmp_path / "state.json"
     Coordinator(api, StateStore(path)).run(apply=True)
     assert {entry["status"] for entry in StateStore(path).snapshot()["outbox"].values()} == {"uncertain"}
@@ -26857,7 +26857,7 @@ class RecordingApi(FakeApi):
 def test_terminal_records_compact_across_heads_without_duplicate_writes(tmp_path, monkeypatch):
     import deploy.cloud_coordinator as coordinator_module
     monkeypatch.setattr(coordinator_module, "TOMBSTONE_LIMIT", 8)
-    api = RecordingApi()
+    api = RecordingApi(strict_protection=False)
     api.sensitive = True
     path = tmp_path / "state.json"
 
@@ -26875,7 +26875,11 @@ def test_terminal_records_compact_across_heads_without_duplicate_writes(tmp_path
         assert {entry["head"] for entry in state["outbox"].values()} == {head}
         assert {action["head"] for action in state["actions"].values()} <= {head}
     assert sizes[-1] < coordinator_module.MAX_STATE_BYTES
-    assert len(StateStore(path).snapshot()["lifecycle_events"]) == len(heads)
+    # A persistent policy incident retains its first observation across heads.
+    events = StateStore(path).snapshot()["lifecycle_events"]
+    assert len(events) == 1
+    assert events[0]["reason"] == "policy_broken"
+    assert events[0]["head_sha"] == heads[0]
     retired = json.loads(path.read_text())["retired"]["16"]
     assert len(retired["outbox"]) <= 8 and len(retired["actions"]) <= 8
     assert retired["status_generation"] == 0  # Review statuses are no longer generated.

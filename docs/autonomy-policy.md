@@ -129,13 +129,16 @@ behavioral contracts remain specified in
 
 ### Issue #115 current coordinator source pin
 
-The current autonomy-policy source pin reflects the issue #115 coordinator bytes.
+The current autonomy-policy source pins reflect the issue #115 coordinator and
+review-evidence bytes. Supplied review edit metadata must still prove an unchanged
+submission; retiring sensitive grants does not waive current-review validity.
 It is a source-integrity value only, not exact-head review, CI, merge, or deployment
 evidence.
 
 | Current source path | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `389357ae2d58412f5cf0848e61caa83c972f16e4d5df5fe93e58c478d238c7a8` |
+| `deploy/review_evidence.py` | `697cf833a005146a354d399f62252c64e64103c73febd8762fbdc271244821be` |
 
 ### Historical Issue #106 verification-status parser overlay
 

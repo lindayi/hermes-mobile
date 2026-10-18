@@ -94,12 +94,14 @@ def test_plan_is_not_request_evidence_and_superseded_apply_reports_no_request(tm
 
 @pytest.mark.parametrize("fence", [
     "head", "main", "head-repo", "base-repo", "base-ref", "draft",
-    "review", "threads", "checks", "task", "strict", "conversation", "sensitive",
+    "review", "threads", "checks", "task", "strict", "conversation",
     "owner", "repository",
 ])
-def test_recovery_rechecks_fresh_fences_after_planning(tmp_path, fence):
+@pytest.mark.parametrize("sensitive", [False, True])
+def test_recovery_rechecks_fresh_fences_after_planning(tmp_path, fence, sensitive):
     api, store, coordinator, plan = setup_plan(tmp_path)
     supersede(api, store, coordinator, plan)
+    api.sensitive = sensitive
     plan = coordinator._build_plan(apply=False)
     original_get = api.get
     if fence == "head":
@@ -120,8 +122,6 @@ def test_recovery_rechecks_fresh_fences_after_planning(tmp_path, fence):
         api.strict_protection = False
     elif fence == "conversation":
         api.conversation_resolution = False
-    elif fence == "sensitive":
-        api.sensitive = True
     else:
         route = "user" if fence == "owner" else "repos/lindayi/hermes-mobile"
         api.get = lambda path: {"id": 1} if path == route else original_get(path)
@@ -151,6 +151,27 @@ def test_recovery_rechecks_fresh_fences_after_planning(tmp_path, fence):
         if fence in {"head-repo", "base-repo", "base-ref"}:
             assert injected
     assert not api.graphql_writes
+
+
+def test_recovery_allows_fresh_sensitive_paths_without_separate_owner_grant(tmp_path):
+    api, store, coordinator, plan = setup_plan(tmp_path)
+    action = supersede(api, store, coordinator, plan)
+    plan = coordinator._build_plan(apply=False)
+    api.sensitive = True
+
+    summary = coordinator._apply(plan)[0]
+
+    assert summary["auto_merge_requested"] is True
+    assert summary["auto_merge_eligible"] is True
+    assert len(api.graphql_writes) == 1
+    assert api.graphql_writes[0][1]["expectedHeadOid"] == HEAD
+    assert store.action(action["key"])["status"] == "sent"
+    enrollment = store.snapshot()["enrollments"]["16"]
+    assert enrollment["sensitive_sha"] is None
+    assert enrollment["sensitive_authorization"] is None
+    assert not any(key.endswith(":sensitive") for key in store.snapshot()["outbox"])
+    Coordinator(api, StateStore(store.path)).run(apply=True)
+    assert len(api.graphql_writes) == 1
 
 
 @pytest.mark.parametrize("fence", ["head-repo", "base-repo", "base-ref", "malformed-repo"])

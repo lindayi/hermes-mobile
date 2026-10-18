@@ -75,7 +75,8 @@ the exact head and base, plus complete authenticated task/session evidence
 showing no active or unknown task occupancy and certain source receipt and
 reservation provenance. Verify fresh-main ancestry, all three current exact-head
 required checks, and the same-run complete `source-ci` aggregate. Do not collect or
-revalidate a separate sensitive owner command.
+revalidate a separate sensitive owner command. Preserve the SHA-256 of the exact
+raw UTF-8 review body in the qualification evidence.
 
 The record preserves the exact bot prose and the operator's reasoned
 disposition. Any head, base, review, or provenance change invalidates it;
@@ -265,7 +266,8 @@ Named object types, with all keys mandatory:
   `authorization_result` (enum `accepted`, `rejected`, `missing`, `unknown`,
   `not-required`), `blocked_reason` (Text). Authorization observations are
   historical only; current qualification does not collect a sensitive grant.
-  Record actual parser/collector disposition and observed source revision and time.
+  Record actual machine acceptance or rejection, including the parser/collector
+  disposition and observed source revision and time.
   Each reference names a machine manifest for that actual observation.
   An unavailable observation is `unknown`, never inferred acceptance.
 - Evidence is a discriminated union, selected by `type`. Each alternative has
@@ -777,6 +779,8 @@ The retained `selected_copilot_sensitive_review` and
 only. Current coordinator and eligibility paths do not call them. The existing
 prose parser and exact-head Copilot review checks remain independent requirements;
 missing or invalid review evidence still blocks.
+Historical sensitive review selection does not call the prose parser; retaining
+that helper does not grant current review or merge authority.
 
 Immediately before any merge, perform and publish fresh complete revalidation,
 including readback of every prior event and absence of competing successors.

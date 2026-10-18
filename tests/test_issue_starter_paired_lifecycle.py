@@ -22,6 +22,7 @@ def genuine_review(api, head, *, state="COMMENTED"):
     api.review_sha = head
     api.review_state = state
     api.review_submitted_at = "2026-10-02T11:00:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.missing_review = False
 
 
@@ -206,8 +207,10 @@ def test_bound_result_head_clears_sensitive_authorization(tmp_path):
     finish(api, action)
     api.unresolved = False
     result = worker.run(apply=True)["pull_requests"][0]
-    assert "sensitive" in result["reasons"]
-    assert not result["auto_merge_requested"]
+    assert "sensitive" not in result["reasons"]
+    assert result["auto_merge_requested"]
+    assert not any(event["reason"] == "sensitive_approval"
+                   for event in store.snapshot()["lifecycle_events"])
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
     enrollment = store.snapshot()["enrollments"]["16"]
     assert enrollment["sensitive_authorization"] is None

@@ -295,6 +295,10 @@ def current_copilot_review_valid(reviews, head_sha, *, pull_author_id, complete=
         and review.get("commit_id") == head_sha
         and review.get("dismissed") is not True
         and review.get("dismissed_at") in (None, "")
+        and (not any(key in review for key in (
+            "updatedAt", "lastEditedAt", "includesCreatedEdit",
+            "updated_at", "last_edited_at", "includes_created_edit",
+        )) or _review_submission(review) is not None)
         for review in selected
     )
 

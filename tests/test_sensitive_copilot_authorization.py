@@ -293,7 +293,8 @@ def test_sensitive_repair_uses_enrollment_without_merge_authorization(tmp_path):
 
 @pytest.mark.parametrize('boundary', ['command', 'review'])
 @pytest.mark.parametrize('status', [None, 429, 500])
-def test_transient_authorization_evidence_failure_preserves_state(tmp_path, monkeypatch, boundary, status):
+def test_obsolete_command_is_not_revalidated_but_review_failures_preserve_state(
+        tmp_path, monkeypatch, boundary, status):
     from deploy.cloud_coordinator import ApiError
     api = SensitiveCopilotApi()
     path = tmp_path / 'state.json'
@@ -303,9 +304,11 @@ def test_transient_authorization_evidence_failure_preserves_state(tmp_path, monk
     api.graphql_writes.clear()
     get = api.get
     graphql = api.graphql
+    command_reads = []
 
     def failing_get(route):
         if route.endswith(f'/issues/comments/{OWNER_COMMAND_ID}'):
+            command_reads.append(route)
             raise ApiError('synthetic temporary outage', status=status)
         return get(route)
 
@@ -316,9 +319,18 @@ def test_transient_authorization_evidence_failure_preserves_state(tmp_path, monk
 
     monkeypatch.setattr(api, 'get' if boundary == 'command' else 'graphql',
                         failing_get if boundary == 'command' else failing_graphql)
-    with pytest.raises(ApiError, match='temporary outage'):
-        Coordinator(api, StateStore(path)).run(apply=True)
-    assert path.read_bytes() == before
+    if boundary == 'review':
+        with pytest.raises(ApiError, match='temporary outage'):
+            Coordinator(api, StateStore(path)).run(apply=True)
+        assert path.read_bytes() == before
+    else:
+        enrollment = StateStore(path).snapshot()['enrollments']['16']
+        result = Coordinator(api, StateStore(path)).run(apply=True)['pull_requests'][0]
+        assert StateStore(path).snapshot()['enrollments']['16'] == enrollment
+        assert command_reads == []
+        assert 'sensitive' not in result['reasons']
+        assert not result['auto_merge_eligible']
+        assert api.fix_attempts == 1
     assert api.writes == api.graphql_writes == []
 
 
@@ -329,26 +341,31 @@ def test_transient_authorization_evidence_failure_preserves_state(tmp_path, monk
     ('created_at', 'invalid'), ('updated_at', {}), ('id', True),
     ('issue_url', []),
 ])
-def test_malformed_current_comment_preserves_durable_authorization(tmp_path, field, malformed):
-    from deploy.cloud_coordinator import ApiError
+def test_obsolete_current_comment_is_not_read_and_preserves_history(tmp_path, field, malformed):
     api = SensitiveCopilotApi()
     path = tmp_path / 'state.json'
     Coordinator(api, StateStore(path)).run(apply=True)
-    before = path.read_bytes()
+    before = StateStore(path).snapshot()['enrollments']['16']
     api.writes.clear()
     api.graphql_writes.clear()
     get = api.get
+    command_reads = []
 
     def malformed_get(route):
         value = get(route)
         if route.endswith(f'/issues/comments/{OWNER_COMMAND_ID}'):
+            command_reads.append(route)
             return malformed if field is None else value | {field: malformed}
         return value
 
     api.get = malformed_get
-    with pytest.raises(ApiError, match='^Malformed current owner-comment response$'):
-        Coordinator(api, StateStore(path)).run(apply=True)
-    assert path.read_bytes() == before
+    result = Coordinator(api, StateStore(path)).run(apply=True)['pull_requests'][0]
+    assert command_reads == []
+    assert StateStore(path).snapshot()['enrollments']['16'] == before
+    assert before['sensitive_authorization']['review_id'] == REVIEW_ID
+    assert 'sensitive' not in result['reasons']
+    assert not result['auto_merge_eligible']
+    assert api.fix_attempts == 1
     assert api.writes == api.graphql_writes == []
 
 
@@ -432,5 +449,6 @@ def test_changed_head_revokes_copilot_authorization_after_restart(tmp_path):
     assert enrollment["sensitive_sha"] is None
     assert enrollment["sensitive_authorization"] is None
     assert enrollment["targeted_review"] is None
-    assert "sensitive" in result["pull_requests"][0]["reasons"]
+    assert "sensitive" not in result["pull_requests"][0]["reasons"]
+    assert "review" in result["pull_requests"][0]["reasons"]
     assert api.fix_attempts == 1

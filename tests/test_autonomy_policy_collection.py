@@ -253,12 +253,20 @@ def test_final_collection_fences_fail_closed(collection, capsys, hazard):
     assert api.writes == api.graphql_writes == []
 
 
-@pytest.mark.parametrize('hazard', ['edited-review', 'pending-check', 'partial-checks', 'malformed-check'])
+@pytest.mark.parametrize('hazard', ['edited-review', 'stale-review', 'pending-check',
+                                  'partial-checks', 'malformed-check',
+                                  'updated-review', 'created-edit'])
 def test_real_snapshot_review_and_check_contracts_remain_blocking(collection, capsys, hazard):
     api, _, state_path, _, args, _ = collection
     before = state_path.read_bytes()
     if hazard == 'edited-review':
         api.copilot_review_last_edited_at = '2026-10-02T00:00:00Z'
+    elif hazard == 'stale-review':
+        api.review_sha = 'e' * 40
+    elif hazard == 'updated-review':
+        api.copilot_review_updated_at = '2026-10-02T00:00:00Z'
+    elif hazard == 'created-edit':
+        api.copilot_review_includes_created_edit = True
     elif hazard == 'pending-check':
         api.pending_required = True
     else:
@@ -289,7 +297,7 @@ def test_offline_cli_does_not_construct_transport(collection, monkeypatch, capsy
     report = json.loads(capsys.readouterr().out)
     assert report['ready'] is True
     assert report['blockers'] == []
-    assert 'evidence' in report
+    assert 'evidence' not in report
 
 
 @pytest.mark.parametrize('flag', ['--state', '--pull', '--head'])

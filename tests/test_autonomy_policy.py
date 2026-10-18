@@ -258,6 +258,7 @@ _ISSUE108_PR109_PR112_MERGED_FIXTURE = {
 
 _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE = {
     'deploy/cloud_coordinator.py': '389357ae2d58412f5cf0848e61caa83c972f16e4d5df5fe93e58c478d238c7a8',
+    'deploy/review_evidence.py': '697cf833a005146a354d399f62252c64e64103c73febd8762fbdc271244821be',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
@@ -771,20 +772,29 @@ def test_historical_issue111_candidate_table_preserves_its_source_pins():
         assert f'| `{path}` | `{digest}` |' in section
 
 
-def test_merged_candidate_table_matches_source_bytes():
+def test_merged_candidate_table_preserves_historical_source_pins():
     root = Path(__file__).resolve().parents[1]
     docs = (root / 'docs/autonomy-policy.md').read_text()
     section = docs.split(
         '### Issue #108 PR #109 and PR #112 merged candidate', 1,
     )[1].split('### Retained merged source and deliberate native refreshes', 1)[0]
-    for path in _ISSUE108_PR109_PR112_MERGED_FIXTURE:
-        digest = hashlib.sha256((root / path).read_bytes()).hexdigest()
+    for path, digest in _ISSUE108_PR109_PR112_MERGED_FIXTURE.items():
         assert f'| `{path}` | `{digest}` |' in section
     receipt_actual = hashlib.sha256((root / 'deploy/task_receipts.py').read_bytes()).hexdigest()
     assert [line for line in section.splitlines()
             if line.startswith('| `deploy/task_receipts.py` |')] == [
         f'| `deploy/task_receipts.py` | `{receipt_actual}` |',
     ]
+
+
+def test_issue115_candidate_table_matches_source_bytes():
+    root = Path(__file__).resolve().parents[1]
+    docs = (root / 'docs/autonomy-policy.md').read_text()
+    section = docs.split('### Issue #115 current coordinator source pin', 1)[1].split(
+        '\n### ', 1)[0]
+    for path, digest in _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE.items():
+        assert digest == hashlib.sha256((root / path).read_bytes()).hexdigest()
+        assert f'| `{path}` | `{digest}` |' in section
 
 
 def test_reviewed_source_fixture_matches_complete_required_contract():
@@ -822,13 +832,13 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         if path in {'deploy/cloud_coordinator.py', 'deploy/issue_starter.py',
                     'deploy/review_evidence.py'}
     } == {
-        'deploy/cloud_coordinator.py': _ISSUE108_PR109_PR112_MERGED_FIXTURE[
+        'deploy/cloud_coordinator.py': _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE[
             'deploy/cloud_coordinator.py'
         ],
         'deploy/issue_starter.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
             'deploy/issue_starter.py'
         ],
-        'deploy/review_evidence.py': _ISSUE106_REVIEW_SUMMARY_FIXTURE[
+        'deploy/review_evidence.py': _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE[
             'deploy/review_evidence.py'
         ],
     }
@@ -864,6 +874,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
             | _PR105_OWNER_ABANDONMENT_FIXTURE
             | _ISSUE111_OWNER_CONTINUATION_FIXTURE
             | _ISSUE108_PR109_PR112_MERGED_FIXTURE
+            | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE
         ).items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
     }
@@ -912,7 +923,8 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
           | _ISSUE106_REVIEW_SUMMARY_FIXTURE
           | _PR105_OWNER_ABANDONMENT_FIXTURE
           | _ISSUE111_OWNER_CONTINUATION_FIXTURE
-          | _ISSUE108_PR109_PR112_MERGED_FIXTURE)
+          | _ISSUE108_PR109_PR112_MERGED_FIXTURE
+          | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE)
     for path, digest in (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
                          | _ISSUE92_COPILOT_REVIEW_FIXTURE
                          | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
@@ -979,7 +991,7 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
     | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
     | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
     | _PR105_OWNER_ABANDONMENT_FIXTURE | _ISSUE111_OWNER_CONTINUATION_FIXTURE
-    | _ISSUE108_PR109_PR112_MERGED_FIXTURE,
+    | _ISSUE108_PR109_PR112_MERGED_FIXTURE | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
 def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
@@ -1003,7 +1015,8 @@ def test_issue83_initial_review_pin_matches_actual_candidate_bytes(path, pins):
     SOURCE_FINGERPRINTS, _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
     | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
     | _ISSUE106_REVIEW_SUMMARY_FIXTURE | _PR105_OWNER_ABANDONMENT_FIXTURE
-    | _ISSUE111_OWNER_CONTINUATION_FIXTURE | _ISSUE108_PR109_PR112_MERGED_FIXTURE,
+    | _ISSUE111_OWNER_CONTINUATION_FIXTURE | _ISSUE108_PR109_PR112_MERGED_FIXTURE
+    | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE))
 def test_issue87_bounded_repair_pin_matches_actual_candidate_bytes(path, pins):
@@ -1867,6 +1880,25 @@ def test_copilot_comment_or_approval_is_required(state):
     assert _blockers(evidence) == set()
     review['reviews'] = [item for item in review['reviews']
                          if item['user']['id'] != COPILOT_REVIEWER_ID]
+    assert _blockers(evidence) == {'copilot-review'}
+
+
+@pytest.mark.parametrize('metadata', [
+    {'updatedAt': '2026-10-01T21:01:00Z'},
+    {'updatedAt': None},
+    {'lastEditedAt': '2026-10-01T21:01:00Z'},
+    {'includesCreatedEdit': True},
+    {'updated_at': '2026-10-01T21:01:00Z'},
+    {'last_edited_at': '2026-10-01T21:01:00Z'},
+    {'includes_created_edit': True},
+])
+def test_supplied_copilot_edit_metadata_must_prove_unchanged_submission(metadata):
+    evidence = _evidence()
+    review = evidence['copilot_review']['reviews'][0]
+    review.update(updatedAt=review['submitted_at'], lastEditedAt=None,
+                  includesCreatedEdit=False)
+    assert _blockers(evidence) == set()
+    review.update(metadata)
     assert _blockers(evidence) == {'copilot-review'}
 
 

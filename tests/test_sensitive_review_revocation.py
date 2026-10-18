@@ -1,4 +1,4 @@
-"""PR44: selected-review revocation must reach the existing owner Inbox."""
+"""Legacy sensitive authorization history never requests a new owner approval."""
 import json
 import os
 import sqlite3
@@ -58,25 +58,27 @@ def test_regressions_revocation_commits_before_export(tmp_path, change):
         store._save(data)
     else:
         api.revocation = change
+    historical = store.snapshot()["enrollments"]["16"]
     before = store.path.read_bytes()
-    # Read-only planning may deny, but never modifies durable authorization.
+    # Read-only planning still enforces review/CI without changing history.
     result = Coordinator(api, store, clock=lambda: NOW + 1).run()
-    assert "sensitive" in result["pull_requests"][0]["reasons"]
+    assert "sensitive" not in result["pull_requests"][0]["reasons"]
+    assert "checks" in result["pull_requests"][0]["reasons"]
+    if change != "legacy":
+        assert "review" in result["pull_requests"][0]["reasons"]
     assert store.path.read_bytes() == before
     result = Coordinator(api, StateStore(store.path), clock=lambda: NOW + 2,
                          owner_user_id="synthetic-mobile-owner").run(apply=True)
     enrollment = store.snapshot()["enrollments"]["16"]
-    assert enrollment["sensitive_sha"] is None
-    assert enrollment["sensitive_authorization"] is None
-    assert enrollment["targeted_review"] is None
-    events = json.loads((tmp_path / "workflow-events.json").read_text())["events"]
-    assert [e["reason"] for e in events] == ["sensitive_approval"]
-    assert events[0]["head_sha"] == HEAD
-    assert "sensitive" in result["pull_requests"][0]["reasons"]
+    assert enrollment == historical
+    assert enrollment["sensitive_sha"] == HEAD
+    assert not (tmp_path / "workflow-events.json").exists()
+    assert store.snapshot()["lifecycle_events"] == []
+    assert "sensitive" not in result["pull_requests"][0]["reasons"]
+    assert "checks" in result["pull_requests"][0]["reasons"]
     assert enrollment["attempts"] == 0 and api.fix_attempts == 0
     assert not api.graphql_writes
-    # New selected review + genuinely fresh command supersedes this request,
-    # without deleting its immutable event or trusting the previous selection.
+    # A fresh command may still record legacy history, without an approval notice.
     api.revocation = None
     api.set_copilot_review(
         review_id=api.copilot_review_id + 2,
@@ -89,13 +91,14 @@ def test_regressions_revocation_commits_before_export(tmp_path, change):
                 owner_user_id="synthetic-mobile-owner").run(apply=True)
     assert not (tmp_path / "workflow-events.json").exists()
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] == HEAD
-    assert events[0] in store.snapshot()["lifecycle_events"]
+    assert store.snapshot()["lifecycle_events"] == []
 
 
 @pytest.mark.parametrize("ack_initial", [False, True])
 def test_regressions_revocation_episode_reaches_real_inbox_after_restart(tmp_path, ack_initial):
+    from deploy.workflow_lifecycle import build_export, pull_event
     from deploy.workflow_lifecycle_sources import LifecycleSourcePaths
-    from deploy.workflow_notifications import process
+    from deploy.workflow_notifications import Blocked, process
     from test_workflow_lifecycle_sources import app_fixture, APP_OWNER, NOW as CLOCK
 
     paths, state_dir, _, inbox, notifications = app_fixture(tmp_path / "app")
@@ -111,12 +114,21 @@ def test_regressions_revocation_episode_reaches_real_inbox_after_restart(tmp_pat
                            lifecycle_source_paths=sources).run(apply=True)
 
     def consume():
-        os.utime(export, (CLOCK.timestamp(), CLOCK.timestamp()))
+        if export.exists():
+            os.utime(export, (CLOCK.timestamp(), CLOCK.timestamp()))
         return process(paths, apply=True, now=CLOCK)
 
     poll()
-    initial = json.loads(export.read_text())["events"][0]
+    assert not export.exists()
+    initial = pull_event({"issue": 16, "head": HEAD,
+                          "enrollment": store.snapshot()["enrollments"]["16"]},
+                         "sensitive_approval", occurred_at="2026-10-01T20:59:00Z",
+                         decision="authorize_sensitive_action")
+    store.record_lifecycle(initial, now=CLOCK)
     if ack_initial:
+        # Simulate a notice delivered before the obsolete gate was removed.
+        export.write_text(json.dumps(build_export([initial], APP_OWNER, now=CLOCK)))
+        export.chmod(0o600)
         assert consume()["inbox_items"] == 1
     authorize(api)
     poll()
@@ -125,44 +137,42 @@ def test_regressions_revocation_episode_reaches_real_inbox_after_restart(tmp_pat
         assert initial in store.snapshot()["lifecycle_context"]["events"]
     else:
         assert initial in store.snapshot()["lifecycle_events"]
+    historical = store.snapshot()["enrollments"]["16"]
     api.revocation = "edited"
     poll()
-    assert export.exists(), "old ACK must not suppress the renewed approval request"
-    renewed = json.loads(export.read_text())["events"]
-    assert len(renewed) == 1  # Never re-export older unACKed request episodes.
-    assert renewed[0]["event_id"] != initial["event_id"]
-    assert consume()["inbox_items"] == 1
-    assert consume()["inbox_items"] == 0
+    assert not export.exists()
+    assert store.snapshot()["enrollments"]["16"] == historical
+    for _ in range(2):
+        with pytest.raises(Blocked, match="^Required private evidence is unavailable$"):
+            consume()
     poll()
     assert not export.exists()
-    assert renewed[0] in store.snapshot()["lifecycle_context"]["events"]
 
-    # Restoring the same review does not restore consumed authorization.
+    # Review changes do not consume or restore historical sensitive grants.
     api.revocation = None
     poll()
     assert not export.exists()
-    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
-    # A NEW command may select the very same review ID/body; its next revocation
-    # must still be a distinct authorization episode, not a review-digest identity.
+    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] == HEAD
+    # A new legacy command must not create a new notification episode.
     authorize(api, comment_id=125)
     poll()
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] == HEAD
     assert not export.exists()
     api.revocation = "dismissed"
     poll()
-    again = json.loads(export.read_text())["events"]
-    assert len(again) == 1
-    assert again[0]["event_id"] not in {initial["event_id"], renewed[0]["event_id"]}
-    assert consume()["inbox_items"] == 1
+    assert not export.exists()
+    with pytest.raises(Blocked, match="^Required private evidence is unavailable$"):
+        consume()
     poll()
     poll()
     assert not export.exists()
-    history = store.snapshot()["lifecycle_context"]["events"]
-    assert renewed[0] in history and again[0] in history
+    history = store.snapshot().get("lifecycle_context", {}).get("events", [])
     assert initial in (history if ack_initial else store.snapshot()["lifecycle_events"])
+    assert [event for event in [*history, *store.snapshot()["lifecycle_events"]]
+            if event["reason"] == "sensitive_approval"] == [initial]
     with sqlite3.connect(inbox) as db:
         deliveries = db.execute("SELECT delivery_id FROM inbox WHERE user_id=?", (APP_OWNER,)).fetchall()
-    assert len(deliveries) == (3 if ack_initial else 2)
+    assert len(deliveries) == (1 if ack_initial else 0)
     assert len(set(deliveries)) == len(deliveries)
     assert notifications.list_inbox("synthetic-member") == []
     assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
@@ -175,7 +185,7 @@ def test_regressions_revocation_failure_preserves_producer_export_and_consumer(
     from deploy import cloud_coordinator as module
     from deploy.workflow_lifecycle import pull_event
     from deploy.workflow_lifecycle_sources import LifecycleSourcePaths
-    from deploy.workflow_notifications import process
+    from deploy.workflow_notifications import Blocked, process
     from test_workflow_lifecycle_sources import app_fixture, NOW as CLOCK
 
     paths, state_dir, _, inbox, _ = app_fixture(tmp_path / "app")
@@ -187,10 +197,16 @@ def test_regressions_revocation_failure_preserves_producer_export_and_consumer(
     coordinator = Coordinator(api, store, clock=CLOCK.timestamp, lifecycle_source_paths=sources)
     coordinator.run(apply=True)
     export = state_dir / "workflow-events.json"
-    os.utime(export, (CLOCK.timestamp(), CLOCK.timestamp()))
-    assert process(paths, apply=True, now=CLOCK)["inbox_items"] == 1
+    assert not export.exists()
+    with pytest.raises(Blocked, match="^Required private evidence is unavailable$"):
+        process(paths, apply=True, now=CLOCK)
     authorize(api)
     coordinator.run(apply=True)
+    historical = store.snapshot()["enrollments"]["16"]
+    approval = pull_event({"issue": 16, "head": HEAD, "enrollment": historical},
+                          "sensitive_approval", occurred_at="2026-10-01T20:58:00Z",
+                          decision="authorize_sensitive_action")
+    store.record_lifecycle(approval, now=CLOCK)
     # Retain a real exported/ACKed outcome so failed preparation also proves that
     # retirement and export replacement/removal did not leak out before commit.
     outcome = pull_event({"issue": 16, "head": HEAD,
@@ -242,9 +258,9 @@ def test_regressions_revocation_failure_preserves_producer_export_and_consumer(
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] == HEAD
     Coordinator(api, StateStore(store.path), clock=CLOCK.timestamp,
                 lifecycle_source_paths=sources).run(apply=True)
-    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
-    renewed = json.loads(export.read_text())["events"]
-    assert [event["reason"] for event in renewed] == ["sensitive_approval"]
+    assert store.snapshot()["enrollments"]["16"] == historical
+    assert not export.exists()
+    assert approval in store.snapshot()["lifecycle_events"]
     assert outcome in store.snapshot()["lifecycle_context"]["events"]
     assert api.fix_attempts == 0 and not api.graphql_writes
 
@@ -261,15 +277,24 @@ def test_regressions_revocation_generation_fails_closed_at_bound(tmp_path, gener
     api.revocation = "edited"
     before = store.path.read_bytes()
     writes = list(api.writes)
-    with pytest.raises(CoordinatorError, match="episode"):
-        Coordinator(api, StateStore(store.path), clock=lambda: NOW,
-                    owner_user_id="synthetic-mobile-owner").run(apply=True)
-    assert store.path.read_bytes() == before
+    if generation == 2**31 - 1:
+        result = Coordinator(api, StateStore(store.path), clock=lambda: NOW,
+                             owner_user_id="synthetic-mobile-owner").run(apply=True)
+        assert "sensitive" not in result["pull_requests"][0]["reasons"]
+        enrollment = store.snapshot()["enrollments"]["16"]
+        assert enrollment["sensitive_generation"] == generation
+        assert enrollment["sensitive_sha"] == HEAD
+    else:
+        with pytest.raises(CoordinatorError, match="episode"):
+            Coordinator(api, StateStore(store.path), clock=lambda: NOW,
+                        owner_user_id="synthetic-mobile-owner").run(apply=True)
+        assert store.path.read_bytes() == before
     assert not (tmp_path / "workflow-events.json").exists()
     assert api.writes == writes and not api.graphql_writes
 
 
 def test_regressions_revocation_new_head_and_enrollment_scope(tmp_path):
+    from deploy.workflow_lifecycle import pull_event
     api = RevocationApi(sensitive=True, authorize=True)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     api.pending_required = True
@@ -280,11 +305,17 @@ def test_regressions_revocation_new_head_and_enrollment_scope(tmp_path):
                            owner_user_id="synthetic-mobile-owner").run(apply=True)
 
     poll()
+    old = pull_event({"issue": 16, "head": HEAD,
+                      "enrollment": store.snapshot()["enrollments"]["16"]},
+                     "sensitive_approval", occurred_at="2026-10-01T20:59:00Z",
+                     decision="authorize_sensitive_action")
+    store.record_lifecycle(old, now=NOW)
     api.revocation = "edited"
     poll()
     export = tmp_path / "workflow-events.json"
-    old = json.loads(export.read_text())["events"][0]
-    # Explicit renewal scopes a new decision and cannot inherit sensitive consent.
+    assert not export.exists()
+    assert old in store.snapshot()["lifecycle_events"]
+    # Explicit renewal retains the original head and creates no approval request.
     new_head = "c" * 40
     api.head_sha = new_head
     api.pull["head"]["sha"] = new_head
@@ -292,13 +323,15 @@ def test_regressions_revocation_new_head_and_enrollment_scope(tmp_path):
                          "body": f"/hermes enroll {new_head}",
                          "created_at": "2026-10-01T21:00:00Z",
                          "updated_at": "2026-10-01T21:00:00Z"})
-    poll()
+    result = poll()["pull_requests"][0]
     enrollment = store.snapshot()["enrollments"]["16"]
     assert enrollment["sensitive_sha"] is None
     assert enrollment["sensitive_generation"] == 0
-    events = json.loads(export.read_text())["events"]
-    assert len(events) == 1 and events[0]["head_sha"] == new_head
-    assert events[0]["event_id"] != old["event_id"]
+    assert not export.exists()
+    assert "sensitive" not in result["reasons"]
+    assert "checks" in result["reasons"]
+    assert [event for event in store.snapshot()["lifecycle_events"]
+            if event["reason"] == "sensitive_approval"] == [old]
     assert old in store.snapshot()["lifecycle_events"]
     assert enrollment["authorized_head"] == HEAD
     assert enrollment["owner_authorized_head"] == new_head
