@@ -27,7 +27,11 @@ def test_multiple_intents_reconcile_before_run_is_restored(tmp_path):
         runtime.approval_notifier = original
         client.portal.call(runtime.reconcile_approval_notifications)
         runtime.drain_approval_notifications()
-        assert [i['request_id'] for i in app.state.notifications.list_inbox(user['id'])] == ['current']
+        with app.state.notifications._db() as db:
+            assert [row['request_id'] for row in db.execute(
+                '''SELECT a.request_id FROM approval_notifications a JOIN inbox i ON i.id=a.inbox_id
+                   WHERE i.user_id=?''', (user['id'],))] == ['current']
+        assert app.state.notifications.list_inbox(user['id']) == []
 
 
 @pytest.mark.parametrize('gap', ['before_ingest', 'after_ingest'])
@@ -87,7 +91,10 @@ def test_lifespan_restart_reconciles_only_explicit_intents(tmp_path, gap, native
         if native == 'current':
             assert len(sent) == 1
             assert status == 'sent'
-            assert len(notify.list_inbox(user['id'])) == 1
+            with notify._db() as db:
+                assert db.execute('SELECT count(*) FROM approval_notifications a JOIN inbox i '
+                                  'ON i.id=a.inbox_id WHERE i.user_id=?', (user['id'],)).fetchone()[0] == 1
+            assert notify.list_inbox(user['id']) == []
             restarted.state.orchestrator.drain_approval_notifications()
             notify.flush()
             assert len(sent) == 1

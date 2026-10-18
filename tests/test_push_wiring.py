@@ -38,9 +38,12 @@ def test_lifecycle_persists_authoritative_completion_without_phone(tmp_path):
     app.state.request_notifications.tick = tick
     with client:
         assert seen.wait(3)
-        rows = app.state.notifications.list_inbox(user['id'])
+        with app.state.notifications._db() as db:
+            rows = db.execute('SELECT body,session_id FROM inbox WHERE user_id=?', (user['id'],)).fetchall()
         assert len(rows) == 1
         assert rows[0]['body'] == 'Public persisted final'
+        assert rows[0]['session_id'] == 'wa-1'
+        assert app.state.notifications.list_inbox(user['id']) == []
 
 
 def test_optional_producer_and_approval_errors_cannot_starve_push(tmp_path):
@@ -70,9 +73,11 @@ def test_completion_routes_to_current_compression_tip_and_alias_tombstone_fences
     run, _ = journal.submit(user['id'], 'default', 'wa-1', 'PRIVATE', 'compressed')
     journal.finish(user['id'], run['id'], 'completed', output='Public final')
     app.state.request_notifications.tick()
-    rows = app.state.notifications.list_inbox(user['id'])
+    with app.state.notifications._db() as db:
+        rows = db.execute('SELECT session_id FROM inbox WHERE user_id=?', (user['id'],)).fetchall()
     assert len(rows) == 1
     assert rows[0]['session_id'] == 'tip'
+    assert app.state.notifications.list_inbox(user['id']) == []
     assert app.state.notifications.presence_validator(user['id'], 'tip')
     # A live view may retain the original ID after compression.
     assert app.state.notifications.presence_validator(user['id'], 'wa-1')
@@ -107,9 +112,11 @@ def test_persisted_canonical_run_alias_routes_and_fences_absent_original(tmp_pat
         history_anchor=lambda: {'session_id': 'old-alias', 'canonical_session_id': 'wa-1', 'message_id': 1})
     journal.finish(user['id'], run['id'], 'completed', output='Public final')
     app.state.request_notifications.tick()
-    rows = app.state.notifications.list_inbox(user['id'])
+    with app.state.notifications._db() as db:
+        rows = db.execute('SELECT session_id FROM inbox WHERE user_id=?', (user['id'],)).fetchall()
     assert len(rows) == 1
     assert rows[0]['session_id'] == 'wa-1'
+    assert app.state.notifications.list_inbox(user['id']) == []
     with closing(journal.connect()) as db, db:
         db.execute('INSERT INTO session_deletions VALUES(?,?,?,?,?,?)',
                    (user['id'], 'default', 'old-alias', 'op', 'deleted', 100))
