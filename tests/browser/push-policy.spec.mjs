@@ -73,6 +73,11 @@ async function fixture(run){
     if(control.activeRun && p===`/runs/${control.activeRun.id}`)data=control.activeRun;
     else if(p.startsWith('/runs/') && control.realHistory)data=control.realHistory.runs[p.slice('/runs/'.length)]||{items:[]};
     else if(p==='/runs/older-run')data={id:'older-run',session_id:'session-one',input:'Original request',status:'completed',output:'Exact notification result',created_at:1,updated_at:2};
+    if((control.requestReadPath==='run' && p==='/runs/older-run')
+       || (control.requestReadPath==='history' && p==='/sessions/session-one/messages' && requestURL.searchParams.has('offset'))){
+     if(control.requestReadHold)await control.requestReadHold;
+     if(control.requestReadErrors){control.requestReadErrors--;status=503;data={detail:'Synthetic temporary request read failure'};}
+    }
     if(p==='/push/preferences'){
      if(control.hold)await control.hold;
      if(req.method==='GET' && control.getError || req.method==='PUT' && control.putError){status=503;data={detail:'Synthetic unavailable'};}
@@ -445,6 +450,67 @@ test('generated app retries temporary opaque target failures for both routes wit
   assert.equal(calls.filter(call=>call.p==='/inbox/notice-target/target').length,3);
  }
  }
+}));
+const scrollableRequestHistory=()=>({
+ latest:{items:Array.from({length:40},(_,index)=>({id:index+3,role:index%2?'assistant':'user',
+  content:`Newer history ${index}: unrelated request or result`,run_id:`newer-${index}`,session_id:'session-one'})),offset:2,total:42},
+ pages:{0:{items:[{id:1,role:'user',content:'Original request',run_id:'older-run',session_id:'session-one'},
+  {id:2,role:'assistant',content:'Original history result',run_id:'older-run',session_id:'session-one'}],offset:0,total:42}},
+ runs:{'older-run':{id:'older-run',session_id:'session-one',input:'Original request',status:'completed',
+  output:'Exact notification result',created_at:1,updated_at:2}}
+});
+for(const read of ['initial','run','history'])test(`generated ${read} request recovery reveals and focuses the exact older target`,{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ control.notificationTarget={kind:'request',session_id:'session-one',run_id:'older-run',run_session_id:'session-one'};
+ control.realHistory=scrollableRequestHistory();
+ control.requestReadPath=read;control.requestReadErrors=read==='initial'?0:1;
+ await mount(page,'?notification=notice-target');
+ if(read!=='initial'){
+  const retry=page.getByRole('button',{name:'Retry request details',exact:true});
+  await retry.waitFor();
+  assert.equal(await page.locator('[data-notification-run]').count(),0);
+  await retry.click();
+ }
+ const target=page.locator('[data-notification-run="older-run"]');
+ await target.waitFor();
+ const position=await target.evaluate(node=>{
+  const transcript=node.closest('.messages'),view=transcript.getBoundingClientRect(),rect=node.getBoundingClientRect();
+  return {scrollable:transcript.scrollHeight>transcript.clientHeight,
+   inside:rect.top>=view.top && rect.bottom<=view.bottom,focused:document.activeElement===node};
+ });
+ assert.equal(position.scrollable,true,'realistic newer history must overflow the transcript');
+ assert.equal(position.inside,true,'the recovered original target must be inside the transcript viewport');
+ assert.equal(position.focused,true,'focus must be on the exact recovered article');
+ assert.match(await target.innerText(),/Original request[\s\S]*Exact notification result/);
+ assert.equal(await target.count(),1);
+ assert.equal(await page.locator('.user-message').filter({hasText:'Original request'}).count(),1,'history is inserted once');
+ assert.equal(await page.getByRole('button',{name:'Retry request details',exact:true}).count(),0);
+ assert.equal(calls.filter(call=>call.p==='/runs/older-run').length,read==='run'?2:1);
+ assert.equal(calls.filter(call=>call.p==='/sessions/session-one/messages' && call.query.includes('offset=')).length,read==='history'?2:1);
+ assert.equal(calls.filter(call=>call.p.startsWith('/runs/') && call.method!=='GET'
+  || call.p.includes('/decision') || call.p.startsWith('/auth/verify')).length,0,'target recovery is read-only');
+}));
+for(const read of ['run','history'])test(`late generated ${read} request retry cannot focus or scroll a newer chat`,{timeout:30000},()=>fixture(async({page,control,mount})=>{
+ control.notificationTarget={kind:'request',session_id:'session-one',run_id:'older-run',run_session_id:'session-one'};
+ control.realHistory=scrollableRequestHistory();control.requestReadPath=read;control.requestReadErrors=1;
+ await mount(page,'?notification=notice-target');
+ const retry=page.getByRole('button',{name:'Retry request details',exact:true});await retry.waitFor();
+ let release;control.requestReadHold=new Promise(resolve=>release=resolve);
+ const path=read==='run'?'/runs/older-run':'/sessions/session-one/messages';
+ const request=page.waitForRequest(req=>new URL(req.url()).pathname.endsWith(path)
+  && (read==='run' || new URL(req.url()).searchParams.has('offset')));
+ const response=page.waitForResponse(res=>new URL(res.url()).pathname.endsWith(path)
+  && (read==='run' || new URL(res.url()).searchParams.has('offset')));
+ await retry.click();await request;
+ await page.getByRole('button',{name:'Chats',exact:true}).click();
+ await page.getByRole('button',{name:/Second conversation/}).click();
+ const composer=page.getByRole('textbox',{name:'Message Hermes'});await composer.waitFor();await composer.focus();
+ const before=await page.locator('.messages').evaluate(node=>node.scrollTop);
+ control.requestReadHold=null;release();await response;
+ await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
+ assert.equal(await page.locator('[data-notification-run]').count(),0);
+ assert.equal(await composer.evaluate(node=>document.activeElement===node),true,'late completion keeps newer chat focus');
+ assert.equal(await page.locator('.messages').evaluate(node=>node.scrollTop),before);
+ await page.evaluate(()=>app.destroy());
 }));
 test('generated request routing uses composed native+journal anchors beyond a history page',{timeout:60000},()=>fixture(async({page,control,calls,mount})=>{
  const python=process.env.HERMES_TEST_PYTHON||repo+'.venv/bin/python';

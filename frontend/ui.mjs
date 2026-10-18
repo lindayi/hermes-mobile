@@ -1020,6 +1020,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         messages.querySelector('.empty')?.remove();
         if(anchor)anchor.after(target);else messages.append(target);
         notificationTargetNode=target;
+        if(current() && messages.isConnected && target.isConnected){
+          target.scrollIntoView?.({block:'center'});target.focus();
+        }
       })();
       notificationTargetRead=pending;
       const release=()=>{
