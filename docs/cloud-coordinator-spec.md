@@ -2047,7 +2047,13 @@ the existing v1 omission rules for receipt version, main SHA and task type, whil
 retaining authenticated supplied values in a read-only candidate for downstream
 checks. Never backfill the retained proof. Require receipt base equality for v2
 or an explicitly supplied main SHA, not an omitted v1 field.
-Historical-base ancestry checks and active-writer exclusion remain mandatory.
+The lineage and handoff checks use the same narrow exception for an
+unauthenticated typed-blocker copy: only differences in `receipt_result` and
+`receipt_body` may be ignored in favor of the authenticated proof. Authenticated
+blockers and every key, task, storage-identity, attempt, binding, head, or other
+projection conflict still fail closed. A read-only proof view never backfills or
+promotes the retained proof or live action. Historical-base ancestry checks and
+active-writer exclusion remain mandatory.
 
 ACK-backed lifecycle retirement does not erase history. The optional
 `lifecycle_context` preserves each retired event's canonical payload and exact

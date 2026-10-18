@@ -4057,35 +4057,13 @@ def _reconciled_receipt_records(issue, enrollment, actions, comments):
                 for proof in matching_proofs):
             matching_proofs = list(matching_proofs)
             unauthenticated_blocker_copy = False
-            if (matching_proofs
-                    and candidate.get("receipt_result") in {
-                        "conflict_incompatible", "policy_broken",
-                    }
-                    and isinstance(candidate.get("receipt_body"), str)
-                    and all(
-                        _valid_receipt_proof(proof, comments)
-                        and _receipt_proof_matches_live(
-                            proof, candidate,
-                            ignored_fields={"receipt_result", "receipt_body"},
-                        )
-                        for proof in matching_proofs
-                    )):
-                try:
-                    unauthenticated_blocker_copy = receipt_body_matches(
-                        candidate["receipt_body"],
-                        candidate["receipt_nonce"],
-                        candidate["receipt_task_id"],
-                        candidate["receipt_session_id"],
-                        candidate.get("issue"),
-                        candidate["receipt_start_head"],
-                        candidate["receipt_head"],
-                        candidate["receipt_base"],
-                        candidate["receipt_result"],
-                        version=candidate.get("receipt_version", "v1"),
-                        legacy_neutral=candidate.get("receipt_legacy_neutral", False),
+            if matching_proofs:
+                unauthenticated_blocker_copy = all(
+                    _unauthenticated_blocker_copy_matches(
+                        proof, candidate, comments,
                     )
-                except (OverflowError, TypeError, ValueError):
-                    pass
+                    for proof in matching_proofs
+                )
             if not unauthenticated_blocker_copy:
                 mark_conflict(candidate, *matching_proofs)
                 invalid_proof_keys.update(linked_keys)
@@ -4168,6 +4146,53 @@ def _reconciled_receipt_records(issue, enrollment, actions, comments):
         not (invalid_proof_keys or invalid_task_ids),
         conflicting_heads,
     )
+
+
+def _unauthenticated_blocker_copy_matches(proof, candidate, comments):
+    if (candidate.get("receipt_result") not in {
+            "conflict_incompatible", "policy_broken",
+        }
+            or not isinstance(candidate.get("receipt_body"), str)
+            or _valid_receipt_proof(candidate, comments)
+            or not _valid_receipt_proof(proof, comments)
+            or not _receipt_proof_matches_live(
+                proof, candidate,
+                ignored_fields={"receipt_result", "receipt_body"},
+            )):
+        return False
+    try:
+        return receipt_body_matches(
+            candidate["receipt_body"],
+            candidate["receipt_nonce"],
+            candidate["receipt_task_id"],
+            candidate["receipt_session_id"],
+            candidate.get("issue"),
+            candidate["receipt_start_head"],
+            candidate["receipt_head"],
+            candidate["receipt_base"],
+            candidate["receipt_result"],
+            version=candidate.get("receipt_version", "v1"),
+            legacy_neutral=candidate.get("receipt_legacy_neutral", False),
+        )
+    except (KeyError, OverflowError, TypeError, ValueError):
+        return False
+
+
+def _authenticated_ready_receipt_view(action, enrollment, actions, comments):
+    reconciled = _reconciled_receipt_records(
+        action.get("issue"), enrollment, actions, comments,
+    )
+    if reconciled is None or not reconciled[2]:
+        return None
+    proofs = [
+        proof for proof in reconciled[0]
+        if proof.get("task_id") == action.get("task_id")
+        and proof.get("receipt_result") == "ready"
+        and _unauthenticated_blocker_copy_matches(
+            proof, _receipt_projection(action), comments,
+        )
+    ]
+    return proofs[0] if len(proofs) == 1 else None
 
 
 def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
@@ -6898,8 +6923,16 @@ class Coordinator:
         During planning, ``deferred`` collects keys whose next step is a remote
         mutation; those steps run only after the scan commit succeeds.
         """
+        comments = snapshot.get("comments")
+        if not _valid_receipt_proof(action, comments):
+            proof = _authenticated_ready_receipt_view(
+                action, snapshot.get("enrollment", {}),
+                self.store.actions(), comments,
+            )
+            if proof is not None:
+                action = {**action, **_receipt_projection(proof)}
         head = action.get("receipt_head")
-        if not _valid_receipt_proof(action, snapshot.get("comments")):
+        if not _valid_receipt_proof(action, comments):
             return self._handoff_wait(key, action, snapshot)
         # Receipt base records dispatch provenance, not current-main eligibility.
         # Fence handoff mutations against the fresh scan base (and live main).
@@ -7440,24 +7473,35 @@ class Coordinator:
                 "status_action": None, "merge_action": None, "outcomes": [outcome],
                 "receipt_recoveries": receipt_recoveries, "handoffs": handoffs,
             }
-        copilot_review_handoff_keys = {
-            key for key, action in actions.items()
+        copilot_review_handoff_keys = set()
+        for key, action in actions.items():
+            if (not isinstance(action, dict)
+                    or action.get("issue") != number
+                    or action.get("kind") != "fix"
+                    or action.get("status") != "completed"
+                    or action.get("handoff_state") != "waiting_review"
+                    or action.get("review_requirement") != "missing_copilot_review"):
+                continue
+            handoff_action = action
+            if not _valid_receipt_proof(handoff_action, snapshot["comments"]):
+                proof = _authenticated_ready_receipt_view(
+                    action, enrollment, actions, snapshot["comments"],
+                )
+                if proof is None:
+                    continue
+                handoff_action = {**action, **_receipt_projection(proof)}
             if (
-                isinstance(action, dict)
-                and action.get("issue") == number
-                and action.get("kind") == "fix"
-                and action.get("status") == "completed"
-                and action.get("handoff_state") == "waiting_review"
-                and action.get("review_requirement") == "missing_copilot_review"
-                and action.get("receipt_result") == "ready"
-                and action.get("receipt_head") == head
-                and action.get("receipt_base") == action.get("main_sha")
-                and action.get("owner_id") == OWNER_ID
-                and action.get("repository_id") == REPOSITORY_ID
-                and _pull_identity(snapshot["pull"], action)
-                and _valid_receipt_proof(action, snapshot["comments"])
-            )
-        }
+                    handoff_action.get("receipt_result") == "ready"
+                    and handoff_action.get("receipt_head") == head
+                    and handoff_action.get("receipt_base")
+                        == handoff_action.get("main_sha")
+                    and handoff_action.get("owner_id") == OWNER_ID
+                    and handoff_action.get("repository_id") == REPOSITORY_ID
+                    and _pull_identity(snapshot["pull"], handoff_action)
+                    and _valid_receipt_proof(
+                        handoff_action, snapshot["comments"],
+                    )):
+                copilot_review_handoff_keys.add(key)
         waiting_handoff_is_only_busy = (
             len(copilot_review_handoff_keys) == 1
             and busy_details.get("action_keys") == copilot_review_handoff_keys
@@ -8894,6 +8938,14 @@ class Coordinator:
             if (duplicate is not None
                     and not _receipt_proof_matches_live(
                         _receipt_projection(candidate), _receipt_projection(duplicate),
+                    )
+                    and not _unauthenticated_blocker_copy_matches(
+                        _receipt_projection(candidate), _receipt_projection(duplicate),
+                        snapshot["comments"],
+                    )
+                    and not _unauthenticated_blocker_copy_matches(
+                        _receipt_projection(duplicate), _receipt_projection(candidate),
+                        snapshot["comments"],
                     )):
                 return False
             reconciled_by_key[key] = (
@@ -8913,6 +8965,14 @@ class Coordinator:
                         )
                         or _receipt_proof_matches_live(
                             _receipt_projection(duplicate), _receipt_projection(candidate),
+                        )
+                        or _unauthenticated_blocker_copy_matches(
+                            _receipt_projection(candidate), _receipt_projection(duplicate),
+                            snapshot["comments"],
+                        )
+                        or _unauthenticated_blocker_copy_matches(
+                            _receipt_projection(duplicate), _receipt_projection(candidate),
+                            snapshot["comments"],
                         )
                     )):
                 return False

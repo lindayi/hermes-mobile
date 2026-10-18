@@ -10711,6 +10711,7 @@ def test_owner_abandonment_transitive_receipts_release_busy_after_compaction(
 @pytest.mark.parametrize("key_state", [
     "omitted", "omitted-retained-only", "null", "empty", "list", "integer",
     "conflicting-live-key", "conflicting-live-task", "conflicting-proof",
+    "forged-blocker-keyed", "forged-blocker-keyless",
 ])
 def test_owner_abandonment_keyless_retained_successor_apply_restart(
         tmp_path, publication, key_state):
@@ -10725,7 +10726,7 @@ def test_owner_abandonment_keyless_retained_successor_apply_restart(
         proof.pop("key")
         if key_state == "omitted-retained-only":
             state["actions"].pop(source["key"])
-        if key_state in {"null", "empty", "list", "integer"}:
+        elif key_state in {"null", "empty", "list", "integer"}:
             proof["key"] = {
                 "null": None, "empty": "", "list": [], "integer": 16,
             }[key_state]
@@ -10739,6 +10740,14 @@ def test_owner_abandonment_keyless_retained_successor_apply_restart(
             alias = deepcopy(proof)
             alias["attempt"] = 99
             proofs.append(alias)
+        if key_state == "forged-blocker-keyed":
+            proof["key"] = source["key"]
+        if key_state in {"forged-blocker-keyed", "forged-blocker-keyless"}:
+            live = state["actions"][source["key"]]
+            live["receipt_result"] = "policy_broken"
+            live["receipt_body"] = live["receipt_body"].replace(
+                "result=ready", "result=policy_broken",
+            )
 
     StateStore(store.path)._mutate(configure_proofs)
     api.review_state = "APPROVED" if publication == "source" else None
@@ -10749,7 +10758,10 @@ def test_owner_abandonment_keyless_retained_successor_apply_restart(
     api.source_failure_sha = head if publication == "source" else None
     before = StateStore(store.path).snapshot()
     writes, posts = deepcopy(api.writes), api.task_posts
-    valid = key_state in {"omitted", "omitted-retained-only"}
+    valid = key_state in {
+        "omitted", "omitted-retained-only",
+        "forged-blocker-keyed", "forged-blocker-keyless",
+    }
     for poll in range(2):
         coordinator = Coordinator(
             api, StateStore(store.path), clock=lambda: 1790856660,
@@ -10765,7 +10777,7 @@ def test_owner_abandonment_keyless_retained_successor_apply_restart(
             assert len([
                 write for write in api.writes[len(writes):]
                 if write[0].endswith("/requested_reviewers")
-            ]) == int(publication == "reviewer")
+            ]) == int(publication == "reviewer"), json.dumps(result, sort_keys=True)
         else:
             assert api.writes == writes
             assert api.task_posts == posts
