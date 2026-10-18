@@ -36,7 +36,8 @@ async function fixture(run){
     if(p==='/inbox/notice-target/target' && control.notificationTarget)data=control.notificationTarget;
     if(control.notificationTarget && p===`/sessions/${control.notificationTarget.session_id}`)data={id:control.notificationTarget.session_id,title:'Exact notification chat'};
     if(p==='/push/key')data={public_key:'AQID'};
-    if(control.notificationTarget && p===`/sessions/${control.notificationTarget.session_id}/messages`){
+    if((control.notificationTarget && p===`/sessions/${control.notificationTarget.session_id}/messages`)
+       || (control.realHistory && p==='/sessions/session-one/messages')){
      if(control.realHistory){
       const offset=requestURL.searchParams.get('offset');
       data=offset===null?control.realHistory.latest:control.realHistory.pages[offset]||{items:[],offset:Number(offset),total:control.realHistory.latest.total};
@@ -84,6 +85,11 @@ const approvalTarget={
  kind:'approval',session_id:'session-one',run_id:'approval-run',
  run_session_id:'session-one',approval_id:'approval-1',request_id:'request-1'
 };
+const approvalHistory=()=>({
+ latest:{items:[{id:20,role:'assistant',content:'Newer response',run_id:'newer-run',session_id:'session-one'}],offset:10,total:11},
+ pages:{0:{items:[{id:1,role:'user',content:'Original request',run_id:'approval-run',session_id:'session-one'}],offset:0,total:11}},
+ runs:{}
+});
 async function holdPasskey(page){
  await page.evaluate(()=>{
   window.PublicKeyCredential=function(){};
@@ -400,6 +406,29 @@ test('generated chat stays usable while approval reconciliation is unresolved an
  release();await page.getByRole('heading',{name:'Approval required'}).waitFor();
  assert.equal(await page.getByRole('textbox',{name:'Message Hermes'}).isVisible(),true);
 }));
+
+test('approval notification loads the matching older turn before focusing its card',{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ control.notificationTarget=approvalTarget;control.approvals=[approvalRecord()];control.approvalDetail=approvalRecord();control.realHistory=approvalHistory();
+ await mount(page,'?notification=notice-target');
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.waitFor();await page.waitForTimeout(50);
+ assert.ok(calls.some(call=>call.p==='/sessions/session-one/messages' && call.query.includes('offset=0')),
+   'approval notification must load its matching older turn');
+ await page.locator('.messages [data-history-run="approval-run"]:not(.approval-card)').waitFor();
+ assert.equal(await card.evaluate(node=>node.previousElementSibling?.dataset.historyRun),'approval-run');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+}));
+
+test('manual older-history loading repositions an already rendered approval card',{timeout:30000},()=>fixture(async({page,control})=>{
+ control.approvals=[approvalRecord()];control.realHistory=approvalHistory();
+ await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.waitFor();
+ await page.getByRole('button',{name:'Load older messages',exact:true}).click();
+ await page.locator('.messages [data-history-run="approval-run"]:not(.approval-card)').waitFor();
+ assert.equal(await card.evaluate(node=>node.previousElementSibling?.dataset.historyRun),'approval-run');
+}));
+
 test('approval controls retain pending and card-scoped errors across focus refresh',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
  const item=approvalRecord();control.notificationTarget=approvalTarget;control.approvals=[item];control.approvalDetail=item;
  await mount(page,'?notification=notice-target');await page.getByRole('button',{name:'Approve once'}).waitFor();

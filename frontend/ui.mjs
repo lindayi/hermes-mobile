@@ -896,7 +896,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     let oldestOffset=result.offset ?? 0;
     const turnHint=h('p',{class:'caption turn-continuation',hidden:!result.turn_boundary?.truncated},'This turn continues earlier. Load older messages to see the rest.');
     messages.prepend(turnHint);
-    let more;
+    let more,renderApprovals=()=>{};
     const loadOlder=async()=>{
       if(!current() || oldestOffset<=0)return false;
       const limit=Math.min(100,oldestOffset),offset=oldestOffset-limit;
@@ -915,6 +915,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       turnHint.hidden=!page.turn_boundary?.truncated;
       oldestOffset=page.offset ?? offset;
       reflowBackground();
+      renderApprovals();
       if(!page.items?.length || oldestOffset===0)more?.remove();
       messages.scrollTop=previousTop+messages.scrollHeight-previousHeight;
       return Boolean(page.items?.length);
@@ -1186,7 +1187,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }
       return card;
     };
-    const renderApprovals=()=>{
+    renderApprovals=()=>{
       const count=approvalPending.size;
       approvalNotice.hidden=!count && !genericApproval;
       approvalNotice.textContent=count?`${count} approval${count===1?'':'s'} require your review.`
@@ -1280,6 +1281,16 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(!current())return;
         if(matches(item)){
           const key=approvalKey(item),existing=approvalItems.get(key);
+          const findAnchor=()=>[...messages.querySelectorAll('[data-history-run]')]
+            .find(node=>node.dataset.historyRun===item.run_id && node.dataset.historySession===session.id
+              && !node.matches('.approval-card'));
+          let pages=0;
+          while(!findAnchor() && oldestOffset>0 && pages++<100){
+            const loaded=await loadOlder();
+            if(!current())return;
+            if(!loaded)break;
+          }
+          if(!current())return;
           if(handledApprovals.has(key)){
             approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
             renderApprovals();focusApprovalTarget();return;
