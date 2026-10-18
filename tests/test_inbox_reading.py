@@ -43,6 +43,7 @@ class InboxReadingTests(unittest.TestCase):
         item = self.item(read=False)
         self.service.approval_validator = lambda *args: True
         approval = self.service.ingest_approval(self.user['id'], 'run', 'req', 'action', 'native', self.now[0]+3600)
+        assert self.service.list_inbox(self.user['id']) == [item]
         with sqlite3.connect(self.db) as db:
             before = db.execute('SELECT * FROM approval_notifications').fetchall()
             db.execute("CREATE TRIGGER reject_read BEFORE UPDATE ON outbox BEGIN SELECT RAISE(ABORT,'disk error'); END")
@@ -51,9 +52,11 @@ class InboxReadingTests(unittest.TestCase):
         assert not any(i['read'] for i in self.service.list_inbox(self.user['id']))
         with sqlite3.connect(self.db) as db:
             db.execute('DROP TRIGGER reject_read')
-        assert self.post('read-all').json()['updated'] == 2
+        assert self.post('read-all').json()['updated'] == 1
         with sqlite3.connect(self.db) as db:
             assert db.execute('SELECT * FROM approval_notifications').fetchall() == before
+            assert db.execute('SELECT read FROM inbox WHERE id=?', (approval['id'],)).fetchone()[0] == 0
+        assert self.service.list_inbox(self.user['id'])[0]['id'] == item['id']
         assert self.service.list_inbox(self.user['id'])[0]['read']
 
     def test_bulk_read_revalidates_revocation_after_notification_writer_admission(self):

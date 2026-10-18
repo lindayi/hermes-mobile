@@ -174,6 +174,9 @@ def test_attention_receipt_provenance_wins_over_nonbackground_category(attention
 
 def test_request_and_session_approval_rows_are_hidden_without_changing_push_storage(attention_env):
     service, client, now, user = attention_env
+    from types import SimpleNamespace
+    sent = []
+    service.send_push = lambda **payload: (sent.append(payload) or SimpleNamespace(status_code=201))
     service.approval_validator = lambda *identity: True
     service.subscribe(user['id'], user['session_id'], subscription())
     completed = service.ingest(user['id'], 'request:run-1:terminal', 'Request finished',
@@ -185,6 +188,8 @@ def test_request_and_session_approval_rows_are_hidden_without_changing_push_stor
     scheduled = service.ingest(user['id'], 'scheduled:1', 'Scheduled update', 'Still visible',
         category='scheduled')
 
+    assert service.flush()['sent'] == 4
+    assert len(sent) == 4
     for item in (completed, failed, approval, scheduled):
         service.mark_read(user['id'], item['id'])
 
@@ -195,7 +200,7 @@ def test_request_and_session_approval_rows_are_hidden_without_changing_push_stor
         assert db.execute('SELECT count(*) FROM inbox').fetchone()[0] == 4
         assert db.execute('SELECT count(*) FROM outbox').fetchone()[0] == 4
         assert db.execute('SELECT count(*) FROM dismissed_inbox').fetchone()[0] == 1
-        assert {row[0] for row in db.execute('SELECT status FROM outbox')} == {'suppressed'}
+        assert {row[0] for row in db.execute('SELECT status FROM outbox')} == {'sent'}
 
 
 def test_notification_target_lookup_is_owner_scoped_and_binds_request_or_approval(attention_env):

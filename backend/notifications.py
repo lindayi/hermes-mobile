@@ -4,6 +4,7 @@ import hmac
 import json
 import math
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -24,6 +25,15 @@ def _attention_visible_sql(db):
         AND NOT EXISTS (SELECT 1 FROM background_receipts r
                         WHERE r.inbox_id=inbox.id AND r.user_id=inbox.user_id)
     '''
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='notification_policy'").fetchone():
+        predicate += '''AND NOT EXISTS (SELECT 1 FROM notification_policy p
+                         WHERE p.inbox_id=inbox.id AND p.category IN ('completion','attention')
+                         AND inbox.session_id IS NOT NULL AND inbox.delivery_id LIKE 'request:%')
+        '''
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='approval_notifications'").fetchone():
+        predicate += '''AND NOT EXISTS (SELECT 1 FROM approval_notifications a
+                         WHERE a.inbox_id=inbox.id AND inbox.session_id IS NOT NULL)
+        '''
     # The silent release observer can use a pre-policy DB without initializing
     # schema. Only absent metadata is optional; database/query errors propagate.
     if db.execute("SELECT 1 FROM sqlite_master WHERE name='notification_policy'").fetchone():
@@ -591,6 +601,28 @@ class NotificationService:
                     item.update(dict(metadata))
             return items
 
+    def notification_target(self, user_id, item_id):
+        with self._db() as db:
+            row = db.execute('''SELECT i.id,i.delivery_id,i.session_id,p.category,
+                    a.approval_id,a.run_id,a.request_id
+                FROM inbox i
+                LEFT JOIN notification_policy p ON p.inbox_id=i.id
+                LEFT JOIN approval_notifications a ON a.inbox_id=i.id
+                WHERE i.id=? AND i.user_id=?''', (item_id, user_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, 'Inbox item not found')
+        if row['approval_id'] and row['session_id']:
+            return {'kind': 'approval', 'session_id': row['session_id'],
+                    'run_id': row['run_id'], 'approval_id': row['approval_id'],
+                    'request_id': row['request_id']}
+        if (row['session_id'] and row['category'] in ('completion', 'attention')
+                and row['delivery_id'].startswith('request:')):
+            parts = row['delivery_id'].split(':')
+            if (len(parts) == 3 and parts[2] in ('terminal', 'unknown')
+                    and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', parts[1])):
+                return {'kind': 'request', 'session_id': row['session_id'], 'run_id': parts[1]}
+        return {'kind': 'inbox'}
+
 
 def build_notifications_router(service, auth_service):
     if service.session_validator is None:
@@ -623,6 +655,10 @@ def build_notifications_router(service, auth_service):
               offset: int = Query(0, ge=0)):
         return {'items': service.list_inbox(user['id'], limit, offset),
                 'read_count': service.read_count(user['id'])}
+
+    @router.get('/inbox/{item_id}/target')
+    def notification_target(item_id: str, user=Depends(auth_service.require_user)):
+        return service.notification_target(user['id'], item_id)
 
     @router.post('/inbox/read-all')
     def mark_all_read(request: Request, user=Depends(auth_service.require_user)):
