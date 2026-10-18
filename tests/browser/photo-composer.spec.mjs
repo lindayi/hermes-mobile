@@ -155,6 +155,7 @@ test('photo picker icon stays accessible and removal retries only the remaining 
   assert.ok(bounds.width>=44 && bounds.height>=44,'the photo picker must retain a 44px touch target');
   assert.ok(bounds.x>=0 && bounds.right<=320,'the photo picker must not clip at narrow mobile width');
   assert.ok(await addPhotos.evaluate(el=>el.scrollWidth<=el.clientWidth),'the composer must not overflow at narrow mobile width');
+  const originalTheme=await page.evaluate(()=>document.documentElement.dataset.theme);
   for(const theme of ['light','dark']){
     const ratio=await addPhotos.evaluate((el,theme)=>{
       document.documentElement.dataset.theme=theme;
@@ -164,8 +165,7 @@ test('photo picker icon stays accessible and removal retries only the remaining 
     },theme);
     assert.ok(ratio>=3,`the photo icon must have adequate ${theme}-theme contrast`);
   }
-  const theme=await page.evaluate(()=>document.documentElement.dataset.theme);
-  await page.evaluate(value=>document.documentElement.dataset.theme=value,theme);
+  await page.evaluate(value=>document.documentElement.dataset.theme=value,originalTheme);
   await page.getByRole('button',{name:'Send message'}).focus();
   await page.keyboard.press('Shift+Tab');
   assert.ok(await addPhotos.evaluate(el=>document.activeElement===el),'the photo picker must be keyboard focusable');
