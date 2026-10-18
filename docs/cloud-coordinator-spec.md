@@ -2054,6 +2054,13 @@ blockers and every key, task, storage-identity, attempt, binding, head, or other
 projection conflict still fail closed. A read-only proof view never backfills or
 promotes the retained proof or live action. Historical-base ancestry checks and
 active-writer exclusion remain mandatory.
+For an accepted anchored SOURCE continuation, the waiting-review handoff joins
+the full live action to its retained proof, including receipt-anchor fields and
+the original prompt and task request body. Cold restart must permit one genuine
+Copilot review request for the authenticated ready receipt without changing either
+stored receipt copy or replaying that request on the next poll. Missing or changed
+remote evidence and conflicts outside the two receipt result/body fields still
+deny publication.
 
 ACK-backed lifecycle retirement does not erase history. The optional
 `lifecycle_context` preserves each retired event's canonical payload and exact

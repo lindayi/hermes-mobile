@@ -6091,6 +6091,115 @@ def test_owner_continuation_source_receipt_requires_bound_anchor_and_prompt(
     assert store.action(abandonment["action_key"]) == historical
 
 
+@pytest.mark.parametrize("blocker", ["policy_broken", "conflict_incompatible"])
+@pytest.mark.parametrize("mutation", [
+    "unchanged", "malformed-blocker", "attempt",
+    "prompt", "request-body", "anchor-missing", "anchor-edited",
+    "anchor-mismatch", "receipt-deleted", "receipt-edited",
+])
+def test_owner_continuation_source_ready_view_handoff_apply_restart(
+        tmp_path, blocker, mutation):
+    api, store, abandonment, _, main = _owner_continuation_advanced_case(tmp_path)
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    successor = next(
+        action for action in store.actions().values()
+        if action.get("owner_continuation_binding")
+    )
+    assert successor.get("task_type", "source") == "source"
+    assert successor["receipt_anchor_role"] == "continuation-source"
+    result_head = "8" * 40
+    api.complete_task(
+        successor["task_id"], successor, head_sha=result_head, base_sha=main,
+    )
+    api.head_sha = api.pull["head"]["sha"] = result_head
+    api.source_failure = api.unresolved = False
+    api.source_failure_sha = None
+    api.review_state, api.review_sha = "PENDING", result_head
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(apply=True)
+    accepted = store.action(successor["key"])
+    assert accepted["receipt_result"] == "ready"
+    assert accepted["handoff_state"] == "waiting_review"
+    assert accepted["review_requirement"] == "missing_copilot_review"
+    StateStore(store.path).retire(16, result_head, main)
+
+    def forge_live_copy(state):
+        proof = next(
+            proof for proof in state["enrollments"]["16"]["receipt_proofs"]
+            if proof["task_id"] == successor["task_id"]
+        )
+        for field in ("receipt_anchor_body", "receipt_anchor_comment_id",
+                      "receipt_anchor_key", "body", "task_request_body"):
+            assert proof[field] == accepted[field]
+        live = state["actions"][successor["key"]]
+        live["receipt_result"] = blocker
+        live["receipt_body"] = live["receipt_body"].replace(
+            "result=ready", f"result={blocker}",
+        )
+        if mutation == "malformed-blocker":
+            live["receipt_body"] += "\ninvalid"
+        elif mutation == "attempt":
+            live["attempt"] += 1
+        elif mutation == "prompt":
+            live["body"] += " changed"
+        elif mutation == "request-body":
+            live["task_request_body"] += " changed"
+        elif mutation == "anchor-mismatch":
+            live["receipt_anchor_comment_id"] += 10000
+
+    store._mutate(forge_live_copy)
+    live = store.action(successor["key"])
+    receipt = next(
+        comment for comment in api.comments
+        if comment["id"] == live["receipt_comment_id"]
+    )
+    anchor = next(
+        comment for comment in api.comments
+        if comment["id"] == accepted["receipt_anchor_comment_id"]
+    )
+    if mutation == "anchor-missing":
+        api.comments.remove(anchor)
+    elif mutation == "anchor-edited":
+        anchor["updated_at"] = "2026-10-15T00:00:00Z"
+    elif mutation == "receipt-deleted":
+        api.comments.remove(receipt)
+    elif mutation == "receipt-edited":
+        receipt["updated_at"] = "2026-10-15T00:00:00Z"
+    api.review_state = api.review_sha = None
+    api.requested_reviewers = []
+    before = StateStore(store.path).snapshot()
+    writes, posts = deepcopy(api.writes), api.task_posts
+    for poll in range(2):
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856780,
+        ).run(apply=True)
+        review_writes = [
+            write for write in api.writes[len(writes):]
+            if write[0].endswith("/requested_reviewers")
+        ]
+        assert len(review_writes) == int(mutation == "unchanged"), json.dumps(
+            result, sort_keys=True,
+        )
+        assert api.task_posts == posts
+        after = StateStore(store.path).snapshot()
+        assert after["actions"][abandonment["action_key"]] == before[
+            "actions"
+        ][abandonment["action_key"]]
+        for field in (
+                "receipt_proofs", "owner_abandonments", "owner_continuations",
+                "attempts", "neutral_attempts", "neutral_anchor_reservations"):
+            assert after["enrollments"]["16"][field] == before["enrollments"]["16"][field]
+        for field in live:
+            if field not in {"handoff_waits", "blocker", "handoff_state"}:
+                assert after["actions"][successor["key"]][field] == live[field]
+        if mutation == "unchanged":
+            assert api.requested_reviewers == [{"id": COPILOT_REVIEWER}]
+            assert after["actions"][successor["key"]] == live
+        if poll == 0:
+            first_writes = deepcopy(api.writes)
+        else:
+            assert api.writes == first_writes
+
+
 def test_owner_continuation_source_prompt_change_blocks_publication(tmp_path, monkeypatch):
     api, store, abandonment, _, _ = _owner_continuation_advanced_case(tmp_path)
     before = store.snapshot()

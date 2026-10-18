@@ -4189,7 +4189,7 @@ def _authenticated_ready_receipt_view(action, enrollment, actions, comments):
         if proof.get("task_id") == action.get("task_id")
         and proof.get("receipt_result") == "ready"
         and _unauthenticated_blocker_copy_matches(
-            proof, _receipt_projection(action), comments,
+            proof, action, comments,
         )
     ]
     return proofs[0] if len(proofs) == 1 else None
