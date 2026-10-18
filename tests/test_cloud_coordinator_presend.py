@@ -1,4 +1,6 @@
 """Issue36: recover only proven pre-send auto-merge claims, with fresh fences."""
+from copy import deepcopy
+
 import pytest
 
 from test_cloud_coordinator import (
@@ -70,8 +72,20 @@ def test_retired_sent_key_never_reopens_or_reports_a_new_request(tmp_path):
 def test_plan_is_not_request_evidence_and_superseded_apply_reports_no_request(tmp_path):
     api, store, coordinator, plan = setup_plan(tmp_path)
     assert coordinator.run()["pull_requests"][0]["auto_merge_requested"] is False
-    api.pull["head"]["repo"]["id"] = 1
+    original_get = api.get
+    injected = False
+
+    def get(route):
+        nonlocal injected
+        value = deepcopy(original_get(route))
+        if route == "repos/lindayi/hermes-mobile/pulls/16" and not injected:
+            injected = True
+            api.pull["head"]["repo"]["id"] = 1
+        return value
+
+    api.get = get
     summary = coordinator._apply(plan)[0]
+    assert injected
     assert not api.graphql_writes
     assert summary["auto_merge_requested"] is False
     assert summary["auto_merge_eligible"] is False
@@ -92,10 +106,6 @@ def test_recovery_rechecks_fresh_fences_after_planning(tmp_path, fence):
         api.pull["head"]["sha"] = "c" * 40
     elif fence == "main":
         api.advance_main = True
-    elif fence in {"head-repo", "base-repo"}:
-        api.pull[fence.split("-")[0]]["repo"]["id"] = 1
-    elif fence == "base-ref":
-        api.pull["base"]["ref"] = "other"
     elif fence == "draft":
         api.pull["draft"] = True
     elif fence == "review":
@@ -115,13 +125,52 @@ def test_recovery_rechecks_fresh_fences_after_planning(tmp_path, fence):
     else:
         route = "user" if fence == "owner" else "repos/lindayi/hermes-mobile"
         api.get = lambda path: {"id": 1} if path == route else original_get(path)
+    if fence in {"head-repo", "base-repo", "base-ref"}:
+        injected = False
+
+        def get(path):
+            nonlocal injected
+            value = deepcopy(original_get(path))
+            if path == "repos/lindayi/hermes-mobile/pulls/16" and not injected:
+                injected = True
+                if fence == "head-repo":
+                    api.pull["head"]["repo"]["id"] = 1
+                elif fence == "base-repo":
+                    api.pull["base"]["repo"]["id"] = 1
+                else:
+                    api.pull["base"]["ref"] = "other"
+            return value
+
+        api.get = get
     if fence in {"owner", "repository"}:
         with pytest.raises(CoordinatorError):
             coordinator._apply(plan)
     else:
         summary = coordinator._apply(plan)[0]
         assert summary["auto_merge_requested"] is False
+        if fence in {"head-repo", "base-repo", "base-ref"}:
+            assert injected
     assert not api.graphql_writes
+
+
+@pytest.mark.parametrize("fence", ["head-repo", "base-repo", "base-ref", "malformed-repo"])
+def test_apply_keeps_early_pull_identity_failures_strict(tmp_path, fence):
+    api, store, coordinator, plan = setup_plan(tmp_path)
+    before = store.snapshot()
+    if fence == "head-repo":
+        api.pull["head"]["repo"]["id"] = 1
+    elif fence == "base-repo":
+        api.pull["base"]["repo"]["id"] = 1
+    elif fence == "base-ref":
+        api.pull["base"]["ref"] = "other"
+    else:
+        api.pull["head"]["repo"]["id"] = True
+
+    with pytest.raises(CoordinatorError, match="Pull request identity"):
+        coordinator._apply(plan)
+
+    assert store.snapshot() == before
+    assert not api.writes and not api.graphql_writes
 
 
 def test_recovered_claim_lost_response_stays_uncertain_across_restart(tmp_path):

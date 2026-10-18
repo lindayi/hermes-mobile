@@ -1998,7 +1998,7 @@ def _owner_abandonment_record_valid(record):
             or not _is_sha(record.get("base_sha"))
             or not positive_id(record.get("command_comment_id"))
             or type(record.get("actor_id")) is not int
-            or record.get("actor_id") != OWNER_ID
+            or record["actor_id"] != OWNER_ID
             or record.get("command_body") != (
                 f"/hermes abandon-unverified {record.get('task_id')} "
                 f"{record.get('head_sha')}"
@@ -2085,6 +2085,8 @@ def _owner_abandonment_successor_candidate_matches(record, action):
         and expected_binding is not None
         and action.get("key") != record["action_key"]
         and action.get("task_id") != record["task_id"]
+        and type(action.get("issue")) is int
+        and action["issue"] > 0
         and action.get("issue") == record["issue"]
         and action.get("kind") == "fix"
         and action.get("task_type") in {
@@ -2120,12 +2122,16 @@ def _owner_abandonment_matches_action(record, action):
         and action.get("status") == "uncertain"
         and action.get("task_id") == record["task_id"]
         and action.get("task_created_at") == record["task_created_at"]
+        and type(action.get("issue")) is int
+        and action["issue"] == record["issue"]
         and type(action.get("receipt_waits")) is int
         and action["receipt_waits"] == MAX_RECEIPT_POLLS
         and type(action.get("pull_id")) is int and action["pull_id"] > 0
         and isinstance(action.get("pull_node_id"), str)
         and bool(action["pull_node_id"])
+        and type(action.get("owner_id")) is int
         and action.get("owner_id") == OWNER_ID
+        and type(action.get("repository_id")) is int
         and action.get("repository_id") == REPOSITORY_ID
         and _reservation_sha256(action) == record["reservation_sha256"]
     )
@@ -3478,6 +3484,83 @@ def _valid_receipt_proof(action, comments):
     )
 
 
+def _retained_receipt_proofs_valid(enrollment, issue, comments=None):
+    if not isinstance(enrollment, dict) or type(issue) is not int:
+        return False
+    proofs = enrollment.get("receipt_proofs", [])
+    if not isinstance(proofs, list):
+        return False
+    return all(
+        isinstance(proof, dict)
+        and ("key" not in proof
+             or (isinstance(proof["key"], str) and proof["key"]))
+        and isinstance(proof.get("task_id"), str) and proof["task_id"]
+        and type(proof.get("issue")) is int and proof["issue"] == issue
+        and _is_sha(proof.get("receipt_head"))
+        and (comments is None or _valid_receipt_proof(proof, comments))
+        for proof in proofs
+    )
+
+
+_RECEIPT_AUTHORITY_FIELDS = frozenset({
+    "owner_abandonment_binding", "owner_abandonment_attestation",
+    "owner_continuation_binding", "owner_continuation_attestation",
+    "owner_continuation_companions",
+})
+
+
+_RECEIPT_PROOF_FIELDS = frozenset({
+    "key", "issue", "kind", "status", "head", "task_id", "dispatch_nonce",
+    "created_at", "receipt_result", "receipt_comment_id", "receipt_created_at",
+    "receipt_body", "receipt_task_id", "receipt_session_id",
+    "receipt_completed_at", "receipt_session_completed_at", "receipt_nonce",
+    "receipt_start_head", "receipt_head", "receipt_base", "receipt_legacy_neutral",
+    "head_ref", "recorded_base_sha", "attempt", "owner_id", "repository_id",
+    "pull_id", "pull_node_id", "repair_policy_version", "repair_fingerprints",
+    "repair_fingerprints_complete", "repair_fingerprint_version",
+    "repair_target_map", "receipt_version", "main_sha", "task_type",
+}) | _RECEIPT_AUTHORITY_FIELDS
+
+
+def _canonical_receipt_json(value):
+    try:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError):
+        return None
+
+
+def _receipt_projection(action):
+    return {
+        field: action[field] for field in _RECEIPT_PROOF_FIELDS if field in action
+    }
+
+
+def _receipt_proof_matches_live(
+        proof, action, *, require_proven_branch=False, ignored_fields=()):
+    if not isinstance(proof, dict) or not isinstance(action, dict):
+        return False
+    if (require_proven_branch and "head_ref" in action
+            and "head_ref" not in proof):
+        return False
+    fields = (_RECEIPT_PROOF_FIELDS | proof.keys()) - set(ignored_fields)
+    legacy_fields = {"key", "head_ref"}
+    if (proof.get("receipt_version", "v1") == "v1"
+            and action.get("receipt_version", "v1") == "v1"):
+        legacy_fields.update(("receipt_version", "main_sha", "task_type"))
+    legacy_omissions = {field for field in legacy_fields if field not in proof}
+    return _projected_fields_match(proof, action, fields - legacy_omissions)
+
+
+def _receipt_like_action(action):
+    return isinstance(action, dict) and any(
+        field in action for field in (
+            "receipt_result", "receipt_start_head", "receipt_head", "receipt_body",
+        )
+    )
+
+
 def _legacy_task_reservation_type(record, tasks, snapshot):
     if (not isinstance(snapshot, dict)
             or not isinstance(snapshot.get("pull"), dict)
@@ -3562,6 +3645,64 @@ def _legacy_task_reservation_type(record, tasks, snapshot):
     return reservation_type
 
 
+def _legacy_task_artifacts_match(listed, detailed, *, expected_pull=None):
+    if not isinstance(listed, dict) or not isinstance(detailed, dict):
+        return False
+    listed_artifacts = listed.get("artifacts")
+    detailed_artifacts = detailed.get("artifacts")
+    if (not isinstance(listed_artifacts, list)
+            or not isinstance(detailed_artifacts, list)
+            or len(listed_artifacts) > 20
+            or len(detailed_artifacts) > 20):
+        return False
+    try:
+        listed_json = json.dumps(
+            listed_artifacts, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        )
+        detailed_json = json.dumps(
+            detailed_artifacts, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return False
+    if listed_json != detailed_json:
+        return False
+    if expected_pull is not None:
+        expected_pull_id, expected_pull_node_id = expected_pull
+        if (type(expected_pull_id) is not int or expected_pull_id <= 0
+                or not isinstance(expected_pull_node_id, str)
+                or not expected_pull_node_id):
+            return False
+    branches, pulls = [], []
+    for artifact in listed_artifacts:
+        if (not isinstance(artifact, dict)
+                or artifact.get("provider") != "github"
+                or not isinstance(artifact.get("data"), dict)):
+            return False
+        data = artifact["data"]
+        if artifact.get("type") == "branch":
+            if (not isinstance(data.get("head_ref"), str)
+                    or not data["head_ref"]
+                    or data.get("base_ref") != MAIN_BRANCH):
+                return False
+            branches.append(data)
+        elif artifact.get("type") == "pull":
+            if (type(data.get("id")) is not int or data["id"] <= 0
+                    or (data.get("global_id") is not None
+                        and (not isinstance(data["global_id"], str)
+                             or not data["global_id"]))):
+                return False
+            if expected_pull is not None and (
+                    data["id"] != expected_pull_id
+                    or data.get("global_id") != expected_pull_node_id):
+                return False
+            pulls.append(data)
+        else:
+            return False
+    return len(branches) == 1 and len(pulls) == 1
+
+
 def _legacy_task_detail_matches_list(listed, detailed):
     terminal_states = {"completed", "failed", "timed_out", "cancelled"}
     if (
@@ -3578,6 +3719,7 @@ def _legacy_task_detail_matches_list(listed, detailed):
             or detailed.get("state") != listed.get("state")
             or detailed.get("state") not in terminal_states
             or detailed.get("created_at") != listed.get("created_at")
+            or not _legacy_task_artifacts_match(listed, detailed)
             or not isinstance(listed.get("updated_at"), str)
             or not isinstance(detailed.get("updated_at"), str)
             or detailed.get("updated_at") != listed.get("updated_at")
@@ -3596,6 +3738,28 @@ def _legacy_task_detail_matches_list(listed, detailed):
             ("creator", OWNER_ID), ("owner", OWNER_ID),
             ("repository", REPOSITORY_ID),
         )
+    )
+
+
+def _canonical_json_match(left, right):
+    try:
+        left_json = json.dumps(
+            left, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+        right_json = json.dumps(
+            right, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return False
+    return left_json == right_json
+
+
+def _projected_fields_match(left, right, fields):
+    if any((field in left) != (field in right) for field in fields):
+        return False
+    return _canonical_json_match(
+        {field: left[field] for field in fields if field in left},
+        {field: right[field] for field in fields if field in right},
     )
 
 
@@ -3759,6 +3923,278 @@ def _legacy_neutral_attempt_count(enrollment, actions, comments, *,
     return sum(binding[0] for binding in by_task.values())
 
 
+def _reconciled_receipt_records(issue, enrollment, actions, comments):
+    proofs = enrollment.get("receipt_proofs", [])
+    if not isinstance(proofs, list):
+        return None
+    proof_records = []
+    for proof in proofs:
+        if not isinstance(proof, dict):
+            return None
+        proof_issue = proof.get("issue")
+        if type(proof_issue) is not int or proof_issue <= 0:
+            return None
+        if proof_issue != issue:
+            continue
+        if (("key" in proof
+             and (not isinstance(proof.get("key"), str) or not proof["key"]))
+                or not isinstance(proof.get("task_id"), str)
+                or not proof["task_id"]):
+            return None
+        proof_records.append(proof)
+
+    proof_keys = {
+        proof["key"] for proof in proof_records
+        if isinstance(proof.get("key"), str)
+    }
+    proof_task_ids = {proof["task_id"] for proof in proof_records}
+    invalid_proof_keys, invalid_task_ids = set(), set()
+    conflicting_heads = set()
+
+    def mark_conflict(*records):
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            conflicting_heads.update(
+                head for field in ("receipt_start_head", "receipt_head")
+                if _is_sha(head := record.get(field))
+            )
+
+    proofs_by_key, proofs_by_task = {}, {}
+    for proof in proof_records:
+        if isinstance(proof.get("key"), str):
+            proofs_by_key.setdefault(proof["key"], []).append(proof)
+        proofs_by_task.setdefault(proof["task_id"], []).append(proof)
+
+    for key, records in proofs_by_key.items():
+        canonical = _canonical_receipt_json(records[0])
+        if canonical is None or any(
+                _canonical_receipt_json(record) != canonical for record in records[1:]):
+            invalid_proof_keys.add(key)
+            invalid_task_ids.update(record["task_id"] for record in records)
+            mark_conflict(*records)
+    for task_id, records in proofs_by_task.items():
+        canonical = _canonical_receipt_json(records[0])
+        if (len({record.get("key") for record in records}) != 1
+                or canonical is None or any(
+                    _canonical_receipt_json(record) != canonical
+                    for record in records[1:]
+                )):
+            invalid_task_ids.add(task_id)
+            invalid_proof_keys.update(
+                record["key"] for record in records
+                if isinstance(record.get("key"), str)
+            )
+            mark_conflict(*records)
+
+    for proof in proofs:
+        if type(proof["issue"]) is int and proof["issue"] != issue:
+            proof_key = proof.get("key")
+            task_id = proof.get("task_id")
+            if isinstance(proof_key, str) and proof_key in proof_keys:
+                invalid_proof_keys.add(proof_key)
+                invalid_task_ids.update(
+                    item["task_id"] for item in proofs_by_key[proof_key]
+                )
+                mark_conflict(*proofs_by_key[proof_key])
+            if isinstance(task_id, str) and task_id in proof_task_ids:
+                invalid_task_ids.add(task_id)
+                invalid_proof_keys.update(
+                    item["key"] for item in proofs_by_task[task_id]
+                    if isinstance(item.get("key"), str)
+                )
+                mark_conflict(*proofs_by_task[task_id])
+
+    live_records = []
+    for key, candidate in actions.items():
+        if not isinstance(candidate, dict):
+            if key in proof_keys:
+                return None
+            continue
+        candidate_key = candidate.get("key")
+        task_id = candidate.get("task_id")
+        receipt_like = _receipt_like_action(candidate)
+        linked_keys = {
+            value for value in (key, candidate_key)
+            if isinstance(value, str) and value in proof_keys
+        }
+        linked_tasks = (
+            {task_id} if isinstance(task_id, str) and task_id in proof_task_ids
+            else set()
+        )
+        exact_issue = type(candidate.get("issue")) is int and candidate["issue"] == issue
+        aliases_issue = candidate.get("issue") == issue
+        if not linked_keys and not linked_tasks and not (
+                receipt_like and (exact_issue or aliases_issue)):
+            continue
+        if (not exact_issue
+                or ("key" in candidate and (
+                    not isinstance(candidate_key, str) or candidate_key != key
+                ))
+                or not isinstance(task_id, str) or not task_id):
+            return None
+        candidate = {**candidate, "key": key} if "key" not in candidate else candidate
+        candidate_key = candidate["key"]
+        if receipt_like and _valid_receipt_proof(candidate, comments):
+            live_records.append(candidate)
+        matching_proofs = {
+            id(proof): proof for proof in [
+                *(
+                    record for proof_key in linked_keys
+                    for record in proofs_by_key[proof_key]
+                ),
+                *(
+                    record for linked_task in linked_tasks
+                    for record in proofs_by_task[linked_task]
+                ),
+            ]
+        }.values()
+        if any(
+                (proof.get("key") is not None
+                 and proof["key"] != candidate_key)
+                or proof["task_id"] != task_id
+                or not _receipt_proof_matches_live(proof, candidate)
+                for proof in matching_proofs):
+            matching_proofs = list(matching_proofs)
+            unauthenticated_blocker_copy = False
+            if matching_proofs:
+                unauthenticated_blocker_copy = all(
+                    _unauthenticated_blocker_copy_matches(
+                        proof, candidate, comments,
+                    )
+                    for proof in matching_proofs
+                )
+            if not unauthenticated_blocker_copy:
+                mark_conflict(candidate, *matching_proofs)
+                invalid_proof_keys.update(linked_keys)
+                invalid_proof_keys.update(
+                    proof["key"] for proof in matching_proofs
+                    if isinstance(proof.get("key"), str)
+                )
+                invalid_task_ids.update(linked_tasks)
+                invalid_task_ids.update(
+                    proof["task_id"] for proof in matching_proofs
+                )
+            continue
+
+    authenticated_blockers = [
+        proof for proof in [*proof_records, *live_records]
+        if proof.get("receipt_result") != "ready"
+        and _valid_receipt_proof(proof, comments)
+    ]
+    live_by_key, live_by_task = {}, {}
+    for candidate in live_records:
+        receipt_key = (
+            candidate["key"] if "key" in candidate
+            else ("legacy-task", candidate["task_id"])
+        )
+        live_by_key.setdefault(receipt_key, []).append(candidate)
+        live_by_task.setdefault(candidate["task_id"], []).append(candidate)
+    for key, records in live_by_key.items():
+        canonical = _canonical_receipt_json(_receipt_projection(records[0]))
+        if canonical is None or any(
+                _canonical_receipt_json(_receipt_projection(record)) != canonical
+                for record in records[1:]):
+            invalid_proof_keys.add(key)
+            invalid_task_ids.update(record["task_id"] for record in records)
+            mark_conflict(*records)
+    for task_id, records in live_by_task.items():
+        canonical = _canonical_receipt_json(_receipt_projection(records[0]))
+        if (len({
+                record["key"] if "key" in record
+                else ("legacy-task", record["task_id"])
+                for record in records
+        }) != 1
+                or canonical is None or any(
+                    _canonical_receipt_json(_receipt_projection(record)) != canonical
+                    for record in records[1:]
+                )):
+            invalid_task_ids.add(task_id)
+            invalid_proof_keys.update(
+                record["key"] if "key" in record
+                else ("legacy-task", record["task_id"])
+                for record in records
+            )
+            mark_conflict(*records)
+
+    candidates_by_key = {
+        key: records[0] for key, records in proofs_by_key.items()
+        if key not in invalid_proof_keys
+    }
+    for task_id, records in proofs_by_task.items():
+        if (not isinstance(records[0].get("key"), str)
+                and task_id not in invalid_task_ids):
+            candidates_by_key[("legacy-task", task_id)] = records[0]
+    for key, records in live_by_key.items():
+        if key in invalid_proof_keys or records[0]["task_id"] in invalid_task_ids:
+            continue
+        if key in candidates_by_key:
+            candidates_by_key[key] = {
+                **_receipt_projection(records[0]),
+                **candidates_by_key[key],
+            }
+            continue
+        candidates_by_key[key] = records[0]
+    candidates = [
+        candidate for key, candidate in candidates_by_key.items()
+        if candidate.get("task_id") not in invalid_task_ids
+        and _valid_receipt_proof(candidate, comments)
+    ]
+    return (
+        candidates,
+        authenticated_blockers,
+        not (invalid_proof_keys or invalid_task_ids),
+        conflicting_heads,
+    )
+
+
+def _unauthenticated_blocker_copy_matches(proof, candidate, comments):
+    if (candidate.get("receipt_result") not in {
+            "conflict_incompatible", "policy_broken",
+        }
+            or not isinstance(candidate.get("receipt_body"), str)
+            or _valid_receipt_proof(candidate, comments)
+            or not _valid_receipt_proof(proof, comments)
+            or not _receipt_proof_matches_live(
+                proof, candidate,
+                ignored_fields={"receipt_result", "receipt_body"},
+            )):
+        return False
+    try:
+        return receipt_body_matches(
+            candidate["receipt_body"],
+            candidate["receipt_nonce"],
+            candidate["receipt_task_id"],
+            candidate["receipt_session_id"],
+            candidate.get("issue"),
+            candidate["receipt_start_head"],
+            candidate["receipt_head"],
+            candidate["receipt_base"],
+            candidate["receipt_result"],
+            version=candidate.get("receipt_version", "v1"),
+            legacy_neutral=candidate.get("receipt_legacy_neutral", False),
+        )
+    except (KeyError, OverflowError, TypeError, ValueError):
+        return False
+
+
+def _authenticated_ready_receipt_view(action, enrollment, actions, comments):
+    reconciled = _reconciled_receipt_records(
+        action.get("issue"), enrollment, actions, comments,
+    )
+    if reconciled is None or not reconciled[2]:
+        return None
+    proofs = [
+        proof for proof in reconciled[0]
+        if proof.get("task_id") == action.get("task_id")
+        and proof.get("receipt_result") == "ready"
+        and _unauthenticated_blocker_copy_matches(
+            proof, action, comments,
+        )
+    ]
+    return proofs[0] if len(proofs) == 1 else None
+
+
 def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     # base_sha is retained for callers, but current-main eligibility is enforced
     # by live dispatch/merge fences, never by revoking recorded HEAD provenance.
@@ -3770,25 +4206,36 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
     authorized = {initial}
     if _is_sha(enrollment.get("owner_authorized_head")):
         authorized.add(enrollment["owner_authorized_head"])
+    if type(issue) is not int or issue <= 0:
+        return initial, set(), set()
     continuation_records = [
         recovery for _, recovery in _valid_owner_abandonment_claims(
             enrollment, actions,
         )
     ]
+    abandonment_records = enrollment.get("owner_abandonments", [])
+    if (not isinstance(abandonment_records, list)
+            or len(continuation_records) != len(abandonment_records)
+            or any(record.get("issue") != issue
+                   for record in continuation_records)):
+        return initial, set(), set()
     owner_continuation_records = [
         recovery for _, recovery in _valid_owner_continuation_claims(
             enrollment, actions,
         )
     ]
-    blocked = set()
-    candidates = [
-        action for action in [*enrollment.get("receipt_proofs", []), *actions.values()]
-        if isinstance(action, dict) and action.get("issue") == issue
-        and _valid_receipt_proof(action, comments)
-    ]
+    reconciled = _reconciled_receipt_records(issue, enrollment, actions, comments)
+    if reconciled is None:
+        return initial, set(), set()
+    candidates, authenticated_blockers, reconciliation_complete, conflicting_heads = (
+        reconciled
+    )
+    blocked = set(conflicting_heads)
+    if not reconciliation_complete and not blocked:
+        blocked.update(authorized)
     while True:
         changed = False
-        for action in candidates:
+        for action in [*candidates, *authenticated_blockers]:
             start_head = action.get("receipt_start_head")
             if (start_head not in authorized and not any(
                     recovery["head_sha"] == start_head
@@ -3812,20 +4259,122 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
             return initial, authorized, blocked
 
 
+def _dispatch_authorization_inputs(state, issue):
+    if not isinstance(state, dict):
+        return None
+    enrollments = state.get("enrollments")
+    enrollment = enrollments.get(str(issue)) if isinstance(enrollments, dict) else None
+    actions = state.get("actions")
+    if not isinstance(enrollment, dict) or not isinstance(actions, dict):
+        return None
+    proofs = enrollment.get("receipt_proofs")
+    proof_records = proofs if isinstance(proofs, list) else []
+    proof_keys = {
+        proof["key"] for proof in proof_records
+        if isinstance(proof, dict) and isinstance(proof.get("key"), str)
+    }
+    proof_task_ids = {
+        proof["task_id"] for proof in proof_records
+        if isinstance(proof, dict) and isinstance(proof.get("task_id"), str)
+    }
+    continuations = enrollment.get("owner_continuations")
+    continuation_records = continuations if isinstance(continuations, list) else []
+    continuation_keys = {
+        record["historical_action_key"] for record in continuation_records
+        if isinstance(record, dict)
+        and isinstance(record.get("historical_action_key"), str)
+    }
+    continuation_task_ids = {
+        record["historical_task_id"] for record in continuation_records
+        if isinstance(record, dict)
+        and isinstance(record.get("historical_task_id"), str)
+    }
+    abandonments = enrollment.get("owner_abandonments")
+    abandonment_records = abandonments if isinstance(abandonments, list) else []
+    abandonment_keys = {
+        record["action_key"] for record in abandonment_records
+        if isinstance(record, dict) and isinstance(record.get("action_key"), str)
+    }
+    abandonment_task_ids = {
+        record["task_id"] for record in abandonment_records
+        if isinstance(record, dict) and isinstance(record.get("task_id"), str)
+    }
+    authority_keys = proof_keys | abandonment_keys | continuation_keys
+    relevant_actions = {
+        key: deepcopy(action)
+        for key, action in actions.items()
+        if key in authority_keys
+        or (
+            isinstance(action, dict)
+            and (
+                (
+                    isinstance(action.get("key"), str)
+                    and action["key"] in authority_keys
+                ) or (
+                    isinstance(action.get("task_id"), str)
+                    and action["task_id"] in (
+                        proof_task_ids | abandonment_task_ids | continuation_task_ids
+                    )
+                )
+                or (
+                    action.get("issue") == issue
+                    and (
+                        action.get("key") != key
+                        or _receipt_like_action(action)
+                    )
+                )
+            )
+        )
+    }
+    return {
+        "enrollment": {
+            field: deepcopy(enrollment.get(field))
+            for field in (
+                "active", "issue", "repository_id", "pull_id", "pull_node_id",
+                "base", "authorized_head", "owner_authorized_head",
+                "owner_abandonments", "owner_continuations", "receipt_proofs",
+            )
+            if field != "receipt_proofs" or field in enrollment
+        },
+        "actions": relevant_actions,
+    }
+
+
+def _action_correlates_authority(key, action, reservation_key, task_id):
+    return isinstance(action, dict) and (
+        (isinstance(reservation_key, str) and reservation_key
+         and reservation_key in (key, action.get("key")))
+        or (isinstance(task_id, str) and task_id
+            and action.get("task_id") == task_id)
+    )
+
+
 def _valid_owner_abandonment_claims(enrollment, actions):
     records = enrollment.get("owner_abandonments", []) if isinstance(
         enrollment, dict,
     ) else []
     if not isinstance(records, list) or not isinstance(actions, dict):
         return []
-    return [
-        (record["action_key"], record)
-        for record in records
-        if isinstance(record, dict)
-        and _owner_abandonment_matches_action(
-            record, actions.get(record.get("action_key")),
-        )
-    ]
+    claims = []
+    seen = set()
+    seen_task_ids = set()
+    for record in records:
+        key = record.get("action_key") if isinstance(record, dict) else None
+        if (not isinstance(key, str) or key in seen
+                or not _owner_abandonment_matches_action(record, actions.get(key))
+                or record["task_id"] in seen_task_ids
+                or any(
+                    candidate_key != key
+                    and _action_correlates_authority(
+                        candidate_key, candidate, key, record["task_id"],
+                    )
+                    for candidate_key, candidate in actions.items()
+                )):
+            return []
+        seen.add(key)
+        seen_task_ids.add(record["task_id"])
+        claims.append((key, record))
+    return claims
 
 
 def _owner_continuation_matches_history(record, enrollment, actions):
@@ -4122,10 +4671,10 @@ def _owner_continuation_enrollment_head(enrollment):
 
 def _owner_continuation_successor_proven(record, enrollment, actions, comments,
                                          current_head):
-    candidates = [
-        *actions.values(),
-        *enrollment.get("receipt_proofs", []),
-    ]
+    proofs = enrollment.get("receipt_proofs", [])
+    if not isinstance(proofs, list):
+        return False
+    candidates = [*actions.values(), *proofs]
     direct_successors = [
         action for action in candidates
         if isinstance(action, dict)
@@ -4219,8 +4768,10 @@ def _owner_abandonment_successor_matches(record, action, *, allow_intent=False):
             )
             or (
                 not allow_intent
-                and action.get("owner_abandonment_binding")
-                    != _owner_abandonment_successor_binding(record)
+                and not _canonical_json_match(
+                    action.get("owner_abandonment_binding"),
+                    _owner_abandonment_successor_binding(record),
+                )
             )
     ):
         return False
@@ -4307,6 +4858,8 @@ def _completed_repair_progress(snapshot, actions, current_fingerprints,
                     )
                 )
                 or (ready_receipt
+                    and (action.get("receipt_version", "v1") != "v1"
+                         or "main_sha" in action)
                     and action.get("receipt_base") != action.get("main_sha"))
                 or action.get("pull_id") != pull.get("id")
                 or action.get("pull_node_id") != pull.get("node_id")
@@ -4470,6 +5023,20 @@ def _pull_identity(pull, binding):
             and pull.get("node_id") == binding["pull_node_id"])
 
 
+def _pull_identity_change_isolatable(pull, enrollment):
+    return (
+        isinstance(pull, dict)
+        and pull.get("state") == "open"
+        and pull.get("merged") is False
+        and type(pull.get("number")) is int and pull["number"] > 0
+        and type(pull.get("id")) is int and pull["id"] > 0
+        and isinstance(pull.get("node_id"), str) and bool(pull["node_id"])
+        and type(enrollment.get("pull_id")) is int and enrollment["pull_id"] > 0
+        and isinstance(enrollment.get("pull_node_id"), str)
+        and bool(enrollment["pull_node_id"])
+    )
+
+
 def _legacy_neutral_receipt_recovery_binding(action, pull, number, expected_base_sha):
     base = pull.get("base") if isinstance(pull, dict) else None
     return (
@@ -4535,6 +5102,7 @@ class Coordinator:
         self.owner_user_id = owner_user_id
         self.lifecycle_source_paths = lifecycle_source_paths
         self.starter_state_path = starter_state_path
+        self._processed_by_issue = []
 
     def _identity(self):
         repository = self.api.get(f"repos/{REPOSITORY}")
@@ -4705,7 +5273,7 @@ class Coordinator:
 
     def _scan_enrollments(self, state, *, admission_checks=None,
                           blocked_continuations=(), pending_event_exceptions=()):
-        commands, processed = [], []
+        commands, processed, processed_by_issue = [], [], []
         pending_event_exceptions = set(map(str, pending_event_exceptions))
         cursor = state.get("cursor")
         issues = self._issues(cursor)
@@ -4749,6 +5317,7 @@ class Coordinator:
                             r"/hermes enroll [0-9a-f]{40}(?: issue [^\n]*)?", body,
                         )):
                     processed.append(key)
+                    processed_by_issue.append((issue["number"], key))
                     if not issue.get("pull_request"):
                         continue
                     pull = self.api.get(f"repos/{REPOSITORY}/pulls/{issue['number']}")
@@ -4764,6 +5333,7 @@ class Coordinator:
                             "issue": issue["number"], **abandonment,
                         }))
                         processed.append(key)
+                        processed_by_issue.append((issue["number"], key))
                         continue
                     continuation = _is_owner_unverified_continuation_command(comment)
                     if continuation:
@@ -4771,6 +5341,7 @@ class Coordinator:
                             "issue": issue["number"], **continuation,
                         }))
                         processed.append(key)
+                        processed_by_issue.append((issue["number"], key))
                         continue
                     authorization = _is_owner_sensitive_command(comment)
                     if authorization:
@@ -4783,6 +5354,7 @@ class Coordinator:
                             },
                         }))
                         processed.append(key)
+                        processed_by_issue.append((issue["number"], key))
         candidates = {key: dict(value) for key, value in state["enrollments"].items()
                       if value.get("active")}
         for action, enrollment in commands:
@@ -4856,6 +5428,7 @@ class Coordinator:
                 item["owner_authorization"] = owner_authorization
                 item["targeted_review"] = targeted_review
                 item["validated"] = True
+        self._processed_by_issue = processed_by_issue
         return issues, commands, processed, candidates
 
     def _compare_proves_ancestry(self, base_sha, tip_sha, *, allow_identical=False,
@@ -5217,7 +5790,8 @@ class Coordinator:
                 except (ApiError, CoordinatorError, KeyError, TypeError, ValueError, UnicodeError):
                     return None, "unverified"
 
-    def _snapshot_pull(self, number, enrollment, main_sha, actions=None):
+    def _snapshot_pull(self, number, enrollment, main_sha, actions=None, *,
+                       allow_unrelated_active=False):
         if not {"pull_id", "pull_node_id", "repository_id"}.issubset(enrollment):
             raise CoordinatorError(
                 "Unsupported legacy enrollment: missing pull/repository identity; "
@@ -5232,8 +5806,9 @@ class Coordinator:
             raise CoordinatorError("Pull request head was not a commit SHA")
         head_repo, base_repo = head.get("repo"), base.get("repo")
         if (
-            type(number) is not int or enrollment.get("issue") != number
-            or not _pull_identity(pull, enrollment)
+            type(number) is not int or type(enrollment.get("issue")) is not int
+            or enrollment["issue"] != number
+            or type(enrollment.get("repository_id")) is not int
             or enrollment.get("repository_id") != REPOSITORY_ID
             or not _github_identity(head_repo, REPOSITORY_ID)
             or not _github_identity(base_repo, REPOSITORY_ID)
@@ -5241,6 +5816,15 @@ class Coordinator:
             or not _is_sha(base.get("sha"))
         ):
             raise CoordinatorError("Pull request identity did not match enrollment")
+        if not _pull_identity(pull, enrollment):
+            if not (allow_unrelated_active
+                    and _pull_identity_change_isolatable(pull, enrollment)):
+                raise CoordinatorError("Pull request identity did not match enrollment")
+            return {
+                "issue": number, "enrollment": enrollment, "pull": pull,
+                "head": head["sha"], "main_sha": main_sha, "scoped": False,
+                "terminal": False, "identity_invalid": True,
+            }
         if pull.get("state") != "open" or pull.get("merged") is not False:
             return {
                 "issue": number, "enrollment": enrollment, "pull": pull,
@@ -5982,7 +6566,7 @@ class Coordinator:
                             )
                     else:
                         if snapshot["enrollment"].get("authorized_head") is not None:
-                            _, authorized_heads, _ = _authorized_result_heads(
+                            _, authorized_heads, blocked_heads = _authorized_result_heads(
                                 number, snapshot["enrollment"], self.store.actions(),
                                 snapshot["comments"],
                                 snapshot["pull"].get("base", {}).get("sha"),
@@ -6005,8 +6589,9 @@ class Coordinator:
                                     snapshot["enrollment"], actions,
                                 )
                             )
-                            if (action.get("head") not in authorized_heads
-                                    and not continuation_start):
+                            if (action.get("head") in blocked_heads
+                                    or (action.get("head") not in authorized_heads
+                                        and not continuation_start)):
                                 if apply and not receipt_recovery:
                                     self._record_receipt_wait(key, action)
                                 mark_busy()
@@ -6338,8 +6923,16 @@ class Coordinator:
         During planning, ``deferred`` collects keys whose next step is a remote
         mutation; those steps run only after the scan commit succeeds.
         """
+        comments = snapshot.get("comments")
+        if not _valid_receipt_proof(action, comments):
+            proof = _authenticated_ready_receipt_view(
+                action, snapshot.get("enrollment", {}),
+                self.store.actions(), comments,
+            )
+            if proof is not None:
+                action = {**action, **_receipt_projection(proof)}
         head = action.get("receipt_head")
-        if not _valid_receipt_proof(action, snapshot.get("comments")):
+        if not _valid_receipt_proof(action, comments):
             return self._handoff_wait(key, action, snapshot)
         # Receipt base records dispatch provenance, not current-main eligibility.
         # Fence handoff mutations against the fresh scan base (and live main).
@@ -6660,6 +7253,15 @@ class Coordinator:
     def _plan_pull(self, snapshot, actions, *, apply, reconciled_busy=None,
                    reconciled_busy_details=None):
         number, head = snapshot["issue"], snapshot["head"]
+        if snapshot.get("identity_invalid"):
+            return {
+                "issue": number, "head": head, "terminal": False,
+                "identity_invalid": True, "sensitive": True,
+                "review_valid": False, "required_checks_green": False,
+                "auto_merge_eligible": False, "repair": None,
+                "status_action": None, "merge_action": None,
+                "reasons": ["pull-identity"], "outcomes": [],
+            }
         if snapshot.get("terminal"):
             lifecycle = []
             enrollment = snapshot["enrollment"]
@@ -6688,6 +7290,14 @@ class Coordinator:
                 "repair": None, "status_action": None, "merge_action": None,
                 "reasons": ["terminal"], "outcomes": [],
                 "lifecycle_events": lifecycle,
+            }
+        if not isinstance(snapshot["enrollment"].get("receipt_proofs", []), list):
+            return {
+                "issue": number, "head": head, "terminal": False,
+                "sensitive": True, "review_valid": False,
+                "required_checks_green": False, "auto_merge_eligible": False,
+                "repair": None, "status_action": None, "merge_action": None,
+                "reasons": ["receipt-proofs-invalid"], "outcomes": [],
             }
         pull_user = snapshot["pull"].get("user")
         review_ok = independent_review_valid(
@@ -6759,7 +7369,8 @@ class Coordinator:
         enrollment["receipt_proofs"] = self.store.snapshot()["enrollments"].get(
             str(number), {},
         ).get("receipt_proofs", [])
-        if enrollment.get("neutral_attempts_unknown") is True:
+        if (enrollment.get("neutral_attempts_unknown") is True
+                and isinstance(enrollment.get("receipt_proofs"), list)):
             task_details = self._hydrate_legacy_task_details(
                 enrollment, actions, snapshot,
             )
@@ -6778,11 +7389,23 @@ class Coordinator:
                 enrollment["neutral_attempts_unknown"] = False
                 enrollment["attempts"] -= recovered_neutral_attempts
         snapshot["enrollment"] = enrollment
+        receipt_views = {}
+        abandonment_head_proven = self._owner_abandonment_head_proven(
+            snapshot, receipt_views=receipt_views,
+        )
+        authority_enrollment = {
+            **enrollment,
+            "receipt_proofs": [
+                receipt_views.get(proof.get("task_id"), proof)
+                if isinstance(proof, dict) else proof
+                for proof in enrollment.get("receipt_proofs", [])
+            ],
+        } if receipt_views else enrollment
         authorized_head, authorized_heads, blocked_heads = _authorized_result_heads(
-            number, enrollment, self.store.actions(),
+            number, authority_enrollment, self.store.actions(),
             snapshot["comments"], snapshot["pull"].get("base", {}).get("sha"),
         )
-        receipt_enrollment = dict(enrollment)
+        receipt_enrollment = dict(authority_enrollment)
         receipt_enrollment.pop("owner_authorized_head", None)
         _, receipt_authorized_heads, _ = _authorized_result_heads(
             number, receipt_enrollment, self.store.actions(),
@@ -6804,6 +7427,8 @@ class Coordinator:
             and _owner_abandonment_record_valid(record)
             and record["head_sha"] != head
             and head not in receipt_authorized_heads
+            and not self._owner_abandonment_successor_proven(snapshot, record)
+            and not self._owner_abandonment_continuation_proven(snapshot, record)
             and not any(
                 continuation["historical_action_key"]
                     == record["action_key"]
@@ -6813,12 +7438,22 @@ class Coordinator:
             )
             for record in historical_roots
         )
-        if missing_root_disposition:
+        if (missing_root_disposition
+                or (not abandonment_head_proven and not continuation_for_head)):
+            reasons = ["unauthorized-continuation"]
+            if (not abandonment_head_proven and not owner_continuations and agent_busy
+                    and busy_details.get("external_busy") is False
+                    and busy_details.get("action_keys")
+                    and isinstance(historical_roots, list)
+                    and len(_valid_owner_abandonment_claims(
+                        enrollment, self.store.actions(),
+                    )) == len(historical_roots)):
+                reasons.append("agent")
             return {
                 "issue": number, "head": head, "sensitive": sensitive,
                 "terminal": False, "review_valid": review_ok,
                 "required_checks_green": checks_ok, "auto_merge_eligible": False,
-                "reasons": ["unauthorized-continuation"], "repair": None,
+                "reasons": reasons, "repair": None,
                 "status_action": None, "merge_action": None, "outcomes": [],
                 "receipt_recoveries": receipt_recoveries, "handoffs": handoffs,
             }
@@ -6846,24 +7481,35 @@ class Coordinator:
                 "status_action": None, "merge_action": None, "outcomes": [outcome],
                 "receipt_recoveries": receipt_recoveries, "handoffs": handoffs,
             }
-        copilot_review_handoff_keys = {
-            key for key, action in actions.items()
+        copilot_review_handoff_keys = set()
+        for key, action in actions.items():
+            if (not isinstance(action, dict)
+                    or action.get("issue") != number
+                    or action.get("kind") != "fix"
+                    or action.get("status") != "completed"
+                    or action.get("handoff_state") != "waiting_review"
+                    or action.get("review_requirement") != "missing_copilot_review"):
+                continue
+            handoff_action = action
+            if not _valid_receipt_proof(handoff_action, snapshot["comments"]):
+                proof = _authenticated_ready_receipt_view(
+                    action, enrollment, actions, snapshot["comments"],
+                )
+                if proof is None:
+                    continue
+                handoff_action = {**action, **_receipt_projection(proof)}
             if (
-                isinstance(action, dict)
-                and action.get("issue") == number
-                and action.get("kind") == "fix"
-                and action.get("status") == "completed"
-                and action.get("handoff_state") == "waiting_review"
-                and action.get("review_requirement") == "missing_copilot_review"
-                and action.get("receipt_result") == "ready"
-                and action.get("receipt_head") == head
-                and action.get("receipt_base") == action.get("main_sha")
-                and action.get("owner_id") == OWNER_ID
-                and action.get("repository_id") == REPOSITORY_ID
-                and _pull_identity(snapshot["pull"], action)
-                and _valid_receipt_proof(action, snapshot["comments"])
-            )
-        }
+                    handoff_action.get("receipt_result") == "ready"
+                    and handoff_action.get("receipt_head") == head
+                    and handoff_action.get("receipt_base")
+                        == handoff_action.get("main_sha")
+                    and handoff_action.get("owner_id") == OWNER_ID
+                    and handoff_action.get("repository_id") == REPOSITORY_ID
+                    and _pull_identity(snapshot["pull"], handoff_action)
+                    and _valid_receipt_proof(
+                        handoff_action, snapshot["comments"],
+                    )):
+                copilot_review_handoff_keys.add(key)
         waiting_handoff_is_only_busy = (
             len(copilot_review_handoff_keys) == 1
             and busy_details.get("action_keys") == copilot_review_handoff_keys
@@ -7629,6 +8275,7 @@ class Coordinator:
         if not _is_sha(main_sha):
             raise CoordinatorError("Current main commit was unavailable")
         admission_checks = []
+        self._processed_by_issue = []
         scan_options = (
             {"blocked_continuations": blocked_continuations}
             if blocked_continuations else {}
@@ -7638,6 +8285,7 @@ class Coordinator:
         issues, commands, processed, enrollments = self._scan_enrollments(
             state, admission_checks=admission_checks, **scan_options,
         )
+        processed_by_issue = self._processed_by_issue
         scans, sensitive_revocations, starter_sources = [], [], []
         pending_events = []
         for key, enrollment in enrollments.items():
@@ -7645,7 +8293,11 @@ class Coordinator:
                 continue
             snapshot = self._snapshot_pull(
                 int(key), enrollment, main_sha, actions=state["actions"],
+                allow_unrelated_active=True,
             )
+            if snapshot.get("identity_invalid"):
+                scans.append(snapshot)
+                continue
             source = snapshot.get("initial_source")
             if _valid_initial_source(source):
                 starter_sources.append((snapshot["issue"], snapshot["head"], source))
@@ -7699,6 +8351,7 @@ class Coordinator:
                 (value for value in scans if value["issue"] == item["issue"]), None,
             )
             if (snapshot is None or snapshot.get("terminal")
+                    or snapshot.get("identity_invalid")
                     or snapshot["head"] != item["head_sha"]):
                 continue
             actions = [
@@ -7797,6 +8450,8 @@ class Coordinator:
             })
         deferred_mixed_enrollments = set()
         for snapshot in scans:
+            if snapshot.get("identity_invalid"):
+                continue
             issue = snapshot["issue"]
             new_records = [
                 recovery["record"] for recovery in owner_continuations
@@ -7938,11 +8593,12 @@ class Coordinator:
             ]
         observations = [
             (snapshot["issue"], snapshot["head"]) for snapshot in scans
-            if not snapshot.get("terminal")
+            if not snapshot.get("terminal") and not snapshot.get("identity_invalid")
         ]
         return {
             "cursor": cursor, "main_sha": main_sha,
-            "processed": processed, "commands": accepted_commands,
+            "processed": processed, "processed_by_issue": processed_by_issue,
+            "commands": accepted_commands,
             "pending_events": list(dict.fromkeys(pending_events)),
             "starter_admissions": admission_checks,
             "starter_sources": starter_sources,
@@ -7998,34 +8654,465 @@ class Coordinator:
                 return False
         return pull
 
-    def _owner_abandonment_successor_proven(self, snapshot, record):
+    def _legacy_receipt_branch_view(self, proof, snapshot, tasks, actions):
+        if not _valid_receipt_proof(proof, snapshot["comments"]):
+            return None
+        task_id = proof["task_id"]
+        listed = [
+            task for task in tasks
+            if isinstance(task, dict) and task.get("id") == task_id
+        ]
+        if len(listed) != 1:
+            return None
+        try:
+            task = self.api.get(
+                f"agents/repos/{REPOSITORY}/tasks/{quote(task_id, safe='')}",
+            )
+        except CoordinatorError:
+            return None
+        listed = listed[0]
+        if not _legacy_task_artifacts_match(
+                listed, task,
+                expected_pull=(proof.get("pull_id"), proof.get("pull_node_id"))):
+            return None
+        if "sessions" not in listed:
+            if not _legacy_task_detail_matches_list(listed, task):
+                return None
+        else:
+            fields = (
+                "id", "state", "created_at", "updated_at", "creator",
+                "owner", "repository", "artifacts", "sessions",
+            )
+            try:
+                listed_json = json.dumps(
+                    {field: listed.get(field) for field in fields},
+                    sort_keys=True, separators=(",", ":"), allow_nan=False,
+                )
+                detailed_json = json.dumps(
+                    {field: task.get(field) for field in fields},
+                    sort_keys=True, separators=(",", ":"), allow_nan=False,
+                )
+            except (TypeError, ValueError):
+                return None
+            if listed_json != detailed_json:
+                return None
+        original_snapshot = {**snapshot, "issue": proof.get("issue")}
+        reservation_type = _legacy_task_reservation_type(
+            proof, {task_id: task}, original_snapshot,
+        )
+        if reservation_type is None or task.get("state") != "completed":
+            return None
+        session = task["sessions"][0]
+        prompt = session["prompt"]
+        markers = re.findall(
+            r"<!-- (hermes-coordinator-fix:[0-9a-f]{20}) -->", prompt,
+        )
+        if len(markers) != 1:
+            return None
+        original_key = f"fix:{proof['issue']}:{markers[0]}"
+        reservation = re.fullmatch(
+            rf"fix:{proof['issue']}:(hermes-coordinator-fix:[0-9a-f]{{20}})",
+            proof.get("key", original_key),
+        )
+        if (session.get("state") != "completed"
+                or reservation is None
+                or proof.get("key", original_key) != original_key
+                or ("head_ref" in proof
+                    and proof["head_ref"] != session["head_ref"])
+                or session.get("completed_at") != proof["receipt_completed_at"]
+                or any(
+                    action.get("body") != prompt
+                    for action in actions.values()
+                    if isinstance(action, dict)
+                    and action.get("task_id") == task_id
+                )):
+            return None
+        view = {
+            **proof, "key": original_key,
+            "head_ref": session["head_ref"], "body": prompt,
+            "task_created_at": task.get("created_at"), "marker": reservation[1],
+        }
+        bindings = {
+            "pull_number": proof["issue"], "start_head": proof["head"],
+            "base_sha": proof.get("main_sha", proof["receipt_base"]),
+        }
+        instructions = [receipt_instruction(proof["dispatch_nonce"], **bindings)]
+        if reservation_type:
+            if not prompt.startswith(
+                    f"Neutral reconciliation for PR #{proof['issue']} at exact PR "
+                    f"head `{proof['head']}`. The current target main is "
+                    f"`{proof.get('main_sha')}`; the PR's recorded base is "
+                    f"`{proof.get('recorded_base_sha')}`. "):
+                return None
+            instructions.extend([
+                receipt_instruction(
+                    proof["dispatch_nonce"], neutral=True, **bindings,
+                ),
+                _historical_neutral_receipt_instruction(
+                    proof["dispatch_nonce"], **bindings,
+                ),
+                _previous_release_neutral_receipt_instruction(
+                    proof["dispatch_nonce"], **bindings,
+                ),
+            ])
+            for comment in snapshot["comments"]:
+                if (not isinstance(comment, dict)
+                        or not _github_identity(comment.get("user"), OWNER_ID)
+                        or type(comment.get("id")) is not int
+                        or not 0 < comment["id"] <= 2**63 - 1
+                        or not _valid_timestamp(comment.get("created_at"))
+                        or comment.get("updated_at") != comment["created_at"]
+                        or not isinstance(comment.get("body"), str)
+                        or re.fullmatch(
+                            r"hermes-coordinator-neutral-receipt:[0-9a-f]{20}",
+                            comment["body"],
+                        ) is None):
+                    continue
+                anchor_bindings = {
+                    **bindings, "anchor_comment_id": comment["id"],
+                    "anchor_body": comment["body"],
+                }
+                anchored = [
+                    receipt_instruction(
+                        proof["dispatch_nonce"], neutral=True, **anchor_bindings,
+                    ),
+                    _anchored_neutral_receipt_instruction_v1(
+                        proof["dispatch_nonce"], **anchor_bindings,
+                    ),
+                ]
+                if any(prompt.endswith(f"\n\n{item}") for item in anchored):
+                    view.update(
+                        receipt_anchor_comment_id=comment["id"],
+                        receipt_anchor_body=comment["body"],
+                    )
+                    instructions.extend(anchored)
+        if not any(
+                prompt.endswith(f"<!-- {reservation[1]} -->\n\n{item}")
+                for item in instructions):
+            return None
+        historical_pull = deepcopy(snapshot["pull"])
+        historical_pull["head"]["sha"] = proof["receipt_head"]
+        historical_pull["base"]["sha"] = proof["receipt_base"]
+        try:
+            receipt = validate_task_receipt(
+                task, view, historical_pull, snapshot["comments"],
+                now=datetime.fromtimestamp(self.clock(), timezone.utc),
+            )
+        except (ReceiptError, OverflowError, TypeError, ValueError):
+            return None
+        if (receipt is None or any(
+                receipt.get(field) != proof.get(f"receipt_{field}")
+                for field in (
+                    "result", "comment_id", "created_at", "body", "task_id",
+                    "session_id", "completed_at", "nonce", "start_head",
+                    "head", "base",
+                ))):
+            return None
+        return view
+
+    def _owner_abandonment_successor_proven(self, snapshot, record, *, receipt_views=None):
         pull = snapshot.get("pull")
         head = pull.get("head") if isinstance(pull, dict) else None
         base = pull.get("base") if isinstance(pull, dict) else None
+        abandoned_action = self.store.action(
+            record.get("action_key") if isinstance(record, dict) else None,
+        )
+        if (not _owner_abandonment_record_valid(record)
+                or not _owner_abandonment_matches_action(record, abandoned_action)
+                or not isinstance(head, dict) or not isinstance(base, dict)
+                or not _is_sha(head.get("sha"))
+                or not _is_sha(base.get("sha"))
+                or base.get("ref") != MAIN_BRANCH
+                or not _github_identity(base.get("repo"), REPOSITORY_ID)
+                or not isinstance(head.get("ref"), str) or not head["ref"]
+                or not _github_identity(head.get("repo"), REPOSITORY_ID)
+                or head.get("ref") != abandoned_action.get("head_ref")
+                or not _pull_identity(pull, abandoned_action)
+                or not isinstance(snapshot.get("comments"), list)):
+            return False
         actions = self.store.actions()
         enrollment = self.store.snapshot()["enrollments"].get(
             str(record.get("issue")), {},
         )
-        successors = [
-            *actions.values(),
-            *enrollment.get("receipt_proofs", []),
-        ]
-        return any(
-            _owner_abandonment_successor_matches(record, successor)
-            and successor.get("receipt_result") == "ready"
-            and successor.get("receipt_head") == (
-                head.get("sha") if isinstance(head, dict) else None
-            )
-            and isinstance(base, dict)
-            and base.get("sha") == (
-                successor.get("main_sha")
-                if successor.get("task_type") == "neutral"
-                else record["base_sha"]
-            )
-            and _pull_identity(pull, successor)
-            and _valid_receipt_proof(successor, snapshot.get("comments"))
-            for successor in successors
+        roots = enrollment.get("owner_abandonments")
+        if (not isinstance(roots, list)
+                or len(_valid_owner_abandonment_claims(enrollment, actions)) != len(roots)):
+            return False
+        proofs = enrollment.get("receipt_proofs", [])
+        if not _retained_receipt_proofs_valid(
+                enrollment, record["issue"], snapshot["comments"]):
+            return False
+        candidates = []
+        representations = [*actions.values(), *proofs]
+        retained_task_ids = {proof["task_id"] for proof in proofs}
+        abandoned_task_ids = {root["task_id"] for root in roots}
+        continuations = enrollment.get("owner_continuations", [])
+        if not isinstance(continuations, list):
+            continuations = []
+        authority_keys = (
+            {proof["key"] for proof in proofs if "key" in proof}
+            | {root["action_key"] for root in roots
+               if isinstance(root.get("action_key"), str)}
+            | {
+                continuation["historical_action_key"]
+                for continuation in continuations
+                if isinstance(continuation, dict)
+                and isinstance(
+                    continuation.get("historical_action_key"), str,
+                )
+            }
         )
+        relevant_keys = authority_keys | {
+            key for key, candidate in actions.items()
+            if isinstance(candidate, dict)
+            and (
+                candidate.get("issue") == record["issue"]
+                or (isinstance(candidate.get("task_id"), str)
+                    and candidate["task_id"] in (
+                        retained_task_ids | abandoned_task_ids
+                    ))
+                or any(
+                    _action_correlates_authority(
+                        key, candidate, authority_key, None,
+                    )
+                    for authority_key in authority_keys
+                )
+            )
+        }
+        relevant_task_ids = {
+            candidate.get("task_id") for candidate in representations
+            if isinstance(candidate, dict)
+            and candidate.get("issue") == record["issue"]
+            and isinstance(candidate.get("task_id"), str)
+        } | retained_task_ids | abandoned_task_ids
+        legacy_proofs = [
+            proof for proof in proofs
+            if isinstance(proof, dict)
+            and ("head_ref" not in proof or "key" not in proof
+                 and "owner_abandonment_binding" in proof)
+            and proof.get("task_id") in relevant_task_ids
+        ]
+        legacy_views = {}
+        try:
+            if _current_owner_unverified_abandonment_command(
+                    self.api, record) is None:
+                return False
+        except (CoordinatorError, OverflowError, TypeError, ValueError):
+            return False
+        if legacy_proofs:
+            try:
+                tasks = _rest_list(
+                    self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+                    collection="tasks",
+                )
+                if not _owner_abandonment_inventory_valid(
+                        tasks, abandoned_action, snapshot, record):
+                    return False
+                for proof in legacy_proofs:
+                    view = self._legacy_receipt_branch_view(
+                        proof, snapshot, tasks, actions,
+                    )
+                    if view is None:
+                        return False
+                    legacy_views[id(proof)] = view
+            except (CoordinatorError, OverflowError, TypeError, ValueError):
+                return False
+        keyed_representations = [
+            *actions.items(),
+            *((proof["key"] if "key" in proof else ("legacy-task", proof["task_id"]),
+               proof) for proof in proofs),
+        ]
+        relevant_keys.update(
+            ("legacy-task", proof["task_id"]) for proof in proofs
+            if "key" not in proof
+        )
+        reconciled_by_key = {}
+        for key, candidate in keyed_representations:
+            if key not in relevant_keys:
+                continue
+            if (not isinstance(candidate, dict)
+                    or (isinstance(key, str) and "key" in candidate
+                        and candidate["key"] != key)
+                    or (not isinstance(key, str)
+                        and (key != ("legacy-task", candidate.get("task_id"))
+                             or "key" in candidate))):
+                return False
+            if (candidate.get("issue") == record["issue"]
+                    and type(candidate.get("issue")) is not int
+                    and _receipt_like_action(candidate)):
+                return False
+            candidate = legacy_views.get(id(candidate), candidate)
+            if isinstance(key, str) and "key" not in candidate:
+                candidate = {**candidate, "key": key}
+            duplicate = reconciled_by_key.get(key)
+            if (duplicate is not None
+                    and not _receipt_proof_matches_live(
+                        _receipt_projection(candidate), _receipt_projection(duplicate),
+                    )
+                    and not _unauthenticated_blocker_copy_matches(
+                        _receipt_projection(candidate), _receipt_projection(duplicate),
+                        snapshot["comments"],
+                    )
+                    and not _unauthenticated_blocker_copy_matches(
+                        _receipt_projection(duplicate), _receipt_projection(candidate),
+                        snapshot["comments"],
+                    )):
+                return False
+            reconciled_by_key[key] = (
+                {**duplicate, **candidate} if duplicate is not None else candidate
+            )
+        reconciled = {}
+        for candidate in reconciled_by_key.values():
+            if (not isinstance(candidate, dict)
+                    or not isinstance(candidate.get("task_id"), str)
+                    or candidate["task_id"] not in relevant_task_ids):
+                continue
+            duplicate = reconciled.get(candidate["task_id"])
+            if (duplicate is not None
+                    and not (
+                        _receipt_proof_matches_live(
+                            _receipt_projection(candidate), _receipt_projection(duplicate),
+                        )
+                        or _receipt_proof_matches_live(
+                            _receipt_projection(duplicate), _receipt_projection(candidate),
+                        )
+                        or _unauthenticated_blocker_copy_matches(
+                            _receipt_projection(candidate), _receipt_projection(duplicate),
+                            snapshot["comments"],
+                        )
+                        or _unauthenticated_blocker_copy_matches(
+                            _receipt_projection(duplicate), _receipt_projection(candidate),
+                            snapshot["comments"],
+                        )
+                    )):
+                return False
+            reconciled[candidate["task_id"]] = (
+                {**duplicate, **candidate} if duplicate is not None else candidate
+            )
+        for candidate in reconciled.values():
+            if (not isinstance(candidate, dict)
+                    or type(candidate.get("issue")) is not int
+                    or candidate["issue"] <= 0
+                    or candidate["issue"] != record["issue"]
+                    or candidate.get("kind") != "fix"
+                    or candidate.get("task_type") not in (
+                        None, "source", "review-followup", "neutral",
+                    )
+                    or candidate.get("status") != "completed"
+                    or not _is_sha(candidate.get("receipt_start_head"))):
+                if candidate.get("task_id") in retained_task_ids:
+                    return False
+                continue
+            candidates.append(candidate)
+        if len(candidates) > REPAIR_LIMIT + NEUTRAL_LIMIT:
+            return False
+
+        def bound_to_current_pull(candidate):
+            return (
+                type(candidate.get("owner_id")) is int
+                and candidate["owner_id"] == OWNER_ID
+                and type(candidate.get("repository_id")) is int
+                and candidate["repository_id"] == REPOSITORY_ID
+                and candidate.get("head_ref") == head.get("ref")
+                and _pull_identity(pull, candidate)
+                and _valid_receipt_proof(candidate, snapshot["comments"])
+            )
+
+        current = record["head_sha"]
+        visited = {current}
+        used = set()
+        has_rooted_successor = False
+        max_steps = REPAIR_LIMIT + NEUTRAL_LIMIT
+        for step in range(max_steps + 1):
+            outgoing = [
+                candidate for candidate in candidates
+                if (candidate.get("receipt_start_head") == current
+                    and id(candidate) not in used)
+            ]
+            if not outgoing:
+                proven = has_rooted_successor and current == head["sha"]
+                if proven and receipt_views is not None:
+                    receipt_views.update(
+                        (view["task_id"], view) for view in legacy_views.values()
+                    )
+                return proven
+            if step == max_steps:
+                return False
+            root_step = current == record["head_sha"] and not has_rooted_successor
+            if root_step:
+                rooted_successors = [
+                    candidate for candidate in outgoing
+                    if _owner_abandonment_successor_matches(record, candidate)
+                ]
+                if len(rooted_successors) != 1:
+                    return False
+                successor = rooted_successors[0]
+                parallel = [
+                    candidate for candidate in outgoing
+                    if candidate is not successor
+                ]
+                if parallel and not (
+                        successor.get("receipt_head") == current
+                        and len(parallel) == 1
+                        and parallel[0].get("task_type") in (None, "source")
+                        and parallel[0].get("receipt_result") == "ready"
+                        and parallel[0].get("receipt_head") != current
+                        and type(successor.get("created_at")) in (int, float)
+                        and type(parallel[0].get("created_at")) in (int, float)
+                        and all(
+                            type(value) is int or math.isfinite(value)
+                            for value in (
+                                successor["created_at"],
+                                parallel[0]["created_at"],
+                            )
+                        )
+                        and parallel[0]["created_at"] > successor["created_at"]):
+                    return False
+                has_rooted_successor = True
+            else:
+                if len(outgoing) != 1:
+                    return False
+                successor = outgoing[0]
+            if (not bound_to_current_pull(successor)
+                    or successor.get("receipt_result") != "ready"
+                    or ((successor.get("receipt_version", "v1") != "v1"
+                         or "main_sha" in successor)
+                        and successor.get("receipt_base") != successor.get("main_sha"))):
+                return False
+            edge_base = successor["receipt_base"]
+            if edge_base != base["sha"] and not (
+                    self._compare_proves_ancestry(edge_base, base["sha"])
+                    and self._compare_proves_ancestry(
+                        edge_base, successor["receipt_head"], allow_identical=True,
+                    )):
+                return False
+            if not root_step and any(
+                    field in successor
+                    for field in (
+                        "owner_abandonment_binding",
+                        "owner_abandonment_attestation",
+                        "owner_abandonment_intent",
+                    )):
+                bound_roots = [
+                    root for root in roots
+                    if _owner_abandonment_successor_matches(root, successor)
+                ]
+                if (len(bound_roots) != 1
+                        or _current_owner_unverified_abandonment_command(
+                            self.api, bound_roots[0],
+                        ) is None):
+                    return False
+            used.add(id(successor))
+            next_head = successor["receipt_head"]
+            if next_head == current:
+                if current != record["head_sha"]:
+                    return False
+                continue
+            if next_head in visited:
+                return False
+            visited.add(next_head)
+            current = next_head
+        return False
 
     def _owner_continuation_advances_abandonment(
             self, prior, enrollment, actions, comments, current_head):
@@ -8063,6 +9150,7 @@ class Coordinator:
         continued_head = (
             supervised_head_advance
             or self._owner_abandonment_successor_proven(snapshot, record)
+            or self._owner_abandonment_continuation_proven(snapshot, record)
         )
         historical_base = (
             isinstance(base, dict)
@@ -8083,6 +9171,8 @@ class Coordinator:
         comments = snapshot.get("comments")
         if not isinstance(comments, list):
             return False
+        if not self._owner_abandonment_head_proven(snapshot):
+            return False
         try:
             receipt = validate_task_receipt(
                 task, action, snapshot["pull"], comments,
@@ -8091,6 +9181,96 @@ class Coordinator:
         except (ReceiptError, TypeError, ValueError):
             return True
         return receipt is None
+
+    def _owner_abandonment_head_proven(self, snapshot, *, receipt_views=None):
+        pull = snapshot.get("pull") if isinstance(snapshot, dict) else None
+        head = pull.get("head") if isinstance(pull, dict) else None
+        issue = snapshot.get("issue") if isinstance(snapshot, dict) else None
+        if type(issue) is not int and isinstance(pull, dict):
+            issue = pull.get("number")
+        comments = snapshot.get("comments") if isinstance(snapshot, dict) else None
+        if (type(issue) is not int or not isinstance(head, dict)
+                or not isinstance(comments, list)):
+            return False
+        state = self.store.snapshot()
+        if any(
+                _receipt_like_action(action)
+                and action.get("issue") == issue
+                and type(action.get("issue")) is not int
+                for action in state.get("actions", {}).values()):
+            return False
+        enrollment = state.get("enrollments", {}).get(str(issue), {})
+        records = enrollment.get("owner_abandonments", [])
+        recoveries = _valid_owner_abandonment_claims(
+            enrollment, state.get("actions", {}),
+        )
+        if (not isinstance(records, list) or len(recoveries) != len(records)
+                or any(record.get("issue") != issue for _, record in recoveries)):
+            return False
+        receipt_proofs = enrollment.get("receipt_proofs", [])
+        if not _retained_receipt_proofs_valid(enrollment, issue, comments):
+            return False
+        current_proof = any(
+            proof["receipt_head"] == head.get("sha")
+            for proof in receipt_proofs
+        )
+        if not current_proof:
+            return True
+        recoveries = [
+            record for _, record in recoveries if record.get("issue") == issue
+        ]
+        if not recoveries:
+            return True
+        return any(
+            self._owner_abandonment_successor_proven(
+                {"pull": pull, "comments": comments}, record,
+                receipt_views=receipt_views,
+            ) or self._owner_abandonment_continuation_proven(
+                snapshot, record,
+            )
+            for record in recoveries
+        )
+
+    def _owner_abandonment_continuation_proven(self, snapshot, record):
+        pull = snapshot.get("pull") if isinstance(snapshot, dict) else None
+        head = pull.get("head") if isinstance(pull, dict) else None
+        comments = snapshot.get("comments") if isinstance(snapshot, dict) else None
+        if (not _owner_abandonment_record_valid(record)
+                or not isinstance(head, dict) or not _is_sha(head.get("sha"))
+                or not isinstance(comments, list)):
+            return False
+        state = self.store.snapshot()
+        actions = state.get("actions", {})
+        enrollment = state.get("enrollments", {}).get(str(record["issue"]), {})
+        roots = enrollment.get("owner_abandonments", [])
+        claims = _valid_owner_abandonment_claims(enrollment, actions)
+        if (not isinstance(roots, list) or len(claims) != len(roots)):
+            return False
+        matching_roots = [
+            candidate for key, candidate in claims
+            if key == record["action_key"]
+            and _canonical_json_match(candidate, record)
+        ]
+        if (len(matching_roots) != 1
+                or _current_owner_unverified_abandonment_command(
+                    self.api, record,
+                ) is None):
+            return False
+        return any(
+            continuation["historical_action_key"] == record["action_key"]
+            and _owner_continuation_matches_history(
+                continuation, enrollment, actions,
+            )
+            and _owner_continuation_successor_proven(
+                continuation, enrollment, actions, comments, head["sha"],
+            )
+            and _current_owner_unverified_continuation_command(
+                self.api, continuation,
+            ) is not None
+            for _, continuation in _valid_owner_continuation_claims(
+                enrollment, actions,
+            )
+        )
 
     def _fence_owner_abandonment(self, recovery, main_sha):
         if not isinstance(recovery, dict) or not _owner_abandonment_record_valid(
@@ -8513,24 +9693,70 @@ class Coordinator:
         )
 
     def _authorized_dispatch_head(self, issue, head, base_sha=None, *,
-                                  receipt_action=None, continuation_action=None):
-        enrollment = self.store.snapshot()["enrollments"].get(str(issue))
+                                  receipt_action=None, continuation_action=None,
+                                  proof_fence=None, require_base_match=False):
+        state = self.store.snapshot()
+        enrollment = state["enrollments"].get(str(issue))
         if not enrollment or not enrollment.get("active"):
             return False
+        if proof_fence is not None:
+            proof_fence["projection"] = _dispatch_authorization_inputs(state, issue)
         if enrollment.get("authorized_head") is None:
-            return True
+            if not _retained_receipt_proofs_valid(enrollment, issue):
+                return False
+            if not enrollment.get("receipt_proofs"):
+                return True
+            try:
+                comments = _all_review_comments(self.api, issue, None)
+            except CoordinatorError:
+                return False
+            if not _retained_receipt_proofs_valid(enrollment, issue, comments):
+                return False
+            reconciled = _reconciled_receipt_records(
+                issue, enrollment, state["actions"], comments,
+            )
+            return reconciled is not None and reconciled[2]
         try:
             comments = _all_review_comments(self.api, issue, None)
         except CoordinatorError:
             return False
+        try:
+            pull = self.api.get(f"repos/{REPOSITORY}/pulls/{issue}")
+        except CoordinatorError:
+            return False
+        if not isinstance(pull, dict):
+            return False
+        pull_head = pull.get("head")
+        pull_base = pull.get("base")
+        receipt_views = {}
+        if (not isinstance(pull_head, dict)
+                or not _pull_identity(pull, enrollment)
+                or pull_head.get("sha") != head
+                or not isinstance(pull_base, dict)
+                or (require_base_match and base_sha is not None
+                    and pull_base.get("sha") != base_sha)
+                or not self._owner_abandonment_head_proven({
+                    "issue": issue, "pull": pull, "comments": comments,
+                }, receipt_views=receipt_views)):
+            return False
         if receipt_action is not None and not _valid_receipt_proof(receipt_action, comments):
             return False
         base = base_sha or enrollment.get("base")
+        if receipt_views:
+            enrollment = {
+                **enrollment,
+                "receipt_proofs": [
+                    receipt_views.get(proof.get("task_id"), proof)
+                    for proof in enrollment.get("receipt_proofs", [])
+                ],
+            }
         _, authorized, blocked = _authorized_result_heads(
             issue, enrollment, self.store.actions(), comments, base,
         )
         if head in authorized and head not in blocked:
             return True
+        if head in blocked:
+            return False
         if (not isinstance(continuation_action, dict)
                 or continuation_action.get("issue") != issue
                 or continuation_action.get("kind") != "fix"
@@ -8568,9 +9794,12 @@ class Coordinator:
         if self.store.action(key) is not None:
             return "reserved"
         pull = self._fence_pull(action["issue"], action["head"], action["main_sha"])
+        authorization_fence = {}
         if (not _pull_identity(pull, action) or pull.get("draft") is not False
                 or not self._authorized_dispatch_head(
-                    action["issue"], action["head"], pull["base"]["sha"])):
+                    action["issue"], action["head"], pull["base"]["sha"],
+                    proof_fence=authorization_fence,
+                )):
             return "superseded"
         reviews = _rest_list(
             self.api, f"repos/{REPOSITORY}/pulls/{action['issue']}/reviews?per_page=100",
@@ -8594,6 +9823,69 @@ class Coordinator:
         if (not _pull_identity(current, action) or current.get("draft") is not False
                 or not self._authorized_dispatch_head(
                     action["issue"], action["head"], current["base"]["sha"])):
+            return "superseded"
+        state = self.store.snapshot()
+        enrollment = state["enrollments"].get(str(action["issue"]), {})
+        claims = _valid_owner_abandonment_claims(enrollment, state["actions"])
+        if claims:
+            try:
+                tasks = _rest_list(
+                    self.api, f"agents/repos/{REPOSITORY}/tasks?per_page=100",
+                    collection="tasks",
+                )
+                comments = _all_review_comments(self.api, action["issue"], None)
+                for claim_key, record in claims:
+                    if (_current_owner_unverified_abandonment_command(
+                            self.api, record) is None
+                            or not self._owner_abandonment_task_terminal(
+                                {"issue": action["issue"], "pull": current,
+                                 "comments": comments},
+                                state["actions"].get(claim_key), record, tasks)):
+                        return "agent-running"
+            except CoordinatorError:
+                return "incomplete"
+        current = self._fence_pull(
+            action["issue"], action["head"], action["main_sha"],
+        )
+        final_authorization = {}
+        if (not _pull_identity(current, action) or current.get("draft") is not False
+                or not self._authorized_dispatch_head(
+                    action["issue"], action["head"], current["base"]["sha"],
+                    proof_fence=final_authorization,
+                    require_base_match=True,
+                )):
+            return "superseded"
+        final_state = StateStore(self.store.path).snapshot()
+        final_inputs = _dispatch_authorization_inputs(final_state, action["issue"])
+        if (not _canonical_json_match(
+                final_authorization.get("projection"),
+                authorization_fence.get("projection"),
+        ) or not _canonical_json_match(
+                final_inputs, final_authorization.get("projection"),
+        )):
+            return "superseded"
+        try:
+            publication_pull = self._fence_pull(
+                action["issue"], action["head"], action["main_sha"],
+            )
+        except CoordinatorError:
+            return "superseded"
+        if (
+                not _pull_identity(publication_pull, action)
+                or publication_pull.get("draft") is not False
+                or publication_pull.get("head", {}).get("ref")
+                    != current.get("head", {}).get("ref")
+                or publication_pull.get("base", {}).get("sha")
+                    != current.get("base", {}).get("sha")
+        ):
+            return "superseded"
+        publication_state = StateStore(self.store.path).snapshot()
+        if (not _canonical_json_match(
+                _dispatch_authorization_inputs(
+                    publication_state, action["issue"],
+                ), final_authorization.get("projection"),
+            )
+                or publication_state["actions"].get(key) is not None):
             return "superseded"
         if not self.store.claim_action(key, action):
             return "reserved"
@@ -8878,10 +10170,12 @@ class Coordinator:
             return "draft"
         if not _pull_identity(current, action):
             return "superseded"
+        authorization_fence = {}
         if (not self._authorized_dispatch_head(
                     action["issue"], action["head"],
                     current.get("base", {}).get("sha"),
                     continuation_action=action,
+                    proof_fence=authorization_fence,
                 )
                 or (self.store.snapshot()["enrollments"].get(
                     str(action["issue"]), {},
@@ -9123,11 +10417,45 @@ class Coordinator:
                                 ))):
                         self.store.update_action(key, "superseded")
                         return "agent-running"
+                final_pull = self._fence_pull(
+                    claimed_action["issue"], claimed_action["head"],
+                    claimed_action["main_sha"],
+                    allow_historical_reconciliation=True,
+                    allow_historical_dirty=neutral,
+                    expected_base_sha=(
+                        claimed_action.get("recorded_base_sha") if neutral
+                        else continuation_record.get("base_sha")
+                        if continuation_record is not None else None
+                    ),
+                )
+                final_authorization = {}
+                if (not _pull_identity(final_pull, claimed_action)
+                        or final_pull.get("head", {}).get("ref") != branch
+                        or not self._authorized_dispatch_head(
+                            claimed_action["issue"], claimed_action["head"],
+                            final_pull.get("base", {}).get("sha"),
+                            continuation_action=claimed_action,
+                            proof_fence=final_authorization,
+                            require_base_match=True,
+                        )):
+                    self.store.update_action(key, "superseded")
+                    return "superseded"
                 final_state = StateStore(self.store.path).snapshot()
                 final_enrollment = final_state["enrollments"].get(
                     str(claimed_action["issue"]), {},
                 )
-                if (final_state["actions"].get(key) != claimed_action
+                if (not _canonical_json_match(
+                            final_state["actions"].get(key), claimed_action,
+                        )
+                        or not _canonical_json_match(
+                            final_authorization.get("projection"),
+                            authorization_fence.get("projection"),
+                        )
+                        or not _canonical_json_match(
+                            _dispatch_authorization_inputs(
+                                final_state, claimed_action["issue"],
+                            ), final_authorization.get("projection"),
+                        )
                         or any(
                             final_state["actions"].get(prior["key"]) != prior
                             or _owner_abandonment_for_action(
@@ -9137,16 +10465,59 @@ class Coordinator:
                         )):
                     self.store.update_action(key, "superseded")
                     return "superseded"
+                publication_pull = self._fence_pull(
+                    claimed_action["issue"], claimed_action["head"],
+                    claimed_action["main_sha"],
+                    allow_historical_reconciliation=True,
+                    allow_historical_dirty=neutral,
+                    expected_base_sha=(
+                        claimed_action.get("recorded_base_sha") if neutral
+                        else continuation_record.get("base_sha")
+                        if continuation_record is not None else None
+                    ),
+                )
+                if (
+                        not _pull_identity(publication_pull, claimed_action)
+                        or publication_pull.get("draft") is not False
+                        or publication_pull.get("head", {}).get("ref") != branch
+                        or publication_pull.get("base", {}).get("sha")
+                            != final_pull.get("base", {}).get("sha")
+                ):
+                    self.store.update_action(key, "superseded")
+                    return "superseded"
+                publication_state = StateStore(self.store.path).snapshot()
+                publication_enrollment = publication_state["enrollments"].get(
+                    str(claimed_action["issue"]), {},
+                )
+                if (
+                        not _canonical_json_match(
+                            publication_state["actions"].get(key), claimed_action,
+                        )
+                        or not _canonical_json_match(
+                            _dispatch_authorization_inputs(
+                                publication_state, claimed_action["issue"],
+                            ), final_authorization.get("projection"),
+                        )
+                        or any(
+                            publication_state["actions"].get(prior["key"]) != prior
+                            or _owner_abandonment_for_action(
+                                publication_enrollment, prior["key"], prior,
+                            ) != abandonment
+                            for prior, abandonment in recovered_claims
+                        )
+                ):
+                    self.store.update_action(key, "superseded")
+                    return "superseded"
                 if owner_continuation_record is not None:
                     self._fence_owner_continuation(
                         {
-                            "issue": action["issue"],
+                            "issue": claimed_action["issue"],
                             "action_key": owner_continuation_record[
                                 "historical_action_key"
                             ],
                             "record": owner_continuation_record,
                         },
-                        action["main_sha"],
+                        claimed_action["main_sha"],
                         successor_action=claimed_action,
                     )
             except CoordinatorError:
@@ -9497,8 +10868,10 @@ class Coordinator:
         """Reprove effective new admissions after all preparation, before any commit.
 
         This is admission-only provenance, not a lifetime body/linkage pin.
-        A failure discards the whole prepared scan via run's finally block.
+        A changed valid open pull identity is isolated; other proof changes fail
+        closed and discard the prepared scan via run's finally block.
         """
+        identity_blocked = set()
         for expected in admissions:
             number = expected["issue"]
             comments = _all_review_comments(self.api, number, None)
@@ -9510,30 +10883,121 @@ class Coordinator:
             current = enrollment_from_comment(
                 {"number": number, "pull_request": True}, pull, matches[0], api=self.api,
             )
-            if (current is None or any(current.get(key) != value
-                                       for key, value in expected.items()
-                                       if key not in {"last_open_seen", "last_open_head"})):
+            if current is None or any(
+                    current.get(key) != value
+                    for key, value in expected.items()
+                    if key not in {
+                        "last_open_seen", "last_open_head", "pull_id", "pull_node_id",
+                    }):
                 raise CoordinatorError("Starter admission binding changed before state commit")
+            if (current["pull_id"] != expected["pull_id"]
+                    or current["pull_node_id"] != expected["pull_node_id"]):
+                if not _pull_identity_change_isolatable(pull, expected):
+                    raise CoordinatorError("Starter admission binding changed before state commit")
+                identity_blocked.add(number)
+        return identity_blocked
 
     def _fence_starter_sources(self, sources, enrollments, main_sha):
+        identity_blocked = set()
         for number, expected_head, expected_source in sources:
             enrollment = enrollments.get(str(number))
             if not isinstance(enrollment, dict) or not _valid_initial_source(expected_source):
                 raise CoordinatorError("Initial starter source evidence was invalid before state commit")
             current = self._snapshot_pull(
                 number, enrollment, main_sha, actions=self.store.actions(),
+                allow_unrelated_active=True,
             )
+            if current.get("identity_invalid"):
+                identity_blocked.add(number)
+                continue
             if (current.get("head") != expected_head
                     or current.get("initial_source") != expected_source):
                 raise CoordinatorError("Initial starter source evidence changed before state commit")
+        return identity_blocked
+
+    def _fence_pull_identities(self, plan):
+        identity_blocked = set()
+        for item in plan["pull_requests"]:
+            number = item["issue"]
+            if item.get("identity_invalid"):
+                identity_blocked.add(number)
+                continue
+            enrollment = plan["enrollments"].get(str(number))
+            if not isinstance(enrollment, dict):
+                raise CoordinatorError("Pull enrollment was unavailable before state commit")
+            if not {"pull_id", "pull_node_id", "repository_id"}.issubset(enrollment):
+                raise CoordinatorError(
+                    "Unsupported legacy enrollment: missing pull/repository identity; "
+                    "automatic migration is not supported; preserve state and stop activation"
+                )
+            current = self.api.get(f"repos/{REPOSITORY}/pulls/{number}")
+            head = current.get("head") if isinstance(current, dict) else None
+            base = current.get("base") if isinstance(current, dict) else None
+            if not isinstance(head, dict) or not isinstance(base, dict):
+                raise CoordinatorError("Pull request data was incomplete")
+            if not _is_sha(head.get("sha")):
+                raise CoordinatorError("Pull request head was not a commit SHA")
+            if (
+                    type(number) is not int or type(enrollment.get("issue")) is not int
+                    or enrollment["issue"] != number
+                    or type(enrollment.get("repository_id")) is not int
+                    or enrollment["repository_id"] != REPOSITORY_ID
+                    or not _github_identity(head.get("repo"), REPOSITORY_ID)
+                    or not _github_identity(base.get("repo"), REPOSITORY_ID)
+                    or base.get("ref") != MAIN_BRANCH
+                    or not _is_sha(base.get("sha"))):
+                raise CoordinatorError("Pull request identity did not match enrollment")
+            if _pull_identity(current, enrollment):
+                continue
+            if _pull_identity_change_isolatable(current, enrollment):
+                identity_blocked.add(number)
+                continue
+            raise CoordinatorError("Pull request identity did not match enrollment")
+        return identity_blocked
 
     def _apply(self, plan, *, after_commit=None, acknowledgements=None):
-        self._fence_starter_admissions(plan.get("starter_admissions", ()))
-        self._fence_starter_sources(
-            plan.get("starter_sources", ()), plan["enrollments"], plan["main_sha"],
+        identity_blocked = {
+            item["issue"] for item in plan["pull_requests"]
+            if item.get("identity_invalid")
+        }
+        identity_blocked.update(self._fence_pull_identities(plan))
+        identity_blocked.update(
+            self._fence_starter_admissions(plan.get("starter_admissions", ())),
         )
+        identity_blocked.update(self._fence_starter_sources(
+            plan.get("starter_sources", ()), plan["enrollments"], plan["main_sha"],
+        ))
+        for item in plan["pull_requests"]:
+            if item["issue"] in identity_blocked:
+                item.update(
+                    identity_invalid=True, sensitive=True, repair=None,
+                    status_action=None, merge_action=None,
+                    auto_merge_eligible=False, reasons=["pull-identity"],
+                )
         for recovery in plan.get("owner_recoveries", ()):
-            self._fence_owner_abandonment(recovery, plan["main_sha"])
+            if recovery["issue"] not in identity_blocked:
+                self._fence_owner_abandonment(recovery, plan["main_sha"])
+        deferred_command_ids = {
+            key for issue, key in plan.get("processed_by_issue", ())
+            if issue in identity_blocked
+        }
+        if identity_blocked:
+            self.store.restore_prepared_pull_state(identity_blocked)
+        lifecycle_events = plan.get("lifecycle_events", [
+            event for item in plan["pull_requests"]
+            for event in item.get("lifecycle_events", [])
+        ] + plan.get("source_lifecycle_events", []))
+        lifecycle_events = [
+            event for event in lifecycle_events
+            if event.get("issue_number") not in identity_blocked
+            and event.get("pr_number") not in identity_blocked
+        ]
+        preparation_base = self.store._preparation_base
+        commit_cursor = (
+            preparation_base.get("cursor")
+            if deferred_command_ids and isinstance(preparation_base, dict)
+            else plan["cursor"]
+        )
         deferred_continuation_issues = set()
         checked_continuation_issues = set()
         for recovery in list(plan.get("owner_continuations", ())):
@@ -9640,21 +11104,36 @@ class Coordinator:
                     review_publications=[], copilot_review_request=None,
                     status_action=None, merge_action=None, outcomes=[],
                 )
+        pending_events = list(dict.fromkeys([
+            *plan.get("pending_events", ()), *deferred_command_ids,
+        ]))
         self.store.commit_scan(
-            plan["cursor"], plan["processed"], commands=plan["commands"],
-            pending_events=plan.get("pending_events", ()),
+            commit_cursor,
+            [key for key in plan["processed"] if key not in deferred_command_ids],
+            commands=[
+                (command, item) for command, item in plan["commands"]
+                if item.get("issue") not in identity_blocked
+            ],
+            pending_events=pending_events,
             pending_event_exceptions=plan.get("pending_event_exceptions", ()),
             retirements=[
-                item["issue"] for item in plan["pull_requests"] if item.get("terminal")
+                item["issue"] for item in plan["pull_requests"]
+                if item.get("terminal") and item["issue"] not in identity_blocked
             ],
             # Keep causal pull events ahead of their derived deployment outcomes.
-            lifecycle_events=plan.get("lifecycle_events", [
-                event for item in plan["pull_requests"]
-                for event in item.get("lifecycle_events", [])
-            ] + plan.get("source_lifecycle_events", [])),
-            observations=plan.get("observations", []),
-            sensitive_revocations=plan.get("sensitive_revocations", []),
-            starter_sources=plan.get("starter_sources", ()),
+            lifecycle_events=lifecycle_events,
+            observations=[
+                item for item in plan.get("observations", [])
+                if item[0] not in identity_blocked
+            ],
+            sensitive_revocations=[
+                item for item in plan.get("sensitive_revocations", [])
+                if item[0] not in identity_blocked
+            ],
+            starter_sources=[
+                source for source in plan.get("starter_sources", ())
+                if source[0] not in identity_blocked
+            ],
             now=plan["now"],
         )
         # Publish only committed observations before fallible reads or mutations.
@@ -9662,6 +11141,9 @@ class Coordinator:
             after_commit()
         summaries = []
         for pr_plan, snapshot in zip(plan["pull_requests"], plan["snapshots"]):
+            if pr_plan.get("identity_invalid"):
+                summaries.append(self._summary(pr_plan))
+                continue
             if pr_plan.get("terminal"):
                 self.store.retire(
                     snapshot["issue"], snapshot["head"], snapshot["main_sha"],
@@ -10000,11 +11482,13 @@ class Coordinator:
                     apply=apply, blocked_continuations=blocked_continuations,
                     pending_event_exceptions=pending_event_exceptions,
                 )
-            else:
+            elif pending_event_exceptions:
                 plan = self._build_plan(
                     apply=apply,
                     pending_event_exceptions=pending_event_exceptions,
                 )
+            else:
+                plan = self._build_plan(apply=apply)
             processed_ids = set(map(str, plan["processed"]))
             carried_pending = [
                 key for key in pending_event_exceptions if key not in processed_ids
@@ -10238,6 +11722,100 @@ class StateStore:
     def discard_preparation(self):
         self._prepared = None
         self._preparation_base = None
+
+    def restore_prepared_pull_state(self, issues):
+        if (self._prepared is None or not isinstance(self._preparation_base, dict)
+                or not isinstance(issues, (set, frozenset, list, tuple))
+                or any(type(issue) is not int or issue <= 0 for issue in issues)):
+            raise CoordinatorError("Pull isolation requires an active prepared scan")
+        blocked = set(issues)
+        if not blocked:
+            return
+        baseline = self._preparation_base
+        prepared = deepcopy(self._prepared)
+        blocked_keys = {str(issue) for issue in blocked}
+        for section in ("enrollments", "actions", "outbox", "retired"):
+            base_items = baseline.get(section)
+            prepared_items = prepared.get(section)
+            if not isinstance(base_items, dict) or not isinstance(prepared_items, dict):
+                raise CoordinatorError("Prepared pull state has an unsupported shape")
+            for key in set(base_items) | set(prepared_items):
+                before = base_items.get(key)
+                after = prepared_items.get(key)
+                scoped = key in blocked_keys if section in {
+                    "enrollments", "retired",
+                } else any(
+                    isinstance(item, dict)
+                    and (
+                        type(item.get("issue")) in (int, float, bool)
+                        and item["issue"] in blocked
+                        or isinstance(item.get("issue"), str)
+                        and item["issue"] in blocked_keys
+                    )
+                    for item in (before, after)
+                )
+                if not scoped:
+                    continue
+                if key in base_items:
+                    prepared_items[key] = deepcopy(before)
+                else:
+                    prepared_items.pop(key, None)
+
+        def restore_events(base_events, prepared_events):
+            if (not isinstance(base_events, list) or not isinstance(prepared_events, list)
+                    or any(not _lifecycle_event_valid(event)
+                           for event in (*base_events, *prepared_events))):
+                raise CoordinatorError("Prepared pull lifecycle state was invalid")
+            blocked_event_ids = {
+                event["event_id"]
+                for event in (*base_events, *prepared_events)
+                if event.get("issue_number") in blocked
+                or event.get("pr_number") in blocked
+            }
+            prepared_by_id = {
+                event["event_id"]: event for event in prepared_events
+            }
+            restored, seen = [], set()
+            for event in base_events:
+                event_id = event["event_id"]
+                candidate = (
+                    event if event_id in blocked_event_ids
+                    else prepared_by_id.get(event_id)
+                )
+                if candidate is not None and event_id not in seen:
+                    restored.append(deepcopy(candidate))
+                    seen.add(event_id)
+            for event in prepared_events:
+                event_id = event["event_id"]
+                if event_id not in seen and event_id not in blocked_event_ids:
+                    restored.append(deepcopy(event))
+                    seen.add(event_id)
+            return restored
+
+        baseline_events = baseline.get("lifecycle_events", [])
+        prepared_events = prepared.get("lifecycle_events", [])
+        prepared["lifecycle_events"] = restore_events(
+            baseline_events, prepared_events,
+        )
+        base_context = baseline.get("lifecycle_context")
+        prepared_context = prepared.get("lifecycle_context")
+        if base_context is not None or prepared_context is not None:
+            for context in (base_context, prepared_context):
+                if context is not None and not _lifecycle_context_valid(context):
+                    raise CoordinatorError("Prepared lifecycle context was invalid")
+            restored_context_events = restore_events(
+                [] if base_context is None else base_context["events"],
+                [] if prepared_context is None else prepared_context["events"],
+            )
+            context = deepcopy(
+                prepared_context if prepared_context is not None else base_context,
+            )
+            context["events"] = restored_context_events
+            if not restored_context_events and base_context is None:
+                prepared.pop("lifecycle_context", None)
+            else:
+                prepared["lifecycle_context"] = context
+        self._prepared = prepared
 
     @staticmethod
     def _empty():
@@ -11413,7 +12991,11 @@ class StateStore:
                     and action.get("task_type") == "neutral"):
                 self._supersede_neutral_predecessors(data, action)
             enrollment = data["enrollments"].get(str(action.get("issue")), {})
-            if (enrollment.get("authorized_head") is not None
+            if ((enrollment.get("authorized_head") is not None or any(
+                    record["issue"] == action.get("issue")
+                    for _, record in _valid_owner_abandonment_claims(
+                        enrollment, data["actions"],
+                    )))
                     and status == "completed" and fields.get("receipt_result")):
                 # Persist the validated proof in the same write as completion,
                 # independently of the action that lifecycle compaction retires.
@@ -11430,12 +13012,14 @@ class StateStore:
                     "owner_continuation_binding", "owner_continuation_attestation",
                     "owner_continuation_companions",
                     "attempt", "owner_id", "repository_id", "pull_id", "pull_node_id",
+                    "head_ref",
                     "repair_policy_version", "repair_fingerprints",
                     "repair_fingerprints_complete", "repair_fingerprint_version",
                     "repair_target_map",
                 }
                 proof = {
-                    field: action[field] for field in proof_fields if field in action
+                    field: action[field]
+                    for field in proof_fields if field in action
                 }
                 # Old v1 proofs have no dispatch-main/version projection; do not
                 # invent historical bindings while preserving new v2 provenance.
@@ -11451,7 +13035,12 @@ class StateStore:
                         if field in action:
                             proof[field] = action[field]
                 proofs = enrollment.setdefault("receipt_proofs", [])
-                if proof not in proofs:
+                canonical = _canonical_receipt_json(proof)
+                if (isinstance(proofs, list) and canonical is not None
+                        and not any(
+                            _canonical_receipt_json(existing) == canonical
+                            for existing in proofs if isinstance(existing, dict)
+                        )):
                     proofs.append(proof)
             if event is not None:
                 action["lifecycle_event_id"] = event["event_id"]
@@ -11565,9 +13154,80 @@ class StateStore:
                 "status_generation": 0, "actions": [], "outbox": [],
             }
             changed = False
+            roots = [
+                root for retained_enrollment in data["enrollments"].values()
+                if isinstance(retained_enrollment.get("owner_abandonments", []), list)
+                for root in retained_enrollment.get("owner_abandonments", [])
+                if isinstance(root, dict)
+            ]
+            proofs = [
+                proof for retained_enrollment in data["enrollments"].values()
+                if isinstance(retained_enrollment.get("receipt_proofs", []), list)
+                for proof in retained_enrollment.get("receipt_proofs", [])
+                if isinstance(proof, dict)
+            ]
+            live_receipts_by_task = {}
+            for key, action in data["actions"].items():
+                if (isinstance(action, dict)
+                        and type(action.get("issue")) is int
+                        and action["issue"] == issue
+                        and isinstance(action.get("task_id"), str)
+                        and action["task_id"]
+                        and _receipt_like_action(action)):
+                    live_receipts_by_task.setdefault(
+                        action["task_id"], [],
+                    ).append((key, action))
+            conflicting_live_receipt_keys = set()
+            for records in live_receipts_by_task.values():
+                if len(records) < 2:
+                    continue
+                canonical = _canonical_receipt_json(
+                    _receipt_projection(records[0][1]),
+                )
+                if canonical is None or any(
+                        _canonical_receipt_json(_receipt_projection(action))
+                        != canonical for _, action in records[1:]):
+                    conflicting_live_receipt_keys.update(
+                        key for key, _ in records
+                    )
+            outgoing_heads = {
+                proof["receipt_start_head"] for proof in proofs
+                if proof.get("issue") == issue
+                and _is_sha(proof.get("receipt_start_head"))
+            }
             for key, action in list(data["actions"].items()):
-                if (action.get("issue") != issue
+                if (key in conflicting_live_receipt_keys
+                        or type(action.get("issue")) is not int
+                        or action["issue"] != issue
+                        or ("key" in action and action["key"] != key)
+                        or any(
+                            _action_correlates_authority(
+                                key, action, root.get("action_key"), root.get("task_id"),
+                            )
+                            for root in roots
+                        )
                         or not _retirable_action(action, current_head, inactive)):
+                    continue
+                related_proofs = [
+                    proof for proof in proofs
+                    if _action_correlates_authority(
+                        key, action, proof.get("key"), proof.get("task_id"),
+                    )
+                ]
+                if (not related_proofs and _receipt_like_action(action)
+                        and _is_sha(action.get("receipt_start_head"))
+                        and action.get("receipt_start_head") in outgoing_heads):
+                    continue
+                if any(
+                        type(proof.get("issue")) is not int
+                        or proof["issue"] != issue
+                        or ("key" in proof
+                            and proof.get("key") != action.get("key"))
+                        or proof.get("task_id") != action.get("task_id")
+                        or not _receipt_proof_matches_live(
+                            proof, action, require_proven_branch=True,
+                        )
+                        for proof in related_proofs):
                     continue
                 del data["actions"][key]
                 changed = True

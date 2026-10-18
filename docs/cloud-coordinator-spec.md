@@ -32,6 +32,44 @@ head. Only a genuinely new immutable command can authorize that head. The legacy
 bare command retains its historical timestamp compatibility.
 A stale or mismatched command is consumed without enrollment.
 
+Every pull snapshot strictly validates the enrolled numeric ID, number and node
+identity, plus repository and base identity. A direct snapshot or a terminal pull
+with a changed identity fails closed. During multi-PR scan only, a structurally
+valid identity mismatch on an open pull is isolated as unscoped so other enrolled
+pulls can progress; that pull receives no writes. Malformed IDs and repository or
+base mismatches are not isolated.
+
+The final pre-commit pull-identity fence applies to every planned enrolled pull,
+including manual enrollments without starter-source evidence. If a structurally
+valid, open pull's identity changes after planning, discard only that pull's
+prepared enrollment, actions, outbox, retirement and lifecycle changes, and omit
+its commands, recoveries, observations, source proof, revocations and lifecycle
+events from the commit. The additional starter-source fence still validates its
+head and source proof. Keep the state-store preparation baseline unchanged so the
+ordinary compare-and-swap still rejects concurrent durable changes. If an owner
+command for that pull was read in the scan, retain the old global cursor and do
+not consume that pull's command event IDs; the next cold scan must reread and
+revalidate the command rather than silently losing its authority. Consume other
+pulls' processed command IDs once, including stale or invalid commands. Other
+eligible pulls may still commit and advance.
+Direct snapshots and terminal identity mismatches remain strict.
+
+Mixed-root continuation preparation must also skip identity-isolated snapshots.
+Acceptance uses a multi-PR apply cycle with multiple retained abandonment roots,
+matching retained continuations and a newly scanned continuation command. The
+isolated pull keeps its commands pending and unconsumed, with no publication,
+history or lifetime-budget changes, while a separate eligible pull advances.
+Cold restarts preserve those pending IDs and do not duplicate accepted work.
+Restoring the identity permits retry only after fresh authenticated evidence;
+missing comment evidence is never replaced with an empty list.
+
+A retained continuation with an explicitly malformed `receipt_proofs` container
+(null, mapping or string) never proves a successor, at the shared proof seam used
+by planning, reconciliation and preparation. That pull is blocked without task,
+review or anchor publication and without history, disposition or budget changes,
+while a separate eligible pull advances durably. An absent legacy container still
+uses existing authenticated live evidence; an empty or valid list is unchanged.
+
 Extended starter admission additionally requires a strict positive integer comment
 ID and owner ID, an explicitly non-draft open same-repository PR, matching current
 head/body, and exactly one canonical originating-issue closing edge. The shared
@@ -43,10 +81,13 @@ authenticated API verifier, the extended parser cannot admit a PR.
 
 After all prepared planning and lifecycle source reads, immediately before
 `commit_scan`, every effective new extended admission/renewal repeats the unchanged
-command identity/body/timestamp and live binding proof. A late mismatch or
-incomplete read aborts the entire preparation: no cursor/events, enrollment,
-receipts, retirement/export, or external write commits. Compact optional
-`starter_admission` metadata is strictly validated on state load. Version 1
+command identity/body/timestamp and live binding proof, after the fresh pull-identity
+fence. A structurally valid, open replacement pull identity isolates only that pull
+and defers its command as above. Changed commands, body/linkage proof, malformed
+identity, repository/base mismatch, or incomplete reads still abort the entire
+preparation: no cursor/events, enrollment, receipts, retirement/export, or external
+write commits. Compact optional `starter_admission` metadata is strictly validated
+on state load. Version 1
 contains exactly `version`, `issue_number`, `head_sha`, `body_sha256`, `comment_id`,
 and `comment_created_at`; version 2 adds the explicitly recorded
 `source_task_id`/`source_session_id`; the current version 3 also records the exact
@@ -700,14 +741,155 @@ current `main_sha`. After a valid continuation receipt, bind the recovered task'
 terminal check to that exact receipt lineage even when the PR head has advanced.
 The terminal check uses both live actions and the enrollment's authenticated
 `receipt_proofs`; compaction must retain the neutral continuation's
-`recorded_base_sha` as well as its receipt and owner-abandonment bindings. A
-different current head is accepted only when that retained or live proof validates
-for the exact current pull identity, head, and applicable source or neutral base.
-The recovery head remains continuation-only only while it lacks general receipt
-provenance. A distinct, bound ready receipt that returns the same head releases this
-restriction, including after a cold restart; recovery alone never does.
+`recorded_base_sha` and exact `head_ref` as well as its receipt and
+owner-abandonment bindings. Missing or mismatched branch identity is never inferred
+from the current pull.
+For bare enrollments with valid retained abandonment claims, persist accepted receipt
+proofs atomically with completion too, so every lineage edge survives compaction and
+cold restart. These occupancy proofs do not create SHA-bound source authorization.
+
+Pre-upgrade retained proofs omit `head_ref`. A read-only compatibility view may
+obtain it only from the original authenticated task session. It requires a fresh
+complete task inventory, positive task and session completion, the same owner,
+creator, repository, pull artifact and branch artifact, and exact task/session
+IDs. Summary rows and rows that retain `sessions` use the same strict artifact
+validation before task detail is used. The original summary and exact detail must
+agree, including their complete type-exact artifact lists; each must contain
+exactly one valid GitHub pull and branch artifact. The pull artifact's numeric ID
+and node ID must both match the identities stored in the proof. Missing, foreign,
+malformed, duplicate, or contradictory artifacts deny the view. The original
+prompt must match
+the supported reservation type, exact pull/start head and reservation marker, and
+end with a supported canonical receipt instruction bound to the stored nonce and
+base. If a live action remains, its original prompt must also agree; a missing body
+is a mismatch. Anchored
+neutral prompts require the immutable authenticated original owner anchor and its
+exact receipt carrier. Revalidate the stored receipt against the original task's
+chronology and the unchanged receipt comment; require the immutable abandonment
+root and fresh scoped occupancy. Unknown, reactivated, mismatched, incomplete or
+unavailable original evidence denies the view. An explicitly present branch value
+is never replaced. No proof, claim or counter is migrated, and no current pull or
+enrollment supplies missing historical identity. Repeat these checks at the final
+source and reviewer write fences; planning evidence is not a write fence.
+
+A different current head is accepted only through a connected chain that starts with
+one distinct, abandonment-bound ready receipt and follows each later ready receipt's
+exact `receipt_start_head` to the preceding `receipt_head`. The chain is bounded by
+the source and neutral lifetime ceilings combined. Every edge must pass immutable
+receipt validation and match the current repository, pull request and branch; the
+live pull's numeric and node IDs must also match the retained abandoned-task
+reservation; never bind a pull identity using the live pull's own IDs. The current
+base must match each receipt's original dispatch base. Historical dispatch bases
+may precede the current pull base only with authenticated ancestry to that base
+and the edge's result head. A later bound edge must match its own unique retained
+valid abandonment root and unchanged original owner command, including its causal
+binding and attestation. Sequential roots followed by a main advance must survive
+actual apply, retirement and cold restart without duplicate dispatches, changed
+history or reset allowances. Missing or contradictory ancestry must deny progress.
+Missing, ambiguous, disconnected,
+malformed, non-ready, wrong-identity or cyclic history fails closed.
+Before eligibility filtering, correlate live and retained representations by the
+durable action key, then reconcile each task relevant to this pull. A missing,
+non-string or substituted task ID cannot hide a duplicate. All receipt,
+reservation, identity, starting
+`head` and `dispatch_nonce` fields must agree. An ineligible malformed duplicate
+cannot disappear from this check. Include any live action sharing a retained task
+ID before filtering by its issue identity, so a missing, malformed or mismatched
+issue cannot hide the duplicate. Identical copies count once; distinct tasks on
+unrelated pulls do not block this lineage.
+Receipt-like live actions with a numeric-equal malformed issue identity block the
+affected pull even with a fresh action key and task ID and no retained links.
+Both source-authority indexing and final remote lineage validation check this
+before filtering candidates. Boolean aliases of issue 1 fail the same way.
+Exact integer receipts for genuinely unrelated pulls remain isolated.
+Apply the same bounded receipt-like identity check before the no-current-proof
+fallback, including first-successor dispatch. Correlate embedded action keys against
+retained proof, abandonment, and continuation keys before issue or task filtering,
+including final source and reviewer publication fences. Retirement and lineage
+reconciliation must preserve live/proof authority-field presence and canonical-value
+conflicts, including continuation bindings, attestations, and companions, not just
+compare fields present in the proof. A legacy proof without `head_ref` cannot erase a
+live branch value unless authenticated retained evidence establishes that exact
+branch; retirement must retain uncertainty rather than infer it from the current
+pull. Preserve supported authentic legacy omissions and unrelated terminal
+compaction.
+An unrepresented competing same-pull outgoing edge remains evidence by its
+`receipt_start_head`, even with a fresh key/task and old dispatch head. Repeated
+apply, explicit retirement and cold restart must retain those exact conflicting
+bytes and deny source/reviewer writes; unrelated terminal actions still compact.
+Every persisted abandonment record must resolve to one matching retained root
+action before any receipt, dispatch, reviewer, or terminal authority is granted.
+Missing, mismatched, or duplicate root claims block the affected enrollment. The
+root action keys and abandoned task IDs must each be unique; distinct matching
+actions do not make two claims for the same abandoned task valid. The
+record's issue, command-comment and actor IDs, and the root action's issue, owner,
+repository and pull IDs must be exact positive integers; the enrolled repository ID
+is validated the same way at pull snapshot admission.
+Each individual successor proof's issue must also be an exact positive integer
+before identity comparison; matching duplicates and receipt bindings do not replace
+this per-proof validation.
+The immutable abandonment command is revalidated for both current and pre-upgrade
+receipt proofs at every applicable successor and final write fence; a current
+`head_ref` never replaces that check.
+Each candidate root binding is checked against the expected binding with canonical
+JSON equality before lineage traversal; numeric aliases such as `1.0` for version
+`1` fail closed even when only one retained proof exists.
+A source-task publication fence repeats exact pull/head and source-authority checks
+after its final task, workflow, comment and root reads. It binds the enrollment's
+retained receipt proofs, abandonment records and related actions to the fresh final
+state before posting; unrelated PR state does not widen that fence. The commit-time
+pull-identity fence permits isolation only for a structurally valid, open PR with
+a changed pull identity, so that PR receives no state or writes while other enrolled
+PRs continue. It applies regardless of optional starter-source proof. Direct
+snapshots, malformed identities and terminal pulls remain strict.
+
+For source and reviewer publication, the coordinator re-fetches the exact pull after
+final authorization and projection checks, then rechecks the local proof projection
+with canonical JSON equality before publication, so numeric aliases in the retained
+proof projection cannot pass ordinary Python dictionary equality. This finite
+ordering closes changes observed during legacy root/task reads; it is not a remote
+compare-and-swap and does not claim network atomicity. Task occupancy and workflow
+reads are completed before this final pull; no later remote read is treated as part
+of that fence. A changed head, identity, or base blocks publication. The source
+reservation remains truthful and is superseded; a reviewer request is not claimed.
+Repeated polls do not replay either write.
+Malformed retained `receipt_proofs` that are not lists deny owner-abandonment head
+authority for that PR without aborting unrelated PR work. An empty list and valid
+legacy proofs retain their existing meanings.
+Legacy receipt actions may omit their embedded `key`; an omitted key remains
+distinct from an explicit null, malformed, or mismatched key. Conflicting receipt
+representations cannot erase a separately authenticated `policy_broken` proof:
+its result head stays blocked, and conflicting ready records do not restore source
+or reviewer publication authority. Authenticate non-ready receipts from both live
+actions and retained proofs before filtering representation conflicts, including
+live/live conflicts. This does not promote conflicting ready evidence or trust
+unauthenticated blockers, and it leaves stored receipts and histories unchanged.
+
+A same-head ready receipt is still a valid direct continuation, but it cannot hide a
+cycle in a later edge. At the abandonment root, one bound `A -> A` receipt may be
+followed by exactly one authenticated ready source receipt reserved later from `A`
+to a different head. The self-edge is consumed once; any additional competing edge
+or later cycle still fails closed. A second `A -> A` receipt does not advance the
+lineage and is rejected.
+Live and retained copies must agree on reservation `created_at`, including field
+presence and value, before that timestamp can establish same-head root ordering.
+This only proves terminal occupancy; ordinary
+source authorization, fresh review/check, current-main and sensitive-head fences
+remain separate. The recovery head remains continuation-only only while it lacks
+general receipt provenance. A distinct, bound ready receipt that returns the same
+head releases this restriction, including after a cold restart; recovery alone
+never does.
 Reactivation, duplicate commands, restart, or uncertain persistence must not cause
 a repeated POST, notice, or accepted result.
+
+A later owner-enrolled supervised task is not a coordinator receipt. Its enrollment
+or terminal task state alone grants no result authority. Any separate support after
+a neutral main merge must require an unchanged exact-head owner enrollment and
+positive authenticated ancestry from the abandonment-rooted ready result, with the
+same repository, pull request and branch. Until that contract is implemented and
+verified, this separate supervised-descendant case remains unsupported and is
+tracked separately in issue #110. PR #109 closes only issue #108's receipt-lineage
+slice; it does not recover PR #99 or implement the issue #110 contract.
 
 Neutral task publication uses one immutable receipt-only PR reply, not a decision
 comment followed by a receipt comment. The complete per-hunk decision audit stays
@@ -914,6 +1096,9 @@ included roots. Restart, compaction, and inactive close/reopen must preserve
 all per-root bindings and spent allowances. A retained authenticated same-head
 successor proof prevents later ordinary work from rebinding a spent disposition.
 Malformed retained evidence remains blocked, not a fresh allowance.
+After receipt acceptance, both the original abandonment command and its continuation
+command must still authenticate unchanged before granting terminal/head authority,
+including merge replanning and final publication.
 
 A SOURCE or neutral successor cannot combine an ordinary
 `owner_abandonment_intent` with an `owner_continuation_intent`. If a planned
@@ -1047,6 +1232,9 @@ of valid ready receipts from that bound successor; a blocked or disconnected res
 cannot release the abandoned reservation or advance progress. Recheck this chain
 after compaction and restart before releasing historical occupancy or requesting
 review.
+Revalidate the immutable disposition command even when a retained ready receipt
+establishes the successor chain. Edited or deleted commands deny the continuation
+fallback at planning and final source/reviewer publication fences.
 
 Prove this reachability from the matching direct successor receipt results. Global
 authorization from a later owner enrollment, another continuation, or another
@@ -1822,6 +2010,73 @@ Positively completed `inventory_blocked` fixer handoffs are terminal too and are
 retired by the same head-change/inactive contract; active, current-head, and
 uncertain work and pending outbox posts remain retained. Their retirement comparison
 uses the authenticated `receipt_head` when available, not the dispatch head.
+Compaction preserves every action correlated by map key, embedded reservation key,
+or task ID to a retained abandonment root, and conflicting copies of retained
+receipt proofs. Missing or foreign issue fields never sever that correlation.
+Before the first successor, alternate representations of an abandoned reservation
+or task deny admission too. Repeated apply polls, explicit retirement, and cold
+restart must retain the original conflicting bytes, histories, and attempt counts
+with no source or reviewer publication. Unrelated terminal actions still compact.
+
+Malformed receipt-proof containers, entries, identities, or same-issue live
+receipt aliases cannot preserve initial or separate owner-authorized head
+permission while skipping blocker evidence. An absent or empty legacy proof list
+remains valid; explicit null and malformed members fail closed before fallback or
+bare-enrollment publication. Acceptance covers both proof orders beside an
+authenticated same-head `policy_broken` receipt, real apply and final dispatch
+denial, retirement, cold restart, and unchanged budgets and history.
+Bare-enrollment reconciliation uses the complete shared receipt projection,
+including attempt and repair metadata.
+Canonical value or presence conflicts deny source and reviewer publication and
+remain retained; identical or reordered canonical copies and authentic legacy
+omissions remain valid.
+An unauthenticated live copy that asserts a well-formed typed blocker may be
+ignored only when it differs from a valid retained proof solely in `receipt_result`
+and `receipt_body`. It is not blocker or receipt authority; the retained proof
+remains authoritative. Any mismatch in identity, attempt, binding, head, or another
+projection field still fails closed. Typed blockers prevent progress only when
+their remote receipt is authenticated.
+An authenticated live v1 projection may supply omitted legacy values to a
+read-only candidate only after the receipt pair matches. Conflicting copies block
+their affected start and result heads, including initial or separately authorized
+heads and continuation fallbacks; unrelated authorized history remains usable.
+Authenticated typed blockers remain visible during planning.
+An authenticated retained receipt may omit its legacy reservation key. Reconcile
+that proof by its exact task ID, without adding a key to persisted history.
+Explicit null, empty, or malformed keys remain invalid. Keyless successor proofs
+must match all other receipt fields in live copies; conflicting task or keyed
+aliases deny source and reviewer publication after compaction and restart.
+Bare final publication authorization uses this same canonical key/task
+reconciliation before its snapshot fence; individually valid retained proofs
+cannot hide a pre-existing conflicting live copy. This does not create SHA source
+authority or add an authorized head to bare enrollment.
+
+For a retained-only direct successor with an omitted key, authenticate the
+original task, session, prompt and unique reservation marker before recovering
+the original key into a read-only view. The same view proves an omitted branch
+and supplies the original abandonment attestation key to source authorization.
+Never infer that key from current enrollment or write it into retained history.
+Missing or ambiguous original evidence and explicit malformed keys fail closed.
+A live action may omit its embedded key when its action-map key proves it;
+explicit key mismatches and task aliases still conflict. Key and task joins use
+the existing v1 omission rules for receipt version, main SHA and task type, while
+retaining authenticated supplied values in a read-only candidate for downstream
+checks. Never backfill the retained proof. Require receipt base equality for v2
+or an explicitly supplied main SHA, not an omitted v1 field.
+The lineage and handoff checks use the same narrow exception for an
+unauthenticated typed-blocker copy: only differences in `receipt_result` and
+`receipt_body` may be ignored in favor of the authenticated proof. Authenticated
+blockers and every key, task, storage-identity, attempt, binding, head, or other
+projection conflict still fail closed. A read-only proof view never backfills or
+promotes the retained proof or live action. Historical-base ancestry checks and
+active-writer exclusion remain mandatory.
+For an accepted anchored SOURCE continuation, the waiting-review handoff joins
+the full live action to its retained proof, including receipt-anchor fields and
+the original prompt and task request body. Cold restart must permit one genuine
+Copilot review request for the authenticated ready receipt without changing either
+stored receipt copy or replaying that request on the next poll. Missing or changed
+remote evidence and conflicts outside the two receipt result/body fields still
+deny publication.
 
 ACK-backed lifecycle retirement does not erase history. The optional
 `lifecycle_context` preserves each retired event's canonical payload and exact
