@@ -20,7 +20,7 @@ const responseBatch=(page,path,count)=>new Promise(resolve=>{
 });
 async function fixture(run){
  const tmp=await mkdtemp((process.env.TMPDIR || '/tmp')+'/b-');let server,browser;
- const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,approvals:[],approvalHold:null,approvalDetail:null,approvalDetailHold:null,approvalDetailStatus:200,decisionHold:null,decisionStatus:200,activeRun:null,runEventStreams:[],runEventSequence:0};
+ const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,notificationTargetErrors:0,approvals:[],approvalHold:null,approvalDetail:null,approvalDetailHold:null,approvalDetailStatus:200,decisionHold:null,decisionStatus:200,activeRun:null,runEventStreams:[],runEventSequence:0};
  try{
   const names=await readdir(dir),ui=names.find(n=>/^ui\.[a-f0-9]+\.mjs$/.test(n)),sw=names.find(n=>/^sw\.[a-f0-9]+\.js$/.test(n));
   assert.ok(ui && sw,'tests use generated release graph');
@@ -53,7 +53,10 @@ async function fixture(run){
     if(p==='/auth/verify/options')data={challenge_id:'fixture-challenge',publicKey:{challenge:'AQ'}};
     if(p==='/auth/verify/finish')data={verified:true};
     if(p==='/sessions')data={items:[{id:'session-one',title:'First conversation'},{id:'session-two',title:'Second conversation'}]};
-    if(p==='/inbox/notice-target/target' && control.notificationTarget)data=control.notificationTarget;
+    if(p==='/inbox/notice-target/target' && control.notificationTarget){
+     if(control.notificationTargetErrors){control.notificationTargetErrors--;status=503;data={detail:'Synthetic temporary target failure'};}
+     else data=control.notificationTarget;
+    }
     if(control.notificationTarget && p===`/sessions/${control.notificationTarget.session_id}`)data={id:control.notificationTarget.session_id,title:'Exact notification chat'};
     if(p==='/push/key')data={public_key:'AQID'};
     if((control.notificationTarget && p===`/sessions/${control.notificationTarget.session_id}/messages`)
@@ -400,6 +403,47 @@ test('generated app restores opaque and legacy notification links to the exact o
   assert.ok(calls.some(call=>call.p==='/runs/older-run'));
   assert.equal(await page.locator('.bottom-nav [aria-current="page"]').getAttribute('data-view'),'chats');
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ }
+}));
+test('generated app retries temporary opaque target failures for both routes without deciding approvals',{timeout:60000},()=>fixture(async({page,control,calls,mount})=>{
+ for(const route of ['?notification=notice-target','?inbox=notice-target']){
+ for(const kind of ['request','approval']){
+  await page.evaluate(()=>window.app?.destroy());
+  calls.splice(0);
+  control.notificationTargetErrors=2;
+  control.notificationTarget=kind==='request'
+   ? {kind,session_id:'session-one',run_id:'older-run',run_session_id:'session-one'}
+   : {...approvalTarget};
+  control.approvals=kind==='approval'?[approvalRecord()]:[];
+  control.approvalDetail=kind==='approval'?approvalRecord():null;
+  await mount(page,route);
+  await page.getByRole('heading',{name:'Notification could not be opened'}).waitFor();
+  const retry=page.getByRole('button',{name:'Retry notification'});
+  assert.equal(await retry.count(),1);
+  const retryResponse=responseBatch(page,'/inbox/notice-target/target',1);
+  await retry.click();
+  await retryResponse;
+  const secondRetry=page.getByRole('button',{name:'Retry notification'});
+  await secondRetry.waitFor();
+  assert.equal(await secondRetry.isEnabled(),true,'repeated temporary errors stay recoverable');
+  await secondRetry.click();
+  if(kind==='request'){
+   const request=page.locator('[data-notification-run="older-run"]');
+   await request.waitFor();
+   assert.match(await request.innerText(),/Original request/);
+   assert.match(await request.innerText(),/Exact notification result/);
+  }else{
+   const card=page.locator('[data-approval-id="approval-1"]');
+   await card.waitFor();
+   await page.getByRole('button',{name:'Approve once'}).waitFor();
+   await page.getByRole('button',{name:'Deny'}).waitFor();
+   assert.equal(await card.locator('button').count(),2);
+   assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+   assert.equal(await page.locator('[data-notification-run]').count(),0);
+  }
+  assert.equal(await page.locator('.notification-target-retry').count(),0);
+  assert.equal(calls.filter(call=>call.p==='/inbox/notice-target/target').length,3);
+ }
  }
 }));
 test('generated request routing uses composed native+journal anchors beyond a history page',{timeout:60000},()=>fixture(async({page,control,calls,mount})=>{

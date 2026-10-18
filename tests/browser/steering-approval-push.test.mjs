@@ -1477,3 +1477,161 @@ test('initial notification message 401 expires only the current login',async()=>
   assert.ok(calls.includes('/sessions/s/messages?latest=true&turn_boundary=true'));
  }finally{app.destroy();win.close();}
 });
+
+test('request notification retries a failed run read without losing its exact target',async()=>{
+ const calls=[],runRead=deferred(),dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ let runReads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+ calls.push(p);
+ if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+ if(p==='/inbox/n/target')return {kind:'request',session_id:'s',run_id:'old-run',run_session_id:'s'};
+ if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+ if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[{id:20,role:'assistant',content:'Newer response',run_id:'new-run',session_id:'s'}],offset:0,total:1};
+ if(p==='/runs/old-run'){
+  if(++runReads===1)throw Object.assign(new Error('Temporary run read failure'),{status:503});
+  return runRead.promise;
+ }
+ return {items:[]};
+ }},win);
+ try{
+ const retry=doc.querySelector('.notification-unavailable button');
+ assert.equal(retry?.textContent,'Retry request details');
+ assert.match(doc.querySelector('.notification-unavailable').textContent,/could not be loaded/i);
+ retry.click();retry.click();retry.click();
+ await waitFor(()=>runReads===2);
+ assert.equal(runReads,2,'repeated clicks share one in-flight target read');
+ runRead.resolve({id:'old-run',session_id:'s',input:'Original request',status:'completed',output:'Exact result'});
+ await waitFor(()=>doc.querySelector('[data-notification-run="old-run"]'));
+ assert.match(doc.querySelector('[data-notification-run="old-run"]').textContent,/Original request/);
+ assert.match(doc.querySelector('[data-notification-run="old-run"]').textContent,/Exact result/);
+ assert.equal(doc.querySelectorAll('[data-history-run="new-run"]').length,1,'existing history is retained once');
+ assert.equal(calls.filter(path=>path==='/inbox/n/target').length,1);
+ assert.equal(calls.filter(path=>path==='/sessions/s/messages?latest=true&turn_boundary=true').length,1);
+ assert.equal(calls.some(path=>path.endsWith('/decision') || path.endsWith('/stop')),false);
+ }finally{app.destroy();win.close();}
+});
+
+test('request notification retries failed older-history reads without duplicating history',async()=>{
+ const calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ let historyReads=0,runReads=0;
+ const historyPath='/sessions/s/messages?limit=10&offset=0&turn_boundary=true';
+ const app=await mountApp(doc,{clear(){},async request(p){
+ calls.push(p);
+ if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+ if(p==='/inbox/n/target')return {kind:'request',session_id:'s',run_id:'old-run',run_session_id:'s'};
+ if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+ if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[{id:20,role:'assistant',content:'Newer response',run_id:'new-run',session_id:'s'}],offset:10,total:11};
+ if(p===historyPath){
+  if(++historyReads<=2)throw Object.assign(new Error('Temporary history read failure'),{status:503});
+  return {items:[{id:1,role:'user',content:'Original request',run_id:'old-run',session_id:'s'}],offset:0,total:11};
+ }
+ if(p==='/runs/old-run'){
+  runReads++;
+  return {id:'old-run',session_id:'s',input:'Original request',status:'completed',output:'Exact result'};
+ }
+ return {items:[]};
+ }},win);
+ try{
+ assert.equal(runReads,1);
+ for(let attempt=0;attempt<2;attempt++){
+  const retry=doc.querySelector('.notification-unavailable button');
+  assert.equal(retry?.textContent,'Retry request details');
+  retry.click();retry.click();
+  await waitFor(()=>historyReads===attempt+2);
+  assert.equal(historyReads,attempt+2,'repeated clicks share one history read');
+  if(attempt===0)await waitFor(()=>{
+   const next=doc.querySelector('.notification-unavailable button');
+   return next && !next.disabled;
+  });
+ }
+ await waitFor(()=>doc.querySelector('[data-notification-run="old-run"]'));
+ assert.equal(doc.querySelectorAll('[data-history-run="new-run"]').length,1);
+ assert.equal(doc.querySelectorAll('.user-message').length,1);
+ assert.equal(doc.querySelectorAll('[data-notification-run="old-run"]').length,1);
+ assert.equal(runReads,1,'retry reuses the already verified run identity');
+ assert.equal(calls.filter(path=>path==='/inbox/n/target').length,1);
+ assert.equal(calls.some(path=>path.endsWith('/decision') || path.endsWith('/stop')),false);
+ }finally{app.destroy();win.close();}
+});
+
+test('request-target read errors retain auth expiry and terminal unavailable states',async()=>{
+ for(const read of ['run','history'])for(const status of [401,404,409,410]){
+  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+  const historyPath='/sessions/s/messages?limit=10&offset=0&turn_boundary=true';
+  const app=await mountApp(doc,{clear(){},async request(p){
+   if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+   if(p==='/inbox/n/target')return {kind:'request',session_id:'s',run_id:'old-run',run_session_id:'s'};
+   if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+   if(p==='/sessions/s/messages?latest=true&turn_boundary=true')
+    return {items:[{id:20,role:'assistant',content:'Newer response',run_id:'new-run',session_id:'s'}],offset:read==='history'?10:0,total:11};
+   if(p==='/runs/old-run'){
+    if(read==='run')throw Object.assign(new Error('Read failed'),{status});
+    return {id:'old-run',session_id:'s',input:'Original request',status:'completed',output:'Exact result'};
+   }
+   if(p===historyPath)throw Object.assign(new Error('Read failed'),{status});
+   return {items:[]};
+  }},win);
+  try{
+   if(status===401){
+    assert.equal(app.state.user,null,`${read} 401 expires the current context`);
+    assert.match(doc.querySelector('.auth-card h1').textContent,/Sign in/);
+   }else{
+    assert.equal(doc.querySelector('.notification-unavailable h3').textContent,'Request unavailable');
+    assert.equal(doc.querySelector('.notification-unavailable button'),null,
+      `${read} ${status} stays terminal`);
+   }
+  }finally{app.destroy();win.close();}
+ }
+});
+
+test('late notification-target retries cannot cross a route, owner, or opaque target change',async()=>{
+ for(const departure of ['route','owner','target']){
+  const lateTarget=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=old'}),win=dom.window,doc=win.document;
+  let owner='owner',oldTargetReads=0;
+  const app=await mountApp(doc,{clear(){},async request(p){
+   calls.push(p);
+   if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+   if(p==='/inbox/old/target'){
+    if(++oldTargetReads===1)throw Object.assign(new Error('Temporary target failure'),{status:503});
+    if(oldTargetReads===2)return lateTarget.promise;
+    return {kind:'request',session_id:'new-chat',run_id:'new-run',run_session_id:'new-chat'};
+   }
+   if(p==='/inbox/next/target')return {kind:'request',session_id:'new-chat',run_id:'new-run',run_session_id:'new-chat'};
+   if(p.startsWith('/sessions?'))return {items:[{id:'new-chat',title:'New chat'}],total:1};
+   if(p==='/sessions/old-chat')return {id:'old-chat',title:'Old chat'};
+   if(p==='/sessions/new-chat')return {id:'new-chat',title:'New chat'};
+   if(p==='/sessions/new-chat/messages?latest=true&turn_boundary=true'
+       || p==='/sessions/old-chat/messages?latest=true&turn_boundary=true')return {items:[],offset:0,total:0};
+   if(p==='/runs/new-run')return {id:'new-run',session_id:'new-chat',input:'New request',status:'completed',output:'New result'};
+   if(p==='/approvals')return {items:[]};
+   return {items:[]};
+  }},win);
+  try{
+   const retry=doc.querySelector('.notification-target-retry button');
+   assert.equal(retry?.textContent,'Retry notification');
+   retry.click();
+   await waitFor(()=>oldTargetReads===2);
+   if(departure==='route'){
+    doc.querySelector('[data-view="inbox"]').click();
+    await waitFor(()=>app.state.view==='inbox');
+   }else{
+    if(departure==='owner')owner='another-owner';
+    else win.history.replaceState({},'','/hermes/?notification=next');
+    await app.start();
+    assert.equal(doc.querySelector('.conversation-head h1').textContent,'New chat');
+    assert.equal(doc.querySelector('[data-notification-run="new-run"]')?.textContent.includes('New request'),true);
+   }
+   const priorReads=oldTargetReads;
+   retry.disabled=false;retry.click();await tick();
+   assert.equal(oldTargetReads,priorReads,'detached retry controls cannot repeat a stale lookup');
+   lateTarget.resolve({kind:'request',session_id:'old-chat',run_id:'old-run',run_session_id:'old-chat'});
+   await tick();await tick();
+   if(departure==='route')assert.equal(app.state.view,'inbox');
+   else{
+    assert.equal(doc.querySelector('.conversation-head h1').textContent,'New chat');
+    assert.equal(doc.querySelector('[data-notification-run="old-run"]'),null);
+   }
+   assert.equal(calls.includes('/runs/old-run'),false);
+  }finally{app.destroy();win.close();}
+ }
+});

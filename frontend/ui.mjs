@@ -72,6 +72,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   const key = name => `hermes:${state.user?.id}:${name}`;
   const photoURL=(sessionId,id)=>`${BASE}app-api/sessions/${encodeURIComponent(sessionId)}/attachments/${id}`;
   const validNotificationId=value=>typeof value==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+  const transientReadFailure=error=>error?.status==null || error.status===0
+    || error.status===408 || error.status===429 || error.status>=500 && error.status<600;
   const h = (tag, attrs = {}, ...children) => {
     const el = doc.createElement(tag);
     for (const [key,value] of Object.entries(attrs)) {
@@ -948,23 +950,61 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       messages.prepend(more);
     }
     if (!result.items?.length) messages.append(empty('New chat',''));
-    let notificationTargetNode=null;
-    if(notificationTarget?.kind==='request'){
-      try{
-        const run=await api.request(`/runs/${encodeURIComponent(notificationTarget.run_id)}`);
-        if(!current())return;
-        if(run?.id!==notificationTarget.run_id || run.session_id!==notificationTarget.run_session_id
-            || notificationTarget.session_id!==session.id
-            || typeof run.input!=='string' || !run.input.trim())throw new Error('Request identity mismatch.');
+    let notificationTargetNode=null,notificationTargetRun=null,notificationTargetRead=null,notificationTargetNotice=null;
+    const showRequestTargetNotice=retryable=>{
+      notificationTargetNotice?.remove();
+      const unavailable=h('section',{class:'clarification-card notification-unavailable',role:'status'},
+        h('h3',{},retryable?'Request details could not be loaded':'Request unavailable'),
+        h('p',{},retryable?'This request could not be loaded right now. Your chat history is unchanged.'
+          :'This request is no longer available in this chat.'));
+      if(retryable){
+        let retry;
+        retry=button('Retry request details',()=>{
+          if(!current() || !retry.isConnected || retry.disabled || notificationTargetRead)return;
+          retry.disabled=true;
+          void restoreRequestTarget();
+        },'secondary',{disabled:true});
+        unavailable.append(retry);
+      }
+      messages.append(unavailable);notificationTargetNotice=unavailable;
+      unavailable.scrollIntoView?.({block:'center'});
+    };
+    const restoreRequestTarget=()=>{
+      if(notificationTargetRead)return notificationTargetRead;
+      const pending=(async()=>{
+        let run=notificationTargetRun;
+        if(!run){
+          try{run=await api.request(`/runs/${encodeURIComponent(notificationTarget.run_id)}`);}
+          catch(error){
+            if(!current())return;
+            if(error.status===401){expiredSession();return;}
+            showRequestTargetNotice(transientReadFailure(error));return;
+          }
+          if(!current())return;
+          if(run?.id!==notificationTarget.run_id || run.session_id!==notificationTarget.run_session_id
+              || notificationTarget.session_id!==session.id
+              || typeof run.input!=='string' || !run.input.trim()){
+            showRequestTargetNotice(false);return;
+          }
+          notificationTargetRun=run;
+        }
         const findAnchor=()=>[...messages.querySelectorAll('[data-history-run]')]
           .find(node=>node.dataset.historyRun===run.id && node.dataset.historySession===session.id);
         let anchor=findAnchor(),pages=0;
         while(!anchor && oldestOffset>0 && pages++<100){
-          const loaded=await loadOlder();
+          let loaded;
+          try{loaded=await loadOlder();}
+          catch(error){
+            if(!current())return;
+            if(error.status===401){expiredSession();return;}
+            showRequestTargetNotice(transientReadFailure(error));return;
+          }
           if(!current())return;
           if(!loaded)break;
           anchor=findAnchor();
         }
+        if(!current() || notificationTargetNode?.isConnected)return;
+        notificationTargetNotice?.remove();notificationTargetNotice=null;
         const target=h('article',{class:'message notification-target','data-notification-run':run.id,
           'data-history-run':run.id,'data-history-session':session.id,tabindex:'-1'},
         h('div',{class:'message-author'},run.status==='failed'?'Request needs attention'
@@ -980,13 +1020,20 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         messages.querySelector('.empty')?.remove();
         if(anchor)anchor.after(target);else messages.append(target);
         notificationTargetNode=target;
-      }catch(error){
-        if(!current())return;
-        if(error.status===401){expiredSession();return;}
-        const unavailable=h('section',{class:'clarification-card notification-unavailable',role:'status'},
-          h('h3',{},'Request unavailable'),h('p',{},'This request is no longer available in this chat.'));
-        messages.append(unavailable);unavailable.scrollIntoView?.({block:'center'});
-      }
+      })();
+      notificationTargetRead=pending;
+      const release=()=>{
+        if(notificationTargetRead!==pending)return;
+        notificationTargetRead=null;
+        const retry=notificationTargetNotice?.querySelector('button');
+        if(retry)retry.disabled=false;
+      };
+      void pending.then(release,release);
+      return pending;
+    };
+    if(notificationTarget?.kind==='request'){
+      await restoreRequestTarget();
+      if(!current())return;
     }
     const draftKey=key(`draft:${session.id}`);
     const textarea = h('textarea',{name:'message',rows:2,placeholder:'Message Hermes…','aria-label':'Message Hermes',maxlength:32000});
@@ -2749,26 +2796,65 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const params=new URL(win.location.href).searchParams;
       const notification=params.get('notification') || params.get('inbox');
       if(notification && validNotificationId(notification)){
-        try{
-          const target=await api.request(`/inbox/${encodeURIComponent(notification)}/target`);
-          if(destroyed || version!==routeVersion)return;
-          if(['request','approval'].includes(target?.kind)
-              && typeof target.session_id==='string' && target.session_id.length<=256
-              && typeof target.run_id==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(target.run_id)
-              && (target.kind!=='approval' || target.run_session_id===undefined
-                  || typeof target.run_session_id==='string')){
-            await openSession({id:target.session_id},{...target,notification_id:notification});
-            return;
-          }
-          await navigate('inbox');
-          return;
-        }catch(error){
-          if(destroyed || version!==routeVersion)return;
-          if(error.status===401){expiredSession();return;}
-          await navigate(params.has('inbox')?'inbox':'chats');
-          inform('This notification is no longer available.',true);
-          return;
-        }
+        const targetParam=params.get('notification')?'notification':'inbox',owner=state.user.id;
+        const fallbackView=params.has('inbox')?'inbox':'chats';
+        const targetCurrent=()=>{
+          if(destroyed || version!==routeVersion || owner!==state.user?.id)return false;
+          const currentParams=new URL(win.location.href).searchParams;
+          return targetParam==='notification'
+            ? currentParams.get('notification')===notification
+            : !currentParams.get('notification') && currentParams.get('inbox')===notification;
+        };
+        let notificationRead=null;
+        const showNotificationRetry=()=>{
+          let retry;
+          retry=button('Retry notification',()=>{
+            if(!targetCurrent() || !retry.isConnected || retry.disabled || notificationRead)return;
+            retry.disabled=true;
+            void readNotificationTarget();
+          },'secondary',{disabled:true});
+          content.replaceChildren(h('section',{class:'card stack notification-target-retry',role:'status'},
+            h('h1',{},'Notification could not be opened'),
+            h('p',{},'Hermes could not load this notification. No approval or request was sent.'),
+            retry));
+        };
+        const readNotificationTarget=()=>{
+          if(notificationRead)return notificationRead;
+          const pending=(async()=>{
+            let target;
+            try{target=await api.request(`/inbox/${encodeURIComponent(notification)}/target`);}
+            catch(error){
+              if(!targetCurrent())return;
+              if(error.status===401){expiredSession();return;}
+              if(transientReadFailure(error)){showNotificationRetry();return;}
+              await navigate(fallbackView);
+              inform('This notification is no longer available.',true);
+              return;
+            }
+            if(!targetCurrent())return;
+            if(['request','approval'].includes(target?.kind)
+                && typeof target.session_id==='string' && target.session_id.length<=256
+                && typeof target.run_id==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(target.run_id)
+                && (target.kind!=='approval' || target.run_session_id===undefined
+                    || typeof target.run_session_id==='string')){
+              await openSession({id:target.session_id},{...target,notification_id:notification});
+              return;
+            }
+            await navigate('inbox');
+          })();
+          notificationRead=pending;
+          const release=()=>{
+            if(notificationRead!==pending)return;
+            notificationRead=null;
+            if(!targetCurrent())return;
+            const retry=content.querySelector('.notification-target-retry button');
+            if(retry)retry.disabled=false;
+          };
+          void pending.then(release,release);
+          return pending;
+        };
+        await readNotificationTarget();
+        return;
       }
       await navigate(params.has('inbox')?'inbox':'chats');
     }
