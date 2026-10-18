@@ -194,6 +194,59 @@ for(const status of ['sending','unknown'])test(`mounted local expiry survives ha
  }finally{app.destroy();assert.equal(timers.size,0);win.close();}
 });
 
+for(const count of [100,101])for(const status of ['sending','unknown'])for(const stalePending of [false,true])
+test(`held initial detail preserves local expiry provenance (${count}, ${status}, stale pending ${stalePending})`,async t=>{
+ let now=1800000000000,next=0;const timers=new Map(),calls=[],list=deferred(),detail=deferred();
+ t.mock.method(Date,'now',()=>now);
+ const expires_at=(now+10000)/1000,items=Array.from({length:count},(_,index)=>({
+  ...approvalItem(),id:`a${index}`,request_id:`request-${index}`,status:'pending',expires_at
+ }));
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.setTimeout=(callback,delay)=>{const id=++next;timers.set(id,{callback,delay});return id;};
+ win.clearTimeout=id=>timers.delete(id);
+ let listReads=0,detailReads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a0',request_id:'request-0'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return ++listReads===1?list.promise:{items:[]};
+  if(p==='/approvals/a0')return ++detailReads===1?detail.promise:{...items[0],status,executable:false,choices:[]};
+  if(p.startsWith('/approvals/'))return {...items.find(item=>p===`/approvals/${item.id}`),status:'expired',executable:false,choices:[]};
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>detailReads===1,'the initial target detail is held before the list mounts');
+  list.resolve({items});
+  await waitFor(()=>doc.querySelectorAll('.approval-card').length===count);
+  const card=doc.querySelector('[data-approval-id="a0"]');
+  now=expires_at*1000;
+  const expiries=[...timers].filter(([,timer])=>timer.delay===10000);
+  assert.equal(expiries.length,count);
+  for(const [id,timer] of expiries){timers.delete(id);timer.callback();}
+  assert.equal(card.querySelector('h3').textContent,'Expired');
+  assert.equal(card.querySelector('button'),null);
+  assert.equal(detailReads,1,'no refresh substitutes for the held initial fallback');
+  detail.resolve({...items[0],status:stalePending?'pending':status,executable:stalePending,choices:stalePending?['once','deny']:[]});
+  await tick();
+  if(stalePending){
+   assert.equal(card.querySelector('h3').textContent,'Expired','held stale pending cannot restore controls');
+   assert.equal(card.querySelector('button'),null);
+   win.dispatchEvent(new win.Event('focus'));
+   await waitFor(()=>detailReads===2);
+   await tick();
+  }
+  assert.equal(card.querySelector('h3').textContent,status==='sending'?'Decision pending':'Decision status unknown',
+   'authenticated transitional detail must replace only locally inferred expiry');
+  assert.equal(doc.querySelector('[data-approval-id="a0"]'),card);
+  assert.equal(doc.querySelectorAll('.approval-card').length,count);
+  assert.equal(card.querySelector('button'),null);
+  assert.equal(calls.some(path=>path.endsWith('/decision')||path.startsWith('/auth/verify')
+   ||path.startsWith('/runs/')),false,'initial detail reconciliation is read-only');
+ }finally{app.destroy();assert.equal(timers.size,0);win.close();}
+});
+
 for(const distance of [10000,2147483647+10000])test(`early approval expiry callback rearms to its deadline (${distance})`,async t=>{
  let now=1800000000000,next=0;const timers=new Map(),calls=[];
  t.mock.method(Date,'now',()=>now);

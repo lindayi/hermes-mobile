@@ -1595,7 +1595,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             nextStatus=actionState?.uncertain && !freshFinal?'unknown'
               :freshFinal?item.status
                 :approvalFinals.get(key)==='unavailable' || existing?.status==='unavailable'
-                  ?'unavailable':preferredApprovalStatus(item.status,previousStatus);
+                  ?'unavailable':preferredApprovalStatus(item.status,previousStatus,locallyExpiredApproval(key));
           const unchanged=sameApprovalData(existing,item),statusOverridden=nextStatus!==item.status;
           if(statusOverridden)item={...(existing || item),status:nextStatus,executable:false,choices:[]};
           else if(unchanged)item=existing;
@@ -1612,7 +1612,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           if(item.status==='pending'){
             approvalPending.set(key,item);approvalFinals.delete(key);
           }else{
-            approvalPending.delete(key);rememberHandledApproval(key,item,item.status);approvalFinals.set(key,item.status);
+            approvalPending.delete(key);
+            rememberHandledApproval(key,item,item.status,
+              locallyExpiredApproval(key) && item.status==='expired' && !freshFinal);
+            approvalFinals.set(key,item.status);
           }
           approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
           renderApprovals();focusApprovalTarget();

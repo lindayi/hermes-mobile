@@ -1193,6 +1193,53 @@ for(const status of ['sending','unknown'])test(`generated mounted expiry survive
  await page.evaluate(()=>app.destroy());
 }));
 
+for(const count of [100,101])for(const status of ['sending','unknown'])for(const stalePending of [false,true])
+test(`generated held initial detail preserves expiry provenance (${count}, ${status}, stale pending ${stalePending})`,{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ await page.clock.install();
+ const items=Array.from({length:count},(_,index)=>approvalRecord({
+  id:index===0?'approval-1':`expired-${index}`,request_id:index===0?'request-1':`expired-request-${index}`,
+  expires_at:Date.now()/1000+10
+ }));
+ let releaseList,releaseDetail;
+ control.notificationTarget=approvalTarget;control.approvals=items;
+ control.approvalHold=new Promise(resolve=>{releaseList=resolve;});
+ control.approvalDetailHold=new Promise(resolve=>{releaseDetail=resolve;});
+ control.approvalDetail={...items[0],status:stalePending?'pending':status,
+  executable:stalePending,choices:stalePending?['once','deny']:[]};
+ const detailPath='/approvals/approval-1',detailReads=()=>calls.filter(call=>call.p===detailPath&&call.method==='GET').length;
+ const requested=page.waitForRequest(request=>new URL(request.url()).pathname.endsWith(detailPath));
+ await mount(page,'?notification=notice-target');
+ await requested;
+ assert.equal(detailReads(),1,'the initial target detail is held before the list mounts');
+ releaseList();control.approvalHold=null;
+ await page.waitForFunction(count=>document.querySelectorAll('.approval-card').length===count,count);
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await page.clock.fastForward(11000);
+ await card.getByRole('heading',{name:'Expired',exact:true}).waitFor();
+ assert.equal(await page.locator('.approval-card h3').evaluateAll(nodes=>nodes.every(node=>node.textContent==='Expired')),true);
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(detailReads(),1,'the regression exercises the initial fallback, not focus refresh');
+ const initialResponse=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith(detailPath));
+ releaseDetail();control.approvalDetailHold=null;
+ await initialResponse;
+ await page.waitForTimeout(100);
+ if(stalePending){
+  assert.equal(await card.getByRole('heading').innerText(),'Expired','held stale pending stays non-actionable');
+  assert.equal(await card.getByRole('button').count(),0);
+  control.approvals=[];control.approvalDetail={...items[0],status,executable:false,choices:[]};
+  const refreshed=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith(detailPath));
+  await page.evaluate(()=>dispatchEvent(new Event('focus')));
+  await refreshed;
+  assert.equal(detailReads(),2,'later authenticated detail reuses retained local-expiry provenance');
+ }
+ await card.getByRole('heading',{name:status==='sending'?'Decision pending':'Decision status unknown',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(await page.locator('.approval-card').count(),count);
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')||call.p.startsWith('/auth/verify')
+  ||call.p.startsWith('/runs/')&&call.method==='POST').length,0,'initial status reconciliation never decides or resubmits');
+ await page.evaluate(()=>app.destroy());
+}));
+
 for(const status of ['sending','expired'])test(`a held ${status} detail cannot update a newer session after route teardown`,{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
  control.notificationTarget=approvalTarget;control.approvals=[];
  control.approvalDetail=approvalRecord({status,executable:false,choices:[]});
