@@ -424,8 +424,13 @@ test('approval controls retain pending and card-scoped errors across focus refre
  assert.equal(await page.locator('.approval-card').getByRole('button',{name:'Approve once'}).isDisabled(),false,'a cancelled verification can be deliberately retried');
 
  let release;control.decisionHold=new Promise(resolve=>release=resolve);control.decisionStatus=503;
+ await holdPasskey(page);
  await page.locator('.approval-card').getByRole('button',{name:'Deny'}).click();
- await page.waitForFunction(()=>document.querySelector('.approval-card')?.querySelector('.actions button[disabled]'));
+ await page.waitForFunction(()=>window.passkeyRequest?.started);
+ await page.evaluate(()=>finishPasskey());
+ const decisionPath='/approvals/approval-1/decision',deadline=Date.now()+5000;
+ while(!calls.some(call=>call.p===decisionPath) && Date.now()<deadline)await page.waitForTimeout(10);
+ assert.ok(calls.some(call=>call.p===decisionPath),'verified deny request must reach the decision endpoint');
  await page.evaluate(()=>dispatchEvent(new Event('focus')));await page.waitForTimeout(80);
  assert.equal(await page.locator('.approval-card').getByRole('button',{name:'Deny'}).isDisabled(),true,'refresh must keep a submitted decision locked');
  release();await page.locator('.approval-card').getByText('Synthetic unavailable').waitFor();
@@ -435,8 +440,13 @@ test('approval acknowledgement wins over list removal and changed actions reject
  const item=approvalRecord();control.notificationTarget=approvalTarget;control.approvals=[item];control.approvalDetail=item;
  await mount(page,'?notification=notice-target');await page.getByRole('button',{name:'Deny'}).waitFor();
  let release;control.decisionHold=new Promise(resolve=>release=resolve);
+ await holdPasskey(page);
  await page.getByRole('button',{name:'Deny'}).click();
- await page.waitForFunction(()=>window.app && document.querySelector('.approval-card .actions button[disabled]'));
+ await page.waitForFunction(()=>window.passkeyRequest?.started);
+ await page.evaluate(()=>finishPasskey());
+ const decisionPath='/approvals/approval-1/decision',deadline=Date.now()+5000;
+ while(!calls.some(call=>call.p===decisionPath) && Date.now()<deadline)await page.waitForTimeout(10);
+ assert.ok(calls.some(call=>call.p===decisionPath),'verified deny request must reach the decision endpoint');
  control.approvals=[];await page.evaluate(()=>dispatchEvent(new Event('focus')));await page.waitForTimeout(80);
  release();await page.locator('.approval-card').getByRole('heading',{name:'Resolved'}).waitFor();
  assert.equal(calls.filter(call=>call.p==='/approvals/approval-1/decision').length,1);
