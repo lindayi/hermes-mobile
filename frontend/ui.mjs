@@ -1446,6 +1446,40 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         approvalTargetPlaceholder.scrollIntoView?.({block:'center'});approvalTargetPlaceholder.focus();
       }
     };
+    let approvalTargetHistoryLoading=false,approvalTargetHistoryNotice=null;
+    const restoreApprovalTargetHistory=async item=>{
+      const key=approvalKey(item),sameTarget=()=>current()
+        && sameApprovalIdentity(approvalItems.get(key),item);
+      if(approvalTargetHistoryLoading || !sameTarget())return;
+      approvalTargetHistoryLoading=true;
+      approvalTargetHistoryNotice?.remove();approvalTargetHistoryNotice=null;
+      try{
+        const findAnchor=()=>[...messages.querySelectorAll('[data-history-run]')]
+          .find(node=>node.dataset.historyRun===item.run_id && node.dataset.historySession===session.id
+            && !node.matches('.approval-card'));
+        let pages=0,loadedHistory=false;
+        while(!findAnchor() && oldestOffset>0 && pages++<100){
+          const loaded=await loadOlder();
+          if(!sameTarget())return;
+          if(!loaded)break;
+          loadedHistory=true;
+        }
+        if(!sameTarget())return;
+        if(loadedHistory)approvalTargetFocusedCard=false;
+        renderApprovals();focusApprovalTarget();
+      }catch(error){
+        if(!sameTarget())return;
+        if(error.status===401){expiredSession();return;}
+        approvalTargetHistoryNotice=h('section',{class:'notification-unavailable',role:'region',
+          'aria-label':'Approval history'},h('h3',{},'Approval history unavailable'),
+          h('p',{},'The approval status is unchanged. Earlier messages could not be loaded.'),
+          button('Retry approval history',event=>{
+            if(!sameTarget() || !event.currentTarget.isConnected)return;
+            void restoreApprovalTargetHistory(item);
+          },'secondary'));
+        messages.append(approvalTargetHistoryNotice);
+      }finally{approvalTargetHistoryLoading=false;}
+    };
     const resolveApprovalTarget=async target=>{
       const matches=item=>item?.id===target.approval_id && item.run_id===target.run_id
         && item.request_id===target.request_id && item.session_id===session.id
@@ -1479,19 +1513,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(!current())return;
         if(matches(item)){
           const key=approvalKey(item);
-          const findAnchor=()=>[...messages.querySelectorAll('[data-history-run]')]
-            .find(node=>node.dataset.historyRun===item.run_id && node.dataset.historySession===session.id
-              && !node.matches('.approval-card'));
-          let pages=0,loadedHistory=false;
-          while(!findAnchor() && oldestOffset>0 && pages++<100){
-            const loaded=await loadOlder();
-            if(!current())return;
-            if(!loaded)break;
-            loadedHistory=true;
-          }
-          if(!current())return;
           let existing=approvalItems.get(key);
-          if(loadedHistory)approvalTargetFocusedCard=false;
           if(handledApprovals.has(key)){
             const cached=handledApprovalDetails.get(key);
             const cachedItem=cached && sameApprovalIdentity(cached,item)?cached:null;
@@ -1507,7 +1529,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             approvalFinals.set(key,finalStatus);rememberHandledApproval(key,finalItem,finalStatus);
             clearApprovalExpiry(key);
             approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
-            renderApprovals();focusApprovalTarget();return;
+            renderApprovals();focusApprovalTarget();
+            await restoreApprovalTargetHistory(finalItem);return;
           }
           const listChanged=detailListRevision!==null && detailListRevision!==approvalListRevision;
           if(detailRevision!==null && (detailRevision!==approvalRevision || listChanged) && item.status==='pending'){
@@ -1515,7 +1538,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             if(approvalPending.has(key) && matches(latest))item=latest;
             else if(existing && matches(existing)){
               approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
-              renderApprovals();focusApprovalTarget();return;
+              renderApprovals();focusApprovalTarget();
+              await restoreApprovalTargetHistory(existing);return;
             }else if(listChanged){
               for(let recheck=0;recheck<2;recheck++){
                 const revalidatedListRevision=approvalListRevision,revalidatedRevision=approvalRevision,
@@ -1580,6 +1604,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           }
           approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
           renderApprovals();focusApprovalTarget();
+          await restoreApprovalTargetHistory(item);
         }else{
           approvalTargetPlaceholder?.querySelector('h3') && (approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable');
           if(approvalTargetPlaceholder){

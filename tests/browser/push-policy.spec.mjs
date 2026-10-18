@@ -555,6 +555,72 @@ test('approval notification loads the matching older turn before focusing its ca
  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
 }));
 
+for(const departure of [false,true])test(`generated resolved approval survives history failure and retry (departure=${departure})`,{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ control.notificationTarget=approvalTarget;control.approvals=[approvalRecord()];
+ control.approvalDetail=approvalRecord({status:'resolved',executable:false,choices:[]});
+ control.realHistory=approvalHistory();
+ control.realHistory.latest.items=Array.from({length:24},(_,index)=>({
+  id:20+index,role:index%2?'assistant':'user',content:`Newer synthetic message ${index}. `.repeat(12),
+  run_id:'newer-run',session_id:'session-one'
+ }));
+ let releaseDetail;control.approvalDetailHold=new Promise(resolve=>releaseDetail=resolve);
+ control.requestReadPath='history';control.requestReadErrors=2;
+ await mount(page,'?notification=notice-target');
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.getByRole('button',{name:'Approve once'}).waitFor();
+ assert.equal(await page.locator('.approval-notice').innerText(),'1 approval require your review.');
+ const detailResponse=responseBatch(page,'/approvals/approval-1',1);
+ const historyResponse=responseBatch(page,'/sessions/session-one/messages',1);
+ control.approvalDetailHold=null;releaseDetail();await detailResponse;await historyResponse;
+ await page.waitForTimeout(30);
+ assert.equal(await card.getByRole('heading').innerText(),'Resolved','matched detail must apply even when older history fails');
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(await page.locator('.approval-notice').isHidden(),true);
+ const retry=page.getByRole('button',{name:'Retry approval history',exact:true});
+ await retry.waitFor();
+ const failedRetry=responseBatch(page,'/sessions/session-one/messages',1);
+ await retry.click();await failedRetry;await retry.waitFor();
+ assert.equal(await card.getByRole('heading').innerText(),'Resolved');
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(await page.locator('.approval-notice').isHidden(),true);
+ let releaseHistory;control.requestReadHold=new Promise(resolve=>releaseHistory=resolve);
+ const historyRequest=page.waitForRequest(req=>new URL(req.url()).pathname.endsWith('/sessions/session-one/messages')
+  && new URL(req.url()).searchParams.has('offset'));
+ const recovered=responseBatch(page,'/sessions/session-one/messages',1);
+ await retry.click();await historyRequest;
+ if(departure){
+  await page.getByRole('button',{name:'Chats',exact:true}).click();
+  await page.getByRole('button',{name:/Second conversation/}).click();
+  await page.getByRole('textbox',{name:'Message Hermes'}).focus();
+ }
+ const before=await page.locator('.messages').evaluate(node=>node.scrollTop);
+ control.requestReadHold=null;releaseHistory();await recovered;
+ if(departure){
+  await page.waitForTimeout(30);
+  assert.equal(await card.count(),0);
+  assert.equal(await page.getByText('Original request',{exact:true}).count(),0);
+  assert.equal(await page.getByRole('textbox',{name:'Message Hermes'}).evaluate(node=>document.activeElement===node),true);
+  assert.equal(await page.locator('.messages').evaluate(node=>node.scrollTop),before);
+ }else{
+  await page.locator('.messages [data-history-run="approval-run"]:not(.approval-card)').waitFor();
+  await page.waitForTimeout(30);
+  const position=await card.evaluate(node=>{
+   const transcript=node.closest('.messages'),view=transcript.getBoundingClientRect(),rect=node.getBoundingClientRect();
+   return {anchor:node.previousElementSibling?.dataset.historyRun,
+    scrollable:transcript.scrollHeight>transcript.clientHeight,inside:rect.top>=view.top && rect.bottom<=view.bottom,
+    focused:document.activeElement===node};
+  });
+  assert.deepEqual(position,{anchor:'approval-run',scrollable:true,inside:true,focused:true});
+  assert.equal(await card.count(),1);
+  assert.equal(await page.getByText('Original request',{exact:true}).count(),1);
+  assert.equal(await retry.count(),0);
+  assert.equal(await card.getByRole('button').count(),0);
+ }
+ assert.equal(calls.filter(call=>call.p==='/approvals/approval-1').length,1);
+ assert.equal(calls.filter(call=>call.p==='/sessions/session-one/messages' && call.query.includes('offset=')).length,3);
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')).length,0);
+}));
+
 test('generated long approval details are keyboard-scrollable before decision',{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
  const endMarker='END OF SYNTHETIC APPROVAL DETAILS';
  const command=Array.from({length:100},(_,index)=>`synthetic action detail line ${index+1}: review this safe fixture before approval`).join('\n')+`\n${endMarker}`;

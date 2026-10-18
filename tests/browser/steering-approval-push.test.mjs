@@ -816,6 +816,84 @@ for(const revalidated of ['resolved','pending'])test(`empty approval list revali
  }finally{app.destroy();win.close();}
 });
 
+for(const departure of ['none','route','owner','target'])test(`resolved approval survives older-history failure and read-only recovery (${departure})`,async()=>{
+ const detail=deferred(),older=deferred(),calls=[],scrolls=[];
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ let historyReads=0,owner='owner';
+ win.HTMLElement.prototype.scrollIntoView=function(){scrolls.push(this);};
+ const historyPath='/sessions/s/messages?limit=10&offset=0&turn_boundary=true';
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/inbox/next/target')return {kind:'approval',session_id:'new-chat',run_session_id:'new-chat',run_id:'new-run',approval_id:'b',request_id:'native-b'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p==='/sessions/new-chat')return {id:'new-chat',title:'New chat title'};
+  if(p.startsWith('/sessions?'))return {items:[{id:'new-chat',title:'New chat title'}],total:1};
+  if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[{id:20,role:'user',content:'New request',run_id:'newer',session_id:'s'}],total:11,offset:10};
+  if(p.startsWith('/sessions/new-chat/messages'))return {items:[],total:0,offset:0};
+  if(p===historyPath){
+   if(++historyReads<=2)throw Object.assign(new Error('Synthetic history failure'),{status:503});
+   return older.promise;
+  }
+  if(p==='/approvals')return {items:[approvalItem()]};
+  if(p==='/approvals/a')return detail.promise;
+  if(p==='/approvals/b')return {...approvalItem(),id:'b',request_id:'native-b',session_id:'new-chat',run_session_id:'new-chat',run_id:'new-run',status:'resolved'};
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>calls.includes('/approvals/a') && doc.querySelector('[data-approval-id="a"] button.primary'));
+  assert.match(doc.querySelector('.approval-notice').textContent,/1 approval/);
+  assert.equal(doc.querySelector('.approval-notice').hidden,false,'pending list is visible before detail');
+  detail.resolve({...approvalItem(),status:'resolved',executable:false,choices:[]});
+  await waitFor(()=>historyReads===1);
+  const card=doc.querySelector('[data-approval-id="a"]');
+  assert.equal(card.querySelector('h3').textContent,'Resolved','resolved detail applies despite history 503');
+  assert.equal(card.querySelector('button'),null);
+  assert.equal(doc.querySelector('.approval-notice').hidden,true,'resolved detail clears pending count');
+  const retry=()=>[...doc.querySelectorAll('button')].find(node=>node.textContent==='Retry approval history');
+  assert.ok(retry(),'history recovery remains available without the removed status placeholder');
+  retry().click();await waitFor(()=>historyReads===2 && retry());
+  assert.equal(card.querySelector('h3').textContent,'Resolved');
+  assert.equal(card.querySelector('button'),null);
+  assert.equal(doc.querySelector('.approval-notice').hidden,true);
+  const savedRetry=retry();savedRetry.click();savedRetry.click();
+  await waitFor(()=>historyReads===3);
+  if(departure!=='none'){
+   if(departure==='target'){
+    win.history.replaceState({},'','/hermes/?notification=next');await app.start();
+   }else{
+    if(departure==='route')doc.querySelector('[data-view="chats"]').click();
+    else{owner='another-owner';win.history.replaceState({},'','/hermes/');await app.start();}
+    await waitFor(()=>doc.querySelector('.session-row[aria-label="New chat title"]'));
+    doc.querySelector('.session-row[aria-label="New chat title"]').click();
+   }
+   await waitFor(()=>doc.querySelector('.conversation-head h1')?.textContent==='New chat title');
+   doc.querySelector('textarea').focus();
+  }
+  const focused=doc.activeElement,scrollCount=scrolls.length;
+  older.resolve({items:[{id:1,role:'user',content:'Original request',run_id:'r',session_id:'s'}],offset:0,total:11});
+  await tick();await tick();
+  if(departure==='none'){
+   assert.equal(card.previousElementSibling?.dataset.historyRun,'r');
+   assert.equal(doc.activeElement,card);
+   assert.ok(scrolls.length>scrollCount);
+   assert.equal(doc.querySelectorAll('[data-approval-id="a"]').length,1);
+   assert.equal(doc.querySelectorAll('.user-message').length,2);
+   assert.equal(retry(),undefined);
+   assert.equal(card.querySelector('button'),null);
+  }else{
+   assert.equal(doc.querySelector('[data-approval-id="a"]'),null);
+   assert.doesNotMatch(doc.querySelector('.messages').textContent,/Original request/);
+   assert.equal(doc.activeElement,focused);
+   assert.equal(scrolls.length,scrollCount);
+  }
+  assert.equal(historyReads,3,'repeated clicks share one bounded read');
+  assert.equal(calls.filter(path=>path==='/approvals/a').length,1,'history retry does not re-read approval status');
+  assert.equal(calls.some(path=>path.endsWith('/decision') || path.startsWith('/auth/verify')),false);
+ }finally{app.destroy();win.close();}
+});
+
 test('automatic approval history shares manual loads and refocuses after relocation',async()=>{
  const older=deferred(),calls=[],scrolls=[];
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
