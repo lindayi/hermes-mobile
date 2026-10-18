@@ -144,6 +144,8 @@ test('photo picker icon stays accessible and removal retries only the remaining 
     headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
   t.after(async()=>{await browser.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));});
   const page=await browser.newPage({viewport:{width:320,height:844}});
+  let chooserCount=0;
+  page.on('filechooser',()=>chooserCount++);
   page.setDefaultTimeout(5000);
   await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);
   await page.getByRole('button',{name:'Photo fixture'}).click();
@@ -169,8 +171,6 @@ test('photo picker icon stays accessible and removal retries only the remaining 
   await page.getByRole('button',{name:'Send message'}).focus();
   await page.keyboard.press('Shift+Tab');
   assert.ok(await addPhotos.evaluate(el=>document.activeElement===el),'the photo picker must be keyboard focusable');
-  let chooserCount=0;
-  page.on('filechooser',()=>chooserCount++);
   const chooserEvent=page.waitForEvent('filechooser');
   await page.keyboard.press('Enter');
   const chooser=await chooserEvent;
