@@ -66,7 +66,8 @@ async function fixture(run){
     }else if(p.endsWith('/messages')){if(control.messagesDelay)await new Promise(resolve=>setTimeout(resolve,control.messagesDelay));data={items:[],total:0};}
     if(p.endsWith('/messages') && control.activeRun)data={...data,run:control.activeRun};
     if(p.endsWith('/controls') && control.activeRun)data={steering:true,attempts:[]};
-    if(p.startsWith('/runs/') && control.realHistory)data=control.realHistory.runs[p.slice('/runs/'.length)]||{items:[]};
+    if(control.activeRun && p===`/runs/${control.activeRun.id}`)data=control.activeRun;
+    else if(p.startsWith('/runs/') && control.realHistory)data=control.realHistory.runs[p.slice('/runs/'.length)]||{items:[]};
     else if(p==='/runs/older-run')data={id:'older-run',session_id:'session-one',input:'Original request',status:'completed',output:'Exact notification result',created_at:1,updated_at:2};
     if(p==='/push/preferences'){
      if(control.hold)await control.hold;
@@ -90,7 +91,9 @@ async function fixture(run){
    await page.evaluate(async({ui})=>{document.body.innerHTML='<div id="app"></div>';const style=document.createElement('link');style.rel='stylesheet';style.href='./styles.'+ui.split('.')[1]+'.css';document.head.append(style);const {createAPI}=await import('./api.'+ui.split('.')[1]+'.mjs');const {mountApp}=await import('./'+ui);window.app=await mountApp(document,createAPI(),window);},{ui});
   }
   await mount(page);
-  await run({page,context,url,calls,control,ui,sw,dir,mount,emitRunEvent(name,data,id=++control.runEventSequence){
+  await run({page,context,url,calls,control,ui,sw,dir,mount,disconnectRunStreams(){
+   for(const stream of [...control.runEventStreams])stream.end();
+  },emitRunEvent(name,data,id=++control.runEventSequence){
    for(const stream of control.runEventStreams)if(!stream.writableEnded)
     stream.write(`id: ${id}\nevent: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
   }});
@@ -570,6 +573,38 @@ test('generated run status refresh removes an externally answered approval and p
  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0,'status reconciliation never decides an approval');
 }));
 
+test('generated unavailable approval stays retired after list refresh and approval replay',{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
+ const target=approvalRecord(),sibling=approvalRecord({id:'approval-2',request_id:'request-2'});
+ control.notificationTarget=approvalTarget;control.approvals=[target,sibling];
+ control.activeRun={id:target.run_id,session_id:target.session_id,status:'waiting_for_approval'};
+ control.approvalDetail=target;control.approvalDetailStatus=409;
+ await mount(page,'?notification=notice-target');
+ const connectDeadline=Date.now()+2500;
+ while(!control.runEventStreams.length&&Date.now()<connectDeadline)await page.waitForTimeout(10);
+ assert.ok(control.runEventStreams.length,'generated chat opens its run event stream');
+ const card=page.locator(`[data-approval-id="${target.id}"]`),other=page.locator(`[data-approval-id="${sibling.id}"]`);
+ await card.getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
+ await other.getByRole('button',{name:'Approve once'}).waitFor();
+ const before=calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length;
+ emitRunEvent('status',{status:'waiting_for_approval'},'refresh-after-unavailable');
+ const deadline=Date.now()+2500;
+ while(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length===before&&Date.now()<deadline)
+  await page.waitForTimeout(10);
+ await page.waitForTimeout(30);
+ assert.equal(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length,before+1,
+  'status refresh reads the same pending database row once');
+ assert.equal(await card.getByRole('heading').innerText(),'Approval unavailable');
+ emitRunEvent('approval',target,'replayed-unavailable-approval');
+ await page.waitForTimeout(80);
+ assert.equal(await page.locator(`[data-approval-id="${target.id}"]`).count(),1);
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(await other.getByRole('button').count(),2,'a sibling with a distinct request remains actionable');
+ assert.equal(await page.locator('.approval-notice').innerText(),'1 approval require your review.');
+ assert.equal(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length,before+1,
+  'replayed approval events do not start another list read');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+}));
+
 test('generated pending-list card loses controls after its held detail returns deletion-fence 409',{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
  const target=approvalRecord(),sibling=approvalRecord({id:'approval-2',request_id:'request-2'});
  control.notificationTarget=approvalTarget;
@@ -591,6 +626,83 @@ test('generated pending-list card loses controls after its held detail returns d
  assert.equal(await card.getByRole('button').count(),0);
  assert.equal(await other.getByRole('button').count(),2,'the other approval is unchanged');
  assert.equal(await page.locator('.approval-notice').innerText(),'1 approval require your review.');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+}));
+
+test('generated terminal run finish wins over held pending detail but fresh final detail replaces it',{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
+ const pending=approvalRecord();
+ control.notificationTarget=approvalTarget;control.approvals=[pending];
+ control.activeRun={id:pending.run_id,session_id:pending.session_id,status:'running'};
+ control.approvalDetail=pending;
+ let releaseDetail;control.approvalDetailHold=new Promise(resolve=>releaseDetail=resolve);
+ await mount(page,'?notification=notice-target');
+ const connectDeadline=Date.now()+2500;
+ while(!control.runEventStreams.length&&Date.now()<connectDeadline)await page.waitForTimeout(10);
+ assert.ok(control.runEventStreams.length,'generated chat opens its run event stream');
+ const card=page.locator(`[data-approval-id="${pending.id}"]`),detailPath='/approvals/approval-1';
+ await card.getByRole('button',{name:'Approve once'}).waitFor();
+ const deadline=Date.now()+2500;
+ while(!calls.some(call=>call.p===detailPath&&call.method==='GET')&&Date.now()<deadline)await page.waitForTimeout(10);
+ assert.ok(calls.some(call=>call.p===detailPath&&call.method==='GET'),'initial pending detail is held');
+ emitRunEvent('status',{status:'cancelled'},'terminal-before-pending-detail');
+ await card.getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(await page.locator('.approval-notice').isHidden(),true);
+ const staleResponse=page.waitForResponse(response=>response.url().endsWith(detailPath)&&response.request().method()==='GET');
+ control.approvalDetailHold=null;releaseDetail();await staleResponse;
+ await page.waitForTimeout(30);
+ assert.equal(await card.getByRole('heading').innerText(),'Approval unavailable',
+  'the held pending detail cannot replace terminal-run retirement');
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(await page.locator('.approval-notice').isHidden(),true);
+
+ control.approvalDetail=approvalRecord({status:'resolved',executable:false,choices:[]});
+ control.approvals=[];
+ await settings(page);await page.getByRole('button',{name:'Sign out',exact:true}).click();
+ await page.getByRole('button',{name:'Sign in with a passkey',exact:true}).waitFor();
+ await page.evaluate(()=>app.start());
+ await card.getByRole('heading',{name:'Resolved',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0,'a fresh final detail remains authoritative');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+}));
+
+test('generated disconnected-stream polling reconciles an externally answered approval and keeps its sibling',{timeout:30000},()=>fixture(async({page,control,calls,disconnectRunStreams})=>{
+ const answered=approvalRecord(),sibling=approvalRecord({id:'approval-2',request_id:'request-2'});
+ control.approvals=[answered,sibling];
+ control.activeRun={id:answered.run_id,session_id:answered.session_id,status:'waiting_for_approval'};
+ await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ const connectDeadline=Date.now()+2500;
+ while(!control.runEventStreams.length&&Date.now()<connectDeadline)await page.waitForTimeout(10);
+ assert.ok(control.runEventStreams.length,'generated chat opens its run event stream');
+ const answeredCard=page.locator(`[data-approval-id="${answered.id}"]`),siblingCard=page.locator(`[data-approval-id="${sibling.id}"]`);
+ await answeredCard.getByRole('button',{name:'Approve once'}).waitFor();
+ await siblingCard.getByRole('button',{name:'Approve once'}).waitFor();
+ await page.getByRole('textbox',{name:'Message Hermes'}).focus();
+ disconnectRunStreams();
+ const disconnectDeadline=Date.now()+1000;
+ while(control.runEventStreams.length&&Date.now()<disconnectDeadline)await page.waitForTimeout(10);
+ assert.equal(control.runEventStreams.length,0,'poll recovery runs with no connected event stream');
+ const initialLists=calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length;
+ const initialPolls=calls.filter(call=>call.p===`/runs/${answered.run_id}`&&call.method==='GET').length;
+ control.approvals=[sibling];
+ const pollResponse=page.waitForResponse(response=>response.url().endsWith(`/runs/${answered.run_id}`)&&response.request().method()==='GET');
+ await page.evaluate(()=>dispatchEvent(new Event('pageshow')));
+ await pollResponse;
+ const deadline=Date.now()+2500;
+ while(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length===initialLists&&Date.now()<deadline)
+  await page.waitForTimeout(10);
+ await answeredCard.getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
+ assert.equal(calls.filter(call=>call.p===`/runs/${answered.run_id}`&&call.method==='GET').length,initialPolls+1);
+ assert.equal(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length,initialLists+1,
+  'one waiting poll performs one bounded approval reconciliation');
+ assert.equal(await answeredCard.getByRole('button').count(),0);
+ assert.equal(await siblingCard.getByRole('button').count(),2);
+ assert.equal(await page.locator('.approval-notice').innerText(),'1 approval require your review.');
+ assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),'Message Hermes',
+  'polling does not move reader focus');
+ await page.waitForTimeout(100);
+ assert.equal(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length,initialLists+1,
+  'reconciliation does not create an approval-read loop');
  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
 }));
 

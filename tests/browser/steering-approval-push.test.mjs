@@ -304,6 +304,45 @@ for(const status of [404,409,410])test(`authoritative ${status} detail failure r
  }finally{app.destroy();win.close();}
 });
 
+for(const status of [404,409,410])for(const outcome of ['complete','cancel'])
+test(`authoritative ${status} detail failure retires an approval during passkey ${outcome}`,async()=>{
+const detail=deferred(),list=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+win.PublicKeyCredential=class {};
+const credential=deferred();
+win.navigator.credentials={get:()=>credential.promise};
+const target={...approvalItem(),status:'pending'};
+const sibling={...approvalItem(),id:'b',request_id:'native-b',status:'pending'};
+const app=await mountApp(doc,{clear(){},async request(p){
+ calls.push(p);
+ if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+ if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+ if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+ if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+ if(p==='/approvals')return list.promise;
+ if(p==='/approvals/a')return detail.promise;
+ if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+ if(p==='/auth/verify/finish')return {ok:true};
+ return {items:[]};
+}},win);
+try{
+ await waitFor(()=>calls.includes('/approvals/a'));
+ list.resolve({items:[target,sibling]});
+ await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+ doc.querySelector('[data-approval-id="a"] button.primary').click();
+ await waitFor(()=>calls.includes('/auth/verify/options'));
+ detail.reject(Object.assign(new Error('Approval unavailable'),{status}));
+ await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Approval unavailable');
+ assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+ assert.equal(doc.querySelector('[data-approval-id="b"] button.primary')!==null,true);
+ assert.equal(doc.querySelector('.approval-notice').textContent,'1 approval require your review.');
+ if(outcome==='complete')credential.resolve(fakeCredential());
+ else credential.reject(new win.DOMException('Passkey cancelled','NotAllowedError'));
+ await tick();await tick();
+ if(outcome==='complete')assert.ok(calls.includes('/auth/verify/finish'));
+ assert.equal(calls.filter(path=>path==='/approvals/a/decision').length,0);
+}finally{app.destroy();win.close();}
+});
+
 test('authoritative detail error applies when a revalidation loses its placeholder to a refreshed list',async()=>{
  const first=deferred(),second=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
  const target={...approvalItem(),status:'pending'};

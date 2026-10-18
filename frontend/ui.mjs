@@ -43,6 +43,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   let closeEditor=null, stopExtras=null, approvalState=null, currentModelSync=null, stopPushPresence=null;
   let pushIdentity={client_id:win.crypto.randomUUID(),sequence:0},pushIdentityKey=null,releasePushIdentity=null,pushRequest=null;
   const handledApprovals=new Set(),handledApprovalDetails=new Map();
+  const maxHandledApprovals=100;
   const finalApprovalStatuses=new Set(['resolved','resolved_external','cancelled','expired']);
   const approvalStatusRank={pending:0,sending:1,unknown:2};
   const preferredApprovalStatus=(fresh,cached)=>{
@@ -52,8 +53,13 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   };
   const approvalKey=item=>`${state.user?.id}:${item.run_id}:${item.id || item.request_id}`;
   const rememberHandledApproval=(key,item,status)=>{
+    handledApprovals.delete(key);
     handledApprovals.add(key);
     if(item)handledApprovalDetails.set(key,{...item,status,executable:false,choices:[]});
+    while(handledApprovals.size>maxHandledApprovals){
+      const oldest=handledApprovals.values().next().value;
+      handledApprovals.delete(oldest);handledApprovalDetails.delete(oldest);
+    }
   };
   function leaveConversation(){stopDisclosureReachability?.();stopDisclosureReachability=null;stopPushPresence?.();stopPushPresence=null;currentModelSync=null;closeEditor?.(false);stopExtras?.();stopExtras=null;approvalState=null;headerState?.destroy();headerState=null;root.querySelector('[data-rename-dialog]')?.remove();}
   function disconnect(){const cancel=cancelTracking;cancelTracking=null;cancel?.();stream?.close();stream=null;}
@@ -448,8 +454,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       section.append(h('article',{class:'card approval inbox-approval','data-approval-id':item.id,tabindex:'-1'},h('details',{},
         h('summary',{class:'inbox-summary inbox-approval-summary'},disclosure(),h('span',{class:'inbox-summary-text'},h('span',{class:'eyebrow'},'NEEDS YOUR REVIEW'),h('h2',{},item.title || 'Action requested'),h('span',{class:'caption'},'Expires: ',date(item.expires_at)))),
         h('div',{class:'inbox-body'},h('pre',{class:'review-payload'},actionText),h('p',{},'Target: ',typeof item.target==='string' ? item.target : 'See action details'),
-        h('div',{class:'actions'},button('Approve once',e=>inboxAction(e.currentTarget,async()=>{await ceremony('verify');if(!current())return;await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,{method:'POST',body:{decision:'once'}});if(!current())return;handledApprovals.add(approvalKey(item));await navigate('inbox');}),'primary'),
-        button('Deny',e=>inboxAction(e.currentTarget,async()=>{await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,{method:'POST',body:{decision:'deny'}});if(!current())return;handledApprovals.add(approvalKey(item));await navigate('inbox');}),'secondary'))))));
+        h('div',{class:'actions'},button('Approve once',e=>inboxAction(e.currentTarget,async()=>{await ceremony('verify');if(!current())return;await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,{method:'POST',body:{decision:'once'}});if(!current())return;rememberHandledApproval(approvalKey(item),item,'resolved');await navigate('inbox');}),'primary'),
+        button('Deny',e=>inboxAction(e.currentTarget,async()=>{await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,{method:'POST',body:{decision:'deny'}});if(!current())return;rememberHandledApproval(approvalKey(item),item,'resolved');await navigate('inbox');}),'secondary'))))));
     } else section.append(h('p',{class:'inline-error'},'Approvals unavailable: ',errorMessage(approvals.reason)));
     if(deliveries.status==='fulfilled') {
       for(const delivery of deliveries.value.items || []) {
@@ -1369,11 +1375,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       finish(runId){
         approvalRevision++;
         for(const [key,item] of approvalPending)if(item.run_id===runId){
-          handledApprovals.add(key);approvalPending.delete(key);approvalFinals.set(key,'unavailable');
+          const finalItem={...item,status:'unavailable',executable:false,choices:[]};
+          rememberHandledApproval(key,finalItem,'unavailable');
+          approvalPending.delete(key);approvalItems.set(key,finalItem);approvalFinals.set(key,'unavailable');
           const actionState=approvalActionStates.get(key);
-          if(actionState?.pending && !actionState.decisionStarted && !actionState.uncertain){
-            actionState.pending=false;actionState.error='';
-          }
+          if(actionState?.pending && !actionState.decisionStarted && !actionState.uncertain)
+            approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
         }
         genericApproval=false;renderApprovals();
       }
@@ -1420,7 +1427,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           if(handledApprovals.has(key)){
             const cached=handledApprovalDetails.get(key);
             const cachedItem=cached && sameApprovalIdentity(cached,item)?cached:null;
-            const finalStatus=preferredApprovalStatus(item.status,cachedItem?.status);
+            const finalStatus=finalApprovalStatuses.has(item.status)?item.status
+              :cachedItem?.status==='unavailable'?'unavailable'
+                :preferredApprovalStatus(item.status,cachedItem?.status);
             const finalItem={...(finalStatus===item.status?item:cachedItem || item),status:finalStatus,executable:false,choices:[]};
             const actionState=approvalActionStates.get(key);
             if(finalApprovalStatuses.has(item.status) && actionState){
@@ -1536,9 +1545,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           const item=approvalPending.get(key),actionState=approvalActionStates.get(key);
           if(item && matches(item) && approvalItems.get(key)===item && !handledApprovals.has(key)
               && !finalApprovalStatuses.has(approvalFinals.get(key))
-              && !actionState?.pending && !actionState?.decisionStarted && !actionState?.uncertain){
+              && !actionState?.decisionStarted && !actionState?.uncertain){
             const finalItem={...item,status:'unavailable',executable:false,choices:[]};
+            if(actionState)approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
             approvalRevision++;approvalPending.delete(key);approvalItems.set(key,finalItem);
+            rememberHandledApproval(key,finalItem,'unavailable');
             approvalFinals.set(key,'unavailable');clearApprovalExpiry(key);renderApprovals();
           }
         }
@@ -2431,6 +2442,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         // Fresh terminal reads still reconcile offline; newer events defer them to the next poll.
         const currentRevision=token===connection?.token();
         if(connection?.success(token))connection.run(current.status);
+        if(currentRevision && current.status==='waiting_for_approval')void approvalState?.reconcile();
         if(currentRevision && (finalStates.has(current.status) || current.status==='stopping')) {recovered();apply(current);}
       } catch(error) {
         if(!disposed && version===routeVersion) {
