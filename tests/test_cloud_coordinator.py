@@ -251,6 +251,12 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
     fix = next(action for action in store.actions().values()
                if action.get("kind") == "fix")
     assert store.authorize_sensitive(16, HEAD)
+    legacy_enrollment = store.snapshot()["enrollments"]["16"]
+    legacy_sensitive_history = {
+        field: deepcopy(legacy_enrollment[field])
+        for field in ("sensitive_sha", "sensitive_authorization", "targeted_review")
+        if field in legacy_enrollment
+    }
     task = api.tasks[fix["task_id"]]
     session_id = "session-1"
     task.update(
@@ -300,7 +306,11 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
     assert completed["receipt_session_id"] == session_id
     assert completed["receipt_nonce"] == fix["dispatch_nonce"]
     assert store.snapshot()["enrollments"]["16"]["authorized_head"] == HEAD
-    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
+    completed_enrollment = store.snapshot()["enrollments"]["16"]
+    assert {
+        field: completed_enrollment.get(field)
+        for field in legacy_sensitive_history
+    } == legacy_sensitive_history
     assert api.fix_attempts == 1
     assert api.review_attempts == 0
     assert "Hermes-Task-Receipt: v2" in fix["body"]
@@ -333,6 +343,15 @@ def _accepted_compacted_receipt_case(tmp_path, issue=16):
                 return _original(route, *args, **kwargs)
 
             setattr(api, name, route_issue_one)
+        original_graphql = api.graphql
+
+        def graphql_issue_one(query, variables):
+            response = original_graphql(query, variables)
+            if "PullRequestReview" in query:
+                response["data"]["node"]["pullRequest"]["number"] = issue
+            return response
+
+        api.graphql = graphql_issue_one
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     path = tmp_path / "coordinator-state.json"
     store = StateStore(path)
@@ -21087,24 +21106,8 @@ def test_scan_cursor_and_owner_commands_commit_atomically(tmp_path):
     path = tmp_path / "state.json"
     store = StateStore(path)
     enrollment = {"issue": 16, "comment": 123, "head": HEAD, "base": BASE}
-    body = json.dumps({
-        "schema": "hermes-independent-agent-review-v1",
-        "reviewed_head_sha": "c" * 40,
-        "review_method": "independent-agent",
-        "verdict": "pass",
-        "evidence_sha256": "d" * 64,
-    }, separators=(",", ":"))
-    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     authorization = {
-        "issue": 16, "comment": "124", "head": "c" * 40, "validated": True,
-        "owner_authorization": {
-            "actor_id": OWNER, "head_sha": "c" * 40, "state": "approved",
-            "review_id": 64001, "body_sha256": digest,
-        },
-        "targeted_review": {
-            "review_id": 64001, "reviewer_id": OWNER, "head_sha": "c" * 40,
-            "state": "COMMENTED", "body_sha256": digest, "evidence_sha256": "d" * 64,
-        },
+        "issue": 16, "comment": "124", "head": "c" * 40,
     }
     store.commit_scan(
         "2026-10-01T12:00:00Z", ["123", "124"],
@@ -21114,7 +21117,9 @@ def test_scan_cursor_and_owner_commands_commit_atomically(tmp_path):
     state = restarted.snapshot()
     assert state["cursor"] == "2026-10-01T12:00:00Z"
     assert set(state["events"]) == {"123", "124"}
-    assert state["enrollments"]["16"]["sensitive_sha"] == "c" * 40
+    assert state["enrollments"]["16"].get("sensitive_sha") is None
+    assert state["enrollments"]["16"].get("sensitive_authorization") is None
+    assert state["enrollments"]["16"].get("targeted_review") is None
 
 
 def test_stale_owner_sensitive_authorization_does_not_block_current_head(tmp_path):

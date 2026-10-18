@@ -133,6 +133,12 @@ def test_bound_proof_is_durable_before_compaction_and_survives_restart(tmp_path,
 def test_new_owner_sha_command_renews_active_enrollment_without_reset(tmp_path, pending):
     api, store, worker, action = bound_worker(tmp_path, sensitive=True)
     store.authorize_sensitive(16, HEAD)
+    seeded_enrollment = store.snapshot()["enrollments"]["16"]
+    legacy_sensitive_history = {
+        field: deepcopy(seeded_enrollment[field])
+        for field in ("sensitive_sha", "sensitive_authorization", "targeted_review")
+        if field in seeded_enrollment
+    }
     if not pending:
         api.tasks[action["task_id"]]["state"] = "failed"
         api.unresolved = False
@@ -152,7 +158,9 @@ def test_new_owner_sha_command_renews_active_enrollment_without_reset(tmp_path, 
     assert enrollment["authorized_head"] == HEAD
     assert enrollment["comment"] == 10001
     assert enrollment["attempts"] == 1
-    assert enrollment["sensitive_sha"] is None
+    assert {
+        field: enrollment.get(field) for field in legacy_sensitive_history
+    } == legacy_sensitive_history
     assert api.fix_attempts == 1
     if pending:
         assert store.action(action["key"])["task_id"] == action["task_id"]
