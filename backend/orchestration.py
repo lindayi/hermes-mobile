@@ -949,7 +949,11 @@ class Orchestrator:
             status = 'expired'
         elif status == 'pending' and row['run_status'] != 'waiting_for_approval':
             status = 'unavailable'
-        return {**self._approval_view(row), 'status': status}
+        view = self._approval_view(row)
+        view['status'] = status
+        if status != 'pending':
+            view.update(choices=[], executable=False)
+        return view
 
     async def decide(self, user, approval_id, decision):
         with closing(self.journal.connect()) as c:

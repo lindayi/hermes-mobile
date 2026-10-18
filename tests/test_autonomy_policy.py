@@ -321,7 +321,7 @@ _PR119_NOTIFICATION_FOLLOWUP_FIXTURE = {
     'backend/app.py': '9680845f1fbf52c37ef9aba600a5cc1323927c91a0455e106b911c63475d2d9d',
     'backend/notifications.py': 'e18c0c656ea15681f92debdffe3578ac629a6f128bd299babad979a68e3da09e',
     'backend/native_catalog.py': 'f6b54791ba24637b193ff247b34c9992764e6ba27dd4abd368eb61c83de15f69',
-    'backend/orchestration.py': '82589613f732673df5c17b7add63fb127fac5084919562e00768a36c118c362b',
+    'backend/orchestration.py': 'c36d265cf3f84d3e064efed9b52b181e43a395fd000a52ee10e7129b8f880db2',
 }
 
 

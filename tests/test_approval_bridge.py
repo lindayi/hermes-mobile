@@ -127,11 +127,19 @@ def test_approval_target_resolves_absent_run_alias_through_verified_lineage(tmp_
 def test_expired_approval_target_keeps_authorized_chat_but_has_no_decision(tmp_path):
     with environment(tmp_path) as (app, client, user, rid, _):
         runtime=app.state.orchestrator
+        runtime.gateway.execution_ready=True
+        runtime.gateway.action_approvals_ready=True
         runtime._approval(user,runtime.get(user,rid),{
             'event':'approval.request','request_id':'expired-action','run_id':'native-run',
             'command':'echo expired'})
         with app.state.notifications._db() as db:
             notice=db.execute('SELECT id FROM inbox WHERE user_id=?',(user['id'],)).fetchone()
+        approval_id=client.get(BASE+f"/inbox/{notice['id']}/target").json()['approval_id']
+        pending=client.get(BASE+f'/approvals/{approval_id}')
+        assert pending.status_code==200
+        assert pending.json()['status']=='pending'
+        assert pending.json()['executable'] is True
+        assert pending.json()['choices']==['once','deny']
         with app.state.journal.connect() as db, db:
             db.execute('UPDATE orchestration_approvals SET expires_at=? WHERE request_id=?',
                        (time.time()-1,'expired-action'))
@@ -139,7 +147,30 @@ def test_expired_approval_target_keeps_authorized_chat_but_has_no_decision(tmp_p
         assert target.status_code==200
         approval=client.get(BASE+f"/approvals/{target.json()['approval_id']}")
         assert approval.status_code==200 and approval.json()['status']=='expired'
-        assert approval.json()['executable'] is False or 'once' not in approval.json()['choices']
+        assert approval.json()['executable'] is False
+        assert approval.json()['choices']==[]
+
+
+@pytest.mark.parametrize('decision', ['once','deny'])
+def test_expired_verification_rejects_approval_before_native_decision(tmp_path, decision):
+    with environment(tmp_path) as (app,client,user,rid,calls):
+        runtime=app.state.orchestrator
+        runtime._approval(user,runtime.get(user,rid),{
+            'event':'approval.request','request_id':'fresh-action','run_id':'native-run',
+            'command':'echo fresh'})
+        approval_id=runtime.approvals(user)['items'][0]['id']
+        with app.state.auth.store.transaction() as db:
+            db.execute('UPDATE sessions SET last_verified_at=? WHERE user_id=?',
+                       (time.time()-301,user['id']))
+
+        response=client.post(BASE+f'/approvals/{approval_id}/decision',json={'decision':decision})
+
+        assert response.status_code==403
+        assert app.state.journal.get(user['id'],rid)['status']=='waiting_for_approval'
+        with app.state.journal.connect() as db:
+            assert db.execute('SELECT status FROM orchestration_approvals WHERE id=?',
+                              (approval_id,)).fetchone()['status']=='pending'
+        assert not [request for request in calls if request.method=='POST']
 
 
 def test_cross_database_failure_leaves_retryable_intent_not_historical_sweep(tmp_path):
