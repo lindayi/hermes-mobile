@@ -125,13 +125,48 @@ def test_regressions_revocation_episode_reaches_real_inbox_after_restart(tmp_pat
                          "sensitive_approval", occurred_at="2026-10-01T20:59:00Z",
                          decision="authorize_sensitive_action")
     store.record_lifecycle(initial, now=CLOCK)
+    data = store.snapshot()
+    enrollment = data["enrollments"]["16"]
+    enrollment.update(
+        sensitive_sha=HEAD,
+        sensitive_generation=7,
+        sensitive_authorization={"legacy": "grant"},
+        targeted_review={"legacy": "review"},
+        attempts=2,
+    )
+    store._save(data)
+    legacy_history = {
+        key: enrollment[key] for key in (
+            "sensitive_sha", "sensitive_generation", "sensitive_authorization",
+            "targeted_review", "attempts",
+        )
+    }
     if ack_initial:
         # Simulate a notice delivered before the obsolete gate was removed.
         export.write_text(json.dumps(build_export([initial], APP_OWNER, now=CLOCK)))
         export.chmod(0o600)
         assert consume()["inbox_items"] == 1
     authorize(api)
-    poll()
+    review_reads = []
+    get_all = api.get_all
+
+    def count_review_reads(route, *, collection=None):
+        if route.endswith("/pulls/16/reviews?per_page=100"):
+            review_reads.append(route)
+        return get_all(route, collection=collection)
+
+    api.get_all = count_review_reads
+    result = poll()
+    api.get_all = get_all
+    assert review_reads == [
+        "repos/lindayi/hermes-mobile/pulls/16/reviews?per_page=100",
+    ]
+    assert not store.event_seen("124")
+    assert "checks" in result["pull_requests"][0]["reasons"]
+    assert "sensitive" not in result["pull_requests"][0]["reasons"]
+    assert {
+        key: store.snapshot()["enrollments"]["16"][key] for key in legacy_history
+    } == legacy_history
     assert not export.exists()
     assert initial in store.snapshot()["lifecycle_context"]["events"]
     historical = store.snapshot()["enrollments"]["16"]
@@ -172,7 +207,7 @@ def test_regressions_revocation_episode_reaches_real_inbox_after_restart(tmp_pat
     assert len(deliveries) == (1 if ack_initial else 0)
     assert len(set(deliveries)) == len(deliveries)
     assert notifications.list_inbox("synthetic-member") == []
-    assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == legacy_history["attempts"]
     assert api.fix_attempts == 0 and not api.graphql_writes
 
 

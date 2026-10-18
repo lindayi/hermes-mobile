@@ -30,10 +30,8 @@ from deploy.review_evidence import (
     current_copilot_review_valid,
     latest_reviews,
     positive_id,
-    selected_copilot_sensitive_review,
     selected_independent_agent_review,
     review_body_disposition,
-    sensitive_review_authorized,
 )
 from deploy.workflow_lifecycle import (
     MAX_EVENTS as MAX_LIFECYCLE_EVENTS,
@@ -410,8 +408,8 @@ def _renewed_bound_enrollment(prior, incoming):
         return None
     return {
         **prior, **incoming, "authorized_head": prior["authorized_head"],
-        "owner_authorized_head": incoming["head"], "sensitive_generation": 0,
-        "attempts": prior.get("attempts", 0), "sensitive_sha": None,
+        "owner_authorized_head": incoming["head"],
+        "attempts": prior.get("attempts", 0),
         "neutral_attempts": prior.get(
             "neutral_attempts",
             NEUTRAL_LIMIT,
@@ -423,7 +421,6 @@ def _renewed_bound_enrollment(prior, incoming):
         "repair_progress": deepcopy(prior.get(
             "repair_progress", _new_repair_progress(legacy_unknown=True),
         )),
-        "sensitive_authorization": None, "targeted_review": None,
     }
 
 
@@ -2135,48 +2132,6 @@ def _owner_abandonment_matches_action(record, action):
         and action.get("repository_id") == REPOSITORY_ID
         and _reservation_sha256(action) == record["reservation_sha256"]
     )
-
-
-def _current_sensitive_owner_command(api, issue, authorization):
-    if (not positive_id(issue) or not isinstance(authorization, dict)
-            or not positive_id(authorization.get("command_comment_id"))):
-        return None
-    try:
-        comment = api.get(
-            f"repos/{REPOSITORY}/issues/comments/{authorization['command_comment_id']}",
-        )
-    except ApiError as error:
-        if error.status == 404:
-            return None
-        raise
-    # Invalid transport evidence is incomplete, not confirmed command revocation.
-    if (not isinstance(comment, dict)
-            or not isinstance(comment.get("user"), dict)
-            or not positive_id(comment["user"].get("id"))
-            or not positive_id(comment.get("id"))
-            or not isinstance(comment.get("body"), str)
-            or not _valid_timestamp(comment.get("created_at"))
-            or not _valid_timestamp(comment.get("updated_at"))
-            or not isinstance(comment.get("issue_url"), str)):
-        raise ApiError("Malformed current owner-comment response")
-    parsed = _is_owner_sensitive_command(comment)
-    user = comment["user"]
-    if (parsed is None or not isinstance(user, dict)
-            or comment.get("issue_url") != (
-                f"https://api.github.com/repos/{REPOSITORY}/issues/{issue}"
-            )
-            or parsed["head"] != authorization.get("head_sha")
-            or parsed["review_id"] != authorization.get("review_id")
-            or parsed["body_sha256"] != authorization.get("body_sha256")
-            or parsed["command_comment_id"] != authorization.get("command_comment_id")
-            or parsed["command_body_sha256"] != authorization.get("command_body_sha256")
-            or parsed["command_created_at"] != authorization.get("command_created_at")):
-        return None
-    return {
-        "comment_id": comment["id"], "actor_id": user["id"],
-        "body": comment["body"], "created_at": comment["created_at"],
-        "updated_at": comment["updated_at"],
-    }
 
 
 def _rest_list(api, route, collection=None):
@@ -5343,18 +5298,6 @@ class Coordinator:
                         processed.append(key)
                         processed_by_issue.append((issue["number"], key))
                         continue
-                    authorization = _is_owner_sensitive_command(comment)
-                    if authorization:
-                        commands.append(("authorize", {
-                            "issue": issue["number"], "comment": key, **authorization,
-                            "owner_command": {
-                                "comment_id": comment["id"], "actor_id": user["id"],
-                                "body": body, "created_at": comment["created_at"],
-                                "updated_at": comment["updated_at"],
-                            },
-                        }))
-                        processed.append(key)
-                        processed_by_issue.append((issue["number"], key))
         candidates = {key: dict(value) for key, value in state["enrollments"].items()
                       if value.get("active")}
         for action, enrollment in commands:
@@ -5386,48 +5329,6 @@ class Coordinator:
                     candidates[str(enrollment["issue"])] = candidate
                 if effective and "starter_admission" in enrollment and admission_checks is not None:
                     admission_checks.append(deepcopy(enrollment))
-        for action, item in commands:
-            if action != "authorize":
-                continue
-            enrollment = candidates.get(str(item["issue"]))
-            if not enrollment:
-                continue
-            pull = self.api.get(f"repos/{REPOSITORY}/pulls/{item['issue']}")
-            head = pull.get("head") if isinstance(pull, dict) else None
-            base = pull.get("base") if isinstance(pull, dict) else None
-            if (_pull_identity(pull, enrollment)
-                    and isinstance(head, dict) and head.get("sha") == item["head"]
-                    and _github_identity(head.get("repo"), REPOSITORY_ID)
-                    and isinstance(base, dict) and base.get("ref") == MAIN_BRANCH
-                    and _github_identity(base.get("repo"), REPOSITORY_ID)):
-                pull_user = pull.get("user") if isinstance(pull, dict) else None
-                pull_author_id = pull_user.get("id") if isinstance(pull_user, dict) else None
-                reviews = _rest_list(
-                    self.api,
-                    f"repos/{REPOSITORY}/pulls/{item['issue']}/reviews?per_page=100",
-                )
-                owner_authorization = {
-                    "actor_id": OWNER_ID, "head_sha": item["head"], "state": "approved",
-                    "review_id": item["review_id"], "body_sha256": item["body_sha256"],
-                    "command_comment_id": item["command_comment_id"],
-                    "command_body_sha256": item["command_body_sha256"],
-                    "command_created_at": item["command_created_at"],
-                }
-                targeted_review = selected_copilot_sensitive_review(
-                    reviews, item["head"], item["review_id"], item["body_sha256"],
-                    pull_author_id=pull_author_id,
-                )
-                if not targeted_review or not sensitive_review_authorized(
-                        reviews, item["head"], owner_authorization, targeted_review,
-                        owner_id=OWNER_ID, owner_command=item["owner_command"],
-                        pull_author_id=pull_author_id):
-                    continue
-                enrollment["sensitive_sha"] = item["head"]
-                enrollment["sensitive_authorization"] = owner_authorization
-                enrollment["targeted_review"] = targeted_review
-                item["owner_authorization"] = owner_authorization
-                item["targeted_review"] = targeted_review
-                item["validated"] = True
         self._processed_by_issue = processed_by_issue
         return issues, commands, processed, candidates
 
@@ -12200,14 +12101,7 @@ class StateStore:
                         )
                     data["enrollments"][key] = enrollment
             for action, item in commands:
-                if action == "authorize" and item.get("validated") is True:
-                    enrollment = data["enrollments"].get(str(item.get("issue")))
-                    if (enrollment and enrollment.get("active")
-                            and _is_sha(item.get("head"))):
-                        enrollment["sensitive_sha"] = item["head"]
-                        enrollment["sensitive_authorization"] = item["owner_authorization"]
-                        enrollment["targeted_review"] = item["targeted_review"]
-                elif action == "abandon-unverified":
+                if action == "abandon-unverified":
                     enrollment = data["enrollments"].get(str(item.get("issue")))
                     record = item.get("recovery_record")
                     action_key = record.get("action_key") if isinstance(record, dict) else None
@@ -12297,10 +12191,6 @@ class StateStore:
             for issue, head in observations:
                 enrollment = data["enrollments"].get(str(issue))
                 if enrollment and enrollment.get("active") and _is_sha(head):
-                    if enrollment.get("sensitive_sha") != head:
-                        enrollment["sensitive_sha"] = None
-                        enrollment["sensitive_authorization"] = None
-                        enrollment["targeted_review"] = None
                     enrollment["last_open_seen"] = True
                     enrollment["last_open_head"] = head
             for issue in retirements:
