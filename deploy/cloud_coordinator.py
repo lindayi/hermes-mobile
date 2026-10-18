@@ -4671,10 +4671,10 @@ def _owner_continuation_enrollment_head(enrollment):
 
 def _owner_continuation_successor_proven(record, enrollment, actions, comments,
                                          current_head):
-    candidates = [
-        *actions.values(),
-        *enrollment.get("receipt_proofs", []),
-    ]
+    proofs = enrollment.get("receipt_proofs", [])
+    if not isinstance(proofs, list):
+        return False
+    candidates = [*actions.values(), *proofs]
     direct_successors = [
         action for action in candidates
         if isinstance(action, dict)
@@ -7290,6 +7290,14 @@ class Coordinator:
                 "repair": None, "status_action": None, "merge_action": None,
                 "reasons": ["terminal"], "outcomes": [],
                 "lifecycle_events": lifecycle,
+            }
+        if not isinstance(snapshot["enrollment"].get("receipt_proofs", []), list):
+            return {
+                "issue": number, "head": head, "terminal": False,
+                "sensitive": True, "review_valid": False,
+                "required_checks_green": False, "auto_merge_eligible": False,
+                "repair": None, "status_action": None, "merge_action": None,
+                "reasons": ["receipt-proofs-invalid"], "outcomes": [],
             }
         pull_user = snapshot["pull"].get("user")
         review_ok = independent_review_valid(

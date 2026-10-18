@@ -63,6 +63,13 @@ Cold restarts preserve those pending IDs and do not duplicate accepted work.
 Restoring the identity permits retry only after fresh authenticated evidence;
 missing comment evidence is never replaced with an empty list.
 
+A retained continuation with an explicitly malformed `receipt_proofs` container
+(null, mapping or string) never proves a successor, at the shared proof seam used
+by planning, reconciliation and preparation. That pull is blocked without task,
+review or anchor publication and without history, disposition or budget changes,
+while a separate eligible pull advances durably. An absent legacy container still
+uses existing authenticated live evidence; an empty or valid list is unchanged.
+
 Extended starter admission additionally requires a strict positive integer comment
 ID and owner ID, an explicitly non-draft open same-repository PR, matching current
 head/body, and exactly one canonical originating-issue closing edge. The shared

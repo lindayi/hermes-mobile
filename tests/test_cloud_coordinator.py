@@ -13464,6 +13464,67 @@ def test_identity_isolated_mixed_roots_defer_commands_and_progress_other_pr(tmp_
     assert api.writes == writes
 
 
+@pytest.mark.parametrize("pending_command", [False, True])
+@pytest.mark.parametrize("proofs", [None, {}, "x"])
+def test_null_receipt_proof_container_blocks_only_that_pr_after_restart(
+        tmp_path, pending_command, proofs):
+    api, store, _, _, _ = _owner_continuation_advanced_case(
+        tmp_path, multiple_roots=pending_command,
+    )
+    Coordinator(api, StateStore(store.path), clock=lambda: 1790856780).run(
+        apply=True,
+    )
+    assert StateStore(store.path).snapshot()["enrollments"]["16"][
+        "owner_continuations"
+    ]
+    if pending_command:
+        command = deepcopy(next(c for c in api.comments if c["id"] == 7781))
+        command.update(
+            id=7783, created_at="2026-10-01T12:14:00Z",
+            updated_at="2026-10-01T12:14:00Z",
+        )
+        api.comments.append(command)
+    unrelated_pull = _add_unrelated_enrolled_pull(api, store)
+    unrelated_pull["head"]["ref"] = "topic-17"
+    _bind_unrelated_task_artifacts(api)
+
+    def corrupt(state):
+        state["enrollments"]["16"]["receipt_proofs"] = proofs
+
+    StateStore(store.path)._mutate(corrupt)
+    before = StateStore(store.path).snapshot()
+    before_issue = _pull_issue_state(before, 16)
+    writes, graphql_writes = len(api.writes), len(api.graphql_writes)
+    posts = api.task_posts
+
+    result = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856900,
+    ).run(apply=True)
+
+    plans = {item["issue"]: item for item in result["pull_requests"]}
+    after = StateStore(store.path).snapshot()
+    assert plans[16]["repair_requested"] is False
+    assert not plans[16]["auto_merge_eligible"]
+    assert plans[17]["repair_requested"] is True
+    assert _pull_issue_state(after, 16) == before_issue
+    assert api.task_posts == posts + 1
+    assert len(api.writes[writes:]) == 1
+    assert "PR #17" in api.writes[writes][1]["prompt"]
+    assert api.graphql_writes[graphql_writes:] == []
+    accepted_other = _pull_issue_state(after, 17)
+    writes = deepcopy(api.writes)
+
+    for _ in range(2):
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856900).run(
+            apply=True,
+        )
+        repeated = StateStore(store.path).snapshot()
+        assert _pull_issue_state(repeated, 16) == before_issue
+        assert _pull_issue_state(repeated, 17) == accepted_other
+        assert api.task_posts == posts + 1
+        assert api.writes == writes
+
+
 def test_owner_recovery_identity_swap_isolated_and_command_rechecked(
         tmp_path, monkeypatch):
     from copy import deepcopy
