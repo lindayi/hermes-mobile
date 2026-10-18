@@ -82,6 +82,32 @@ def test_cli_collects_current_owner_command_through_actual_snapshot(collection, 
     assert api.writes == api.graphql_writes == []
 
 
+def test_cli_collects_sensitive_review_without_a_stale_owner_command(
+        collection, capsys):
+    api, _, state_path, _, args, _ = collection
+    api.comments.pop()
+    routes = []
+    original_get = api.get
+
+    def record_get(route):
+        routes.append(route)
+        return original_get(route)
+
+    api.get = record_get
+
+    assert cli.main(args) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report['ready'] is True
+    change = report['evidence']['copilot_review']['change']
+    assert change['sensitive'] is True
+    assert not any(
+        field in change
+        for field in ('owner_authorization', 'owner_command', 'targeted_review')
+    )
+    assert not any('/issues/comments/4' in route for route in routes)
+    assert api.writes == api.graphql_writes == []
+
+
 @pytest.mark.parametrize('active', [False, None, 0, 1, 'true'])
 def test_cli_rejects_inactive_or_malformed_enrollment(collection, capsys, active):
     api, _, state_path, evidence_path, args, _ = collection

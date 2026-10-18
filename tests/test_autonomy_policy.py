@@ -1523,6 +1523,18 @@ def test_mismatched_current_head_and_sensitive_approval_block():
 
 
 @pytest.mark.parametrize('phase', PHASES)
+def test_sensitive_change_needs_no_separate_owner_authorization(phase):
+    evidence = _sensitive_evidence(phase)
+    change = evidence['copilot_review']['change']
+    for field in ('owner_authorization', 'owner_command', 'targeted_review'):
+        change.pop(field)
+
+    assert validate_transition(evidence, phase=phase) == {
+        'ready': True, 'phase': phase, 'blockers': [],
+    }
+
+
+@pytest.mark.parametrize('phase', PHASES)
 def test_additive_staging_synthetic_positive_and_no_input_mutation(phase):
     evidence = _phase_evidence(phase)
     before = copy.deepcopy(evidence)

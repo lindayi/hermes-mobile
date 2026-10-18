@@ -16932,18 +16932,28 @@ def test_apply_replay_does_not_repeat_enrollment_or_auto_merge(tmp_path):
     assert store.event_seen("123")
 
 
-def test_sensitive_change_needs_owner_authorization_for_the_exact_current_sha(tmp_path):
-    denied = FakeApi(sensitive=True, authorize=False)
-    denied_store = StateStore(tmp_path / "denied.json")
-    result = Coordinator(denied, denied_store).run(apply=True)
-    assert result["pull_requests"][0]["sensitive"]
-    assert not denied.graphql_writes
+def test_owner_enrollment_allows_sensitive_change_without_extra_authorization(tmp_path):
+    plans = []
+    for index, sensitive in enumerate((False, True)):
+        api = FakeApi(sensitive=sensitive)
+        store = StateStore(tmp_path / f"state-{index}.json")
+        result = Coordinator(api, store).run(apply=True)
+        plan = result["pull_requests"][0]
+        enrollment = store.snapshot()["enrollments"]["16"]
 
-    allowed = FakeApi(sensitive=True, authorize=True)
-    allowed_store = StateStore(tmp_path / "allowed.json")
-    Coordinator(allowed, allowed_store).run(apply=True)
-    assert allowed.graphql_writes
-    assert allowed_store.snapshot()["enrollments"]["16"]["sensitive_sha"] == HEAD
+        assert plan["sensitive"] is sensitive
+        assert plan["auto_merge_eligible"] is True
+        assert plan["auto_merge_requested"] is True
+        assert "sensitive" not in plan["reasons"]
+        assert enrollment["active"] is True
+        assert enrollment["sensitive_authorization"] is None
+        assert not any(
+            event["reason"] == "sensitive_approval"
+            for event in store.snapshot()["lifecycle_events"]
+        )
+        plans.append((plan["review_valid"], plan["required_checks_green"],
+                      plan["auto_merge_eligible"], plan["auto_merge_requested"]))
+    assert plans[0] == plans[1]
 
 
 def test_sensitive_authorization_command_selects_review_and_body_digest():
