@@ -20,7 +20,7 @@ const responseBatch=(page,path,count)=>new Promise(resolve=>{
 });
 async function fixture(run){
  const tmp=await mkdtemp((process.env.TMPDIR || '/tmp')+'/b-');let server,browser;
- const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,notificationTargetErrors:0,approvals:[],approvalHold:null,approvalDetail:null,approvalDetailHold:null,approvalDetailStatus:200,decisionHold:null,decisionStatus:200,activeRun:null,runEventStreams:[],runEventSequence:0};
+ const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,notificationTargetErrors:0,approvals:[],approvalHold:null,approvalDetail:null,approvalDetails:null,approvalDetailHold:null,approvalDetailStatus:200,decisionHold:null,decisionStatus:200,activeRun:null,runEventStreams:[],runEventSequence:0};
  try{
   const names=await readdir(dir),ui=names.find(n=>/^ui\.[a-f0-9]+\.mjs$/.test(n)),sw=names.find(n=>/^sw\.[a-f0-9]+\.js$/.test(n));
   assert.ok(ui && sw,'tests use generated release graph');
@@ -45,10 +45,10 @@ async function fixture(run){
      if(control.decisionHold)await control.decisionHold;
      status=control.decisionStatus;data=status===200?{status:'resolved'}:{detail:'Synthetic unavailable'};
     }else if(p.startsWith('/approvals/') && req.method==='GET'){
-     const detail=control.approvalDetail;
+     const id=decodeURIComponent(p.split('/').at(-1)),detail=control.approvalDetails?.[id] || control.approvalDetail;
      if(control.approvalDetailHold)await control.approvalDetailHold;
      if(control.approvalDetailLost){res.destroy();return;}
-     if(detail?.id===decodeURIComponent(p.split('/').at(-1))){data=detail;status=control.approvalDetailStatus;}
+     if(detail?.id===id){data=detail;status=control.approvalDetailStatus;}
     }
     if(p==='/auth/verify/options')data={challenge_id:'fixture-challenge',publicKey:{challenge:'AQ'}};
     if(p==='/auth/verify/finish')data={verified:true};
@@ -1079,6 +1079,77 @@ test('a locally expired approval rechecks its final status in the generated brow
  'authoritative revalidation updates the mounted card instead of adding a duplicate');
  assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')
  || call.p.startsWith('/runs/') && call.method==='POST').length,0,'reconciliation is read-only');
+ await page.evaluate(()=>app.destroy());
+}));
+
+for(const status of ['sending','unknown'])test(`generated local expiry accepts fresh ${status} after same-owner reentry`,{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ await page.clock.install();
+ const item=approvalRecord({expires_at:Date.now()/1000+2});
+ control.notificationTarget=approvalTarget;control.approvals=[item];control.approvalDetail=item;
+ await mount(page,'?notification=notice-target');
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.getByRole('button',{name:'Approve once'}).waitFor();
+ control.approvals=[];await page.clock.fastForward(2500);
+ await card.getByRole('heading',{name:'Expired',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0);
+ control.approvalDetail=item;
+ const stalePendingResponse=page.waitForResponse(response=>
+  new URL(response.url()).pathname.endsWith('/approvals/approval-1'));
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));
+ await stalePendingResponse;
+ assert.equal(await card.getByRole('heading').innerText(),'Expired','stale pending data cannot resurrect local expiry');
+ assert.equal(await card.getByRole('button').count(),0);
+ control.approvalDetail={...item,status,executable:false,choices:[]};
+ await page.evaluate(()=>history.replaceState({},'','/hermes/?notification=notice-target'));
+ await page.evaluate(()=>app.start());
+ await page.waitForTimeout(100);
+ assert.equal(await card.getByRole('heading').innerText(),
+  status==='sending'?'Decision pending':'Decision status unknown',
+  `fresh ${status} was not applied; calls=${calls.map(call=>call.p).join(',')}`);
+ assert.equal(await card.getByRole('button').count(),0,'fresh transitional status stays non-actionable');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0,'status reentry never decides');
+ await page.evaluate(()=>app.destroy());
+}));
+
+test('generated approval detail batches rotate past transient failures and stay bounded',{timeout:30000},()=>fixture(async({page,control,calls})=>{
+ await page.clock.install();
+ const items=Array.from({length:11},(_,index)=>approvalRecord({
+  id:`expired-${index}`,request_id:`expired-request-${index}`,expires_at:Date.now()/1000+2
+ }));
+ control.approvals=items;
+ control.approvalDetails=Object.fromEntries(items.map((item,index)=>[item.id,{
+  ...item,status:index===10?'resolved':'expired',executable:false,choices:[]
+ }]));
+ await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ const cards=page.locator('.approval-card');
+ await page.waitForFunction(()=>document.querySelectorAll('.approval-card').length===11);
+ await page.clock.fastForward(2500);
+ await page.locator('[data-approval-id="expired-0"]').getByRole('heading',{name:'Expired',exact:true}).waitFor();
+ assert.equal(await cards.count(),11);
+ control.approvalDetailStatus=503;
+ const firstBatch=items.slice(0,10).map(item=>page.waitForResponse(response=>
+  new URL(response.url()).pathname.endsWith(`/approvals/${item.id}`)));
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));
+ await Promise.all(firstBatch);
+ const detailReads=()=>calls.filter(call=>call.method==='GET'&&/^\/approvals\/expired-\d+$/.test(call.p));
+ assert.equal(detailReads().length,10,'one refresh reads at most ten approval details');
+ assert.deepEqual(new Set(detailReads().map(call=>call.p)),new Set(items.slice(0,10).map(item=>`/approvals/${item.id}`)));
+ assert.equal(await page.evaluate(ids=>ids.every(id=>
+  document.querySelector(`[data-approval-id="${id}"] h3`)?.textContent==='Expired'),
+ items.slice(0,10).map(item=>item.id)),true);
+
+ control.approvalDetailStatus=200;
+ const laterResponse=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/approvals/expired-10'));
+ const secondBatch=items.slice(10).concat(items.slice(0,9)).map(item=>page.waitForResponse(response=>
+  new URL(response.url()).pathname.endsWith(`/approvals/${item.id}`)));
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));
+ await Promise.all([laterResponse,...secondBatch]);
+ await page.locator('[data-approval-id="expired-10"]').getByRole('heading',{name:'Resolved',exact:true}).waitFor();
+ assert.equal(detailReads().length,20,'each focus refresh stays within a ten-detail batch');
+ assert.equal(await page.locator('[data-approval-id="expired-10"] button').count(),0);
+ assert.equal(await page.locator('.approval-card').count(),11,'reconciliation preserves card order and identity');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')||call.p.startsWith('/auth/verify')
+  ||call.p.startsWith('/runs/')&&call.method==='POST').length,0,'detail reconciliation is read-only');
  await page.evaluate(()=>app.destroy());
 }));
 

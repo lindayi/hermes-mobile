@@ -183,10 +183,11 @@ for(const distance of [10000,2147483647+10000])test(`early approval expiry callb
 });
 
 for(const [status,label] of Object.entries({
- resolved:'Resolved',resolved_external:'No longer pending',cancelled:'Cancelled',
+ resolved:'Resolved',resolved_external:'No longer pending',cancelled:'Cancelled',expired:'Expired',
  sending:'Decision pending',unknown:'Decision status unknown'
 }))test(`expired ${status} detail keeps its authoritative status on same-owner reentry`,async()=>{
  const calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ let freshStatus=status;
  const app=await mountApp(doc,{clear(){},async request(p){
   calls.push(p);
   if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
@@ -194,7 +195,7 @@ for(const [status,label] of Object.entries({
   if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
   if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
   if(p==='/approvals')return {items:[]};
-  if(p==='/approvals/a')return {...approvalItem(),status,expires_at:1};
+  if(p==='/approvals/a')return {...approvalItem(),status:freshStatus,expires_at:1};
   return {items:[]};
  }},win);
  try{
@@ -209,6 +210,13 @@ for(const [status,label] of Object.entries({
   await waitFor(()=>doc.querySelector('[data-approval-id="a"]'));
   assert.equal(doc.querySelector('[data-approval-id="a"] h3').textContent,label);
   assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+  if(status==='expired'){
+   freshStatus='sending';win.history.replaceState({},'','/hermes/?notification=n');await app.start();
+   await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Expired',
+    `authoritative expiry changed on reentry; calls=${calls.join(',')} heading=${doc.querySelector('[data-approval-id="a"] h3')?.textContent}`);
+   assert.equal(doc.querySelector('[data-approval-id="a"] button'),null,
+     'authoritative expiry remains terminal when a later detail says sending');
+  }
   assert.equal(calls.some(path=>path.endsWith('/decision')),false);
  }finally{app.destroy();win.close();}
 });
@@ -1369,6 +1377,63 @@ test('final approval detail wins over pending list data in either response order
    assert.equal(calls.filter(path=>path==='/approvals/a/decision').length,0);
   }finally{app.destroy();win.close();}
  }
+});
+
+for(const [status,label] of Object.entries({
+ resolved:'Resolved',resolved_external:'No longer pending',cancelled:'Cancelled',expired:'Expired'
+}))test(`authoritative ${status} list status wins over an elapsed deadline and stale pending detail`,async()=>{
+ const calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const final={...approvalItem(),status,expires_at:1,executable:false,choices:[]};
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:[final]};
+  if(p==='/approvals/a')return {...final,status:'pending',executable:true,choices:['once','deny']};
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent===label);
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+  assert.equal(calls.filter(path=>path==='/approvals/a/decision').length,0);
+ }finally{app.destroy();win.close();}
+});
+
+for(const status of ['sending','unknown'])test(`fresh ${status} approval status replaces locally inferred expiry on same-owner reentry`,async()=>{
+ const calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const item={...approvalItem(),expires_at:Date.now()/1000+0.2};
+ let detail=item,approvals=[item];
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:approvals};
+  if(p==='/approvals/a')return detail;
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Expired');
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null,'local expiry has no decision controls');
+  const previousReads=calls.filter(path=>path==='/approvals/a').length;
+  detail=item;win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>calls.filter(path=>path==='/approvals/a').length>previousReads);
+  await tick();await tick();
+  assert.equal(doc.querySelector('[data-approval-id="a"] h3').textContent,'Expired',
+   'stale pending detail cannot resurrect local expiry');
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+  approvals=[];detail={...item,status,executable:false,choices:[]};
+  win.history.replaceState({},'','/hermes/?notification=n');
+  await app.start();
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent
+    ===(status==='sending'?'Decision pending':'Decision status unknown'),
+   `fresh ${status} was not applied; calls=${calls.join(',')} heading=${doc.querySelector('[data-approval-id="a"] h3')?.textContent}`);
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+  assert.equal(calls.filter(path=>path==='/approvals/a/decision').length,0,'status revalidation never decides');
+ }finally{app.destroy();win.close();}
 });
 
 test('late approval details cannot update a changed route or owner',async()=>{
