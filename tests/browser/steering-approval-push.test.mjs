@@ -274,6 +274,60 @@ test('repeated unrelated refreshes offer one explicit approval-status retry',asy
  }finally{app.destroy();win.close();}
 });
 
+for(const status of [404,409,410])test(`missing approval target remains terminal after ${status}`,async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals/a')throw Object.assign(new Error('Unavailable'),{status});
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>doc.querySelector('.notification-unavailable h3')?.textContent==='Approval unavailable');
+  assert.equal(doc.querySelector('.notification-unavailable button'),null,'authoritative unavailability is not retryable');
+  assert.equal(doc.querySelector('[data-approval-id]'),null);
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
+for(const departure of ['route','owner','target'])test(`approval-status retry rejects late details after ${departure} changes`,async()=>{
+ const detail=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ let owner='owner',reads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals/a'){
+   if(++reads===1)throw Object.assign(new Error('Temporary failure'),{status:503});
+   return detail.promise;
+  }
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>doc.querySelector('.notification-unavailable button')?.textContent==='Retry status');
+  const retry=doc.querySelector('.notification-unavailable button');
+  for(let i=0;i<4;i++)retry.click();
+  await waitFor(()=>reads===2);
+  assert.equal(reads,2);
+  if(departure==='route')doc.querySelector('[data-view="chats"]').click();
+  else{
+   win.history.replaceState({},'','/hermes/'+(departure==='target'?'?session=s':''));
+   if(departure==='owner')owner='another-owner';
+   await app.start();
+  }
+  detail.resolve({...approvalItem(),status:'unknown',executable:false,choices:[]});await tick();await tick();
+  retry.click();await tick();
+  assert.equal(reads,2,'detached retry controls cannot read an old target');
+  assert.equal(doc.querySelector('[data-approval-id="a"]'),null);
+  assert.equal(calls.some(path=>path.endsWith('/decision') || path.startsWith('/auth/verify')),false);
+ }finally{app.destroy();win.close();}
+});
+
 for(const status of [404,409,410])test(`authoritative ${status} detail failure removes only its mounted pending approval`,async()=>{
  const detail=deferred(),list=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
  const target={...approvalItem(),status:'pending'};

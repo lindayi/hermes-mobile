@@ -47,6 +47,7 @@ async function fixture(run){
     }else if(p.startsWith('/approvals/') && req.method==='GET'){
      const detail=control.approvalDetail;
      if(control.approvalDetailHold)await control.approvalDetailHold;
+     if(control.approvalDetailLost){res.destroy();return;}
      if(detail?.id===decodeURIComponent(p.split('/').at(-1))){data=detail;status=control.approvalDetailStatus;}
     }
     if(p==='/auth/verify/options')data={challenge_id:'fixture-challenge',publicKey:{challenge:'AQ'}};
@@ -782,6 +783,67 @@ test('held approval details cannot replace an ambiguous decision with sending',{
  assert.match(await card.locator('.inline-error').innerText(),/Synthetic unavailable/);
  assert.equal(await card.getByRole('button').count(),0,'a stale sending detail cannot restore controls');
  assert.equal(calls.filter(call=>call.p===decisionPath).length,1,'uncertainty never replays the decision');
+ await page.evaluate(()=>app.destroy());
+}));
+
+for(const failure of ['503','lost response'])for(const [initial,final] of [['sending','resolved'],['unknown','cancelled']])
+test(`missing ${initial} notification approval recovers after ${failure} without reload or decision`,{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ control.notificationTarget=approvalTarget;control.approvals=[];
+ control.approvalDetail=approvalRecord({status:initial,executable:false,choices:[]});
+ control.approvalDetailStatus=failure==='503'?503:200;control.approvalDetailLost=failure==='lost response';
+ await mount(page,'?notification=notice-target');
+ const placeholder=page.getByRole('region',{name:'Approval status',exact:true});
+ await page.getByRole('heading',{name:'Approval status unavailable',exact:true}).waitFor();
+ await placeholder.getByRole('button',{name:'Retry status',exact:true}).waitFor();
+ const detailPath='/approvals/approval-1',reads=()=>calls.filter(call=>call.p===detailPath && call.method==='GET').length;
+ assert.ok(reads()>=1);
+ assert.equal(await page.locator('[data-approval-id]').count(),0,'an empty pending list must not invent a card');
+ await placeholder.getByRole('button',{name:'Retry status',exact:true}).click();
+ await placeholder.getByRole('button',{name:'Retry status',exact:true}).waitFor();
+ await placeholder.getByRole('heading',{name:'Approval status unavailable',exact:true}).waitFor();
+ const before=reads();
+ let release;control.approvalDetailHold=new Promise(resolve=>release=resolve);
+ control.approvalDetailStatus=200;control.approvalDetailLost=false;
+ const response=page.waitForResponse(res=>res.url().endsWith(detailPath) && res.request().method()==='GET');
+ const request=page.waitForRequest(req=>req.url().endsWith(detailPath) && req.method()==='GET');
+ await placeholder.getByRole('button',{name:'Retry status',exact:true}).evaluate(button=>{
+  for(let i=0;i<4;i++)button.click();
+ });
+ await request;
+ await page.getByRole('heading',{name:'Checking approval status',exact:true}).waitFor();
+ assert.equal(reads(),before+1,'repeated clicks start only one held read');
+ control.approvalDetailHold=null;release();await response;
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.getByRole('heading',{name:initial==='sending'?'Decision pending':'Decision status unknown',exact:true}).waitFor();
+ assert.equal(await page.locator('.approval-card').count(),1,'recovery replaces the placeholder with exactly one card');
+ assert.equal(await card.getByRole('button').count(),0);
+ control.approvalDetail=approvalRecord({status:final,executable:false,choices:[]});
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));
+ await card.getByRole('heading',{name:final==='resolved'?'Resolved':'Cancelled',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(calls.filter(call=>call.p.includes('/decision') || call.p.startsWith('/auth/verify')
+  || call.p.startsWith('/runs/') && call.method==='POST').length,0,'status recovery is read-only');
+ await page.evaluate(()=>app.destroy());
+}));
+
+for(const outcome of ['detail','failure'])test(`late approval retry ${outcome} cannot update a newer session`,{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ control.notificationTarget=approvalTarget;control.approvals=[];
+ control.approvalDetail=approvalRecord({status:'unknown',executable:false,choices:[]});control.approvalDetailStatus=503;
+ await mount(page,'?notification=notice-target');
+ const retry=page.getByRole('button',{name:'Retry status',exact:true});await retry.waitFor();
+ let release;control.approvalDetailHold=new Promise(resolve=>release=resolve);
+ control.approvalDetailStatus=outcome==='detail'?200:503;
+ const request=page.waitForRequest(req=>req.url().endsWith('/app-api/approvals/approval-1'));
+ const response=page.waitForResponse(res=>res.url().endsWith('/app-api/approvals/approval-1'));
+ await retry.click();await request;
+ await page.getByRole('button',{name:'Chats',exact:true}).click();
+ await page.getByRole('button',{name:/Second conversation/}).click();
+ await page.getByRole('heading',{name:'Second conversation'}).waitFor();
+ control.approvalDetailHold=null;release();await response;
+ await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
+ assert.equal(await page.locator('.approval-card').count(),0);
+ assert.equal(await page.getByRole('button',{name:'Retry status',exact:true}).count(),0);
+ assert.equal(calls.filter(call=>call.p.includes('/decision') || call.p.startsWith('/auth/verify')).length,0);
  await page.evaluate(()=>app.destroy());
 }));
 

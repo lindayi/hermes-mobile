@@ -1400,6 +1400,24 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const matches=item=>item?.id===target.approval_id && item.run_id===target.run_id
         && item.request_id===target.request_id && item.session_id===session.id
         && item.run_session_id===target.run_session_id && typeof item.status==='string';
+      const retryTarget=(heading='Approval status changed',
+        message='The approval changed while its status was loading. Check its current state again.')=>{
+        if(!approvalTargetPlaceholder)return;
+        approvalTargetPlaceholder.setAttribute('role','region');
+        approvalTargetPlaceholder.setAttribute('aria-label','Approval status');
+        approvalTargetPlaceholder.replaceChildren(h('h3',{},heading),h('p',{},message),
+          button('Retry status',event=>{
+            if(!current() || !event.currentTarget.isConnected || !approvalTargetPlaceholder?.isConnected)return;
+            approvalTargetPlaceholderFocused=false;
+            approvalTargetPlaceholder.setAttribute('role','status');
+            approvalTargetPlaceholder.removeAttribute('aria-label');
+            approvalTargetPlaceholder.replaceChildren(h('h3',{},'Checking approval status'),
+              h('p',{},'This chat is ready. Approval details are loading.'));
+            scheduleApprovalTargetTimer();
+            void resolveApprovalTarget(target);
+          },'secondary'));
+        focusApprovalTarget();
+      };
       try{
         let item=[...approvalItems.values()].find(matches),detailRevision=null,detailListRevision=null;
         if(!item){
@@ -1449,24 +1467,6 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
               renderApprovals();focusApprovalTarget();return;
             }else if(listChanged){
-              const retryTarget=()=>{
-                if(!approvalTargetPlaceholder)return;
-                approvalTargetPlaceholder.setAttribute('role','region');
-                approvalTargetPlaceholder.setAttribute('aria-label','Approval status');
-                approvalTargetPlaceholder.replaceChildren(h('h3',{},'Approval status changed'),
-                  h('p',{},'The approval changed while its status was loading. Check its current state again.'),
-                  button('Retry status',()=>{
-                    if(!current() || !approvalTargetPlaceholder?.isConnected)return;
-                    approvalTargetPlaceholderFocused=false;
-                    approvalTargetPlaceholder.setAttribute('role','status');
-                    approvalTargetPlaceholder.removeAttribute('aria-label');
-                    approvalTargetPlaceholder.replaceChildren(h('h3',{},'Checking approval status'),
-                      h('p',{},'This chat is ready. Approval details are loading.'));
-                    scheduleApprovalTargetTimer();
-                    void resolveApprovalTarget(target);
-                  },'secondary'));
-                focusApprovalTarget();
-              };
               for(let recheck=0;recheck<2;recheck++){
                 const revalidatedListRevision=approvalListRevision,revalidatedRevision=approvalRevision,
                   revalidatedItem=approvalItems.get(key),revalidatedPending=approvalPending.get(key),
@@ -1556,10 +1556,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           }
         }
         if(approvalTargetPlaceholder){
-          approvalTargetPlaceholder.querySelector('h3').textContent=unavailable?'Approval unavailable':'Approval status unavailable';
-          approvalTargetPlaceholder.querySelector('p').textContent=unavailable
-            ? 'This approval is no longer pending in this chat.'
-            : 'This chat is ready. Approval status could not be confirmed.';
+          if(unavailable){
+            approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable';
+            approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+          }else retryTarget('Approval status unavailable','This chat is ready. Approval status could not be confirmed.');
         }
         clearApprovalTargetTimer();
         focusApprovalTarget();
