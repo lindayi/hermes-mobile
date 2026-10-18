@@ -200,6 +200,134 @@ test('second detail revalidation cannot restore pending after an SSE approval is
  }finally{app.destroy();refresh.resolve({items:[]});win.close();}
 });
 
+test('an unrelated focus refresh rechecks a pending target instead of stranding its placeholder',async()=>{
+ const first=deferred(),second=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ let detailReads=0,listReads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+ calls.push(p);
+ if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+ if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+ if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+ if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+ if(p==='/approvals'){listReads++;return {items:[]};}
+ if(p==='/approvals/a'){
+  detailReads++;
+  if(detailReads===1)return first.promise;
+  if(detailReads===2)return second.promise;
+  return {...approvalItem(),status:'pending'};
+ }
+ return {items:[]};
+ }},win);
+ try{
+ await waitFor(()=>detailReads===1&&listReads===1);await tick();
+ first.resolve({...approvalItem(),status:'pending'});
+ await waitFor(()=>detailReads===2,'the empty accepted list should cause target detail revalidation');
+ win.dispatchEvent(new win.Event('focus'));
+ await waitFor(()=>listReads===2,'focus must perform an authenticated approval-list refresh');
+ await tick();
+ second.resolve({...approvalItem(),status:'pending'});
+ await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+ assert.equal(detailReads,3,'a target-specific read after the unrelated empty-list refresh confirms the pending card');
+ assert.equal(doc.querySelector('[data-approval-id="a"] h3').textContent,'Approval required');
+ assert.equal(calls.filter(path=>path.endsWith('/decision')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
+test('repeated unrelated refreshes offer one explicit approval-status retry',async()=>{
+ const details=[deferred(),deferred(),deferred()],calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ let detailReads=0,listReads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals'){listReads++;return {items:[]};}
+  if(p==='/approvals/a'){
+   detailReads++;
+   return detailReads<=details.length?details[detailReads-1].promise:{...approvalItem(),status:'pending'};
+  }
+  return {items:[]};
+ }},win);
+ const refresh=async expected=>{
+  win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>listReads===expected);
+  await tick();
+ };
+ try{
+  await waitFor(()=>detailReads===1&&listReads===1);await tick();
+  details[0].resolve({...approvalItem(),status:'pending'});
+  await waitFor(()=>detailReads===2);
+  await refresh(2);
+  details[1].resolve({...approvalItem(),status:'pending'});
+  await waitFor(()=>detailReads===3);
+  await refresh(3);
+  details[2].resolve({...approvalItem(),status:'pending'});
+  await waitFor(()=>doc.querySelector('.notification-unavailable h3')?.textContent==='Approval status changed'
+    && [...doc.querySelectorAll('.notification-unavailable button')].some(button=>button.textContent==='Retry status'));
+  assert.equal(detailReads,3,'unrelated list churn causes only one bounded target-specific retry');
+  doc.querySelector('.notification-unavailable button').click();
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+  assert.equal(detailReads,4,'the explicit retry starts one fresh target read');
+  assert.equal(doc.querySelector('[data-approval-id="a"] h3').textContent,'Approval required');
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
+for(const staleStatus of ['pending','sending','unknown'])test(`an initial ${staleStatus} detail cannot replace an acknowledged approval`,async()=>{
+ const detail=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};
+ win.navigator.credentials={get:async()=>fakeCredential()};
+ const pending={...approvalItem(),status:'pending'};
+ let detailReads=0,listItems=[pending],detailStatus='cancelled',detailFinished=false;
+ const app=await mountApp(doc,{clear(){},async request(p){
+ calls.push(p);
+ if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+ if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+ if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+ if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+ if(p==='/approvals')return {items:listItems};
+ if(p==='/approvals/a'){
+  detailReads++;
+  if(detailReads===1)return detail.promise.then(item=>{detailFinished=true;return item;});
+  return {...pending,status:detailStatus};
+ }
+ if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+ if(p==='/auth/verify/finish')return {ok:true};
+ if(p==='/approvals/a/decision'){listItems=[];return {status:'resolved'};}
+ return {items:[]};
+ }},win);
+ const reenter=async()=>{
+ doc.querySelector('[data-view="settings"]').click();
+ await waitFor(()=>[...doc.querySelectorAll('button')].some(button=>button.textContent==='Sign out'));
+ [...doc.querySelectorAll('button')].find(button=>button.textContent==='Sign out').click();
+ await waitFor(()=>[...doc.querySelectorAll('button')].some(button=>button.textContent==='Sign in with a passkey'));
+ await app.start();
+ };
+ try{
+ await waitFor(()=>detailReads===1);
+ await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+ doc.querySelector('[data-approval-id="a"] button.primary').click();
+ await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Resolved');
+ detail.resolve({...pending,status:staleStatus});
+ await waitFor(()=>detailFinished);
+ await tick();
+ assert.equal(doc.querySelector('[data-approval-id="a"] h3').textContent,'Resolved',
+   `an older ${staleStatus} snapshot cannot overwrite the acknowledged decision`);
+ assert.equal(calls.filter(path=>path==='/approvals/a/decision').length,1);
+ detailStatus='sending';
+ await reenter();
+ await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Resolved',
+   'same-owner reentry must preserve the acknowledged terminal state');
+ detailStatus='cancelled';
+ await reenter();
+ await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Cancelled',
+   'a fresh authenticated final detail must still replace the cached result');
+ assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+ assert.equal(calls.filter(path=>path==='/approvals/a/decision').length,1);
+ }finally{app.destroy();win.close();}
+});
+
 test('an expired timer from a closed chat cannot change a parallel session approval',async()=>{
  const expires_at=Date.now()/1000+0.3,calls=[];
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;

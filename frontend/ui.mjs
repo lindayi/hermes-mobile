@@ -43,6 +43,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   let closeEditor=null, stopExtras=null, approvalState=null, currentModelSync=null, stopPushPresence=null;
   let pushIdentity={client_id:win.crypto.randomUUID(),sequence:0},pushIdentityKey=null,releasePushIdentity=null,pushRequest=null;
   const handledApprovals=new Set(),handledApprovalDetails=new Map();
+  const finalApprovalStatuses=new Set(['resolved','resolved_external','cancelled','expired']);
   const approvalKey=item=>`${state.user?.id}:${item.run_id}:${item.id || item.request_id}`;
   const rememberHandledApproval=(key,item,status)=>{
     handledApprovals.add(key);
@@ -1068,6 +1069,15 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(approvalTargetTimer)win.clearTimeout(approvalTargetTimer);
       approvalTargetTimer=null;
     };
+    const scheduleApprovalTargetTimer=()=>{
+      clearApprovalTargetTimer();
+      approvalTargetTimer=win.setTimeout(()=>{
+        if(current() && approvalTargetPlaceholder?.isConnected){
+          approvalTargetPlaceholder.querySelector('h3').textContent='Approval status is taking longer to load';
+          approvalTargetPlaceholder.querySelector('p').textContent='You can continue using this chat while the status is checked.';
+        }
+      },10000);
+    };
     const approvalExpired=item=>Number.isFinite(item?.expires_at) && item.expires_at*1000<=Date.now();
     const clearApprovalExpiry=key=>{
       const entry=approvalExpiryTimers.get(key);
@@ -1133,7 +1143,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         const heading=h('h3',{id:`approval-title-${item.id}`});
         const title=h('p',{},typeof item.title==='string'?item.title:'');title.hidden=!title.textContent.trim();
         const commandText=typeof item.command==='string'?item.command:typeof item.action==='string'?item.action:'';
-        const command=h('pre',{class:'review-payload'},commandText);command.hidden=!commandText;
+        const command=h('pre',{class:'review-payload',role:'region',tabindex:'0','aria-label':'Approval action details'},commandText);command.hidden=!commandText;
         const targetText=typeof item.target==='string'?item.target:'';
         const target=h('p',{},targetText?['Target: ',targetText]:[]);target.hidden=!targetText;
         const error=h('p',{class:'inline-error',role:'alert'});
@@ -1341,7 +1351,6 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           detailListRevision=approvalListRevision;
           item=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
           if(!current())return;
-          clearApprovalTargetTimer();
         }
         if(!current())return;
         if(matches(item)){
@@ -1361,10 +1370,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           if(loadedHistory)approvalTargetFocusedCard=false;
           if(handledApprovals.has(key)){
             const cached=handledApprovalDetails.get(key);
-            const finalStatus=item.status!=='pending'?item.status
-              :cached && sameApprovalIdentity(cached,item)?cached.status:'unavailable';
-            const finalItem={...(item.status!=='pending'?item:
-              cached && sameApprovalIdentity(cached,item)?cached:item),status:finalStatus,executable:false,choices:[]};
+            const cachedItem=cached && sameApprovalIdentity(cached,item)?cached:null;
+            const confirmedFinal=finalApprovalStatuses.has(item.status);
+            const finalStatus=confirmedFinal?item.status:cachedItem?.status || item.status;
+            const finalItem={...(confirmedFinal?item:cachedItem || item),status:finalStatus,executable:false,choices:[]};
             approvalItems.set(key,finalItem);approvalPending.delete(key);
             approvalFinals.set(key,finalStatus);rememberHandledApproval(key,finalItem,finalStatus);
             clearApprovalExpiry(key);
@@ -1379,29 +1388,56 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
               renderApprovals();focusApprovalTarget();return;
             }else if(listChanged){
-              const revalidatedListRevision=approvalListRevision,revalidatedRevision=approvalRevision,
-                revalidatedItem=approvalItems.get(key),revalidatedPending=approvalPending.get(key),
-                revalidatedHandled=handledApprovals.has(key),revalidatedDetails=handledApprovalDetails.get(key);
-              const latestDetail=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
-              if(!current())return;
-              const actionState=approvalActionStates.get(key);
-              if(revalidatedRevision!==approvalRevision || revalidatedItem!==approvalItems.get(key)
-                  || revalidatedPending!==approvalPending.get(key) || revalidatedHandled!==handledApprovals.has(key)
-                  || revalidatedDetails!==handledApprovalDetails.get(key)
-                  || actionState?.pending || actionState?.decisionStarted || actionState?.uncertain){
-                renderApprovals();focusApprovalTarget();return;
-              }
-              if(revalidatedListRevision!==approvalListRevision || !matches(latestDetail)){
-                if(approvalTargetPlaceholder){
-                  approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable';
-                  approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+              const retryTarget=()=>{
+                if(!approvalTargetPlaceholder)return;
+                approvalTargetPlaceholder.setAttribute('role','region');
+                approvalTargetPlaceholder.setAttribute('aria-label','Approval status');
+                approvalTargetPlaceholder.replaceChildren(h('h3',{},'Approval status changed'),
+                  h('p',{},'The approval changed while its status was loading. Check its current state again.'),
+                  button('Retry status',()=>{
+                    if(!current() || !approvalTargetPlaceholder?.isConnected)return;
+                    approvalTargetPlaceholderFocused=false;
+                    approvalTargetPlaceholder.setAttribute('role','status');
+                    approvalTargetPlaceholder.removeAttribute('aria-label');
+                    approvalTargetPlaceholder.replaceChildren(h('h3',{},'Checking approval status'),
+                      h('p',{},'This chat is ready. Approval details are loading.'));
+                    scheduleApprovalTargetTimer();
+                    void resolveApprovalTarget(target);
+                  },'secondary'));
+                focusApprovalTarget();
+              };
+              for(let recheck=0;recheck<2;recheck++){
+                const revalidatedListRevision=approvalListRevision,revalidatedRevision=approvalRevision,
+                  revalidatedItem=approvalItems.get(key),revalidatedPending=approvalPending.get(key),
+                  revalidatedHandled=handledApprovals.has(key),revalidatedDetails=handledApprovalDetails.get(key);
+                const latestDetail=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
+                if(!current())return;
+                const actionState=approvalActionStates.get(key);
+                if(revalidatedItem!==approvalItems.get(key) || revalidatedPending!==approvalPending.get(key)
+                    || revalidatedHandled!==handledApprovals.has(key) || revalidatedDetails!==handledApprovalDetails.get(key)
+                    || actionState?.pending || actionState?.decisionStarted || actionState?.uncertain){
+                  renderApprovals();focusApprovalTarget();return;
                 }
-                focusApprovalTarget();return;
+                if(revalidatedRevision!==approvalRevision || revalidatedListRevision!==approvalListRevision){
+                  if(recheck===0)continue;
+                  retryTarget();return;
+                }
+                if(!matches(latestDetail)){
+                  if(approvalTargetPlaceholder){
+                    approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable';
+                    approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+                  }
+                  clearApprovalTargetTimer();focusApprovalTarget();return;
+                }
+                item=latestDetail;detailRevision=approvalRevision;detailListRevision=approvalListRevision;
+                break;
               }
-              item=latestDetail;detailRevision=approvalRevision;detailListRevision=approvalListRevision;
             }else{
               approvalTargetPlaceholder?.querySelector('h3') && (approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable');
-              if(approvalTargetPlaceholder)approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+              if(approvalTargetPlaceholder){
+                approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+                clearApprovalTargetTimer();
+              }
               focusApprovalTarget();return;
             }
           }
@@ -1428,7 +1464,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           renderApprovals();focusApprovalTarget();
         }else{
           approvalTargetPlaceholder?.querySelector('h3') && (approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable');
-          if(approvalTargetPlaceholder)approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+          if(approvalTargetPlaceholder){
+            approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+            clearApprovalTargetTimer();
+          }
           focusApprovalTarget();
         }
       }catch(error){
@@ -1458,12 +1497,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         role:'status',tabindex:'-1'},h('h3',{},'Checking approval status'),
         h('p',{},'This chat is ready. Approval details are loading.'));
       messages.append(approvalTargetPlaceholder);
-      approvalTargetTimer=win.setTimeout(()=>{
-        if(current() && approvalTargetPlaceholder?.isConnected){
-          approvalTargetPlaceholder.querySelector('h3').textContent='Approval status is taking longer to load';
-          approvalTargetPlaceholder.querySelector('p').textContent='You can continue using this chat while the status is checked.';
-        }
-      },10000);
+      scheduleApprovalTargetTimer();
       void resolveApprovalTarget(target);
     }
     let pending=attempts.get(session.id);

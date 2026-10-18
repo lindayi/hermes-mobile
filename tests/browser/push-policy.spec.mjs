@@ -419,6 +419,38 @@ test('approval notification loads the matching older turn before focusing its ca
  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
 }));
 
+test('generated long approval details are keyboard-scrollable before decision',{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ const endMarker='END OF SYNTHETIC APPROVAL DETAILS';
+ const command=Array.from({length:100},(_,index)=>`synthetic action detail line ${index+1}: review this safe fixture before approval`).join('\n')+`\n${endMarker}`;
+ const item=approvalRecord({command});
+ control.notificationTarget=approvalTarget;control.approvals=[item];control.approvalDetail=item;
+ await mount(page,'?notification=notice-target');
+ const preview=page.getByRole('region',{name:'Approval action details'});
+ await preview.waitFor();
+ assert.equal(await preview.getAttribute('tabindex'),'0','the full action text must be keyboard focusable');
+ await page.keyboard.press('Tab');
+ assert.equal(await preview.evaluate(node=>node===document.activeElement),true,'Tab reaches the action text before decision controls');
+ assert.equal(await preview.evaluate(node=>getComputedStyle(node).outlineWidth),'3px','keyboard focus is visible');
+ const before=await preview.evaluate(node=>({top:node.scrollTop,height:node.scrollHeight,client:node.clientHeight}));
+ assert.ok(before.height>before.client,'the long action text has a scrollable viewport');
+ for(let step=0;step<Math.ceil((before.height-before.client)/8);step++)await page.keyboard.press('ArrowDown');
+ assert.ok(await preview.evaluate((node,top)=>node.scrollTop>top,before.top),'ArrowDown moves the focused action text');
+ const endState=await preview.evaluate((node,marker)=>{
+ const text=node.firstChild,offset=text.textContent.lastIndexOf(marker),range=document.createRange();
+ range.setStart(text,offset);range.setEnd(text,offset+marker.length);
+ const textRect=range.getBoundingClientRect(),box=node.getBoundingClientRect();
+ return {atEnd:node.scrollTop+node.clientHeight>=node.scrollHeight-1,
+   visible:textRect.top>=box.top && textRect.bottom<=box.bottom,
+   scrollTop:node.scrollTop,max:node.scrollHeight-node.clientHeight,
+   textTop:textRect.top,textBottom:textRect.bottom,boxTop:box.top,boxBottom:box.bottom};
+ },endMarker);
+ assert.ok(endState.atEnd&&endState.visible,`End reveals the last action text inside the scroll region: ${JSON.stringify(endState)}`);
+ await page.keyboard.press('Tab');
+ assert.equal(await page.getByRole('button',{name:'Approve once'}).evaluate(node=>node===document.activeElement),
+ true,'Tab continues to the explicit decision control');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0,'keyboard review does not decide');
+}));
+
 test('manual older-history loading repositions an already rendered approval card',{timeout:30000},()=>fixture(async({page,control})=>{
  control.approvals=[approvalRecord()];control.realHistory=approvalHistory();
  await page.getByRole('button',{name:'First conversation',exact:true}).click();
