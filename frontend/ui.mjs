@@ -42,8 +42,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   let stopDisclosureReachability=null;
   let closeEditor=null, stopExtras=null, approvalState=null, currentModelSync=null, stopPushPresence=null;
   let pushIdentity={client_id:win.crypto.randomUUID(),sequence:0},pushIdentityKey=null,releasePushIdentity=null,pushRequest=null;
-  const handledApprovals=new Set();
+  const handledApprovals=new Set(),handledApprovalDetails=new Map();
   const approvalKey=item=>`${state.user?.id}:${item.run_id}:${item.id || item.request_id}`;
+  const rememberHandledApproval=(key,item,status)=>{
+    handledApprovals.add(key);
+    if(item)handledApprovalDetails.set(key,{...item,status,executable:false,choices:[]});
+  };
   function leaveConversation(){stopDisclosureReachability?.();stopDisclosureReachability=null;stopPushPresence?.();stopPushPresence=null;currentModelSync=null;closeEditor?.(false);stopExtras?.();stopExtras=null;approvalState=null;headerState?.destroy();headerState=null;root.querySelector('[data-rename-dialog]')?.remove();}
   function disconnect(){const cancel=cancelTracking;cancelTracking=null;cancel?.();stream?.close();stream=null;}
   const drafts = new Map();
@@ -893,32 +897,38 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       return rendered;
     }
     messages.append(...renderPage(result.items));
-    let oldestOffset=result.offset ?? 0;
+    let oldestOffset=result.offset ?? 0,loadingOlder=null;
     const turnHint=h('p',{class:'caption turn-continuation',hidden:!result.turn_boundary?.truncated},'This turn continues earlier. Load older messages to see the rest.');
     messages.prepend(turnHint);
     let more,renderApprovals=()=>{};
-    const loadOlder=async()=>{
-      if(!current() || oldestOffset<=0)return false;
+    const loadOlder=()=>{
+      if(loadingOlder)return loadingOlder;
+      if(!current() || oldestOffset<=0)return Promise.resolve(false);
       const limit=Math.min(100,oldestOffset),offset=oldestOffset-limit;
-      const page=await api.request(`/sessions/${encodeURIComponent(session.id)}/messages?limit=${limit}&offset=${offset}&turn_boundary=true`);
-      if(version!==routeVersion)return false;
-      const previousHeight=messages.scrollHeight,previousTop=messages.scrollTop;
-      const fragment=doc.createDocumentFragment();
-      const olderNodes=renderPage(page.items),earliest=turnHint.nextElementSibling;
-      const seam=olderNodes.at(-1);
-      if(seam?.matches?.('details.tool-activity') && earliest?.matches?.('details.tool-activity')) {
-        earliest.querySelector('.tool-rows').prepend(...seam.querySelector('.tool-rows').children);
-        refreshToolActivity(earliest);olderNodes.pop();
-      }
-      fragment.append(...olderNodes);
-      turnHint.after(fragment);
-      turnHint.hidden=!page.turn_boundary?.truncated;
-      oldestOffset=page.offset ?? offset;
-      reflowBackground();
-      renderApprovals();
-      if(!page.items?.length || oldestOffset===0)more?.remove();
-      messages.scrollTop=previousTop+messages.scrollHeight-previousHeight;
-      return Boolean(page.items?.length);
+      const request=(async()=>{
+        const page=await api.request(`/sessions/${encodeURIComponent(session.id)}/messages?limit=${limit}&offset=${offset}&turn_boundary=true`);
+        if(version!==routeVersion)return false;
+        const previousHeight=messages.scrollHeight,previousTop=messages.scrollTop;
+        const fragment=doc.createDocumentFragment();
+        const olderNodes=renderPage(page.items),earliest=turnHint.nextElementSibling;
+        const seam=olderNodes.at(-1);
+        if(seam?.matches?.('details.tool-activity') && earliest?.matches?.('details.tool-activity')) {
+          earliest.querySelector('.tool-rows').prepend(...seam.querySelector('.tool-rows').children);
+          refreshToolActivity(earliest);olderNodes.pop();
+        }
+        fragment.append(...olderNodes);
+        turnHint.after(fragment);
+        turnHint.hidden=!page.turn_boundary?.truncated;
+        oldestOffset=page.offset ?? offset;
+        reflowBackground();
+        renderApprovals();
+        if(!page.items?.length || oldestOffset===0)more?.remove();
+        messages.scrollTop=previousTop+messages.scrollHeight-previousHeight;
+        return Boolean(page.items?.length);
+      })();
+      const pending=request.finally(()=>{if(loadingOlder===pending)loadingOlder=null;});
+      loadingOlder=pending;
+      return pending;
     };
     if(oldestOffset > 0){
       more=button('Load older messages',e=>action(e.currentTarget,loadOlder),'secondary');
@@ -1041,9 +1051,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const accepted=result.run || result.last_run;
     const approvalNotice=h('div',{class:'approval-notice',role:'status','aria-live':'polite',hidden:true});
     const approvalCards=new Map(),approvalItems=new Map(),approvalFinals=new Map(),approvalCardViews=new Map(),approvalActionStates=new Map();
-    let approvalRevision=0,approvalPending=new Map(),genericApproval=false,
+    let approvalRevision=0,approvalListRevision=0,approvalPending=new Map(),genericApproval=false,
       currentApprovalRun=accepted?.id || notificationTarget?.run_id,approvalTargetPlaceholder=null,
       approvalTargetTimer=null,approvalTargetFocusedCard=false,approvalTargetPlaceholderFocused=false;
+    const approvalExpiryTimers=new Map();
     const approvalDataFields=[
       'id','run_id','run_session_id','request_id','session_id','status','title','command','action',
       'target','expires_at','executable','choices','error','details_unavailable'
@@ -1056,6 +1067,33 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const clearApprovalTargetTimer=()=>{
       if(approvalTargetTimer)win.clearTimeout(approvalTargetTimer);
       approvalTargetTimer=null;
+    };
+    const approvalExpired=item=>Number.isFinite(item?.expires_at) && item.expires_at*1000<=Date.now();
+    const clearApprovalExpiry=key=>{
+      const entry=approvalExpiryTimers.get(key);
+      if(entry)win.clearTimeout(entry.timer);
+      approvalExpiryTimers.delete(key);
+    };
+    const expireApproval=(key,item,card)=>{
+      if(!current() || owner!==state.user?.id || state.session?.id!==session.id
+          || approvalCards.get(key)!==card || !card.isConnected
+          || approvalItems.get(key)!==item || !approvalPending.has(key) || !approvalExpired(item))return;
+      const actionState=approvalActionStates.get(key);
+      if(actionState?.decisionStarted || actionState?.uncertain){clearApprovalExpiry(key);return;}
+      if(actionState){actionState.pending=false;actionState.decisionStarted=false;actionState.error='';}
+      const finalItem={...item,status:'expired',executable:false,choices:[]};
+      approvalPending.delete(key);approvalItems.set(key,finalItem);
+      rememberHandledApproval(key,finalItem,'expired');approvalFinals.set(key,'expired');
+      clearApprovalExpiry(key);approvalRevision++;renderApprovals();
+    };
+    const scheduleApprovalExpiry=(key,item,card)=>{
+      const existing=approvalExpiryTimers.get(key);
+      if(existing?.item===item)return;
+      clearApprovalExpiry(key);
+      if(!Number.isFinite(item?.expires_at))return;
+      const delay=Math.max(0,item.expires_at*1000-Date.now());
+      const timer=win.setTimeout(()=>expireApproval(key,item,card),Math.min(delay,2147483647));
+      approvalExpiryTimers.set(key,{item,timer});
     };
     const placeApprovalCard=(card,item)=>{
       const anchor=[...messages.querySelectorAll('[data-history-run]')].find(node=>
@@ -1100,7 +1138,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         const detailsUnavailable=h('p',{class:'caption'},'No decision was sent. Review this action in the native client.');
         detailsUnavailable.hidden=item.details_unavailable!==true;
         const decisions=h('div',{class:'actions'});
-        const canDecide=status==='pending' && item.executable===true && Array.isArray(item.choices)
+        const canDecide=status==='pending' && !approvalExpired(item) && item.executable===true && Array.isArray(item.choices)
           && item.choices.includes('once') && item.choices.includes('deny');
         const decide=async choice=>{
           const sameApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
@@ -1115,6 +1153,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             && approvalActionStates.get(key)===actionState
             && !decisionStarted && !actionState.decisionStarted;
           if(!sameApproval() || actionState.pending || actionState.uncertain)return;
+          if(approvalExpired(item)){expireApproval(key,item,card);return;}
           const hadFocus=card.contains(doc.activeElement);
           actionState.pending=true;actionState.error='';renderApprovals();
           if(hadFocus && !card.contains(doc.activeElement))card.focus({preventScroll:true});
@@ -1127,12 +1166,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               }
               return;
             }
+            if(approvalExpired(item)){expireApproval(key,item,card);return;}
             decisionStarted=true;actionState.decisionStarted=true;
             await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,
               {method:'POST',body:{decision:choice}});
             if(!sameAcknowledgedApproval())return;
             actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
-            approvalRevision++;handledApprovals.add(key);approvalPending.delete(key);approvalFinals.set(key,'resolved');
+            approvalRevision++;approvalPending.delete(key);rememberHandledApproval(key,item,'resolved');approvalFinals.set(key,'resolved');
+            clearApprovalExpiry(key);
             renderApprovals();
           }catch(error){
             if(!sameAcknowledgedApproval())return;
@@ -1167,18 +1208,21 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const labels={pending:'Approval required',expired:'Expired',resolved:'Resolved',
         resolved_external:'No longer pending',cancelled:'Cancelled',unknown:'Decision status unknown',
         sending:'Decision pending',unavailable:'Approval unavailable',details_unavailable:'Approval details unavailable'};
-      const effectiveStatus=actionState.pending?'sending':actionState.uncertain?'unknown':status;
+      const effectiveStatus=actionState.pending?'sending':actionState.uncertain?'unknown':approvalExpired(item)?'expired':status;
       view.heading.textContent=labels[effectiveStatus] || 'Approval unavailable';
       view.error.textContent=actionState.error;view.error.hidden=!actionState.error;
       view.itemError.hidden=typeof item.error!=='string' || !item.error;
       view.expires.hidden=!Number.isFinite(item.expires_at) || effectiveStatus!=='pending';
       view.detailsUnavailable.hidden=item.details_unavailable!==true && effectiveStatus!=='details_unavailable';
-      const canDecide=view.canDecide && (effectiveStatus==='pending' || actionState.pending) && !actionState.uncertain;
+      const canDecide=view.canDecide && !approvalExpired(item)
+        && (effectiveStatus==='pending' || actionState.pending) && !actionState.uncertain;
       view.decisions.hidden=!canDecide;
       for(const control of [view.approve,view.deny])if(control)control.disabled=actionState.pending || actionState.uncertain;
       if(!canDecide && !actionState.pending && view.decisions.childNodes.length)view.decisions.replaceChildren();
       const focused=card.contains(doc.activeElement)?doc.activeElement:null;
       placeApprovalCard(card,item);
+      if(status==='pending')scheduleApprovalExpiry(key,item,card);
+      else clearApprovalExpiry(key);
       if(focused?.isConnected && doc.activeElement!==focused)focused.focus({preventScroll:true});
       if(notificationTarget?.kind==='approval' && item.id===notificationTarget.approval_id){
         clearApprovalTargetTimer();
@@ -1202,9 +1246,22 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       try{
         const data=await api.request('/approvals');
         if(!current() || revision!==approvalRevision || !Array.isArray(data.items))return;
+        approvalListRevision++;
         const items=data.items.filter(item=>(item.run_id===currentApprovalRun || item.session_id===session.id)
           && !handledApprovals.has(approvalKey(item)));
-        const next=new Map(items.map(item=>{
+        const activeItems=[];
+        for(const item of items){
+          if(!approvalExpired(item)){activeItems.push(item);continue;}
+          const key=approvalKey(item),actionState=approvalActionStates.get(key);
+          if(actionState?.decisionStarted || actionState?.uncertain){
+            activeItems.push(approvalPending.get(key) || item);
+            continue;
+          }
+          const finalItem={...item,status:'expired',executable:false,choices:[]};
+          approvalItems.set(key,finalItem);approvalFinals.set(key,'expired');
+          rememberHandledApproval(key,finalItem,'expired');clearApprovalExpiry(key);
+        }
+        const next=new Map(activeItems.map(item=>{
           const key=approvalKey(item),previous=approvalPending.get(key) || approvalItems.get(key);
           const unchanged=sameApprovalData(previous,item);
           const actionState=approvalActionStates.get(key);
@@ -1215,7 +1272,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           return [key,unchanged?previous:item];
         }));
         for(const [key,item] of approvalPending)if(!next.has(key)){
-          handledApprovals.add(key);
+          if(approvalFinals.get(key)!=='expired')rememberHandledApproval(key,item,'unavailable');
           const actionState=approvalActionStates.get(key);
           if(actionState?.pending && !actionState.decisionStarted && !actionState.uncertain){
             actionState.pending=false;actionState.error='';
@@ -1271,42 +1328,68 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         && item.request_id===target.request_id && item.session_id===session.id
         && item.run_session_id===target.run_session_id && typeof item.status==='string';
       try{
-        let item=[...approvalItems.values()].find(matches),detailRevision=null;
+        let item=[...approvalItems.values()].find(matches),detailRevision=null,detailListRevision=null;
         if(!item){
           detailRevision=approvalRevision;
+          detailListRevision=approvalListRevision;
           item=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
           if(!current())return;
           clearApprovalTargetTimer();
         }
         if(!current())return;
         if(matches(item)){
-          const key=approvalKey(item),existing=approvalItems.get(key);
+          const key=approvalKey(item);
           const findAnchor=()=>[...messages.querySelectorAll('[data-history-run]')]
             .find(node=>node.dataset.historyRun===item.run_id && node.dataset.historySession===session.id
               && !node.matches('.approval-card'));
-          let pages=0;
+          let pages=0,loadedHistory=false;
           while(!findAnchor() && oldestOffset>0 && pages++<100){
             const loaded=await loadOlder();
             if(!current())return;
             if(!loaded)break;
+            loadedHistory=true;
           }
           if(!current())return;
+          let existing=approvalItems.get(key);
+          if(loadedHistory)approvalTargetFocusedCard=false;
           if(handledApprovals.has(key)){
+            const cached=handledApprovalDetails.get(key);
+            const finalStatus=item.status!=='pending'?item.status
+              :cached && sameApprovalIdentity(cached,item)?cached.status:'unavailable';
+            const finalItem={...(item.status!=='pending'?item:
+              cached && sameApprovalIdentity(cached,item)?cached:item),status:finalStatus,executable:false,choices:[]};
+            approvalItems.set(key,finalItem);approvalPending.delete(key);
+            approvalFinals.set(key,finalStatus);rememberHandledApproval(key,finalItem,finalStatus);
+            clearApprovalExpiry(key);
             approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
             renderApprovals();focusApprovalTarget();return;
           }
-          if(detailRevision!==null && detailRevision!==approvalRevision && item.status==='pending'){
+          const listChanged=detailListRevision!==null && detailListRevision!==approvalListRevision;
+          if(detailRevision!==null && (detailRevision!==approvalRevision || listChanged) && item.status==='pending'){
             const latest=approvalItems.get(key);
             if(approvalPending.has(key) && matches(latest))item=latest;
             else if(existing && matches(existing)){
               approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
               renderApprovals();focusApprovalTarget();return;
+            }else if(listChanged){
+              const revalidatedListRevision=approvalListRevision;
+              const latestDetail=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
+              if(!current())return;
+              if(revalidatedListRevision!==approvalListRevision || !matches(latestDetail)){
+                if(approvalTargetPlaceholder){
+                  approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable';
+                  approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+                }
+                focusApprovalTarget();return;
+              }
+              item=latestDetail;detailRevision=approvalRevision;detailListRevision=approvalListRevision;
             }else{
               approvalTargetPlaceholder?.querySelector('h3') && (approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable');
               if(approvalTargetPlaceholder)approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
               focusApprovalTarget();return;
             }
           }
+          existing=approvalItems.get(key);
           if(sameApprovalData(existing,item))item=existing;
           else if(item.status!=='pending'){
             const actionState=approvalActionStates.get(key);
@@ -1323,7 +1406,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           if(item.status==='pending'){
             approvalPending.set(key,item);approvalFinals.delete(key);
           }else{
-            approvalPending.delete(key);handledApprovals.add(key);approvalFinals.set(key,item.status);
+            approvalPending.delete(key);rememberHandledApproval(key,item,item.status);approvalFinals.set(key,item.status);
           }
           approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
           renderApprovals();focusApprovalTarget();
@@ -1347,7 +1430,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }
     };
     win.addEventListener('focus',reconcileApprovals);
-    stopExtras=()=>{approvalRevision++;win.removeEventListener('focus',reconcileApprovals);clearApprovalTargetTimer();};
+    stopExtras=()=>{
+      approvalRevision++;win.removeEventListener('focus',reconcileApprovals);clearApprovalTargetTimer();
+      for(const {timer} of approvalExpiryTimers.values())win.clearTimeout(timer);
+      approvalExpiryTimers.clear();
+    };
     void reconcileApprovals();
     if(notificationTarget?.kind==='approval'){
       const target=notificationTarget;

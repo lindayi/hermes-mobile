@@ -84,6 +84,40 @@ test('an open approval expires on time without affecting a parallel approval',as
  }finally{app.destroy();win.close();}
 });
 
+test('an expired timer from a closed chat cannot change a parallel session approval',async()=>{
+ const expires_at=Date.now()/1000+0.3,calls=[];
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ let listReads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'First chat'};
+  if(p==='/sessions/s2')return {id:'s2',title:'Second chat'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p.startsWith('/sessions/s2/messages'))return {items:[],total:0,offset:0,run:{id:'r2',session_id:'s2',status:'waiting_for_approval'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s2',title:'Second chat'}],total:1};
+  if(p==='/approvals')return {items:++listReads===1
+   ? [{...approvalItem(),expires_at}]
+   : [{...approvalItem(),run_id:'r2',session_id:'s2',run_session_id:'s2',expires_at:Date.now()/1000+20}]};
+  if(p==='/approvals/a')return {...approvalItem(),status:'pending',expires_at};
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+  doc.querySelector('[data-view="chats"]').click();
+  await waitFor(()=>doc.querySelector('[aria-label="Second chat"]'));
+  doc.querySelector('[aria-label="Second chat"]').click();
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+  await new Promise(resolve=>setTimeout(resolve,350));
+  const cards=doc.querySelectorAll('[data-approval-id="a"]');
+  assert.equal(cards.length,1);
+  assert.equal(cards[0].closest('.conversation').querySelector('h1').textContent,'Second chat');
+  assert.equal(cards[0].querySelectorAll('button').length,2);
+  assert.equal(calls.some(path=>path.endsWith('/decision')),false);
+ }finally{app.destroy();win.close();}
+});
+
 test('approval expiry during a held passkey ceremony prevents the decision POST',async()=>{
  const credential=deferred(),calls=[],expires_at=Date.now()/1000+0.12;
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
