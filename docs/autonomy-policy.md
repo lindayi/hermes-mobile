@@ -842,6 +842,20 @@ authenticated edit metadata remain bound and unchanged. Missing, malformed,
 edited, removed, dismissed, duplicate, stale, negative, or conflicting review
 evidence still blocks.
 
+### PR #119 request-notification source refresh
+
+The PR #119 follow-up separates retained request-target authorization from
+send-time eligibility and preserves the run/session lineage binding. These current
+source pins and the independent literal fixture in `tests/test_autonomy_policy.py`
+identify exact candidate bytes only; they do not establish review, CI, merge, or
+deployment evidence.
+
+| PR #119 candidate path | SHA-256 |
+| --- | --- |
+| `backend/app.py` | `77a19ab97b94a6a48fd1819a426b21c0c4cb20e8fa7f9b30d82f104d6da5ce38` |
+| `backend/notifications.py` | `42de0bcae886c139aa61ea23ef4dd0a24cc17a8d338ab3edbfeadd6b47a70935` |
+| `backend/orchestration.py` | `82589613f732673df5c17b7add63fb127fac5084919562e00768a36c118c362b` |
+
 ## Policy phases and activation
 
 | Phase | Required main protection checks | Meaning |
