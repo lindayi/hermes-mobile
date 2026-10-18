@@ -16,6 +16,8 @@ decisions. Historical pin/evidence notes below do not reinstate that requirement
 Sensitive-path classification is informative only; owner enrollment defines
 permitted work. Current exact-head Copilot review, resolved conversations, required
 checks, and guarded exact-main deployment remain separate safeguards.
+The ordinary review gate requires affirmative authenticated unchanged submission
+metadata. Missing edit fields or failed actor, body, or head binding cannot qualify.
 
 GitHub's automatic Copilot review ruleset requests reviews. The coordinator,
 read-only validator, and manual operator require genuine current-head Copilot
@@ -138,7 +140,7 @@ evidence.
 | Current source path | SHA-256 |
 | --- | --- |
 | `deploy/cloud_coordinator.py` | `389357ae2d58412f5cf0848e61caa83c972f16e4d5df5fe93e58c478d238c7a8` |
-| `deploy/review_evidence.py` | `697cf833a005146a354d399f62252c64e64103c73febd8762fbdc271244821be` |
+| `deploy/review_evidence.py` | `e2f9a8c2082ca5b4c180395bd915d983ed9ba3aeaa8670d0083696c17500d3d6` |
 
 ### Historical Issue #106 verification-status parser overlay
 

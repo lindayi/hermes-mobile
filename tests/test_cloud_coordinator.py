@@ -17030,7 +17030,7 @@ def test_final_review_read_revoked_copilot_blocks_auto_merge(tmp_path, sensitive
 
 
 @pytest.mark.parametrize("invalid_on_read", [2, 3, 4])
-def test_sensitive_owner_grant_is_not_revalidated_at_status_or_merge_fences(
+def test_edited_copilot_review_blocks_status_or_merge_fences(
         tmp_path, invalid_on_read):
     class ChangingOwnerReview(FakeApi):
         review_reads = 0
@@ -17053,9 +17053,8 @@ def test_sensitive_owner_grant_is_not_revalidated_at_status_or_merge_fences(
     result = Coordinator(api, store).run(apply=True)
 
     assert api.review_reads >= invalid_on_read
-    assert api.graphql_writes
-    assert result["pull_requests"][0]["review_valid"] is True
-    assert result["pull_requests"][0]["auto_merge_requested"] is True
+    assert not api.graphql_writes
+    assert result["pull_requests"][0]["auto_merge_requested"] is False
     assert "sensitive" not in result["pull_requests"][0]["reasons"]
 
 
@@ -17313,6 +17312,8 @@ def _progress_review(head, review_id, text, submitted_at):
     )
     return {
         "id": review_id, "state": "COMMENTED", "commit_id": head,
+        "updatedAt": submitted_at, "lastEditedAt": None,
+        "includesCreatedEdit": False,
         "submitted_at": submitted_at, "user": {"id": COPILOT_REVIEWER},
         "body": body, "body_html": body.removeprefix("<!-- ccr-overview-v2 -->"),
     }

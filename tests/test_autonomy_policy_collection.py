@@ -85,6 +85,42 @@ def test_cli_collects_sensitive_review_without_owner_command(collection, capsys)
     assert api.writes == api.graphql_writes == []
 
 
+@pytest.mark.parametrize("failure", [
+    "null-node", "updatedAt", "lastEditedAt", "includesCreatedEdit",
+    "actor", "body", "head",
+])
+def test_failed_review_metadata_binding_blocks_collection_and_coordinator(
+        collection, capsys, failure, tmp_path):
+    api, _, _, _, args, _ = collection
+    original_graphql = api.graphql
+
+    def graphql(query, variables):
+        response = original_graphql(query, variables)
+        if variables.get("id") == api.copilot_review_node_id:
+            node = response["data"]["node"]
+            if failure == "null-node":
+                response["data"]["node"] = None
+            elif failure == "actor":
+                node["author"]["id"] = "unbound-actor"
+            elif failure == "body":
+                node["body"] += " edited"
+            elif failure == "head":
+                node["commit"]["oid"] = "f" * 40
+            else:
+                node.pop(failure)
+        return response
+
+    api.graphql = graphql
+    assert cli.main(args) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is False
+    store = coordinator.StateStore(tmp_path / "coordinator.json")
+    result = coordinator.Coordinator(api, store).run(apply=True)
+    assert "review" in result["pull_requests"][0]["reasons"]
+    assert not result["pull_requests"][0]["auto_merge_requested"]
+    assert not api.graphql_writes
+
+
 def test_cli_collects_sensitive_review_without_a_stale_owner_command(
         collection, capsys):
     api, _, state_path, _, args, _ = collection

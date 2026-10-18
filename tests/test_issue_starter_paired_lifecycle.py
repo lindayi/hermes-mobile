@@ -1085,6 +1085,7 @@ def test_actual_paired_v2_main_advance_keeps_authority_but_requires_neutral_repa
     assert not run()["auto_merge_requested"]  # Previous review names the old head.
     api.review_sha = repaired_head
     api.review_submitted_at = "2026-10-01T12:07:01Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.pending_required = True
     assert not run()["auto_merge_requested"]
     api.pending_required = False

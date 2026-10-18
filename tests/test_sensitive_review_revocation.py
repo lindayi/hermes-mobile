@@ -274,7 +274,7 @@ def test_regressions_revocation_generation_fails_closed_at_bound(tmp_path, gener
     data = store.snapshot()
     data["enrollments"]["16"]["sensitive_generation"] = generation
     store._save(data)
-    api.revocation = "edited"
+    api.comments = [comment for comment in api.comments if comment["id"] != 124]
     before = store.path.read_bytes()
     writes = list(api.writes)
     if generation == 2**31 - 1:

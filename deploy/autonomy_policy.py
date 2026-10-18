@@ -260,6 +260,11 @@ ISSUE106_REVIEW_EVIDENCE_OVERLAY = {
     'deploy/review_evidence.py': '697cf833a005146a354d399f62252c64e64103c73febd8762fbdc271244821be',
 }
 SOURCE_FINGERPRINTS.update(ISSUE106_REVIEW_EVIDENCE_OVERLAY)
+# Issue #115 retains authenticated unchanged metadata in the ordinary review gate.
+ISSUE115_REVIEW_EVIDENCE_OVERLAY = {
+    'deploy/review_evidence.py': 'e2f9a8c2082ca5b4c180395bd915d983ed9ba3aeaa8670d0083696c17500d3d6',
+}
+SOURCE_FINGERPRINTS.update(ISSUE115_REVIEW_EVIDENCE_OVERLAY)
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',
     '.github/workflows/issue-link.yml': 'hosted-workflow-contract',

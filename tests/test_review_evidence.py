@@ -158,6 +158,8 @@ def copilot_review(body, *, state="COMMENTED", review_id=REVIEW_ID, commit_id=HE
     return {"id": review_id, "state": state, "body": body,
             "body_html": body.removeprefix("<!-- ccr-overview-v2 -->"),
             "commit_id": commit_id,
+            "updatedAt": submitted_at, "lastEditedAt": None,
+            "includesCreatedEdit": False,
             "submitted_at": submitted_at, "user": {"id": user_id},
             "author_association": "CONTRIBUTOR"}
 

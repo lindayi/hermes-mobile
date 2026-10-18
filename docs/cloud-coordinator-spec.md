@@ -190,6 +190,9 @@ Copilot review, resolved conversations, all required CI checks, complete source
 evidence, task occupancy, and receipt bindings remain mandatory. A bounded source
 repair may proceed while findings remain unresolved, but merge remains blocked
 until all merge gates pass.
+The ordinary review gate requires authenticated unchanged submission metadata.
+Missing edit fields or failed metadata enrichment cannot qualify at planning,
+publication, final merge fencing, or downstream autonomy validation.
 
 This is a source/first-activation boundary, not an upgrade path for historical
 coordinator state. Version-1 records remain readable for inspection, but active

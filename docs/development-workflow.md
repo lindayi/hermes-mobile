@@ -125,8 +125,9 @@ All three active contexts must pass on the exact head SHA before GitHub merge.
 Copilot review must be authenticated and bound to that SHA, with complete
 review/thread pagination and resolved conversations. Resolve actual findings; do
 not treat a definite rejection as acceptance. New commits invalidate head-bound
-review and status evidence. Sensitive changes still require separate exact-SHA
-owner authorization and targeted review.
+review and status evidence. Sensitive-path classification adds no separate owner
+grant or targeted-review requirement. Current Copilot evidence must include
+authenticated unchanged submission metadata; missing or edited metadata blocks.
 
 The narrow supervised operator path for a generic request for a non-required
 reviewer role is defined by

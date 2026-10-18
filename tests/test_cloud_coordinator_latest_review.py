@@ -796,7 +796,7 @@ def test_cold_restart_ignores_revoked_sensitive_grant_and_retires_pending_notice
     assert restarted.snapshot()["outbox"][key]["status"] == "superseded"
     assert not (tmp_path / "workflow-events.json").exists()
     assert not any(
-        "Owner exact-head authorization is required" in body
+        "Owner exact-head authorization is required" in body.get("body", "")
         for _, body in api.writes if isinstance(body, dict)
     )
 

@@ -258,7 +258,7 @@ _ISSUE108_PR109_PR112_MERGED_FIXTURE = {
 
 _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE = {
     'deploy/cloud_coordinator.py': '389357ae2d58412f5cf0848e61caa83c972f16e4d5df5fe93e58c478d238c7a8',
-    'deploy/review_evidence.py': '697cf833a005146a354d399f62252c64e64103c73febd8762fbdc271244821be',
+    'deploy/review_evidence.py': 'e2f9a8c2082ca5b4c180395bd915d983ed9ba3aeaa8670d0083696c17500d3d6',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
@@ -418,6 +418,8 @@ def _evidence():
             'reviews': [{
                 'id': 2, 'user': {'id': COPILOT_REVIEWER_ID}, 'state': 'COMMENTED',
                 'commit_id': review_head, 'submitted_at': '2026-10-01T21:00:00Z',
+                'updatedAt': '2026-10-01T21:00:00Z',
+                'lastEditedAt': None, 'includesCreatedEdit': False,
                 'body': '', 'body_html': '',
             }, {
                 'id': 1, 'node_id': 'PRR_kwDOU3FvNc8AAAABQehXFA',
