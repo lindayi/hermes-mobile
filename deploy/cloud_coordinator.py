@@ -11373,13 +11373,14 @@ class Coordinator:
                             export_directory / ADAPTER_STATE_NAME, owner_user_id,
                             known_events,
                         )
-                        self.store.retire_acknowledged_lifecycle_events(
-                            acknowledgements, owner_user_id,
-                        )
                     except (LifecycleSourceError, Blocked, OSError, TypeError, ValueError) as error:
                         raise CoordinatorError(
                             "Lifecycle ACK or owner evidence is unavailable"
                         ) from error
+                if owner_user_id is not None:
+                    self.store.retire_acknowledged_lifecycle_events(
+                        acknowledgements, owner_user_id,
+                    )
             current_state = StateStore(self.store.path).snapshot()
             pending_event_exceptions = tuple(
                 key for key in dict.fromkeys(map(str, pending_events))
@@ -11955,10 +11956,13 @@ class StateStore:
         retained, retired = [], []
         for event in self._prepared["lifecycle_events"]:
             acknowledgement = acknowledgements.get(event["event_id"])
-            if acknowledgement is None or acknowledgement.get("status") != "acked":
+            acknowledged = (
+                acknowledgement is not None and acknowledgement.get("status") == "acked"
+            )
+            if not acknowledged and event["reason"] != "sensitive_approval":
                 retained.append(event)
                 continue
-            if (acknowledgement.get("digest") != event_digest(event)
+            if acknowledged and (acknowledgement.get("digest") != event_digest(event)
                     or not isinstance(acknowledgement.get("inbox_id"), str)
                     or not acknowledgement["inbox_id"]):
                 raise CoordinatorError("Lifecycle acknowledgement does not match its canonical event")

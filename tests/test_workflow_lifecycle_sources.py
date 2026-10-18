@@ -25,6 +25,53 @@ HEAD = "a" * 40
 MERGE = "b" * 40
 
 
+def test_full_legacy_approval_queue_retires_without_forging_acknowledgements(tmp_path):
+    from deploy.cloud_coordinator import Coordinator, MAX_LIFECYCLE_EVENTS
+    from deploy.workflow_lifecycle import build_export
+
+    notification_paths, state_dir, _, _, _ = app_fixture(tmp_path / "app")
+    paths = LifecycleSourcePaths(
+        notifications=notification_paths, starter_state=tmp_path / "absent-starter.json",
+    )
+    store = StateStore(tmp_path / "coordinator" / "state.json")
+    legacy = [
+        pull_event(
+            {"issue": number + 1, "head": HEAD, "enrollment": {"comment": number + 1}},
+            "sensitive_approval", occurred_at="2026-10-01T20:58:00Z",
+            decision="authorize_sensitive_action",
+        )
+        for number in range(MAX_LIFECYCLE_EVENTS)
+    ]
+    for event in legacy:
+        store.record_lifecycle(event, now=NOW)
+    export = state_dir / "workflow-events.json"
+    export.write_text(json.dumps(build_export([legacy[0]], APP_OWNER, now=NOW)))
+    export.chmod(0o600)
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == 1
+    adapter = state_dir / "workflow-notifications.sqlite"
+    acknowledged = adapter.read_bytes()
+
+    Coordinator(
+        EmptyLifecycleApi(), store, clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    restarted = StateStore(store.path)
+    assert restarted.snapshot()["lifecycle_events"] == []
+    assert restarted.snapshot()["lifecycle_context"]["events"] == legacy
+    assert adapter.read_bytes() == acknowledged
+    meaningful = issue_event(
+        31, "issue_failed", occurred_at="2026-10-01T20:59:00Z", incident="ordinary",
+    )
+    restarted.record_lifecycle(meaningful, now=NOW)
+    Coordinator(
+        EmptyLifecycleApi(), restarted, clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    assert restarted.snapshot()["lifecycle_events"] == [meaningful]
+    assert restarted.snapshot()["lifecycle_context"]["events"] == legacy
+    assert json.loads(export.read_text())["events"] == [meaningful]
+    assert adapter.read_bytes() == acknowledged
+
+
 def test_pull_lifecycle_events_preserve_authenticated_linked_issue_identity():
     linked = pull_event(
         {
@@ -548,7 +595,7 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
     os.utime(export, (NOW.timestamp(), NOW.timestamp()))
     old_events = json.loads(export.read_bytes())["events"]
     assert approval not in old_events
-    assert approval in store.snapshot()["lifecycle_events"]
+    assert approval in store.snapshot()["lifecycle_context"]["events"]
     outcomes = old_events
     assert {e["reason"] for e in outcomes} == {"merged", "controller_verified"}
     process(notification_paths, apply=True, now=NOW)
@@ -594,11 +641,11 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
     assert api.writes == writes and api.graphql_writes == graphql_writes
     state = store.snapshot()
     if failure == "commit":
-        assert approval in state["lifecycle_events"]
+        assert approval in state["lifecycle_context"]["events"]
         assert all(event in state["lifecycle_events"] for event in outcomes)
     else:
-        assert approval in state["lifecycle_events"]
-        assert approval not in state["lifecycle_context"]["events"]
+        assert approval not in state["lifecycle_events"]
+        assert approval in state["lifecycle_context"]["events"]
         assert all(event in state["lifecycle_context"]["events"] for event in outcomes)
     if failure == "commit":
         assert not store.committed

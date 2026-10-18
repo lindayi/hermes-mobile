@@ -1818,7 +1818,10 @@ Sensitive approval lifecycle events and outbox outcomes are legacy history only.
 They are not generated for current processing, and pending legacy approval outcomes
 are marked superseded rather than replaced with a new request. Lifecycle export
 omits legacy `sensitive_approval` events without deleting durable records or changing
-consumer ACK history. Legacy `sensitive_generation` and grant fields remain readable
+consumer ACK history. With a trusted application owner binding, preparation moves
+obsolete approvals into the existing replay context even without an ACK, releasing
+active queue capacity. Context is audit history, not delivery proof; no consumer
+ACK is created or changed. Legacy `sensitive_generation` and grant fields remain readable
 for compatibility but are not revalidated, advanced, or used as a processing gate.
 If filtering leaves no events, the previous export is removed rather than refreshing
 an obsolete request. This is a polling snapshot of observed state, not a live

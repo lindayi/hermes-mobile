@@ -64,6 +64,7 @@ def test_accepted_receipt_handoff_uses_fresh_scanned_main(tmp_path, monkeypatch,
     api.pull["mergeable_state"] = "behind"
     api.review_state = "COMMENTED"
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     from copy import deepcopy
     original_get = api.get
     pull_reads = 0
@@ -286,6 +287,7 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
     refresh_owner_review(api, result_head)
     api.review_sha = result_head
     api.review_submitted_at = "2026-10-01T12:04:01Z"
+    api.copilot_review_updated_at = api.review_submitted_at
 
     Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
 
@@ -3744,6 +3746,7 @@ def test_neutral_waiting_review_serializes_source_failure(
     if review_state == "stale":
         api.review_sha = RESULT_HEAD
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.source_failure = True
     api.source_failure_sha = NEXT_RESULT_HEAD
     if failure == "check" or review_state == "wrong_author":
@@ -3933,6 +3936,7 @@ def test_stale_base_reconciliation_accepts_a_validated_new_head_handoff(tmp_path
     api.review_state = "COMMENTED"
     api.review_sha = NEXT_RESULT_HEAD
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     requests_before = [write for write in api.writes
                        if write[0].endswith("/requested_reviewers")]
 
@@ -4292,6 +4296,7 @@ def _owner_abandonment_historical_neutral_case(tmp_path, *, bare=False):
     api.review_state = "COMMENTED"
     api.review_sha = api.head_sha
     api.review_submitted_at = "2026-10-01T12:09:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.source_failure = False
     api.source_failure_sha = None
     return api, store, neutral
@@ -5468,6 +5473,7 @@ def test_owner_continuation_disposition_records_missing_root_before_successor_di
     api.review_state = "CHANGES_REQUESTED"
     api.review_sha = successor_head
     api.review_submitted_at = "2026-10-01T12:15:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.unresolved = False
     api.progress_review = _progress_review(
         successor_head, 63002, "The synthetic source failure remains.",
@@ -13743,6 +13749,7 @@ def test_prepared_receipt_isolated_after_plan_without_initial_source(
     api.review_state = "APPROVED"
     api.review_sha = RESULT_HEAD
     api.review_submitted_at = "2026-10-01T12:04:01Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     before = StateStore(store.path).snapshot()
     before_issue = _pull_issue_state(before, 16)
     before_writes = deepcopy(api.writes)
@@ -17346,6 +17353,8 @@ class InlineProgressApi(ProgressApi):
         )
         self.progress_review = {
             "id": review_id, "state": "COMMENTED", "commit_id": head,
+            "updatedAt": submitted_at, "lastEditedAt": None,
+            "includesCreatedEdit": False,
             "submitted_at": submitted_at, "user": {"id": COPILOT_REVIEWER},
             "body": "<!-- ccr-overview-v2 -->\n" + rendered,
             "body_html": rendered,
@@ -17886,6 +17895,7 @@ def test_rejecting_review_progress_uses_non_review_checks_in_the_planner(
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     api.review_state = "CHANGES_REQUESTED"
     api.review_submitted_at = "2026-10-01T12:10:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.progress_review = _progress_review(
         HEAD, 63002, "Finding A remains.", "2026-10-01T12:10:00Z",
     ) | {"state": "CHANGES_REQUESTED"}
@@ -17966,6 +17976,7 @@ def test_commented_findings_evaluate_completed_receipt_and_resume_once(
     api.review_state = "COMMENTED"
     api.review_sha = result_head
     api.review_submitted_at = "2026-10-01T12:11:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.progress_review = _progress_review(
         result_head, 63003, finding, "2026-10-01T12:11:00Z",
     )
@@ -18063,6 +18074,7 @@ def test_body_only_commented_progress_requires_complete_unique_inventory(
     api.review_state = "COMMENTED"
     api.review_sha = result_head
     api.review_submitted_at = "2026-10-01T12:11:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.progress_review = _progress_review(
         result_head, 63003, finding, "2026-10-01T12:11:00Z",
     )
@@ -20647,6 +20659,7 @@ def test_incomplete_verification_does_not_consume_stagnation_decision(tmp_path, 
         refresh_owner_review(api, result_head, submitted_at="2026-10-01T12:07:00Z")
         api.review_state = "COMMENTED"
         api.review_submitted_at = "2026-10-01T12:07:00Z"
+        api.copilot_review_updated_at = api.review_submitted_at
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
 
     enrollment = StateStore(path).snapshot()["enrollments"]["16"]
@@ -22604,6 +22617,7 @@ def test_copilot_review_timing_must_be_valid_for_handoff(
     api.source_failure = False
     api.review_state = review_state
     api.review_submitted_at = submitted_at
+    api.copilot_review_updated_at = submitted_at
 
     summary = coordinator.run(apply=True)["pull_requests"][0]
 
@@ -22646,6 +22660,7 @@ def test_post_task_review_still_requires_exact_head_and_authenticated_identity(
     api.complete_task(fix["task_id"], fix)
     api.source_failure = False
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
 
     summary = coordinator.run(apply=True)["pull_requests"][0]
 
@@ -22678,6 +22693,7 @@ def test_post_task_review_cannot_replace_invalid_persisted_completion_proof(
     api.tasks.clear()
     api.review_state = "COMMENTED"
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     writes, graphql_writes = list(api.writes), list(api.graphql_writes)
 
     summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
@@ -22726,6 +22742,7 @@ def test_waiting_copilot_review_handoff_survives_restart_without_budget(
     # Absent task inventory does not release the lock without a completed review.
     api.tasks.clear()
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     writes, graphql_writes = list(api.writes), list(api.graphql_writes)
     restarted = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
     before = path.read_bytes()

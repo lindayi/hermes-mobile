@@ -133,10 +133,7 @@ def test_regressions_revocation_episode_reaches_real_inbox_after_restart(tmp_pat
     authorize(api)
     poll()
     assert not export.exists()
-    if ack_initial:
-        assert initial in store.snapshot()["lifecycle_context"]["events"]
-    else:
-        assert initial in store.snapshot()["lifecycle_events"]
+    assert initial in store.snapshot()["lifecycle_context"]["events"]
     historical = store.snapshot()["enrollments"]["16"]
     api.revocation = "edited"
     poll()
@@ -167,7 +164,7 @@ def test_regressions_revocation_episode_reaches_real_inbox_after_restart(tmp_pat
     poll()
     assert not export.exists()
     history = store.snapshot().get("lifecycle_context", {}).get("events", [])
-    assert initial in (history if ack_initial else store.snapshot()["lifecycle_events"])
+    assert initial in history
     assert [event for event in [*history, *store.snapshot()["lifecycle_events"]]
             if event["reason"] == "sensitive_approval"] == [initial]
     with sqlite3.connect(inbox) as db:
@@ -260,7 +257,7 @@ def test_regressions_revocation_failure_preserves_producer_export_and_consumer(
                 lifecycle_source_paths=sources).run(apply=True)
     assert store.snapshot()["enrollments"]["16"] == historical
     assert not export.exists()
-    assert approval in store.snapshot()["lifecycle_events"]
+    assert approval in store.snapshot()["lifecycle_context"]["events"]
     assert outcome in store.snapshot()["lifecycle_context"]["events"]
     assert api.fix_attempts == 0 and not api.graphql_writes
 
@@ -314,7 +311,7 @@ def test_regressions_revocation_new_head_and_enrollment_scope(tmp_path):
     poll()
     export = tmp_path / "workflow-events.json"
     assert not export.exists()
-    assert old in store.snapshot()["lifecycle_events"]
+    assert old in store.snapshot()["lifecycle_context"]["events"]
     # Explicit renewal retains the original head and creates no approval request.
     new_head = "c" * 40
     api.head_sha = new_head
@@ -330,9 +327,9 @@ def test_regressions_revocation_new_head_and_enrollment_scope(tmp_path):
     assert not export.exists()
     assert "sensitive" not in result["reasons"]
     assert "checks" in result["reasons"]
-    assert [event for event in store.snapshot()["lifecycle_events"]
+    assert [event for event in store.snapshot()["lifecycle_context"]["events"]
             if event["reason"] == "sensitive_approval"] == [old]
-    assert old in store.snapshot()["lifecycle_events"]
+    assert old in store.snapshot()["lifecycle_context"]["events"]
     assert enrollment["authorized_head"] == HEAD
     assert enrollment["owner_authorized_head"] == new_head
     assert enrollment["attempts"] == 0 and api.fix_attempts == 0

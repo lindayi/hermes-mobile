@@ -792,7 +792,8 @@ def test_cold_restart_ignores_revoked_sensitive_grant_and_retires_pending_notice
     assert sensitive_reads == []
     assert restarted.snapshot()["enrollments"]["16"]["sensitive_authorization"] == authorization
     assert restarted.snapshot()["enrollments"]["16"].get("sensitive_generation", 0) == generation
-    assert restarted.snapshot()["lifecycle_events"] == before_history
+    assert restarted.snapshot()["lifecycle_events"] == []
+    assert restarted.snapshot()["lifecycle_context"]["events"] == before_history
     assert restarted.snapshot()["outbox"][key]["status"] == "superseded"
     assert not (tmp_path / "workflow-events.json").exists()
     assert not any(
