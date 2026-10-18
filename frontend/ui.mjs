@@ -44,6 +44,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   let pushIdentity={client_id:win.crypto.randomUUID(),sequence:0},pushIdentityKey=null,releasePushIdentity=null,pushRequest=null;
   const handledApprovals=new Set(),handledApprovalDetails=new Map();
   const finalApprovalStatuses=new Set(['resolved','resolved_external','cancelled','expired']);
+  const approvalStatusRank={pending:0,sending:1,unknown:2};
+  const preferredApprovalStatus=(fresh,cached)=>{
+    if(finalApprovalStatuses.has(fresh))return fresh;
+    if(finalApprovalStatuses.has(cached))return cached;
+    return (approvalStatusRank[cached] ?? 0)>(approvalStatusRank[fresh] ?? 0)?cached:fresh;
+  };
   const approvalKey=item=>`${state.user?.id}:${item.run_id}:${item.id || item.request_id}`;
   const rememberHandledApproval=(key,item,status)=>{
     handledApprovals.add(key);
@@ -1051,7 +1057,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     });
     const accepted=result.run || result.last_run;
     const approvalNotice=h('div',{class:'approval-notice',role:'status','aria-live':'polite',hidden:true});
-    const approvalCards=new Map(),approvalItems=new Map(),approvalFinals=new Map(),approvalCardViews=new Map(),approvalActionStates=new Map();
+    const approvalCards=new Map(),approvalItems=new Map(),approvalFinals=new Map(),approvalCardViews=new Map(),approvalActionStates=new Map(),approvalDetailReads=new Map();
     let approvalRevision=0,approvalListRevision=0,approvalPending=new Map(),genericApproval=false,
       currentApprovalRun=accepted?.id || notificationTarget?.run_id,approvalTargetPlaceholder=null,
       approvalTargetTimer=null,approvalTargetFocusedCard=false,approvalTargetPlaceholderFocused=false;
@@ -1068,6 +1074,17 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const clearApprovalTargetTimer=()=>{
       if(approvalTargetTimer)win.clearTimeout(approvalTargetTimer);
       approvalTargetTimer=null;
+    };
+    const readApprovalDetail=approvalId=>{
+      const existing=approvalDetailReads.get(approvalId);
+      if(existing)return existing;
+      const pending=api.request(`/approvals/${encodeURIComponent(approvalId)}`);
+      approvalDetailReads.set(approvalId,pending);
+      pending.then(
+        ()=>{if(approvalDetailReads.get(approvalId)===pending)approvalDetailReads.delete(approvalId);},
+        ()=>{if(approvalDetailReads.get(approvalId)===pending)approvalDetailReads.delete(approvalId);}
+      );
+      return pending;
     };
     const scheduleApprovalTargetTimer=()=>{
       clearApprovalTargetTimer();
@@ -1205,7 +1222,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               actionState.pending=false;actionState.decisionStarted=false;actionState.error=errorMessage(error);
             }
             if(decisionStarted && ![403,404,409].includes(error.status)){
-              actionState.uncertain=true;approvalFinals.set(key,'unknown');
+              actionState.uncertain=true;
+              const unresolved={...(approvalItems.get(key) || item),status:'unknown',executable:false,choices:[]};
+              approvalRevision++;approvalItems.set(key,unresolved);approvalPending.delete(key);
+              rememberHandledApproval(key,unresolved,'unknown');approvalFinals.set(key,'unknown');
             }
             if(error.status===401){expiredSession();return;}
             renderApprovals();
@@ -1258,8 +1278,37 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         renderApprovalCard(item,approvalPending.has(key)?'pending':approvalFinals.get(key) || 'unavailable');
       }
     };
+    const refreshTransitionalApprovalDetails=async()=>{
+      const targets=[...approvalItems].filter(([key,item])=>{
+        const actionState=approvalActionStates.get(key);
+        const status=actionState?.uncertain?'unknown':approvalFinals.get(key) || item.status;
+        return item.id && ['sending','unknown'].includes(status)
+          && (item.session_id===session.id || item.run_id===currentApprovalRun);
+      }).slice(0,10);
+      await Promise.all(targets.map(async([key,item])=>{
+        try{
+          const detail=await readApprovalDetail(item.id);
+          if(!current() || owner!==state.user?.id || state.session?.id!==session.id
+              || approvalItems.get(key)!==item || !detail || !sameApprovalIdentity(item,detail)
+              || typeof detail.status!=='string')return;
+          const actionState=approvalActionStates.get(key),
+            currentStatus=actionState?.uncertain?'unknown':approvalFinals.get(key) || item.status,
+            status=actionState?.uncertain && !finalApprovalStatuses.has(detail.status)
+              ?'unknown':preferredApprovalStatus(detail.status,currentStatus);
+          if(status===currentStatus && !finalApprovalStatuses.has(detail.status))return;
+          const next={...(status===detail.status?detail:item),status,executable:false,choices:[]};
+          approvalItems.set(key,next);approvalPending.delete(key);
+          rememberHandledApproval(key,next,status);approvalFinals.set(key,status);clearApprovalExpiry(key);
+          if(finalApprovalStatuses.has(detail.status) && actionState){
+            actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
+          }
+          renderApprovals();
+        }catch(error){if(current() && error.status===401)expiredSession();}
+      }));
+    };
     const reconcileApprovals=async()=>{
       const revision=++approvalRevision;
+      void refreshTransitionalApprovalDetails();
       try{
         const data=await api.request('/approvals');
         if(!current() || revision!==approvalRevision || !Array.isArray(data.items))return;
@@ -1349,7 +1398,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(!item){
           detailRevision=approvalRevision;
           detailListRevision=approvalListRevision;
-          item=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
+          item=await readApprovalDetail(target.approval_id);
           if(!current())return;
         }
         if(!current())return;
@@ -1371,9 +1420,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           if(handledApprovals.has(key)){
             const cached=handledApprovalDetails.get(key);
             const cachedItem=cached && sameApprovalIdentity(cached,item)?cached:null;
-            const confirmedFinal=finalApprovalStatuses.has(item.status);
-            const finalStatus=confirmedFinal?item.status:cachedItem?.status || item.status;
-            const finalItem={...(confirmedFinal?item:cachedItem || item),status:finalStatus,executable:false,choices:[]};
+            const finalStatus=preferredApprovalStatus(item.status,cachedItem?.status);
+            const finalItem={...(finalStatus===item.status?item:cachedItem || item),status:finalStatus,executable:false,choices:[]};
+            const actionState=approvalActionStates.get(key);
+            if(finalApprovalStatuses.has(item.status) && actionState){
+              actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
+            }
             approvalItems.set(key,finalItem);approvalPending.delete(key);
             approvalFinals.set(key,finalStatus);rememberHandledApproval(key,finalItem,finalStatus);
             clearApprovalExpiry(key);
@@ -1410,7 +1462,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
                 const revalidatedListRevision=approvalListRevision,revalidatedRevision=approvalRevision,
                   revalidatedItem=approvalItems.get(key),revalidatedPending=approvalPending.get(key),
                   revalidatedHandled=handledApprovals.has(key),revalidatedDetails=handledApprovalDetails.get(key);
-                const latestDetail=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
+                const latestDetail=await readApprovalDetail(target.approval_id);
                 if(!current())return;
                 const actionState=approvalActionStates.get(key);
                 if(revalidatedItem!==approvalItems.get(key) || revalidatedPending!==approvalPending.get(key)
@@ -1442,17 +1494,22 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             }
           }
           existing=approvalItems.get(key);
-          if(sameApprovalData(existing,item))item=existing;
-          else if(item.status!=='pending'){
-            const actionState=approvalActionStates.get(key);
-            if(actionState && !actionState.decisionStarted){
-              actionState.pending=false;actionState.decisionStarted=false;
-              actionState.uncertain=false;actionState.error='';
-            }
-          }else{
-            const actionState=approvalActionStates.get(key);
-            if(!actionState?.pending && !actionState?.uncertain)
-              approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
+          const actionState=approvalActionStates.get(key),
+            freshFinal=finalApprovalStatuses.has(item.status),
+            previousStatus=actionState?.uncertain?'unknown':approvalFinals.get(key) || existing?.status,
+            nextStatus=actionState?.uncertain && !freshFinal
+              ?'unknown':preferredApprovalStatus(item.status,previousStatus);
+          const unchanged=sameApprovalData(existing,item),statusOverridden=nextStatus!==item.status;
+          if(statusOverridden)item={...(existing || item),status:nextStatus,executable:false,choices:[]};
+          else if(unchanged)item=existing;
+          if(freshFinal && actionState){
+            actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
+          }else if(!statusOverridden && !unchanged && !actionState?.uncertain
+              && item.status!=='pending' && actionState && !actionState.decisionStarted){
+            actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
+          }else if(!statusOverridden && !unchanged && item.status==='pending'
+              && !actionState?.pending && !actionState?.uncertain){
+            approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
           }
           approvalItems.set(key,item);
           if(item.status==='pending'){

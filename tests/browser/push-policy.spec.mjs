@@ -10,9 +10,17 @@ import {fileURLToPath} from 'node:url';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
 const repo=fileURLToPath(new URL('../../',import.meta.url));
 const defaults=()=>({revision:0,enabled:true,categories:{completion:true,approval:true,attention:true,scheduled:true,operational:true},hide_details:false});
+const responseBatch=(page,path,count)=>new Promise(resolve=>{
+ const listener=response=>{
+  if(new URL(response.url()).pathname.endsWith(path) && response.request().method()==='GET' && --count===0){
+   page.off('response',listener);resolve();
+  }
+ };
+ page.on('response',listener);
+});
 async function fixture(run){
  const tmp=await mkdtemp((process.env.TMPDIR || '/tmp')+'/b-');let server,browser;
- const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,approvals:[],approvalHold:null,approvalDetail:null,decisionHold:null,decisionStatus:200,activeRun:null};
+ const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,approvals:[],approvalHold:null,approvalDetail:null,approvalDetailHold:null,decisionHold:null,decisionStatus:200,activeRun:null};
  try{
   const names=await readdir(dir),ui=names.find(n=>/^ui\.[a-f0-9]+\.mjs$/.test(n)),sw=names.find(n=>/^sw\.[a-f0-9]+\.js$/.test(n));
   assert.ok(ui && sw,'tests use generated release graph');
@@ -29,7 +37,11 @@ async function fixture(run){
     if(p.startsWith('/approvals/') && p.endsWith('/decision') && req.method==='POST'){
      if(control.decisionHold)await control.decisionHold;
      status=control.decisionStatus;data=status===200?{status:'resolved'}:{detail:'Synthetic unavailable'};
-    }else if(p.startsWith('/approvals/') && req.method==='GET' && control.approvalDetail?.id===decodeURIComponent(p.split('/').at(-1)))data=control.approvalDetail;
+    }else if(p.startsWith('/approvals/') && req.method==='GET'){
+     const detail=control.approvalDetail;
+     if(control.approvalDetailHold)await control.approvalDetailHold;
+     if(detail?.id===decodeURIComponent(p.split('/').at(-1)))data=detail;
+    }
     if(p==='/auth/verify/options')data={challenge_id:'fixture-challenge',publicKey:{challenge:'AQ'}};
     if(p==='/auth/verify/finish')data={verified:true};
     if(p==='/sessions')data={items:[{id:'session-one',title:'First conversation'},{id:'session-two',title:'Second conversation'}]};
@@ -558,6 +570,90 @@ test('generated second detail GET cannot replay a successfully answered approval
  assert.equal(await card.getByRole('button').count(),0);
  assert.equal(calls.filter(call=>call.p==='/approvals/approval-1/decision').length,1);
  await page.evaluate(()=>app.destroy());releaseRefresh();
+}));
+
+test('held approval details cannot replace an ambiguous decision with sending',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ const pending=approvalRecord(),sending=approvalRecord({status:'sending',executable:false,choices:[]});
+ control.notificationTarget=approvalTarget;control.approvals=[pending];control.approvalDetail=sending;
+ let releaseDetail,releaseDecision;
+ control.approvalDetailHold=new Promise(resolve=>releaseDetail=resolve);
+ control.decisionHold=new Promise(resolve=>releaseDecision=resolve);control.decisionStatus=503;
+ await mount(page,'?notification=notice-target');
+ const card=page.locator('.approval-card');
+ await card.getByRole('button',{name:'Approve once'}).waitFor();
+ const decisionPath='/approvals/approval-1/decision',detailPath='/approvals/approval-1';
+ const deadline=Date.now()+5000;
+ while(!calls.some(call=>call.p===detailPath && call.method==='GET') && Date.now()<deadline)await page.waitForTimeout(10);
+ assert.ok(calls.some(call=>call.p===detailPath && call.method==='GET'),'the initial detail read is held');
+ await holdPasskey(page);await card.getByRole('button',{name:'Approve once'}).click();
+ await page.waitForFunction(()=>window.passkeyRequest?.started);
+ await page.evaluate(()=>finishPasskey());
+ while(!calls.some(call=>call.p===decisionPath) && Date.now()<deadline)await page.waitForTimeout(10);
+ assert.ok(calls.some(call=>call.p===decisionPath),'verified decision reaches the API');
+ releaseDecision();
+ await card.getByRole('heading',{name:'Decision status unknown',exact:true}).waitFor();
+ const staleResponse=page.waitForResponse(response=>response.url().endsWith(detailPath) && response.request().method()==='GET');
+ control.approvalDetailHold=null;releaseDetail();await staleResponse;
+ await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
+ assert.equal(await card.getByRole('heading').innerText(),'Decision status unknown');
+ assert.match(await card.locator('.inline-error').innerText(),/Synthetic unavailable/);
+ assert.equal(await card.getByRole('button').count(),0,'a stale sending detail cannot restore controls');
+ assert.equal(calls.filter(call=>call.p===decisionPath).length,1,'uncertainty never replays the decision');
+ await page.evaluate(()=>app.destroy());
+}));
+
+for(const [initial,final] of [['sending','resolved'],['unknown','cancelled']])test(`mounted ${initial} approval revalidates after focus without losing reader focus`,{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ const transitioning=approvalRecord({status:initial,executable:false,choices:[]});
+ control.notificationTarget=approvalTarget;control.approvals=[];control.approvalDetail=transitioning;
+ await mount(page,'?notification=notice-target');
+ const card=page.locator('.approval-card');
+ await card.getByRole('heading',{name:initial==='sending'?'Decision pending':'Decision status unknown',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0);
+ const detailPath='/approvals/approval-1',before=calls.filter(call=>call.p===detailPath && call.method==='GET').length;
+ let release;control.approvalDetailHold=new Promise(resolve=>release=resolve);
+ const listResponses=responseBatch(page,'/app-api/approvals',4);
+ await page.evaluate(()=>{for(let i=0;i<4;i++)dispatchEvent(new Event('focus'));});
+ await listResponses;
+ await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
+ assert.equal(calls.filter(call=>call.p===detailPath && call.method==='GET').length,before+1,
+  'repeated focus refreshes share one held target-detail request');
+ const staleResponse=page.waitForResponse(response=>response.url().endsWith(detailPath) && response.request().method()==='GET');
+ const focused=await page.evaluate(()=>document.activeElement===document.querySelector('.approval-card'));
+ control.approvalDetail=approvalRecord({status:final,executable:false,choices:[]});
+ control.approvalDetailHold=null;release();await staleResponse;
+ await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
+ assert.equal(await card.getByRole('heading').innerText(),initial==='sending'?'Decision pending':'Decision status unknown',
+  'the captured transitional response does not invent a final outcome');
+ assert.equal(await page.evaluate(()=>document.activeElement===document.querySelector('.approval-card')),focused,
+  'refresh does not steal reader focus');
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));
+ await card.getByRole('heading',{name:final==='resolved'?'Resolved':'Cancelled',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(calls.filter(call=>call.p==='/approvals/approval-1/decision').length,0);
+ await page.evaluate(()=>app.destroy());
+}));
+
+test('a held transitional detail cannot update a newer session after route teardown',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ control.notificationTarget=approvalTarget;control.approvals=[];
+ control.approvalDetail=approvalRecord({status:'sending',executable:false,choices:[]});
+ await mount(page,'?notification=notice-target');
+ await page.getByRole('heading',{name:'Decision pending',exact:true}).waitFor();
+ let release;control.approvalDetailHold=new Promise(resolve=>release=resolve);
+ const detailPath='/approvals/approval-1',before=calls.filter(call=>call.p===detailPath && call.method==='GET').length;
+ const listResponse=responseBatch(page,'/app-api/approvals',1);
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));
+ await listResponse;
+ await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
+ assert.equal(calls.filter(call=>call.p===detailPath && call.method==='GET').length,before+1);
+ const staleResponse=page.waitForResponse(response=>response.url().endsWith(detailPath) && response.request().method()==='GET');
+ await page.getByRole('button',{name:'Chats',exact:true}).click();
+ await page.getByRole('button',{name:/Second conversation/}).click();
+ await page.getByRole('heading',{name:'Second conversation'}).waitFor();
+ control.approvalDetailHold=null;release();await staleResponse;
+ await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
+ assert.equal(await page.locator('.approval-card').count(),0,'a response from the closed chat cannot place an approval');
+ assert.equal(calls.filter(call=>call.p==='/approvals/approval-1/decision').length,0);
+ await page.evaluate(()=>app.destroy());
 }));
 
 test('approval controls retain pending and card-scoped errors across focus refresh',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{

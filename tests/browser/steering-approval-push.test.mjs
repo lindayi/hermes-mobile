@@ -429,6 +429,92 @@ test('an answered approval stays final on same-owner sign-in at the retained not
  }finally{app.destroy();win.close();}
 });
 
+test('a cached sending approval yields to fresh unknown on same-owner reentry',async()=>{
+ const calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ let detailStatus='sending';
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:[]};
+  if(p==='/approvals/a')return {...approvalItem(),status:detailStatus};
+  return {items:[]};
+ }},win);
+ const reenter=async()=>{
+  doc.querySelector('[data-view="settings"]').click();
+  await waitFor(()=>[...doc.querySelectorAll('button')].some(button=>button.textContent==='Sign out'));
+  [...doc.querySelectorAll('button')].find(button=>button.textContent==='Sign out').click();
+  await waitFor(()=>[...doc.querySelectorAll('button')].some(button=>button.textContent==='Sign in with a passkey'));
+  await app.start();
+ };
+ try{
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Decision pending');
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+  detailStatus='unknown';
+  await reenter();
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Decision status unknown');
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
+for(const staleStatus of ['pending','sending','unknown'])test(`a held ${staleStatus} detail cannot clear an ambiguous decision on reentry`,async()=>{
+ const detail=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};
+ win.navigator.credentials={get:async()=>fakeCredential()};
+ const pending={...approvalItem(),status:'pending'};
+ let detailReads=0,detailFinished=false,detailStatus=staleStatus;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:[pending]};
+  if(p==='/approvals/a'){
+   detailReads++;
+   if(detailReads===1)return detail.promise.then(item=>{detailFinished=true;return item;});
+   return {...approvalItem(),status:detailStatus};
+  }
+  if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision')throw Object.assign(new Error('Synthetic unavailable'),{status:503});
+  return {items:[]};
+ }},win);
+ const reenter=async()=>{
+  doc.querySelector('[data-view="settings"]').click();
+  await waitFor(()=>[...doc.querySelectorAll('button')].some(button=>button.textContent==='Sign out'));
+  [...doc.querySelectorAll('button')].find(button=>button.textContent==='Sign out').click();
+  await waitFor(()=>[...doc.querySelectorAll('button')].some(button=>button.textContent==='Sign in with a passkey'));
+  await app.start();
+ };
+ try{
+  await waitFor(()=>detailReads===1);
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+  doc.querySelector('[data-approval-id="a"] button.primary').click();
+  await waitFor(()=>calls.includes('/auth/verify/options'));
+  await waitFor(()=>calls.includes('/approvals/a/decision'));
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Decision status unknown');
+  assert.match(doc.querySelector('[data-approval-id="a"] .inline-error').textContent,/Synthetic unavailable/);
+  detail.resolve({...approvalItem(),status:staleStatus});
+  await waitFor(()=>detailFinished);
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Decision status unknown');
+  assert.match(doc.querySelector('[data-approval-id="a"] .inline-error').textContent,/Synthetic unavailable/,
+    `a stale ${staleStatus} detail cannot erase the ambiguous-decision error`);
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null,
+    `a held ${staleStatus} detail cannot restore decision controls`);
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,1);
+  detailStatus='resolved';
+  await reenter();
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Resolved',
+    'a later authenticated final detail recovers the uncertain state');
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,1);
+ }finally{app.destroy();win.close();}
+});
+
 for(const revalidated of ['resolved','pending'])test(`empty approval list revalidates a delayed pending detail (${revalidated})`,async()=>{
  const stale=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
  let detailReads=0;
