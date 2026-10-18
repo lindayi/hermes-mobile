@@ -142,6 +142,58 @@ test('a locally expired approval revalidates after external resolution without r
  }finally{app.destroy();assert.equal(timers.size,0);win.close();}
 });
 
+for(const status of ['sending','unknown'])test(`mounted local expiry survives handled-cache eviction before fresh ${status}`,async t=>{
+ let now=1800000000000,next=0;const timers=new Map(),calls=[];
+ t.mock.method(Date,'now',()=>now);
+ const expires_at=(now+10000)/1000,items=Array.from({length:101},(_,index)=>({
+  ...approvalItem(),id:`a${index}`,request_id:`request-${index}`,status:'pending',expires_at
+ }));
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document;
+ win.setTimeout=(callback,delay)=>{const id=++next;timers.set(id,{callback,delay});return id;};
+ win.clearTimeout=id=>timers.delete(id);
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Exact chat title'}],total:1};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:itemsVisible?items:[]};
+  if(p==='/approvals/a0' && ++firstDetailReads===1)throw Object.assign(new Error('Temporary failure'),{status:503});
+  if(p.startsWith('/approvals/')){
+   const item=items.find(value=>p===`/approvals/${value.id}`);
+   return {...item,status:item.id==='a0'&&firstDetailReads>1?status:'expired',executable:false,choices:[]};
+  }
+  return {items:[]};
+ }},win);
+ let itemsVisible=true,firstDetailReads=0;
+ try{
+  await waitFor(()=>doc.querySelector('.session-row[aria-label="Exact chat title"]'));
+  doc.querySelector('.session-row[aria-label="Exact chat title"]').click();
+  await waitFor(()=>doc.querySelectorAll('.approval-card').length===101);
+  now=expires_at*1000;
+  const expiries=[...timers].filter(([,timer])=>timer.delay===10000);
+  assert.equal(expiries.length,101,'all mounted approvals have a local expiry timer');
+  for(const [id,timer] of expiries){timers.delete(id);timer.callback();}
+  itemsVisible=false;
+  assert.equal(doc.querySelector('[data-approval-id="a0"] h3').textContent,'Expired');
+
+  for(let batch=0;batch<11;batch++){
+   const expected=(batch+1)*10;
+   win.dispatchEvent(new win.Event('focus'));
+   await waitFor(()=>calls.filter(path=>path.startsWith('/approvals/') && /^a\d+$/.test(path.slice('/approvals/'.length))).length===expected);
+   await tick();
+   assert.ok(calls.filter(path=>path.startsWith('/approvals/') && /^a\d+$/.test(path.slice('/approvals/'.length))).length<=expected,
+    'each refresh reads only one bounded detail batch');
+  }
+  const card=doc.querySelector('[data-approval-id="a0"]');
+  assert.equal(card.querySelector('h3').textContent,status==='sending'?'Decision pending':'Decision status unknown',
+   `the later ${status} detail must replace expired after fair rotation`);
+  assert.equal(card.querySelector('button'),null,'transitional status stays non-actionable');
+  assert.equal(firstDetailReads,2,'the first card is retried after rotation past 100 others');
+  assert.equal(calls.some(path=>path.endsWith('/decision')||path.startsWith('/auth/verify')),false);
+ }finally{app.destroy();assert.equal(timers.size,0);win.close();}
+});
+
 for(const distance of [10000,2147483647+10000])test(`early approval expiry callback rearms to its deadline (${distance})`,async t=>{
  let now=1800000000000,next=0;const timers=new Map(),calls=[];
  t.mock.method(Date,'now',()=>now);

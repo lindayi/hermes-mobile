@@ -1153,6 +1153,46 @@ test('generated approval detail batches rotate past transient failures and stay 
  await page.evaluate(()=>app.destroy());
 }));
 
+for(const status of ['sending','unknown'])test(`generated mounted expiry survives cache eviction before fresh ${status}`,{timeout:60000},()=>fixture(async({page,control,calls})=>{
+ await page.clock.install();
+ const items=Array.from({length:101},(_,index)=>approvalRecord({
+  id:`expired-${index}`,request_id:`expired-request-${index}`,expires_at:Date.now()/1000+2
+ }));
+ control.approvals=items;
+ control.approvalDetails=Object.fromEntries(items.map((item,index)=>[item.id,{
+  ...item,status:index===0?'pending':'expired',executable:false,choices:[]
+ }]));
+ await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ const cards=page.locator('.approval-card'),first=page.locator('[data-approval-id="expired-0"]');
+ await page.waitForFunction(()=>document.querySelectorAll('.approval-card').length===101);
+ await page.clock.fastForward(2500);
+ await first.getByRole('heading',{name:'Expired',exact:true}).waitFor();
+ control.approvals=[];
+
+ const detailReads=()=>calls.filter(call=>call.method==='GET'&&call.p.startsWith('/approvals/')
+  && /^expired-\d+$/.test(call.p.slice('/approvals/'.length)));
+ for(let batch=0;batch<11;batch++){
+  const start=batch===10?100:batch*10;
+  const ids=Array.from({length:10},(_,offset)=>items[(start+offset)%items.length].id);
+  control.approvalDetailStatus=batch===0?503:200;
+  if(batch===10)control.approvalDetails['expired-0']={
+   ...items[0],status,executable:false,choices:[]
+  };
+  const responses=ids.map(id=>page.waitForResponse(response=>
+   new URL(response.url()).pathname.endsWith(`/approvals/${id}`)
+   && response.request().method()==='GET'));
+  await page.evaluate(()=>dispatchEvent(new Event('focus')));
+  await Promise.all(responses);
+  assert.equal(detailReads().length,(batch+1)*10,'each reconciliation reads at most one ten-detail batch');
+ }
+ await first.getByRole('heading',{name:status==='sending'?'Decision pending':'Decision status unknown',exact:true}).waitFor();
+ assert.equal(await first.getByRole('button').count(),0,'a fresh transitional result remains non-actionable');
+ assert.equal(await cards.count(),101,'all mounted approval cards retain identity');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')||call.p.startsWith('/auth/verify')
+  ||call.p.startsWith('/runs/')&&call.method==='POST').length,0,'rotation and revalidation never decide');
+ await page.evaluate(()=>app.destroy());
+}));
+
 for(const status of ['sending','expired'])test(`a held ${status} detail cannot update a newer session after route teardown`,{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
  control.notificationTarget=approvalTarget;control.approvals=[];
  control.approvalDetail=approvalRecord({status,executable:false,choices:[]});

@@ -42,7 +42,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   let stopDisclosureReachability=null;
   let closeEditor=null, stopExtras=null, approvalState=null, currentModelSync=null, stopPushPresence=null;
   let pushIdentity={client_id:win.crypto.randomUUID(),sequence:0},pushIdentityKey=null,releasePushIdentity=null,pushRequest=null;
-  const handledApprovals=new Set(),handledApprovalDetails=new Map(),locallyExpiredApprovals=new Set();
+  const handledApprovals=new Set(),handledApprovalDetails=new Map(),locallyExpiredApprovals=new Set(),mountedLocallyExpiredApprovals=new Set();
   const maxHandledApprovals=100;
   const finalApprovalStatuses=new Set(['resolved','resolved_external','cancelled','expired']);
   const approvalStatusRank={pending:0,sending:1,unknown:2};
@@ -53,17 +53,19 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     return (approvalStatusRank[cached] ?? 0)>(approvalStatusRank[fresh] ?? 0)?cached:fresh;
   };
   const approvalKey=item=>`${state.user?.id}:${item.run_id}:${item.id || item.request_id}`;
+  const locallyExpiredApproval=key=>locallyExpiredApprovals.has(key)||mountedLocallyExpiredApprovals.has(key);
   const rememberHandledApproval=(key,item,status,locallyExpired=false)=>{
     handledApprovals.delete(key);
     handledApprovals.add(key);
     if(item)handledApprovalDetails.set(key,{...item,status,executable:false,choices:[]});
-    if(locallyExpired)locallyExpiredApprovals.add(key);else locallyExpiredApprovals.delete(key);
+    if(locallyExpired){locallyExpiredApprovals.add(key);mountedLocallyExpiredApprovals.add(key);}
+    else{locallyExpiredApprovals.delete(key);mountedLocallyExpiredApprovals.delete(key);}
     while(handledApprovals.size>maxHandledApprovals){
       const oldest=handledApprovals.values().next().value;
       handledApprovals.delete(oldest);handledApprovalDetails.delete(oldest);locallyExpiredApprovals.delete(oldest);
     }
   };
-  function leaveConversation(){stopDisclosureReachability?.();stopDisclosureReachability=null;stopPushPresence?.();stopPushPresence=null;currentModelSync=null;closeEditor?.(false);stopExtras?.();stopExtras=null;approvalState=null;headerState?.destroy();headerState=null;root.querySelector('[data-rename-dialog]')?.remove();}
+  function leaveConversation(){stopDisclosureReachability?.();stopDisclosureReachability=null;stopPushPresence?.();stopPushPresence=null;currentModelSync=null;closeEditor?.(false);stopExtras?.();stopExtras=null;approvalState=null;mountedLocallyExpiredApprovals.clear();headerState?.destroy();headerState=null;root.querySelector('[data-rename-dialog]')?.remove();}
   function disconnect(){const cancel=cancelTracking;cancelTracking=null;cancel?.();stream?.close();stream=null;}
   const drafts = new Map();
   const attempts = new Map();
@@ -1357,7 +1359,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           const actionState=approvalActionStates.get(key),
             currentStatus=actionState?.uncertain?'unknown':approvalFinals.get(key) || item.status,
             status=actionState?.uncertain && !finalApprovalStatuses.has(detail.status)
-              ?'unknown':preferredApprovalStatus(detail.status,currentStatus,locallyExpiredApprovals.has(key));
+              ?'unknown':preferredApprovalStatus(detail.status,currentStatus,locallyExpiredApproval(key));
           if(status===currentStatus && !finalApprovalStatuses.has(detail.status))return;
           const next={...(status===detail.status?detail:item),status,executable:false,choices:[]};
           approvalItems.set(key,next);approvalPending.delete(key);
@@ -1527,7 +1529,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             const cachedItem=cached && sameApprovalIdentity(cached,item)?cached:null;
             const finalStatus=finalApprovalStatuses.has(item.status)?item.status
               :cachedItem?.status==='unavailable'?'unavailable'
-                :preferredApprovalStatus(item.status,cachedItem?.status,locallyExpiredApprovals.has(key));
+                :preferredApprovalStatus(item.status,cachedItem?.status,locallyExpiredApproval(key));
             const finalItem={...(finalStatus===item.status?item:cachedItem || item),status:finalStatus,executable:false,choices:[]};
             const actionState=approvalActionStates.get(key);
             if(finalApprovalStatuses.has(item.status) && actionState){
@@ -1536,7 +1538,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             approvalItems.set(key,finalItem);approvalPending.delete(key);
             approvalFinals.set(key,finalStatus);
             rememberHandledApproval(key,finalItem,finalStatus,
-              locallyExpiredApprovals.has(key) && finalStatus==='expired' && !finalApprovalStatuses.has(item.status));
+              locallyExpiredApproval(key) && finalStatus==='expired' && !finalApprovalStatuses.has(item.status));
             clearApprovalExpiry(key);
             approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
             renderApprovals();focusApprovalTarget();
