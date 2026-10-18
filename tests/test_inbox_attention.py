@@ -170,3 +170,51 @@ def test_attention_receipt_provenance_wins_over_nonbackground_category(attention
     with service._db() as db:
         db.execute('INSERT INTO notification_policy VALUES(?,?,NULL,NULL)', (item_id, 'operational'))
     assert client.get(BASE + '/inbox').json() == {'items': [], 'read_count': 0}
+
+
+def test_request_and_session_approval_rows_are_hidden_without_changing_push_storage(attention_env):
+    service, client, now, user = attention_env
+    service.approval_validator = lambda *identity: True
+    service.subscribe(user['id'], user['session_id'], subscription())
+    completed = service.ingest(user['id'], 'request:run-1:terminal', 'Request finished',
+        'The result is ready.', 'chat-1', category='completion')
+    failed = service.ingest(user['id'], 'request:run-2:terminal', 'Request needs attention',
+        'The request failed.', 'chat-1', category='attention')
+    approval = service.ingest_approval(user['id'], 'run-3', 'native-3', 'approval-3',
+        'chat-1', now[0] + 100)
+    scheduled = service.ingest(user['id'], 'scheduled:1', 'Scheduled update', 'Still visible',
+        category='scheduled')
+
+    for item in (completed, failed, approval, scheduled):
+        service.mark_read(user['id'], item['id'])
+
+    assert [item['id'] for item in service.list_inbox(user['id'])] == [scheduled['id']]
+    assert service.read_count(user['id']) == 1
+    assert service.clear_read(user['id']) == 1
+    with service._db() as db:
+        assert db.execute('SELECT count(*) FROM inbox').fetchone()[0] == 4
+        assert db.execute('SELECT count(*) FROM outbox').fetchone()[0] == 4
+        assert db.execute('SELECT count(*) FROM dismissed_inbox').fetchone()[0] == 1
+        assert {row[0] for row in db.execute('SELECT status FROM outbox')} == {'suppressed'}
+
+
+def test_notification_target_lookup_is_owner_scoped_and_binds_request_or_approval(attention_env):
+    service, client, now, user = attention_env
+    service.approval_validator = lambda *identity: True
+    request = service.ingest(user['id'], 'request:run-1:terminal', 'Finished', 'Public result',
+        'chat-1', category='completion')
+    approval = service.ingest_approval(user['id'], 'run-2', 'native-2', 'approval-2',
+        'chat-1', now[0] + 100)
+
+    request_target = client.get(BASE + f"/inbox/{request['id']}/target")
+    approval_target = client.get(BASE + f"/inbox/{approval['id']}/target")
+
+    assert request_target.status_code == 200
+    assert request_target.json() == {'kind': 'request', 'session_id': 'chat-1', 'run_id': 'run-1'}
+    assert approval_target.status_code == 200
+    assert approval_target.json() == {
+        'kind': 'approval', 'session_id': 'chat-1', 'run_id': 'run-2',
+        'approval_id': 'approval-2', 'request_id': 'native-2'
+    }
+    assert client.get(BASE + f"/inbox/{request['id']}/target").status_code == 200
+    assert client.get(BASE + '/inbox/foreign-notice/target').status_code == 404
